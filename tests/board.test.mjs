@@ -4910,6 +4910,49 @@ test('--serve with an idle time that is not a number starts no page', { timeout:
   } finally { await board.end([]) }
 })
 
+test('--serve with a stale time that is not a positive number exits non-zero with INVALID_STALE_MS', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  try {
+    for (const extra of [['--stale-ms', 'abc'], ['--stale-ms', '0'], ['--stale-ms', '-1'], ['--stale-ms']]) {
+      const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', ...extra], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+      assert.notEqual(ran.status, 0, extra.join(' '))
+      assert.match(ran.stderr, /INVALID_STALE_MS/)
+      assert.ok(!existsSync(board.served), extra.join(' '))
+    }
+  } finally { await board.end([]) }
+})
+
+test('--serve forwards --stale-ms to the background browser child', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board', '--stale-ms', '300000']))
+    assert.ok(url)
+    const res = await fetch(`http://127.0.0.1:${new URL(url).port}/api/ping`, { headers: { 'x-board-token': new URL(url).searchParams.get('t') } })
+    assert.equal(res.status, 200)
+    const json = await res.json()
+    assert.equal(json.staleMs, 300000)
+  } finally { await board.end([url]) }
+})
+
+test('running page reuses server when timeout matches and restarts when requested stale timeout differs', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  let url1 = null
+  let url2 = null
+  try {
+    url1 = board.urlOf(await board.serve(['--quiet-board', '--stale-ms', '300000']))
+    assert.ok(url1)
+    const same = board.urlOf(await board.serve(['--quiet-board', '--stale-ms', '300000']))
+    assert.equal(same, url1)
+    url2 = board.urlOf(await board.serve(['--quiet-board', '--stale-ms', '600000']))
+    assert.ok(url2)
+    assert.notEqual(url2, url1)
+    const res = await fetch(`http://127.0.0.1:${new URL(url2).port}/api/ping`, { headers: { 'x-board-token': new URL(url2).searchParams.get('t') } })
+    const json = await res.json()
+    assert.equal(json.staleMs, 600000)
+  } finally { await board.end([url1, url2]) }
+})
+
 // The two runs may or may not meet halfway (one can find the other's page already written); the
 // server started by hand always meets a page that is there.
 test('two --serve run at the same moment open one page between them, and a server started while it runs stops at once', { timeout: 60_000 }, async () => {
@@ -6566,8 +6609,11 @@ test("the page's server runs the hourly sweep and writes nothing when the seen f
     assert.deepEqual(snapshot(), before)
     // Damaged for good (older than a write in progress) or the wrong shape: still nothing is written.
     for (const text of ['not json at all', '{"seen":[]}']) {
-      writeFileSync(record, text)
-      utimesSync(record, (TIDY_NOW - 60_000) / 1000, (TIDY_NOW - 60_000) / 1000)
+      // A sweep must not see the empty file a direct write exposes before its contents are written.
+      const next = `${record}.next`
+      writeFileSync(next, text)
+      utimesSync(next, (TIDY_NOW - 60_000) / 1000, (TIDY_NOW - 60_000) / 1000)
+      renameSync(next, record)
       const damaged = snapshot()
       await delay(600)
       assert.deepEqual(snapshot(), damaged)

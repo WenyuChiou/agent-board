@@ -37,8 +37,8 @@ test('a verdict for an older head does not count against a Ready for the current
   assert.deepEqual(queue.approved, [])
 })
 
-test('a conflicted or behind pull request is listed as needing main before anything else', () => {
-  const prs = [pull(1, { mergeStateStatus: 'DIRTY' }), pull(2, { mergeStateStatus: 'BEHIND' })]
+test('a conflicted pull request is listed as needing main before anything else', () => {
+  const prs = [pull(1, { mergeStateStatus: 'DIRTY' }), pull(2, { mergeStateStatus: 'DIRTY' })]
   const comments = { 1: [ready()], 2: [ready(), verdict('APPROVE', head, '2026-10-20T10:00:00Z')] }
   const queue = classify(prs, comments, now)
   assert.deepEqual(queue.needsMain.map(item => item.number), [1, 2])
@@ -46,6 +46,15 @@ test('a conflicted or behind pull request is listed as needing main before anyth
   assert.deepEqual(queue.needsReviewer, [])
   assert.deepEqual(queue.approved, [])
   assert.match(formatQueue(queue), /^No pull requests need a reviewer\./)
+})
+
+test('a pull request that is only behind main is queued for review like any other', () => {
+  const prs = [pull(1, { mergeStateStatus: 'BEHIND' }), pull(2, { mergeStateStatus: 'BEHIND' })]
+  const comments = { 1: [ready()], 2: [ready(), verdict('APPROVE', head, '2026-10-20T10:00:00Z')] }
+  const queue = classify(prs, comments, now)
+  assert.deepEqual(queue.needsMain, [])
+  assert.deepEqual(queue.needsReviewer.map(item => item.number), [1])
+  assert.deepEqual(queue.approved.map(item => item.number), [2])
 })
 
 test('the reviewer queue lists the smallest pull request first and marks one Ready for more than four hours', () => {

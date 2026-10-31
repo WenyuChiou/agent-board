@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  TOTAL_CAP, addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr, claimed,
-  isGovernancePath, isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
+  addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr,
+  isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
   privateData, report, reportMarkdown, reviewOf, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
@@ -99,7 +99,9 @@ test('pr-check accepts a conforming pull request body and a CHANGELOG entry whos
   const execution = await fixture(t).run()
   assert.equal(execution.status, 0, execution.stderr || execution.stdout)
   assert.match(execution.stdout, /all checks passed/)
-  for (const check of ['issue status', 'claim', 'cap', 'review']) assert.ok(execution.stdout.includes(`${check}: skipped (offline)`))
+  for (const check of ['issue status', 'review']) assert.ok(execution.stdout.includes(`${check}: skipped (offline)`))
+  // The team has no claim or limit on open pull requests to skip.
+  for (const check of ['claim', 'cap']) assert.equal(execution.stdout.includes(`${check}: skipped`), false)
 })
 
 test('pr-check accepts a fix whose entry is a new changelog fragment', async t => {
@@ -369,41 +371,11 @@ test('pr-check matches template-literal test titles and placeholder names', () =
 
 const openPr = (number, author, extra = {}) => ({ number, title: 'fix: synthetic', body: `Fixes #${number}\nAuthor: ${author}, fix/synthetic-${number}`, createdAt: `2030-01-01T00:00:${String(number).padStart(2, '0')}Z`, labels: [], ...extra })
 
-test('pr-check fails the newest pull request over the cap and keeps older ones', () => {
-  const open = Array.from({ length: TOTAL_CAP + 1 }, (_, index) => openPr(index + 1, `agent-${index + 1}`)).reverse()
-  assert.equal(cap({ open, number: 1 }).problems.length, 0)
-  assert.equal(cap({ open, number: TOTAL_CAP }).problems.length, 0)
-  const over = cap({ open, number: TOTAL_CAP + 1 })
-  assert.equal(over.problems.length, 1)
-  assert.match(over.problems[0].message, /9 pull requests would be open, over the 8 in all; counted: #1, #2, #3, #4, #5, #6, #7, #8, #9/)
-  assert.match(over.problems[0].fix, /waiting for a slot/)
-  assert.equal(cap({ open: open.slice(1), number: null, body: 'Author: agent-new, fix/new' }).problems.length, 1)
-  const exemptions = open.map(pr => pr.number === 9 ? { ...pr, labels: [{ name: 'cap-exempt' }] } : pr)
-  assert.equal(cap({ open: exemptions, number: 9 }).problems.length, 0)
-  assert.equal(cap({ open: open.map(pr => pr.number === 9 ? { ...pr, title: 'chore(release): synthetic' } : pr), number: 9 }).problems.length, 0)
-  assert.equal(cap({ open: [], number: null, body: 'Author: agent-new, fix/new' }).problems.length, 0)
-})
-
-test('pr-check counts each author and lane on its own and leaves governance pull requests out of the cap', () => {
-  const open = [openPr(1, 'dot'), openPr(2, '`Dot`'), openPr(3, 'dot'), openPr(4, 'codex (phase1)'), openPr(5, 'Codex (phase1)'), openPr(6, 'codex (e2e)')]
-  assert.equal(cap({ open, number: 2 }).problems.length, 0)
-  const third = cap({ open, number: 3 })
-  assert.equal(third.problems.length, 1)
-  assert.match(third.problems[0].message, /"dot" would have 3 open pull requests, over 2 per author: #1, #2, #3/)
-  assert.match(third.problems[0].fix, /codex \(phase1\)/)
-  assert.equal(cap({ open, number: 5 }).problems.length, 0)
-  assert.equal(cap({ open, number: 6 }).problems.length, 0)
-  assert.equal(cap({ open, number: null, body: 'Author: codex (phase1), fix/next' }).problems.length, 1)
-  assert.equal(cap({ open, number: null, body: 'Author: codex (contrib), fix/next' }).problems.length, 0)
-  const governed = open.map(pr => pr.number === 1 ? { ...pr, isGovernance: true } : pr)
-  assert.equal(cap({ open: governed, number: 3 }).problems.length, 0)
+test('pr-check reads the agent on the Author line, with its lane, as the key the weekly table counts by', () => {
   assert.equal(authorKey('<!-- Author: hidden -->\nAuthor:  `Codex  (Phase1)`, branch `fix/x`'), 'codex (phase1)')
+  assert.equal(authorKey('Author: dot, fix/x'), authorKey('Author: `Dot`, fix/y'))
+  assert.notEqual(authorKey('Author: codex (phase1), fix/x'), authorKey('Author: codex (e2e), fix/x'))
   assert.equal(authorKey('Fixes #1'), null)
-  assert.ok(['AGENTS.md', 'CONTRIBUTING.md', '.github/workflows/test.yml'].every(isGovernancePath))
-  assert.ok(!['docs/CONTRIBUTOR-PATH.md', 'scripts/pr-check.mjs'].some(isGovernancePath))
-  const data = { ...syntheticPr(), open: [openPr(1, 'codex (local)'), openPr(2, 'codex (local)')], number: null }
-  assert.ok(checkPr(data).problems.some(item => item.check === 'cap'))
-  assert.ok(checkPr({ ...data, paths: [...data.paths, 'CONTRIBUTING.md'] }).info.includes('cap: this pull request is exempt.'))
 })
 
 test('pr-check finds a session id, a home-folder path and a token link in added docs and the body', () => {
@@ -479,12 +451,9 @@ test('pr-check tracks added line numbers across hunks and ignores deleted files 
   ])
 })
 
-test('pr-check checks naming and accepts both old and new branch claims', () => {
+test('pr-check checks naming, the paths that need the bundle and comment stripping', () => {
   assert.equal(naming('fix(parser)!: synthetic', branch).problems.length, 0)
   assert.equal(naming('bad title', 'Bad/branch').problems.length, 2)
-  assert.equal(claimed([{ body: `Claiming as CODEX on \`${branch}\`` }], 'codex', branch).problems.length, 0)
-  assert.equal(claimed([{ body: `Claim: codex, ${branch}, until 2030-01-01 00:00 UTC` }], 'codex', branch).problems.length, 0)
-  assert.equal(claimed([{ body: `Claim: notcodex, ${branch}` }], 'codex', branch).problems.length, 1)
   assert.equal(needsBundle(['docs/example.md']), false)
   assert.equal(needsBundle(['scripts/example.mjs']), true)
   assert.equal(needsBundle(['hooks/example.ts']), true)
@@ -514,14 +483,13 @@ test('pr-check reports the last review verdict and distinguishes current and old
   assert.match(verdict([{ body: `Checks complete\nReview: REQUEST CHANGES \`${head}\`` }], head).info[0], /REQUEST CHANGES.*current head/)
 })
 
-test('pr-check combines issue state claims cap and draft information without mutating inputs', () => {
+test('pr-check combines issue state and draft information without mutating inputs', () => {
   const data = syntheticPr()
   const before = JSON.stringify(data)
   assert.deepEqual(checkPr(data).problems, [])
   assert.equal(JSON.stringify(data), before)
   assert.ok(checkPr({ ...data, issueData: { state: 'closed' } }).problems.some(item => item.check === 'issue'))
   assert.ok(checkPr({ ...data, issueData: { state: 'open', pull_request: {} } }).problems.some(item => item.check === 'issue'))
-  assert.ok(checkPr({ ...data, issueComments: [] }).problems.some(item => item.check === 'claim'))
   assert.ok(checkPr({ ...data, isDraft: true }).info.some(line => /gh pr ready 17/.test(line)))
 })
 
@@ -545,19 +513,8 @@ const withFragments = (base, ...extra) => {
   return data
 }
 
-// Both fragments in place, so only the claim and the state of the issues are in question.
+// Both fragments in place, so only the state of the issues is in question.
 const twoIssuePr = (second = {}) => withFragments(twoIssueLookups(second), fragmentFile(43, 'second-check'))
-
-test('pr-check checks the claim on every listed issue and names the issue that has none', () => {
-  assert.deepEqual(checkPr(twoIssuePr()).problems, [])
-  const checked = checkPr(twoIssuePr({ issueComments: [{ body: `Claim: dot, ${branch}, until 2030-01-01 00:00 UTC` }] }))
-  assert.equal(checked.problems.length, 1)
-  assert.equal(checked.problems[0].check, 'claim')
-  assert.match(checked.problems[0].message, /comment on #43 claims/)
-  assert.match(checked.problems[0].fix, /comment on #43 with "Claim: <agent>, <branch>"/)
-  const first = checkPr({ ...twoIssuePr(), issueComments: [] })
-  assert.match(first.problems.find(item => item.check === 'claim').message, /comment on #42 claims/)
-})
 
 test('pr-check checks the state of every listed issue', () => {
   const closed = checkPr(twoIssuePr({ issueData: { state: 'closed' } }))
@@ -568,7 +525,7 @@ test('pr-check checks the state of every listed issue', () => {
   assert.match(missing.problems[0].message, /^issue #43 does not exist/)
   const offline = checkPr({ ...twoIssuePr(), moreIssues: undefined })
   assert.deepEqual(offline.problems, [])
-  assert.ok(offline.info.includes('claim: skipped (offline).'))
+  assert.ok(offline.info.includes('issue status: skipped (offline).'))
 })
 
 const threeIssuePr = () => {
@@ -787,7 +744,7 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   assert.equal(calls.some(call => call.host === 'untrusted.invalid'), false)
 })
 
-test('pr-check looks up each further issue with the token and names the issue that has no claim', async t => {
+test('pr-check looks up each further issue with the token and reads a repeated issue once', async t => {
   const setup = fixture(t)
   // Two issues need two fragments, so the branch drops the Unreleased entry for one fragment each.
   setup.put('CHANGELOG.md', '# Changelog\n\n## Unreleased\n\n## 1.0.0\n')
@@ -797,40 +754,34 @@ test('pr-check looks up each further issue with the token and names the issue th
   setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'test: synthetic fragments')
   const head = setup.git('rev-parse', 'HEAD')
   const eventFor = text => {
-    setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body: text, draft: false, created_at: '2030-01-01T00:00:00Z', labels: [], head: { ref: branch, sha: head }, base: { sha: setup.base } } }))
+    setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body: text, draft: false, author_association: 'OWNER', created_at: '2030-01-01T00:00:00Z', labels: [], head: { ref: branch, sha: head }, base: { sha: setup.base } } }))
     return ['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory]
   }
   const originalFetch = globalThis.fetch
   t.after(() => { globalThis.fetch = originalFetch })
   const env = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' }
   const calls = []
-  const answer = claimedIssues => async (url, options) => {
+  // The team needs no claim, so no issue has a comment on it and the pull request still passes.
+  const answer = async (url, options) => {
     calls.push({ path: url.pathname, authorization: options.headers.Authorization })
     const issue = url.pathname.match(/\/issues\/(\d+)(\/comments)?$/)
-    const payload = !issue ? [] : !issue[2] ? { state: 'open' } : claimedIssues.includes(issue[1]) ? [{ body: `Claim: codex, ${branch}` }] : []
+    const payload = !issue ? [] : !issue[2] ? { state: 'open' } : []
     return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
   }
   const listed = body.replace('Fixes #42', 'Fixes #42\nFixes #43')
-  globalThis.fetch = answer(['42'])
-  const failed = await runMain(eventFor(listed), env)
-  assert.equal(failed.status, 1, failed.stdout + failed.stderr)
-  assert.match(failed.stdout, /no comment on #43 claims this branch/)
-  assert.equal(failed.stdout.includes('comment on #42 claims'), false)
-  for (const path of ['/issues/42', '/issues/42/comments', '/issues/43', '/issues/43/comments']) {
+  globalThis.fetch = answer
+  const passed = await runMain(eventFor(listed), env)
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
+  assert.equal(passed.stdout.includes('claim'), false)
+  for (const path of ['/issues/42', '/issues/43']) {
     assert.ok(calls.some(call => call.path.endsWith(path)), path)
   }
   assert.ok(calls.every(call => call.authorization === 'Bearer synthetic-token-value'))
+  // An issue listed twice is read once, with the repeat itself reported.
   calls.length = 0
-  globalThis.fetch = answer(['42', '43'])
-  const passed = await runMain(eventFor(listed), env)
-  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
-  // An issue listed twice is read once and its missing claim is reported once, with the repeat itself.
-  calls.length = 0
-  globalThis.fetch = answer(['42'])
   const repeated = await runMain(eventFor(listed.replace('Fixes #43', 'Fixes #43\nFixes #43')), env)
   assert.equal(repeated.status, 1)
   assert.equal(calls.filter(call => call.path.endsWith('/issues/43')).length, 1)
-  assert.equal(repeated.stdout.split('no comment on #43 claims').length - 1, 1)
   assert.match(repeated.stdout, /#43 is listed more than once/)
 })
 
@@ -861,7 +812,7 @@ const githubAnswers = (calls, { labels = [], comments = [], pulls = [] }) => asy
 }
 const pullItem = (number, association, login) => ({ number, title: 'fix: synthetic', body: `Fixes #${number}\nAuthor: agent-${number}, fix/synthetic-${number}`, created_at: `2030-01-01T00:00:${String(number).padStart(2, '0')}Z`, labels: [], author_association: association, user: { login } })
 
-test("pr-check counts an outside author's open pull requests by login, apart from the team's eight", () => {
+test("pr-check counts an outside author's open pull requests by login, apart from the team's", () => {
   assert.ok(['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'first_timer'].every(isOutsideAssociation))
   assert.ok([undefined, null, '', 'OWNER', 'member', 'COLLABORATOR'].every(value => !isOutsideAssociation(value)))
   // The third pull request of one login fails and the two older ones keep their slots; a login is not case-sensitive.
@@ -878,16 +829,13 @@ test("pr-check counts an outside author's open pull requests by login, apart fro
   const fifth = cap({ open: [...four, outsideOpen(35, 'e')], number: 35, isOutside: true, login: 'e' })
   assert.equal(fifth.problems.length, 1)
   assert.match(fifth.problems[0].message, /5 outside pull requests would be open, over the 4 in all; counted: #31, #32, #33, #34, #35/)
-  // The team's eight and the outside four do not count toward each other.
-  const mixed = [...teamOpen(TOTAL_CAP), ...four]
-  assert.equal(cap({ open: mixed, number: TOTAL_CAP }).problems.length, 0)
-  assert.equal(cap({ open: mixed, number: 34, isOutside: true, login: 'd' }).problems.length, 0)
-  assert.equal(cap({ open: [...teamOpen(TOTAL_CAP), outsideOpen(31, 'a')], number: 31, isOutside: true, login: 'a' }).problems.length, 0)
-  assert.match(cap({ open: [...mixed, openPr(9, 'agent-9')], number: 9 }).problems[0].message, /^9 pull requests would be open, over the 8 in all; counted: #1, #2, #3, #4, #5, #6, #7, #8, #9\./)
-  // The name an outside pull request puts on its Author line takes no slot of the team's author, however old it is.
+  // The team's pull requests, however many, take no outside slot.
+  assert.equal(cap({ open: [...teamOpen(12), ...four], number: 34, isOutside: true, login: 'd' }).problems.length, 0)
+  assert.equal(cap({ open: [...teamOpen(12), outsideOpen(31, 'a')], number: 31, isOutside: true, login: 'a' }).problems.length, 0)
+  // Nor does the name an outside pull request puts on its Author line take a slot of the team's author.
   const named = [openPr(1, 'dot'), openPr(2, 'dot'), outsideOpen(31, 'newcomer', { body: 'Fixes #31\nAuthor: dot, fix/synthetic-31', createdAt: '2029-12-31T00:00:00Z' })]
-  assert.equal(cap({ open: named, number: 2 }).problems.length, 0)
-  // The exemptions are the team's: a governance, cap-exempt or release pull request from outside still takes a slot.
+  assert.equal(cap({ open: named, number: 31, isOutside: true, login: 'newcomer' }).problems.length, 0)
+  // No exemption applies to a pull request from outside: a governance, cap-exempt or release one still takes a slot.
   const exempt = [outsideOpen(21, 'newcomer', { isGovernance: true }), outsideOpen(22, 'newcomer', { labels: [{ name: 'cap-exempt' }] }), outsideOpen(23, 'newcomer', { title: 'chore(release): synthetic' })]
   assert.equal(cap({ open: exempt, number: 22, isOutside: true, login: 'newcomer' }).problems.length, 0)
   assert.equal(cap({ open: exempt, number: 23, isOutside: true, login: 'newcomer' }).problems.length, 1)
@@ -895,9 +843,7 @@ test("pr-check counts an outside author's open pull requests by login, apart fro
   const open = [outsideOpen(21, 'newcomer'), outsideOpen(22, 'newcomer'), outsideOpen(17, 'newcomer', { createdAt: '2030-01-02T00:00:00Z' })]
   const governed = outsidePr({ open, paths: [...syntheticPr().paths, 'CONTRIBUTING.md'] })
   assert.ok(checkPr(governed).problems.some(item => item.check === 'cap'))
-  assert.equal(checkPr(governed).info.includes('cap: this pull request is exempt.'), false)
   assert.equal(checkPr({ ...governed, association: 'OWNER' }).problems.some(item => item.check === 'cap'), false)
-  assert.ok(checkPr({ ...governed, association: 'OWNER' }).info.includes('cap: this pull request is exempt.'))
 })
 
 test('pr-check fails an outside pull request whose claim was written by someone else or whose issue is not ready', async t => {
@@ -1009,16 +955,14 @@ test('pr-check lets a small docs pull request from an outside author through wit
   assert.deepEqual(passed.problems, [])
   assert.ok(passed.info.includes('issue: a small docs fix needs no issue line.'))
   assert.deepEqual(checkPr(docsPr({ title: 'docs(readme): explain the first step' })).problems, [])
-  // The lane is for outside pull requests: the owner's agents, and a run that does not know the author, still need the issue line and the claim.
+  // The lane is for outside pull requests: the owner's agents, and a run that does not know the author, still need the issue line (and no claim).
   for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR', undefined]) {
     const team = docsPr({ association, login: undefined })
     const missing = checkPr(team).problems
     assert.equal(missing.length, 1, String(association))
     assert.equal(missing[0].check, 'issue')
     assert.match(missing[0].message, /first non-empty body line must name one issue/)
-    const unclaimed = checkPr({ ...team, body: `Part of #42\n${docsBody}`, issueData: { state: 'open' }, issueComments: [] }).problems
-    assert.equal(unclaimed.length, 1, String(association))
-    assert.equal(unclaimed[0].check, 'claim')
+    assert.deepEqual(checkPr({ ...team, body: `Part of #42\n${docsBody}`, issueData: { state: 'open' }, issueComments: [] }).problems, [], String(association))
   }
   // Naming an issue it has no claim on, and that is not ready, is no failure either.
   const named = checkPr(docsPr({ body: `Part of #42\n${docsBody}`, issueData: { state: 'open', labels: [] }, issueComments: [] }))
@@ -1084,45 +1028,65 @@ test('pr-check only notes, and does not fail, a large or governance-touching out
   assert.match(execution.stdout, /info outside note: 503 changed lines in 3 files/)
 })
 
-test("pr-check leaves the owner's agents' caps and claims as they were", async t => {
-  // The owner, a member, a collaborator and a run that does not know the author are all judged as before.
+// A local run that does not know the author says the claim and the cap were not checked, rather than pass them silently.
+const unknownAuthorNote = 'claim and cap: not checked, the author is unknown here. The team needs neither; a contributor from outside the team needs both (CONTRIBUTING rules 3 and 10), and CI checks them.'
+
+test('pr-check passes a team pull request with no claim on its issue', async t => {
+  // The owner, a member, a collaborator and a run that does not know the author need no claim on any issue.
   for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR', undefined]) {
     const team = { ...syntheticPr(), association, login: 'WenyuChiou', now: outsideNow }
-    assert.deepEqual(checkPr(team).problems, [], String(association))
-    // No ready label, no login on the comment and another login's live claim do not matter to the team.
-    const lax = checkPr({ ...team, issueData: { state: 'open', labels: [] }, issueComments: [claimBy('someone', 'Claim: dot, fix/another, until 2030-06-02 00:00 UTC'), { body: `Claim: codex, ${branch}, until 2030-06-02 00:00 UTC` }] })
-    assert.deepEqual(lax.problems, [], String(association))
-    // The claim must still name this agent and branch.
-    const wrongAgent = checkPr({ ...team, issueComments: [claimBy('WenyuChiou', `Claim: dot, ${branch}, until 2030-06-02 00:00 UTC`)] }).problems
-    assert.equal(wrongAgent.length, 1)
-    assert.match(wrongAgent[0].message, /^no issue comment claims this branch for this agent/)
-    // A release or governance pull request keeps its exemption from the cap.
-    assert.equal(checkPr({ ...team, title: 'chore(release): Agent Board 9.9.9' }).problems.some(item => item.check === 'outside'), false)
-    assert.ok(checkPr({ ...team, paths: [...team.paths, 'CONTRIBUTING.md'] }).info.includes('cap: this pull request is exempt.'))
-    // Four outside pull requests do not count toward the eight, and a ninth team pull request still fails as before.
-    const outside = [21, 22, 23, 24].map(number => outsideOpen(number, `visitor-${number}`))
-    assert.deepEqual(checkPr({ ...team, open: [...teamOpen(7), ...outside] }).problems, [], String(association))
-    const over = checkPr({ ...team, open: [...teamOpen(8), ...outside] }).problems.filter(item => item.check === 'cap')
-    assert.equal(over.length, 1)
-    assert.match(over[0].message, /^9 pull requests would be open, over the 8 in all; counted: #1, #2, #3, #4, #5, #6, #7, #8\./)
-    // Two per author still holds, and an outside pull request that names the same agent takes no slot.
-    const codex = [openPr(1, 'codex (local)'), openPr(2, 'codex (local)')]
-    const third = checkPr({ ...team, open: codex }).problems.filter(item => item.check === 'cap')
-    assert.equal(third.length, 1)
-    assert.match(third[0].message, /"codex \(local\)" would have 3 open pull requests, over 2 per author: #1, #2, #17/)
-    const named = outsideOpen(21, 'visitor', { body: 'Fixes #21\nAuthor: codex (local), fix/synthetic-21', createdAt: '2029-12-31T00:00:00Z' })
-    assert.deepEqual(checkPr({ ...team, open: [codex[0], named] }).problems, [], String(association))
+    for (const issueComments of [[], [claimBy('someone', 'Claim: dot, fix/another, until 2030-06-02 00:00 UTC')], [{ body: `Claim: dot, ${branch}, until 2030-06-02 00:00 UTC` }]]) {
+      const checked = checkPr({ ...team, issueData: { state: 'open', labels: [] }, issueComments })
+      assert.deepEqual(checked.problems, [], String(association))
+      assert.deepEqual(checked.info.filter(line => /claim/.test(line)), association ? [] : [unknownAuthorNote], String(association))
+    }
+    // Offline, and with several issues listed, there is still no claim to check or to skip.
+    assert.deepEqual(checkPr({ ...team, issueData: null, issueComments: null }).info.filter(line => /claim/.test(line)), association ? [] : [unknownAuthorNote])
+    const two = checkPr({ ...twoIssuePr({ issueComments: [] }), association, issueComments: [] })
+    assert.deepEqual(two.problems, [], String(association))
+    // The issue itself is still judged: a closed one fails whoever wrote the pull request.
+    assert.ok(checkPr({ ...team, issueData: { state: 'closed' }, issueComments: [] }).problems.some(item => item.check === 'issue'))
   }
-  // In CI the owner's pull request is read from the event: the claim and the cap are the team's, whoever else is open.
+  // In CI the owner's pull request is read from the event, and an issue with no comment at all is enough.
   const setup = fixture(t)
   const originalFetch = globalThis.fetch
   t.after(() => { globalThis.fetch = originalFetch })
   const calls = []
-  const pulls = [...[1, 2, 3, 4, 5, 6, 7].map(number => pullItem(number, 'OWNER', 'WenyuChiou')), ...[21, 22, 23, 24].map(number => pullItem(number, 'NONE', `visitor-${number}`))]
+  globalThis.fetch = githubAnswers(calls, { labels: [], comments: [] })
+  const passed = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
+  assert.equal(passed.stdout.includes('claim'), false)
+  // A team author's check reads neither the issue's comments nor the open pull requests, so a failed lookup it does
+  // not need cannot stop it.
+  assert.equal(calls.some(path => path.endsWith('/issues/42/comments') || path.endsWith('/pulls')), false, calls.join(' '))
+})
+
+test('pr-check passes a team pull request when more than eight pull requests are open', async t => {
+  for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR', undefined]) {
+    const team = { ...syntheticPr(), association, login: 'WenyuChiou', now: outsideNow }
+    // Nine pull requests of nine agents are open ahead of this one, and a new pull request has no number yet.
+    const nine = teamOpen(9)
+    for (const number of [17, null]) {
+      const checked = checkPr({ ...team, number, open: nine })
+      assert.deepEqual(checked.problems, [], String(association))
+      assert.deepEqual(checked.info.filter(line => /cap/.test(line)), association ? [] : [unknownAuthorNote], String(association))
+    }
+    // Three open pull requests of one agent and its lane take no slot from a fourth.
+    const codex = [1, 2, 3].map(number => openPr(number, 'codex (local)'))
+    assert.deepEqual(checkPr({ ...team, open: codex }).problems, [], String(association))
+    // Outside pull requests do not change that, and a team release is still not taken for an outside one.
+    const outside = [21, 22, 23, 24, 25].map(number => outsideOpen(number, `visitor-${number}`))
+    assert.deepEqual(checkPr({ ...team, open: [...nine, ...outside] }).problems, [], String(association))
+    assert.equal(checkPr({ ...team, title: 'chore(release): Agent Board 9.9.9', open: nine }).problems.some(item => item.check === 'outside' || item.check === 'cap'), false)
+  }
+  // In CI the owner's pull request is read from the event: twelve of the owner's are open, and no file list is read for any.
+  const setup = fixture(t)
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const calls = []
+  const pulls = [...Array.from({ length: 12 }, (_, index) => pullItem(index + 1, 'OWNER', 'WenyuChiou')), ...[21, 22, 23, 24].map(number => pullItem(number, 'NONE', `visitor-${number}`))]
   globalThis.fetch = githubAnswers(calls, { labels: [], comments: [{ body: `Claim: codex, ${branch}, until 2030-01-01 00:00 UTC` }], pulls })
   const passed = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
   assert.equal(passed.status, 0, passed.stdout + passed.stderr)
-  assert.ok(calls.some(path => path.endsWith('/pulls/1/files')))
-  // An outside pull request has no governance exemption, so its files are never listed.
-  assert.equal(calls.some(path => path.endsWith('/pulls/21/files')), false)
+  assert.equal(calls.some(path => path.endsWith('/files')), false)
 })

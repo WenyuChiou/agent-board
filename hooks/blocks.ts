@@ -455,9 +455,9 @@ export type ConfirmedTask = { text: string; ref: ConfirmRef; entries: Array<Omit
 
 // A person's completion changes only the exact task drawn, and only after its agent
 // stopped. Recheck here, inside each caller's read/change/write retry.
-export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}): ConfirmedTask | null => {
+export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS): ConfirmedTask | null => {
   const task = confirmedTarget(text, ref, s)
-  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now, observedTime(task.auto, now, seen).updated)) return null
+  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now, observedTime(task.auto, now, seen).updated, staleMs)) return null
   const lines = linesOf(text)
   const spans = scanBlocks(lines)
   const span = ref.session === null ? undefined : spans.find(one => one.session === ref.session)
@@ -622,7 +622,7 @@ export const takeManualDone = (
 // null when it cannot be found for sure: a block without its end marker, a heading that is
 // gone or has a twin, a heading inside some session's block, or a session id two blocks
 // share when the row's project and each block's first heading cannot tell them apart.
-export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}): Archived | null => {
+export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
@@ -657,7 +657,7 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       // The older block of a twin pair is offered for archive while it still looks live (#399):
       // a newer block with the same agent and full id is the one that runs.
       const isTwin = ref.isDuplicate === true && task !== undefined && isOutranked(tasks, task)
-      if (auto === null || !isTwin && !isStale(auto, now, observedTime(auto, now, observations).updated)) return null
+      if (auto === null || !isTwin && !isStale(auto, now, observedTime(auto, now, observations).updated, staleMs)) return null
     }
 
     return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }

@@ -69,12 +69,14 @@ test('preflight passes when the branch contains the base and no files changed', 
   assert.equal(checks.filter(item => item.state !== 'PASS').length, 0)
 })
 
-test('preflight fails when the branch does not contain the base', async t => {
+test('preflight only warns when the branch is behind main, since a branch behind main can merge as it is', async t => {
   const f = fixture(t)
   const tree = f.git('rev-parse', 'HEAD^{tree}')
   const newer = f.git('commit-tree', tree, '-p', 'HEAD', '-m', 'New main')
   f.git('update-ref', 'refs/remotes/origin/main', newer)
-  assert.ok(has(await f.check(), 'FAIL', 'merge origin/main into this branch (no rebase, no force-push)'))
+  const checks = await f.check()
+  assert.ok(has(checks, 'WARN', 'does not contain the latest main'))
+  assert.ok(!checks.some(item => item.state === 'FAIL' && /origin\/main/.test(item.message)))
 })
 
 test('preflight fetches main by default and fails closed when fetch fails', async t => {
