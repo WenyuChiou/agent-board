@@ -90,7 +90,7 @@ npx --yes bun@1.4.2 scripts/build-released.ts --check
 
 The installer checks and the type check the template lists are in [CONTRIBUTING.md, Run the checks](../CONTRIBUTING.md#run-the-checks).
 
-If you changed `scripts/board-cli.ts` or a `hooks/` file it imports, rebuild the bundle with `npx --yes bun@1.4.2 scripts/build-board.ts` and commit `hooks/board-script.ts` together with the change.
+If you changed `scripts/board-cli.ts` or a `hooks/` file it imports, rebuild the bundle with `npx --yes bun@1.4.2 scripts/build-board.ts` and commit `hooks/board-script.ts` and its parts (`hooks/board-script-*.ts`) together with the change.
 
 When the plugin group is selected, CI runs `claude plugin validate --strict .` and `claude plugin test .` on Ubuntu (both systems on `main` and release PRs). To run them yourself, install the version CI pins, then run both through `iso` (offline, no login, several minutes):
 
@@ -188,14 +188,18 @@ git fetch origin
 git merge origin/main       # never rebase or force-push
 ```
 
-The generated bundle `hooks/board-script.ts` is stored one line per line, so it conflicts only when two pull requests change the same code. If it conflicts, take the copy from the `main` you are merging, rebuild it from the merged sources and finish the merge:
+The generated bundle is `hooks/board-script.ts` and its parts `hooks/board-script-1.ts`, `-2.ts`, …. It is stored one line per line, so it conflicts only when two pull requests change the same code. If any of these files conflicts, take them from the `main` you are merging, rebuild from the merged sources and finish the merge:
 
 ```sh
-git restore --source=MERGE_HEAD --staged --worktree hooks/board-script.ts
+git restore --source=MERGE_HEAD --staged --worktree -- 'hooks/board-script*.ts'
 npx --yes bun@1.4.2 scripts/build-board.ts
-git add hooks/board-script.ts
+git add -A -- 'hooks/board-script*.ts'
 git commit --no-edit
 ```
+
+The rebuild also removes a part that `main` no longer has, and `add -A` stages that removal.
+
+When `scripts/build-board.ts` says a bundle part is over 1,000,000 bytes, do not remove or shorten features to make it fit. Add a split point to `PART_STARTS` in `scripts/build-board.ts` and rebuild, or say so on your issue and the maintainer adds it.
 
 Fragments in `changelog.d/` do not conflict, since each pull request adds its own file. Run the checks again and push. Once the pull request is Ready, merge `main` only while answering `Review: REQUEST CHANGES`, or when the maintainer comments that `main` moved ([docs/dev/team-process.md, Merge order](dev/team-process.md#merge-order)); after that push, comment `Ready for review <new full head sha>`. After `Review: APPROVE`, leave merging `main` to the reviewer.
 
