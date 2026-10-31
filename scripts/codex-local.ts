@@ -13,7 +13,7 @@ import { parseProgress, progressTail, STALE_MS } from '../hooks/parse'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
-import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
+import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents, windowsHookCommand } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
 import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
@@ -731,9 +731,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const changes: { file: string; action: string }[] = []
   const nextHooks: Json = { ...hooks }
   const groups: Json = {}
+  // Codex runs its hooks through PowerShell on Windows (#623).
+  const isPowerShellHost = agent === 'codex' && process.platform === 'win32'
+  const hostNode = isPowerShellHost ? windowsHookNode(process.execPath) : undefined
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
-    const eventCommand = hookArgs(event, state).map(quote).join(' ')
+    const eventCommand = isPowerShellHost ? windowsHookCommand(hookArgs(event, state), quote, hostNode) : hookArgs(event, state).map(quote).join(' ')
     const group = agent === 'cursor' ? { command: eventCommand, timeout: hostHookTimeout(agent, event) } : { hooks: [{ type: 'command', command: eventCommand, timeout: hostHookTimeout(agent, event) }] }
     if (hooks[event] !== undefined && !Array.isArray(hooks[event])) throw new Error('INVALID_HOOK_GROUP')
     const entries = (hooks[event] ?? []) as unknown[]
