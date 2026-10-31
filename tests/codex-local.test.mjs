@@ -11,7 +11,7 @@ import { inspect } from 'node:util'
 import { formatWriter } from './e2e/lib/faults.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
-import { hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
+import { HOOK_INPUT_TIMEOUT, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
@@ -1753,6 +1753,45 @@ const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell 
   assert.equal(errors.trimEnd().split('\n').length, 200)
   assert.match(errors, /INPUT_TIMEOUT/)
   assert.ok(!errors.includes('PRIVATE_') && !errors.includes(home), errors)
+})
+
+test('the PowerShell reporter reads a complete input before it loads any module', { skip: process.platform !== 'win32' }, () => fixture(f => {
+  const modules = join(f.home, 'modules'), inbox = join(f.home, '.claude', 'progress-inbox')
+  const script = join(f.home, '.claude', 'progress-report.ps1')
+  const env = isolatedEnv(f.home)
+  const moduleKey = Object.keys(env).find(key => key.toLowerCase() === 'psmodulepath')
+  const inheritedModules = moduleKey === undefined ? '' : env[moduleKey]
+  if (moduleKey !== undefined) delete env[moduleKey]
+  env.PSModulePath = [modules, inheritedModules].filter(Boolean).join(delimiter)
+  f.save(join(modules, 'SlowShim', 'SlowShim.psd1'), "@{ RootModule = 'SlowShim.psm1'; ModuleVersion = '1.0'; FunctionsToExport = @('New-Object') }")
+  f.save(join(modules, 'SlowShim', 'SlowShim.psm1'), `[Threading.Thread]::Sleep(${HOOK_INPUT_TIMEOUT + 1000})\nfunction New-Object { Microsoft.PowerShell.Utility\\New-Object @args }\n`)
+  f.save(script, reporterPs1())
+  const payload = '{"session_id":"synthetic-ready-input","id":1234567890123456789}'
+  const input = join(f.home, 'complete-input.txt')
+  f.save(input, payload)
+  const descriptor = openSync(input, 'r')
+  const powershell = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  let result
+  try {
+    result = spawnSync(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'turn'], {
+      env, stdio: [descriptor, 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 30000,
+    })
+  } finally { closeSync(descriptor) }
+  assert.equal(result.error, undefined, hookFailure(result))
+  assert.equal(result.status, 0, hookFailure(result))
+  assert.equal(result.stdout.trim(), '{}')
+  const delivered = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')) : []
+  assert.equal(delivered.length, 1, `${hookFailure(result)}; hookLog=${hookLog(f)}`)
+  assert.equal(readFileSync(join(inbox, delivered[0]), 'utf8'), payload)
+  assert.doesNotMatch(hookLog(f), /INPUT_TIMEOUT/)
+}))
+
+test('the PowerShell reporter calls no cmdlet between its input clock and the payload', () => {
+  const source = reporterPs1()
+  const start = source.indexOf('$clock = [Diagnostics.Stopwatch]::StartNew()')
+  const end = source.indexOf('$Payload = [Text.Encoding]::UTF8.GetString', start)
+  assert.ok(start >= 0 && end > start, 'the reporter has an input clock and payload decode')
+  assert.doesNotMatch(source.slice(start, end), /\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/)
 })
 
 test('legacy reporters bound an unfinished input and keep Cursor responses and errors local', () => legacyReporterProbe())

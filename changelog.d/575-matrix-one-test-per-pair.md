@@ -1,0 +1,2 @@
+- **Tests / Messaging** · The sender-receiver matrix sets up one board for every sender and receiver and runs one test for every pair, each with its own time limit, instead of one test that started a board for every pair and ran out of time on Windows (#575).
+  Tests: `messages: codex → antigravity (other) delivers with a receipt or names the fallback in words`, `messages: page → muse (other) delivers with a receipt or names the fallback in words`.

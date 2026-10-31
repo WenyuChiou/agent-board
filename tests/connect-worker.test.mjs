@@ -262,6 +262,8 @@ test('the full generated worker bundle runs through verified staging without rec
   // Staged code has no argv size limit. This is only a coarse growth alarm;
   // the structural checks above catch an embedded generated predecessor. The decoded text is
   // not one module: Claude Code's per-file limit is checked by the module limit test above.
+  // /progress connect writes and reads the decoded text through $.fs, which refuses files over
+  // 4,194,304 bytes (hooks/register.tsx), so this alarm fires well before that limit.
   assert.ok(Buffer.byteLength(code) < 2 * 1024 * 1024)
   // A bundle built twice into itself repeats every module banner, so each hooks/ module appears once.
   // An earlier build embedded as a string keeps its banners inside the string: the BOARD_SCRIPT
