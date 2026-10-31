@@ -353,8 +353,10 @@ export const baseName = (path: string): string => path.replace(/[\\/]+$/, '').sp
 // `## persona_framework (PFC)` belongs to the session whose repo is persona_framework.
 export const projectHead = (name: string): string => (name.trim().split(/[\s(（·—]/)[0] ?? '').toLowerCase()
 
+// The whole heading first, so `## my project` is the folder `my project`, not only `my`.
 export const isHereProject = (name: string, here: readonly string[]): boolean => {
   const head = projectHead(name)
+  const whole = name.trim().toLowerCase()
 
-  return head !== '' && here.some(one => one.toLowerCase() === head)
+  return head !== '' && here.some(one => one.toLowerCase() === whole || one.toLowerCase() === head)
 }

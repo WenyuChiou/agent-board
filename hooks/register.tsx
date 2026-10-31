@@ -75,7 +75,8 @@ import {
   stateOf,
 } from './mirror'
 import type { ListedTask } from './mirror'
-import { baseName, countSteps, doneKey, isHereProject, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
+import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
+import { othersNote } from './others'
 import type { ProgressProject } from '../types'
 import { dashboardHtml } from './dashboard'
 import { peekInbox, redact, turnsFor } from './board'
@@ -3189,31 +3190,11 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
   }
 }
 
-// For a session's first turn: work in this project that other sessions left or hold.
-const othersNote = async ($: EngineInterface): Promise<string | null> => {
-  const names = await read($, here)
+// For a session's first turn: work in this project that other sessions left or hold (hooks/others.ts).
+const othersNoteFor = async ($: EngineInterface): Promise<string | null> => {
   const mirror = await read($, mine)
-  const own = mirror === null ? '' : shortId(mirror.sessionId)
-  const at = await $.clock.now()
-  const s = await wordsOf($)
-  const lines: string[] = []
-  for (const project of (await read($, snapshot)).projects) {
-    if (!isHereProject(project.name, names)) continue
-    for (const task of project.tasks) {
-      const auto = task.auto
-      if (auto === null || auto.session === own || auto.state === 'done' || isTaskComplete(task)) continue
-      if (at - auto.updated > 7 * DAY) continue
-      const { done, total } = countSteps(task)
-      const open = task.steps.find(step => step.status !== 'done' && step.status !== 'cancelled')
-      // Another agent wrote these words: they reach Claude as quoted data, never as a line of
-      // their own that reads like an instruction.
-      const title = asData(task.title)
-      lines.push(auto.state === 'ended' ? s.othersEnded(title, open === undefined ? s.none : asData(open.text), done, total) : s.othersHeld(title, done, total))
-    }
-  }
-  if (lines.length === 0) return null
 
-  return [s.othersHead, ...dataBlock(lines, s), s.othersTail].join('\n')
+  return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : shortId(mirror.sessionId), await $.clock.now(), await wordsOf($))
 }
 
 // Keeps the store to what the board still needs (retention.ts, #373). A pass reads at most
@@ -3938,7 +3919,7 @@ export const register: Register = (on, options) => {
       await settle($, false)
     } else if (mirror !== null && (await $.store.get(`hinted:${mirror.sessionId}`)) === undefined) {
       await $.store.set(`hinted:${mirror.sessionId}`, await $.clock.now())
-      const note = await othersNote($)
+      const note = await othersNoteFor($)
       if (note !== null) {
         // The engine takes a plugin's row as a hidden (meta) user row; the file's words in it
         // sit in a fence, marked as data. The row has said `isMeta` since 0.12.0, which the
