@@ -1665,7 +1665,9 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   const call = (method, target, { body, headers = {} } = {}) =>
     new Promise((done, fail) => {
       const sent = { host: `127.0.0.1:${port}`, 'x-board-token': token, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }
-      const req = request({ host: '127.0.0.1', port, method, path: target, headers: sent }, res => {
+      // A connection of its own for each call: a test that blocks on spawnSync past the server's
+      // 5 s keep-alive would otherwise reuse a socket the server already closed (ECONNRESET).
+      const req = request({ host: '127.0.0.1', port, method, path: target, headers: sent, agent: false }, res => {
         let data = ''
         res.setEncoding('utf8')
         res.on('data', chunk => (data += chunk))
