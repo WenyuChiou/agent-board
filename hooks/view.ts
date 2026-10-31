@@ -58,7 +58,7 @@ export type StepRef = { project: string; title: string; step: string; line: numb
 // heading line, checked against the title so a task that moved is still found once.
 // `isDuplicate` marks the older block of two for one session (#399): its archive is allowed
 // while it still looks live, once the file shows a newer block for the same agent and id.
-export type TaskRef = { project: string; title: string; line: number; session: string | null; isDuplicate?: true }
+export type TaskRef = { project: string; title: string; line: number; session: string | null; resume?: string | null; isDuplicate?: true }
 
 // Another agent's session, as its block names it: its block id, the session id its hook gave
 // (`resume=`), the folder it ran in (`dir=`), and whether it has closed (`state=ended`). The
@@ -519,15 +519,16 @@ const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
 const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, string>>): WaitingItem[] => {
   const title = mine.title || fallbackTitle(mine)
   const context = contextFor(mine)
+  const ownId = shortId(mine.sessionId)
   // Keyed on the steps this session's block marks [?]: a blocked one is written [!], which no
   // other reader lists as a question, so it cannot be marked answered.
   const keys = askKeys(
-    shortId(mine.sessionId),
+    ownId,
     mine.tasks.map(task => (waitsOnYou(mine, task) && task.blocked === null ? stepWords(task).trim() : null)),
   )
 
   return mine.tasks
-    .map((task, index) => ({ task, hideKey: stable?.[questionSlot(questionScope(mine.project, 'claude', shortId(mine.sessionId)), index)] ?? keys[index] ?? '' }))
+    .map((task, index) => ({ task, hideKey: stable?.[questionSlot(questionScope(mine.project, 'claude', ownId), index)] ?? keys[index] ?? '' }))
     .filter(({ task }) => waitsOnYou(mine, task))
     .map(({ task, hideKey }) => ({
       key: `mine::${task.id}`,
@@ -755,6 +756,20 @@ const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 const runAgents = (group: RunGroup, s: Strings): string => group.agents.map(agent => s.agentNames[agent] ?? agentName(agent)).join(' / ')
 const runsText = (group: RunGroup, now: number, s: Strings): string => s.runsLine(group.count, runAgents(group, s), relativeTime(group.last, now, s))
 
+const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string, ownAgent = 'claude'): boolean => {
+  let count = 0
+  let unresumed = 0
+  for (const p of projects) {
+    for (const t of p.tasks) {
+      if (t.auto !== null && (t.auto.agent ?? 'claude') === ownAgent && t.auto.session === ownId) {
+        count += 1
+        if (t.auto.resume === null || t.auto.resume === undefined) unresumed += 1
+      }
+    }
+  }
+  return count === 1 && unresumed === 1
+}
+
 export const buildView = (
   projects: readonly ProgressProject[],
   here: readonly string[],
@@ -823,8 +838,14 @@ export const buildView = (
   for (const project of folded.projects) {
     const name = project.name || s.uncategorized
     const isHere = isHereProject(name, here)
+    const ownAgent = (mine?.agent || 'claude').toLowerCase()
     for (const task of project.tasks) {
-      if (task.auto !== null && task.auto.session === ownId) {
+      const isMine = task.auto !== null && (
+        task.auto.resume !== null && mine !== null && mine.sessionId
+          ? task.auto.resume === mine.sessionId && (task.auto.agent ?? 'claude') === ownAgent
+          : (mine !== null && mine.sessionId && task.auto.session === ownId && (task.auto.agent ?? 'claude') === ownAgent && mine.isRun !== true && isUniqueUnresumedTask(task, folded.projects, ownId, ownAgent))
+      )
+      if (isMine) {
         const own = folded.runs.get(task)
         if (own !== undefined) {
           ownRuns = own
@@ -1005,13 +1026,13 @@ export const buildView = (
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142).
         confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || auto === 'ended')
-          ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
+          ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, resume: task.auto?.resume ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
             : auto === 'ended' && task.auto !== null
-              ? { project: name, title: task.title, line: task.line, session: task.auto.session }
+              ? { project: name, title: task.title, line: task.line, session: task.auto.session, ...(task.auto.resume ? { resume: task.auto.resume } : {}) }
               : null,
         target: targetOf(task.auto),
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
@@ -1063,7 +1084,7 @@ export const buildView = (
         project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
         when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], left: [], next: null, due: null, pr: '',
         agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
-        archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
+        archive: { project: name, title: task.title, line: task.line, session: auto.session, ...(auto.resume ? { resume: auto.resume } : {}), isDuplicate: true }, target: null,
       },
     })
   }

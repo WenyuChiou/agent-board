@@ -1,0 +1,2 @@
+- **Messaging / Native hook delivery** · Queued board and cross-agent messages deliver through native turn-start hooks and record acknowledgements when the session reports back, even when no background message poller is attached (#603).
+  Tests: `hook-queued messages claim once on turn start and transition to acknowledged on ACK report`, `--codex-send queues hook-driven messages and delivers them via lifecycle hook stdout with ACK reconciliation on --codex-report`.

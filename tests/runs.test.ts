@@ -1,11 +1,11 @@
 import { expect, test } from 'claude-code/testing'
 
 import { boardItems, boardScreen, boardText, chatText, emptyBoardState } from '../hooks/board'
-import { renderAutoBlock, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { removeAutoBlock, renderAutoBlock, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { dashboardHtml } from '../hooks/dashboard'
 import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
 import { autoOf, parseProgress } from '../hooks/parse'
-import { emptyQuestions, observeQuestions, withCaptures } from '../hooks/questions'
+import { archiveQuestionsKept, emptyQuestions, observeQuestions, questionScope, withCaptures } from '../hooks/questions'
 import { cleanSignal, codexSignal, foldRuns, isStrongRun, pickParent, withRunMark, withSignal } from '../hooks/runs'
 import { serveModel } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
@@ -388,4 +388,175 @@ test('a strong run is suppressed while a weak hint remains eligible for the lega
   expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { source: 'exec' })))).toBe(true)
   expect(isStrongRun(withSignal(null, codexSignal(true, null, null)))).toBe(false)
   expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { originator: 'Codex Desktop' })))).toBe(false)
+})
+
+test('concurrent subagents sharing the same 8-character session prefix are tracked independently and do not clobber each other', () => {
+  const sub1 = delegate(1, { session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000a', parent: PERSON, title: 'Subagent A' })
+  const sub2 = delegate(2, { session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000b', parent: PERSON, title: 'Subagent B' })
+  const text = file(person, sub1, sub2)
+  const view = viewOf(text)
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.title).toBe('Ship the export feature')
+  expect(rows[0]?.runs).toBe('+2 runs by Codex, last 21 min ago')
+
+  const qBoard = file(person, sub1, sub2)
+    .replace('### Subagent A\n- [~] A step', '### Subagent A\n- [?] Question from Subagent A?')
+    .replace('### Subagent B\n- [~] A step', '### Subagent B\n- [?] Question from Subagent B?')
+  const projects = parseProgress(qBoard)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'fixture:collision').ledger
+  const unresolved = ledger.records.filter(r => r.isUnresolved)
+  expect(unresolved).toHaveLength(2)
+  expect(unresolved.map(r => r.source?.session)).toEqual([
+    'bbbb0001-0000-4000-8000-00000000000a',
+    'bbbb0001-0000-4000-8000-00000000000b',
+  ])
+})
+
+test('Antigravity subagents fold into parent session row as runs without creating duplicate top-level rows', () => {
+  const antigravitySub: Spec = {
+    session: '8d21f0b4',
+    agent: 'antigravity',
+    resume: '8d21f0b4-1111-4000-8000-000000000001',
+    run: true,
+    parent: PERSON,
+    ageMinutes: 5,
+    title: 'Audit subagent task',
+  }
+  const view = viewOf(file(person, antigravitySub))
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.title).toBe('Ship the export feature')
+  expect(rows[0]?.runs).toBe('+1 run by Antigravity, last 5 min ago')
+  expect(view.background).toBe(undefined)
+  expect(view.overview.active).toBe(1)
+})
+
+test('upsertAutoBlock preserves concurrent subagents with identical 8-character prefix', () => {
+  const mirrorA: ProgressMirror = {
+    ...emptyMirror('abcdef01-0000-4000-8000-000000000001', 'Demo', NOW, ''),
+    title: 'Subagent Alpha',
+    tasks: [{ subject: 'Alpha step', status: 'in_progress', blocked: null, waiting: null, why: null }],
+    isRun: true,
+  }
+  const mirrorB: ProgressMirror = {
+    ...emptyMirror('abcdef01-0000-4000-8000-000000000002', 'Demo', NOW, ''),
+    title: 'Subagent Beta',
+    tasks: [{ subject: 'Beta step', status: 'in_progress', blocked: null, waiting: null, why: null }],
+    isRun: true,
+  }
+  const withA = upsertAutoBlock(file(person), mirrorA, en)
+  expect(withA).toContain('Subagent Alpha')
+  const withBoth = upsertAutoBlock(withA, mirrorB, en)
+  expect(withBoth).toContain('Subagent Alpha')
+  expect(withBoth).toContain('Subagent Beta')
+
+  const updatedA: ProgressMirror = {
+    ...mirrorA,
+    tasks: [{ subject: 'Alpha finished', status: 'completed', blocked: null, waiting: null, why: null }],
+  }
+  const reUpserted = upsertAutoBlock(withBoth, updatedA, en)
+  expect(reUpserted).toContain('Subagent Alpha')
+  expect(reUpserted).toContain('Alpha finished')
+  expect(reUpserted).toContain('Subagent Beta')
+  expect(reUpserted).toContain('Beta step')
+})
+
+test('old ledger records under short-id scopes migrate to full session id scopes and settled records do not resurface', () => {
+  const shortScope = questionScope('Demo', 'claude', 'aaaa1111')
+  const fullScope = questionScope('Demo', 'claude', PERSON)
+  const initialLedger = {
+    ...emptyQuestions(),
+    records: [{
+      id: 'question:deadbeef:1',
+      scope: shortScope,
+      words: 'confirm export format',
+      occurrence: 1,
+      copies: 1,
+      isWaiting: false,
+      isPresent: false,
+      isUnresolved: false,
+      resolvedAt: NOW - 5000,
+      firstObserved: NOW - 10000,
+      incarnation: 'init',
+      source: { kind: 'own' as const, project: 'Demo', task: 'Ship the export feature', text: 'Confirm export format', agent: 'claude', session: 'aaaa1111', data: '{}' },
+    }],
+  }
+  const mine: ProgressMirror = {
+    ...emptyMirror(PERSON, 'Demo', NOW, ''),
+    title: 'Ship the export feature',
+    tasks: [{ subject: 'Confirm export format', status: 'in_progress', blocked: null, waiting: true, why: null }],
+  }
+  const reconciled = observeQuestions(initialLedger, [], mine, [], NOW, true, 'reconcile-test')
+  const record = reconciled.ledger.records.find(r => r.id === 'question:deadbeef:1')
+  expect(record?.scope).toBe(shortScope)
+  expect(record?.source?.session).toBe('aaaa1111')
+  expect(record?.isUnresolved).toBe(false)
+  expect(reconciled.ledger.records.filter(r => r.isUnresolved)).toHaveLength(0)
+})
+
+test('archiveQuestionsKept distinguishes subagents with colliding short id when resume is specified', () => {
+  const sub1 = delegate(1, { session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000a', parent: PERSON, title: 'Sub A' })
+  const sub2 = delegate(2, { session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000b', parent: PERSON, title: 'Sub B' })
+  const text = file(person, sub1, sub2)
+  const projects = parseProgress(text)
+  const ledger = emptyQuestions()
+  const refA = { project: 'Demo', title: 'Sub A', line: 1, session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000a' }
+  const refB = { project: 'Demo', title: 'Sub B', line: 1, session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000b' }
+  expect(archiveQuestionsKept(projects, refA, ledger)).toBe(true)
+  expect(archiveQuestionsKept(projects, refB, ledger)).toBe(true)
+})
+
+test('a block with a long session value but no resume attribute does not acquire resume authority', () => {
+  const line = '<!-- auto session=1234567890abcdef agent=codex state=working updated=2026-10-27T12:00:00Z -->'
+  const auto = autoOf(line)
+  expect(auto?.session).toBe('1234567890abcdef')
+  expect(auto?.resume).toBeNull()
+})
+
+test('upsertAutoBlock refuses an ambiguous match against an old block without resume', () => {
+  const oldBlockA = ['<!-- auto session=12345678 agent=claude state=working updated=2026-10-27T12:00:00Z -->', '### Old task', '- [~] Doing', '<!-- /auto session=12345678 -->'].join('\n')
+  const oldBlockB = ['<!-- auto session=12345678 agent=claude state=working updated=2026-10-27T12:01:00Z -->', '### Second old task', '- [~] Doing', '<!-- /auto session=12345678 -->'].join('\n')
+  const initial = `## Demo\n${oldBlockA}\n\n${oldBlockB}\n`
+  const mirror: ProgressMirror = {
+    ...emptyMirror('12345678-0000-4000-8000-000000000001', 'Demo', NOW, ''),
+    title: 'New Task',
+    tasks: [{ subject: 'Step 1', status: 'in_progress', blocked: null, waiting: null, why: null }],
+  }
+  const result = upsertAutoBlock(initial, mirror, en)
+  expect(result).toContain('### Old task')
+  expect(result).toContain('### Second old task')
+  expect(result).toContain('### New Task')
+})
+
+test('removeAutoBlock with agent parameter removes only matching agent block', () => {
+  const claudeBlock = ['<!-- auto session=aaaa1111 agent=claude state=working updated=2026-10-27T12:00:00Z resume=aaaa1111-0000-4000-8000-000000000001 -->', '### Claude task', '- [~] Doing', '<!-- /auto session=aaaa1111 -->'].join('\n')
+  const codexBlock = ['<!-- auto session=aaaa1111 agent=codex state=working updated=2026-10-27T12:00:00Z resume=aaaa1111-0000-4000-8000-000000000001 -->', '### Codex task', '- [~] Doing', '<!-- /auto session=aaaa1111 -->'].join('\n')
+  const initial = `## Demo\n${claudeBlock}\n\n${codexBlock}\n`
+  const removedClaude = removeAutoBlock(initial, 'aaaa1111-0000-4000-8000-000000000001', 'claude')
+  expect(removedClaude).not.toContain('### Claude task')
+  expect(removedClaude).toContain('### Codex task')
+})
+
+test('empty mirror remove removes only matching agent block when same session id exists across agents', () => {
+  const claudeBlock = ['<!-- auto session=aaaa1111 agent=claude state=working updated=2026-10-27T12:00:00Z resume=aaaa1111-0000-4000-8000-000000000001 -->', '### Claude task', '- [~] Doing', '<!-- /auto session=aaaa1111 -->'].join('\n')
+  const codexBlock = ['<!-- auto session=aaaa1111 agent=codex state=working updated=2026-10-27T12:00:00Z resume=aaaa1111-0000-4000-8000-000000000001 -->', '### Codex task', '- [~] Doing', '<!-- /auto session=aaaa1111 -->'].join('\n')
+  const initial = `## Demo\n${claudeBlock}\n\n${codexBlock}\n`
+  const emptyClaudeMirror: ProgressMirror = {
+    ...emptyMirror('aaaa1111-0000-4000-8000-000000000001', 'Demo', NOW, ''),
+    agent: 'claude',
+    tasks: [],
+  }
+  const removed = emptyClaudeMirror.tasks.length === 0 ? removeAutoBlock(initial, emptyClaudeMirror.sessionId, emptyClaudeMirror.agent || 'claude') : upsertAutoBlock(initial, emptyClaudeMirror, en)
+  expect(removed).not.toContain('### Claude task')
+  expect(removed).toContain('### Codex task')
+})
+
+test('foldRuns keeps two blocks with the same agent and short id apart when full id is unknown', () => {
+  const oldA: Spec = { session: 'bbbb0001', agent: 'claude', title: 'Old Block A' }
+  const oldB: Spec = { session: 'bbbb0001', agent: 'claude', title: 'Old Block B' }
+  const view = viewOf(file(oldA, oldB))
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(2)
+  expect(rows.map(r => r.title).sort()).toEqual(['Old Block A', 'Old Block B'].sort())
 })

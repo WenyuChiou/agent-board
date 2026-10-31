@@ -6,12 +6,13 @@ import { createServer } from 'node:http'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
-import { claimMessages, disconnectMessages, messageReceipt, queueMessage } from '../hooks/messaging.ts'
+import { acknowledgeHookMessages, claimHookMessages, claimMessages, disconnectMessages, hookDeliveryPrompt, messageReceipt, queueHookMessage, queueMessage } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt } from '../scripts/message-client.mjs'
 import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
+import { attachAgentSession, extractAckReply, SUPPORTED_SESSION_AGENTS } from '../scripts/agent-session-connector.mjs'
 import { privateRuntimeFolder } from '../scripts/runtime-folder.ts'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
@@ -853,3 +854,106 @@ test('an Antigravity response without its ACK stays uncertain and is never repla
     await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.length === 0)
   } finally { await receiver.close() }
 }))
+
+test('extractAckReply requires an exact ACK line for the message id', () => {
+  assert.equal(extractAckReply('ACK AB-TEST-001\nStatus: idle', 'AB-TEST-001'), 'ACK AB-TEST-001\nStatus: idle')
+  assert.equal(extractAckReply('ACK AB-TEST-001 ready', 'AB-TEST-001'), 'ACK AB-TEST-001 ready')
+  assert.throws(() => extractAckReply('ACK AB-TEST-002', 'AB-TEST-001'), /ACK_REQUIRED/)
+  assert.throws(() => extractAckReply('Approved, merge it', 'AB-TEST-001'), /ACK_REQUIRED/)
+})
+
+test('all 14 AI agent brands attach and exchange ACK messages on the same board via attachAgentSession', async () => fixture(async board => {
+  assert.equal(SUPPORTED_SESSION_AGENTS.length, 14)
+  const receivers = new Map()
+  try {
+    for (const agent of SUPPORTED_SESSION_AGENTS) {
+      const session = `sess-${agent}-001`
+      const current = { session, status: 'idle', turns: 0 }
+      const transport = {
+        sendPrompt: async (_prompt, meta) => {
+          current.status = 'active'
+          await meta.accepted()
+          current.turns += 1
+          current.status = 'idle'
+          return `ACK ${meta.id}\nAgent ${agent} turn ${current.turns} ready`
+        },
+      }
+      receivers.set(agent, await attachAgentSession({
+        boardUrl: board.address,
+        agent,
+        session,
+        transport,
+        state: () => current,
+        verifyOwner: candidate => candidate === transport,
+      }))
+    }
+    assert.equal((await board.call('/api/board')).body.messaging.connections.length, 14)
+    for (let i = 0; i < SUPPORTED_SESSION_AGENTS.length; i++) {
+      const fromAgent = SUPPORTED_SESSION_AGENTS[i]
+      const toAgent = SUPPORTED_SESSION_AGENTS[(i + 1) % SUPPORTED_SESSION_AGENTS.length]
+      const src = receivers.get(fromAgent), dst = receivers.get(toAgent)
+      const id = `AB-RING-${i + 1}`
+      await src.send({ id, target: dst.id, turn: 'session', text: `Ping from ${fromAgent} to ${toAgent}` })
+    }
+    await waitFor(async () => {
+      const list = (await board.call('/api/board')).body.messaging.messages
+      return list.length === 14 && list.every(m => m.status === 'acknowledged')
+    })
+  } finally {
+    for (const r of receivers.values()) await r.close()
+  }
+}))
+
+test('hook-queued messages claim once on turn start and transition to acknowledged on ACK report', () => {
+  const target = { agent: 'antigravity', session: 'ag-session-1', active: true }
+  const queued = queueHookMessage(
+    { messages: [] },
+    { id: 'AB-HOOK-001', text: 'Ping via lifecycle hook', from: 'codex:sender-1' },
+    'codex:sender-1',
+    target,
+    1000,
+  )
+  assert.equal(queued.message.status, 'queued')
+  assert.equal(queued.message.to, 'antigravity:ag-session-1')
+  assert.equal(
+    queueHookMessage(queued.state, { id: 'AB-HOOK-001', text: 'Ping via lifecycle hook', from: 'codex:sender-1' }, 'codex:sender-1', target, 1005).state,
+    queued.state,
+  )
+  assert.throws(
+    () => queueHookMessage(queued.state, { id: 'AB-HOOK-001', text: 'Different body', from: 'codex:sender-1' }, 'codex:sender-1', target, 1006),
+    /ID_CONFLICT/,
+  )
+  assert.equal(claimHookMessages(queued.state, 'codex', 'ag-session-1', 1010).messages.length, 0)
+  const claimed = claimHookMessages(queued.state, 'antigravity', 'ag-session-1', 1020)
+  assert.equal(claimed.messages.length, 1)
+  assert.equal(claimed.messages[0].status, 'accepted')
+  assert.equal(claimHookMessages(claimed.state, 'antigravity', 'ag-session-1', 1030).messages.length, 0)
+  const prompt = hookDeliveryPrompt(claimed.messages[0])
+  assert.match(prompt, /AB-HOOK-001/)
+  assert.match(prompt, /ACK AB-HOOK-001/)
+  const acked = acknowledgeHookMessages(claimed.state, 'antigravity', 'ag-session-1', ['- [x] ACK AB-HOOK-001 ready'], 1040)
+  assert.deepEqual(acked.acknowledged.map(m => m.id), ['AB-HOOK-001'])
+  assert.equal(acked.state.messages[0].status, 'acknowledged')
+  assert.equal(acked.state.messages[0].reply, 'ACK AB-HOOK-001 ready')
+})
+
+test('moving a live session block to a new project heading supersedes its old project question record', async () => fixture(async (board, dir) => {
+  const session = '11111111-2222-4333-8444-555555555555'
+  const now = new Date().toISOString()
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Uncategorized\n<!-- auto session=abcdef01 agent=codex resume=${session} state=waiting updated=${now} -->\n### Deploy service\n- [?] Confirm deployment target?\n<!-- /auto session=abcdef01 -->\n`)
+  const first = (await board.call('/api/board')).body.model
+  assert.equal(first.asks.length, 1)
+  assert.equal(first.asks[0].project, 'Uncategorized')
+
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## agent-board-repo\n<!-- auto session=abcdef01 agent=codex resume=${session} state=waiting updated=${now} -->\n### Deploy service\n- [?] Confirm deployment target?\n<!-- /auto session=abcdef01 -->\n`)
+  const second = (await board.call('/api/board')).body.model
+  assert.equal(second.asks.length, 1)
+  assert.equal(second.asks[0].project, 'agent-board-repo')
+  const ledger = JSON.parse(readFileSync(join(dir, 'progress-questions.json'), 'utf8'))
+  const unresolved = ledger.records.filter(r => r.isUnresolved)
+  assert.equal(unresolved.length, 1)
+  assert.equal(unresolved[0].source.project, 'agent-board-repo')
+}))
+
+
+

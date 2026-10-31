@@ -83,7 +83,13 @@ const normalizeSource = (source: QuestionSource): QuestionSource => {
 }
 
 export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: TaskRef, ledger: QuestionLedger): boolean => {
-  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : task.auto?.session === ref.session)
+  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => {
+    if (ref.session === null) return task.title === ref.title
+    if (ref.resume !== undefined && ref.resume !== null) {
+      return task.auto?.resume === ref.resume || (task.auto?.resume === null && task.auto?.session === ref.resume)
+    }
+    return task.auto?.session === ref.session
+  })
   if (tasks.length !== 1) return false
   const task = tasks[0]
   if (task === undefined) return false
@@ -102,7 +108,7 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
 // session, so a block of another session with the same title is not taken for it. A hand-kept
 // task has no session, so only a hand-kept task's questions match it, not an agent block's (#174).
 export const isAskedBy = (record: QuestionRecord, ref: TaskRef): boolean =>
-  record.source?.project === ref.project && record.source.task === ref.title && (ref.session === null ? record.source.kind === 'manual' : record.source.session === ref.session)
+  record.source?.project === ref.project && record.source.task === ref.title && (ref.session === null ? record.source.kind === 'manual' : (ref.resume !== undefined && ref.resume !== null && record.source.session === ref.resume) || record.source.session === ref.session || (record.source.session.length > 8 && record.source.session.startsWith(ref.session)))
 export const questionProofPath = (path: string, kind: keyof QuestionProofs, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-${kind}-${hash}.json`
 export const questionProofOf = (path: string, name: string): { kind: keyof QuestionProofs; hash: string } | null => {
   const prefix = `${path.replace(/\\/g, '/').split('/').at(-1)?.replace(/\.md$/i, '')}-questions-`
@@ -386,6 +392,20 @@ export const questionFilesKey = (
 
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
+const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string, ownAgent = 'claude'): boolean => {
+  let count = 0
+  let unresumed = 0
+  for (const p of projects) {
+    for (const t of p.tasks) {
+      if (t.auto !== null && (t.auto.agent ?? 'claude') === ownAgent && t.auto.session === ownId) {
+        count += 1
+        if (t.auto.resume === null || t.auto.resume === undefined) unresumed += 1
+      }
+    }
+  }
+  return count === 1 && unresumed === 1
+}
+
 const ownObservations = (mine: ProgressMirror): Observation[] => {
   if (mine.isRun === true) return []
   const own = shortId(mine.sessionId)
@@ -397,17 +417,35 @@ const ownObservations = (mine: ProgressMirror): Observation[] => {
 // Its times, turn state and background jobs change with every hook of a running session and
 // are left out, so they do not make an idle poll pass again (#416).
 export const ownQuestionsKey = (mine: ProgressMirror | null): string =>
-  JSON.stringify(mine === null ? null : [shortId(mine.sessionId), mine.project, ownObservations(mine)])
+  JSON.stringify(mine === null ? null : [mine === null ? '' : shortId(mine.sessionId), mine.project, ownObservations(mine)])
 
 const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): Observation[] => {
   const own = mine === null ? '' : shortId(mine.sessionId)
+  const ownAgent = (mine?.agent || 'claude').toLowerCase()
   const rows: Observation[] = []
   const scopes = new Set<string>()
   const ambiguous = new Set<string>()
+  const shortCounts = new Map<string, number>()
   for (const project of projects) {
     for (const task of project.tasks) {
-      if (mine !== null && task.auto?.session === own) continue
-      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+      if (task.auto?.session) {
+        const key = questionScope(project.name, task.auto.agent ?? 'manual', task.auto.session)
+        shortCounts.set(key, (shortCounts.get(key) ?? 0) + 1)
+      }
+    }
+  }
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      const isMine = mine !== null && (
+        task.auto?.resume !== null && mine.sessionId
+          ? task.auto?.resume === mine.sessionId && (task.auto?.agent ?? 'claude') === ownAgent
+          : (Boolean(mine.sessionId) && task.auto?.session === own && (task.auto?.agent ?? 'claude') === ownAgent && mine.isRun !== true && isUniqueUnresumedTask(task, projects, own, ownAgent))
+      )
+      if (isMine) continue
+      const shortKey = task.auto?.session ? questionScope(project.name, task.auto.agent ?? 'manual', task.auto.session) : ''
+      const hasShortCollision = shortKey !== '' && (shortCounts.get(shortKey) ?? 0) > 1 && Boolean(task.auto?.resume)
+      const sessionKey = hasShortCollision ? (task.auto?.resume ?? task.auto?.session ?? '') : (task.auto?.session ?? '')
+      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', sessionKey || task.title)
       if (frozen.has(scope)) continue
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
@@ -415,7 +453,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       // are worked out once per task rather than once per step (#371).
       const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? (task.auto === null ? task.notes.join('\n') : '')
       const data = sourceData(task)
-      task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
+      task.steps.forEach((step, index) => rows.push({ scope, session: sessionKey, index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: sessionKey, data } }))
     }
   }
   if (mine !== null) rows.push(...ownObservations(mine))
@@ -588,6 +626,13 @@ export const observeQuestions = (
       if (row.isWaiting) keys[questionSlot(row.scope, row.index)] = record.id
     })
   }
+  for (const record of records) {
+    if (!assigned.has(record.id) && !frozen.has(record.scope) && record.source?.kind === 'block' && record.source.agent !== '' && record.source.session !== '' && !seen.some(row => row.scope === record.scope) && seen.some(row => row.source.kind === 'block' && row.source.agent === record.source?.agent && row.source.session === record.source?.session && row.source.project !== record.source?.project)) {
+      record.isUnresolved = false
+      record.isPresent = false
+      record.isWaiting = false
+    }
+  }
   if (isSettled) {
     for (const record of records) {
       if (!assigned.has(record.id) && !frozen.has(record.scope)) {
@@ -608,10 +653,10 @@ export const observeQuestions = (
     const match = /^(\S+) (\d+) ([\s\S]*)$/.exec(key)
     if (match === null) continue
     const [, session, , text = ''] = match
-    const candidates = rows.filter(row => row.session === session && row.isWaiting && questionWords(row.text) === questionWords(text))
+    const candidates = rows.filter(row => (row.session === session || (row.session.length > 8 && row.session.startsWith(session))) && row.isWaiting && questionWords(row.text) === questionWords(text))
     const picked = candidates.length === 1 ? candidates[0] : undefined
     if (picked !== undefined) legacy[key] = keys[questionSlot(picked.scope, picked.index)] ?? ''
-    else if (isSettled && rows.some(row => row.session === session)) legacy[key] = ''
+    else if (isSettled && rows.some(row => row.session === session || (row.session.length > 8 && row.session.startsWith(session)))) legacy[key] = ''
   }
   return {
     ledger: { version: 1, next, records, legacy: isSettled ? legacy : ledger.legacy },

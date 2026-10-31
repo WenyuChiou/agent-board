@@ -2990,6 +2990,14 @@ test('OpenCode honors its config override for installation, doctor and removal',
   assert.ok(!existsSync(plugin))
 }))
 
+test('--codex-doctor for adapter-pending agents reports ready false', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  for (const agent of ['dot', 'duet', 'bot']) {
+    const doctor = JSON.parse(f.command(['--codex-doctor', '--agent', agent]).stdout)
+    assert.equal(doctor.ready, false)
+  }
+}))
+
 test('auto setup detects overridden host directories without scanning sessions', () => fixture(f => {
   f.env.OPENCODE_CONFIG_DIR = join(f.home, 'opencode-dir')
   f.env.OPENCLAW_STATE_DIR = join(f.home, 'openclaw-dir')
@@ -5880,3 +5888,230 @@ test('tidy keeps an explicit person origin and uses the home history when CODEX_
   assert.doesNotMatch(after, /Verified run/)
   assert.ok(after.includes(kept))
 }))
+
+test('concurrent reports with identical 8-hex owner hash prefix do not trigger false block conflicts', () => fixture(f => {
+  f.install('--agent', 'codex', '--apply')
+  const sessionA = 'collision-32464'
+  const sessionB = 'collision-89260'
+  const reportA = f.command(['--codex-report', '--agent', 'antigravity', '--session', sessionA], {
+    title: 'Subagent Alpha task',
+    state: 'working',
+    steps: ['- [~] Alpha in progress'],
+  })
+  assert.equal(reportA.status, 0, reportA.stderr)
+
+  const reportB = f.command(['--codex-report', '--agent', 'antigravity', '--session', sessionB], {
+    title: 'Subagent Beta task',
+    state: 'working',
+    steps: ['- [~] Beta in progress'],
+  })
+  assert.equal(reportB.status, 0, reportB.stderr)
+
+  const content = readFileSync(f.progress, 'utf8')
+  assert.match(content, /Subagent Alpha task/)
+  assert.match(content, /Subagent Beta task/)
+  assert.equal((content.match(/session=ee3212c5/g) || []).length, 4)
+
+  // Update session A without clobbering session B
+  const updateA = f.command(['--codex-report', '--agent', 'antigravity', '--session', sessionA], {
+    title: 'Subagent Alpha task',
+    state: 'done',
+    steps: ['- [x] Alpha complete'],
+  })
+  assert.equal(updateA.status, 0, updateA.stderr)
+
+  const updatedContent = readFileSync(f.progress, 'utf8')
+  assert.match(updatedContent, /Alpha complete/)
+  assert.match(updatedContent, /Subagent Beta task/)
+  assert.match(updatedContent, /Beta in progress/)
+}))
+
+test('Antigravity subagent report with origin run and parent writes run block and folds into parent', () => fixture(f => {
+  f.install('--agent', 'codex', '--apply')
+  const parentSession = 'parent-session-12345678'
+  const subagentSession = 'subagent-session-87654321'
+
+  const parentReport = f.command(['--codex-report', '--agent', 'antigravity', '--session', parentSession], {
+    title: 'Parent Task',
+    state: 'working',
+    steps: ['- [~] Parent in progress'],
+  })
+  assert.equal(parentReport.status, 0, parentReport.stderr)
+
+  const subReport = f.command(['--codex-report', '--agent', 'antigravity', '--session', subagentSession], {
+    title: 'Child Subagent Task',
+    state: 'working',
+    origin: 'run',
+    parent: parentSession,
+    steps: ['- [x] Child step complete'],
+  })
+  assert.equal(subReport.status, 0, subReport.stderr)
+
+  const content = readFileSync(f.progress, 'utf8')
+  assert.match(content, /origin=run/)
+  assert.match(content, /parent=parent-session-12345678/)
+  assert.match(content, /Child Subagent Task/)
+}))
+
+test('dot, duet, and bot agents report status and write independent blocks to progress.md', () => fixture(f => {
+  f.install('--agent', 'codex', '--apply')
+  for (const agent of ['dot', 'duet', 'bot']) {
+    const session = `${agent}-session-12345678`
+    const report = f.command(['--codex-report', '--agent', agent, '--session', session], {
+      title: `${agent.toUpperCase()} Integration Task`,
+      state: 'working',
+      steps: [`- [x] Initialized ${agent}`, '- [?] Confirm parameters?'],
+    })
+    assert.equal(report.status, 0, report.stderr)
+  }
+  const content = readFileSync(f.progress, 'utf8')
+  assert.match(content, /agent=dot/)
+  assert.match(content, /agent=duet/)
+  assert.match(content, /agent=bot/)
+  assert.match(content, /DOT Integration Task/)
+  assert.match(content, /DUET Integration Task/)
+  assert.match(content, /BOT Integration Task/)
+}))
+
+test('--codex-send queues hook-driven messages and delivers them via lifecycle hook stdout with ACK reconciliation on --codex-report', () => fixture(f => {
+  f.install('--agent', 'codex', '--apply')
+  f.install('--agent', 'antigravity', '--apply')
+  f.install('--agent', 'cursor', '--apply')
+  const agSession = 'ag-hook-msg-12345678'
+  const cursorSession = 'cursor-hook-msg-12345678'
+
+  // Offline / non-existent session is rejected
+  const offline = f.command(['--codex-send', '--agent', 'antigravity', '--session', agSession], {
+    id: 'AB-HOOK-001',
+    from: 'codex:sender-1',
+    text: 'Check status and reply ACK AB-HOOK-001',
+  })
+  assert.notEqual(offline.status, 0)
+  assert.match(offline.stderr, /OFFLINE/)
+
+  // Start the Antigravity session
+  const startAg = f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+    conversationId: agSession,
+  })
+  assert.equal(startAg.status, 0, startAg.stderr)
+
+  // Queue message via --codex-send
+  const sent = f.command(['--codex-send', '--agent', 'antigravity', '--session', agSession], {
+    id: 'AB-HOOK-001',
+    from: 'codex:sender-1',
+    text: 'Check status and reply ACK AB-HOOK-001',
+  })
+  assert.equal(sent.status, 0, sent.stderr)
+  assert.equal(JSON.parse(sent.stdout). status, 'queued')
+
+  // Fire PreInvocation to deliver via injectSteps
+  const preInv = f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: agSession,
+    invocationNum: 1,
+  })
+  assert.equal(preInv.status, 0, preInv.stderr)
+  const injected = JSON.parse(preInv.stdout)
+  assert.ok(Array.isArray(injected.injectSteps) && injected.injectSteps.length === 1)
+  assert.match(injected.injectSteps[0].ephemeralMessage, /AB-HOOK-001/)
+  assert.match(injected.injectSteps[0].ephemeralMessage, /ACK AB-HOOK-001/)
+
+  // Second PreInvocation does not replay the claimed message
+  const preInv2 = f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: agSession,
+    invocationNum: 2,
+  })
+  assert.equal(preInv2.status, 0, preInv2.stderr)
+  assert.deepEqual(JSON.parse(preInv2.stdout), {})
+
+  // Acknowledge via --codex-report steps
+  const report = f.command(['--codex-report', '--agent', 'antigravity', '--session', agSession], {
+    title: 'Antigravity reply task',
+    state: 'waiting',
+    steps: ['- [x] ACK AB-HOOK-001 status idle'],
+  })
+  assert.equal(report.status, 0, report.stderr)
+  assert.deepEqual(JSON.parse(report.stdout).acknowledged, ['AB-HOOK-001'])
+  const stored = JSON.parse(readFileSync(join(f.root, 'messages.json'), 'utf8'))
+  assert.equal(stored.messages[0].status, 'acknowledged')
+
+  // Also verify Cursor beforeSubmitPrompt additional_context delivery
+  assert.equal(f.command(['--codex-event', '--agent', 'cursor'], {
+    conversation_id: cursorSession,
+    hook_event_name: 'sessionStart',
+  }).status, 0)
+  assert.equal(f.command(['--codex-send', '--agent', 'cursor', '--session', cursorSession], {
+    id: 'AB-HOOK-002',
+    from: 'antigravity:' + agSession,
+    text: 'Cursor hook ping',
+  }).status, 0)
+  const cursorPrompt = f.command(['--codex-event', '--agent', 'cursor'], {
+    conversation_id: cursorSession,
+    generation_id: 'gen-1',
+    hook_event_name: 'beforeSubmitPrompt',
+    prompt: 'Continue',
+  })
+  assert.equal(cursorPrompt.status, 0, cursorPrompt.stderr)
+  assert.match(JSON.parse(cursorPrompt.stdout).additional_context, /AB-HOOK-002/)
+}))
+
+test('resumed Antigravity conversations receive bound --codex-report context and non-Codex agents infer session from folderDigest', () => fixture(f => {
+  f.install('--agent', 'antigravity', '--apply')
+  const workDir = join(f.home, 'ag-workspace')
+  mkdirSync(workDir, { recursive: true })
+  const resumedSession = 'resumed-ag-session-777'
+
+  // Resumed conversation fires PreInvocation with invocationNum > 0 and no prior SessionStart
+  const preInv = f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: resumedSession,
+    invocationNum: 5,
+    workspaceRoot: workDir,
+  })
+  assert.equal(preInv.status, 0, preInv.stderr)
+  const out = JSON.parse(preInv.stdout)
+  assert.ok(Array.isArray(out.injectSteps) && out.injectSteps.length === 1)
+  assert.match(out.injectSteps[0].ephemeralMessage, /Agent Board is bound to this Antigravity conversation by its native hook\./)
+
+  // Subsequent --codex-report without --session from the same workspace infers the session via folderDigest
+  const report = spawnSync(
+    process.execPath,
+    [f.script, '--codex-report', '--agent', 'antigravity', '--home', f.home, '--progress-file', f.progress],
+    {
+      cwd: workDir,
+      env: f.env,
+      input: JSON.stringify({ title: 'Inferred Folder Report', state: 'working', steps: ['- [~] Bound via folderDigest'] }),
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  )
+  assert.equal(report.status, 0, report.stderr)
+  assert.equal(JSON.parse(report.stdout).session, resumedSession)
+  assert.match(readFileSync(f.progress, 'utf8'), /Inferred Folder Report/)
+}))
+
+test('updating shared runtime files for one agent synchronizes sibling install manifests without INSTALL_CONFLICT', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+
+  // Simulate an older shared worker & skill version recorded in both manifests and on disk
+  const workerPath = join(f.root, 'agent-board-hook.mjs')
+  const oldWorker = readFileSync(workerPath, 'utf8') + '\n// previous release worker\n'
+  const oldWorkerHash = createHash('sha256').update(oldWorker).digest('hex')
+  writeFileSync(workerPath, oldWorker)
+  for (const name of ['install-codex.json', 'install-antigravity.json']) {
+    const manifestPath = join(f.root, name)
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    manifest.files[workerPath] = oldWorkerHash
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
+  }
+
+  // Updating codex refreshes the shared worker and synchronizes install-antigravity.json
+  const updateCodex = f.install('--agent', 'codex', '--apply')
+  assert.equal(updateCodex.status, 0, updateCodex.stderr)
+
+  // Now updating or removing antigravity succeeds cleanly with zero INSTALL_CONFLICT
+  const updateAg = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(updateAg.status, 0, updateAg.stderr)
+  const removeAg = f.install('--agent', 'antigravity', '--remove', '--apply')
+  assert.equal(removeAg.status, 0, removeAg.stderr)
+}))
+
