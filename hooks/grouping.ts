@@ -135,11 +135,15 @@ export type NeedsYou = {
   older: GroupedQuestion[]
 }
 
+export type Quiet = { kind: 'asking'; n: number } | { kind: 'stopped'; agent: string; at: number } | { kind: 'none' }
+
 export type Grouping = {
   // Most recent activity first, worked out once from the input.
   agents: AgentGroup[]
   needs: NeedsYou
   working: GroupedTask[]
+  // Why Working now is empty; only `none` may say that no agent did anything (#612).
+  quiet: Quiet
   // Every agent's rows, not the hand-kept ones. Hidden below two agents.
   all: Bucket & { isHidden: boolean }
   own: Bucket
@@ -188,7 +192,19 @@ const identity = (agent: string, isOwn: boolean, project: string, title: string,
 const isHers = (item: GroupingDone, row: GroupingRow): boolean =>
   item.isOwn === true ? row.isOwn === true : item.agent === undefined || (row.isOwn !== true && keyOf(row.agent) === keyOf(item.agent))
 
-export const groupBoard = (model: GroupingInput, now: number, repoOf: RepoOf, s: Strings = ZH_TW): Grouping => {
+// A question card stands for an agent that waits on the person, whatever its age; a stopped or
+// finished task counts only inside the Working now window.
+const quietOf = (cards: readonly Card[], tasks: readonly GroupedTask[], now: number): Quiet => {
+  const asking = cards.filter(card => !card.isOwn).length
+  if (asking > 0) return { kind: 'asking', n: asking }
+  const last = tasks
+    .filter(task => !task.isOwn && task.shelf !== 'open' && !task.isIdle && task.at > 0 && now - task.at <= WORKING_MS)
+    .reduce<GroupedTask | null>((best, task) => best === null || task.at > best.at ? task : best, null)
+
+  return last === null ? { kind: 'none' } : { kind: 'stopped', agent: last.agent, at: last.at }
+}
+
+export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: Strings = ZH_TW): Grouping => {
   const folders = new Map<string, string>()
   const repoName = (project: string, dir: string | null | undefined): string => {
     if (dir === undefined || dir === null || dir.trim() === '') return project
@@ -401,6 +417,7 @@ export const groupBoard = (model: GroupingInput, now: number, repoOf: RepoOf, s:
     },
     // Rows that wait on the person are on the Needs you list, and a hand-kept task is not an agent at work.
     working: sortedTasks.filter(task => task.shelf === 'open' && !task.hasCard && !task.isOwn && task.at > 0 && now - task.at <= WORKING_MS),
+    quiet: quietOf(cards, sortedTasks, now),
     all: { ...bucketOf(one => !one.isOwn), isHidden: agents.length < 2 },
     own: bucketOf(one => one.isOwn),
     projects: newestFirst([...projects.values()]).map(({ name, open }) => ({ name, open })),

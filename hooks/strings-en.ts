@@ -627,6 +627,8 @@ export const EN: Strings = {
   pgWorking: 'Working now',
   pgWorkingHint: 'Tasks with activity in the last 30 minutes',
   pgNoWorking: 'No agent has done anything in the last 30 minutes.',
+  pgQuietAsking: (n: number): string => `No agent is at work right now. What they asked is under Needs you (${n}).`,
+  pgQuietStopped: (agent: string, minutes: number): string => `No agent is at work right now. ${agent} last worked ${minutes} min ago.`,
   pgNothing: 'Nothing needs you.',
   pgNothingHint: 'When an agent asks you something or gets stuck, it shows up here, and the tab title shows a number.',
   pgOlder: (n: number): string => `${n} older questions still unanswered (their chats have stopped)`,

@@ -3,12 +3,13 @@ import type { PendingTurn } from './board'
 import { clip } from './mirror'
 import { askRole, stepRole, toneRole } from './palette'
 import type { Palette } from './palette'
+import type { Quiet } from './grouping'
 import { agentFade, agentMark, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, pageBaseCss, pageTokens, sheetCss, themeHead, themeToggle } from './page-look'
 import { serveModel } from './serve'
 import { agentLabel } from './strings'
 import type { Strings } from './i18n'
 import type { TaskRow, View, ViewStep, WaitingItem } from './view'
-import { OLDER_SHOWN } from './view'
+import { isSameName, OLDER_SHOWN } from './view'
 
 // progress.html: the board page's order (the agent row, Needs you, Working now, the projects, a closed
 // Done shelf) as a page any browser keeps open in a window of its own, beside progress.md. Built from the file and pending inbox turns, without a session's
@@ -73,7 +74,7 @@ const waitingItem = (item: WaitingItem, s: Strings): string =>
   '</div>'
 
 const row = (it: TaskRow, s: Strings, showProject: boolean): string => {
-  const meta = [it.due === null ? '' : it.due.date, showProject ? it.project : '', it.agent, it.status, it.pr, it.when].filter(
+  const meta = [it.due === null ? '' : it.due.date, showProject && !isSameName(it.project, it.title) ? it.project : '', it.agent, it.status, it.pr, it.when].filter(
     part => part !== '',
   )
   return (
@@ -175,6 +176,12 @@ footer{color:var(--muted);display:grid;gap:var(--s1);border-top:1px solid var(--
 }
 `
 
+// An agent that waits on the person, or stopped a moment ago, is not "nothing" (#612).
+const quietLine = (quiet: Quiet | undefined, now: number, s: Strings): string =>
+  quiet?.kind === 'asking' ? s.pgQuietAsking(quiet.n)
+    : quiet?.kind === 'stopped' ? s.pgQuietStopped(agentLabel(quiet.agent, s) || quiet.agent, Math.max(1, Math.round((now - quiet.at) / 60_000)))
+      : s.pgNoWorking
+
 export const dashboardHtml = (view: View, s: Strings, path: string, stamp: string, pending: readonly PendingTurn[] = [], now: number = Date.now()): string => {
   pending = view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
   const model = serveModel(view, pending, s, new Set(), false, undefined, false, { now, repoOf: () => null, versions: { board: '', package: null }, unreadable: view.unreadable ?? [] })
@@ -235,7 +242,7 @@ ${section('reminder', s.sectionQuestionReminders, view.reminder?.length ?? 0, 'm
 ${section('older', s.sectionOlderQuestions, view.older?.length ?? 0, 'muted', s.questionAgingHint, older, false)}
 </div></section>
 ${view.hidden.length === 0 ? '' : `<p class="quiet">${esc(s.hiddenCount(view.hidden.length))}</p>`}
-<section class="sec" id="dash-working"><h2 class="sec-title">${esc(s.pgWorking)}<span class="count">${working.length}</span></h2>${working.length === 0 ? `<p class="working-empty">${esc(s.pgNoWorking)}</p>` : `<div class="rows">${working.map(it => row(it, s, true)).join('')}</div>`}</section>
+<section class="sec" id="dash-working"><h2 class="sec-title">${esc(s.pgWorking)}<span class="count">${working.length}</span></h2>${working.length === 0 ? `<p class="working-empty">${esc(quietLine(grouped?.quiet, now, s))}</p>` : `<div class="rows">${working.map(it => row(it, s, true)).join('')}</div>`}</section>
 ${section('due', s.sectionDue, dueRows.length, 'soon', nearest === undefined ? '' : s.nearestDue(nearest.title, nearest.due?.left ?? ''), dueRows.map(it => row(it, s, true)).join(''), false)}
 ${section(
   'others',
