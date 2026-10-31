@@ -1,0 +1,2 @@
+- **Codex / Trusting hooks** · Approving the board's Codex hooks prints one short line saying what happened and what to do next, instead of about 40 lines of JSON with paths and hashes; `--json` still prints the full details (#611).
+  Tests: `--codex-trust prints one plain line by default and the JSON only with --json`, `the installed Codex host grants only six reviewed hashes and preserves unrelated config`.

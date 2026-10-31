@@ -29,7 +29,10 @@ export const EN: Strings = {
   codexTask: 'Local Codex task',
   codexProject: 'Codex',
   codexLifecycle: "Waiting for the next instruction",
-  codexTrust: 'Codex installation does not automatically trust hooks. Resolve the actual Codex executable and preview --codex-trust --codex-bin with its absolute path. List the six current definitions, hashes and config.toml changes, then ask the user to confirm once before adding --apply to that command. This uses the Codex config API to trust only those hashes, preserves other settings and never bypasses trust globally. Only fall back to CLI /hooks when the API is unsupported; do not assume a desktop entry. Read trust back and observe real events afterward; without execution keep acceptance unverified.',
+  codexTrust: 'Codex installation does not automatically trust hooks. Resolve the actual Codex executable and preview --codex-trust --codex-bin with its absolute path and --json. List the six current definitions, hashes and config.toml changes, then ask the user to confirm once before adding --apply to that command. This uses the Codex config API to trust only those hashes, preserves other settings and never bypasses trust globally. Only fall back to CLI /hooks when the API is unsupported; do not assume a desktop entry. Read trust back and observe real events afterward; without execution keep acceptance unverified.',
+  codexTrustPreview: (n: number): string => `Codex: would trust the board's ${n} hooks. Run the same command again with --apply.`,
+  codexTrustApplied: (n: number): string => `Codex: trusted the board's ${n} hooks. Start a new Codex session.`,
+  codexTrustNone: "Codex: the board's hooks are already trusted. Start a new Codex session.",
   codexPrivacy: 'Keeps only session, turn, state and explicit task summaries. Never reads transcripts, stores hook prompts, tool inputs or replies, or sends content to another model.',
   codexDoctor: 'Checks files and hook definitions, not hook trust or execution. Verify CLI and desktop separately.',
   setupSummary: {

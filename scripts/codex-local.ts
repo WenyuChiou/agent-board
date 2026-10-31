@@ -91,6 +91,12 @@ const quote = (path: string): string => {
 export const localProgressPath = (explicit: string | undefined, fallback: string, stored?: unknown): string =>
   resolve(explicit ?? (process.env.CLAUDE_PROGRESS_FILE || (typeof stored === 'string' ? stored : fallback)))
 
+export const codexTrustOutput = (result: { changes: number; applied: boolean }, s: Strings, isJson: boolean): string => {
+  if (isJson) return `${JSON.stringify(result, null, 2)}\n`
+  const line = result.changes === 0 ? s.codexTrustNone : result.applied ? s.codexTrustApplied(result.changes) : s.codexTrustPreview(result.changes)
+  return `${line}\n`
+}
+
 // What a person reads when a setup mode fails (#465): one sentence with its next step, never the code name, a stack or a path.
 export const setupFailure = (error: unknown, agent: string, s: Strings): { code: string; message: string } => {
   const detail = error as { code?: unknown; message?: unknown; record?: unknown } | null | undefined
@@ -719,7 +725,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (agent !== 'codex' || conflicts.length || changes.length || readLocal(manifestFile) === null) throw new Error('OWNED_CODEX_INSTALL_REQUIRED')
     const executable = flag('--codex-bin')
     if (!executable) throw new Error('CODEX_BINARY_REQUIRED')
-    output(await trustCodex(executable, config, manifest.groups, args.includes('--apply')))
+    const result = await trustCodex(executable, config, manifest.groups, args.includes('--apply'))
+    process.stdout.write(codexTrustOutput(result, s, args.includes('--json')))
     return true
   }
   if (mode === '--codex-doctor') {

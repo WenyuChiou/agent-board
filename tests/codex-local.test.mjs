@@ -2223,6 +2223,40 @@ test('Codex trust requires an owned installation and an explicit host binary', (
   assert.match(f.command(['--codex-trust', '--json']).stderr, /CODEX_BINARY_REQUIRED/)
 }))
 
+test('--codex-trust prints one plain line by default and the JSON only with --json', async () => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  try {
+    const { codexTrustOutput } = await import('../scripts/codex-local.ts')
+    const { STRINGS } = await import('../hooks/strings.ts')
+    const examples = [
+      [{ changes: 6, applied: false }, STRINGS.en, "Codex: would trust the board's 6 hooks. Run the same command again with --apply."],
+      [{ changes: 6, applied: true }, STRINGS.en, "Codex: trusted the board's 6 hooks. Start a new Codex session."],
+      [{ changes: 0, applied: false }, STRINGS.en, "Codex: the board's hooks are already trusted. Start a new Codex session."],
+      [{ changes: 0, applied: true }, STRINGS.en, "Codex: the board's hooks are already trusted. Start a new Codex session."],
+      [{ changes: 6, applied: false }, STRINGS['zh-TW'], 'Codex：將信任看板的 6 個 hooks。加上 --apply 再執行同一命令。'],
+      [{ changes: 6, applied: true }, STRINGS['zh-TW'], 'Codex：已信任看板的 6 個 hooks。開始新的 Codex 工作階段。'],
+      [{ changes: 0, applied: false }, STRINGS['zh-TW'], 'Codex：看板的 hooks 已受信任。開始新的 Codex 工作階段。'],
+      [{ changes: 6, applied: false }, STRINGS['zh-CN'], 'Codex：将信任看板的 6 个 hooks。加上 --apply 再运行同一命令。'],
+      [{ changes: 6, applied: true }, STRINGS['zh-CN'], 'Codex：已信任看板的 6 个 hooks。开始新的 Codex 会话。'],
+      [{ changes: 0, applied: false }, STRINGS['zh-CN'], 'Codex：看板的 hooks 已受信任。开始新的 Codex 会话。'],
+    ]
+    for (const [result, strings, expected] of examples) {
+      const output = codexTrustOutput(result, strings, false)
+      assert.equal(output, `${expected}\n`)
+      assert.doesNotMatch(output.slice(0, -1), /[\r\n{\\/]|sha256:/)
+    }
+    const result = { file: 'synthetic/config.toml', hooks: [{ hash: 'sha256:synthetic' }], changes: 6, applied: false }
+    const json = codexTrustOutput(result, STRINGS.en, true)
+    assert.equal(json, `${JSON.stringify(result, null, 2)}\n`)
+    assert.deepEqual(JSON.parse(json), result)
+  } finally { resolver.deregister() }
+})
+
 test('the installed Codex host grants only six reviewed hashes and preserves unrelated config', { skip: !process.env.AGENT_BOARD_TEST_CODEX }, () => fixture(f => {
   const executable = process.env.AGENT_BOARD_TEST_CODEX
   f.env.CODEX_HOME = join(f.home, '.codex')
@@ -2231,7 +2265,7 @@ test('the installed Codex host grants only six reviewed hashes and preserves unr
   f.save(config, original)
   f.save(f.hooks, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo foreign' }] }] } }))
   assert.equal(f.install('--apply').status, 0)
-  const args = ['--codex-trust', '--codex-bin', executable]
+  const args = ['--codex-trust', '--codex-bin', executable, '--json']
   const plan = f.command(args)
   assert.equal(plan.status, 0, plan.stderr)
   assert.equal(JSON.parse(plan.stdout).changes, 6)
