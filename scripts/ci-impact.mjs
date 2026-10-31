@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, appendFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { BUNDLE_ENTRY, bundleFiles, isBundleFile } from './bundle-text.mjs'
 
 export const GROUPS = ['board', 'messaging', 'tooling', 'npm', 'plugin', 'installers', 'remote', 'journeys', 'browser', 'generated']
 const systems = ['ubuntu-latest', 'windows-latest']
@@ -47,7 +48,7 @@ export const makePlan = (files, options = {}) => {
       select(group, path)
       known = true
     }
-    if (options.bundleSources?.has(path) || path === 'hooks/board-script.ts' || path === 'scripts/build-board.ts') {
+    if (options.bundleSources?.has(path) || isBundleFile(path) || path === 'scripts/build-board.ts') {
       generated.bundle = true
       known = true
     }
@@ -148,7 +149,8 @@ export const walkDependencies = async (root, entryPaths) => {
     }
     if (existsSync(absolute) && lstatSync(absolute).isDirectory()) return
     dependencies.add(path)
-    if (!existsSync(absolute) || path === 'hooks/board-script.ts' || !/\.(?:mjs|cjs|js|ts|tsx)$/.test(path)) return
+    // The entry is read for the parts it imports; the parts are strings only, and large.
+    if (!existsSync(absolute) || (isBundleFile(path) && path !== BUNDLE_ENTRY) || !/\.(?:mjs|cjs|js|ts|tsx)$/.test(path)) return
     const tokens = codeTokens(readFileSync(absolute, 'utf8'))
     const add = specifier => {
       if (!specifier.startsWith('.')) return
@@ -206,8 +208,8 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
     }
     for (const path of await walkDependencies(root, ['scripts/board-cli.ts', 'scripts/build-board.ts'])) bundleSources.add(path)
     // These data reads are not JS imports: retain explicit edges next to the dependency walker.
-    for (const path of ['scripts/setup.sh', 'scripts/setup.ps1', 'scripts/claude-md-rule.md', 'AGENTS.md', 'hooks/board-script.ts', 'hooks/released.ts']) deps.installers.add(path)
-    for (const path of ['bin/agent-board.mjs', 'scripts/setup-agent.mjs', 'scripts/setup-codex.mjs', 'hooks/board-script.ts', 'hooks/released.ts']) {
+    for (const path of ['scripts/setup.sh', 'scripts/setup.ps1', 'scripts/claude-md-rule.md', 'AGENTS.md', ...bundleFiles(root), 'hooks/released.ts']) deps.installers.add(path)
+    for (const path of ['bin/agent-board.mjs', 'scripts/setup-agent.mjs', 'scripts/setup-codex.mjs', ...bundleFiles(root), 'hooks/released.ts']) {
       for (const dependency of await walkDependencies(root, [path])) deps.npm.add(dependency)
     }
     for (const path of ['hooks/parse.ts', 'hooks/blocks.ts']) deps.remote.add(path)
@@ -217,7 +219,7 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
     }
   }
   // Changes hidden behind the generated bundle affect every consumer of that bundle.
-  for (const group of GROUPS) if (deps[group].has('hooks/board-script.ts')) {
+  for (const group of GROUPS) if ([...deps[group]].some(isBundleFile)) {
     for (const path of bundleSources) deps[group].add(path)
   }
   // Removed tests inform impact, but only existing head tests may be executed.
