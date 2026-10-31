@@ -62,8 +62,9 @@ test('L5 read-only file: a failed tick writes no journal line and shows a one-li
     })
     const card = page.cards().find(one => one.textContent.includes('First card'))
     assert.ok(card, page.text())
-    // The button names this long step by its first words (#463); the whole step is its title, the row lists it and the press sends it.
-    const button = page.buttons(card).find(one => one.textContent.startsWith('Done: ') && one.title === step)
+    // The row's Done button names this long step by its first words (#463); the whole step is its title, the row lists it and the press sends it.
+    // Each step in the open row has its own Done button too, named by the whole step; this is the row's one.
+    const button = page.buttons(card).find(one => one.textContent.startsWith('Done: ') && one.title === step && (one.className || '').split(' ').includes('primary'))
     assert.ok(button?.textContent.endsWith('…'), card.textContent)
     assert.ok(button, card.textContent)
     assert.ok(card.textContent.includes(step), card.textContent)
