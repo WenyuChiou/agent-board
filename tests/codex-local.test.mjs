@@ -5880,3 +5880,88 @@ test('tidy keeps an explicit person origin and uses the home history when CODEX_
   assert.doesNotMatch(after, /Verified run/)
   assert.ok(after.includes(kept))
 }))
+
+test('a Codex session a person starts gets the open work of other sessions in its folder at SessionStart, and a run or a resumed session gets none', () => fixture(f => {
+  f.install('--apply')
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd, { recursive: true })
+  const at = new Date(Date.now() - 3600000).toISOString()
+  const block = (id, state, title, steps) => `<!-- auto session=${id} agent=claude state=${state} updated=${at} -->\n### ${title}\n${steps}\n<!-- /auto session=${id} -->\n`
+  f.save(f.progress, [
+    '## demo',
+    block('a1b2c3e1', 'working', 'Synthetic held work', '- [x] One\n- [~] Two'),
+    block('a1b2c3e2', 'ended', 'Synthetic ended work', '- [x] One\n- [ ] Synthetic next step'),
+    block('a1b2c3e3', 'done', 'Synthetic finished work', '- [x] One'),
+    '## elsewhere',
+    block('a1b2c3e4', 'working', 'Synthetic other project', '- [~] One'),
+  ].join('\n'))
+  const start = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd, source: 'startup', transcript_path: null })
+  assert.equal(start.status, 0, start.stderr)
+  const context = JSON.parse(start.stdout).hookSpecificOutput
+  assert.equal(context.hookEventName, 'SessionStart')
+  assert.match(context.additionalContext, /Synthetic held work/)
+  assert.match(context.additionalContext, /Synthetic ended work.*Synthetic next step/)
+  assert.match(context.additionalContext, /```text/)
+  assert.doesNotMatch(context.additionalContext, /Synthetic finished work|Synthetic other project|TaskCreate/)
+  const resumed = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd, source: 'resume', transcript_path: null })
+  assert.equal(resumed.status, 0, resumed.stderr)
+  assert.equal(resumed.stdout, '')
+  const id = 'synthetic-run-start'
+  const run = f.event('SessionStart', null, { session_id: id, cwd, source: 'startup', transcript_path: rollout(f, id, { originator: 'codex_exec' }) })
+  assert.equal(run.status, 0, run.stderr)
+  assert.equal(run.stdout, '')
+}))
+
+test('a Codex start note finds the project by a checkout folder, a worktree main folder, its remote name and a folder name with spaces', () => fixture(f => {
+  f.install('--apply')
+  const at = new Date(Date.now() - 3600000).toISOString()
+  const block = (id, title) => `<!-- auto session=${id} agent=claude state=working updated=${at} -->\n### ${title}\n- [~] One\n<!-- /auto session=${id} -->\n`
+  f.save(f.progress, [
+    '## demo', block('b1b2c3e1', 'Synthetic remote work'),
+    '## repo-copy', block('b1b2c3e2', 'Synthetic main folder work'),
+    '## my project', block('b1b2c3e3', 'Synthetic spaced work'),
+    '## my', block('b1b2c3e4', 'Synthetic first word work'),
+    '## other', block('b1b2c3e5', 'Synthetic upstream work'),
+    '## modules', block('b1b2c3e6', 'Synthetic submodule folder work'),
+  ].join('\n'))
+  const start = cwd => {
+    const result = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd, source: 'startup', transcript_path: null })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout === '' ? '' : JSON.parse(result.stdout).hookSpecificOutput.additionalContext
+  }
+  // An ordinary checkout: `.git` is a folder, and its remote names the project.
+  const checkout = join(f.home, 'checkout')
+  mkdirSync(join(checkout, '.git'), { recursive: true })
+  writeFileSync(join(checkout, '.git', 'config'), '[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://example.invalid/someone/other.git\n[remote "origin"]\n\turl = git@example.invalid:someone/demo.git\n')
+  // `origin` wins over a remote listed first.
+  const checkoutNote = start(checkout)
+  assert.match(checkoutNote, /Synthetic remote work/)
+  assert.doesNotMatch(checkoutNote, /Synthetic upstream work/)
+  // With no `source`, as an older Codex sends it, the note still comes.
+  const noSource = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd: checkout, transcript_path: null })
+  assert.equal(noSource.status, 0, noSource.stderr)
+  assert.match(JSON.parse(noSource.stdout).hookSpecificOutput.additionalContext, /Synthetic remote work/)
+  // A submodule: its `.git` file names a folder under `.git/modules`, which is no project's name.
+  mkdirSync(join(checkout, '.git', 'modules', 'lib'), { recursive: true })
+  const submodule = join(checkout, 'lib')
+  mkdirSync(submodule, { recursive: true })
+  writeFileSync(join(submodule, '.git'), 'gitdir: ../.git/modules/lib\n')
+  assert.doesNotMatch(start(submodule), /Synthetic submodule folder work/)
+  // A worktree: `.git` is a file naming a folder inside the main checkout `repo-copy`.
+  const main = join(f.home, 'repo-copy')
+  mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
+  writeFileSync(join(main, '.git', 'worktrees', 'feature', 'commondir'), '../..\n')
+  writeFileSync(join(main, '.git', 'config'), '[remote "origin"]\n\turl = https://example.invalid/someone/demo.git\n')
+  const worktree = join(f.home, 'feature')
+  mkdirSync(worktree, { recursive: true })
+  writeFileSync(join(worktree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+  const both = start(worktree)
+  assert.match(both, /Synthetic main folder work/)
+  assert.match(both, /Synthetic remote work/)
+  // A folder with a space: the whole heading, not only its first word.
+  const spaced = join(f.home, 'my project')
+  mkdirSync(spaced, { recursive: true })
+  const spacedNote = start(spaced)
+  assert.match(spacedNote, /Synthetic spaced work/)
+  assert.doesNotMatch(spacedNote, /Synthetic first word work/)
+}))
