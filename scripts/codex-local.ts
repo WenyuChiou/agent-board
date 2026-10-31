@@ -10,6 +10,7 @@ import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { parseProgress, progressTail, STALE_MS } from '../hooks/parse'
+import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
@@ -42,6 +43,53 @@ const readBytes = (file: string): Buffer | null => {
   }
 }
 const readLocal = (file: string): string | null => readBytes(file)?.toString('utf8') ?? null
+
+// The repository name in a remote's address: `demo` from `https://host/x/demo.git` or `git@host:x/demo.git`.
+// `origin` when there is one, else the first remote; only that section's own `url` counts.
+const remoteName = (config: string): string => {
+  const remotes = config.split(/^(?=\s*\[)/m).filter(section => /^\s*\[remote\s/.test(section))
+  const remote = remotes.find(section => /^\s*\[remote\s+"origin"\s*\]/.test(section)) ?? remotes[0] ?? ''
+  const url = /^\s*url\s*=\s*(.+?)\s*$/m.exec(remote)?.[1] ?? ''
+
+  return (url.split(/[\\/:]/).filter(Boolean).pop() ?? '').replace(/\.git$/, '')
+}
+
+// Names this folder's project may go by, as the Claude mod's `detectHere` has them: the folder
+// Codex files its block under, the main repository's folder for a git worktree, and the
+// repository's name in its remote. Read from `.git`, `commondir` and `config`, without
+// starting git inside the host's time limit; anything unreadable leaves the folder alone.
+const hereNames = (cwd: unknown): string[] => {
+  const folder = folderProject(cwd)
+  const names = new Set(folder === '' ? [] : [folder])
+  if (typeof cwd !== 'string' || folder === '' || !isAbsolute(cwd)) return [...names]
+  try {
+    const dotGit = join(cwd, '.git')
+    if (!existsSync(dotGit)) return [...names]
+    // A checkout has a `.git` folder; a worktree has a `.git` file that names its own folder.
+    const gitDir = statSync(dotGit).isDirectory() ? dotGit : resolve(cwd, /^gitdir:\s*(.+)$/im.exec(readLocal(dotGit) ?? '')?.[1]?.trim() ?? '.git')
+    const common = readLocal(join(gitDir, 'commondir'))?.trim()
+    const commonDir = common === undefined ? gitDir : resolve(gitDir, common)
+    // Only a worktree has `commondir`; a submodule's git folder sits under `.git/modules`, not in a checkout.
+    if (common !== undefined) names.add(basename(dirname(commonDir)))
+    names.add(remoteName(readLocal(join(commonDir, 'config')) ?? ''))
+  } catch {}
+
+  return [...names].filter(name => name !== '')
+}
+
+// A Codex session a person starts gets, on its SessionStart, the note the Claude mod gives a
+// first turn (#502). A run another agent started gets none, by the signal #501 keeps (`run`);
+// a resumed, cleared or compacted session already had its chance.
+export const codexStartNote = (raw: Json, run: RunSignal | undefined, session: string, progress: string, s: Strings, now = Date.now()): string | null => {
+  if (raw.hook_event_name !== 'SessionStart' || raw.source !== undefined && raw.source !== 'startup') return null
+  if (run !== undefined && isStrongRun(run)) return null
+  // A board the hook cannot read now (busy, no access) gives no note rather than a failed event.
+  let text: string | null = null
+  try { text = readLocal(progress) } catch {}
+  if (text === null) return null
+
+  return othersNote(parseProgress(text), hereNames(raw.cwd), hash(`codex:${session}`).slice(0, 8), now, s, s.othersTailCodex)
+}
 const withoutBom = (text: string): string => text.startsWith('\uFEFF') ? text.slice(1) : text
 const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
@@ -557,6 +605,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       ])) : ''
       output(isStart ? { injectSteps: [{ systemMessage: { systemMessage: context } }] } : isFirst ? { injectSteps: [{ ephemeralMessage: context }] } : {})
     } else if (agent === 'gemini') output({})
+    else if (agent === 'codex' && mode === '--codex-event') {
+      const note = codexStartNote(raw, current.run, session, progress, s)
+      // Codex adds `additionalContext` to the conversation as developer context.
+      if (note !== null) output({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: note } })
+    }
     return true
   }
 
