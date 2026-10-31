@@ -24,6 +24,8 @@ const { plainReason } = await import('../../hooks/strings.ts')
 resolver.deregister()
 
 const locales = [EN, ZH_TW, ZH_CN]
+// The question of the seeded Review gateway session: the page draws it as a card of this text, without the task's name.
+const QUESTION = 'Publish the gateway, OK?'
 const resume = '12345678-1234-4234-8234-123456789abc'
 const seed = world => {
   block(world, { agent: 'codex', resume, dir: world.root, state: 'waiting', title: 'Review gateway', steps: ['- [?] Publish the gateway, OK?'] })
@@ -61,10 +63,10 @@ test('L7 page: the copy status never shows a session id, and a refused copy leav
       seed(world)
       block(world, { session: 'a1000003', agent: 'codex', resume: '32345678-1234-4234-8234-123456789abc', dir: join(world.root, 'gone-project'), state: 'ended', title: 'Missing project' })
       const server = await serve.start(world, ['--allow-resume'])
-      await server.press('Review gateway', s.serveCopyResume)
+      await server.press(QUESTION, s.serveCopyResume)
       const dom = server.dom
-      const resultSlot = card => card.childNodes.flatMap(node => [node, ...node.childNodes]).find(node => node.className?.split(' ').includes('press-result'))
-      const reviewSlot = () => resultSlot(dom.cards().find(card => card.textContent.includes('Review gateway')))
+      const resultSlot = card => dom.slot(card)
+      const reviewSlot = () => resultSlot(dom.cards().find(card => card.textContent.includes(QUESTION)))
       assert.equal(reviewSlot().textContent, s.copied)
       assert.equal(dom.node('note').textContent, '')
       const model = (await server.get('/api/board')).json().model
@@ -74,7 +76,7 @@ test('L7 page: the copy status never shows a session id, and a refused copy leav
       noMachineIds(reviewSlot().textContent, world)
       assert.equal(dom.inputs(reviewSlot()).length, 0)
       dom.setClipboard(false)
-      await server.press('Review gateway', s.serveCopyResume)
+      await server.press(QUESTION, s.serveCopyResume)
       assert.equal(reviewSlot().textContent, s.boardCopyFailedBelow)
       noMachineIds(reviewSlot().textContent, world)
       assert.equal(dom.node('note').textContent, '')
@@ -102,7 +104,8 @@ test('L7 page: the copy status never shows a session id, and a refused copy leav
       assert.equal(dom.activeElement, selected)
       assert.equal(selected.selectionStart, 2)
       assert.equal(selected.selectionEnd, 7)
-      const elsewhere = dom.node('paste')
+      // The person's focus is on a control of the page, not in the field.
+      const elsewhere = dom.node('close')
       elsewhere.focus()
       await dom.redraw(model)
       assert.equal(dom.activeElement, elsewhere)
@@ -115,10 +118,15 @@ test('L7 page: the copy status never shows a session id, and a refused copy leav
       late.inputs(missing)[0].value = 'Continue the synthetic work'
       late.buttons(missing).find(button => button.textContent === s.serveSend('Codex')).click()
       await late.flush()
-      const review = late.cards().find(card => card.textContent.includes('Review gateway'))
+      const review = late.cards().find(card => card.textContent.includes(QUESTION))
       late.buttons(review).find(button => button.textContent === s.serveCopyResume).click()
       await late.flush()
-      await late.redraw({ ...model, asks: [], hidden: [], idle: [], stopped: [], groups: [], turns: [], recent: [] })
+      // The page draws from the model's view, so the view is emptied with the lists: the question is gone.
+      const bucket = one => ({ ...one, counts: { open: 0, needs: 0, stopped: 0, done: 0, older: 0 }, cards: [], open: [], stopped: [], done: [], older: [] })
+      await late.redraw({
+        ...model, asks: [], hidden: [], idle: [], stopped: [], groups: [], turns: [], recent: [],
+        view: { ...model.view, n: 0, questions: 0, stuck: 0, agents: [], working: [], projects: [], needs: { n: 0, questions: 0, stuck: 0, cards: [], older: [] }, all: bucket(model.view.all), own: bucket(model.view.own) },
+      })
       const lostField = () => late.inputs(resultSlot(late.cards().find(card => card.textContent.includes('Review gateway'))))[0]
       lostField().setSelectionRange(2, 7)
       lostField().focus({ preventScroll: true })
@@ -133,7 +141,7 @@ test('L7 page: the copy status never shows a session id, and a refused copy leav
       assert.equal(retained.scrollCalls?.length ?? 0, 0)
       for (const legacyCopy of [true, false]) {
         const fallback = await pageDom(source, model, undefined, { clipboard: false, legacyCopy })
-        const ask = fallback.cards().find(card => card.textContent.includes('Review gateway'))
+        const ask = fallback.cards().find(card => card.textContent.includes(QUESTION))
         fallback.buttons(ask).find(button => button.textContent === s.serveCopyResume).click()
         await fallback.flush()
         const slot = resultSlot(ask)
@@ -161,9 +169,11 @@ test('L7 page: the copy status never shows a session id, and a refused copy leav
       input.value = 'Continue the synthetic work'
       input.focus()
       await server.press('Missing project', s.serveSend('Codex'))
-      const note = resultSlot(dom.cards().find(card => card.className?.split(' ').includes('row') && card.textContent.includes('Missing project'))).textContent
-      assert.equal(note, s.serveSendFailed('Codex · Missing project', s.serveFolderGone('gone-project')), JSON.stringify(dom.requests))
-      noMachineIds(note, world)
+      const failed = resultSlot(dom.cards().find(card => card.className?.split(' ').includes('row') && card.textContent.includes('Missing project')))
+      // The line says what failed in one sentence; a failed send now also offers Send again and Copy message beside it.
+      assert.equal(failed.text, s.serveSendFailed('Codex · Missing project', s.serveFolderGone('gone-project')), JSON.stringify(dom.requests))
+      assert.deepEqual(dom.buttons(failed).map(button => button.textContent), [s.serveRetry, s.serveCopyMessage])
+      noMachineIds(failed.textContent, world)
       assert.equal(dom.inputs(reviewSlot()).length, 0)
       assert.equal(dom.node('note').textContent, '')
     } finally { await world.close() }
@@ -208,7 +218,7 @@ test('L7 errors: every error is one plain sentence with no stack trace and no fu
       sentence(status, world)
       await server.press('Check routes', s.serveTickNext('Review routes'))
       const card = server.dom.cards().find(card => card.className?.split(' ').includes('row') && card.textContent.includes('Check routes'))
-      const slot = card.childNodes.flatMap(node => [node, ...node.childNodes]).find(node => node.className?.split(' ').includes('press-result'))
+      const slot = server.dom.slot(card)
       assert.ok(slot, card.textContent)
       assert.equal(slot.textContent, expected)
       sentence(slot.textContent, world)

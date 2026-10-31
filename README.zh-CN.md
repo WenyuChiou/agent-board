@@ -23,7 +23,7 @@
 <a href="#支持的-agent"><img src="docs/images/agents/chip-deepseek-harness.svg" height="28" alt="DeepSeek Harness"></a>
 </p>
 
-<p align="center"><sub>dot 和其他网页聊天要自己汇报：把它们的区块贴进<a href="#看板的网页">看板的网页</a>。</sub></p>
+<p align="center"><sub>dot 和其他网页聊天要自己汇报：把它们的区块合并进进度文件（<a href="docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste">做法</a>）。</sub></p>
 
 你在一个项目开 Claude Code，另一个开 Codex，第三个开 Antigravity，其中一个停下来问你事情，你要等到刚好切回去才会发现。**Agent Board** 在它一开口就把问题放到你眼前，每个答案一个按钮。它在你自己的电脑上运行，所有东西都放在一个 Markdown 文件里。
 
@@ -47,7 +47,7 @@ npx @wenyuchiou/agent-board
 - **Claude Code** 改用它的插件接入：`claude plugin marketplace add WenyuChiou/agent-board`，再运行 `claude plugin install agent-board@agent-board`。
 - **Codex：** 到 `/hooks` 信任它的 hooks（[做法](docs/CODEX.md)）。
 - **OpenCode、OpenClaw：** 重新加载它们的插件。
-- **dot 和其他网页聊天：** 把 [AGENTS.md 最后一段](AGENTS.md#report-your-progress-to-the-progress-pane)贴进那个 agent 的指令，再把它写出的区块贴进[看板的网页](#看板的网页)。
+- **dot 和其他网页聊天：** 把 [AGENTS.md 最后一段](AGENTS.md#report-your-progress-to-the-progress-pane)贴进那个 agent 的指令，再把它写出的每个区块存成文件，照[远程报告](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)的做法合并进进度文件。
 
 在新对话里，用对应的入口打开看板：
 
@@ -153,7 +153,7 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | 聊天软件 | 看板和它的 skill；它自己的 hooks 还没做好 | 复制 |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | 聊天软件 | 它的插件发来的对话事件 | 复制 |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | CLI | 它的插件发来的对话事件 | 复制 |
-| | dot、其他网页聊天 | 网页 | 你贴进来的区块 | 在它的对话里回 |
+| | dot、其他网页聊天 | 网页 | 你合并进来的区块 | 在它的对话里回 |
 
 Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来自 agent 自己的报告。Gemini CLI 仍保留为付费和企业用的目标（`--agent gemini`），见[安装指南](docs/SETUP.md#legacy-gemini-cli-compatibility)（英文）。
 
@@ -202,7 +202,6 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 - **回复**问题：开启消息功能、对话也连上时就**发送**，否则**复制**回复。LAN 网页没有消息功能。
 - **勾掉**下一步、**归档**一件工作，或点**现在归档**收走所有做完的。
 - **已回复，先隐藏**：已在原来对话里回过的问题，只在这台电脑上隐藏，直到那个对话问新的问题；不会发出任何内容。
-- **贴入区块**：把 Muse、dot 这类网页聊天的进度贴进来。
 
 网页只在 127.0.0.1 上监听，网址带一串随机密钥：这台电脑上拿到链接的程序都能用。关掉标签页它还在运行，点**关闭看板**才停止。加上 `--lan` 就能用同一个 Wi-Fi 的手机打开：那条链接走没加密的 HTTP，拿到的人都能用这个网页，所以只在信得过的网络上用。细节和限制见[使用指南](docs/GUIDE.zh-CN.md#看板的网页)。
 

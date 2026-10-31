@@ -24,9 +24,10 @@ describe('L3 across agents and sessions', () => {
       assert.match(world.read('progress.md'), /Check monitoring/)
       assert.match(world.read('progress.md'), /- \[\?\] Publish the gateway, OK\?/)
       const server = await serve.start(world)
-      for (const text of [await terminal.screen(world), await server.page()]) {
+      for (const [surface, text] of Object.entries({ terminal: await terminal.screen(world), page: await server.page() })) {
         noMachineIds(text, world)
-        assert.match(text, /1\s+waiting/i)
+        // The page counts what waits on the flag of its Needs you section.
+        assert.match(text, surface === 'page' ? /Needs you\s*1\b/ : /1\s+waiting/i, surface)
       }
     } finally { await world.close() }
   })
@@ -158,7 +159,8 @@ describe('L3 across agents and sessions', () => {
       const before = (await server.get('/api/board')).json().model
       assert.equal(before.stopped.filter(one => one.title === 'Resume gateway publishing').length, 1)
       block(world, { agent: 'codex', state: 'working', title: 'Resume gateway publishing', steps: ['- [~] Publish routes'] })
-      await seenPageWithin(server, text => text.includes('Codex is working'), PAGE_MS)
+      // The resumed task is a row under Working now, in place of its line on the shelf of stopped work.
+      await seenPageWithin(server, text => text.includes('Resume gateway publishing'), PAGE_MS, { read: async () => { await server.page(); return server.dom.section('working') } })
       const after = (await server.get('/api/board')).json().model
       const rows = [...after.groups.flatMap(group => group.rows), ...after.stopped]
       assert.equal(rows.filter(one => one.title === 'Resume gateway publishing').length, 1)

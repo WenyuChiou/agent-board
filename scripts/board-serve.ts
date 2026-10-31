@@ -364,17 +364,14 @@ export const startServer = (o: ServeOptions): void => {
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
-      res.end(servePage(o.s, nonce, isLan, o.idleMs, url.searchParams.get('group') === 'agent'))
+      res.end(servePage(o.s, nonce, isLan, o.idleMs))
       return
     }
     if (req.method === 'GET') {
       if (url.pathname === '/api/board') {
-        // A file the board cannot read is named on the page, which would otherwise say it is offline.
+        // A file the board cannot read is named on the page, which would otherwise say it is offline. The page
+        // is always the grouped one; the old ?group=agent address asks for what every address gets now.
         try {
-          if (url.searchParams.get('group') !== 'agent') {
-            const state = isLan ? undefined : messaging?.snapshot(Date.now(), o.reports?.())
-            return json(res, 200, { model: serveModel(o.view(), o.pending(false), o.s, sending, isLan, state, o.allowResume), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now: Date.now() })
-          }
           const now = Date.now()
           const state = isLan ? undefined : messaging?.snapshot(now, o.reports?.())
           const view = o.view()

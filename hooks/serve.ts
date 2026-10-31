@@ -2,11 +2,10 @@ import type { AskKind } from './ask'
 import { answersOf, boardItems, fingerprint, olderKey, remainingInbox } from './board'
 import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
-import { htmlLang } from './dashboard'
 import { groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, RepoOf } from './grouping'
-import { AGENT_ALIASES, agentMarkCss, boardMark, faviconLink, pageBaseCss, pageTokens, themeHead, themeSwitch } from './page-look'
-import { RELAY, ZH_TW } from './i18n'
+import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead, themeToggle } from './page-look'
+import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { agentLabel } from './strings'
 import type { Tone } from './palette'
@@ -17,7 +16,7 @@ import type { Connection, Message } from './messaging'
 
 // The board's page: what `agent-board.mjs --serve` shows in a browser for agents other than
 // Claude Code, and what a press on it does. It does what the pane does: tick a hand-kept step,
-// archive, copy an answer, answer another agent, and take in a block pasted from a web chat.
+// archive, copy an answer, answer another agent, and tidy the board.
 // Pure: scripts/board-serve.ts runs the server, writes the files and starts the agents.
 
 // How a reply reaches the session a line belongs to. send: into the session, from the page (a
@@ -135,6 +134,9 @@ export type ServeAsk = {
   // The command that reopens that session once it is closed, in its folder; never to a phone.
   reopen: string | null
   isSending: boolean
+  // That session has ended, as its progress record says: the page shows its agent as offline when no other
+  // session of it is open.
+  isClosed?: true
 }
 
 export type ServeRow = {
@@ -182,6 +184,7 @@ export type ServeRow = {
   isSending: boolean
   // On the local network, where a reply that would be sent here is written and copied instead.
   hasCopyBox: boolean
+  isClosed?: true
 }
 
 // A question marked answered, listed so it can be shown again.
@@ -363,6 +366,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
         isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && ['queued', 'uncertain', 'accepted'].includes(one.status)) ?? false),
+        ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
       continue
     }
@@ -421,6 +425,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' ? infoOf(send, row.agent, row.title, '', s) : ''),
         isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && ['queued', 'uncertain', 'accepted'].includes(one.status)) ?? false),
         hasCopyBox: lanInfo(baseMode, row.agent) !== null || (messaging !== undefined || !allowResume) && row.auto !== null && connection === undefined,
+        ...(row.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
       continue
     }
@@ -651,75 +656,29 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
-  'viewAll', 'viewStopped', 'viewCount', 'viewCountOne', 'sideViews', 'sideProjects', 'sideAgents', 'sideOwnTasks',
-  'viewEmptyDue', 'viewEmptyStopped', 'viewEmptyRecent', 'viewEmptyFiltered', 'clearFilters', 'removeFilter',
-  'sectionActive', 'sectionDue',
-  'messagesQueued', 'messagesUncertain',
-  'messagesAccepted', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
-  'sectionWaiting',
-  'sectionQuestionReminders',
-  'sectionOlderQuestions',
-  'stoppedAsking',
-  'showAllQuestions',
-  'questionAgingHint',
-  'questionReviewOnly',
-  'nothingForYou',
-  'empty',
-  'boardInbox',
-  'sectionRecent',
-  'archiveNow',
-  'cleanUp',
-  'serveClosed',
-  'serveClose',
-  'serveOffline',
-  'serveTickNext',
-  'serveArchive',
-  'confirmDone',
-  'serveCopy',
-  'serveCopyResume',
-  'serveCopyCommand',
-  'serveOpenLink',
-  'serveMore',
-  'answeredHide',
-  'showAgain',
-  'hiddenCount',
-  'idleCount',
-  'stoppedCount',
-  'serveReplyPlaceholder',
-  'serveMessagePlaceholder',
-  'serveSend',
-  'serveSending',
-  'servePasteTitle',
-  'pasteReview',
-  'copied',
-  'pressDone',
-  'pressFailed',
-  'pressEmpty',
-  'pressPending',
-  'boardCopyFailedBelow',
-  'pgNeeds', 'pgAll', 'pgAgents', 'pgOwn', 'pgOpen', 'pgStopped', 'pgDone', 'pgSearch',
-  'pgProjects', 'pgTasks', 'pgNoMatches', 'pgRefine', 'pgTabTitle', 'pgQuestions', 'pgQuestionsOne',
-  'pgStuckCount', 'pgStuckCountOne', 'pgCopyHint', 'pgWorking', 'pgWorkingCount', 'pgWorkingLink',
-  'pgNoWorking', 'pgAllTasks', 'pgNothing', 'pgNothingHint', 'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore',
-  'pgAsks', 'pgIsStuck', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgCopyOnlyHint',
-  'pgAllAgents', 'pgAgentCounts', 'pgAllCounts', 'pgNeedLink', 'pgNeedLinkOne', 'pgAsking', 'pgStuck', 'pgQuiet', 'pgTodo',
-  'pgLast', 'pgStoppedAt', 'pgSteps', 'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne',
-  'pgOnly', 'pgProject', 'pgOpenCount', 'pgVersion', 'pgVersions', 'pgPrivacy', 'pgUnreadable',
-  'pgHowFix', 'pgFixAdvice', 'pgReady', 'pgReadyHint', 'pgInClaude', 'pgInCodex', 'pgUnreadableReply', 'pgUnknownAge',
+  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
+  'archiveNow', 'cleanUp', 'stoppedCount',
+  'serveClosed', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
+  'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
+  'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
+  'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgNothing', 'pgNothingHint',
+  'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
+  'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
+  'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
+  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 // The chat prompt goes as it is in every language: the chat reads it, not the person.
-export const pageWords = (s: Strings, isGrouped = false): Record<string, string> => ({
+export const pageWords = (s: Strings): Record<string, string> => ({
   ...Object.fromEntries(Object.entries(s.agentNames).map(([agent, name]) => [`agent:${agent}`, name])),
   ...Object.fromEntries(
-    PAGE_WORDS.filter(key => isGrouped || !key.startsWith('pg')).map(key => {
+    PAGE_WORDS.map(key => {
       const value = s[key] as unknown
       return [key, typeof value === 'function' ? String((value as (...blanks: string[]) => unknown)('\u0001', '\u0002')) : String(value)]
     }),
   ),
-  relayPrompt: RELAY,
-  ...(isGrouped ? { group: 'agent' } : {}),
 })
 
 const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -730,204 +689,333 @@ const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, 
 export const pagePolicy = (nonce: string): string =>
   `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
 
+const CLIP_CSS = `.clip{flex:1 1 0;min-width:0}.clip>summary,.clip[open]>summary{display:block;cursor:pointer}.clip>summary::before,.clip[open]>summary::before{content:none}.clip .short{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.clip .whole{display:none;white-space:pre-wrap;overflow-wrap:anywhere}.clip[open] .short{display:none}.clip[open] .whole{display:block}`
+
+// The page: one column, a header, a row of agent icons, then what needs the person, what is moving,
+// the rest by project and two closed shelves. Only the Needs you sheet is raised; everything else sits on
+// the ground with hairlines. Sizes, spacing, motion and the derived states are tokens (page-look.ts); a
+// phone (640px and narrower) lets the answers wrap two or three to a line at 48px and only the agent row stays pinned.
+const PAGE_CSS = `
+html{scrollbar-gutter:stable}
+body{overflow-wrap:anywhere}
+.col{width:100%;max-width:808px;margin:0 auto;padding-left:max(var(--s5),env(safe-area-inset-left,0px));padding-right:max(var(--s5),env(safe-area-inset-right,0px))}
+.head .topbar{flex-wrap:nowrap;min-height:56px;padding-block:0;gap:var(--s3)}
+.brand h1{white-space:nowrap}
+.live{display:inline-flex;align-items:center;gap:6px;flex:none;font-size:var(--text-xs);color:var(--muted);border:1px solid var(--line);border-radius:var(--radius-round);padding:1px 8px 1px 7px;white-space:nowrap}
+.live i{width:7px;height:7px;border-radius:var(--radius-round);background:var(--done)}
+body:has(#offline:not(:empty)) .live{display:none}
+#offline{position:sticky;top:0;color:var(--alert);overflow-wrap:anywhere;padding:var(--s2) 0;border-bottom:1px solid var(--line)}
+#offline:empty{display:none}
+#offline:not(:empty){top:var(--head-h,56px);z-index:5;padding:var(--s3) max(var(--s4),calc((100vw - 808px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--ground))}
+#offline:not(:empty)::before{content:'!';display:inline-grid;place-items:center;width:20px;height:20px;border:1px solid currentColor;border-radius:var(--radius-round);margin-right:var(--s3);font-weight:600}
+button,.btn{font:inherit;color:inherit}
+button:hover,.btn:hover,summary:hover{background-color:var(--hover)}
+button:active,.btn:active{background-color:var(--press)}
+button:disabled,button[aria-disabled="true"]{color:var(--muted);border-color:var(--line);cursor:not-allowed}
+${agentRowCss}
+.link{border:0;background:none;padding:0;min-height:var(--hit);color:var(--ink);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
+.link:hover{background:none}
+.page{flex:1;display:flex;flex-direction:column;gap:var(--s6);padding-top:var(--s5);padding-bottom:var(--s6)}
+#board{display:flex;flex-direction:column;gap:var(--s6);min-width:0}
+.t-alert{color:var(--alert)}.t-quiet{color:var(--muted)}
+${sheetCss}
+.sheet-foot{display:grid;gap:var(--s2);padding:0 var(--s4) var(--s3)}
+.sheet-foot:empty{display:none}
+.sheet-foot p{margin:0;color:var(--muted)}
+.cards,.rows{list-style:none;margin:0;padding:0}
+.cards>li+li .card{border-top:1px solid var(--line)}
+.card{display:grid;grid-template-columns:24px minmax(0,1fr);gap:var(--s3);padding:var(--s4);min-width:0}
+.arrived>.fx>.fx-in{animation:glow var(--dur-glow) var(--ease-out)}
+.c-body{min-width:0;display:flex;flex-direction:column;gap:var(--s2)}
+.c-meta,.r-meta,.note,.context{overflow-wrap:anywhere}
+.c-meta{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1) var(--s3);font-size:var(--text-xs);line-height:1.5;color:var(--muted)}
+.c-meta .who{color:var(--ink);font-weight:600}
+.q{margin:0;font-size:var(--text-lg);line-height:1.4;font-weight:600;overflow-wrap:anywhere}
+.note,.context{margin:0;color:var(--muted)}
+.answers{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;padding-top:var(--s1)}
+.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
+button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)}
+button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
+button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
+.btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover,.pfoot #close:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
+button.quiet:hover,.side .pfoot #close:hover{background-color:var(--hover)}
+.chev{display:inline-block;transition:transform var(--dur-base) var(--ease-out)}.chev::before{content:"▸"}
+.open>.shelf-head .chev{transform:rotate(90deg)}
+code{display:block;max-width:100%;overflow-x:auto;white-space:pre;font:var(--text-xs)/1.5 var(--font-mono);padding:6px var(--s2);border:1px solid var(--line);border-radius:var(--radius-s);background:var(--inset);color:var(--ink)}
+.state{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s3)}
+.state .msg{display:inline-flex;align-items:center;gap:var(--s2);min-width:0;line-break:strict}
+.ok{color:var(--done)}.go{color:var(--ink)}
+.dots{display:inline-flex;gap:3px;margin-left:var(--s2)}.dots i{width:4px;height:4px;border-radius:var(--radius-round);background:currentColor;animation:dot var(--dur-dots) infinite ease-in-out}
+.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
+.composer{display:grid;gap:var(--s2)}
+textarea{display:block;width:100%;min-width:0;font:inherit;font-size:var(--text-sm);line-height:1.5;padding:10px var(--s3);border:1px solid var(--line-strong);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);resize:vertical;min-height:76px;transition:border-color var(--dur-fast) var(--ease-out)}
+textarea:focus{outline:none;border-color:var(--ink);box-shadow:var(--ring)}
+.cf{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;justify-content:flex-end}
+.cf .where{margin-right:auto;font-size:var(--text-xs);color:var(--muted)}
+.receipt,.said-line{margin:0;font-size:var(--text-sm);color:var(--muted)}
+.receipt.t-alert{color:var(--alert)}.receipt-box{display:grid;gap:var(--s2)}
+.press-result{font-size:var(--text-sm)}.press-result .acts{margin-top:var(--s2)}.press-result:empty{display:none}.press-result.done{color:var(--done)}.press-result.alert{color:var(--alert)}
+.press-result textarea{margin-top:var(--s2);font-size:var(--text-sm)}
+.empty{display:grid;gap:var(--s1);padding:var(--s4)}
+.empty p{margin:0}.empty .sub{font-size:var(--text-xs);color:var(--muted)}
+.sec{display:flex;flex-direction:column;gap:var(--s2)}
+.sec-head{display:flex;align-items:baseline;gap:var(--s3);flex-wrap:wrap}
+.sec-head h2{margin:0;font-size:var(--text-lg);line-height:1.4;font-weight:600}
+.sec-head .count{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums}
+.sec>p{margin:0;color:var(--muted)}
+.proj{margin:var(--s3) 0 var(--s2);font-size:var(--text-xs);font-weight:600;color:var(--muted)}
+.rows{border-top:1px solid var(--line-strong)}
+.rows.bare{border-width:0}
+.row-btn:focus-visible{outline-offset:-2px}
+div.row-btn{cursor:default}
+.rows>li+li>.fx>.fx-in{border-top:1px solid var(--line)}
+.row-btn{width:100%;display:grid;grid-template-columns:24px minmax(0,1fr) auto 16px;gap:var(--s3);align-items:center;text-align:left;border:0;background:transparent;padding:var(--s3) var(--s2);min-height:56px;cursor:pointer;border-radius:var(--radius-m);color:inherit;transition:background-color var(--dur-fast) var(--ease-out)}
+.row.open .row-btn{background:var(--current);border-radius:var(--radius-m) var(--radius-m) 0 0}
+.r-text{min-width:0;display:flex;flex-direction:column;gap:2px}
+.r-title{font-size:var(--text-md);line-height:1.4;font-weight:600;overflow-wrap:anywhere}
+.r-meta{font-size:var(--text-sm);line-height:1.5;color:var(--muted);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+.r-meta span+span{margin-left:var(--s3)}
+.r-chev{width:16px;height:16px;color:var(--muted);transition:transform var(--dur-base) var(--ease-out)}
+.r-chev::before{content:'';display:block;width:7px;height:7px;margin:4px 0 0 2px;border-top:2px solid currentColor;border-right:2px solid currentColor;transform:rotate(45deg)}
+.row-btn[aria-expanded="true"] .r-chev{transform:rotate(90deg)}
+div.row-btn .r-chev{visibility:hidden}
+.r-meta .st{color:var(--ink)}
+.r-right{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;max-width:9em;overflow:hidden;text-overflow:ellipsis}
+.row-open{background:var(--current);border-radius:0 0 var(--radius-m) var(--radius-m);padding:var(--s1) var(--s2) var(--s3) calc(var(--s2) + 36px);display:grid;gap:var(--s3);min-width:0;opacity:0;transition:opacity var(--dur-base) var(--ease-out)}
+.row.open .row-open{opacity:1}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:var(--s1)}
+.steps li{display:grid;grid-template-columns:22px minmax(0,1fr);gap:var(--s2);align-items:baseline}
+/* A step's Done button sits under its text, one line wide at most; the whole step is its title. */
+.steps li>button{grid-column:2;justify-self:start;max-width:100%;min-width:0}
+.steps li>button>span{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.steps .now .t{font-weight:600}
+.steps .mk{text-align:center}
+.t-quiet .short,.t-quiet .whole{color:var(--muted)}
+.row-open details:not(.clip)>summary{cursor:pointer;color:var(--muted);list-style:none}
+.row-open details:not(.clip)>summary::before{content:"▸ ";color:var(--muted)}.row-open details[open]:not(.clip)>summary::before{content:"▾ "}
+.row-open details:not(.clip)>summary::-webkit-details-marker{display:none}
+.acts{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center}
+.s-doing,.k-input,.k-reply,.n-active{color:var(--ink)}
+.s-waiting,.k-confirm,.k-choose,.n-waiting{color:var(--waiting-text)}
+.s-blocked{color:var(--alert)}.n-today{color:var(--done)}.s-running{color:var(--alive)}.s-done,.s-todo,.s-cancelled{color:var(--muted)}
+.shelf{display:block}
+.shelf-head{display:flex;gap:var(--s2);width:100%;border-width:1px 0;border-radius:0;min-height:48px;padding:var(--s3) var(--s2);font-size:var(--text-md);line-height:1.4;font-weight:600}
+.shelf-head .count{font-size:var(--text-xs);font-weight:400;color:var(--muted);font-variant-numeric:tabular-nums}
+.shelf .rows{border-top:0}
+.shelf-body{display:grid;gap:var(--s2);padding:var(--s3) var(--s2);min-width:0}
+.shelf-body .quiet{margin:0;color:var(--muted)}
+.shelf-body textarea{font-family:var(--font-mono);min-height:72px}
+.hid{display:grid;gap:var(--s2);padding:var(--s2) 0;min-width:0}
+.hid+.hid{border-top:1px solid var(--line)}
+.hid p{margin:0}
+.fresh{display:grid;gap:var(--s4);padding:var(--s6) 0;max-width:560px}
+.fresh h2{margin:0;font-size:var(--text-lg);line-height:1.4}.fresh p{margin:0;color:var(--muted)}
+.fresh .mark{width:44px;height:44px}
+.fresh ul{list-style:none;margin:0;padding:0;display:grid;gap:var(--s3)}
+.fresh li{display:grid;grid-template-columns:24px minmax(0,1fr);gap:var(--s3);align-items:center}
+.fresh li b{font-weight:600}
+.fresh .ok{color:var(--done)}
+.pfoot{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s4);align-items:center;border-top:1px solid var(--line);padding-top:var(--s4);font-size:var(--text-xs);color:var(--muted)}
+.pfoot p{margin:0}.pfoot .press-result{flex-basis:100%}
+#note{position:sticky;bottom:0;padding:var(--s3) 0;background:var(--ground);border-top:1px solid var(--line);overflow-wrap:anywhere}
+#note:empty{display:none}#note.done{color:var(--done)}#note.alert{color:var(--alert)}
+.lost{display:grid;gap:var(--s2);padding:var(--s3) var(--s4);border:1px solid var(--line-strong);border-radius:var(--radius-m)}
+.lost .where{font-weight:600}
+.notices{display:grid;gap:var(--s2)}.notices p{margin:0}
+${CLIP_CSS}
+/* The sidebar, the rail and the work beside them. */
+.shell{display:block}
+.side{display:none}
+.stage{min-width:0}
+.s-brand{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 var(--s2)}
+.s-brand .b-name{flex:1 1 auto;font-size:var(--text-md);font-weight:600;line-height:1.4;white-space:nowrap}
+.s-toggle{flex:none;width:32px;height:32px;display:inline-grid;place-items:center;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+.s-toggle:hover{background:var(--hover);color:var(--ink)}
+.s-toggle:active{background:var(--press)}
+.s-group{display:flex;flex-direction:column;gap:2px}
+.s-label{margin:0 0 var(--s1);padding:0 var(--s2);font-size:var(--text-xs);font-weight:600;color:var(--muted)}
+.s-item{position:relative;display:flex;align-items:center;gap:var(--s3);width:100%;max-width:none;min-height:36px;padding:4px var(--s2);border:0;border-radius:var(--radius-m);background:transparent;color:var(--ink);font-size:var(--text-sm);line-height:1.3;text-align:left;cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out)}
+.s-item:hover{background:var(--hover)}
+.s-item:active{background:var(--press)}
+.s-item[aria-pressed="true"]{background:var(--current);font-weight:600}
+.s-agent[aria-pressed="true"].working .ag::after{border-color:var(--current)}
+.s-item>svg.i{width:18px;height:18px;margin-inline:3px}
+.s-item .ag{position:relative;width:24px;height:24px;border-radius:var(--radius-s);flex:none}
+.v-needs>svg.i{color:var(--waiting-text)}.v-working>svg.i{color:var(--alive)}.v-others>svg.i,.v-done>svg.i{color:var(--muted)}
+.s-project::before{content:"";flex:none;width:18px;height:18px;margin-inline:3px;background:var(--muted);-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M2 4.5h4l1.5 1.5H14v6.5H2z'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M2 4.5h4l1.5 1.5H14v6.5H2z'/%3E%3C/svg%3E") center/contain no-repeat}
+.s-txt{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.s-n{flex:none;font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums}
+.s-n:empty{display:none}
+.s-n.hot,.side .badge{position:static;flex:none;min-width:22px;height:22px;padding:0 6px;border:0;border-radius:var(--radius-round);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-xs);font-weight:600;line-height:22px;text-align:center;font-variant-numeric:tabular-nums}
+.side .badge.bad{background:var(--alert)}
+.s-agent[data-presence="offline"] .ag,.s-agent[data-presence="notseen"] .ag{background-color:var(--muted)}
+.s-agent.working .ag::after{content:"";position:absolute;right:-5px;bottom:-5px;width:9px;height:9px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--alive)}
+.shell[data-empty="1"] :is(.s-views,.s-projects){display:none}
+/* the settings at the foot of the sidebar: the language spot (reserved, in a row with the theme button), the project link, then Close the board */
+.s-foot{margin-top:auto;padding-top:var(--s3);border-top:1px solid var(--line)}
+.side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
+.side .pfoot .set-row{order:-1;flex-basis:100%;margin-left:calc(var(--s2) * -1)}
+.side .pfoot .grow{display:none}
+.side .pfoot #close{min-height:32px;padding-inline:8px;border-color:transparent;background:transparent;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
+.side .pfoot p{order:3;flex-basis:100%}
+.ver-link{display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-size:var(--text-xs);text-decoration:none;border-radius:var(--radius-s);white-space:nowrap}
+.ver-link:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
+.ver-link svg.i{width:14px;height:14px}
+.set-row{display:inline-flex;align-items:center;gap:var(--s1)}
+.pfoot .grow{flex:1 1 auto}
+
+@media (min-width:560px){
+  .shell{display:grid;grid-template-columns:232px minmax(0,1fr);align-items:start;transition:grid-template-columns var(--dur-layout) var(--ease-out)}
+  .shell[data-rail="1"]{grid-template-columns:64px minmax(0,1fr)}
+  .side{display:flex;flex-direction:column;gap:var(--s4);position:sticky;top:0;height:100dvh;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;padding:var(--s4) var(--s3);border-right:1px solid var(--line);background:var(--ground)}
+  .head,.agents-in{display:none}
+  .agents{position:static;border-bottom:0}
+  #offline:not(:empty){top:0;padding:var(--s3) var(--s5)}
+  /* the can't-read line and the work share one width, so their edges line up */
+  .col{max-width:1040px}
+  /* one view at a time; Overview shows them all */
+  .shell[data-view="needs"] #board>[data-sec]:not([data-sec="needs"]),
+  .shell[data-view="working"] #board>[data-sec]:not([data-sec="working"]),
+  .shell[data-view="others"] #board>[data-sec]:not([data-sec="others"]),
+  .shell[data-view="done"] #board>[data-sec]:not([data-sec="done"]){display:none}
+  /* the rail: the views and the agents as 44px icons with their badges; names in the tooltip; the project link, the theme and Close the board in the footer */
+  .shell[data-rail="1"] .side{padding:var(--s3) 10px;align-items:center}
+  .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-name){display:none}
+  .shell[data-rail="1"] .s-brand{flex-direction:column;gap:var(--s2);padding:0}
+  .shell[data-rail="1"] .s-group{align-items:center;width:100%}
+  .shell[data-rail="1"] :is(.s-views,.s-views+.s-group){border-top:1px solid var(--line);padding-top:var(--s3)}
+  .shell[data-rail="1"] .s-item{width:44px;height:44px;min-height:44px;padding:0;justify-content:center}
+  .shell[data-rail="1"] .s-item>svg.i{margin:0}
+  .shell[data-rail="1"] .s-txt{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  .shell[data-rail="1"] .s-n:not(.hot){display:none}
+  .shell[data-rail="1"] :is(.s-n.hot,.side .badge){position:absolute;top:-3px;right:-5px;border:2px solid var(--ground);line-height:18px}
+}
+@media (min-width:1280px){
+  .shell:is([data-view="all"],[data-view="needs"]) .col{max-width:1440px}
+  /* Overview in two columns: Needs you on the left, the rest stacked on the right; the last row takes the slack */
+  .shell[data-view="all"] #board{display:grid;grid-template-columns:minmax(460px,5fr) minmax(0,6fr);column-gap:var(--s6);row-gap:0;grid-template-rows:repeat(12,auto) 1fr;align-items:start}
+  .shell[data-view="all"] #board>*{grid-column:2;margin-bottom:var(--s6)}
+  .shell[data-view="all"] #board>#needs{grid-column:1;grid-row:1 / -1;margin-bottom:0}
+  .shell[data-view="all"] #board>.fresh{grid-column:1 / -1}
+  /* Needs you on its own: the questions sit side by side, each its own sheet */
+  .shell[data-view="needs"] .sheet{background:none;border:0}
+  .shell[data-view="needs"] .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:var(--s4);align-items:start}
+  .shell[data-view="needs"] .cards>li{background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--radius-m)}
+  .shell[data-view="needs"] .cards>li:first-child{border-top-left-radius:0}
+  .shell[data-view="needs"] .cards>li+li .card{border-top:0}
+}
+@media (min-width:1760px){
+  .shell[data-view="all"] .col{max-width:1840px}
+  .shell[data-view="all"] #board{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .shell[data-view="all"] #board>*{grid-column:3}
+  .shell[data-view="all"] #board>#needs{grid-column:1}
+  .shell[data-view="all"] #board>[data-sec="working"]{grid-column:2;grid-row:1 / -1;margin-bottom:0}
+  .shell[data-view="all"] #board>.fresh{grid-column:1 / -1}
+}
+@media (max-width:640px){
+  .col{padding-left:max(var(--s3),env(safe-area-inset-left,0px));padding-right:max(var(--s3),env(safe-area-inset-right,0px))}
+  .head{position:static}
+  .agents{top:0}
+  #offline:not(:empty){top:0}
+  .live .lbl{display:none}.live{padding:var(--s1)}
+  .page,#board{gap:var(--s5)}
+  .page{padding-top:var(--s4)}
+  .card{padding:var(--s3)}
+  .row-open{padding-left:var(--s2)}
+  .pfoot{gap:var(--s2)}
+}
+/* A finger, not the width, decides target size: a narrow window with a mouse keeps the desktop sizes. */
+@media (pointer:coarse){
+  .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.s-item{min-height:44px}
+  .link{min-height:44px}
+  .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
+  .answers button.quiet{flex:0 0 auto;min-height:44px}
+  .s-toggle{width:44px;height:44px}
+  textarea{min-height:96px}
+}
+${motionCss}
+`
+
+const VIEW_ICONS = {
+  all: '<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/>',
+  needs: '<path d="M4 14V2.5M4 3h8l-2 2.75L12 8.5H4"/>',
+  working: '<path d="M5 3.5v9l7-4.5z" fill="currentColor" stroke="none"/>',
+  others: '<path d="M6 4.5h7.5M6 8h7.5M6 11.5h7.5M2.75 4.5h.01M2.75 8h.01M2.75 11.5h.01"/>',
+  done: '<path d="M3 8.5 6.5 12 13 4.5"/>',
+} as const
+
+// One view in the sidebar: pressing it shows that section alone (Overview shows all of them). It works without the server.
+const sideView = (id: keyof typeof VIEW_ICONS, label: string, hasCount: boolean): string =>
+  `<button type="button" class="s-item v-${id}" id="view-${id}" data-view="${id}" data-local data-nav title="${esc(label)}" aria-pressed="${id === 'all'}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${VIEW_ICONS[id]}</svg><span class="s-txt">${esc(label)}</span>${hasCount ? `<span class="s-n${id === 'needs' ? ' hot' : ''}" id="count-${id}"></span>` : ''}</button>`
+
 // `isLan`: the page a phone opens on the local network, which closes sooner.
-export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, isGrouped = false): string => isGrouped ? groupedPage(s, nonce, isLan) : `<!doctype html>
+export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0): string => `<!doctype html>
 <html lang="${htmlLang(s)}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>${esc(s.paneTitle)} · Agent Board</title>
+<title>Agent Board</title>
 ${faviconLink}
 <script nonce="${nonce}">${themeHead}</script>
 <style nonce="${nonce}">
-${pageTokens()}
+${pageTokens('56px')}
 ${pageBaseCss}
 ${agentMarkCss()}
-.shell{display:grid;grid-template-columns:236px minmax(0,1fr);column-gap:36px;align-items:start}
-body:not(:has(#board)) :is(#side,#side-open,#side-scrim,.live){display:none}.shell:not(:has(#board)){grid-template-columns:minmax(0,1fr)}
-main{min-width:0;max-width:780px;display:grid;gap:22px;padding-block:18px 40px}
-#board{display:grid;gap:10px;min-width:0}
-#board>h2{position:sticky;top:var(--head-h,54px);z-index:3;background:var(--ground);font-size:var(--text-md);margin:8px 0 0;padding:8px 0;display:flex;gap:8px;align-items:baseline}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-m);padding:14px 16px;display:grid;gap:10px;min-width:0}
-.where{color:var(--project);font-size:var(--text-sm);overflow-wrap:anywhere}
-.q{overflow-wrap:anywhere}
-.chip{margin-right:4px}
-.quiet{color:var(--muted)}
-.small{font-size:var(--text-sm);overflow-wrap:anywhere}
-.actions{display:flex;flex-wrap:wrap;gap:8px}
-button,.btn{font:inherit;min-height:40px;padding:6px 14px;border-radius:var(--radius-m);border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;max-width:100%;overflow-wrap:anywhere;text-align:left}
-button.primary{background:var(--accent);border-color:var(--accent);color:var(--ground)}
-button:disabled{opacity:.5;cursor:default}
-button:focus-visible,.btn:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-@media (pointer:coarse){button,.btn{min-height:44px}}
-.reply{display:flex;gap:8px;align-items:flex-end}
-textarea{width:100%;min-width:0;font-family:inherit;font-size:var(--text-md);line-height:1.5;padding:8px 10px;border-radius:var(--radius-m);border:1px solid var(--line);background:var(--ground);color:var(--ink);resize:vertical}
-.reply textarea{flex:1}
-code{display:block;overflow-x:auto;white-space:pre;font:var(--text-sm)/1.5 var(--font-mono);padding:6px 8px;border:1px solid var(--line);border-radius:var(--radius-s);color:var(--accent)}
-details>summary{cursor:pointer;list-style:none;display:flex;flex-wrap:wrap;gap:2px 10px;align-items:baseline}
-summary::-webkit-details-marker{display:none}
-details>summary::before{content:"▸";color:var(--muted)}
-details[open]>summary::before{content:"▾"}
-.row .title{font-weight:700;flex:1 1 12em;min-width:0;overflow-wrap:anywhere}
-.row .meta{flex-basis:100%;font-size:var(--text-sm);padding-left:1.1em}
-.row .body{display:grid;gap:8px;margin-top:6px}
-.due{color:var(--soon);font-size:var(--text-sm)}
-.steps{list-style:none;margin:0;padding:0;display:grid;gap:2px}
-.steps li{display:grid;grid-template-columns:1.4em 1fr;column-gap:4px;overflow-wrap:anywhere}
-.steps .now .t{font-weight:700}
-.steps .sn{grid-column:2;font-size:var(--text-sm)}
-.t-accent,.s-doing,.k-input,.k-reply,.n-active{color:var(--accent)}
-.t-warn,.s-waiting,.k-confirm,.k-choose,.n-waiting{color:var(--waiting-text)}
-.t-alert,.s-blocked{color:var(--alert)}
-.t-done,.s-done,.n-today{color:var(--done)}
-.t-running,.s-running,.k-review{color:var(--running)}
-.t-soon,.k-do,.n-due{color:var(--soon)}
-.t-quiet,.s-todo,.s-cancelled,.k-wait{color:var(--muted)}
-#offline{position:sticky;top:0;background:var(--ground);color:var(--alert);overflow-wrap:anywhere;padding:8px 0;border-bottom:1px solid var(--line)}
-#offline:empty{display:none}
-#note{position:sticky;bottom:0;padding:10px 0;background:var(--ground);border-top:1px solid var(--line);overflow-wrap:anywhere}
-#note:empty{display:none}
-#note.done{color:var(--done)}
-#note.alert{color:var(--alert)}
-.press-result.done{color:var(--done)}
-.press-result.alert{color:var(--alert)}
-.press-result:empty{display:none}
-.paste textarea{min-height:7em;font-family:var(--font-mono);font-size:var(--text-sm)}
-
-button.primary{color:var(--on-accent)}
-button:hover,.btn:hover{background:var(--inset);border-color:var(--line-strong)}
-button.primary:hover{background:var(--accent);filter:brightness(.94)}
-.live{display:inline-flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--muted);padding:2px 9px;border:1px solid var(--line);border-radius:var(--radius-round);background:var(--surface)}
-.live i{width:7px;height:7px;border-radius:var(--radius-round);background:var(--done)}
-body:has(#offline:not(:empty)) .live{display:none}
-#offline:not(:empty){top:var(--head-h,54px);z-index:5;padding:10px max(16px,calc((100vw - 1148px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--ground))}
-#offline:not(:empty)::before{content:'!';display:inline-grid;place-items:center;width:18px;height:18px;border:1px solid currentColor;border-radius:var(--radius-round);margin-right:10px;font-weight:700}
-#side{position:sticky;top:var(--head-h,54px);max-height:calc(100dvh - var(--head-h,54px));overflow:auto;padding:20px 0 28px;display:grid;gap:22px;align-content:start}
-.side-head,#side-open,.scrim{display:none}
-.grp{display:grid;gap:2px}.grp h3{margin:0 0 6px;padding:0 10px;font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
-#side-groups{display:grid;gap:22px}
-button.nav{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;width:100%;min-height:34px;padding:6px 10px;border:1px solid transparent;border-radius:var(--radius-m);background:transparent;font-size:var(--text-sm)}
-button.nav:hover{background:var(--surface);border-color:var(--line)}
-button.nav[aria-pressed="true"]{background:var(--surface);border-color:var(--line-strong);font-weight:600}
-.nav .ct{font-size:var(--text-xs);font-variant-numeric:tabular-nums;color:var(--muted)}
-.pd{width:8px;height:8px;justify-self:center;border-radius:var(--radius-round);background:var(--accent)}.pd.waiting{background:var(--waiting)}.pd.soon{background:var(--soon)}.pd.muted{background:var(--muted)}.pd.done{background:var(--done)}.pd.ink{background:var(--ink)}
-#counts{display:none;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:var(--radius-m);overflow:hidden;background:var(--surface)}
-#counts>button{border:0;border-radius:0;border-left:1px solid var(--line);display:grid;gap:2px;min-width:0;padding:12px;font-size:var(--text-sm)}#counts>button:first-child{border-left:0}#counts>button>span:first-child{font-size:var(--text-lg);font-weight:650}
-.scope{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px}.scope h2{margin:0;font-size:var(--text-lg)}.scope .n{font-size:var(--text-sm);color:var(--muted)}
-button.fchip{min-height:28px;padding:0 10px;border-radius:var(--radius-round);background:var(--surface);border-color:var(--line-strong);font-size:var(--text-xs)}
-.empty{padding:28px 20px;justify-items:center;text-align:center}.empty p{margin:0;color:var(--muted)}
-.composer{border:1px solid var(--line-strong);border-radius:var(--radius-m);background:var(--inset);overflow:hidden}.composer:focus-within{border-color:var(--accent);outline:3px solid color-mix(in srgb,var(--accent) 20%,transparent);outline-offset:0}
-.composer textarea{display:block;border:0;background:transparent;min-height:52px;padding:10px 12px 2px;outline:none}.composer .cf{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px}.composer .where{flex:1;padding-left:6px;color:var(--muted);font-size:var(--text-xs)}.composer button{margin-left:auto;min-height:32px;font-size:var(--text-sm)}
-.ask .where,.turn .where{display:flex;align-items:flex-start;gap:7px}.ask .where>span:last-child,.turn .where>span:last-child{min-width:0}.where .ag{margin-top:1px}.q{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px}.q b{font-size:var(--text-md);font-weight:600}.chip{font-size:var(--text-xs);border:1px solid currentColor;padding:3px 8px;border-radius:var(--radius-round)}
-.meta .ag{width:22px;height:22px;margin-right:6px;vertical-align:middle}.archive-note{font-size:var(--text-xs)}
-${CLIP_CSS}
-.steps li{grid-template-columns:22px minmax(0,1fr);gap:5px 10px;padding:5px 8px;border-radius:var(--radius-m)}.steps li.now{background:var(--inset)}.steps .mk{width:22px;height:22px;display:grid;place-items:center;font-size:var(--text-sm);cursor:default;user-select:none}
-.history>div{padding:10px 0;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.pfoot{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:14px;font-size:var(--text-xs);color:var(--muted)}.pfoot p{margin:0;flex:1 1 22em}.pfoot button{font-size:var(--text-sm);min-height:32px}.pfoot .press-result{flex-basis:100%}
-@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#counts{display:grid}#side-open{display:inline-flex;min-height:32px;padding:0 8px}.side-head{display:flex;justify-content:space-between;align-items:center;padding:0 10px;font-weight:600}#side{position:fixed;z-index:30;inset:0 auto 0 0;width:min(304px,86vw);max-height:100dvh;padding:14px 12px 28px;background:var(--surface);border-right:1px solid var(--line);transform:translateX(-105%);visibility:hidden}body.drawer-open #side{transform:none;visibility:visible}body.drawer-open .scrim{display:block;position:fixed;inset:0;z-index:25;background:var(--scrim);border:0;border-radius:0;width:100%;height:100%}}
-@media (max-width:600px){#counts{grid-template-columns:repeat(2,1fr)}#counts>button:nth-child(3){border-left:0}#counts>button:nth-child(n+3){border-top:1px solid var(--line)}.live{font-size:var(--text-xs)}.card{padding:14px}.scope h2{font-size:var(--text-md)}}
+${PAGE_CSS}
 </style>
 </head>
 <body>
-<header class="head" id="head"><div class="wide topbar"><button type="button" id="side-open" data-local aria-controls="side" aria-expanded="false" aria-label="${esc(s.sideTitle)}">☰</button><div class="brand">${boardMark}<h1>${esc(s.paneTitle)}</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i>${esc(s.serveLive)}</span></div>${themeSwitch(s)}</div></header>
+<div class="shell" id="shell" data-view="all">
+<aside class="side" id="side" aria-label="Agent Board">
+<div class="s-brand">${boardMark}<span class="b-name">Agent Board</span><span class="live" title="${esc(s.serveLiveHint)}"><i></i></span><button type="button" class="s-toggle" id="side-toggle" data-local aria-expanded="true" aria-label="${esc(s.pgSideFold)}" title="${esc(s.pgSideFold)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6.5 2.5v11"/></svg></button></div>
+<nav class="s-group s-views" id="side-views" aria-label="${esc(s.pgViews)}">${sideView('all', s.pgOverview, false)}${sideView('needs', s.pgNeeds, true)}${sideView('working', s.pgWorking, true)}${sideView('others', s.pgOthers, true)}${sideView('done', s.pgDone, true)}</nav>
+<div class="s-group s-agents" id="side-agent-group" role="group" aria-labelledby="side-agents-label" hidden><p class="s-label" id="side-agents-label">${esc(s.pgAgents)}</p><div class="s-group" id="side-agents"></div></div>
+<div class="s-group s-projects" id="side-project-group" role="group" aria-labelledby="side-projects-label" hidden><p class="s-label" id="side-projects-label">${esc(s.pgProjects)}</p><div class="s-group" id="side-projects"></div></div>
+<div class="s-foot" id="side-foot"></div>
+</aside>
+<div class="stage">
+<header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i><span class="lbl">${esc(s.serveLive)}</span></span></div></div></header>
 <div id="offline" role="status" aria-live="polite"></div>
-<button type="button" class="scrim" id="side-scrim" data-local aria-label="${esc(s.sideClose)}" tabindex="-1"></button>
-<div class="wide shell"><aside id="side" aria-label="${esc(s.sideTitle)}"><div class="side-head">${esc(s.sideTitle)}<button type="button" id="side-close" data-local>${esc(s.sideClose)}</button></div><div id="side-groups"></div></aside>
-<main>
-<section class="counts" id="counts"></section>
-<div id="scope" class="scope"></div>
+<nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note" id="agent-note"></div></nav>
+<main class="col page">
 <div id="board"></div>
-<details class="card paste"><summary>${esc(s.servePasteTitle)}</summary>
-<p class="quiet small">${esc(s.servePasteHint)}</p>
-<textarea id="paste" spellcheck="false"></textarea>
-<div class="actions"><button type="button" class="primary" id="paste-go" data-static>${esc(s.servePaste)}</button><button type="button" id="relay" data-local>${esc(s.serveRelay)}</button></div>
-<p class="quiet small">${esc(s.serveRelayHint)}</p>
-</details>
-<footer class="pfoot"><p>${esc(isLan ? s.serveLanIdle : idleMs > 0 ? s.serveIdleTimed(idleMs / 60_000) : s.serveIdle)}</p><button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
+<footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span><button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
 <div id="note" role="status" aria-live="polite"></div>
-</main></div>
+</main>
+</div>
+</div>
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
 </html>
 `
 
-const CLIP_CSS = `.clip{flex:1 1 0;min-width:0}.clip>summary,.clip[open]>summary{display:block;cursor:pointer}.clip>summary::before,.clip[open]>summary::before{content:none}.clip .short{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.clip .whole{display:none;white-space:pre-wrap;overflow-wrap:anywhere}.clip[open] .short{display:none}.clip[open] .whole{display:block}`
-
-const GROUP_CSS = `
-.grouped{overflow-wrap:anywhere}
-.grouped .topbar{min-height:56px;flex-wrap:nowrap}.grouped .brand{flex:1;min-width:0}.grouped .brand h1{white-space:nowrap}
-.grouped .live{display:inline-flex;gap:6px;align-items:center;color:var(--muted);font-size:var(--text-xs)}.grouped .live i{width:7px;height:7px;border-radius:var(--radius-round);background:var(--done)}
-.grouped button,.grouped .btn{font:inherit;min-height:40px;max-width:100%;padding:6px 12px;border:1px solid var(--line);border-radius:var(--radius-s);background:transparent;color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere}
-.grouped button:hover,.grouped .btn:hover{background:var(--inset)}.grouped button.primary{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
-.grouped .shell{display:grid;grid-template-columns:248px minmax(0,1fr);gap:32px;align-items:start}
-.grouped main{min-width:0;padding:20px 0 40px;display:grid;gap:24px}.grouped #board{min-width:0;display:grid;gap:24px}
-.grouped #picker{position:sticky;top:var(--head-h,56px);max-height:calc(100dvh - var(--head-h,56px));overflow-y:auto;padding:20px 0;align-self:start;min-width:0;z-index:5;background:var(--ground)}
-.grouped #picks{display:grid;gap:4px}.grouped #picks>button{display:flex;align-items:center;gap:8px;width:100%;border-color:transparent}.grouped #picks .pg-name{flex:1;min-width:0}
-.grouped #picks>button[aria-current="true"]{background:var(--ink);color:var(--ground)}.grouped .pg-count{font-variant-numeric:tabular-nums}.grouped .pg-flag{color:var(--waiting-text);font-weight:600;white-space:nowrap}.grouped #picks>button[aria-current="true"] .pg-flag{color:var(--ground)}
-.grouped .pg-picker-head{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:var(--text-xs);margin:18px 12px 4px}
-.grouped #searchbar{position:relative;margin-bottom:12px}.grouped #search{width:100%;min-width:0;font:inherit;padding:10px;border:1px solid var(--line);border-radius:var(--radius-s);background:var(--surface);color:var(--ink)}
-.grouped #search-results{position:absolute;top:100%;left:0;width:min(540px,calc(100vw - 32px));max-height:65dvh;overflow:auto;z-index:10;background:var(--surface);border:1px solid var(--line);padding:12px;box-shadow:var(--shadow)}
-.grouped #search-results button{display:block;width:100%;margin:4px 0}.grouped #search-results h3{font-size:var(--text-sm);margin:10px 0 4px}.grouped #search-open{display:none}
-.grouped h2,.grouped h3,.grouped p{margin:0}.grouped h2{font-size:var(--text-lg)}.grouped h3{font-size:var(--text-lg)}.grouped .pg-muted,.grouped .quiet{color:var(--muted)}.grouped .small{font-size:var(--text-xs)}
-.grouped .pg-sheet{background:var(--surface);border:1px solid var(--line);padding:16px;min-width:0}.grouped .pg-sheet-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px}.grouped .pg-sheet>p{margin:8px 0 0}
-.grouped .pg-card{padding:16px 0;border-top:1px solid var(--line);min-width:0;display:grid;gap:8px}.grouped .pg-card:first-of-type{margin-top:12px}.grouped .pg-card-meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:var(--text-xs)}.grouped .pg-card-meta>span:last-child{flex:1}
-.grouped .pg-question{font-size:var(--text-lg);font-weight:600;line-height:1.4;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}.grouped .pg-note{color:var(--muted)}
-.grouped .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.grouped .pg-answer{border-color:var(--line-strong);font-weight:600}.grouped .pg-write{border-color:transparent;color:var(--muted)}
-.grouped .pg-more{margin-left:auto}.grouped .pg-more-panel{padding:8px 0}.grouped .composer{padding:8px;border:1px solid var(--line);background:var(--inset)}.grouped textarea{width:100%;min-width:0;min-height:64px;font:inherit;resize:vertical;border:1px solid var(--line);padding:8px;background:var(--ground);color:var(--ink)}.grouped .cf{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
-.grouped .pg-list{display:grid;gap:0;min-width:0}.grouped .pg-row{border-bottom:1px solid var(--line);min-width:0}.grouped .pg-row>summary{list-style:none;cursor:pointer;display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:4px 12px;padding:12px 0;align-items:center;min-width:0}.grouped .pg-row>summary::-webkit-details-marker{display:none}
-.grouped .pg-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}.grouped .pg-age{font-size:var(--text-xs);color:var(--muted);white-space:nowrap}.grouped .pg-meta{grid-column:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:var(--text-xs);min-width:0}.grouped .pg-step-count{grid-column:3;font-size:var(--text-xs);color:var(--muted)}
-.grouped .pg-row[open]{background:var(--inset)}.grouped .pg-row-body{padding:0 12px 16px 36px;display:grid;gap:10px}.grouped .pg-steps{display:grid;gap:6px;padding:0;list-style:none;margin:0}.grouped .pg-steps .now{font-weight:700}.grouped .pg-steps li{display:flex;align-items:baseline;gap:8px;min-width:0;overflow-wrap:anywhere}.grouped .pg-steps li>button{flex:none}
-.grouped .pg-tabs{display:flex;gap:16px;border-bottom:1px solid var(--line);margin:16px 0 4px}.grouped .pg-tabs>button{border:0;border-radius:0;border-bottom:2px solid transparent}.grouped .pg-tabs>[aria-selected="true"]{border-bottom-color:var(--ink);font-weight:600}
-.grouped .pg-view-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px}.grouped .pg-view-head>p{flex-basis:100%}.grouped .pg-working{display:grid;gap:12px}.grouped .pg-older{margin-top:12px;display:grid;gap:8px}
-.grouped .pg-notice{color:var(--alert);display:grid;gap:8px}.grouped .pg-notice summary{cursor:pointer}.grouped .pg-fresh{display:grid;justify-items:start;gap:16px;padding:24px 0}.grouped .pg-fresh .mark{width:44px;height:44px}.grouped code{font-family:var(--font-mono);overflow-wrap:anywhere}
-.grouped .paste{border-top:1px solid var(--line);padding-top:16px}.grouped .paste>summary{cursor:pointer}.grouped .paste>p,.grouped .paste>.actions,.grouped .paste>textarea{margin-top:10px}
-.grouped .pfoot{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center;border-top:1px solid var(--line);padding-top:16px;color:var(--muted);font-size:var(--text-xs)}.grouped #versions,.grouped #unreadable-notices{flex-basis:100%}.grouped #footer-theme{display:none}
-.grouped #offline:empty,.grouped #note:empty,.grouped .press-result:empty{display:none}.grouped #offline,.grouped #note{color:var(--alert)}.grouped .press-result{font-size:var(--text-xs)}.grouped .press-result.done{color:var(--done)}.grouped .press-result.alert{color:var(--alert)}
-@media(max-width:760px){.grouped .wide{padding-inline:12px}.grouped .shell{display:block}.grouped .brand{gap:8px}.grouped .brand h1{font-size:var(--text-md)}.grouped .topbar{gap:8px}.grouped #header-theme{display:none}.grouped #footer-theme{display:block}.grouped #search-open{display:inline-flex;align-items:center;justify-content:center;flex:none;padding:8px;min-width:44px}.grouped .live{font-size:var(--text-xs)}
-.grouped #picker{position:sticky;top:var(--head-h,56px);display:flex;gap:6px;max-height:none;overflow-x:auto;overflow-y:hidden;padding:8px 0;white-space:nowrap;border-bottom:1px solid var(--line);width:100%;max-width:100%;scrollbar-width:thin}.grouped #picks{display:contents}.grouped #picks>button{flex:0 0 auto;width:auto;min-height:44px;white-space:nowrap}.grouped .pg-picker-head{display:none}.grouped #searchbar{display:none;position:fixed;top:calc(var(--head-h,56px) + 60px);left:12px;right:12px;white-space:normal;z-index:10;margin:0}.grouped #picker.pg-searching #searchbar{display:block}.grouped #search-results{width:100%}
-.grouped button,.grouped .btn,.grouped summary,.grouped .seg button{min-height:44px}.grouped .seg button{min-width:44px}.grouped .pg-tabs{gap:4px}.grouped .pg-step-count{display:none}.grouped .pg-row>summary{grid-template-columns:24px minmax(0,1fr) auto;gap:4px 8px}.grouped .pg-meta{grid-column:2 / 4}.grouped .pg-sheet{padding:12px}.grouped .pg-row-body{padding-left:12px}.grouped .pg-age{max-width:6em;white-space:normal;text-align:right}.grouped .actions>button{min-width:44px}.grouped .pg-question{font-size:var(--text-lg)}.grouped .pg-fresh{padding-top:12px}}
-`
-
-const groupedPage = (s: Strings, nonce: string, isLan: boolean): string => `<!doctype html>
-<html lang="${htmlLang(s)}">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Agent Board</title>${faviconLink}<script nonce="${nonce}">${themeHead}</script><style nonce="${nonce}">${pageTokens('56px')}${pageBaseCss}${agentMarkCss()}${CLIP_CSS}${GROUP_CSS}</style></head>
-<body class="grouped">
-<header class="head" id="head"><div class="wide topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i>${esc(s.serveLive)}</span></div><button id="search-open" type="button" data-local aria-label="${esc(s.pgSearch)}" aria-controls="searchbar" aria-expanded="false">⌕</button><div id="header-theme">${themeSwitch(s)}</div></div></header>
-<div id="offline" role="status" aria-live="polite"></div>
-<div class="wide shell"><aside id="picker" aria-label="${esc(s.pgAgents)}"><div id="searchbar"><input id="search" type="search" placeholder="${esc(s.pgSearch)}" aria-label="${esc(s.pgSearch)}" aria-controls="search-results" autocomplete="off"><div id="search-results" hidden></div></div><div id="picks"></div></aside>
-<main><div id="fresh-mark" hidden>${boardMark}</div><div id="board"></div><details class="paste"><summary>${esc(s.servePasteTitle)}</summary><p class="quiet small">${esc(s.servePasteHint)}</p><textarea id="paste" spellcheck="false"></textarea><div class="actions"><button type="button" class="primary" id="paste-go" data-static>${esc(s.servePaste)}</button><button type="button" id="relay" data-local>${esc(s.serveRelay)}</button></div><p class="quiet small">${esc(s.serveRelayHint)}</p></details>
-<footer class="pfoot"><p id="versions"></p><p>${esc(s.pgPrivacy)}</p><div id="unreadable-notices"></div><button type="button" id="close" data-static>${esc(s.serveClose)}</button><div id="footer-theme">${themeSwitch(s)}</div></footer><div id="note" role="status" aria-live="polite"></div></main></div>
-<script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s, true)).replace(/</g, '\\u003c')}</script><script nonce="${nonce}">${PAGE_SCRIPT}</script></body></html>
-`
-
-// The page's own script: it reads the board from its server every 3 seconds and redraws when
-// it changed, keeping what is typed in a box. Text from the file is set as text, never as HTML.
 const PAGE_SCRIPT = String.raw`
 (function () {
   'use strict';
   var W = JSON.parse(document.getElementById('words').textContent);
   var token = new URLSearchParams(location.search).get('t') || '';
   var board = document.getElementById('board');
-  var counts = document.getElementById('counts');
   var note = document.getElementById('note');
   var offline = document.getElementById('offline');
   var presence = null;
   var GLYPH = { done: '✓', doing: '▸', todo: '•', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
   var opened = {};
-  var morePanels = [];
-  var moreCount = 0;
   var timer = null;
   var isClosed = false;
   var isUnreachable = false;
   var offlineButtons = [];
   var since = null;
   var messageAttempts = {};
-
+  var latest = null;
+  var connections = [];
+  ${filterStore}
+  ${agentFade}
+  var fadeChips = agentFade(document.getElementById('chips'));
   function w(key, a, b) {
-    var template = String(W[key === 'viewCount' && a === 1 ? 'viewCountOne' : key]);
+    var template = String(W[key]);
     return template.split('\u0001').join(a === undefined ? '' : String(a)).split('\u0002').join(b === undefined ? '' : String(b));
   }
   function el(tag, cls, text) {
@@ -940,7 +1028,40 @@ const PAGE_SCRIPT = String.raw`
     for (var i = 1; i < arguments.length; i += 1) if (arguments[i]) parent.appendChild(arguments[i]);
     return parent;
   }
+  function hasClass(node, name) { return (' ' + (node.className || '') + ' ').indexOf(' ' + name + ' ') !== -1; }
+  function toggleClass(node, name, on) {
+    var names = String(node.className || '').split(' ').filter(function (one) { return one && one !== name; });
+    if (on) names.push(name);
+    node.className = names.join(' ');
+  }
+  // Motion: the page moves things only after its first draw, and never when the person asked for less.
+  var reduce = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  var hasDrawn = false;
+  function moving() { return hasDrawn && !!reduce && !reduce.matches && typeof requestAnimationFrame === 'function'; }
+  // A block opens and closes by its row track, so what is next to it follows. done runs once it has finished.
+  function reveal(block, isShown, done) {
+    if (!block) return;
+    var was = !hasClass(block, 'gone');
+    toggleClass(block, 'gone', !isShown);
+    block.inert = !isShown;
+    if (!done) return;
+    if (was === isShown || !moving()) { done(); return; }
+    var finished = false;
+    var end = function () { if (!finished) { finished = true; done(); } };
+    block.addEventListener('transitionend', function (event) { if (event.target === block) end(); });
+    setTimeout(end, 420);
+  }
+  function fx(content, isShown) {
+    var wrap = el('div', 'fx gone');
+    wrap.inert = true;
+    add(wrap, add(el('div', 'fx-in'), content));
+    reveal(wrap, isShown !== false);
+    return wrap;
+  }
   var results = {};
+  // The last message sent from each card or row, so a failed one can go again or be copied.
+  var sentLast = {};
+  var agentPresence = {};
   var resultSlots = {};
   var lostResults = [];
   resultSlot(document.querySelector('.pfoot'), 'close', '', w('serveClose'));
@@ -949,7 +1070,7 @@ const PAGE_SCRIPT = String.raw`
     var previous = results[key];
     if (previous && previous.awaitingRefresh) { previous.revision = revision; previous.awaitingRefresh = false; }
     else if (previous && !previous.pending && previous.tone !== 'alert' && previous.revision && revision && previous.revision !== revision) delete results[key];
-    var slot = el('div', 'small press-result');
+    var slot = el('div', 'press-result');
     slot.setAttribute('role', 'status');
     resultSlots[key] = { node: slot, revision: revision, label: label };
     card.appendChild(slot);
@@ -960,7 +1081,12 @@ const PAGE_SCRIPT = String.raw`
     var result = results[key];
     if (!slot || !result) return;
     slot.node.textContent = result.text;
-    slot.node.className = 'small press-result ' + result.tone;
+    slot.node.className = 'press-result ' + result.tone;
+    slot.node.setAttribute('role', result.tone === 'alert' ? 'alert' : 'status');
+    if (result.tone === 'alert' && result.canRetry && sentLast[key]) {
+      var again = sentLast[key];
+      slot.node.appendChild(add(el('div', 'acts'), button(w('serveRetry'), function () { again.again(); }), button(w('serveCopyMessage'), function () { copy(again.text, key); }, '', true)));
+    }
     if (result.copyText) {
       var area = el('textarea');
       area.value = result.copyText;
@@ -987,11 +1113,11 @@ const PAGE_SCRIPT = String.raw`
       if (slot) slot.node.textContent = '';
     });
   }
-  function say(text, tone, key, copyText) {
+  function say(text, tone, key, copyText, canRetry) {
     if (key) {
       var slot = resultSlots[key];
       var previous = results[key];
-      results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '' };
+      results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, canRetry: canRetry === true, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '' };
       paintResult(key);
       if (!slot) keepCopyFocus(drawLostResults);
       return;
@@ -1025,8 +1151,22 @@ const PAGE_SCRIPT = String.raw`
       return res.json().catch(function () { return {}; }).then(function (data) { data.ok = res.ok && data.ok !== false; return data; });
     }).catch(function (error) { unreachable(); throw error; });
   }
-  function copy(text, key) {
+  // onCopied: what to do once the text is on the clipboard; the card then says where to paste it. Without it the
+  // result line says Copied. That line, and the card's after-copy line, show only after a copy was confirmed
+  // (the clipboard promise resolved, or the older copy command on a page the clipboard is closed to, such as
+  // one opened over plain http on the network). If neither worked, the answer stays unanswered and one line in
+  // the alert colour says so; a copy that carries no card (a command) shows its text to select instead.
+  function copy(text, key, onCopied) {
     say(w('pressPending'), '', key);
+    function landed() {
+      if (!onCopied) { say(w('copied'), 'done', key); return; }
+      // The card's own line says where to paste, so the line that said the press was under way goes.
+      delete results[key];
+      var slot = resultSlots[key];
+      if (slot) { slot.node.textContent = ''; slot.node.className = 'press-result'; }
+      onCopied();
+    }
+    function failed() { if (onCopied) say(w('pgCopyFailed'), 'alert', key); else say(w('boardCopyFailedBelow'), 'alert', key, text); }
     function fallback() {
       var area = el('textarea');
       area.value = text;
@@ -1039,9 +1179,10 @@ const PAGE_SCRIPT = String.raw`
       var isCopied = false;
       try { isCopied = document.execCommand('copy'); } catch (e) {}
       document.body.removeChild(area);
-      say(isCopied ? w('copied') : w('boardCopyFailedBelow'), isCopied ? 'done' : 'alert', key, isCopied ? undefined : text);
+      if (isCopied) landed();
+      else failed();
     }
-    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { say(w('copied'), 'done', key); }, fallback);
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(landed, fallback);
     else fallback();
   }
   // isView: a filter or view button changes only what is shown, so finished results stay.
@@ -1058,15 +1199,30 @@ const PAGE_SCRIPT = String.raw`
     node.setAttribute('data-nav', '');
     return node;
   }
-  // fp: the fingerprint the line was drawn with, which the server checks before it writes.
-  function act(key, type, text, waiting, session, asked, fp) {
+  // The pressed button shows the dots and is off while its message is on its way.
+  function busyOn(node) {
+    if (!node) return;
+    node.disabled = true;
+    if (!node.dotsNode) { node.dotsNode = add(el('span', 'dots'), el('i'), el('i'), el('i')); node.appendChild(node.dotsNode); }
+  }
+  function busyOff(node, stillOff) {
+    if (!node) return;
+    node.disabled = stillOff === true;
+    if (node.dotsNode) { node.dotsNode.remove(); node.dotsNode = null; }
+  }
+  // fp: the fingerprint the line was drawn with, which the server checks before it writes. go: the button
+  // that sent it. A failed send keeps the message for Send again and Copy message.
+  function act(key, type, text, waiting, session, asked, fp, go) {
     if (isUnreachable) return Promise.resolve();
+    busyOn(go);
     say(waiting || w('pressPending'), '', key);
     return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '' }).then(function (data) {
-      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key);
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok);
+      busyOff(go, data.ok);
       return data.ok;
     }, function () {
       say(w('serveOffline'), 'alert', key);
+      busyOff(go, false);
       unreachable();
       return false;
     }).then(function (ok) { refresh(); return ok; });
@@ -1076,13 +1232,18 @@ const PAGE_SCRIPT = String.raw`
     var slot = JSON.stringify([key, delivery.id, delivery.turn, session, asked, fp]);
     var attempt = messageAttempts[slot];
     if (!attempt || attempt.text !== text) attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
-    go.disabled = true;
+    busyOn(go);
     say(w('serveSending', agentName(delivery.agent)), '', key);
     return call('/api/act', { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp }).then(function (data) {
-      say(data.note || w(data.ok ? 'messagesQueued' : 'messagesFailed'), data.ok ? 'done' : 'alert', key);
-      if (!data.ok) go.disabled = isUnreachable;
+      say(data.note || w(data.ok ? 'messagesQueued' : 'messagesFailed'), data.ok ? 'done' : 'alert', key, undefined, !data.ok);
+      busyOff(go, data.ok || isUnreachable);
       return data.ok;
-    }, function () { say(w('messagesFailed'), 'alert', key); unreachable(); return false; }).then(function (ok) { refresh(); return ok; });
+    }, function () { say(w('messagesFailed'), 'alert', key, undefined, true); busyOff(go, false); unreachable(); return false; }).then(function (ok) { refresh(); return ok; });
+  }
+  // A draft that was sent is gone from the box on the page now, whatever redraw happened since it was pressed.
+  function clearDraft(draftKey) {
+    pg.drafts[draftKey] = '';
+    board.querySelectorAll('textarea[data-key]').forEach(function (box) { if (box.getAttribute('data-key') === draftKey) box.value = ''; });
   }
   function brand(agent) {
     if (!agent) return '';
@@ -1090,45 +1251,58 @@ const PAGE_SCRIPT = String.raw`
     return Object.prototype.hasOwnProperty.call(W, key) ? W[key] : agent;
   }
   function agentName(agent) { return brand(agent || 'claude'); }
-  function receiptLine(receipt) {
+  function receiptLine(receipt, key) {
     if (!receipt) return null;
     var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     if (receipt.status === 'acknowledged' || receipt.status === 'rejected') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
     var reply = receipt.reply || '';
     var ack = 'ACK ' + receipt.id;
     if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
-    return el('p', 'quiet small', w(receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error) ? 'messagesTimeout' : labels[receipt.status]) + (reply ? ' · ' + reply : ''));
+    var isFailed = receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error);
+    var line = el('p', 'receipt' + (isFailed ? ' t-alert' : ''), w(receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error) ? 'messagesTimeout' : labels[receipt.status]) + (reply ? ' · ' + reply : ''));
+    line.setAttribute('role', isFailed ? 'alert' : 'status');
+    var last = key && sentLast[key];
+    if (!isFailed || !last) return line;
+    return add(el('div', 'receipt-box'), line, add(el('div', 'acts'), button(w('serveRetry'), function () { last.again(); }), button(w('serveCopyMessage'), function () { copy(last.text, key); }, '', true)));
   }
-  function replyBox(key, placeholder, mode, agent, where, isSending, session, asked, fp, delivery) {
+  // The one reply box, on a card and in an open task: send modes go to the session (nativeAct or act), the rest copy.
+  // extras.onCancel adds a Cancel button; extras.onDone(text) runs once the text was sent or copied.
+  function replyBox(key, placeholder, mode, agent, where, isSending, session, asked, fp, delivery, extras) {
+    var done = extras && extras.onDone;
     var box = el('div', 'composer');
     var input = el('textarea');
     input.rows = 2;
     input.placeholder = placeholder;
+    input.setAttribute('aria-label', placeholder);
     // A draft belongs to its session and its question: a redraw that puts another session's
     // line under the same key starts an empty box, so the text is never sent to that session.
     input.setAttribute('data-key', [key, session || '', asked || '', delivery ? delivery.id + ':' + delivery.turn : ''].join('\u0001'));
+    var draftKey = input.getAttribute('data-key');
     var go = mode === 'send' || mode === 'connected'
       ? button(w('serveSend', agentName(agent)), function () {
         var text = input.value.trim();
         if (!text) { say(w('pressEmpty'), 'alert', key); return; }
-        if (mode === 'connected') {
-          nativeAct(key, text, delivery, session, asked, fp, go).then(function (ok) { if (ok) input.value = ''; });
-          return;
-        }
-        act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp).then(function (ok) { if (ok) input.value = ''; });
+        // The same text goes again through the same path; the box keeps it until it was sent.
+        var run = function () {
+          var sent = mode === 'connected' ? nativeAct(key, text, delivery, session, asked, fp, go) : act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp, go);
+          return sent.then(function (ok) { if (ok) { clearDraft(draftKey); if (done) done(text); } return ok; });
+        };
+        sentLast[key] = { text: text, again: run };
+        run();
       }, 'primary')
-      : button(w(W.group === 'agent' ? 'pgCopyAnswer' : 'serveCopy'), function () {
+      : button(w('pgCopyAnswer'), function () {
         var text = input.value.trim();
-        if (text) copy(text, key);
+        if (text) copy(text, key, done ? function () { done(text); } : undefined);
         else say(w('pressEmpty'), 'alert', key);
-      }, '', true);
+      }, 'primary', true);
     go.disabled = isSending === true;
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go.click(); }
     });
     var footer = el('div', 'cf');
-    if (W.group === 'agent') add(footer, el('span', 'quiet small', w('pgCopyOnlyHint')));
+    if (isSending === true && !results[key]) add(box, el('p', 'receipt', w('serveSendBusy', agentName(agent))));
     if (where) add(footer, el('div', 'where', where));
+    if (extras && extras.onCancel) add(footer, navButton(w('pgCancel'), extras.onCancel));
     add(box, input, add(footer, go));
     return box;
   }
@@ -1142,146 +1316,6 @@ const PAGE_SCRIPT = String.raw`
     add(box, add(el('summary'), el('span', 'short', short || whole), el('span', 'whole', whole)));
     return box;
   }
-  function stepsList(steps, key) {
-    var list = el('ol', 'steps');
-    steps.forEach(function (step, index) {
-      var item = el('li', step.isCurrent ? 'now' : '');
-      var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
-      add(item, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'));
-      add(item, clipped(step.line, step.note ? step.text + ' — ' + step.note : step.text, cls, 'step:' + key + ':' + index));
-      list.appendChild(item);
-    });
-    return list;
-  }
-  function setMore(one, isOpen) {
-    opened['more:' + one.key] = isOpen;
-    one.panel.hidden = !isOpen;
-    one.button.setAttribute('aria-expanded', String(isOpen));
-  }
-  function cardActions(card, key, answers, others, composer) {
-    if (answers.length) add(card, add.apply(null, [el('div', 'actions')].concat(answers)));
-    if (composer) add(card, composer);
-    var limit = Math.max(3, answers.length) - answers.length;
-    var visible = others.slice(0, limit);
-    var rest = others.slice(limit);
-    if (!others.length) return;
-    var actions = add.apply(null, [el('div', 'actions')].concat(visible));
-    add(card, actions);
-    if (!rest.length) return;
-    var panel = add.apply(null, [el('div', 'actions')].concat(rest));
-    panel.id = 'more-actions-' + (++moreCount);
-    var more = button(w('serveMore'), function () { setMore(one, panel.hidden); }, '', true, true);
-    more.setAttribute('aria-controls', panel.id);
-    var one = { key: key, button: more, panel: panel };
-    setMore(one, opened['more:' + key] === true);
-    morePanels.push(one);
-    add(actions, more);
-    add(card, panel);
-  }
-  function askCard(ask) {
-    var card = el('article', 'card ask');
-    add(card, add(el('div', 'where'), agentMark(who(ask)), el('span', '', [ask.project, brand(who(ask))].filter(Boolean).join(' · ') + (ask.task ? ' › ' + ask.task : ''))));
-    // The chip is a pill on the page, so the brackets the terminal needs are left off.
-    add(card, add(el('div', 'q'), el('span', 'chip k-' + ask.kind, String(ask.chip).replace(/^\s*[\[〔]\s*|\s*[\]〕]\s*$/g, '')), el('b', '', ask.text)));
-    if (ask.note) add(card, clipped(ask.noteLine, ask.note, 'note', 'note:' + ask.key));
-    else if (ask.context) add(card, clipped(ask.contextLine, ask.context, 'quiet context', 'context:' + ask.key));
-    if (ask.command) add(card, el('code', '', '$ ' + ask.command));
-    var answers = [];
-    var actions = [];
-    if (ask.canTick) {
-      var tick = button(w('serveTickNext', ask.label || ask.text), function () { act(ask.key, 'tick', '', '', '', '', ask.fp); }, 'primary');
-      if (ask.label) tick.title = ask.text;
-      answers.push(tick);
-    }
-    ask.answers.forEach(function (answer, index) {
-      var send = ask.send === 'send' || ask.send === 'connected';
-      var node = button(answer, function () {
-        if (ask.send === 'connected') nativeAct(ask.key, answer, ask.delivery, ask.session, ask.text, ask.fp, node);
-        else if (send) act(ask.key, 'send', answer, w('serveSending', agentName(ask.agent)), ask.session, ask.text, ask.fp);
-        else copy(answer, ask.key);
-      }, index === 0 ? 'primary' : '', !send);
-      node.disabled = send && ask.isSending;
-      answers.push(node);
-    });
-    if (ask.command) actions.push(button(w('serveCopyCommand'), function () { copy(ask.command, ask.key); }, '', true));
-    if (ask.canHide) actions.push(button(w('answeredHide'), function () { act(ask.key, 'hide'); }));
-    if (ask.link && /^https:\/\//i.test(ask.link)) {
-      var link = el('a', 'btn', w('serveOpenLink'));
-      link.href = ask.link;
-      link.target = '_blank';
-      link.rel = 'noreferrer noopener';
-      actions.push(link);
-    }
-    if (ask.reopen) actions.push(button(w('serveCopyResume'), function () { copy(ask.reopen, ask.key); }, '', true));
-    cardActions(card, ask.key, answers, actions, ask.canTick ? null : replyBox(ask.key, w('serveReplyPlaceholder'), ask.send, ask.agent, ask.where, ask.isSending, ask.session, ask.text, ask.fp, ask.delivery));
-    if (ask.receipt) add(card, receiptLine(ask.receipt));
-    if (ask.archiveNote) add(card, el('div', 'quiet small archive-note', ask.archiveNote));
-    if (ask.info) add(card, el('div', 'quiet small', ask.info));
-    resultSlot(card, ask.key, ask.fp, ask.task);
-    return card;
-  }
-  function rowCard(row) {
-    var card = el('details', 'card row');
-    var isWaiting = row.isAsking;
-    // A reply goes with the question it was written under, and only while it is still asked.
-    var asked = row.question;
-    card.open = row.key in opened ? opened[row.key] : row.send === 'send' || isWaiting;
-    card.addEventListener('toggle', function () { opened[row.key] = card.open; });
-    var summary = el('summary');
-    add(summary, el('span', 'title', row.title));
-    if (row.due) add(summary, el('span', 'due', '⚑ ' + row.due));
-    var name = brand(who(row));
-    add(summary, add(el('span', 'meta t-' + row.tone), agentMark(who(row)), el('span', '', (row.total > 0 ? row.done + '/' + row.total + ' ' : '') + row.status + (name ? ' · ' + name : '') + (row.when ? ' · ' + row.when : ''))));
-    card.appendChild(summary);
-    var body = el('div', 'body');
-    if (row.archiveNote) add(body, el('div', 'quiet small archive-note', row.archiveNote));
-    if (row.context) add(body, clipped(row.contextLine, row.context, 'quiet context', 'context:' + row.key));
-    if (row.pr) add(body, el('div', 'quiet', row.pr));
-    if (row.steps.length) add(body, stepsList(row.steps, row.key));
-    if (row.handoff) add(body, el('div', 'quiet small', row.handoff));
-    if (row.runs) add(body, el('div', 'quiet small', row.runs));
-    if (row.send === 'send' || row.send === 'connected') add(body, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, asked, row.fp, row.delivery));
-    else if (row.hasCopyBox) add(body, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, asked));
-    var actions = [];
-    if (row.next) {
-      var tickNext = button(w('serveTickNext', row.nextLabel || row.next), function () { act(row.key, 'tick', row.next, '', '', '', row.fp); }, 'primary');
-      if (row.nextLabel) tickNext.title = row.next;
-      actions.push(tickNext);
-    }
-    if (row.canArchive) actions.push(button(w('serveArchive'), function () { act(row.key, 'archive', '', '', '', '', row.fp); }));
-    if (row.canConfirm) actions.push(button(w('confirmDone'), function () { act(row.key, 'done', '', '', '', '', row.fp); }));
-    if (row.resume) actions.push(button(w('serveCopyResume'), function () { copy(row.resume, row.key); }, '', true));
-    cardActions(body, row.key, [], actions, null);
-    if (row.receipt) add(body, receiptLine(row.receipt));
-    if (row.info) add(body, el('div', 'quiet small', row.info));
-    resultSlot(body, row.key, row.fp, row.title);
-    card.appendChild(body);
-    return card;
-  }
-  function turnCard(turn) {
-    var card = el('article', 'card turn');
-    add(card, add(el('div', 'where'), agentMark(who(turn)), el('span', '', [turn.project, brand(who(turn))].filter(Boolean).join(' · '))));
-    add(card, el('div', turn.isQuestion ? 'q' : '', turn.text));
-    if (turn.isQuestion) add(card, replyBox(turn.key, w('serveReplyPlaceholder'), 'copy', turn.agent, '', false));
-    if (turn.info) add(card, el('div', 'quiet small', turn.info));
-    resultSlot(card, turn.key, turn.text, turn.project);
-    return card;
-  }
-  var pick = { view: 'all', project: '', agent: null };
-  var filterNodes = [];
-  var filterGroups = [];
-  var navNodes = [];
-  var emptyCard;
-  var waitingHead;
-  var nothing = null;
-  var side = document.getElementById('side-groups');
-  var scope = document.getElementById('scope');
-  var viewKeys = [['all', 'viewAll'], ['waiting', 'sectionWaiting'], ['progress', 'sectionActive'], ['due', 'sectionDue'], ['stopped', 'viewStopped'], ['recent', 'sectionRecent']];
-  // The model gives Claude Code's blocks and hand-kept tasks the agent ''; isOwn marks the
-  // hand-kept ones, the person's own.
-  function who(item) {
-    return item.isOwn ? '' : item.agent || 'claude';
-  }
   function agentMark(agent) {
     var first = String(agent || '').toLowerCase().split(/\s+/)[0];
     var aliases = ${JSON.stringify(AGENT_ALIASES)};
@@ -1291,117 +1325,49 @@ const PAGE_SCRIPT = String.raw`
     node.setAttribute('aria-hidden', 'true');
     return node;
   }
-  // isShelf: an entry on a closed shelf (reminders, older and hidden questions, idle tasks). It
-  // filters like the rest but is left out of the counts, as the counts above the board leave it out.
-  function tracked(node, views, item, project, isShelf) {
-    // A finished item carries no agent in the model: it is left out of the agent filters.
-    filterNodes.push({ node: node, views: views, project: project || item.project || '', agent: item.agent === undefined ? null : who(item), isShelf: !!isShelf });
-    return node;
-  }
-  function groupVisibility(node, from) {
-    filterGroups.push({ node: node, entries: filterNodes.slice(from) });
-  }
-  function drawer(isOpen) {
-    if (W.group === 'agent') return;
-    var isExpanded = document.getElementById('side-open').getAttribute('aria-expanded') === 'true';
-    if (document.body) document.body.className = isOpen ? 'drawer-open' : '';
-    document.getElementById('side-open').setAttribute('aria-expanded', String(isOpen));
-    var target = document.getElementById(isOpen ? 'side-close' : 'side-open');
-    if ((isOpen || isExpanded) && target && typeof target.focus === 'function') target.focus();
-  }
-  if (W.group !== 'agent') {
-    document.getElementById('side-open').addEventListener('click', function () { drawer(document.getElementById('side-open').getAttribute('aria-expanded') !== 'true'); });
-    document.getElementById('side-close').addEventListener('click', function () { drawer(false); });
-    document.getElementById('side-scrim').addEventListener('click', function () { drawer(false); });
-  }
-  if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
-    if (event.key !== 'Escape') return;
-    if (W.group !== 'agent' && document.getElementById('side-open').getAttribute('aria-expanded') === 'true') { drawer(false); return; }
-    // Only the panel the focus is in (or its More button) closes; with no focus anywhere, every open one does.
-    // A reply being typed elsewhere is left alone.
-    var active = document.activeElement;
-    var isIdle = !active || active === document.body;
-    morePanels.forEach(function (one) {
-      if (one.panel.hidden) return;
-      var isInside = false;
-      for (var node = active; node; node = node.parentNode) if (node === one.panel || node === one.button) isInside = true;
-      if (!isInside && !isIdle) return;
-      setMore(one, false);
-      if (isInside && active !== one.button) one.button.focus();
-    });
-  });
-  if (typeof ResizeObserver === 'function' && document.documentElement) {
-    var head = document.getElementById('head');
-    new ResizeObserver(function () { document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px'); }).observe(head);
-  }
-  function applyPick() {
-    var visible = 0;
-    var counted = 0;
-    filterNodes.forEach(function (one) {
-      one.node.hidden = !(pick.view === 'all' || one.views.indexOf(pick.view) !== -1) || !!pick.project && one.project !== pick.project || pick.agent !== null && one.agent !== pick.agent;
-      if (!one.node.hidden) visible += 1;
-      if (!one.node.hidden && !one.isShelf) counted += 1;
-    });
-    filterGroups.forEach(function (one) { one.node.hidden = !one.entries.some(function (entry) { return !entry.node.hidden; }); });
-    // With no questions the waiting heading says so, as it always has, unless a filter is on.
-    if (nothing) {
-      nothing.hidden = !(pick.view === 'all' || pick.view === 'waiting') || !!pick.project || pick.agent !== null;
-      if (!nothing.hidden) waitingHead.hidden = false;
+  var pg = { filter: '', project: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
+  var cardState = {};
+  var cardParts = {};
+  // The first screen describes work, so diagnostic identifiers and logs stay out of its labels.
+  function clean(value) {
+    var text = String(value || '').trim();
+    if (/^[{[]/.test(text)) {
+      try {
+        var data = JSON.parse(text);
+        text = typeof data === 'string' ? data : ['text', 'message', 'summary', 'content', 'reply'].map(function (key) { return data && data[key]; }).find(function (one) { return typeof one === 'string'; }) || w('pgUnreadableReply');
+      } catch (e) {}
     }
-    navNodes.forEach(function (one) { one.node.setAttribute('aria-pressed', String(pick[one.kind] === one.value)); });
-    scope.textContent = '';
-    var view = viewKeys.filter(function (one) { return one[0] === pick.view; })[0];
-    add(scope, el('h2', '', w(view[1])), el('span', 'n', w('viewCount', counted)));
-    ['project', 'agent'].forEach(function (kind) {
-      if (kind === 'project' ? !pick.project : pick.agent === null) return;
-      var label = kind === 'agent' ? brand(pick.agent) || w('sideOwnTasks') : pick.project;
-      var chip = button(label + ' ×', function () { pick[kind] = kind === 'agent' ? null : ''; applyPick(); }, 'fchip', true, true);
-      chip.setAttribute('aria-label', w('removeFilter', label));
-      add(scope, chip);
-    });
-    emptyCard.textContent = '';
-    emptyCard.hidden = visible !== 0 || !!nothing && !nothing.hidden;
-    var name = [pick.project, pick.agent === null ? '' : brand(pick.agent) || w('sideOwnTasks')].filter(Boolean).join(' · ');
-    var key = { all: 'empty', waiting: 'nothingForYou', progress: 'empty', due: 'viewEmptyDue', stopped: 'viewEmptyStopped', recent: 'viewEmptyRecent' }[pick.view];
-    add(emptyCard, el('p', '', name ? w('viewEmptyFiltered', name) : w(key)));
-    if (name) add(emptyCard, button(w('clearFilters'), function () { pick.project = ''; pick.agent = null; applyPick(); }, '', true, true));
+    return Array.from(text.replace(/\{\s*"[^"\n]*"\s*:[\s\S]*/g, '…')
+      .replace(/\b[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{0,12}/gi, '…')
+      .replace(/\bsession\s*[=:]\s*[\da-f]{8,}/gi, '…')
+      .replace(/\b[\da-f]{7,}\b/gi, function (one) { return one.length === 40 || /\d/.test(one) && /[a-f]/i.test(one) ? '…' : one; })
+      .replace(/(?:[A-Z]:[\\/]|\/(?:Users|home)\/)[^\s<>"'\x60|]*/gi, '…')
+      .replace(/#\d+\b/g, '').replace(/\s+/g, ' ').trim()).slice(0, 220).join('');
   }
-  function drawSide() {
-    // The board redraws as it changes; a sidebar button that had focus keeps it.
-    var active = document.activeElement;
-    var had = navNodes.filter(function (one) { return one.node === active; })[0];
-    side.textContent = '';
-    navNodes = [];
-    function group(title, entries, kind) {
-      if (!entries.length) return;
-      var box = add(el('section', 'grp'), el('h3', '', w(title)));
-      entries.forEach(function (one) {
-        var node = button('', function () { pick[kind] = one.value; applyPick(); drawer(false); }, 'nav', true, true);
-        node.setAttribute('aria-label', one.label + ' ' + one.count);
-        add(node, kind === 'agent' ? agentMark(one.value) : el('span', 'pd ' + (one.tone || '')), el('span', 'nm', one.label), el('span', 'ct', one.count));
-        navNodes.push({ node: node, kind: kind, value: one.value });
-        add(box, node);
-      });
-      add(side, box);
-    }
-    var views = viewKeys.map(function (view) { return { value: view[0], label: w(view[1]), tone: { all: 'ink', waiting: 'waiting', due: 'soon', stopped: 'muted', recent: 'done' }[view[0]] || '', count: filterNodes.filter(function (one) { return !one.isShelf && (view[0] === 'all' || one.views.indexOf(view[0]) !== -1); }).length }; });
-    group('sideViews', views, 'view');
-    counts.textContent = '';
-    [['●', 'n-waiting', 'waiting'], ['▸', 'n-active', 'progress'], ['⚑', 'n-due', 'due'], ['✓', 'n-today', 'recent']].forEach(function (one) {
-      var view = views.filter(function (entry) { return entry.value === one[2]; })[0];
-      add(counts, add(button('', function () { pick.view = view.value; applyPick(); }, '', true, true), el('span', view.count > 0 ? one[1] : 'quiet', one[0] + ' ' + view.count), el('span', '', view.label)));
-    });
-    ['project', 'agent'].forEach(function (kind) {
-      var values = [];
-      filterNodes.forEach(function (one) { if ((kind === 'project' ? !!one.project : one.agent !== null) && values.indexOf(one[kind]) === -1) values.push(one[kind]); });
-      group(kind === 'project' ? 'sideProjects' : 'sideAgents', values.map(function (value) {
-        var items = filterNodes.filter(function (one) { return one[kind] === value; });
-        var tone = items.some(function (one) { return one.views.indexOf('waiting') !== -1; }) ? 'waiting' : items.some(function (one) { return one.views.indexOf('due') !== -1; }) ? 'soon' : items.every(function (one) { return one.views.indexOf('stopped') !== -1 || one.views.indexOf('recent') !== -1; }) ? 'muted' : '';
-        return { value: value, label: kind === 'agent' ? brand(value) || w('sideOwnTasks') : value, count: items.filter(function (one) { return !one.isShelf; }).length, tone: tone };
-      }), kind);
-    });
-    if (had) navNodes.forEach(function (one) { if (one.kind === had.kind && one.value === had.value && typeof one.node.focus === 'function') one.node.focus(); });
+  function source(ref) { return pg.sources[ref.sourceKey || ref.key] || pg.sources[ref.key.replace(/^stuck:/, '')] || {}; }
+  function fullTitle(ref) { var one = source(ref); return String(one.title || one.task || one.text || ''); }
+  function ageOf(ref) { return clean(source(ref).when || w('pgUnknownAge')); }
+  // 'own' for the person's hand-kept tasks, '?' for a finished task whose agent the model did not say.
+  function agentOf(ref) { return source(ref).isOwn || ref.isOwn ? 'own' : ref.agent || '?'; }
+  function markOf(ref) {
+    var id = agentOf(ref);
+    return agentMark(id === 'own' ? '' : id === '?' ? '?' : ref.agent);
   }
+  function nameOf(id) { return id === 'own' ? w('pgOwn') : agentName(id); }
+  // The project a card or a row belongs to, as the page names it.
+  function projectOf(ref) { return clean(ref.repo || source(ref).project || ''); }
+  // The agent filter (icon row or sidebar) and the project filter (sidebar) both apply; either may be empty.
+  function matchesAgent(id) { return !pg.filter || pg.filter === id; }
+  function matches(id, project) { return matchesAgent(id) && (!pg.project || pg.project === project); }
+  // A sent answer is on its way: its card stays on the sheet with its line, but it no longer waits for the person.
+  // A message that timed out or was refused waits for the person again.
+  function isSent(ref) {
+    var one = source(ref);
+    var receipt = one.receipt;
+    var isFailed = !!receipt && (receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error || ''));
+    return one.isSending === true && !isFailed;
+  }
+  function byTime(a, b) { return (b.at || 0) - (a.at || 0); }
   function keepCopyFocus(redraw) {
     var active = document.activeElement;
     var copyFocus = null;
@@ -1419,612 +1385,857 @@ const PAGE_SCRIPT = String.raw`
       copyArea.focus({ preventScroll: true });
     }
   }
-  function render(model) {
-    keepCopyFocus(function () { renderBoard(model); });
+  // A card answers in place: its question and answers (ask), the box for its own words (write), then one line
+  // saying what happened (copied or sent). The mode outlives a redraw; the parts slide when it changes.
+  function paintMode(key) {
+    var parts = cardParts[key];
+    var state = cardState[key] || { mode: 'ask', text: '' };
+    if (!parts) return;
+    reveal(parts.ask, state.mode === 'ask');
+    reveal(parts.reply, state.mode === 'write');
+    var isAfter = state.mode === 'copied' || state.mode === 'sent';
+    reveal(parts.after, isAfter);
+    if (!isAfter) return;
+    parts.msg.textContent = state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text) : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
+    parts.answered.hidden = state.mode !== 'copied' || !parts.canHide;
+    parts.again.hidden = state.mode !== 'copied';
   }
-  const pg = { pick: 'needs', tab: 'open', repo: '', shown: {}, older: {}, order: [], model: null, sources: {}, targets: {}, drafts: {}, hits: [], mark: W.group === 'agent' ? document.getElementById('fresh-mark') : null }
-  const pgPlural = (key, n) => { const word = n === 1 ? key + 'One' : key; return w(word, n) }
-  // The first screen describes work, so diagnostic identifiers and logs stay out of its labels.
-  const pgText = value => {
-    let text = String(value || '').trim()
-    if (/^[{[]/.test(text)) {
-      try {
-        const data = JSON.parse(text)
-        text = typeof data === 'string' ? data : ['text', 'message', 'summary', 'content', 'reply'].map(key => data && data[key]).find(one => typeof one === 'string') || w('pgUnreadableReply')
-      } catch {}
+  function setMode(key, mode, text) {
+    var previous = cardState[key];
+    cardState[key] = { mode: mode, text: text === undefined ? previous ? previous.text : '' : text };
+    paintMode(key);
+    if (mode === 'write') {
+      var parts = cardParts[key];
+      var box = parts && parts.reply.querySelector('textarea');
+      if (box) { if (moving()) setTimeout(function () { box.focus({ preventScroll: true }); }, 120); else box.focus({ preventScroll: true }); }
     }
-    return Array.from(text.replace(/\{\s*"[^"\n]*"\s*:[\s\S]*/g, '…')
-      .replace(/\b[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{0,12}/gi, '…')
-      .replace(/\bsession\s*[=:]\s*[\da-f]{8,}/gi, '…')
-      .replace(/\b[\da-f]{7,}\b/gi, one => one.length === 40 || /\d/.test(one) && /[a-f]/i.test(one) ? '…' : one)
-      .replace(/(?:[A-Z]:[\\/]|\/(?:Users|home)\/)[^\s<>"'\x60|]*/gi, '…')
-      .replace(/#\d+\b/g, '').replace(/\s+/g, ' ').trim()).slice(0, 220).join('')
   }
-  const pgSource = ref => pg.sources[ref.sourceKey || ref.key] || pg.sources[ref.key.replace(/^stuck:/, '')] || {}
-  const pgFullTitle = ref => String(pgSource(ref).title || pgSource(ref).task || pgSource(ref).text || '')
-  const pgTitle = ref => pgText(pgFullTitle(ref))
-  const pgAge = ref => pgText(pgSource(ref).when || w('pgUnknownAge'))
-  const pgFiltered = refs => refs.filter(ref => !pg.repo || ref.repo === pg.repo)
-  const pgOpenCount = bucket => {
-    const tasks = new Set()
-    const stopped = new Set(pgFiltered(bucket.stopped).map(ref => {
-      const source = pgSource(ref)
-      return JSON.stringify([ref.agent, source.project, source.title])
-    }))
-    pgFiltered(bucket.cards).forEach(ref => {
-      const source = pgSource(ref)
-      const title = ref.kind === 'question' ? source.task : source.title
-      const task = JSON.stringify([ref.agent, source.project, title])
-      if (title && !stopped.has(task)) tasks.add(task)
-    })
-    return pgFiltered(bucket.open).length + tasks.size
+  function stepList(steps, row) {
+    var list = el('ol', 'steps');
+    steps.forEach(function (step) {
+      var line = el('li', step.isCurrent ? 'now' : '');
+      var whole = step.note ? step.text + ' — ' + step.note : step.text;
+      var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
+      add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '○'), clipped(clean(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)));
+      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled') {
+        // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
+        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp); }, 'btn');
+        add(tick, el('span', '', w('serveTickNext', clean(step.text))));
+        tick.title = step.text;
+        add(line, tick);
+      }
+      add(list, line);
+    });
+    return list;
   }
-  const pgShownKey = () => [pg.pick, pg.tab, pg.repo].join('\u0001')
-  const pgStatus = (ref, tab) => {
-    const row = pgSource(ref)
-    if (ref.kind === 'stuck' || row.stuck) return 'pgStuck'
-    if (ref.kind === 'question' || row.isAsking) return 'pgAsking'
-    if (tab === 'done') return 'pgDone'
-    if (tab === 'stopped') return 'pgStopped'
-    if (row.isOwn || ref.agent === '') return 'pgTodo'
-    return ref.at > 0 && pg.model.view.now - ref.at <= 30 * 60 * 1000 ? 'pgWorking' : 'pgQuiet'
+  function plural(key, n) { return w(n === 1 ? key + 'One' : key, n); }
+  function folded(label, list) {
+    var box = el('details');
+    return add(box, el('summary', '', label), list);
   }
-  const pgScroll = node => { if (node && node.scrollIntoView) node.scrollIntoView({ block: 'start' }) }
-  const pgSelect = (value, repo) => {
-    pg.pick = value
-    pg.repo = repo || ''
-    pg.tab = 'open'
-    renderGrouped(pg.model)
-    pgScroll(board)
-  }
-  const pgHolds = (bucket, repo) => !!bucket && ['cards', 'open', 'stopped', 'done', 'older'].some(shelf => bucket[shelf].some(ref => ref.repo === repo))
-  const pgAll = repo => {
-    const view = pg.model.view
-    if (repo) {
-      if (!view.all.isHidden && pgHolds(view.all, repo)) return pgSelect('all', repo)
-      const agent = pg.order.find(id => pgHolds(view.agents.find(one => one.agent === id), repo))
-      if (agent) return pgSelect(agent, repo)
-      if (pgHolds(view.own, repo)) return pgSelect('own', repo)
-    }
-    pgSelect(view.all.isHidden ? view.agents[0]?.agent || 'own' : 'all', repo)
-  }
-  const pgPanel = (card, meta, key, actions) => {
-    if (!actions.length) return
-    const panel = add.apply(null, [el('div', 'actions pg-more-panel')].concat(actions))
-    panel.id = 'more-actions-' + (++moreCount)
-    const more = navButton(w('serveMore'), () => setMore(one, panel.hidden))
-    more.className = 'pg-more'
-    more.setAttribute('aria-controls', panel.id)
-    const one = { key: key, button: more, panel: panel }
-    setMore(one, opened['more:' + key] === true)
-    morePanels.push(one)
-    add(meta, more)
-    add(card, panel)
-  }
-  const pgCard = ref => {
-    const ask = pgSource(ref)
-    const isStuck = ref.kind === 'stuck'
-    const key = ask.key || ref.key
-    const card = el('article', 'pg-card')
-    card.setAttribute('data-ref-key', ref.key)
-    const owner = ask.isOwn || ref.agent === '' ? w('pgOwnTodo') : w(isStuck ? 'pgIsStuck' : 'pgAsks', agentName(ref.agent))
-    const meta = add(el('div', 'pg-card-meta'), agentMark(ref.agent), el('span', '', [owner, pgText(ref.repo), pgAge(ref)].filter(Boolean).join(' · ')))
-    const question = el('div', 'pg-question', pgText(isStuck ? ask.title : ask.text))
-    question.setAttribute('title', pgText(isStuck ? ask.title : ask.text))
-    add(card, meta, question)
-    if (isStuck) add(card, el('p', 'pg-note', pgText(ask.stuck && ask.stuck.reason)))
-    else if (ask.note) add(card, clipped(pgText(ask.noteLine || ask.note), ask.note, 'pg-note', 'note:' + key))
-    else if (ask.context) add(card, clipped(pgText(ask.contextLine || ask.context), ask.context, 'quiet context', 'context:' + key))
-    const answers = []
-    const others = []
+  function sends(mode) { return mode === 'send' || mode === 'connected'; }
+  // One question or stuck task on the Needs you sheet, answerable where it is.
+  // isOlder: a question kept for review (its chat has stopped): nothing to answer here, only to hide once answered.
+  function buildCard(ref, isOlder) {
+    var ask = source(ref);
+    var isStuck = ref.kind === 'stuck';
+    var key = ask.key || ref.key;
+    var id = agentOf(ref);
+    var agent = ref.agent;
+    var card = el('article', 'card');
+    card.setAttribute('data-ref-key', ref.key);
+    add(card, markOf(ref));
+    var body = el('div', 'c-body');
+    var project = clean(ref.repo || ask.project);
+    add(body, add(el('div', 'c-meta'), el('span', 'who', id === 'own' ? w('pgOwnTodo') : agentName(agent)), project ? el('span', '', project) : null, el('span', '', ageOf(ref))));
+    var text = clean(isStuck ? ask.title : ask.text);
+    var question = el('p', 'q', text);
+    question.setAttribute('title', text);
+    add(body, question);
+    if (isStuck) add(body, el('p', 'note', clean(ask.stuck && ask.stuck.reason)));
+    else if (ask.note) add(body, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
+    else if (ask.context) add(body, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
+    if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
+    var mode = ask.send;
+    var answers = el('div', 'answers');
+    var others = [];
+    var canWrite = false;
     if (isStuck) {
-      if (ask.resume) answers.push(button(w('serveCopyResume'), () => copy(ask.resume, key), '', true))
+      if (ask.resume) add(answers, button(w('serveCopyResume'), function () { copy(ask.resume, key); }, '', true));
+    } else if (isOlder) {
+      if (ask.canHide) add(answers, button(w('answeredHide'), function () { act(key, 'hide'); }));
+      else add(body, el('p', 'note', w('questionReviewOnly')));
     } else if (ask.isOwn) {
-      if (ask.canTick) answers.push(button(w('pgDone'), () => act(key, 'tick', '', '', '', '', ask.fp), 'primary'))
+      if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
     } else {
-      const options = ask.answers || []
-      options.slice(0, 2).forEach(answer => answers.push(button(pgText(answer), () => copy(answer, key), 'pg-answer', true)))
-      answers.push(button(w('pgWriteOwn'), () => {
-        opened['reply:' + key] = !opened['reply:' + key]
-        renderGrouped(pg.model)
-        if (opened['reply:' + key]) {
-          const box = Array.from(board.querySelectorAll('textarea[data-key]')).find(one => one.getAttribute('data-key').split('\u0001')[0] === key)
-          if (box) box.focus({ preventScroll: true })
-        }
-      }, 'pg-write', true, true))
-      options.slice(2).forEach(answer => others.push(button(pgText(answer), () => copy(answer, key), 'pg-answer', true)))
-      if (ask.command) others.push(button(w('serveCopyCommand'), () => copy(ask.command, key), '', true))
+      var options = ask.answers || [];
+      canWrite = true;
+      options.slice(0, 3).forEach(function (answer, index) {
+        var node = button(w(sends(mode) ? 'pgSendReply' : 'pgCopyReply', clean(answer)), function () { pressAnswer(ask, key, answer, node); }, '', !sends(mode));
+        node.disabled = sends(mode) && ask.isSending === true;
+        add(answers, node);
+      });
+      options.slice(3).forEach(function (answer) { others.push(button(w(sends(mode) ? 'pgSendReply' : 'pgCopyReply', clean(answer)), function () { pressAnswer(ask, key, answer, null); }, '', !sends(mode))); });
+      if (ask.command) others.push(button(w('serveCopyCommand'), function () { copy(ask.command, key); }, '', true));
       if (ask.link && /^https:\/\//i.test(ask.link)) {
-        const link = el('a', 'btn', w('serveOpenLink'))
-        link.href = ask.link
-        link.target = '_blank'
-        link.rel = 'noreferrer noopener'
-        others.push(link)
+        var link = el('a', 'btn', w('serveOpenLink'));
+        link.href = ask.link;
+        link.target = '_blank';
+        link.rel = 'noreferrer noopener';
+        others.push(link);
       }
-      if (ask.reopen) others.push(button(w('serveCopyResume'), () => copy(ask.reopen, key), '', true))
-      if (ask.canHide) others.push(button(w('answeredHide'), () => act(key, 'hide')))
+      if (ask.reopen) others.push(button(w('serveCopyResume'), function () { copy(ask.reopen, key); }, '', true));
+      if (ask.canHide) others.push(button(w('answeredHide'), function () { act(key, 'hide'); }));
     }
-    if (answers.length) add(card, add.apply(null, [el('div', 'actions')].concat(answers)))
-    if (!isStuck && !ask.isOwn && opened['reply:' + key]) add(card, replyBox(key, w('serveReplyPlaceholder'), 'copy', ref.agent, '', false, ask.session, ask.text, ask.fp))
-    pgPanel(card, meta, key, others)
-    resultSlot(card, key, ask.fp || ask.text, ask.task || ask.title || ref.repo)
-    pg.targets[ref.key] = card
-    return card
-  }
-  const pgRows = (parent, refs, tab, isMixed, cap, slot) => {
-    const list = el('div', 'pg-list')
-    const key = slot || pgShownKey()
-    const shown = pg.shown[key] || cap
-    refs.slice(0, shown).forEach(ref => add(list, pgRow(ref, tab, isMixed)))
-    add(parent, list)
-    if (shown < refs.length) add(parent, navButton(w('pgMore', refs.length - shown), () => {
-      pg.shown[key] = shown + 20
-      renderGrouped(pg.model)
-    }))
-  }
-  const pgRow = (ref, tab, isMixed) => {
-    const row = pgSource(ref)
-    const key = row.key || ref.key
-    const card = el('details', 'pg-row')
-    card.setAttribute('data-row-key', ref.key)
-    card.open = opened[ref.key] === true
-    card.setAttribute('aria-expanded', String(card.open))
-    const summary = el('summary')
-    summary.setAttribute('aria-expanded', String(card.open))
-    const status = pgStatus(ref, tab)
-    const marks = { pgAsking: '⚑', pgStuck: '×', pgWorking: '▸', pgQuiet: '◌', pgTodo: '○', pgStopped: '▪', pgDone: '✓' }
-    const steps = row.steps || []
-    const step = steps.find(one => one.isCurrent) || steps.find(one => one.status !== 'done' && one.status !== 'cancelled')
-    const current = step ? pgText(step.text) : ''
-    const detail = current ? status === 'pgQuiet' ? w('pgLast', current) : tab === 'stopped' ? w('pgStoppedAt', current) : current : ''
-    const meta = [w(status), isMixed && (ref.agent === '' ? w('pgOwn') : agentName(ref.agent)), pgText(ref.repo), detail].filter(Boolean).join(' · ')
-    add(summary, isMixed ? agentMark(ref.agent) : el('span', 'pg-status', marks[status]), el('span', 'pg-title', pgTitle(ref)), el('span', 'pg-age', pgAge(ref)), el('span', 'pg-meta', meta), el('span', 'pg-step-count', row.total ? w('pgSteps', row.done, row.total) : ''))
-    add(card, summary)
-    const body = el('div', 'pg-row-body')
-    if (row.context) add(body, clipped(pgText(row.contextLine || row.context), row.context, 'quiet context', 'context:' + key))
-    const completed = steps.filter(one => one.status === 'done' || one.status === 'cancelled')
-    if (completed.length) {
-      const folded = el('details')
-      add(folded, el('summary', 'pg-muted', pgPlural('pgDoneSteps', completed.length)), pgStepList(completed, row))
-      add(body, folded)
+    var parts = { agent: agent, canHide: ask.canHide === true, late: lateWord(agentPresence[id]) !== '' };
+    cardParts[key] = parts;
+    var askBlock = el('div');
+    add(askBlock, answers);
+    if (others.length) {
+      var more = el('div', 'more' + (opened['more:' + key] ? ' open' : ''));
+      var fold = el('div', 'fold');
+      fold.inert = !opened['more:' + key];
+      add(more, add(fold, add(el('div', 'fold-in'), add.apply(null, [el('div', 'acts')].concat(others)))));
+      var toggle = navButton(w('serveMore'), function () {
+        var isOpen = !hasClass(more, 'open');
+        toggleClass(more, 'open', isOpen);
+        fold.inert = !isOpen;
+        toggle.setAttribute('aria-expanded', String(isOpen));
+        opened['more:' + key] = isOpen;
+      });
+      toggle.className = 'quiet';
+      pg.mores.push({ key: key, box: more, fold: fold, toggle: toggle });
+      toggle.setAttribute('aria-expanded', String(opened['more:' + key] === true));
+      add(answers, toggle);
+      add(askBlock, more);
     }
-    const left = steps.filter(one => one.status !== 'done' && one.status !== 'cancelled' && one.status !== 'waiting')
-    const primary = left.find(one => one.isCurrent) || left[0]
-    if (primary) add(body, pgStepList([primary], row))
-    const rest = left.filter(one => one !== primary)
-    if (rest.length) {
-      const folded = el('details')
-      add(folded, el('summary', 'pg-muted', pgPlural('pgMoreSteps', rest.length)), pgStepList(rest, row))
-      add(body, folded)
+    if (canWrite) {
+      var write = navButton(w('pgWriteOwn'), function () { setMode(key, 'write'); });
+      write.className = 'quiet';
+      add(answers, write);
     }
-    const actions = el('div', 'actions')
-    if (row.isOwn && tab !== 'done') {
-      if (row.next) add(actions, button(w('pgDone'), () => act(key, 'tick', row.next, '', '', '', row.fp), 'primary'))
-    } else if (row.resume) add(actions, button(w('serveCopyResume'), () => copy(row.resume, key), 'primary', true))
-    add(actions, navButton(w('pgOnly', pgText(ref.repo)), () => pgAll(ref.repo)))
-    const others = []
-    if (row.canArchive) others.push(button(w('serveArchive'), () => act(key, 'archive', '', '', '', '', row.fp)))
-    if (row.canConfirm && tab !== 'done') others.push(button(w('confirmDone'), () => act(key, 'done', '', '', '', '', row.fp)))
-    pgPanel(body, actions, key, others)
-    add(body, actions)
-    resultSlot(body, key, row.fp, row.title || row.task)
-    body.hidden = !card.open
-    add(card, body)
-    card.addEventListener('toggle', () => {
-      opened[ref.key] = card.open
-      body.hidden = !card.open
-      card.setAttribute('aria-expanded', String(card.open))
-      summary.setAttribute('aria-expanded', String(card.open))
-    })
-    pg.targets[ref.key] = card
-    return card
+    parts.ask = fx(askBlock);
+    if (canWrite) {
+      parts.reply = fx(replyBox(key, w('serveReplyPlaceholder'), sends(mode) ? mode : 'copy', agent, sends(mode) ? ask.where : '', ask.isSending, ask.session, ask.text, ask.fp, ask.delivery, {
+        onCancel: function () { setMode(key, 'ask'); },
+        onDone: function (value) { setMode(key, sends(mode) ? 'sent' : 'copied', value); },
+      }), false);
+    } else parts.reply = fx(el('div'), false);
+    var after = el('div', 'state');
+    after.setAttribute('role', 'status');
+    parts.msg = el('span', 'msg ok');
+    parts.answered = button(w('pgAnswered'), function () { act(key, 'hide'); }, 'primary');
+    parts.again = button(w('pgCopyAgain'), function () {
+      var state = cardState[key];
+      if (state) copy(state.text, key);
+    }, 'quiet', true);
+    add(after, add(el('span', 'mk ok', '✓')), parts.msg, parts.answered, parts.again);
+    parts.after = fx(after, false);
+    add(body, parts.ask, parts.reply, parts.after);
+    paintMode(key);
+    if (ask.receipt) add(body, receiptLine(ask.receipt, key));
+    resultSlot(body, key, ask.fp || ask.text, ask.task || ask.title || ref.repo);
+    add(card, body);
+    return card;
   }
-  const pgStepList = (steps, row) => {
-    const list = el('ol', 'pg-steps')
-    steps.forEach(step => {
-      const line = el('li', step.isCurrent ? 'now' : '')
-      const whole = step.note ? step.text + ' — ' + step.note : step.text
-      const cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '')
-      add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '○'), clipped(pgText(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)))
-      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled') add(line, button(w('serveTickNext', pgText(step.text)), () => act(row.key, 'tick', step.text, '', '', '', row.fp)))
-      add(list, line)
-    })
-    return list
+  function pressAnswer(ask, key, answer, node) {
+    var mode = ask.send;
+    if (mode !== 'connected' && mode !== 'send') { copy(answer, key, function () { setMode(key, 'copied', answer); }); return; }
+    var run = function () {
+      var sent = mode === 'connected' ? nativeAct(key, answer, ask.delivery, ask.session, ask.text, ask.fp, node || el('button')) : act(key, 'send', answer, w('serveSending', agentName(ask.agent)), ask.session, ask.text, ask.fp, node);
+      return sent.then(function (ok) { if (ok) setMode(key, 'sent', answer); return ok; });
+    };
+    sentLast[key] = { text: answer, again: run };
+    run();
   }
-  const pgOlder = (parent, refs, key) => {
-    if (!refs.length) return
-    const box = el('div', 'pg-older')
-    const shown = pg.older[key] || 0
-    add(box, el('p', 'pg-muted', pgPlural('pgOlder', refs.length)))
-    refs.slice(0, shown).forEach(ref => add(box, pgCard(ref)))
-    if (shown < refs.length) add(box, navButton(shown ? w('pgMore', refs.length - shown) : w('pgSeeAll'), () => {
-      pg.older[key] = shown + 20
-      renderGrouped(pg.model)
-    }))
-    add(parent, box)
+  // A task as one row: its mark, title, one line (the step, with the project where no heading stands above it,
+  // and a status word only when the section does not already say it) and its age. Pressing it opens its steps and
+  // actions in place; the message box for a connected or sendable session is inside the open row.
+  function buildRow(ref, section, showProject) {
+    var row = source(ref);
+    var key = row.key || ref.key;
+    var isTask = Array.isArray(row.steps);
+    var steps = row.steps || [];
+    var inner = el('div', 'row-open');
+    var isOpen = opened[ref.key] === true;
+    var acts = el('div', 'acts');
+    if (isTask) {
+      if (row.context) add(inner, clipped(clean(row.contextLine || row.context), row.context, 'context', 'context:' + key));
+      if (row.pr) add(inner, el('p', 'context', row.pr));
+      var completed = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
+      if (completed.length) add(inner, folded(plural('pgDoneSteps', completed.length), stepList(completed, row)));
+      var left = steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled' && one.status !== 'waiting'; });
+      var primary = left.find(function (one) { return one.isCurrent; }) || left[0];
+      if (primary) add(inner, stepList([primary], row));
+      var rest = left.filter(function (one) { return one !== primary; });
+      if (rest.length) add(inner, folded(plural('pgMoreSteps', rest.length), stepList(rest, row)));
+      if (row.handoff) add(inner, el('p', 'context', row.handoff));
+      if (row.runs) add(inner, el('p', 'context', row.runs));
+      if (sends(row.send)) add(inner, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery));
+      else if (row.hasCopyBox) add(inner, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, row.question));
+      if (row.isOwn && section !== 'done' && row.next) {
+        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', row.next, '', '', '', row.fp); }, 'primary');
+        // A long step is named by its first words; the whole step is its title (#463).
+        if (row.nextLabel) tickNext.title = row.next;
+        add(acts, tickNext);
+      }
+      if (row.resume && !row.isOwn) add(acts, button(w('serveCopyResume'), function () { copy(row.resume, key); }, '', true));
+      // A task still running keeps its Archive button; the board refuses and the line says why only after it is pressed.
+      if (row.canArchive || row.archiveNote) add(acts, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', row.fp); }));
+      if (row.canConfirm && section !== 'done') add(acts, button(w('confirmDone'), function () { act(key, 'done', '', '', '', '', row.fp); }));
+      if (acts.firstChild) add(inner, acts);
+      if (row.receipt) add(inner, receiptLine(row.receipt, key));
+      if (row.info) add(inner, el('p', 'context', row.info));
+    } else (row.questions || []).forEach(function (question) { add(inner, el('p', 'context', clean(question))); });
+    var isExpandable = inner.childNodes.length > 0;
+    if (isExpandable) resultSlot(inner, key, row.fp, row.title || row.task);
+    var current = steps.filter(function (one) { return one.isCurrent; })[0] || steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled'; })[0];
+    var step = current ? clean(current.text) : '';
+    var detail = !step ? '' : section === 'working' ? step : section === 'others' ? w('pgLast', step) : section === 'stopped' ? w('pgStoppedAt', step) : '';
+    var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
+    var project = showProject ? clean(ref.repo || row.project) : '';
+    var meta = add(el('span', 'r-meta'), status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
+    var title = clean(fullTitle(ref));
+    var titleNode = el('span', 'r-title', title);
+    titleNode.setAttribute('title', title);
+    var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
+    li.setAttribute('data-k', ref.key);
+    var fold = el('div', 'fold');
+    fold.inert = !isOpen;
+    add(fold, add(el('div', 'fold-in'), inner));
+    var head = isExpandable ? navButton('', function () {
+      var now = !hasClass(li, 'open');
+      toggleClass(li, 'open', now);
+      head.setAttribute('aria-expanded', String(now));
+      fold.inert = !now;
+      opened[ref.key] = now;
+    }) : el('div');
+    head.className = 'row-btn';
+    if (isExpandable) head.setAttribute('aria-expanded', String(isOpen));
+    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', 'r-right', ageOf(ref)), el('span', 'r-chev'));
+    var block = el('div', 'fx');
+    add(block, add(el('div', 'fx-in'), head, isExpandable ? fold : null));
+    add(li, block);
+    return { li: li, block: block };
   }
-  const pgSheet = (parent, cards, older, n, questions, stuck, key, isNeeds) => {
-    const sheet = el('section', 'pg-sheet')
-    const heading = el('h2', 'pg-flag', w('pgNeeds') + ' | ' + n)
-    if (isNeeds) heading.setAttribute('data-needs-count', String(n))
-    const head = add(el('div', 'pg-sheet-head'), heading)
-    if (n) add(head, el('span', 'pg-muted small', [questions > 0 && pgPlural('pgQuestions', questions), stuck > 0 && pgPlural('pgStuckCount', stuck)].filter(Boolean).join(', ')))
-    if (isNeeds) add(head, navButton(w('pgWorkingLink', pg.model.view.working.length), () => pgScroll(pg.targets.working)))
-    add(sheet, head)
-    if (cards.length) {
-      add(sheet, el('p', 'pg-muted small', w('pgCopyHint')))
-      cards.forEach(ref => add(sheet, pgCard(ref)))
-    } else add(sheet, el('p', '', w('pgNothing')), el('p', 'pg-muted', w('pgNothingHint')))
-    pgOlder(sheet, older, key)
-    add(parent, sheet)
+  function setText(node, text) { if (node && node.textContent !== String(text)) node.textContent = String(text); }
+  // The pieces of the agent row: one icon button per agent on the board and one for the person's own to-dos.
+  // Whether an agent can be reached from here, from what the model already holds. connected: a session of it has a
+  // delivery connection. open: a session is open in its own window or in the pane, or it worked in the last 30
+  // minutes. offline: the board can tell its sessions are closed (a line whose session ended) and none is open.
+  // notseen: the board cannot tell (it has no line of that agent that says either). An agent that reported in the
+  // last 30 minutes is open whatever its older lines say: a Codex turn that ended and waits on you is no closed session.
+  function presenceMap(view) {
+    var map = {};
+    pg.ids.forEach(function (id) {
+      var group = view.agents.filter(function (one) { return one.agent === id; })[0];
+      var isOpen = view.working.some(function (ref) { return agentOf(ref) === id; }) || !!group && group.last > 0 && view.now - group.last <= 30 * 60 * 1000;
+      var isGone = false;
+      Object.keys(pg.sources).forEach(function (key) {
+        var one = pg.sources[key];
+        if (!one || one.isOwn || String(one.agent || 'claude').toLowerCase() !== id) return;
+        if (one.isClosed === true) isGone = true;
+        else if (one.send === 'open' || one.send === 'claude' || one.send === 'connected') isOpen = true;
+      });
+      var isConnected = connections.some(function (one) { return String(one.agent || '').toLowerCase() === id; });
+      map[id] = isConnected ? 'connected' : isOpen ? 'open' : isGone ? 'offline' : 'notseen';
+    });
+    return map;
   }
-  const pgNotice = agent => {
-    const box = el('div', 'pg-notice')
-    const how = el('details')
-    add(how, el('summary', '', w('pgHowFix')), el('p', '', w('pgFixAdvice')))
-    return add(box, el('p', '', w('pgUnreadable', agentName(agent))), how)
+  // The word that follows the name when the board cannot reach the agent: offline or not seen.
+  function lateWord(state) { return state === 'offline' ? w('pgOffline') : state === 'notseen' ? w('pgNotSeen') : ''; }
+  function chipLabel(entry) {
+    var parts = [];
+    if (entry.needs === 1) parts.push(w('pgTipNeedsOne'));
+    else if (entry.needs > 1) parts.push(w('pgTipNeeds', entry.needs));
+    if (entry.working > 0) parts.push(w('pgTipWorking'));
+    if (entry.unreadable) parts.push(w('pgTipCantRead'));
+    var late = lateWord(entry.presence);
+    return entry.name + (late ? ' · ' + late : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
   }
-  const pgPicker = view => {
-    const picks = document.getElementById('picks')
-    const active = document.activeElement
-    const focused = active && active.getAttribute && active.getAttribute('data-pick')
-    picks.textContent = ''
-    const entry = (value, label, count, needs, agent, isUnreadable) => {
-      const node = navButton('', () => pgSelect(value))
-      node.setAttribute('data-pick', value)
-      node.setAttribute('aria-current', String(pg.pick === value))
-      if (agent !== undefined) add(node, agentMark(agent))
-      add(node, el('span', 'pg-name', label), el('span', 'pg-count', count))
-      if (needs > 0) add(node, el('span', 'pg-flag', '⚑ ' + needs))
-      if (value === 'needs') node.setAttribute('data-needs-count', String(view.needs.n))
-      if (isUnreadable) add(node, el('span', 'pg-warn', '⚠'))
-      add(picks, node)
-      if (focused === value) node.focus({ preventScroll: true })
-    }
-    const isFresh = !view.agents.length && !Object.values(view.own.counts).some(n => n > 0)
-    if (isFresh) return
-    entry('needs', w('pgNeeds'), view.needs.n, view.needs.n)
-    if (!view.all.isHidden) entry('all', w('pgAll'), view.all.counts.open, 0)
-    add(picks, add(el('div', 'pg-picker-head'), el('span', '', w('pgAgents')), el('span', '', w('pgOpen'))))
-    pg.order.forEach(id => {
-      const agent = view.agents.find(one => one.agent === id)
-      if (agent) entry(id, agentName(id), agent.counts.open, agent.counts.needs, id, agent.isUnreadable)
-    })
-    if (Object.values(view.own.counts).some(n => n > 0)) entry('own', w('pgOwn'), view.own.counts.open, view.own.counts.needs, '')
+  // One button per agent, twice: in the icon row (phones) and in the sidebar (the rail and wider). Same label, count, dot and filter.
+  function newChip(entry, isSide) {
+    var node = navButton('', function () { setFilter(pg.filter === entry.id ? '' : entry.id); });
+    node.setAttribute('data-agent', entry.id);
+    var chip = { node: node, name: el('span', isSide ? 's-txt' : 'c-name'), badge: null, isSide: isSide };
+    add(node, agentMark(entry.agent), chip.name);
+    return chip;
   }
-  const pgTaskHits = view => {
-    const found = new Map()
-    const buckets = view.agents.concat([view.own])
-    buckets.forEach(bucket => {
-      const shelves = ['open', 'stopped', 'done']
-      shelves.forEach(tab => bucket[tab].forEach(ref => {
-        if (!found.has(ref.key)) found.set(ref.key, { ref: ref, tab: tab, title: pgTitle(ref), card: false })
-      }))
-      bucket.cards.forEach(ref => {
-        const source = pgSource(ref)
-        const title = pgText(source.title || source.task || source.text)
-        if (!found.has(ref.key)) found.set(ref.key, { ref: ref, tab: 'open', title: title, card: true })
-      })
-    })
-    return Array.from(found.values())
+  function paintChip(chip, entry, label) {
+    chip.node.setAttribute('aria-label', label);
+    chip.node.setAttribute('title', label);
+    chip.node.className = (chip.isSide ? 's-item s-agent' : 'chip') + (entry.working > 0 ? ' working' : '');
+    if (entry.presence) chip.node.setAttribute('data-presence', entry.presence);
+    setText(chip.name, lateWord(entry.presence) ? entry.name + ' · ' + lateWord(entry.presence) : entry.name);
+    var text = entry.unreadable ? '!' : entry.needs > 0 ? String(entry.needs) : '';
+    if (text && !chip.badge) { chip.badge = el('span', 'badge'); chip.node.appendChild(chip.badge); }
+    if (!text && chip.badge) { chip.node.removeChild(chip.badge); chip.badge = null; }
+    if (chip.badge) { setText(chip.badge, text); chip.badge.className = 'badge' + (entry.unreadable ? ' bad' : ''); }
+    chip.unreadable = entry.unreadable;
+    chip.title = entry.name;
   }
-  const pgChooseTask = hit => {
-    const ref = hit.ref
-    pg.pick = ref.agent || 'own'
-    pg.repo = ''
-    pg.tab = hit.tab
-    opened[ref.key] = true
-    const bucket = pg.pick === 'own' ? pg.model.view.own : pg.model.view.agents.find(one => one.agent === pg.pick)
-    if (bucket && !hit.card) {
-      const index = bucket[hit.tab].findIndex(one => one.key === ref.key)
-      pg.shown[pgShownKey()] = Math.max(pg.shown[pgShownKey()] || (hit.tab === 'open' ? 12 : 8), index + 1)
-    }
-    renderGrouped(pg.model)
-    pgScroll(pg.targets[ref.key])
-  }
-  const pgSearch = () => {
-    const input = document.getElementById('search')
-    const overlay = document.getElementById('search-results')
-    const value = input.value.trim().toLowerCase()
-    overlay.textContent = ''
-    overlay.hidden = !value
-    pg.hits = []
-    if (!value || !pg.model) return
-    const view = pg.model.view
-    const section = (label, hits) => {
-      if (!hits.length) return
-      add(overlay, el('h3', '', w(label)))
-      hits.slice(0, 8).forEach(hit => {
-        const choose = () => {
-          input.value = ''
-          overlay.hidden = true
-          document.getElementById('picker').className = ''
-          document.getElementById('search-open').setAttribute('aria-expanded', 'false')
-          hit.pick()
+  function drawChips(view) {
+    var nav = document.getElementById('agents');
+    var row = document.getElementById('chips');
+    var sideList = document.getElementById('side-agents');
+    var sideGroup = document.getElementById('side-agent-group');
+    var entries = [];
+    // A sent answer no longer waits for the person, so it leaves the count on its agent's badge.
+    var waiting = function (count, id) { return Math.max(0, count - (pg.sentBy[id] || 0)); };
+    // Your to-dos come first, before every agent; the agents follow in their usual order.
+    if (Object.keys(view.own.counts).some(function (key) { return view.own.counts[key] > 0; })) entries.push({ id: 'own', name: w('pgOwn'), agent: '', needs: waiting(view.own.counts.needs, 'own'), working: 0, unreadable: false });
+    pg.ids.forEach(function (id) {
+      var group = view.agents.filter(function (one) { return one.agent === id; })[0];
+      if (!group) return;
+      entries.push({ id: id, name: agentName(id), agent: id, needs: waiting(group.counts.needs, id), working: view.working.filter(function (ref) { return agentOf(ref) === id; }).length, unreadable: group.isUnreadable, presence: agentPresence[id] });
+    });
+    if (pg.filter && !entries.some(function (one) { return one.id === pg.filter; })) pg.filter = '';
+    nav.hidden = entries.length === 0;
+    if (sideGroup) sideGroup.hidden = entries.length === 0;
+    var ids = entries.map(function (one) { return one.id; });
+    [pg.chips, pg.sideChips].forEach(function (set) {
+      Object.keys(set).forEach(function (id) {
+        if (ids.indexOf(id) === -1) { set[id].node.remove(); delete set[id]; }
+      });
+    });
+    entries.forEach(function (entry) {
+      var label = chipLabel(entry);
+      [[pg.chips, row, false], [pg.sideChips, sideList, true]].forEach(function (pair) {
+        var chip = pair[0][entry.id];
+        if (!chip) {
+          chip = pair[0][entry.id] = newChip(entry, pair[2]);
+          if (entry.id === 'own' && pair[1].firstChild) pair[1].insertBefore(chip.node, pair[1].firstChild);
+          else add(pair[1], chip.node);
         }
-        pg.hits.push(choose)
-        add(overlay, navButton(hit.label, choose))
-      })
-      if (hits.length > 8) add(overlay, el('p', 'pg-muted small', w('pgRefine', hits.length - 8)))
-    }
-    section('pgAgents', pg.order.map(id => view.agents.find(one => one.agent === id)).filter(Boolean).filter(agent => agentName(agent.agent).toLowerCase().includes(value)).map(agent => ({ label: agentName(agent.agent), pick: () => pgSelect(agent.agent) })))
-    section('pgProjects', view.projects.filter(project => project.name.toLowerCase().includes(value)).map(project => ({ label: pgText(project.name) + ' · ' + w('pgOpenCount', project.open), pick: () => pgAll(project.name) })))
-    section('pgTasks', pgTaskHits(view).filter(hit => pgFullTitle(hit.ref).toLowerCase().includes(value)).map(hit => ({ label: hit.title + ' · ' + w(pgStatus(hit.ref, hit.tab)), pick: () => pgChooseTask(hit) })))
-    if (!pg.hits.length) add(overlay, el('p', '', w('pgNoMatches')))
+        paintChip(chip, entry, label);
+      });
+    });
+    paintFilter();
+    drawNote(entries);
+    fadeChips();
   }
-  const renderGrouped = model => {
-    if (!model.view) return
-    board.querySelectorAll('textarea[data-key]').forEach(box => { pg.drafts[box.getAttribute('data-key')] = box.value })
-    const active = document.activeElement
-    const focused = active && active.getAttribute && active.getAttribute('data-key')
-    const caret = focused ? [active.selectionStart, active.selectionEnd] : null
-    const moreFocused = morePanels.find(one => one.button === active)
-    pg.model = model
-    const view = model.view
-    view.agents.forEach(agent => { if (!pg.order.includes(agent.agent)) pg.order.push(agent.agent) })
-    // A view that no longer has anything to show (its agent left the board) goes back to Needs you.
-    const hasPick = pg.pick === 'needs' || (pg.pick === 'all' && !view.all.isHidden) || (pg.pick === 'own' && Object.values(view.own.counts).some(n => n > 0)) || view.agents.some(one => one.agent === pg.pick)
-    if (!hasPick) { pg.pick = 'needs'; pg.repo = ''; pg.tab = 'open' }
-    pg.sources = {}
-    const sources = [].concat(model.asks, model.reminder, model.older, model.idle, model.stopped, model.groups.flatMap(group => group.rows), model.turns, model.recent, model.finished || [])
-    sources.forEach(item => { if (item.key) pg.sources[item.key] = Object.assign({}, pg.sources[item.key], item) })
-    pg.targets = {}
-    document.title = view.needs.n ? w('pgTabTitle', view.needs.n) : 'Agent Board'
-    const version = view.versions
-    document.getElementById('versions').textContent = !version.package || version.package === version.board ? w('pgVersion', version.board) : w('pgVersions', version.board, version.package)
-    const notices = document.getElementById('unreadable-notices')
-    notices.textContent = ''
-    view.agents.filter(agent => agent.isUnreadable).forEach(agent => add(notices, el('p', '', w('pgUnreadable', agentName(agent.agent)))))
-    pgPicker(view)
-    board.textContent = ''
-    morePanels = []
-    moreCount = 0
-    const pasteSlot = resultSlots.paste
-    const closeSlot = resultSlots.close
-    resultSlots = {}
-    if (pasteSlot) resultSlots.paste = pasteSlot
-    if (closeSlot) resultSlots.close = closeSlot
-    const isFresh = !view.agents.length && !Object.values(view.own.counts).some(n => n > 0)
-    if (isFresh) {
-      const fresh = el('section', 'pg-fresh')
-      if (pg.mark) pg.mark.hidden = false
-      add(fresh, pg.mark, el('h2', '', w('pgReady')), el('p', 'pg-muted', w('pgReadyHint')), add(el('p'), el('span', '', w('pgInClaude') + ' '), el('code', '', '/agent-board'), el('span', '', '. ' + w('pgInCodex') + ' '), el('code', '', '$agent-board'), el('span', '', '.')))
-      add(board, fresh)
-    } else if (pg.pick === 'needs') {
-      pgSheet(board, view.needs.cards, view.needs.older, view.needs.n, view.needs.questions, view.needs.stuck, 'needs', true)
-      const working = add(el('section', 'pg-working'), el('h2', '', w('pgWorking')), el('p', 'pg-muted', w('pgWorkingCount', view.working.length)))
-      working.id = 'working-now'
-      pg.targets.working = working
-      if (view.working.length) pgRows(working, view.working, 'open', true, 5, 'working')
-      else add(working, el('p', 'pg-muted', w('pgNoWorking')))
-      add(working, navButton(w('pgAllTasks'), () => pgAll()))
-      add(board, working)
-    } else {
-      const isAll = pg.pick === 'all'
-      const isOwn = pg.pick === 'own'
-      const agent = view.agents.find(one => one.agent === pg.pick)
-      let bucket = isAll ? view.all : isOwn ? view.own : agent
-      if (bucket && pg.repo && !isOwn) {
-        const merged = Object.assign({}, bucket)
-        for (const shelf of ['cards', 'open', 'stopped', 'done', 'older']) {
-          merged[shelf] = bucket[shelf].concat(view.own[shelf]).sort((a, b) => (b.at || 0) - (a.at || 0))
-        }
-        bucket = merged
+  function paintFilter() {
+    [pg.chips, pg.sideChips].forEach(function (set) {
+      Object.keys(set).forEach(function (id) { set[id].node.setAttribute('aria-pressed', String(pg.filter === id)); });
+    });
+  }
+  // A pressed icon widens to show its name; once it has, the row brings it into view and the edge fade is worked out again.
+  function peekChip() {
+    var chip = pg.filter && pg.chips[pg.filter];
+    var settle = function () {
+      if (chip && chip.node.scrollIntoView) chip.node.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: moving() ? 'smooth' : 'auto' });
+      fadeChips();
+    };
+    if (moving()) setTimeout(settle, 280);
+    else settle();
+  }
+  // The line under the row for an agent the board cannot read: while that agent is pressed, or for all of them when nothing is.
+  function drawNote(entries) {
+    var box = document.getElementById('agent-note');
+    var shown = entries.filter(function (one) { return one.unreadable && (!pg.filter || pg.filter === one.id); });
+    var signature = JSON.stringify(shown.map(function (one) { return one.id; }));
+    if (box.getAttribute('data-sig') === signature) return;
+    box.setAttribute('data-sig', signature);
+    box.textContent = '';
+    shown.forEach(function (one) {
+      var how = el('details');
+      add(how, el('summary', '', w('pgHowFix')), el('p', '', w('pgFixAdvice')));
+      add(box, add(el('div'), el('p', '', w('pgUnreadable', one.name)), how));
+    });
+  }
+  function setFilter(id) {
+    pg.filter = id;
+    saveFilter(id);
+    paintFilter();
+    if (latest && latest.view) drawNote(chipEntries(latest.view));
+    layout();
+    peekChip();
+  }
+  function chipEntries(view) {
+    var entries = [];
+    pg.ids.forEach(function (id) {
+      var group = view.agents.filter(function (one) { return one.agent === id; })[0];
+      if (group) entries.push({ id: id, name: agentName(id), unreadable: group.isUnreadable });
+    });
+    return entries;
+  }
+  // What the filter shows: rows, cards and shelves of that agent only; the rest closes up. Counts, empty
+  // lines and headings follow what is left, so every number on the page agrees with what is shown.
+  function layout() {
+    var count = { cards: 0, shown: 0, older: 0, working: 0, others: 0, stopped: 0, done: 0 };
+    var projects = [];
+    var byProject = Object.create(null);
+    pg.lis.forEach(function (one) {
+      one.show = matches(one.id, one.project);
+      if (one.show) {
+        // cards: the number that waits for the person leaves out an answer already sent; shown counts every card on the sheet
+        if (one.list === 'cards') count.shown += 1;
+        if (!(one.list === 'cards' && one.sent)) count[one.list] += 1;
       }
-      if (bucket) {
-        const open = pg.repo ? pgOpenCount(bucket) : bucket.counts.open
-        const needs = pg.repo ? pgFiltered(bucket.cards).length : bucket.counts.needs
-        const agents = pg.repo ? view.agents.filter(one => pgHolds(one, pg.repo)).length : view.agents.length
-        const heading = add(el('header', 'pg-view-head'), isAll ? null : agentMark(isOwn ? '' : pg.pick), el('h2', '', isAll ? w('pgAllAgents') : isOwn ? w('pgOwn') : agentName(pg.pick)), el('p', 'pg-muted', isAll ? w('pgAllCounts', agents, open) : w('pgAgentCounts', open, needs)))
-        add(board, heading)
-        if (agent && agent.isUnreadable) add(board, pgNotice(agent.agent))
-        if (pg.repo) add(board, navButton(w('pgProject', pgText(pg.repo)), () => { pg.repo = ''; renderGrouped(pg.model) }))
-        if (isAll) { if (needs) add(board, navButton(pgPlural('pgNeedLink', needs), () => pgSelect('needs'))) }
-        else if (bucket.cards.length || bucket.older.length) {
-          const cards = pgFiltered(bucket.cards)
-          pgSheet(board, cards, pgFiltered(bucket.older), cards.length, cards.filter(one => one.kind === 'question').length, cards.filter(one => one.kind === 'stuck').length, pg.pick + ':' + pg.repo, false)
-        }
-        const tabs = el('div', 'pg-tabs')
-        tabs.setAttribute('role', 'tablist')
-        const shelves = ['open', 'stopped', 'done']
-        shelves.forEach(tab => {
-          const count = pg.repo ? (tab === 'open' ? open : pgFiltered(bucket[tab]).length) : bucket.counts[tab]
-          const node = navButton(w({ open: 'pgOpen', stopped: 'pgStopped', done: 'pgDone' }[tab]) + ' ' + count, () => { pg.tab = tab; renderGrouped(pg.model) })
-          node.setAttribute('role', 'tab')
-          node.setAttribute('data-tab', tab)
-          node.setAttribute('aria-selected', String(pg.tab === tab))
-          node.setAttribute('aria-controls', 'task-list')
-          add(tabs, node)
-        })
-        add(board, tabs)
-        const rows = el('section')
-        rows.id = 'task-list'
-        rows.setAttribute('role', 'tabpanel')
-        pgRows(rows, pgFiltered(bucket[pg.tab]), pg.tab, isAll || !!pg.repo && !isOwn, pg.tab === 'open' ? 12 : 8)
-        add(board, rows)
+      reveal(one.block, one.show);
+      // the sidebar lists every project with something open, and counts it for the agent that is pressed
+      if (one.project && !one.sent && (one.list === 'cards' || one.list === 'working' || one.list === 'others')) {
+        var held = byProject['p:' + one.project];
+        if (!held) { held = byProject['p:' + one.project] = { name: one.project, n: 0 }; projects.push(held); }
+        if (matchesAgent(one.id)) held.n += 1;
       }
+    });
+    pg.groups.forEach(function (group) {
+      var any = group.entries.some(function (one) { return one.show; });
+      reveal(group.block, any);
+      if (group.ul) toggleClass(group.ul, 'bare', !any);
+    });
+    setText(pg.nodes.needsCount, count.cards);
+    if (pg.nodes.needsCount) pg.nodes.needsFlag.setAttribute('data-needs-count', String(count.cards));
+    setText(pg.nodes.needsText, pg.filter ? w('pgNoQuestions', nameOf(pg.filter)) : w('pgNothing'));
+    setText(pg.nodes.needsSub, pg.filter ? '' : w('pgNothingHint'));
+    reveal(pg.nodes.needsEmpty, count.shown === 0);
+    reveal(pg.nodes.workingEmpty, count.working === 0 && !pg.filter && !pg.project);
+    // The line counts every older question the filters allow, drawn or not.
+    if (pg.olderRefs) count.older = pg.olderRefs.filter(function (ref) { return matches(agentOf(ref), projectOf(ref)); }).length;
+    if (pg.nodes.olderLine) setText(pg.nodes.olderLine, plural('pgOlder', count.older));
+    reveal(pg.nodes.olderBlock, count.older > 0);
+    Object.keys(pg.nodes.counts).forEach(function (name) { setText(pg.nodes.counts[name], name === 'done' ? w('pgDoneWeek', count.done) : count[name]); });
+    pg.sections.forEach(function (section) { reveal(section.block, count[section.list] > 0 || section.list === 'working' && !pg.filter && !pg.project); });
+    drawSide(count, projects);
+  }
+  // The sidebar's numbers come from the same counts as the headings, so every number on the page agrees.
+  function drawSide(count, projects) {
+    var shown = { needs: count.cards, working: count.working, others: count.others + count.stopped, done: count.done };
+    Object.keys(shown).forEach(function (name) {
+      var node = document.getElementById('count-' + name);
+      if (node) setText(node, shown[name] > 0 ? shown[name] : '');
+    });
+    var group = document.getElementById('side-project-group');
+    var list = document.getElementById('side-projects');
+    if (!list) return;
+    if (pg.project && !projects.some(function (one) { return one.name === pg.project; })) pg.project = '';
+    projects.sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+    var wanted = projects.map(function (one) {
+      var held = pg.projectNodes['p:' + one.name];
+      if (!held) {
+        var node = navButton('', function () { setProject(one.name); });
+        node.className = 's-item s-project';
+        node.setAttribute('data-project', one.name);
+        node.setAttribute('title', one.name);
+        held = pg.projectNodes['p:' + one.name] = { node: node, name: el('span', 's-txt', one.name), n: el('span', 's-n') };
+        add(node, held.name, held.n);
+      }
+      setText(held.n, one.n > 0 ? one.n : '');
+      held.node.setAttribute('aria-pressed', String(pg.project === one.name));
+      return held.node;
+    });
+    Object.keys(pg.projectNodes).forEach(function (key) {
+      if (wanted.indexOf(pg.projectNodes[key].node) === -1) { pg.projectNodes[key].node.remove(); delete pg.projectNodes[key]; }
+    });
+    wanted.forEach(function (node, index) { if (list.childNodes[index] !== node) list.insertBefore(node, list.childNodes[index] || null); });
+    if (group) group.hidden = wanted.length === 0;
+  }
+  function setProject(name) {
+    pg.project = pg.project === name ? '' : name;
+    layout();
+  }
+  // A view shows one section alone (the rail and the sidebar); Overview shows them all. Done opens its list.
+  var VIEWS = ['all', 'needs', 'working', 'others', 'done'];
+  function enter(node) {
+    if (!node || !moving()) return;
+    toggleClass(node, 'enter', false);
+    node.offsetWidth;
+    toggleClass(node, 'enter', true);
+    node.addEventListener('animationend', function () { toggleClass(node, 'enter', false); }, { once: true });
+  }
+  function setView(name) {
+    pg.view = name;
+    var shell = document.getElementById('shell');
+    shell.setAttribute('data-view', name);
+    VIEWS.forEach(function (one) { document.getElementById('view-' + one).setAttribute('aria-pressed', String(one === name)); });
+    if (name === 'done' && pg.openShelf.done) pg.openShelf.done(true);
+    enter(board);
+    if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
+  }
+  // The sidebar folds to a rail of icons at any width from 560px up; the pick is kept. Below 800px it starts folded.
+  // The footer (version link, theme, Close the board) lives at the foot of the full sidebar, and under the work otherwise.
+  function savedSide() {
+    var kept = '';
+    try { kept = localStorage.getItem('agent-board.side') || ''; } catch (e) {}
+    return kept === 'rail' || kept === 'full' ? kept : '';
+  }
+  var sidePick = savedSide();
+  function fitSide() {
+    var width = window.innerWidth;
+    var shell = document.getElementById('shell');
+    if (typeof width !== 'number' || !shell) return;
+    var hasSide = width >= 560;
+    var isRail = hasSide && (sidePick === 'rail' || (sidePick !== 'full' && width < 800));
+    shell.setAttribute('data-rail', isRail ? '1' : '');
+    var toggle = document.getElementById('side-toggle');
+    var label = w(isRail ? 'pgSideOpen' : 'pgSideFold');
+    toggle.setAttribute('aria-expanded', String(!isRail));
+    toggle.setAttribute('aria-label', label);
+    toggle.setAttribute('title', label);
+    var foot = document.getElementById('pfoot');
+    var home = hasSide && !isRail ? document.getElementById('side-foot') : document.querySelector('main');
+    if (!foot || !home || foot.parentNode === home) return;
+    if (hasSide && !isRail) home.appendChild(foot);
+    else home.insertBefore(foot, document.getElementById('note'));
+  }
+  // While a row is open the list it is in keeps its order, so what is being read does not move; anything new comes first.
+  function settle(name, refs) {
+    var before = pg.order[name] || [];
+    var ordered = refs;
+    if (refs.some(function (ref) { return opened[ref.key] === true; })) {
+      var place = {};
+      before.forEach(function (key, index) { place[key] = index; });
+      ordered = refs.map(function (ref, index) { return { ref: ref, index: index }; }).sort(function (a, b) {
+        var left = a.ref.key in place ? place[a.ref.key] : -1;
+        var right = b.ref.key in place ? place[b.ref.key] : -1;
+        return left === right ? a.index - b.index : left - right;
+      }).map(function (one) { return one.ref; });
     }
-    drawLostResults()
-    if (moreFocused) morePanels.forEach(one => { if (one.key === moreFocused.key) one.button.focus({ preventScroll: true }) })
-    board.querySelectorAll('textarea[data-key]').forEach(box => {
-      const key = box.getAttribute('data-key')
-      if (Object.prototype.hasOwnProperty.call(pg.drafts, key)) box.value = pg.drafts[key]
-      if (key === focused) {
-        box.focus({ preventScroll: true })
-        if (caret) box.setSelectionRange(caret[0], caret[1])
+    pg.order[name] = ordered.map(function (ref) { return ref.key; });
+    return ordered;
+  }
+  function entry(li, block, ref, list) {
+    var one = { li: li, block: block, id: agentOf(ref), project: projectOf(ref), list: list, show: true, key: ref.key, sent: list === 'cards' && isSent(ref) };
+    pg.lis.push(one);
+    return one;
+  }
+  function rowItem(ref, list, section, showProject) {
+    var built = buildRow(ref, section, showProject);
+    return entry(built.li, built.block, ref, list);
+  }
+  function sectionHead(title, name) {
+    var count = el('span', 'count');
+    pg.nodes.counts[name] = count;
+    var heading = el('h2', '', title);
+    if (name === 'working') heading.setAttribute('title', w('pgWorkingHint'));
+    return add(el('div', 'sec-head'), heading, count);
+  }
+  function needsSection(view) {
+    var wrap = el('section', 'needs-wrap');
+    wrap.id = 'needs';
+    wrap.setAttribute('data-sec', 'needs');
+    var flag = el('h2', 'flag', w('pgNeeds'));
+    var total = el('b', '', String(Math.max(0, view.needs.n - pg.sentTotal)));
+    add(flag, total);
+    flag.setAttribute('data-needs-count', String(Math.max(0, view.needs.n - pg.sentTotal)));
+    pg.nodes.needsCount = total;
+    pg.nodes.needsFlag = flag;
+    var sheet = el('div', 'sheet');
+    var list = el('ul', 'cards');
+    pg.cardList = list;
+    pg.cardNodes = {};
+    settle('cards', view.needs.cards).forEach(function (ref) {
+      var li = el('li');
+      li.setAttribute('data-k', ref.key);
+      var block = el('div', 'fx');
+      add(block, add(el('div', 'fx-in'), buildCard(ref)));
+      add(li, block);
+      add(list, li);
+      pg.cardNodes[ref.key] = li;
+      entry(li, block, ref, 'cards');
+    });
+    pg.nodes.needsText = el('p', '');
+    pg.nodes.needsSub = el('p', 'sub');
+    pg.nodes.needsEmpty = fx(add(el('div', 'empty'), pg.nodes.needsText, pg.nodes.needsSub));
+    add(sheet, list, pg.nodes.needsEmpty);
+    var foot = el('div', 'sheet-foot');
+    var older = view.needs.older;
+    pg.olderRefs = older;
+    if (older.length) {
+      var olderList = el('ul', 'cards');
+      // Ten are drawn until Show all: a board with hundreds of old questions does not build hundreds of cards.
+      var shownOlder = opened['older:all'] ? older.length : ${OLDER_SHOWN};
+      var drawOlder = function (ref) {
+        var li = el('li');
+        var block = el('div', 'fx');
+        add(block, add(el('div', 'fx-in'), buildCard(ref, true)));
+        add(li, block);
+        add(olderList, li);
+        entry(li, block, ref, 'older');
+      };
+      older.slice(0, shownOlder).forEach(drawOlder);
+      var showAll = null;
+      if (shownOlder < older.length) {
+        showAll = navButton(w('showAllQuestions', older.length), function () {
+          opened['older:all'] = true;
+          older.slice(shownOlder).forEach(drawOlder);
+          showAll.remove();
+          layout();
+        });
+        showAll.className = 'link';
       }
-    })
-    pgSearch()
+      var more = el('div', pg.hasOlder ? 'open' : '');
+      var fold = el('div', 'fold');
+      fold.inert = !pg.hasOlder;
+      var line = el('p', '');
+      pg.nodes.olderLine = line;
+      var toggle = navButton(w('pgSeeAll'), function () {
+        pg.hasOlder = !hasClass(more, 'open');
+        toggleClass(more, 'open', pg.hasOlder);
+        fold.inert = !pg.hasOlder;
+        toggle.setAttribute('aria-expanded', String(pg.hasOlder));
+      });
+      toggle.className = 'link';
+      toggle.setAttribute('aria-expanded', String(pg.hasOlder));
+      add(more, add(el('div', 'older-line'), line, toggle), add(fold, add(el('div', 'fold-in'), olderList, showAll)));
+      pg.nodes.olderBlock = fx(more);
+      add(foot, pg.nodes.olderBlock);
+    }
+    add(sheet, foot);
+    add(wrap, add(el('div', 'sheet-tab'), flag), sheet);
+    return wrap;
+  }
+  function workingSection(view, workingKeys) {
+    var refs = settle('working', view.working.slice());
+    refs.forEach(function (ref) { workingKeys[ref.key] = true; });
+    var sec = el('section', 'sec');
+    sec.id = 'working-now';
+    var list = el('ul', 'rows');
+    var group = { ul: list, entries: [] };
+    refs.forEach(function (ref) {
+      var one = rowItem(ref, 'working', 'working', true);
+      group.entries.push(one);
+      add(list, one.li);
+    });
+    pg.groups.push(group);
+    pg.nodes.workingEmpty = fx(el('p', '', w('pgNoWorking')));
+    add(sec, sectionHead(w('pgWorking'), 'working'), list, pg.nodes.workingEmpty);
+    return sec;
+  }
+  function othersSection(view, workingKeys) {
+    var refs = settle('others', view.all.open.concat(view.own.open).filter(function (ref) { return !workingKeys[ref.key]; }).sort(byTime));
+    var order = [];
+    var by = {};
+    refs.forEach(function (ref) {
+      var name = clean(ref.repo || source(ref).project || '');
+      if (!by[name]) { by[name] = []; order.push(name); }
+      by[name].push(ref);
+    });
+    var sec = el('section', 'sec');
+    add(sec, sectionHead(w('pgOthers'), 'others'));
+    order.forEach(function (name) {
+      var list = el('ul', 'rows');
+      var group = { ul: list, entries: [], block: null };
+      by[name].forEach(function (ref) {
+        var one = rowItem(ref, 'others', 'others', false);
+        group.entries.push(one);
+        add(list, one.li);
+      });
+      if (name) {
+        group.block = fx(el('p', 'proj', name));
+        add(sec, group.block);
+      }
+      pg.groups.push(group);
+      add(sec, list);
+    });
+    return refs.length ? sec : null;
+  }
+  // A closed shelf: Stopped and Done list their rows flat, so each row names its project.
+  function shelf(name, title, refs, section, extra) {
+    if (!refs.length && !extra) return null;
+    var box = el('section', 'shelf' + (opened['shelf:' + name] ? ' open' : ''));
+    var count = el('span', 'count');
+    pg.nodes.counts[name] = count;
+    var fold = el('div', 'fold');
+    fold.inert = opened['shelf:' + name] !== true;
+    var setOpen = function (now) {
+      toggleClass(box, 'open', now);
+      head.setAttribute('aria-expanded', String(now));
+      fold.inert = !now;
+      opened['shelf:' + name] = now;
+    };
+    var head = navButton('', function () { setOpen(!hasClass(box, 'open')); });
+    pg.openShelf[name] = setOpen;
+    head.className = 'shelf-head';
+    head.setAttribute('aria-expanded', String(opened['shelf:' + name] === true));
+    add(head, el('span', 'chev'), el('span', '', title), count);
+    head.firstChild.setAttribute('aria-hidden', 'true');
+    var list = el('ul', 'rows');
+    var group = { ul: list, entries: [] };
+    refs.forEach(function (ref) {
+      var one = rowItem(ref, name, section, true);
+      group.entries.push(one);
+      add(list, one.li);
+    });
+    pg.groups.push(group);
+    var body = add(el('div'), list);
+    if (extra) add(body, extra);
+    add(box, head, add(fold, add(el('div', 'fold-in'), body)));
+    return box;
+  }
+  function doneExtra() {
+    var wrap = el('div', 'acts');
+    add(wrap, button(w('archiveNow'), function () { tidyBoard('recent', '/api/tidy'); }));
+    resultSlot(wrap, 'recent', '', w('pgDone'));
+    return wrap;
+  }
+  function hiddenShelf(model) {
+    var items = model.hidden || [];
+    if (!items.length) return null;
+    var box = el('section', 'shelf' + (opened['shelf:hidden'] ? ' open' : ''));
+    box.setAttribute('data-sec', 'needs');
+    var fold = el('div', 'fold');
+    fold.inert = opened['shelf:hidden'] !== true;
+    var head = navButton('', function () {
+      var now = !hasClass(box, 'open');
+      toggleClass(box, 'open', now);
+      head.setAttribute('aria-expanded', String(now));
+      fold.inert = !now;
+      opened['shelf:hidden'] = now;
+    });
+    head.className = 'shelf-head';
+    head.setAttribute('aria-expanded', String(opened['shelf:hidden'] === true));
+    add(head, el('span', 'chev'), el('span', '', w('hiddenCount', items.length)));
+    head.firstChild.setAttribute('aria-hidden', 'true');
+    var body = el('div', 'shelf-body');
+    items.forEach(function (one) {
+      var item = el('div', 'hid');
+      var line = [one.project, one.isOwn ? w('pgOwn') : agentName(one.agent)].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : '');
+      add(item, el('p', 'c-meta', line), el('p', 'q', one.text), add(el('div', 'acts'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
+      resultSlot(item, one.key, one.text, one.task);
+      add(body, item);
+    });
+    add(box, head, add(fold, add(el('div', 'fold-in'), body)));
+    return box;
   }
   // Archive now moves every finished task at once; Clean up runs the sweep --tidy runs.
   function tidyBoard(key, route) {
-    say(w('pressPending'), '', key)
+    say(w('pressPending'), '', key);
     call(route, {}).then(function (data) {
-      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key)
-      refresh()
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key);
+      refresh();
     }, function () {
-      say(w('serveOffline'), 'alert', key)
-      unreachable()
-    })
+      say(w('serveOffline'), 'alert', key);
+      unreachable();
+    });
   }
-  function renderBoard(model) {
-    if (W.group === 'agent') { renderGrouped(model); return; }
-    // What is typed, and where the cursor is, outlast a redraw.
-    var kept = {};
-    board.querySelectorAll('textarea[data-key]').forEach(function (box) { kept[box.getAttribute('data-key')] = box.value; });
+  function connectedIds(view) {
+    var ids = [];
+    var push = function (id) { id = String(id || '').toLowerCase(); if (id && ids.indexOf(id) === -1) ids.push(id); };
+    view.agents.forEach(function (one) { push(one.agent); });
+    connections.forEach(function (one) { push(one.agent); });
+    return ids;
+  }
+  // The empty board: the agents that can report here, and how their work shows up.
+  // With nothing connected it names no agent, so none is marked connected (#546).
+  function freshPage(view) {
+    var ids = connectedIds(view);
+    if (!ids.length) return add(el('section', 'fresh'), el('h2', '', w('pgReady')), el('p', '', w('pgStartAny')));
+    var list = el('ul');
+    ids.forEach(function (id) {
+      add(list, add(el('li'), agentMark(id), add(el('span'), el('b', '', agentName(id)), el('span', 'ok', ' ✓ ' + w('pgConnected')))));
+    });
+    return add(el('section', 'fresh'), el('h2', '', w('pgReady')), list, el('p', '', w('pgStartIn', ids.map(agentName).join(' / '))));
+  }
+  function sectionBlock(section, list) {
+    var block = fx(section);
+    block.setAttribute('data-sec', list === 'stopped' ? 'others' : list);
+    pg.sections.push({ block: block, list: list });
+    return block;
+  }
+  function draw(model) {
+    if (!model.view) return;
+    var view = model.view;
+    board.querySelectorAll('textarea[data-key]').forEach(function (box) { pg.drafts[box.getAttribute('data-key')] = box.value; });
     var active = document.activeElement;
-    var focus = active && active.getAttribute ? active.getAttribute('data-key') : null;
-    var moreFocus = morePanels.filter(function (one) { return one.button === active; })[0];
-    var caret = focus ? [active.selectionStart, active.selectionEnd] : null;
-    board.textContent = '';
-    morePanels = [];
-    moreCount = 0;
-    filterNodes = [];
-    filterGroups = [];
-    // Footer and paste controls keep their slots across board redraws.
-    var pasteSlot = resultSlots.paste;
+    var focused = active && active.getAttribute && active.getAttribute('data-key');
+    var caret = focused ? [active.selectionStart, active.selectionEnd] : null;
+    pg.model = model;
+    latest = model;
+    view.agents.forEach(function (agent) { if (pg.ids.indexOf(agent.agent) === -1) pg.ids.push(agent.agent); });
+    pg.sources = {};
+    [].concat(model.asks || [], model.reminder || [], model.older || [], model.idle || [], model.stopped || [], (model.groups || []).flatMap(function (group) { return group.rows; }), model.turns || [], model.recent || [], model.finished || []).forEach(function (item) { if (item.key) pg.sources[item.key] = Object.assign({}, pg.sources[item.key], item); });
+    if (!hasDrawn) pg.filter = savedFilter();
+    // An answer that was sent stops counting as waiting for the person (tab title, flag, agent badges) until it comes back.
+    pg.sentBy = Object.create(null);
+    pg.sentTotal = 0;
+    view.needs.cards.forEach(function (ref) {
+      if (!isSent(ref)) return;
+      var who = agentOf(ref);
+      pg.sentTotal += 1;
+      pg.sentBy[who] = (pg.sentBy[who] || 0) + 1;
+    });
+    var waitingNow = Math.max(0, view.needs.n - pg.sentTotal);
+    document.title = waitingNow ? w('pgTabTitle', waitingNow) : 'Agent Board';
+    var version = view.versions;
+    document.getElementById('versions').textContent = !version.package || version.package === version.board ? w('pgVersion', version.board) : w('pgVersions', version.board, version.package);
+    var priorCards = pg.cardNodes;
+    var priorOrder = pg.order.cards || [];
+    var priorRows = pg.rowKeys;
+    pg.lis = [];
+    pg.groups = [];
+    pg.sections = [];
+    pg.openShelf = {};
+    pg.mores = [];
+    pg.nodes = { counts: {} };
+    pg.cardNodes = {};
+    cardParts = {};
     var closeSlot = resultSlots.close;
-    resultSlots = pasteSlot ? { paste: pasteSlot } : {};
+    resultSlots = {};
     if (closeSlot) resultSlots.close = closeSlot;
-    if (model.warning) add(board, el('p', 't-alert', model.warning));
+    agentPresence = presenceMap(view);
+    drawChips(view);
+    var parts = [];
+    if (model.warning) parts.push(el('p', 't-alert', model.warning));
+    var hasOwn = Object.keys(view.own.counts).some(function (key) { return view.own.counts[key] > 0; });
+    document.getElementById('shell').setAttribute('data-empty', !view.agents.length && !hasOwn ? '1' : '');
+    if (!view.agents.length && !hasOwn) parts.push(freshPage(view));
+    else {
+      var workingKeys = {};
+      parts.push(needsSection(view));
+      parts.push(sectionBlock(workingSection(view, workingKeys), 'working'));
+      var others = othersSection(view, workingKeys);
+      if (others) parts.push(sectionBlock(others, 'others'));
+      var stopped = shelf('stopped', w('pgStopped'), view.all.stopped.concat(view.own.stopped).sort(byTime), 'stopped');
+      if (stopped) parts.push(sectionBlock(stopped, 'stopped'));
+      var finished = view.all.done.concat(view.own.done).sort(byTime);
+      var done = shelf('done', w('pgDone'), finished, 'done', finished.length ? doneExtra() : null);
+      if (done) parts.push(sectionBlock(done, 'done'));
+      var hidden = hiddenShelf(model);
+      if (hidden) parts.push(hidden);
+      pg.rowKeys = workingKeys;
+    }
+    var notices = el('div', 'notices');
+    if (model.details) add(notices, el('p', 't-quiet', model.details));
+    if (model.background) add(notices, el('p', 't-quiet', model.background));
     if (model.isCleanable) {
-      var cleanup = add(el('div', 'actions'), button(w('cleanUp'), function () { tidyBoard('cleanup', '/api/clean') }))
-      add(board, cleanup)
-      resultSlot(cleanup, 'cleanup', '', w('cleanUp'))
-    } else if (results.cleanup) {
-      resultSlot(board, 'cleanup', '', w('cleanUp'))
-    }
-    if (model.details) add(board, el('p', 't-quiet', model.details))
-    waitingHead = el('h2', 'n-waiting', '● ' + w('sectionWaiting'));
-    nothing = model.asks.length === 0 ? el('div', 'n-today', w('nothingForYou')) : null;
-    add(board, waitingHead, nothing);
-    model.asks.forEach(function (ask) { add(board, tracked(askCard(ask), ['waiting'], ask)); });
-    var olderShelf = null;
-    // Like the questions beside it, the line shows under All and Waiting only.
-    if (model.stoppedAsking > 0) add(board, tracked(navButton(w('stoppedAsking', model.stoppedAsking), function () {
-      opened['older:'] = true;
-      if (olderShelf) {
-        olderShelf.open = true;
-        olderShelf.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-    }), ['waiting'], {}, '', true));
-    [['reminder', 'sectionQuestionReminders'], ['older', 'sectionOlderQuestions']].forEach(function (pair) {
-      var questions = model[pair[0]] || [];
-      if (!questions.length) return;
-      var from = filterNodes.length;
-      var retained = el('details', 'card shelf');
-      if (pair[0] === 'older') olderShelf = retained;
-      retained.open = opened[pair[0] + ':'] === true;
-      retained.addEventListener('toggle', function () { opened[pair[0] + ':'] = retained.open; });
-      add(retained, add(el('summary'), el('span', 'quiet', w(pair[1]) + ' (' + questions.length + ')')), el('p', 'quiet', w('questionAgingHint')));
-      var shown = pair[0] === 'older' && !opened['older:all'] ? ${OLDER_SHOWN} : questions.length;
-      function appendQuestion(one) {
-        // A question that can be hidden has the same button as a live one; a retained source kept for review only says so.
-        var card = add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, brand(who(one)), one.task, one.when].filter(Boolean).join(' · '))), el('div', 'q', one.text), el('div', '', one.note), one.context ? clipped(one.contextLine, one.context, 'quiet context', 'context:' + one.key) : el('div', 'quiet', ''), one.canHide ? add(el('div', 'actions'), button(w('answeredHide'), function () { act(one.key, 'hide'); })) : el('div', 'quiet', w('questionReviewOnly')));
-        resultSlot(card, one.key, one.text, one.task);
-        add(retained, tracked(card, ['waiting'], one, '', true));
-      }
-      questions.slice(0, shown).forEach(appendQuestion);
-      groupVisibility(retained, from);
-      if (shown < questions.length) {
-        var more = navButton(w('showAllQuestions', questions.length), function () {
-          opened['older:all'] = true;
-          var next = filterNodes.length;
-          questions.slice(shown).forEach(appendQuestion);
-          filterGroups.forEach(function (group) {
-            if (group.node === retained || group.node === waitingHead) group.entries = group.entries.concat(filterNodes.slice(next));
-          });
-          retained.removeChild(more);
-          applyPick();
-        });
-        add(retained, more);
-      }
-      add(board, retained);
-    });
-    if (model.hidden.length) {
-      var from = filterNodes.length;
-      var shelf = el('details', 'card shelf');
-      shelf.open = opened['hidden:'] === true;
-      shelf.addEventListener('toggle', function () { opened['hidden:'] = shelf.open; });
-      add(shelf, add(el('summary'), el('span', 'quiet', w('hiddenCount', model.hidden.length))));
-      model.hidden.forEach(function (one) {
-        var hiddenCard = add(el('div'), add(el('div', 'where'), agentMark(who(one)), el('span', '', [one.project, brand(who(one))].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : ''))), el('div', 'q', one.text), add(el('div', 'actions'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
-        resultSlot(hiddenCard, one.key, one.text, one.task);
-        add(shelf, tracked(hiddenCard, ['waiting'], one, '', true));
+      var cleanup = add(el('div', 'acts'), button(w('cleanUp'), function () { tidyBoard('cleanup', '/api/clean'); }));
+      add(notices, cleanup);
+      resultSlot(cleanup, 'cleanup', '', w('cleanUp'));
+    } else if (results.cleanup) resultSlot(notices, 'cleanup', '', w('cleanUp'));
+    if (notices.firstChild) parts.push(notices);
+    // The filter is applied before anything is on the page, so a redraw never plays it.
+    layout();
+    var arriving = moving() ? pg.lis.filter(function (one) { return one.list === 'working' && one.show && !priorRows[one.key]; }) : [];
+    arriving.forEach(function (one) { reveal(one.block, false); });
+    board.textContent = '';
+    parts.forEach(function (part) { add(board, part); });
+    if (moving()) {
+      // A card that left the sheet folds away where it was; its task arrives lit in Working now.
+      priorOrder.forEach(function (key, index) {
+        var node = priorCards[key];
+        if (!node || pg.cardNodes[key] || !pg.cardList || hasClass(node.firstChild, 'gone')) return;
+        pg.cardList.insertBefore(node, pg.cardList.childNodes[index] || null);
+        node.firstChild.offsetHeight;
+        reveal(node.firstChild, false, function () { node.remove(); });
       });
-      groupVisibility(shelf, from);
-      add(board, shelf);
+      if (arriving.length) arriving[0].block.offsetHeight;
+      arriving.forEach(function (one) { reveal(one.block, true); toggleClass(one.li, 'arrived', true); });
     }
-    // The heading stands over the questions and their shelves.
-    groupVisibility(waitingHead, 0);
-    if (model.idle.length) {
-      var from = filterNodes.length;
-      var idleShelf = el('details', 'card shelf');
-      idleShelf.open = opened['idle:'] === true;
-      idleShelf.addEventListener('toggle', function () { opened['idle:'] = idleShelf.open; });
-      add(idleShelf, add(el('summary'), el('span', 'quiet', w('idleCount', model.idle.length))));
-      model.idle.forEach(function (row) { add(idleShelf, tracked(add(el('div'), el('div', 'where', row.project), rowCard(row)), ['progress'], row, '', true)); });
-      groupVisibility(idleShelf, from);
-      add(board, idleShelf);
-    }
-    if (model.stopped.length) {
-      var from = filterNodes.length;
-      var stoppedShelf = el('details', 'card shelf');
-      stoppedShelf.open = opened['stopped:'] === true;
-      stoppedShelf.addEventListener('toggle', function () { opened['stopped:'] = stoppedShelf.open; });
-      add(stoppedShelf, add(el('summary'), el('span', 'quiet', w('stoppedCount', model.stopped.length))));
-      model.stopped.forEach(function (row) { add(stoppedShelf, tracked(add(el('div'), el('div', 'where', row.project), rowCard(row)), ['stopped'], row)); });
-      groupVisibility(stoppedShelf, from);
-      add(board, stoppedShelf);
-    }
-    // Runs no session is known for are one line, never a row or a count.
-    if (model.background) add(board, el('div', 'quiet small', model.background));
-    model.groups.forEach(function (group) {
-      var from = filterNodes.length;
-      var heading = el('h2', 'where', '▸ ' + group.project);
-      add(board, heading);
-      group.rows.forEach(function (row) { add(board, tracked(rowCard(row), row.due ? ['progress', 'due'] : ['progress'], row, group.project)); });
-      groupVisibility(heading, from);
-    });
-    if (model.turns.length) {
-      var from = filterNodes.length;
-      var heading = el('h2', 'n-active', '◐ ' + w('boardInbox'));
-      add(board, heading);
-      model.turns.forEach(function (turn) { add(board, tracked(turnCard(turn), turn.isQuestion ? ['progress', 'waiting'] : ['progress'], turn)); });
-      groupVisibility(heading, from);
-    }
-    if (model.recent.length) {
-      var from = filterNodes.length;
-      var heading = el('h2', 'n-today', '✓ ' + w('sectionRecent'));
-      add(board, heading);
-      var done = el('div', 'history');
-      model.recent.forEach(function (item) {
-        var line = add(el('div'), el('span', 's-done', '✓'), clipped(item.line ? [item.project, item.line, item.when].filter(Boolean).join(' · ') : '', [item.project, item.title, item.when].filter(Boolean).join(' · '), 't-quiet', 'recent:' + item.project + ':' + item.title));
-        (item.questions || []).forEach(function (question) { add(line, el('p', 't-quiet', question)); });
-        add(done, tracked(line, ['recent'], item));
-      });
-      var recent = add(el('div', 'card'), done, add(el('div', 'actions'), button(w('archiveNow'), function () {
-        tidyBoard('recent', '/api/tidy')
-      })));
-      resultSlot(recent, 'recent', '', w('sectionRecent'));
-      groupVisibility(heading, from);
-      groupVisibility(recent, from);
-      add(board, recent);
-    }
-    emptyCard = el('div', 'card empty');
-    add(board, emptyCard);
-    drawSide();
-    applyPick();
     drawLostResults();
-    if (moreFocus) morePanels.forEach(function (one) { if (one.key === moreFocus.key) one.button.focus(); });
     board.querySelectorAll('textarea[data-key]').forEach(function (box) {
       var key = box.getAttribute('data-key');
-      if (key in kept) box.value = kept[key];
-      if (key === focus && !filterNodes.some(function (one) { return one.node.hidden && Array.from(one.node.querySelectorAll('textarea[data-key]')).indexOf(box) !== -1; })) {
-        box.focus();
+      if (Object.prototype.hasOwnProperty.call(pg.drafts, key)) box.value = pg.drafts[key];
+      if (key === focused) {
+        box.focus({ preventScroll: true });
         if (caret) box.setSelectionRange(caret[0], caret[1]);
       }
     });
+    hasDrawn = true;
+  }
+  function render(model) {
+    keepCopyFocus(function () { draw(model); });
   }
   function drawLostResults() {
     lostResults.forEach(function (card) { card.remove(); });
@@ -2033,8 +2244,8 @@ const PAGE_SCRIPT = String.raw`
       if (resultSlots[key]) return;
       var result = results[key];
       if (!result.pending && result.tone !== 'alert' && result.tone !== 'done') { delete results[key]; return; }
-      var card = add(el('article', 'card'), el('div', 'where', result.label));
-      var slot = el('div', 'small press-result');
+      var card = add(el('article', 'lost'), el('div', 'where', result.label));
+      var slot = el('div', 'press-result');
       slot.setAttribute('role', 'status');
       slot.textContent = result.text;
       slot.className += ' ' + result.tone;
@@ -2053,25 +2264,27 @@ const PAGE_SCRIPT = String.raw`
   function refresh() {
     if (isClosed) return;
     clearTimeout(timer);
-    call(W.group === 'agent' ? '/api/board?group=agent' : '/api/board').then(function (data) {
+    call('/api/board').then(function (data) {
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }
         else unreachable();
         return;
       }
       reachable();
-      var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions], W.group === 'agent' ? function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; } : undefined);
+      connections = data.messaging && data.messaging.connections || [];
+      var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; })], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
       if (text !== last) {
-        last = text; render(data.model);
+        last = text;
+        render(data.model);
         if (presence) { presence.remove(); presence = null; }
         // Show actionable progress delays, never transport inventory or native identifiers.
         var sessions = (data.messaging && data.messaging.sessions || []).filter(function (one) { return one.status === 'waiting' || one.status === 'timed_out'; });
-        if (W.group !== 'agent' && sessions.length) {
-          presence = el('section', 'card');
+        if (sessions.length) {
+          presence = el('section', 'notices');
           add(presence, el('h2', '', w('sessionsTitle')));
           sessions.forEach(function (one) {
             var state = one.status === 'timed_out' ? w('sessionsTimedOut') : w('sessionsWaiting');
-            add(presence, add(el('div'), el('div', 'where', agentName(one.agent)), el('div', one.status === 'timed_out' ? 's-blocked small' : 'small', state)));
+            add(presence, add(el('div'), el('div', 'c-meta', agentName(one.agent)), el('div', one.status === 'timed_out' ? 't-alert' : 't-quiet', state)));
           });
           board.insertAdjacentElement('afterend', presence);
         }
@@ -2080,7 +2293,7 @@ const PAGE_SCRIPT = String.raw`
       if (since === null) since = data.now;
       var seenAt = since;
       (data.replies || []).forEach(function (reply) {
-        if (reply.at > seenAt) { since = Math.max(since, reply.at); say(reply.note, reply.ok ? 'done' : 'alert', reply.key); }
+        if (reply.at > seenAt) { since = Math.max(since, reply.at); say(reply.note, reply.ok ? 'done' : 'alert', reply.key, undefined, !reply.ok); }
       });
     }, function () {
       unreachable();
@@ -2088,6 +2301,36 @@ const PAGE_SCRIPT = String.raw`
       if (!isClosed) timer = setTimeout(refresh, 3000);
     });
   }
+  if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    // Only the panel the focus is in (or its More button) closes; with no focus anywhere, every open one does.
+    // A reply being typed elsewhere is left alone.
+    var active = document.activeElement;
+    var isIdle = !active || active === document.body;
+    pg.mores.forEach(function (one) {
+      if (!hasClass(one.box, 'open')) return;
+      var isInside = false;
+      for (var node = active; node; node = node.parentNode) if (node === one.box || node === one.toggle) isInside = true;
+      if (!isInside && !isIdle) return;
+      toggleClass(one.box, 'open', false);
+      one.fold.inert = true;
+      one.toggle.setAttribute('aria-expanded', 'false');
+      opened['more:' + one.key] = false;
+      if (isInside && active !== one.toggle) one.toggle.focus();
+    });
+  });
+  if (typeof ResizeObserver === 'function' && document.documentElement) {
+    var head = document.getElementById('head');
+    new ResizeObserver(function () { document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px'); }).observe(head);
+  }
+  VIEWS.forEach(function (name) { document.getElementById('view-' + name).addEventListener('click', function () { setView(name); }); });
+  document.getElementById('side-toggle').addEventListener('click', function () {
+    sidePick = document.getElementById('shell').getAttribute('data-rail') === '1' ? 'full' : 'rail';
+    try { localStorage.setItem('agent-board.side', sidePick); } catch (e) {}
+    fitSide();
+  });
+  if (typeof window.addEventListener === 'function') window.addEventListener('resize', fitSide);
+  fitSide();
   document.getElementById('close').addEventListener('click', function () {
     if (isUnreachable) return;
     beginPress();
@@ -2098,6 +2341,7 @@ const PAGE_SCRIPT = String.raw`
       var main = document.querySelector('main');
       main.textContent = '';
       add(main, el('p', '', w('serveClosed')));
+      document.getElementById('side').hidden = true;
     };
     call('/api/close', {}).then(function (data) {
       if (data.ok) shut();
@@ -2108,41 +2352,6 @@ const PAGE_SCRIPT = String.raw`
       }
     }, function () { say(w('serveOffline'), 'alert', 'close'); unreachable(); });
   });
-  document.getElementById('paste-go').addEventListener('click', function () {
-    if (isUnreachable) return;
-    beginPress();
-    var box = document.getElementById('paste');
-    if (!box.value.trim()) { say(w('pressEmpty'), 'alert', 'paste'); return; }
-    var pasted = box.value;
-    say(w('pressPending'), '', 'paste');
-    call('/api/paste', { text: pasted }).then(function (data) {
-      if (data.review && window.confirm(w('pasteReview', data.review.current, data.review.incoming))) {
-        return call('/api/paste', { text: pasted, reviewToken: data.review.token });
-      }
-      return data;
-    }).then(function (data) {
-      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'paste');
-      if (data.ok && box.value === pasted) box.value = '';
-      refresh();
-    }, function () { say(w('serveOffline'), 'alert', 'paste'); unreachable(); });
-  });
-  document.getElementById('relay').addEventListener('click', function () { beginPress(); copy(W.relayPrompt, 'paste'); });
-  resultSlot(document.querySelector('.paste'), 'paste', '', w('servePasteTitle'));
-  if (W.group === 'agent') {
-    const input = document.getElementById('search')
-    input.addEventListener('input', pgSearch)
-    input.addEventListener('keydown', event => {
-      if (event.key === 'Enter' && pg.hits.length) { event.preventDefault(); pg.hits[0]() }
-      if (event.key === 'Escape') { input.value = ''; pgSearch(); document.getElementById('search-open').focus() }
-    })
-    document.getElementById('search-open').addEventListener('click', () => {
-      const opener = document.getElementById('search-open')
-      const isOpen = opener.getAttribute('aria-expanded') !== 'true'
-      document.getElementById('picker').className = isOpen ? 'pg-searching' : ''
-      opener.setAttribute('aria-expanded', String(isOpen))
-      if (isOpen) input.focus({ preventScroll: true })
-    })
-  }
   refresh();
 })();
 `

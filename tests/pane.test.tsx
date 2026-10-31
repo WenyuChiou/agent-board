@@ -4887,6 +4887,11 @@ test('/progress lang switches the language and remembers it; auto goes back to t
   expect(ran.text).toBe('面板改用繁體中文。')
 })
 
+// progress.html lists what needs you in its Needs you sheet, before Working now (#546).
+const inNeeds = (page: string, text: string): boolean => { const at = page.indexOf(text); return at > page.indexOf('id="dash-needs"') && at < page.indexOf('id="dash-working"') }
+// An unprocessed inbox turn's copy; a Needs you item also uses class="ask", but starts with its kind.
+const INBOX_ASK = /<div class="ask" data-agent="[^"]*"><div class="where">/
+
 test('progress.html is written beside progress.md, and /progress open opens it in the browser', async ($, on) => {
   const ran: string[][] = []
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, ran }
@@ -4894,7 +4899,8 @@ test('progress.html is written beside progress.md, and /progress open opens it i
   await start($, '幫我重做進度面板')
   await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
   const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain('<title>進度 · Agent Board</title>')
+  expect(page).toContain('<html lang="zh-Hant">')
+  expect(page).toContain('<title>Agent Board</title>')
   expect(page).toContain('Google 暑期實習')
 
   const result = await $.command.run({ ...TIDY, args: 'open' })
@@ -4920,16 +4926,19 @@ test('progress.html shows unprocessed inbox questions before a digest and drops 
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain('data-key="section:waiting" open')
-  expect(page.split(question)).toHaveLength(3)
+  expect(inNeeds(page, question)).toBe(true)
+  expect(page).toContain('<b id="needs-n">1</b>')
   expect(page).toContain('codex')
   expect(page).not.toContain('{ broken')
   await clock.advance(5000)
   await $.command.run({ ...TIDY, args: 'open' })
   const digested = world.files.get('/home/me/.claude/progress.html') ?? ''
   expect(world.files.get(FILE)).toContain(question)
-  expect(digested).toContain(question)
-  expect(digested).not.toContain('data-key="section:inbox"')
+  expect(inNeeds(digested, question)).toBe(true)
+  // The digest recorded the question, so the pending copy is gone: no inbox hint, no unprocessed ask.
+  expect(digested).not.toContain(ZH_TW.dashInboxHint)
+  expect(digested).not.toContain('this page cannot send replies.')
+  expect(digested).not.toMatch(INBOX_ASK)
 })
 
 test('progress.html escapes inbox text and skips turns already recorded as processed', async ($, on) => {
@@ -4961,8 +4970,7 @@ test('progress.html is still written and reminders run when inboxDone is malform
   const page = world.files.get('/home/me/.claude/progress.html') ?? ''
   expect(page).toContain('Google 暑期實習')
   // With no readable record of processed turns, every inbox file counts as not processed yet.
-  expect(page).toContain('data-key="section:waiting"')
-  expect(page).toContain('Ship the demo build, OK?')
+  expect(inNeeds(page, 'Ship the demo build, OK?')).toBe(true)
   expect(world.storeReads).toContain('told')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
   expect(await ui.find({ type: 'Text', text: '● 2' })).toBeDefined()
@@ -4976,8 +4984,7 @@ test('progress.html is still written and reminders run when reading inboxDone is
   const page = world.files.get('/home/me/.claude/progress.html') ?? ''
   expect(page).toContain('Google 暑期實習')
   // With no readable record of processed turns, every inbox file counts as not processed yet.
-  expect(page).toContain('data-key="section:waiting"')
-  expect(page).toContain('Ship the demo build, OK?')
+  expect(inNeeds(page, 'Ship the demo build, OK?')).toBe(true)
   expect(world.storeReads).toContain('told')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
   expect(await ui.find({ type: 'Text', text: '● 2' })).toBeDefined()
@@ -5013,8 +5020,9 @@ test('progress.html shows only the agent and project for a pending turn without 
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain('api-gateway · codex')
-  expect(page).toContain('data-key="section:inbox"')
+  expect(inNeeds(page, 'api-gateway · codex')).toBe(true)
+  expect(page).toMatch(INBOX_ASK)
+  expect(page).toContain(ZH_TW.dashInboxHint)
   expect(page).not.toContain('Private prompt contents')
 })
 
@@ -5072,8 +5080,7 @@ test('progress.html starts no process for a pending turn whose transcript path i
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain('data-key="section:inbox"')
-  expect(page).toContain('api-gateway · codex')
+  expect(inNeeds(page, 'api-gateway · codex')).toBe(true)
   expect(page).not.toContain('Private reply contents.')
   expect(page).not.toContain(transcript)
   expect(world.reads).not.toContain(transcript)
