@@ -44,8 +44,9 @@ export const classify = (prs, commentsByNumber, now) => {
       author: authorKey(pr.body ?? '') ?? pr.author?.login ?? 'unknown',
       title: pr.title ?? '',
     }
-    if (pr.mergeStateStatus === 'DIRTY' || pr.mergeStateStatus === 'BEHIND') {
-      result.needsMain.push({ ...item, detail: pr.mergeStateStatus === 'DIRTY' ? 'no CI runs until main is merged' : 'merge main before review' })
+    // Only a conflict needs main merged first. A pull request that is merely behind main merges as it is (#607).
+    if (pr.mergeStateStatus === 'DIRTY') {
+      result.needsMain.push({ ...item, detail: 'no CI runs until main is merged' })
       continue
     }
     const head = (pr.headRefOid ?? '').toLowerCase()

@@ -6,11 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 import { bundleFiles, isBundleFile } from './bundle-text.mjs'
 
-// The open pull request cap the owner approved for CONTRIBUTING.md rule 10 (#229): per author, and in all.
-export const AUTHOR_CAP = 2
-export const TOTAL_CAP = 8
 // Pull requests from outside the team (CONTRIBUTING.md, Outside contributors; #482): two open per GitHub login and
-// four in all, counted apart from the team's.
+// four in all. The team has no limit on open pull requests (#607).
 export const OUTSIDE_LOGIN_CAP = 2
 export const OUTSIDE_TOTAL_CAP = 4
 // A small docs fix from outside the team (CONTRIBUTING.md rule 2) needs no issue line, claim or changelog fragment.
@@ -33,6 +30,7 @@ const linesOf = text => text.split(/\r?\n/)
 // The owner's agents all post as the OWNER, so only another association is outside; an association that is not
 // known (a local --body-file run) reads as the team and changes nothing.
 export const isOutsideAssociation = association => typeof association === 'string' && association.trim() !== '' && !['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association.trim().toUpperCase())
+const isKnownAssociation = association => typeof association === 'string' && association.trim() !== ''
 
 // A docs: pull request that changes only README*.md or docs/**/*.md (not docs/FORMAT.md or docs/dev/), in at most
 // three files and 50 added lines.
@@ -141,7 +139,7 @@ export const authorLine = (body, branch) => {
   const author = stripComments(body).match(/^Author:[ \t]*(.*)$/m)?.[1]?.trim() ?? ''
   const comma = author.indexOf(',')
   const name = comma === -1 ? '' : author.slice(0, comma).replace(/`/g, '').trim()
-  // The cap counts the words before the comma, so a line without one would count as a new author each time.
+  // The weekly table and the review queue name the agent by the words before the comma, so a line without one would count as a new author each time.
   if (!name || name.toLowerCase() === '<agent>') {
     output.problems.push(problem('author', 'the Author line needs "<agent>, <branch>", with the comma.', 'write "Author: <your agent name>, <this branch>".'))
   } else {
@@ -181,18 +179,6 @@ export const sections = (body, template) => {
     if (items.has(match[2].trim())) {
       output.problems.push(problem('sections', 'a template checkbox has no result or reason.', match[1] === ' ' ? 'tick it and add the result, or add "not run:" and why, or "n/a:" and why.' : 'add the result after a dash on the checked item.'))
     }
-  }
-  return output
-}
-
-// A pull request that names several issues passes each number, so the message names the issue that lacks the claim.
-export const claimed = (comments, agent, branch, issue = null) => {
-  const output = result()
-  const agentPattern = agent ? new RegExp(`\\b${escapeRegex(agent)}\\b`, 'i') : null
-  if (!comments.some(comment => comment.body.includes(branch) && agentPattern?.test(comment.body))) {
-    output.problems.push(issue === null
-      ? problem('claim', 'no issue comment claims this branch for this agent.', 'comment on the issue with "Claim: <agent>, <branch>" before starting work.')
-      : problem('claim', `no comment on #${issue} claims this branch for this agent.`, `comment on #${issue} with "Claim: <agent>, <branch>" before starting work; each issue of the pull request needs its own claim.`))
   }
   return output
 }
@@ -364,59 +350,42 @@ export const changelog = ({ text, added, issue, issues, titles, isRelease, isDoc
 
 export const needsBundle = paths => paths.some(path => /^(scripts|hooks)\//.test(path))
 
-// Rule 12 governance files; a pull request that changes one is not counted for the cap.
-export const isGovernancePath = path => path === 'AGENTS.md' || path === 'CONTRIBUTING.md' || path.startsWith('.github/')
-
-// Every agent posts from one GitHub account, so the cap counts the agent on the Author line:
-// the words before its first comma, with a dispatching lane in brackets as part of the name.
+// Every agent posts from one GitHub account, so the weekly table and the review queue tell agents apart by the
+// Author line: the words before its first comma, with a dispatching lane in brackets as part of the name.
 export const authorKey = body => {
   const author = stripComments(body).match(/^Author:[ \t]*(.*)$/m)?.[1] ?? ''
   return author.split(',')[0].replace(/`/g, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
 }
 
 const labelName = label => (typeof label === 'string' ? label : label.name)
-// A reopened pull request keeps its creation time and would take a slot ahead of newer ones, so it is opened anew.
-const capFix = 'close it and open a new pull request from the same branch when one merges, or keep the claim "waiting for a slot"; the owner may label it "cap-exempt".'
 
+// A reopened pull request keeps its creation time and would take a slot ahead of newer ones, so it is opened anew.
 const outsideCapFix = 'wait until one of the open outside pull requests merges or closes, or close this one and open a new pull request from the same branch later; do not reopen the closed one, since GitHub keeps its first creation time and it would take a slot ahead of newer ones.'
 
-// isOutside: the author is not the owner, a member or a collaborator. Such a pull request counts only against the
-// outside caps (per login and in all), the team's does not count against those, and the release, governance and
-// cap-exempt exemptions are the team's.
-export const cap = ({ open, number, body, isOutside = false, login = null, perAuthor = AUTHOR_CAP, total = TOTAL_CAP, perLogin = OUTSIDE_LOGIN_CAP, outsideTotal = OUTSIDE_TOTAL_CAP }) => {
+// Only a pull request from outside the team (the author is not the owner, a member or a collaborator) is limited: two
+// open per GitHub login and four in all, drafts included. The team has no limit (#607), so checkPr never calls this
+// for a team pull request and a team pull request is not counted here. No exemption applies: a release, governance or
+// cap-exempt pull request from outside takes a slot too.
+export const cap = ({ open, number, login = null, perLogin = OUTSIDE_LOGIN_CAP, outsideTotal = OUTSIDE_TOTAL_CAP }) => {
   const output = result()
-  const isExempt = pr => isReleaseTitle(pr.title) || pr.isGovernance || pr.labels.some(label => labelName(label) === 'cap-exempt')
-  if (!isOutside && open.some(pr => pr.number === number && isExempt(pr))) return output
   // Older pull requests keep their slots: sort by creation and judge only this one's place.
-  const counted = open.filter(pr => Boolean(pr.isOutside) === isOutside && (isOutside || !isExempt(pr))).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.number - b.number)
-  const keyOf = pr => authorKey(pr.body ?? '') ?? `unnamed #${pr.number}`
-  const self = counted.find(pr => pr.number === number) ?? { number, body, login }
+  const counted = open.filter(pr => Boolean(pr.isOutside)).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.number - b.number)
+  const self = counted.find(pr => pr.number === number) ?? { number, login }
   const queue = counted.includes(self) ? counted : [...counted, self]
   const ahead = queue.slice(0, queue.indexOf(self) + 1)
-  if (isOutside) {
-    if (ahead.length > outsideTotal) {
-      output.problems.push(problem('cap', `${ahead.length} outside pull requests would be open, over the ${outsideTotal} in all; counted: ${counted.map(pr => `#${pr.number}`).join(', ')}.`, outsideCapFix))
-    }
-    const mine = typeof (self.login ?? login) === 'string' ? (self.login ?? login).toLowerCase() : null
-    const own = mine ? ahead.filter(pr => typeof pr.login === 'string' ? pr.login.toLowerCase() === mine : pr === self) : []
-    if (own.length > perLogin) {
-      output.problems.push(problem('cap', `"${self.login ?? login}" would have ${own.length} open pull requests, over ${perLogin} per login: ${own.map(pr => pr.number === null ? 'this one' : `#${pr.number}`).join(', ')}.`, outsideCapFix))
-    }
-    return output
+  if (ahead.length > outsideTotal) {
+    output.problems.push(problem('cap', `${ahead.length} outside pull requests would be open, over the ${outsideTotal} in all; counted: ${counted.map(pr => `#${pr.number}`).join(', ')}.`, outsideCapFix))
   }
-  if (ahead.length > total) {
-    output.problems.push(problem('cap', `${ahead.length} pull requests would be open, over the ${total} in all; counted: ${counted.map(pr => `#${pr.number}`).join(', ')}.`, capFix))
-  }
-  const author = keyOf(self)
-  const own = ahead.filter(pr => keyOf(pr) === author)
-  if (own.length > perAuthor) {
-    output.problems.push(problem('cap', `"${author}" would have ${own.length} open pull requests, over ${perAuthor} per author: ${own.map(pr => pr.number === null ? 'this one' : `#${pr.number}`).join(', ')}.`, `${capFix} A dispatched agent names its lane in brackets on the Author line, as in "codex (phase1)".`))
+  const mine = typeof (self.login ?? login) === 'string' ? (self.login ?? login).toLowerCase() : null
+  const own = mine ? ahead.filter(pr => typeof pr.login === 'string' ? pr.login.toLowerCase() === mine : pr === self) : []
+  if (own.length > perLogin) {
+    output.problems.push(problem('cap', `"${self.login ?? login}" would have ${own.length} open pull requests, over ${perLogin} per login: ${own.map(pr => pr.number === null ? 'this one' : `#${pr.number}`).join(', ')}.`, outsideCapFix))
   }
   return output
 }
 
 const dayMs = 24 * 60 * 60 * 1000
-// "Claim taken over:" is a claim too (CONTRIBUTING.md rule 3), as the team's claimed() reads it.
+// "Claim taken over:" is a claim too (CONTRIBUTING.md rule 3).
 const isClaimComment = comment => /^\s*Claim(?: taken over)?:/i.test(comment.body ?? '')
 const loginOf = comment => (typeof comment.user?.login === 'string' ? comment.user.login : null)
 const writtenAt = comment => Date.parse(comment.created_at ?? '')
@@ -628,22 +597,29 @@ export const checkPr = data => {
         output.problems.push(problem('issue', `#${number} must be an open issue, not a pull request or a closed issue.`, 'use the number of an open issue covering this change.'))
       }
     }
+    // The team needs no claim (#607), so only an outside author's issue is read for one.
     if (isSmallDocs) output.info.push('claim: a small docs fix needs none.')
-    else {
+    else if (isOutside) {
       if (lookups.some(item => (item.issueComments ?? null) === null)) output.info.push('claim: skipped (offline).')
       // An outside author's claim is judged by the login that wrote it, so the Author line's name does not enter.
       for (const { number, issueData, issueComments } of lookups) {
         if (!issueComments || issueData === false) continue
-        const more = lookups.length > 1 ? number : null
-        add(isOutside ? outsideClaim({ comments: issueComments, login: data.login, branch: data.branch, issue: more, now: data.now }) : claimed(issueComments, author.agent, data.branch, more))
+        add(outsideClaim({ comments: issueComments, login: data.login, branch: data.branch, issue: lookups.length > 1 ? number : null, now: data.now }))
       }
-      if (isOutside) for (const { number, issueData } of lookups) if (issueData) add(outsideIssue(issueData, number))
+      for (const { number, issueData } of lookups) if (issueData) add(outsideIssue(issueData, number))
     }
   }
-  if (data.open === null) output.info.push('cap: skipped (offline).')
-  else if (!isOutside && (isRelease || data.paths.some(isGovernancePath) || data.labels?.some(label => labelName(label) === 'cap-exempt'))) output.info.push('cap: this pull request is exempt.')
-  else add(cap({ open: data.open, number: data.number, body: data.body, isOutside, login: data.login }))
-  if (isOutside) add(outsideNotes({ paths: data.paths, numstat: data.numstat }))
+  // An unknown author (a local --body-file run) is judged as the team, so say what was not checked: CI knows the
+  // author and holds an outside contributor to the claim and the cap.
+  if (!isOutside && !isSmallDocs && !isKnownAssociation(data.association)) {
+    output.info.push('claim and cap: not checked, the author is unknown here. The team needs neither; a contributor from outside the team needs both (CONTRIBUTING rules 3 and 10), and CI checks them.')
+  }
+  // The team has no limit on open pull requests (#607); only an outside author's are counted.
+  if (isOutside) {
+    if (data.open === null) output.info.push('cap: skipped (offline).')
+    else add(cap({ open: data.open, number: data.number, login: data.login }))
+    add(outsideNotes({ paths: data.paths, numstat: data.numstat }))
+  }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
   else add(verdict(data.prComments, data.head))
   if (data.isDraft) output.info.push(`draft: the reviewer starts when you run \`gh pr ready ${data.number}\` and comment \`Ready for review ${data.head}\`.`)
@@ -867,28 +843,31 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.prComments = null
     if (!options['--offline']) {
       const api = apiReader(options, repo, cwd)
+      // The team needs no claim and has no cap (#607), so a team author's check reads neither the open pull requests
+      // nor the issue comments: a failed lookup it does not need must not stop it. The open list also gives the
+      // author's association when the event did not.
+      const isTeam = () => isKnownAssociation(data.association) && !isOutsideAssociation(data.association)
+      if (!isTeam()) {
+        const open = []
+        for (const pr of await api('pulls?state=open', { isList: true })) {
+          open.push({ number: pr.number, title: pr.title, body: pr.body ?? '', createdAt: pr.created_at, labels: pr.labels, isOutside: isOutsideAssociation(pr.author_association), association: pr.author_association, login: pr.user?.login ?? null })
+        }
+        data.open = open
+        const own = open.find(pr => pr.number === data.number)
+        if (own) {
+          data.association ??= own.association
+          data.login ??= own.login ?? undefined
+        }
+      }
       const [first, ...more] = [...new Set(issueLine(data.body, data.title).issues)]
       const lookup = async number => {
         const issueData = await api(`issues/${number}`, { isMissingAllowed: true })
-        return { issueData, issueComments: issueData === false ? [] : await api(`issues/${number}/comments`, { isList: true }) }
+        return { issueData, issueComments: issueData === false || isTeam() ? [] : await api(`issues/${number}/comments`, { isList: true }) }
       }
       if (first !== undefined) {
         Object.assign(data, await lookup(first))
         data.moreIssues = {}
         for (const number of more) data.moreIssues[number] = await lookup(number)
-      }
-      const open = []
-      for (const pr of await api('pulls?state=open', { isList: true })) {
-        // An outside pull request has no governance exemption, so its files are not listed.
-        const isOutside = isOutsideAssociation(pr.author_association)
-        const files = isOutside ? [] : await api(`pulls/${pr.number}/files`, { isList: true })
-        open.push({ number: pr.number, title: pr.title, body: pr.body ?? '', createdAt: pr.created_at, labels: pr.labels, isGovernance: files.some(file => isGovernancePath(file.filename)), isOutside, association: pr.author_association, login: pr.user?.login ?? null })
-      }
-      data.open = open
-      const own = open.find(pr => pr.number === data.number)
-      if (own) {
-        data.association ??= own.association
-        data.login ??= own.login ?? undefined
       }
       data.prComments = data.number === null ? [] : await api(`issues/${data.number}/comments`, { isList: true })
     }
