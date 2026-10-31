@@ -1,0 +1,2 @@
+- **Antigravity / Resumed conversations** · Resumed Antigravity conversations receive their bound report instructions on the first observed turn, and local agents without a session flag match their active working folder automatically (#600).
+  Tests: `resumed Antigravity conversations receive bound --codex-report context and non-Codex agents infer session from folderDigest`.

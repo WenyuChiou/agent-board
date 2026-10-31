@@ -626,6 +626,13 @@ export const observeQuestions = (
       if (row.isWaiting) keys[questionSlot(row.scope, row.index)] = record.id
     })
   }
+  for (const record of records) {
+    if (!assigned.has(record.id) && !frozen.has(record.scope) && record.source?.kind === 'block' && record.source.agent !== '' && record.source.session !== '' && !seen.some(row => row.scope === record.scope) && seen.some(row => row.source.kind === 'block' && row.source.agent === record.source?.agent && row.source.session === record.source?.session && row.source.project !== record.source?.project)) {
+      record.isUnresolved = false
+      record.isPresent = false
+      record.isWaiting = false
+    }
+  }
   if (isSettled) {
     for (const record of records) {
       if (!assigned.has(record.id) && !frozen.has(record.scope)) {

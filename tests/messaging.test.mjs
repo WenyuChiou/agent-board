@@ -6,7 +6,7 @@ import { createServer } from 'node:http'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
-import { claimMessages, disconnectMessages, messageReceipt, queueMessage } from '../hooks/messaging.ts'
+import { acknowledgeHookMessages, claimHookMessages, claimMessages, disconnectMessages, hookDeliveryPrompt, messageReceipt, queueHookMessage, queueMessage } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt } from '../scripts/message-client.mjs'
 import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
@@ -903,4 +903,57 @@ test('all 14 AI agent brands attach and exchange ACK messages on the same board 
     for (const r of receivers.values()) await r.close()
   }
 }))
+
+test('hook-queued messages claim once on turn start and transition to acknowledged on ACK report', () => {
+  const target = { agent: 'antigravity', session: 'ag-session-1', active: true }
+  const queued = queueHookMessage(
+    { messages: [] },
+    { id: 'AB-HOOK-001', text: 'Ping via lifecycle hook', from: 'codex:sender-1' },
+    'codex:sender-1',
+    target,
+    1000,
+  )
+  assert.equal(queued.message.status, 'queued')
+  assert.equal(queued.message.to, 'antigravity:ag-session-1')
+  assert.equal(
+    queueHookMessage(queued.state, { id: 'AB-HOOK-001', text: 'Ping via lifecycle hook', from: 'codex:sender-1' }, 'codex:sender-1', target, 1005).state,
+    queued.state,
+  )
+  assert.throws(
+    () => queueHookMessage(queued.state, { id: 'AB-HOOK-001', text: 'Different body', from: 'codex:sender-1' }, 'codex:sender-1', target, 1006),
+    /ID_CONFLICT/,
+  )
+  assert.equal(claimHookMessages(queued.state, 'codex', 'ag-session-1', 1010).messages.length, 0)
+  const claimed = claimHookMessages(queued.state, 'antigravity', 'ag-session-1', 1020)
+  assert.equal(claimed.messages.length, 1)
+  assert.equal(claimed.messages[0].status, 'accepted')
+  assert.equal(claimHookMessages(claimed.state, 'antigravity', 'ag-session-1', 1030).messages.length, 0)
+  const prompt = hookDeliveryPrompt(claimed.messages[0])
+  assert.match(prompt, /AB-HOOK-001/)
+  assert.match(prompt, /ACK AB-HOOK-001/)
+  const acked = acknowledgeHookMessages(claimed.state, 'antigravity', 'ag-session-1', ['- [x] ACK AB-HOOK-001 ready'], 1040)
+  assert.deepEqual(acked.acknowledged.map(m => m.id), ['AB-HOOK-001'])
+  assert.equal(acked.state.messages[0].status, 'acknowledged')
+  assert.equal(acked.state.messages[0].reply, 'ACK AB-HOOK-001 ready')
+})
+
+test('moving a live session block to a new project heading supersedes its old project question record', async () => fixture(async (board, dir) => {
+  const session = '11111111-2222-4333-8444-555555555555'
+  const now = new Date().toISOString()
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Uncategorized\n<!-- auto session=abcdef01 agent=codex resume=${session} state=waiting updated=${now} -->\n### Deploy service\n- [?] Confirm deployment target?\n<!-- /auto session=abcdef01 -->\n`)
+  const first = (await board.call('/api/board')).body.model
+  assert.equal(first.asks.length, 1)
+  assert.equal(first.asks[0].project, 'Uncategorized')
+
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## agent-board-repo\n<!-- auto session=abcdef01 agent=codex resume=${session} state=waiting updated=${now} -->\n### Deploy service\n- [?] Confirm deployment target?\n<!-- /auto session=abcdef01 -->\n`)
+  const second = (await board.call('/api/board')).body.model
+  assert.equal(second.asks.length, 1)
+  assert.equal(second.asks[0].project, 'agent-board-repo')
+  const ledger = JSON.parse(readFileSync(join(dir, 'progress-questions.json'), 'utf8'))
+  const unresolved = ledger.records.filter(r => r.isUnresolved)
+  assert.equal(unresolved.length, 1)
+  assert.equal(unresolved[0].source.project, 'agent-board-repo')
+}))
+
+
 
