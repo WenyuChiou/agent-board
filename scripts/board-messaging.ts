@@ -33,15 +33,38 @@ export const createMessaging = (directory: string) => {
     }
     if (new Set(saved.messages.map(one => one.id)).size !== saved.messages.length) throw new Error('INVALID_MESSAGE_STORE')
     state = { messages: saved.messages }
-    for (const id of new Set(state.messages.map(one => one.target))) state = disconnectMessages(state, id, Date.now())
+    for (const id of new Set(state.messages.map(one => one.target))) if (!id.startsWith('hook_')) state = disconnectMessages(state, id, Date.now())
+  }
+  const syncHookMessages = (current: MessageState): MessageState => {
+    if (!existsSync(file)) return current
+    try {
+      const disk = JSON.parse(readFileSync(file, 'utf8')) as { version: unknown; messages: MessageState['messages'] }
+      if (disk.version === 1 && Array.isArray(disk.messages)) {
+        const diskHookMessages = disk.messages.filter(m => typeof m.target === 'string' && m.target.startsWith('hook_'))
+        if (diskHookMessages.length > 0) {
+          const currentIds = new Set(current.messages.map(m => m.id))
+          const newFromDisk = diskHookMessages.filter(m => !currentIds.has(m.id))
+          const updated = current.messages.map(m => {
+            if (typeof m.target === 'string' && m.target.startsWith('hook_')) {
+              const onDisk = diskHookMessages.find(d => d.id === m.id)
+              if (onDisk && onDisk.updated > m.updated) return onDisk
+            }
+            return m
+          })
+          return { messages: [...updated, ...newFromDisk] }
+        }
+      }
+    } catch {}
+    return current
   }
   const save = (next: MessageState): void => {
     if (next === state) return
+    const merged = syncHookMessages(next)
     const temp = `${file}.${process.pid}.tmp`
     try {
-      writeFileSync(temp, JSON.stringify({ version: 1, ...next }), { mode: 0o600, flag: 'wx' })
+      writeFileSync(temp, JSON.stringify({ version: 1, ...merged }), { mode: 0o600, flag: 'wx' })
       renameSync(temp, file)
-      state = next
+      state = merged
     } finally { if (existsSync(temp)) unlinkSync(temp) }
   }
   // Persist reconciliation even if a server closes before a browser polls it again.
@@ -61,6 +84,7 @@ export const createMessaging = (directory: string) => {
     close: () => { if (existsSync(lock) && readFileSync(lock, 'utf8') === String(process.pid)) unlinkSync(lock) },
     snapshot: (now: number, reports: readonly ProgressBinding[] = []) => {
       expire(now)
+      state = syncHookMessages(state)
       for (const [id, one] of expectations) expectations.set(id, observeSession(one, reports, now))
       return {
         enabled: true, connections: [...connections.values()].map(({ secret: _secret, ...one }) => one), messages: state.messages,

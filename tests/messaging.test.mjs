@@ -1,12 +1,12 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
-import { claimMessages, disconnectMessages, messageReceipt, queueMessage } from '../hooks/messaging.ts'
+import { acknowledgeHookMessages, claimHookMessages, claimMessages, disconnectMessages, HOOK_CLAIM_TIMEOUT_MS, hookDeliveryPrompt, hookTargetId, messageReceipt, queueHookMessage, queueMessage } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt } from '../scripts/message-client.mjs'
 import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
@@ -872,3 +872,197 @@ test('an Antigravity response without its ACK stays uncertain and is never repla
     await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.length === 0)
   } finally { await receiver.close() }
 }))
+
+test('hook-queued messages claim once on turn start and transition to acknowledged on ACK report', () => {
+  const target = { agent: 'antigravity', session: 'ag-session-1', active: true }
+  const queued = queueHookMessage(
+    { messages: [] },
+    { id: 'AB-HOOK-001', text: 'Ping via lifecycle hook', from: 'codex:sender-1' },
+    'codex:sender-1',
+    target,
+    1000,
+  )
+  assert.equal(queued.message.status, 'queued')
+  assert.equal(queued.message.to, 'antigravity:ag-session-1')
+  assert.equal(queued.message.target, hookTargetId('antigravity', 'ag-session-1'))
+  assert.equal(
+    queueHookMessage(queued.state, { id: 'AB-HOOK-001', text: 'Ping via lifecycle hook', from: 'codex:sender-1' }, 'codex:sender-1', target, 1005).state,
+    queued.state,
+  )
+  assert.throws(
+    () => queueHookMessage(queued.state, { id: 'AB-HOOK-001', text: 'Different body', from: 'codex:sender-1' }, 'codex:sender-1', target, 1006),
+    /ID_CONFLICT/,
+  )
+  assert.equal(claimHookMessages(queued.state, 'codex', 'ag-session-1', 1010).messages.length, 0)
+  const claimed = claimHookMessages(queued.state, 'antigravity', 'ag-session-1', 1020)
+  assert.equal(claimed.messages.length, 1)
+  assert.equal(claimed.messages[0].status, 'accepted')
+  assert.equal(claimHookMessages(claimed.state, 'antigravity', 'ag-session-1', 1030).messages.length, 0)
+  const prompt = hookDeliveryPrompt(claimed.messages[0])
+  assert.match(prompt, /AB-HOOK-001/)
+  assert.match(prompt, /ACK AB-HOOK-001/)
+  const acked = acknowledgeHookMessages(claimed.state, 'antigravity', 'ag-session-1', ['- [x] ACK AB-HOOK-001 ready'], 1040)
+  assert.deepEqual(acked.acknowledged.map(m => m.id), ['AB-HOOK-001'])
+  assert.equal(acked.state.messages[0].status, 'acknowledged')
+  assert.equal(acked.state.messages[0].reply, 'ACK AB-HOOK-001 ready')
+})
+
+test('starting message server after a hook send preserves queued hook messages without DISCONNECTED or INVALID_ID', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-messages-hook-'))
+  const messagesDir = join(dir, 'messages')
+  mkdirSync(messagesDir, { recursive: true })
+  const target = { agent: 'antigravity', session: 'ag-hook-start', active: true }
+  const queued = queueHookMessage(
+    { messages: [] },
+    { id: 'AB-HOOK-START-1', text: 'Hook message queued before server start' },
+    'board',
+    target,
+    1000,
+  )
+  writeFileSync(join(messagesDir, 'messages.json'), JSON.stringify({ version: 1, ...queued.state }, null, 2))
+  const board = await start(dir)
+  try {
+    const model = (await board.call('/api/board')).body.messaging
+    assert.equal(model.messages.length, 1)
+    assert.equal(model.messages[0].id, 'AB-HOOK-START-1')
+    assert.equal(model.messages[0].status, 'queued')
+    assert.equal(model.messages[0].error, '')
+    assert.ok(model.messages[0].target.startsWith('hook_'))
+  } finally {
+    await board.close().catch(() => undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('accepted hook claims expire back to queued after claim timeout', () => {
+  const target = { agent: 'codex', session: 'sess-timeout-1', active: true }
+  const queued = queueHookMessage(
+    { messages: [] },
+    { id: 'AB-HOOK-TTL-1', text: 'TTL expiration check' },
+    'board',
+    target,
+    1000,
+  )
+  const claimed = claimHookMessages(queued.state, 'codex', 'sess-timeout-1', 1010)
+  assert.equal(claimed.messages.length, 1)
+  assert.equal(claimed.messages[0].status, 'accepted')
+
+  // Under timeout: still busy, no new claim
+  const busy = claimHookMessages(claimed.state, 'codex', 'sess-timeout-1', 1010 + HOOK_CLAIM_TIMEOUT_MS - 1)
+  assert.equal(busy.messages.length, 0)
+
+  // At or after timeout: expired back to queued and claimed again
+  const expiredAndReclaimed = claimHookMessages(claimed.state, 'codex', 'sess-timeout-1', 1010 + HOOK_CLAIM_TIMEOUT_MS)
+  assert.equal(expiredAndReclaimed.messages.length, 1)
+  assert.equal(expiredAndReclaimed.messages[0].id, 'AB-HOOK-TTL-1')
+  assert.equal(expiredAndReclaimed.messages[0].status, 'accepted')
+})
+
+test('--codex-send queues hook-driven messages and delivers them via lifecycle hook stdout with ACK reconciliation on --codex-report', () => {
+  const home = mkdtempSync(join(tmpdir(), 'codex-send-test-'))
+  const setup = resolve('scripts/setup-codex.mjs')
+  const isolated = ['--home', home, '--codex-dir', join(home, '.codex'), '--grok-dir', join(home, '.grok'), '--hermes-dir', join(home, '.hermes')]
+  const run = (file, args, input) => spawnSync(process.execPath, [file, ...args], { env: { ...process.env, NO_COLOR: '1' }, input: input === undefined ? undefined : JSON.stringify(input), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const install = (...args) => run(setup, [...isolated, ...args])
+  const root = join(home, '.agent-board')
+  const script = join(root, 'agent-board.mjs')
+  const command = (args, input) => run(script, [...isolated, ...args], input)
+
+  try {
+    install('--agent', 'codex', '--apply')
+    install('--agent', 'antigravity', '--apply')
+    install('--agent', 'cursor', '--apply')
+    install('--agent', 'opencode', '--apply')
+    const agSession = 'ag-hook-msg-12345678'
+    const cursorSession = 'cursor-hook-msg-12345678'
+    const opencodeSession = 'opencode-hook-msg-12345678'
+
+    // Offline / non-existent session is rejected
+    const offline = command(['--codex-send', '--agent', 'antigravity', '--session', agSession], {
+      id: 'AB-HOOK-001',
+      from: 'codex:sender-1',
+      text: 'Check status and reply ACK AB-HOOK-001',
+    })
+    assert.notEqual(offline.status, 0)
+    assert.match(offline.stderr, /OFFLINE/)
+
+    // Start the Antigravity session
+    const startAg = command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+      conversationId: agSession,
+    })
+    assert.equal(startAg.status, 0, startAg.stderr)
+
+    // Queue message via --codex-send
+    const sent = command(['--codex-send', '--agent', 'antigravity', '--session', agSession], {
+      id: 'AB-HOOK-001',
+      from: 'codex:sender-1',
+      text: 'Check status and reply ACK AB-HOOK-001',
+    })
+    assert.equal(sent.status, 0, sent.stderr)
+    assert.equal(JSON.parse(sent.stdout).status, 'queued')
+
+    // Fire PreInvocation to deliver via injectSteps
+    const preInv = command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+      conversationId: agSession,
+      invocationNum: 1,
+    })
+    assert.equal(preInv.status, 0, preInv.stderr)
+    const injected = JSON.parse(preInv.stdout)
+    assert.ok(Array.isArray(injected.injectSteps) && injected.injectSteps.length === 1)
+    assert.match(injected.injectSteps[0].ephemeralMessage, /AB-HOOK-001/)
+    assert.match(injected.injectSteps[0].ephemeralMessage, /ACK AB-HOOK-001/)
+
+    // Second PreInvocation does not replay the claimed message
+    const preInv2 = command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+      conversationId: agSession,
+      invocationNum: 2,
+    })
+    assert.equal(preInv2.status, 0, preInv2.stderr)
+    assert.deepEqual(JSON.parse(preInv2.stdout), {})
+
+    // Acknowledge via --codex-report steps
+    const report = command(['--codex-report', '--agent', 'antigravity', '--session', agSession], {
+      title: 'Antigravity reply task',
+      state: 'waiting',
+      steps: ['- [x] ACK AB-HOOK-001 status idle'],
+    })
+    assert.equal(report.status, 0, report.stderr)
+    assert.deepEqual(JSON.parse(report.stdout).acknowledged, ['AB-HOOK-001'])
+    const stored = JSON.parse(readFileSync(join(root, 'messages.json'), 'utf8'))
+    assert.equal(stored.messages[0].status, 'acknowledged')
+
+    // Also verify Cursor beforeSubmitPrompt additional_context delivery
+    assert.equal(command(['--codex-event', '--agent', 'cursor'], {
+      conversation_id: cursorSession,
+      hook_event_name: 'sessionStart',
+    }).status, 0)
+    assert.equal(command(['--codex-send', '--agent', 'cursor', '--session', cursorSession], {
+      id: 'AB-HOOK-002',
+      from: 'antigravity:' + agSession,
+      text: 'Cursor hook ping',
+    }).status, 0)
+    const cursorPrompt = command(['--codex-event', '--agent', 'cursor'], {
+      conversation_id: cursorSession,
+      generation_id: 'gen-1',
+      hook_event_name: 'beforeSubmitPrompt',
+      prompt: 'Continue',
+    })
+    assert.equal(cursorPrompt.status, 0, cursorPrompt.stderr)
+    assert.match(JSON.parse(cursorPrompt.stdout).additional_context, /AB-HOOK-002/)
+
+    // Verify hosts that do not read hook output (OpenCode) do not claim hook messages
+    assert.equal(command(['--agent-status', '--agent', 'opencode', '--state', 'waiting'], { session_id: opencodeSession }).status, 0)
+    assert.equal(command(['--codex-send', '--agent', 'opencode', '--session', opencodeSession], {
+      id: 'AB-HOOK-003',
+      from: 'board',
+      text: 'Message to OpenCode',
+    }).status, 0)
+    const opencodeWorking = command(['--agent-status', '--agent', 'opencode', '--state', 'working'], { session_id: opencodeSession })
+    assert.equal(opencodeWorking.status, 0)
+    const storedAfterOpencode = JSON.parse(readFileSync(join(root, 'messages.json'), 'utf8'))
+    const opencodeMsg = storedAfterOpencode.messages.find(m => m.id === 'AB-HOOK-003')
+    assert.equal(opencodeMsg.status, 'queued')
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  }
+})

@@ -25,6 +25,8 @@ import { PROMPT_EVENTS } from '../hooks/inbox'
 import { windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
+import { acknowledgeHookMessages, claimHookMessages, hookDeliveryPrompt, queueHookMessage } from '../hooks/messaging'
+import type { MessageState } from '../hooks/messaging'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown> }
@@ -186,7 +188,7 @@ const input = async (): Promise<Json> => {
     text += String(chunk)
     if (Buffer.byteLength(text) > 1024 * 1024) throw new Error('INPUT_TOO_LARGE')
   }
-  return object(JSON.parse(text))
+  return object(JSON.parse(text.replace(/^\uFEFF/, '')))
 }
 const quote = (path: string): string => {
   if (/["`$%\r\n]/.test(path)) throw new Error('UNSAFE_COMMAND_PATH')
@@ -258,7 +260,7 @@ const saveReporterTail = (progress: string, fragment: Buffer): string => {
 const filesByFolder = (mode: string, agent: string): boolean => mode === '--codex-event' || mode === '--agent-status' && agent === 'opencode'
 
 export const runCodexLocal = async (args: string[], boardPath: string, s: Strings): Promise<boolean> => {
-  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-event', '--agent-status'].find(one => args.includes(one))
+  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-send', '--codex-event', '--agent-status'].find(one => args.includes(one))
   if (!mode) return false
   const flag = (name: string): string | undefined => {
     const index = args.indexOf(name)
@@ -310,6 +312,49 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
   const manifest: Manifest = { files: object(loaded.files ?? {}) as Record<string, string>, groups: object(loaded.groups ?? {}) }
   const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
+  const messagesDir = flag('--messages-dir') ? resolve(flag('--messages-dir')!) : root
+  const messagesFile = join(messagesDir, 'messages.json')
+  const readHookMessages = (): MessageState => {
+    const text = readLocal(messagesFile)
+    if (text === null) return { messages: [] }
+    const parsed = object(JSON.parse(text))
+    if (parsed.version !== 1 || !Array.isArray(parsed.messages)) throw new Error('INVALID_MESSAGE_STORE')
+    return { messages: parsed.messages as MessageState['messages'] }
+  }
+  const writeHookMessages = (state: MessageState, deadlineCheck?: () => void): void => {
+    atomic(messagesFile, `${JSON.stringify({ version: 1, messages: state.messages }, null, 2)}\n`, deadlineCheck, true)
+  }
+
+  if (mode === '--codex-send') {
+    const raw: Json = process.stdin.isTTY && flag('--id') !== undefined && flag('--text') !== undefined ? {} : await input()
+    const targetAgent = (typeof raw.agent === 'string' ? raw.agent : agent) as LocalAgent
+    if (!localAgents.includes(targetAgent)) throw new Error('UNSUPPORTED_AGENT')
+    const targetSession = flag('--session') ?? (typeof raw.session === 'string' ? raw.session : typeof raw.target === 'string' ? raw.target.replace(/^[a-z]+:/, '') : undefined)
+    const sent = withLocalLock(`${progress}.agent-board-lock`, () => {
+      const recordPath = typeof targetSession === 'string' ? join(root, 'sessions', `${hash(`${targetAgent}:${targetSession}`)}.json`) : ''
+      const saved = recordPath && existsSync(recordPath) ? readLocal(recordPath) : null
+      const record = saved === null ? null : object(JSON.parse(saved))
+      const active = record !== null && record.state !== 'ended'
+      const turn = record !== null && typeof record.turn === 'string' ? record.turn : null
+      const state = readHookMessages()
+      const queued = queueHookMessage(
+        state,
+        {
+          ...raw,
+          ...(flag('--id') !== undefined ? { id: flag('--id') } : {}),
+          ...(flag('--turn') !== undefined ? { turn: flag('--turn') } : {}),
+          ...(flag('--text') !== undefined ? { text: flag('--text') } : {}),
+        },
+        flag('--from') ?? (typeof raw.from === 'string' ? raw.from : 'board'),
+        typeof targetSession === 'string' ? { agent: targetAgent, session: targetSession, turn, active } : undefined,
+        Date.now(),
+      )
+      if (queued.state !== state) writeHookMessages(queued.state)
+      return queued.message
+    })
+    output(sent)
+    return true
+  }
 
   if (mode === '--codex-event' || mode === '--codex-report' || mode === '--agent-status' || mode === '--recover-hooks') {
     const isRecovery = mode === '--recover-hooks'
@@ -561,6 +606,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     let delay = 50
     let processed = 0
     let report: CodexReport | undefined
+    let acknowledgedIds: string[] = []
+    let deliveredMessage: string | undefined
+    const canDeliverHookMessage = current !== undefined && ['antigravity', 'codex', 'cursor'].includes(current.agent) && (
+      (current.agent === 'antigravity' && (current.event === 'SessionStart' || current.event === 'PreInvocation')) ||
+      (current.agent === 'codex' && (mode === '--codex-event' || current.event === 'SessionStart' || current.event === 'UserPromptSubmit')) ||
+      (current.agent === 'cursor' && (mode === '--codex-event' || current.event === 'sessionStart' || current.event === 'beforeSubmitPrompt'))
+    )
     for (;;) {
       try {
         checkDeadline()
@@ -624,6 +676,29 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           if (current === undefined) return
           if (isInferredReport && reportSession() !== current.session) throw new Error('UNBOUND_REPORT')
           const applied = apply(current)
+          if (existsSync(messagesFile)) {
+            if (mode === '--codex-report') {
+              const state = readHookMessages()
+              const candidates = [
+                typeof raw.reply === 'string' ? raw.reply : '',
+                typeof raw.ack === 'string' ? raw.ack : '',
+                applied.title,
+                ...applied.steps,
+              ]
+              const acked = acknowledgeHookMessages(state, current.agent, current.session, candidates, Date.now())
+              if (acked.acknowledged.length > 0) {
+                writeHookMessages(acked.state, checkDeadline)
+                acknowledgedIds = acked.acknowledged.map(one => one.id)
+              }
+            } else if (canDeliverHookMessage) {
+              const state = readHookMessages()
+              const claimed = claimHookMessages(state, current.agent, current.session, Date.now())
+              if (claimed.messages.length > 0) {
+                writeHookMessages(claimed.state, checkDeadline)
+                deliveredMessage = hookDeliveryPrompt(claimed.messages[0]!)
+              }
+            }
+          }
           if (queuedFile !== undefined) {
             try { unlinkSync(queuedFile) } catch (error) {
               if ((error as { code?: string }).code !== 'ENOENT') throw error
@@ -663,24 +738,26 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     const { session } = current
     if (mode !== '--codex-report' && args.includes('--hook-recovery-parent') && queuedFile !== undefined && existsSync(queuedFile)) process.stderr.write('AGENT_BOARD_HOOK_PENDING\n')
-    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress })
-    else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
+    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress, ...(acknowledgedIds.length ? { acknowledged: acknowledgedIds } : {}) })
+    else if (agent === 'cursor') output({ ...(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {}), ...(deliveredMessage ? { additional_context: deliveredMessage } : {}) })
     else if (agent === 'antigravity') {
       // The host supplies the binding; the agent supplies semantic summaries. A first
       // invocation also covers resumed conversations that have no SessionStart event.
       const isStart = current.event === 'SessionStart'
       const isFirst = current.event === 'PreInvocation' && raw.invocationNum === 0
       // Legacy connect runs a bundle beside its chosen progress file, outside root.
-      const context = isStart || isFirst ? s.localAgentAntigravityContext(boardRun(process.argv[1] ?? script, [
+      const baseContext = isStart || isFirst ? s.localAgentAntigravityContext(boardRun(process.argv[1] ?? script, [
         '--codex-report', '--agent', 'antigravity', '--session', session,
         '--progress-file', progress, '--home', home, '--data-dir', root,
       ])) : ''
-      output(isStart ? { injectSteps: [{ systemMessage: { systemMessage: context } }] } : isFirst ? { injectSteps: [{ ephemeralMessage: context }] } : {})
+      const context = [baseContext, deliveredMessage].filter(Boolean).join('\n\n')
+      output(isStart && context ? { injectSteps: [{ systemMessage: { systemMessage: context } }] } : context ? { injectSteps: [{ ephemeralMessage: context }] } : {})
     } else if (agent === 'gemini') output({})
     else if (agent === 'codex' && mode === '--codex-event') {
       const note = codexStartNote(raw, current.run, session, progress, s)
-      // Codex adds `additionalContext` to the conversation as developer context.
-      if (note !== null) output({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: note } })
+      const context = [note, deliveredMessage].filter(Boolean).join('\n\n')
+      const eventName = String(raw.hook_event_name ?? raw.hookEventName ?? 'SessionStart')
+      if (context) output({ hookSpecificOutput: { hookEventName: eventName, additionalContext: context } })
     }
     return true
   }
