@@ -13,7 +13,7 @@ import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
-import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, progressReport, unwrittenEntries } from '../hooks/journal'
+import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, parsePendingArchive, pendingArchivePath, progressReport, unwrittenEntries } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
@@ -4510,4 +4510,19 @@ test('archive entries are counted with their number: a new twin of an archived e
   expect(missingEntries(['', archive(3)], [entry, entry])).toEqual([])
   expect(missingEntries([archive(3)], [entry], new Map([[entry, 2]]))).toEqual([])
   expect(missingEntries([archive(2)], [entry], new Map([[entry, 2]]))).toEqual([entry])
+})
+
+test('a pending archive note distinguishes crash-recovery retries from distinct same-day twins', () => {
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const archive = `# Archive\n\n${entry}\n`
+  expect(pendingArchivePath('/work/progress.md')).toBe('/work/progress-archive.pending')
+  expect(parsePendingArchive('')).toEqual([])
+  expect(parsePendingArchive('broken')).toEqual([])
+  expect(parsePendingArchive(JSON.stringify({ entries: [entry] }))).toEqual([entry])
+  expect(parsePendingArchive(JSON.stringify([entry]))).toEqual([entry])
+
+  // When pending holds the entry and archive holds it: crash recovery skips re-adding.
+  expect(missingEntries([archive], [entry], new Map(), [entry])).toEqual([])
+  // When pending does not hold the entry: a same-day twin is added even if archive already has one.
+  expect(missingEntries([archive], [entry], new Map(), [])).toEqual([entry])
 })

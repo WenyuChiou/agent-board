@@ -28,7 +28,7 @@ import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, c
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
-import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, missingEntries, parseJournal, unwrittenEntries } from '../hooks/journal'
+import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, missingEntries, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
@@ -706,6 +706,8 @@ const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
 // the same entry text, and both leave (#231).
 const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[] } | null | typeof AGAIN, now: number): number | null => {
   const archived = new Map<string, number>()
+  const pendingFile = pendingArchivePath(path)
+  let pending = existsSync(pendingFile) ? parsePendingArchive(read(pendingFile)) : []
   const wrote = rewrite(path, (text, isLast) => {
     const taken = take(text, isLast)
     if (taken === AGAIN) return AGAIN
@@ -718,14 +720,21 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
       const before = earlier === undefined ? '' : read(earlier)
       const kept = rewrite(part, past => {
         // A previous process may have saved the archive but failed to remove the task.
-        const missing = missingEntries([past, before], fresh, archived)
-        return missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${missing.join('\n\n')}\n`
+        const missing = missingEntries([past, before], fresh, archived, pending)
+        if (missing.length === 0) return past
+        try { writeFileSync(pendingFile, JSON.stringify({ entries: fresh }) + '\n') } catch {}
+        pending = fresh
+        return `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${missing.join('\n\n')}\n`
       })
       if (kept === null) return null
       for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     }
     return taken.text
   })
+
+  if (wrote !== null && existsSync(pendingFile)) {
+    try { unlinkSync(pendingFile) } catch {}
+  }
 
   return wrote === null ? null : [...archived.values()].reduce((sum, one) => sum + one, 0)
 }

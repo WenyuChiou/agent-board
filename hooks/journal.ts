@@ -26,6 +26,26 @@ const localStamp = (now: number): string => {
 // This month's archive beside progress.md, where finished work moves.
 export const archivePath = (progressPath: string, now: number): string => `${progressPath.replace(/\.md$/i, '')}-archive-${localDay(now).slice(0, 7)}.md`
 
+// A pending-save note written before the archive and cleared after progress.md is updated (#560),
+// telling crash-recovery retries apart from distinct same-day twins with identical text.
+export const pendingArchivePath = (progressPath: string): string =>
+  `${progressPath.replace(/\.md$/i, '')}-archive.pending`
+
+export const parsePendingArchive = (text: string): string[] => {
+  if (text.trim() === '') return []
+  try {
+    const data: unknown = JSON.parse(text)
+    const list = Array.isArray(data)
+      ? data.filter((item): item is string => typeof item === 'string')
+      : data !== null && typeof data === 'object' && 'entries' in data && Array.isArray((data as { entries: unknown }).entries)
+        ? (data as { entries: unknown[] }).entries.filter((item): item is string => typeof item === 'string')
+        : []
+    return list.map(item => item.replace(/\r\n/g, '\n').replace(/\n+$/, ''))
+  } catch {
+    return []
+  }
+}
+
 export const journalPath = (progressPath: string, now: number): string =>
   `${progressPath.replace(/\.md$/i, '')}-journal-${localDay(now).slice(0, 7)}.md`
 
@@ -55,15 +75,48 @@ export const unwrittenEntries = (entries: readonly string[], written: ReadonlyMa
   })
 }
 
-// The entries the archive files (`pasts`) do not hold yet. A process that saved the archive but
-// did not remove the tasks saved all of them in one write, so when the files hold at least as
-// many copies of an entry as are going, besides the ones this run wrote (`written`), they are
-// that save. When they hold fewer, those copies are older tasks and every new one is added.
-export const missingEntries = (pasts: readonly string[], entries: readonly string[], written: ReadonlyMap<string, number> = new Map()): string[] => {
-  const going = new Map<string, number>()
-  for (const entry of entries) going.set(entry, (going.get(entry) ?? 0) + 1)
-  const isHeld = new Map([...going].map(([entry, count]) => [entry, pasts.reduce((sum, past) => sum + archiveEntryCount(past, entry), 0) - (written.get(entry) ?? 0) >= count]))
-  return entries.filter(entry => isHeld.get(entry) !== true)
+// The entries the archive files (`pasts`) do not hold yet. When `pending` is provided, only
+// entries recorded in an interrupted save attempt and already present in the archive are skipped (#560).
+// When `pending` is omitted, an archive holding at least as many copies as are going treats them
+// as that save.
+export const missingEntries = (
+  pasts: readonly string[],
+  entries: readonly string[],
+  written: ReadonlyMap<string, number> = new Map(),
+  pending?: readonly string[],
+): string[] => {
+  const norm = (s: string): string => s.replace(/\r\n/g, '\n').replace(/\n+$/, '')
+  if (pending === undefined) {
+    const going = new Map<string, number>()
+    for (const entry of entries) {
+      const key = norm(entry)
+      going.set(key, (going.get(key) ?? 0) + 1)
+    }
+    const isHeld = new Map([...going].map(([key, count]) => [key, pasts.reduce((sum, past) => sum + archiveEntryCount(past, key), 0) - (written.get(key) ?? 0) >= count]))
+    return entries.filter(entry => isHeld.get(norm(entry)) !== true)
+  }
+  const pendingCount = new Map<string, number>()
+  for (const entry of pending) {
+    const key = norm(entry)
+    pendingCount.set(key, (pendingCount.get(key) ?? 0) + 1)
+  }
+  const inPastCount = new Map<string, number>()
+  for (const entry of entries) {
+    const key = norm(entry)
+    if (!inPastCount.has(key)) {
+      inPastCount.set(key, pasts.reduce((sum, past) => sum + archiveEntryCount(past, entry), 0) - (written.get(entry) ?? 0))
+    }
+  }
+  const consumed = new Map<string, number>()
+  return entries.filter(entry => {
+    const key = norm(entry)
+    const needed = (consumed.get(key) ?? 0) + 1
+    consumed.set(key, needed)
+    const inPending = pendingCount.get(key) ?? 0
+    const inPast = inPastCount.get(key) ?? 0
+    const isAlreadySaved = needed <= inPending && needed <= inPast
+    return !isAlreadySaved
+  })
 }
 
 // The month before, so a week that spans two months reads both files.
