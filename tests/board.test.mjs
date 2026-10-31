@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { registerHooks } from 'node:module'
 import { join, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import fs from 'node:fs'
 import childProcess from 'node:child_process'
@@ -28,7 +28,7 @@ import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { immutableQuestionFiles } from '../scripts/question-files.ts'
 import { recentInboxFiles } from '../scripts/inbox-files.ts'
 import { serverMemoryArgs } from '../scripts/server-runtime.ts'
-import { isPrivateRuntimeSddl } from '../scripts/runtime-folder.ts'
+import { isPrivateRuntimeDacl, isPrivateRuntimeSddl, privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
 import { AGENT_ICONS } from '../hooks/agent-icons.ts'
 import { bigBoard, bigBoardNow } from './fixtures/big-board.mjs'
 import { neverShown } from './fixtures/never-shown.mjs'
@@ -4737,22 +4737,49 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
-test('Windows page token writes explicitly own a new file before trusting its inherited ACL', { skip: process.platform !== 'win32' && 'Windows token owner only', timeout: 40_000 }, async () => {
+// The preload counts the PowerShell starts of a whole page start (the command and the server it
+// starts both load it) and can slow the first one in each process, as a cold first start is on a
+// busy computer.
+const POWERSHELL_STARTS = fileURLToPath(new URL('./fixtures/powershell-starts.cjs', import.meta.url))
+const countPowerShell = (board, firstMs = 0) => {
+  const log = join(board.dir, 'powershell-starts.log')
+  Object.assign(board.env, { NODE_OPTIONS: `--require ${JSON.stringify(POWERSHELL_STARTS)}`, AGENT_BOARD_TEST_PS_LOG: log, AGENT_BOARD_TEST_PS_FIRST_MS: String(firstMs) })
+  return () => existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : []
+}
+
+test('a cold Windows page start runs one PowerShell for the command and the server it starts together', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 60_000 }, async () => {
   const board = serveIn()
-  const preload = join(board.dir, 'default-group-owner.cjs')
-  const changed = join(board.dir, 'new-file-owner-set')
+  const starts = countPowerShell(board)
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    assert.deepEqual(starts(), ['parent'], 'the command reads the folder once; the server reuses that check and reads its new address file through icacls')
+    assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
+    assert.deepEqual(starts(), ['parent', 'parent'], 'a second start reads the folder and the running page\'s address file in one start')
+  } finally { await board.end([url]) }
+})
+
+test('a Windows page start whose first PowerShell start takes over 10 s still opens the page', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 80_000 }, async () => {
+  const board = serveIn()
+  const starts = countPowerShell(board, 10_500)
+  let url = null
+  try {
+    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
+    url = board.urlOf(out)
+    assert.ok(url, out)
+    assert.deepEqual(starts(), ['parent'])
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+  } finally { await board.end([url]) }
+})
+
+test('a Windows page start gives PowerShell a 30 s guard and leaves icacls and whoami at 10 s', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const log = join(board.dir, 'timeouts.log')
+  const preload = join(board.dir, 'timeouts.cjs')
   writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
-const target = ${JSON.stringify(board.served)}.toLowerCase(); const marker = ${JSON.stringify(changed)}
-let owned = false
 cp.execFileSync = (file, args, options) => {
-  if (/icacls\\.exe$/i.test(String(file)) && String(args[0]).toLowerCase() === target && args.includes('/setowner')) { owned = true; fs.writeFileSync(marker, 'set before read and write') }
-  if (/powershell\\.exe$/i.test(String(file)) && String(options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH).toLowerCase() === target && !owned) {
-    const account = original(String(file).replace(/WindowsPowerShell[\\\\/]v1\\.0[\\\\/]powershell\\.exe$/i, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
-    const sid = /"(S-\\d+(?:-\\d+)+)"\\s*$/.exec(account)?.[1]
-    if (!sid) throw new Error('synthetic account lookup failed')
-    fs.writeFileSync(marker + '.group-default', 'modeled group default owner')
-    return 'O:BAG:SYD:AI(A;ID;FA;;;' + sid + ')'
-  }
+  fs.appendFileSync(${JSON.stringify(log)}, String(file).split(/[\\\\/]/).pop().toLowerCase() + ' ' + options?.timeout + '\\n')
   return original(file, args, options)
 }
 require('node:module').syncBuiltinESMExports()
@@ -4761,12 +4788,149 @@ require('node:module').syncBuiltinESMExports()
   let url = null
   try {
     url = board.urlOf(await board.serve(['--quiet-board']))
-    if (!url) assert.ok(existsSync(changed + '.group-default'), 'the failure must come from the modeled group owner')
     assert.ok(url)
-    assert.equal(readFileSync(changed, 'utf8'), 'set before read and write')
-    assert.ok(!existsSync(changed + '.group-default'), 'ownership is set before an inherited group owner can be trusted')
+    const seen = new Set(readFileSync(log, 'utf8').split('\n').filter(Boolean))
+    assert.deepEqual([...seen].sort(), ['icacls.exe 10000', 'powershell.exe 30000', 'whoami.exe 10000'])
+  } finally { await board.end([url]) }
+})
+
+// The server child is told which folder the command just checked. It starts the page on that
+// folder when it is still the same plain folder, and checks in full when it is not.
+const startChild = (board, handoff) => new Promise(done => {
+  const env = { ...board.env }
+  if (handoff !== undefined) env[RUNTIME_FOLDER_ENV] = handoff
+  const child = spawn(process.execPath, [board.script, '--serve-child'], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  let out = '', err = ''
+  child.stdout.on('data', chunk => { out += chunk; if (out.includes('\n')) done({ url: out.split('\n')[0].trim(), err }) })
+  child.stderr.on('data', chunk => { err += chunk })
+  child.once('exit', code => done({ url: null, code, out, err }))
+})
+
+test('a Windows server child reuses the folder its command checked and checks any other folder in full', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 90_000 }, async () => {
+  const board = serveIn()
+  const starts = countPowerShell(board)
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  const icacls = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe')
+  let url = null
+  try {
+    // The folder as the command leaves it, handed over unchanged: nothing is read in a PowerShell.
+    assert.equal(privateRuntimeFolder(folder), resolve(folder))
+    const handoff = runtimeFolderHandoff()
+    assert.ok(handoff)
+    let started = await startChild(board, handoff)
+    url = started.url
+    assert.ok(url, started.err)
+    assert.deepEqual(starts(), [], 'the checked folder is not read again')
+    await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': new URL(url).searchParams.get('t'), 'content-type': 'application/json' }, body: '{}' })
+    for (let tries = 0; existsSync(board.served) && tries < 50; tries++) await delay(100)
+    assert.ok(!existsSync(board.served))
+    url = null
+
+    // A handoff that names another identity is not trusted. The full check runs: one PowerShell
+    // start reads the folder, it removes the grant to another account that the folder holds, and
+    // a second read confirms the folder.
+    execFileSync(icacls, [folder, '/grant', '*S-1-1-0:(OI)(CI)R', '/L'], { windowsHide: true, stdio: 'pipe' })
+    started = await startChild(board, JSON.stringify({ path: resolve(folder), identity: '1:2:3' }))
+    url = started.url
+    assert.ok(url, started.err)
+    assert.deepEqual(starts(), ['child', 'child'])
+    const acl = windowsAcl(folder, board.env)
+    assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the full check removed the other account\'s grant')
+  } finally { await board.end([url]) }
+})
+
+test('a Windows server child refuses a runtime junction even when it is handed the identity of its target', { skip: process.platform !== 'win32' && 'Windows junctions only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const other = join(board.dir, 'synthetic-other-folder')
+  mkdirSync(other)
+  const sentinel = join(other, 'keep.txt')
+  writeFileSync(sentinel, 'Synthetic file must stay unchanged')
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  try {
+    // The identity of a folder that was checked, now offered for the path of a junction to it.
+    privateRuntimeFolder(other)
+    const handed = JSON.parse(runtimeFolderHandoff())
+    renameSync(folder, join(board.dir, 'unused-runtime'))
+    fs.symlinkSync(other, folder, 'junction')
+    const refused = await startChild(board, JSON.stringify({ path: resolve(folder), identity: handed.identity }))
+    assert.equal(refused.url, null)
+    assert.equal(refused.code, 1)
+    assert.equal(refused.err.trim(), EN.serveRuntimePrivate)
+    assert.equal(readFileSync(sentinel, 'utf8'), 'Synthetic file must stay unchanged')
+    assert.deepEqual(readdirSync(other), ['keep.txt'])
+  } finally { await board.end([]) }
+})
+
+test('runtime access list validation without an owner rejects other accounts, extra grants and the wrong flags', () => {
+  const sid = 'S-1-5-21-100-200-300-1001'
+  assert.equal(isPrivateRuntimeDacl(`D:AI(A;ID;FA;;;${sid})`, sid, false), true)
+  assert.equal(isPrivateRuntimeDacl(`D:PAI(A;;FA;;;${sid})`, sid, false), true)
+  assert.equal(isPrivateRuntimeDacl(`D:PAI(A;OICI;FA;;;${sid})`, sid, true), true)
+  assert.equal(isPrivateRuntimeDacl('D:PAI(A;OICI;FA;;;LA)', 'S-1-5-21-100-200-300-500', true, { LA: 'S-1-5-21-100-200-300-500' }), true)
+  assert.equal(isPrivateRuntimeDacl('D:PAI(A;OICI;FA;;;LA)', sid, true, { LA: 'S-1-5-21-100-200-300-500' }), false)
+  for (const changed of [
+    'D:AI(A;ID;FA;;;S-1-1-0)', `D:AI(A;ID;FA;;;${sid})(A;ID;FR;;;WD)`, `D:AI(D;ID;FR;;;${sid})`, `D:AI(A;ID;FR;;;${sid})`,
+    `D:AI(A;OICI;FA;;;${sid})`, `D:AI(A;ID;FA;;;${sid})(A;ID;FA;;;SY)`, 'D:NO_ACCESS_CONTROL', 'D:P', '', `O:${sid}G:SYD:AI(A;ID;FA;;;${sid})`,
+  ]) assert.equal(isPrivateRuntimeDacl(changed, sid, false), false, changed)
+  for (const changed of [`D:AI(A;OICI;FA;;;${sid})`, `D:PAI(A;ID;FA;;;${sid})`, `D:PAI(A;OICIID;FA;;;${sid})`, `D:PAI(A;OI;FA;;;${sid})`]) assert.equal(isPrivateRuntimeDacl(changed, sid, true), false, changed)
+  assert.equal(isPrivateRuntimeDacl(`D:AI(A;ID;FA;;;${sid})`, 'not-a-sid', false), false)
+})
+
+test('Windows page token writes explicitly own a new file before they read its access list or write the token', { skip: process.platform !== 'win32' && 'Windows token owner only', timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'new-file-order.cjs')
+  const marker = join(board.dir, 'new-file-owner-set')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+const target = ${JSON.stringify(board.served)}.toLowerCase(); const marker = ${JSON.stringify(marker)}
+let owned = false
+cp.execFileSync = (file, args, options) => {
+  if (/icacls\\.exe$/i.test(String(file)) && String(args[0]).toLowerCase() === target) {
+    if (args.includes('/setowner')) { owned = true; fs.writeFileSync(marker, 'set before the access list is read and the token written') }
+    if (args.includes('/save') && !owned) fs.writeFileSync(marker + '.read-first', 'the access list was read before the owner was set')
+    if (fs.statSync(args[0]).size !== 0) fs.writeFileSync(marker + '.token-first', 'the token was written before the file was checked')
+  }
+  // The new file is checked without PowerShell.
+  if (/powershell\\.exe$/i.test(String(file)) && String(options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH).toLowerCase().includes(target)) fs.writeFileSync(marker + '.powershell', 'unexpected')
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    assert.equal(readFileSync(marker, 'utf8'), 'set before the access list is read and the token written')
+    for (const late of ['.read-first', '.token-first', '.powershell']) assert.ok(!existsSync(marker + late), late)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
   } finally { await board.end([url]) }
+})
+
+test('Windows page start discards a new address file whose owner cannot be set or whose access list is not private', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  for (const fault of ['owner', 'access']) {
+    const board = serveIn()
+    const preload = join(board.dir, `new-file-${fault}.cjs`)
+    writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+const target = ${JSON.stringify(board.served)}.toLowerCase()
+cp.execFileSync = (file, args, options) => {
+  const isNewFile = /icacls\\.exe$/i.test(String(file)) && String(args[0]).toLowerCase() === target && args.includes('/setowner')
+  if (isNewFile && ${fault === 'owner'}) throw Object.assign(new Error('synthetic owner denial'), { code: 'EACCES' })
+  const result = original(file, args, options)
+  // As if the filesystem had not inherited the private list.
+  if (isNewFile && ${fault === 'access'}) original(file, [args[0], '/grant', '*S-1-1-0:R', '/L'], options)
+  return result
+}
+require('node:module').syncBuiltinESMExports()
+`)
+    board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+    try {
+      const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 30_000 })
+      assert.equal(ran.stdout.trim(), EN.serveFailed(EN.serveNotStarted), fault)
+      assert.ok(!existsSync(board.served), 'the empty file is discarded')
+      assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [], fault)
+      assert.ok(!ran.stdout.includes('http:'))
+    } finally { await board.end([]) }
+  }
 })
 
 test('server memory arguments retain explicit heap choices and ignore unrelated Node flags', () => {
