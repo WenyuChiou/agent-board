@@ -7310,6 +7310,11 @@ test('progress.html follows the page\'s order', () => {
   const order = ['id="dash-needs"', 'id="dash-working"', 'data-key="section:others"', 'data-key="section:recent"']
   assert.ok(order.every(marker => at(marker) > 0), order.filter(marker => at(marker) < 0).join())
   assert.deepEqual([...order].sort((a, b) => at(a) - at(b)), order)
+  // A task an agent touched five minutes ago is under Working now and counted there, not listed again with the projects.
+  const working = html.slice(at('id="dash-working"'), at('data-key="section:others"'))
+  assert.ok(working.includes('<span class="count">1</span>'), working)
+  assert.ok(working.includes('Working plan') && !working.includes(EN.pgNoWorking), working)
+  assert.ok(!html.slice(at('data-key="section:others"')).includes('Working plan'))
   // The same headings the page uses, no pasting from a web chat, and no legend above the work.
   for (const word of [EN.pgNeeds, EN.pgWorking, EN.pgDone]) assert.ok(html.includes(word), word)
   assert.doesNotMatch(html, /<div class="legend">|id="paste"|data-theme-pick/)

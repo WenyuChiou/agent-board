@@ -679,7 +679,8 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
 }
 
 const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
-  const now = new Date()
+  // Through Date.now, so a test clock reaches progress.html's Working now as it reaches the rest.
+  const now = new Date(Date.now())
   const stamp = s.dashStamp(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`)
   const html = path.replace(/\.md$/i, '') + '.html'
   const home = homeOrNone()

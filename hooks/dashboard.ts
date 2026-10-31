@@ -179,7 +179,8 @@ export const dashboardHtml = (view: View, s: Strings, path: string, stamp: strin
   pending = view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
   const model = serveModel(view, pending, s, new Set(), false, undefined, false, { now, repoOf: () => null, versions: { board: '', package: null }, unreadable: view.unreadable ?? [] })
   const grouped = model.view
-  const byKey = new Map<string, TaskRow>([...view.active, ...view.due].map(it => [it.key, it]))
+  // The page's rows are keyed row:<task key>, as boardItems names them.
+  const byKey = new Map<string, TaskRow>([...view.active, ...view.due].map(it => [`row:${it.key}`, it]))
   const working = (grouped?.working ?? []).map(ref => byKey.get(ref.sourceKey ?? ref.key)).filter((it): it is TaskRow => it !== undefined)
   const workingKeys = new Set(working.map(it => it.key))
   const questions = pending.filter(turn => turn.isQuestion)
