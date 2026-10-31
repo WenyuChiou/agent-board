@@ -4,6 +4,7 @@ import { boardItems, boardScreen, boardText, chatText, emptyBoardState } from '.
 import { removeAutoBlock, renderAutoBlock, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { dashboardHtml } from '../hooks/dashboard'
 import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
+import type { ProgressMirror } from '../hooks/mirror'
 import { autoOf, parseProgress } from '../hooks/parse'
 import { archiveQuestionsKept, emptyQuestions, observeQuestions, questionScope, questionWords, withCaptures } from '../hooks/questions'
 import { cleanSignal, codexSignal, foldRuns, isStrongRun, pickParent, withRunMark, withSignal } from '../hooks/runs'
@@ -660,4 +661,67 @@ test('foldRuns keeps two blocks with the same agent and short id apart when full
   const rows = rowsOf(view)
   expect(rows).toHaveLength(2)
   expect(rows.map(r => r.title).sort()).toEqual(['Old Block A', 'Old Block B'].sort())
+})
+
+test('concurrent reports with identical 8-hex owner hash prefix do not trigger false block conflicts', () => {
+  const sessionA = 'collision-32464'
+  const sessionB = 'collision-89260'
+  const initial = ''
+  const mirrorA: ProgressMirror = {
+    ...emptyMirror(sessionA, 'Demo', NOW, ''),
+    agent: 'antigravity',
+    tasks: [{ title: 'Subagent Alpha task', state: 'working', steps: [{ text: 'Alpha in progress', state: 'working' }] }],
+  }
+  const mirrorB: ProgressMirror = {
+    ...emptyMirror(sessionB, 'Demo', NOW, ''),
+    agent: 'antigravity',
+    tasks: [{ title: 'Subagent Beta task', state: 'working', steps: [{ text: 'Beta in progress', state: 'working' }] }],
+  }
+  const withA = upsertAutoBlock(initial, mirrorA, en)
+  const withBoth = upsertAutoBlock(withA, mirrorB, en)
+  expect(withBoth).toContain('Subagent Alpha task')
+  expect(withBoth).toContain('Subagent Beta task')
+
+  const updateA: ProgressMirror = {
+    ...emptyMirror(sessionA, 'Demo', NOW, ''),
+    agent: 'antigravity',
+    tasks: [{ title: 'Subagent Alpha task', state: 'done', steps: [{ text: 'Alpha complete', state: 'done' }] }],
+  }
+  const updated = upsertAutoBlock(withBoth, updateA, en)
+  expect(updated).toContain('Alpha complete')
+  expect(updated).toContain('Subagent Beta task')
+  expect(updated).toContain('Beta in progress')
+})
+
+test('Antigravity subagent report with origin run and parent writes run block and folds into parent', () => {
+  const parentSession = 'parent-session-12345678'
+  const subagentSession = 'subagent-session-87654321'
+  const parentSpec: Spec = { session: parentSession, agent: 'antigravity', resume: parentSession, title: 'Parent Task', state: 'working' }
+  const subSpec: Spec = { session: subagentSession, agent: 'antigravity', resume: subagentSession, title: 'Child Subagent Task', state: 'working', run: true, parent: parentSession }
+  const text = file(parentSpec, subSpec)
+  expect(text).toContain('origin=run')
+  expect(text).toContain(`parent=${parentSession}`)
+  expect(text).toContain('Child Subagent Task')
+  const view = viewOf(text)
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.title).toBe('Parent Task')
+  expect(rows[0]?.runs).toContain('+1 run by Antigravity')
+})
+
+test('dot, duet, and bot agents report status and write independent blocks to progress.md', () => {
+  const dotSpec: Spec = { session: 'dot-session-12345678', agent: 'dot', title: 'DOT Integration Task', state: 'working' }
+  const duetSpec: Spec = { session: 'duet-session-12345678', agent: 'duet', title: 'DUET Integration Task', state: 'working' }
+  const botSpec: Spec = { session: 'bot-session-12345678', agent: 'bot', title: 'BOT Integration Task', state: 'working' }
+  const text = file(dotSpec, duetSpec, botSpec)
+  expect(text).toContain('agent=dot')
+  expect(text).toContain('agent=duet')
+  expect(text).toContain('agent=bot')
+  expect(text).toContain('DOT Integration Task')
+  expect(text).toContain('DUET Integration Task')
+  expect(text).toContain('BOT Integration Task')
+  const view = viewOf(text)
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(3)
+  expect(rows.map(r => r.title).sort()).toEqual(['BOT Integration Task', 'DOT Integration Task', 'DUET Integration Task'].sort())
 })
