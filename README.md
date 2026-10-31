@@ -23,7 +23,7 @@
 <a href="#supported-agents"><img src="docs/images/agents/chip-deepseek-harness.svg" height="28" alt="DeepSeek Harness"></a>
 </p>
 
-<p align="center"><sub>dot and other web chats report by hand: you paste their block into <a href="#the-boards-page">the board's page</a>.</sub></p>
+<p align="center"><sub>dot and other web chats report by hand: you merge their block into the progress file (<a href="docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste">how</a>).</sub></p>
 
 You have Claude Code on one project, Codex on another and Antigravity on a third, and when one of them stops to ask you something, you only find out when you happen to switch back. **Agent Board** puts that question in front of you the moment it's asked, with a button for each answer. It runs on your computer and keeps everything in one Markdown file.
 
@@ -47,7 +47,7 @@ Then:
 - **Claude Code** connects through its plugin instead: `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
 - **Codex:** trust its hooks in `/hooks` ([how](docs/CODEX.md)).
 - **OpenCode, OpenClaw:** reload their plugins.
-- **dot and other web chats:** paste [the last section of AGENTS.md](AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then paste the block it writes into [the board's page](#the-boards-page).
+- **dot and other web chats:** paste [the last section of AGENTS.md](AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then save each block it writes and merge it into the progress file as [Remote reporters](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) shows.
 
 In the new session, open the board with its entry:
 
@@ -153,7 +153,7 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 | <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | Chat | The board and its skill; its own hooks are still to come | Copy |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | Chat | Its plugin's session events | Copy |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | CLI | Its plugin's session events | Copy |
-| | dot, other web chats | Web | A block you paste | Answer in its chat |
+| | dot, other web chats | Web | A block you merge | Answer in its chat |
 
 Hooks say whether a session is working or waiting; its steps and when it is done come from the agent's own reports. Gemini CLI is still a target (`--agent gemini`) for paid and enterprise use: see [setup](docs/SETUP.md#legacy-gemini-cli-compatibility).
 
@@ -202,7 +202,6 @@ The board commands above open the board as a page in your browser (in a chat app
 - **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
 - **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent.
-- **Paste a block** from a web chat such as Muse or dot.
 
 The page listens on 127.0.0.1 only, and its address carries a random key: anything on this computer that has the link can use it. It keeps running after you close the tab; **Close the board** stops it. Add `--lan` to open it on a phone on the same Wi-Fi: that link is plain HTTP and anyone who has it can use the page, so use it only on a network you trust. Details and limits are in [the guide](docs/GUIDE.md#the-boards-page).
 

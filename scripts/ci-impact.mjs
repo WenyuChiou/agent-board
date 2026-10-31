@@ -84,6 +84,11 @@ export const makePlan = (files, options = {}) => {
     for (const group of GROUPS) checks[group] = true
     generated.bundle = generated.released = true
   }
+  // The plugin loads hooks/ (the generated board bundle among them), its manifest, package.json (how Node loads
+  // its modules) and its line-ending policy at run time, under the Claude Code version test.yml pins, and a
+  // Windows-only load failure (a CRLF bundle, #589) passed on Ubuntu twice. Test files and docs that only select the
+  // plugin group stay on Ubuntu, and a hooks/ file the plugin does not load selects no plugin check at all.
+  const reachesPluginRuntime = files.some(path => path.startsWith('hooks/') || path.startsWith('.claude-plugin/') || path === 'package.json' || path === '.gitattributes' || path === '.github/workflows/test.yml' || options.pluginRuntime?.has(path))
   if (checks.installers && (full || !installers.size || files.some(path => options.deps?.installers?.has(path) && !/^(?:scripts\/setup|tests\/setup\.check)\.(?:sh|ps1)$/.test(path)))) {
     for (const system of systems) installers.add(system)
   }
@@ -92,6 +97,7 @@ export const makePlan = (files, options = {}) => {
   return {
     version: 1, full, files, checks, testFiles, generated,
     installerMatrix: systems.filter(system => installers.has(system)),
+    pluginMatrix: checks.plugin && reachesPluginRuntime ? [...systems] : [systems[0]],
     soakRecommended: files.some(path => /(?:lock|storage|archive|poll|queue|inbox|board-serve|board-cli|connect-worker|serve\.ts)/i.test(path)),
     reasons,
   }
@@ -194,6 +200,7 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
   const tests = Object.fromEntries(GROUPS.map(group => [group, []]))
   const deps = Object.fromEntries(GROUPS.map(group => [group, new Set()]))
   const bundleSources = new Set()
+  const pluginRuntime = new Set()
   const notes = []
   for (const root of [...new Set(roots)]) {
     const entries = [
@@ -215,7 +222,10 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
     for (const path of ['hooks/parse.ts', 'hooks/blocks.ts']) deps.remote.add(path)
     for (const path of ['README.md', 'README.zh-TW.md', 'README.zh-CN.md', 'docs/FORMAT.md']) deps.journeys.add(path)
     for (const path of ['hooks/register.tsx', 'hooks/hooks.json', 'types/index.d.ts']) {
-      for (const dependency of await walkDependencies(root, [path])) deps.plugin.add(dependency)
+      for (const dependency of await walkDependencies(root, [path])) {
+        deps.plugin.add(dependency)
+        pluginRuntime.add(dependency)
+      }
     }
   }
   // Changes hidden behind the generated bundle affect every consumer of that bundle.
@@ -225,7 +235,7 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
   // Removed tests inform impact, but only existing head tests may be executed.
   const head = roots.at(-1)
   for (const group of GROUPS) tests[group] = tests[group].filter(path => existsSync(join(head, path))).sort()
-  const plan = makePlan(files, { tests, deps, bundleSources, forceFull })
+  const plan = makePlan(files, { tests, deps, bundleSources, pluginRuntime, forceFull })
   if (!plan.full && files.length && files.every(path => /^README(?:\.[\w-]+)?\.md$/.test(path))) {
     plan.testFiles.journeys = tests.journeys.filter(path => path === 'tests/e2e/l0-readme.test.mjs')
     if (plan.checks.journeys && !plan.testFiles.journeys.length) throw new Error('README contract test is missing')
@@ -242,7 +252,7 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
       }
     }
   }
-  const finalPlan = plan.full && notes.length ? makePlan(files, { tests, deps, bundleSources, forceFull: true }) : plan
+  const finalPlan = plan.full && notes.length ? makePlan(files, { tests, deps, bundleSources, pluginRuntime, forceFull: true }) : plan
   // Changed paths include deletions; runnable files must always come from the head.
   for (const group of GROUPS) finalPlan.testFiles[group] = finalPlan.testFiles[group].filter(path => existsSync(join(head, path)))
   return { ...finalPlan, notes }
@@ -258,7 +268,7 @@ const gitPaths = (root, base, head) => {
 const emitPlan = plan => {
   console.log(JSON.stringify(plan, null, 2))
   if (process.env.GITHUB_OUTPUT) {
-    const output = { plan: JSON.stringify(plan), full: String(plan.full), installers_os: JSON.stringify(plan.installerMatrix.length ? plan.installerMatrix : systems) }
+    const output = { plan: JSON.stringify(plan), full: String(plan.full), installers_os: JSON.stringify(plan.installerMatrix.length ? plan.installerMatrix : systems), plugin_os: JSON.stringify(plan.pluginMatrix.length ? plan.pluginMatrix : systems) }
     for (const group of GROUPS) output[group] = String(plan.checks[group])
     for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys', 'browser']) output[group + '_tests'] = JSON.stringify(plan.testFiles[group])
     output.bundle = String(plan.generated.bundle)

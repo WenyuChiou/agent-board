@@ -739,7 +739,7 @@ const dashboard = (lang: Lang): string => {
   const sample = SAMPLES[lang] as (typeof SAMPLES)[string]
   const file = upsertAutoBlock(sample.file, mineOf(lang, false), s)
   const view = buildView(parseProgress(file), [], null, NOW, today(lang), {}, s)
-  return dashboardHtml(view, s, sample.path, s.dashStamp('2026-10-16 09:40'))
+  return dashboardHtml(view, s, sample.path, s.dashStamp('2026-10-16 09:40'), [], NOW)
 }
 
 // The promotional card, for GitHub's social preview and for sharing: a headline, the agents

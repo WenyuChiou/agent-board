@@ -11,6 +11,7 @@ the same rules. The PR metadata checker still runs separately on every PR.
 | New root Node test | Automatically included in the board group |
 | README only | README contract (on a PR: Node 22 on Ubuntu, Node 24 on Windows) |
 | Pane code | Its consumers, including plugin tests |
+| Hooks, board bundle, plugin manifest, `package.json`, `.gitattributes`, the test workflow | The same, and the plugin checks, on Windows too |
 | Board bundle source | Bundle verification and every bundle consumer |
 | Package/plugin manifests, governance, planner, unknown paths | Every group |
 
@@ -36,9 +37,15 @@ pull request whose selected test main deleted or renamed fails until it merges
 main.
 
 On a pull request, selected Node groups run Node 22 on Ubuntu and Node 24 on
-Windows, and plugin checks run on Ubuntu only. Pushes to main, the weekly run, a
-manual run and a release PR run Node 22 and 24 on both systems and plugin
-on both. Browser checks use
+Windows, and plugin checks run on Ubuntu. They also run on Windows when a changed
+path is under `hooks/` (the generated board bundle included) or `.claude-plugin/`,
+is `package.json`, `.gitattributes` or `.github/workflows/test.yml` (its Claude Code
+version pin), or is a file the plugin loads from outside
+`hooks/` (found by the same dependency walk, from the plugin's entry points only);
+a plugin test file or a doc alone stays on Ubuntu, and so does a full plan on a pull
+request (governance, planner or an unknown path) unless one of those paths changed. The planner writes the systems as `plugin_os`, as it
+does `installers_os`. Pushes to main, the weekly run, a manual run and a release PR
+run Node 22 and 24 on both systems and plugin on both. Browser checks use
 Node 24/Chromium on both systems. Plugin checks keep the pinned offline Claude
 runner. Legacy installers and the Python reporter run without installing Claude.
 Board and messaging have separate ten-minute jobs. No product dependency is

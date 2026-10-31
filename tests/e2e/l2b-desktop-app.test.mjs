@@ -55,7 +55,8 @@ describe('L2 desktop app', () => {
       assert.match(await terminal.screen(world), /\b0 waiting\b/)
 
       // The press redraws from the server's fresh model; the latency budget is checked on the answer above.
-      noSilentPress(await server.press('Publish the docs', EN.serveArchive))
+      // A finished task is a line on the Done shelf; Archive now on the shelf moves every finished task out.
+      noSilentPress(await server.pressPage(EN.archiveNow))
       assert.ok(!(await server.page()).includes('Publish the docs'), 'Archived work leaves the page')
       assert.ok(!world.read('progress.md').includes('Publish the docs'), 'Archived work leaves progress.md')
       noMachineIds(await server.page(), world)

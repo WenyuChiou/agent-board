@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { claimMessages, disconnectMessages, messageReceipt, queueMessage } from '../hooks/messaging.ts'
@@ -12,7 +12,7 @@ import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
-import { privateRuntimeFolder } from '../scripts/runtime-folder.ts'
+import { privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
 const target = { id: 'binding1', agent: 'codex', session: 'session1', turn: 'turn1', surface: 'fixture', expires: 2000 }
@@ -179,6 +179,16 @@ const write = process.stdout.write
 process.stdout.write = function (...args) { log({ phase: 'address' }); return write.apply(this, args) }
 require('node:module').syncBuiltinESMExports()
 `
+// Every start's time from spawn to the printed address, or that it failed. One summary line at
+// the end of the file says when a start was slow or failed; there is no budget on it.
+const startTimes = []
+const SLOW_START_MS = 5000
+after(() => {
+  const slow = startTimes.filter(one => one.ms > SLOW_START_MS), failed = startTimes.filter(one => !one.ok)
+  if (slow.length === 0 && failed.length === 0) return
+  const worst = startTimes.reduce((most, one) => (one.ms > most.ms ? one : most), startTimes[0])
+  console.log(`# board starts: ${startTimes.length}, slowest ${worst.ms} ms (${worst.phases}), ${slow.length} over ${SLOW_START_MS / 1000} s, ${failed.length} failed`)
+})
 const startTrace = file => {
   let text = ''
   try { text = readFileSync(file, 'utf8').trim() } catch { return 'no trace' }
@@ -193,8 +203,9 @@ const start = async (dir, fault = '') => {
   // file there first), so the page's 10 s window starts with PowerShell already loaded. The first
   // PowerShell start on a fresh Windows machine takes seconds (2–3 s on CI) and belongs to `--serve`.
   const isWindows = process.platform === 'win32', preparedAt = performance.now()
+  let handoff
   if (isWindows) {
-    try { privateRuntimeFolder(join(runtime, 'agent-board')) }
+    try { privateRuntimeFolder(join(runtime, 'agent-board')); handoff = runtimeFolderHandoff() }
     catch (error) { throw new Error(`runtime folder not private after ${Math.round(performance.now() - preparedAt)} ms: ${error.message}`) }
   }
   const prepared = isWindows ? ` (folder made private in ${Math.round(performance.now() - preparedAt)} ms before)` : ''
@@ -207,21 +218,29 @@ const start = async (dir, fault = '') => {
   // A restart in the same folder starts a new trace, so a report names only its own child.
   writeFileSync(tracer, START_TRACE); writeFileSync(trace, '')
   const startedAt = performance.now()
-  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', '--messages-dir', join(dir, 'messages')], { windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', '--messages-dir', join(dir, 'messages')], { windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }) }, stdio: ['ignore', 'pipe', 'pipe'] })
   const exited = new Promise(done => child.once('exit', done))
   const address = await new Promise((done, fail) => {
     let out = '', err = ''
     const report = () => `after ${Math.round(performance.now() - startedAt)} ms${prepared}; stdout ${out.length} bytes; stderr ${JSON.stringify(err.slice(-2000))}; child: ${startTrace(trace)}`
-    const timer = setTimeout(() => { fail(new Error('start timeout ' + report())); child.kill() }, 10000)
+    // The start's time and the phases the child logged, kept for the summary line at the end. Only
+    // the first outcome counts: the child exits normally when its test closes the page.
+    let isNoted = false
+    const note = ok => {
+      if (isNoted) return
+      isNoted = true
+      startTimes.push({ ms: Math.round(performance.now() - startedAt), ok, phases: startTrace(trace) })
+    }
+    const timer = setTimeout(() => { note(false); fail(new Error('start timeout ' + report())); child.kill() }, 10000)
     child.stderr.on('data', b => { err += b })
     child.stdout.on('data', b => {
       out += b
       if (!out.includes('\n')) return
       clearTimeout(timer)
-      if (performance.now() - startedAt > 3000) console.log('# slow board start ' + report())
+      note(true)
       done(out.split('\n')[0].trim())
     })
-    child.once('exit', (code, signal) => { clearTimeout(timer); fail(new Error('start failed ' + code + ' ' + signal + ' ' + err + ' ' + report())) })
+    child.once('exit', (code, signal) => { clearTimeout(timer); note(false); fail(new Error('start failed ' + code + ' ' + signal + ' ' + err + ' ' + report())) })
   })
   const url = new URL(address)
   const call = async (path, body, headers = {}) => {
