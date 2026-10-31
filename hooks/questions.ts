@@ -427,6 +427,15 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
   const rows: Observation[] = []
   const scopes = new Set<string>()
   const ambiguous = new Set<string>()
+  const shortCounts = new Map<string, number>()
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto?.session) {
+        const key = questionScope(project.name, task.auto.agent ?? 'manual', task.auto.session)
+        shortCounts.set(key, (shortCounts.get(key) ?? 0) + 1)
+      }
+    }
+  }
   for (const project of projects) {
     for (const task of project.tasks) {
       const isMine = mine !== null && (
@@ -435,7 +444,9 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
           : (Boolean(mine.sessionId) && task.auto?.session === own && (task.auto?.agent ?? 'claude') === ownAgent && mine.isRun !== true && isUniqueUnresumedTask(task, projects, own, ownAgent))
       )
       if (isMine) continue
-      const sessionKey = (task.auto?.resume ?? task.auto?.session) ?? ''
+      const shortKey = task.auto?.session ? questionScope(project.name, task.auto.agent ?? 'manual', task.auto.session) : ''
+      const hasShortCollision = shortKey !== '' && (shortCounts.get(shortKey) ?? 0) > 1 && Boolean(task.auto?.resume)
+      const sessionKey = hasShortCollision ? (task.auto?.resume ?? task.auto?.session ?? '') : (task.auto?.session ?? '')
       const scope = questionScope(project.name, task.auto?.agent ?? 'manual', sessionKey || task.title)
       if (frozen.has(scope)) continue
       if (scopes.has(scope)) ambiguous.add(scope)
@@ -477,7 +488,7 @@ export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: read
   const seen = observations(projects, mine, pending, frozen)
   const scopes = new Set([
     ...projects.flatMap(project => project.tasks.map(task => questionScope(project.name, task.auto?.agent ?? 'manual', (task.auto?.resume ?? task.auto?.session) ?? task.title))),
-    ...(mine === null ? [] : [questionScope(mine.project, 'claude', mine.sessionId ?? shortId(mine.sessionId))]),
+    ...(mine === null ? [] : [questionScope(mine.project, (mine.agent || 'claude').toLowerCase(), mine.sessionId || shortId(mine.sessionId))]),
     ...seen.map(row => row.scope),
   ])
   return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !frozen.has(record.scope) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)

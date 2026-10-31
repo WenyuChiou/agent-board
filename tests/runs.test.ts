@@ -670,12 +670,14 @@ test('concurrent reports with identical 8-hex owner hash prefix do not trigger f
   const mirrorA: ProgressMirror = {
     ...emptyMirror(sessionA, 'Demo', NOW, ''),
     agent: 'antigravity',
-    tasks: [{ title: 'Subagent Alpha task', state: 'working', steps: [{ text: 'Alpha in progress', state: 'working' }] }],
+    title: 'Subagent Alpha task',
+    tasks: [{ subject: 'Alpha in progress', status: 'in_progress', blocked: null, waiting: null, why: null }],
   }
   const mirrorB: ProgressMirror = {
     ...emptyMirror(sessionB, 'Demo', NOW, ''),
     agent: 'antigravity',
-    tasks: [{ title: 'Subagent Beta task', state: 'working', steps: [{ text: 'Beta in progress', state: 'working' }] }],
+    title: 'Subagent Beta task',
+    tasks: [{ subject: 'Beta in progress', status: 'in_progress', blocked: null, waiting: null, why: null }],
   }
   const withA = upsertAutoBlock(initial, mirrorA, en)
   const withBoth = upsertAutoBlock(withA, mirrorB, en)
@@ -685,7 +687,8 @@ test('concurrent reports with identical 8-hex owner hash prefix do not trigger f
   const updateA: ProgressMirror = {
     ...emptyMirror(sessionA, 'Demo', NOW, ''),
     agent: 'antigravity',
-    tasks: [{ title: 'Subagent Alpha task', state: 'done', steps: [{ text: 'Alpha complete', state: 'done' }] }],
+    title: 'Subagent Alpha task',
+    tasks: [{ subject: 'Alpha complete', status: 'completed', blocked: null, waiting: null, why: null }],
   }
   const updated = upsertAutoBlock(withBoth, updateA, en)
   expect(updated).toContain('Alpha complete')

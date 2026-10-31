@@ -824,8 +824,20 @@ export const buildView = (
   let ownRuns: RunGroup | null = null
   // A run's own question is no question for anyone: its saved records stay in the ledger but are not asked again.
   const keptTasks = new Set(folded.projects.flatMap(project => project.tasks))
-  const keptScopes = new Set(folded.projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [questionScope(project.name, task.auto.agent, task.auto.resume ?? task.auto.session)])))
-  const foldedScopes = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto === null || keptTasks.has(task) ? [] : [questionScope(project.name, task.auto.agent, task.auto.resume ?? task.auto.session)])).filter(scope => !keptScopes.has(scope)))
+  const keptScopes = new Set(folded.projects.flatMap(project => project.tasks.flatMap(task => {
+    if (task.auto === null) return []
+    return [
+      questionScope(project.name, task.auto.agent, task.auto.session),
+      ...(task.auto.resume ? [questionScope(project.name, task.auto.agent, task.auto.resume)] : []),
+    ]
+  })))
+  const foldedScopes = new Set(projects.flatMap(project => project.tasks.flatMap(task => {
+    if (task.auto === null || keptTasks.has(task)) return []
+    return [
+      questionScope(project.name, task.auto.agent, task.auto.session),
+      ...(task.auto.resume ? [questionScope(project.name, task.auto.agent, task.auto.resume)] : []),
+    ]
+  })).filter(scope => !keptScopes.has(scope)))
   const repeats = new Map<string, number>()
   // How many tasks share each project and title, counted once rather than for every row (#371).
   const twins = new Map<string, number>()
@@ -833,6 +845,16 @@ export const buildView = (
     for (const task of project.tasks) {
       const twin = JSON.stringify([project.name || s.uncategorized, task.title])
       twins.set(twin, (twins.get(twin) ?? 0) + 1)
+    }
+  }
+
+  const shortCounts = new Map<string, number>()
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto?.session) {
+        const key = questionScope(project.name, task.auto.agent ?? 'manual', task.auto.session)
+        shortCounts.set(key, (shortCounts.get(key) ?? 0) + 1)
+      }
     }
   }
 
@@ -866,7 +888,9 @@ export const buildView = (
       const when = clock.isFuture ? updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(updated, now, s)) : relativeTime(updated, now, s)
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
       const isManual = task.auto === null
-      const sessionKey = (task.auto?.resume ?? task.auto?.session) ?? task.title
+      const shortKey = task.auto?.session ? questionScope(project.name, task.auto.agent ?? 'manual', task.auto.session) : ''
+      const hasShortCollision = shortKey !== '' && (shortCounts.get(shortKey) ?? 0) > 1 && Boolean(task.auto?.resume)
+      const sessionKey = hasShortCollision ? (task.auto?.resume ?? task.auto?.session ?? '') : (task.auto?.session ?? task.title)
       const scope = questionScope(project.name, task.auto?.agent ?? 'manual', sessionKey)
       const isFrozen = frozen.has(scope)
       const lastActive = hasTime(updated) ? updated : seen[taskFingerprint(project.name, task)]

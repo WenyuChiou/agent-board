@@ -101,6 +101,7 @@ test('writeMine with empty tasks removes only matching agent block when same ses
   const world: World = { files: new Map([[FILE, initial]]), mtime: 1, hasTasks: true, store: { autoConnectOff: true } }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'TodoWrite', todos: [] })
   await clock.advance(10)
   const after = world.files.get(FILE) ?? ''
   expect(after).not.toContain('### Claude task')
@@ -594,6 +595,9 @@ const engineBeneath = (on: On, world: World): MockClock => {
   })
   on('tool.call', { tool: 'TaskUpdate' }, ($, e) => ({
     result: { success: true, taskId: e.taskId, updatedFields: ['status'] },
+  }))
+  on('tool.call', { tool: 'TodoWrite' }, () => ({
+    result: { success: true },
   }))
 
   return clock
