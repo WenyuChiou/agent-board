@@ -1,11 +1,11 @@
 // The checked-in bundle makes bootstrap work with Node alone, without Bun or Claude Code.
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { bundleFromDir } from './bundle-text.mjs'
 
-const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
-const code = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
+const code = bundleFromDir(new URL('..', import.meta.url))
 const dir = mkdtempSync(join(tmpdir(), 'agent-board-setup-'))
 try {
   const script = join(dir, 'agent-board.mjs')

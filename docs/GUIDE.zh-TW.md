@@ -35,17 +35,19 @@ OpenClaw、DeepSeek Harness 已有獨立狀態 plugin 與原生 skill；Grok 新
 
 ## 每個 agent 裡都看得到看板
 
-使用已安裝的 skill，或安裝器印出的確切程式路徑：
+執行過 `npm install -g @wenyuchiou/agent-board` 後，任何終端機都能使用 `agent-board` 指令；沒有安裝時，改用 `npx @wenyuchiou/agent-board`：
 
 ```sh
-node ~/.agent-board/agent-board.mjs --serve
-node ~/.agent-board/agent-board.mjs --watch
-node ~/.agent-board/agent-board.mjs --chat
-node ~/.agent-board/agent-board.mjs --html
+agent-board
+agent-board stop
+agent-board --chat
+agent-board --help all
 ```
 
 | 模式 | 結果 |
 | --- | --- |
+| `agent-board` | 就地開啟看板：桌面開視窗、SSH 在終端機開即時看板、agent 印純文字 |
+| `agent-board stop` | 停止此進度檔案的看板網頁伺服器 |
 | `--serve` | 互動網頁與可重用的本機背景服務 |
 | `--watch` | 終端看板：方向鍵／Enter 選取，`x` 勾選，`d` 確認完成，`a` 封存，`h` 隱藏，`u` 還原，`i` 閒置工作，`c` 複製，`o` HTML，`q` 離開 |
 | `--chat` | 精簡文字；不開網頁、連結或瀏覽器、不寫檔 |

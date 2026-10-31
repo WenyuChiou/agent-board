@@ -1,0 +1,2 @@
+- **Contributing / Fewer merge conflicts** · The generated board bundle is now stored one line per line, so two pull requests that change different code merge without a conflict, and the pull request keeps getting its CI run (#573).
+  Tests: `the generated bundle is stored one line per line so pull requests that change different code merge cleanly`, `the full generated worker bundle runs through verified staging without recursive bundle growth`, `a release tag holds the same bundle whether it is one line, as up to 0.24.0, or one line per line, with LF or CRLF`.

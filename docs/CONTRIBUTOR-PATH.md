@@ -90,7 +90,7 @@ npx --yes bun@1.4.2 scripts/build-released.ts --check
 
 The installer checks and the type check the template lists are in [CONTRIBUTING.md, Run the checks](../CONTRIBUTING.md#run-the-checks).
 
-If you changed `scripts/board-cli.ts` or a `hooks/` file it imports, rebuild the bundle with `npx --yes bun@1.4.2 scripts/build-board.ts` and commit `hooks/board-script.ts` together with the change.
+If you changed `scripts/board-cli.ts` or a `hooks/` file it imports, rebuild the bundle with `npx --yes bun@1.4.2 scripts/build-board.ts` and commit `hooks/board-script.ts` and its parts (`hooks/board-script-*.ts`) together with the change.
 
 When the plugin group is selected, CI runs `claude plugin validate --strict .` and `claude plugin test .` on Ubuntu (both systems on `main` and release PRs). To run them yourself, install the version CI pins, then run both through `iso` (offline, no login, several minutes):
 
@@ -102,11 +102,15 @@ iso claude plugin test .
 
 If you do not run them, write `not run:` and why in the pull request.
 
-A test that fails once and passes on its own rerun is reported as both, never as a pass. Known traps, all found on Windows in earlier pull requests:
+A test that fails once and passes on its own rerun is reported as both, never as a pass.
+
+In CI, such a test is flaky. Before you rerun it, comment on your pull request with the run link and the test's title, then rerun only the failed job, once. The same day, open a `bug` issue for it, or add your run to the issue already open for that title, with the job, the system, how long it ran and its timeout. A flaky or slow test is fixed at its cause: what it waits for, what it races with, what it reads before it is written. Raising a timeout, checking less, skipping it or marking it todo is not a fix. A test that takes more than half its timeout in CI counts as slow and gets the same issue.
+
+Known traps, all found on Windows in earlier pull requests:
 
 - In PowerShell, move files with `Move-Item -LiteralPath … -ErrorAction Stop`; `[System.IO.File]::Move` is refused in Constrained Language Mode (#179).
 - Destroying a child process's stdio and calling `unref()` does not free its handles on Windows; a test that gives up on a child must end the run itself (#184).
-- Tests that start a board page or a host process can time out on a busy machine; rerun the one that failed on its own and report both runs.
+- Tests that start a board page or a host process can time out on a busy machine. Locally, rerun the one that failed on its own and report both runs; in CI, a timeout is a flaky test, as above.
 
 ## 5. Write the CHANGELOG fragment
 
@@ -184,14 +188,18 @@ git fetch origin
 git merge origin/main       # never rebase or force-push
 ```
 
-The usual conflict is the generated bundle `hooks/board-script.ts`. Take the copy from the `main` you are merging, rebuild it from the merged sources and finish the merge:
+The generated bundle is `hooks/board-script.ts` and its parts `hooks/board-script-1.ts`, `-2.ts`, …. It is stored one line per line, so it conflicts only when two pull requests change the same code. If any of these files conflicts, take them from the `main` you are merging, rebuild from the merged sources and finish the merge:
 
 ```sh
-git restore --source=MERGE_HEAD --staged --worktree hooks/board-script.ts
+git restore --source=MERGE_HEAD --staged --worktree -- 'hooks/board-script*.ts'
 npx --yes bun@1.4.2 scripts/build-board.ts
-git add hooks/board-script.ts
+git add -A -- 'hooks/board-script*.ts'
 git commit --no-edit
 ```
+
+The rebuild also removes a part that `main` no longer has, and `add -A` stages that removal.
+
+When `scripts/build-board.ts` says a bundle part is over 1,000,000 bytes, do not remove or shorten features to make it fit. Add a split point to `PART_STARTS` in `scripts/build-board.ts` and rebuild, or say so on your issue and the maintainer adds it.
 
 Fragments in `changelog.d/` do not conflict, since each pull request adds its own file. Run the checks again and push. Once the pull request is Ready, merge `main` only while answering `Review: REQUEST CHANGES`, or when the maintainer comments that `main` moved ([docs/dev/team-process.md, Merge order](dev/team-process.md#merge-order)); after that push, comment `Ready for review <new full head sha>`. After `Review: APPROVE`, leave merging `main` to the reviewer.
 
@@ -210,7 +218,10 @@ gh issue edit <N> -R WenyuChiou/agent-board --remove-label claimed
 
 With write access to this repository you may also review and merge pull requests you did not write ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 8 and 9). If the owner names you in [Roles](../CONTRIBUTING.md#roles), a code-review subagent you run may also approve your own pull request, under the conditions in rule 8. In this step `<PR>` is the pull request you are reviewing, and `<N>` is each linked issue. Take one marked `Ready for review <sha>` that nobody is reviewing, and say so first:
 
+Start from the queue. `node scripts/review-queue.mjs` lists the pull requests waiting on a reviewer, smallest first, with how long each has waited since its `Ready for review <sha>`; then those that need `main` merged (a conflicted one gets no CI until it is), the approved ones, and those waiting on their author. Take the small ones first.
+
 ```sh
+node scripts/review-queue.mjs
 gh pr list -R WenyuChiou/agent-board --state open
 gh pr view <PR> -R WenyuChiou/agent-board --json headRefOid,body,isDraft
 gh api repos/WenyuChiou/agent-board/issues/<PR>/comments --paginate
@@ -229,5 +240,9 @@ Merge only when the latest verdict is an approval satisfying rule 8 for the curr
 gh pr merge <PR> -R WenyuChiou/agent-board --squash --match-head-commit <head sha>
 gh issue comment <N> -R WenyuChiou/agent-board --body "Fixed by #<PR>, merged as <merge sha>. <evidence>"
 ```
+
+Don't sit and watch CI. Once you approve, start the wait in the background (`gh pr checks <PR> -R WenyuChiou/agent-board --watch`, then the merge above when every check passes) and take the next pull request in the queue.
+
+A pull request that changes the board page's messages, the setup output or the one-line row summaries also needs `Acceptance: PASS <full head sha>` from a collaborator who did not write it, after walking the steps in #572 on their own machine.
 
 GitHub deletes a merged branch from this repository. A governance pull request also needs the owner's approval quoted in its body (rule 12), and a release pull request stays with the maintainer ([Releases](../CONTRIBUTING.md#releases)).

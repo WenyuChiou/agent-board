@@ -29,7 +29,7 @@ npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
 ## Checklist
 
 1. **Version.** Put the same `X.Y.Z` in `.claude-plugin/plugin.json` and `package.json`, the three README badges and the marketplace descriptions. `node --test tests/npm-package.test.mjs` fails when `package.json` and `plugin.json` disagree.
-2. **CHANGELOG.** Run `node scripts/changelog-fold.mjs X.Y.Z` to preview, then add `--write`. It folds every `changelog.d/` fragment, and any entry left under `## Unreleased`, into `## X.Y.Z — YYYY-MM-DD`.
+2. **CHANGELOG.** Run `node scripts/changelog-fold.mjs X.Y.Z` to preview, then add `--write`. It folds every `changelog.d/` fragment, and any entry left under `## Unreleased`, into `## X.Y.Z — YYYY-MM-DD`. With `--write` its output ends with three questions for the next version's plan (the goal above this version's, one hard number it should move, which other field has solved a problem like ours); it only prints them.
 3. **Generated files.** Rebuild as in [CONTRIBUTING.md, Releases](../CONTRIBUTING.md#releases) step 3: the board bundle and the released-files table, and both `--check` commands pass.
 4. **Checks.** Run everything in [CONTRIBUTING.md, Run the checks](../CONTRIBUTING.md#run-the-checks). The npm test also checks that `npm pack` would publish only the files `package.json` lists.
 5. **Pull request.** Title it `chore(release): Agent Board X.Y.Z`. Obtain the approval required by CONTRIBUTING rule 8 and, under the owner's authorization, squash-merge with `--match-head-commit` only once every CI job and all other checks required by rule 9 have succeeded on that exact head.
