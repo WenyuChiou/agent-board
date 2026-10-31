@@ -120,7 +120,16 @@ const logPendingDrop = (home: string, stored: Json | undefined, code: string): v
       if ((error as { code?: string }).code !== 'ENOENT') throw error
     }
     const line = `${new Date().toISOString()} ${agent} ${event} PENDING_DROPPED_${code}`
-    atomic(file, `${[...previous.trimEnd().split('\n').filter(Boolean).slice(-199), line].join('\n')}\n`)
+    // The same temporary name as the reporters' writer, so their sweep removes one a kill leaves.
+    const temporary = `${file}.${process.pid}.tmp`
+    const fd = openSync(temporary, 'wx', 0o600)
+    try {
+      try { writeFileSync(fd, `${[...previous.trimEnd().split('\n').filter(Boolean).slice(-199), line].join('\n')}\n`) } finally { closeSync(fd) }
+      renameSync(temporary, file)
+    } catch (error) {
+      try { unlinkSync(temporary) } catch {}
+      throw error
+    }
   } catch {}
 }
 const input = async (): Promise<Json> => {
