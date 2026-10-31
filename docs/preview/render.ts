@@ -21,7 +21,7 @@ import type { Palette } from '../../hooks/palette'
 import { parseProgress } from '../../hooks/parse'
 import { emptyQuestions } from '../../hooks/questions'
 import { STRINGS, agentLabel } from '../../hooks/strings'
-import { buildView, replyHint } from '../../hooks/view'
+import { buildView } from '../../hooks/view'
 import { CLI_FILES, COVER, COVER_AGENTS, COVER_MARKS, COVER_MOMENTS, NOW, SAMPLES, SESSION, MIN, coverFile } from './samples'
 import type { CoverAgent, CoverSample } from './samples'
 import { AGENT_ICONS, TESTED_ICONS } from './icons'
@@ -843,20 +843,26 @@ ${glyph(icon, 0, 0, 48)}
 // is the board the person gets, not a drawing of it. One per CLI, language and theme.
 const CLI_AGENTS = ['codex', 'antigravity'] as const
 type CliAgent = (typeof CLI_AGENTS)[number]
-// boardScreen's colour codes (CODES in hooks/board.ts) and the palette colour each one takes;
-// 0 ends a run and 1 is bold. A code missing here stops the render rather than drawing it plain.
-const ANSI: Record<string, keyof Palette> = { '31': 'alert', '32': 'done', '33': 'waiting', '35': 'project', '36': 'accent', '2': 'muted' }
+// boardScreen paints with the palette's own colours, 24-bit here (hooks/palette.ts), bold or not;
+// each is drawn in the picture's palette by its role. A colour that is no role stops the render
+// rather than drawing it plain.
 type Grid = Parameters<typeof gridSvg>[0]
-const ansiGrid = (text: string, palette: Palette): Grid =>
+// A board's lines with the gap before each right-aligned age closed, to tell whether a narrower
+// board cuts anything.
+const shapeOf = (text: string): string => text.split('\n').map(line => line.replace(/ {3,}/g, '  ').trimEnd()).join('\n')
+const ansiGrid =(text: string, palette: Palette, mode: Mode): Grid =>
   text.replace(/\n$/, '').split('\n').map(line => {
+    const source = mode === 'light' ? LIGHT : DARK
     const cells: Grid[number] = []
     let style: Grid[number][number]['style'] = {}
-    for (const part of line.split(/(\u001b\[\d+m)/)) {
-      const code = /^\u001b\[(\d+)m$/.exec(part)?.[1]
-      if (code !== undefined) {
-        const tone = ANSI[code]
-        if (tone === undefined && code !== '0' && code !== '1') throw new Error(`boardScreen paints with ANSI code ${code}, which render.ts has no colour for`)
-        style = code === '1' ? { bold: true } : tone === undefined ? {} : { fg: palette[tone] }
+    for (const part of line.split(/(\u001b\[[\d;]*m)/)) {
+      const codes = /^\u001b\[([\d;]*)m$/.exec(part)?.[1]?.split(';')
+      if (codes !== undefined) {
+        const at = codes.indexOf('38')
+        const hex = at < 0 ? null : `#${codes.slice(at + 2, at + 5).map(n => Number(n).toString(16).padStart(2, '0')).join('')}`.toUpperCase()
+        const role = hex === null ? undefined : (Object.keys(source) as Array<keyof Palette>).find(one => source[one].toUpperCase() === hex)
+        if (hex !== null && (codes[at + 1] !== '2' || role === undefined)) throw new Error(`boardScreen paints with ${codes.join(';')}, which render.ts has no colour for`)
+        style = { ...(codes[0] === '1' ? { bold: true } : {}), ...(role === undefined ? {} : { fg: palette[role] }) }
         continue
       }
       for (const ch of [...part]) cells.push(...(widthCells(ch) === 2 ? [{ ch, style }, { ch: '', style }] : [{ ch, style }]))
@@ -879,10 +885,11 @@ const cliBoard = (lang: Lang, mode: Mode, agent: CliAgent): string => {
   const state = { ...emptyBoardState, selected: at, key, open: key }
   // The window is as narrow as it can be while every line still shows whole: the board cuts an
   // indented line a little before the window's edge, so the widest line alone is not enough.
-  const whole = boardScreen(view, [], state, s, { width: 400, isColor: false })
+  // The ages sit at the right edge, so lines are compared with the gap before them closed.
+  const whole = shapeOf(boardScreen(view, [], state, s, { width: 400, isColor: false }))
   let cols = Math.max(...whole.split('\n').map(widthCells))
-  while (boardScreen(view, [], state, s, { width: cols, isColor: false }) !== whole) cols++
-  const grid = ansiGrid(boardScreen(view, [], state, s, { width: cols, isColor: true }), t.palette)
+  while (shapeOf(boardScreen(view, [], state, s, { width: cols, isColor: false })) !== whole) cols++
+  const grid = ansiGrid(boardScreen(view, [], state, s, { width: cols, isColor: true, depth: 'truecolor', theme: mode }), t.palette, mode)
   const theme: Theme = { ground: t.ground, ink: t.ink, edge: t.edge, muted: t.palette.muted, accent: t.palette.accent, frame: t.palette.frame }
   const title = 'agent-board --watch'
   // Half a unit in from the edge, so the window's outline is not cut by the picture's own edge.
@@ -1055,15 +1062,15 @@ const coverBoard = (lang: Lang, mode: Mode, m: number, cols: number): Grid => {
   const label = item.type === 'ask' ? item.ask.task : item.type === 'row' ? item.row.title : ''
   const copied = cursor.isCopied === true ? { note: s.copied, tone: 'done' as const, result: { key: item.key, revision: null, label } } : {}
   const state: BoardState = { ...emptyBoardState, selected: at, key: item.key, open: cursor.isOpen === true ? item.key : null, ...copied }
-  const lines = boardScreen(view, [], state, s, { width: cols, isColor: true }).replace(/\n$/, '').split('\n')
+  const lines = boardScreen(view, [], state, s, { width: cols, isColor: true, depth: 'truecolor', theme: mode }).replace(/\n$/, '').split('\n')
   if (lines.length < 3 || lines[lines.length - 2] !== '') throw new Error(`The cover's moment ${m} does not end with the board's key line, language ${lang}`)
   const plain = boardScreen(view, [], state, s, { width: cols, isColor: false }).replace(/\n$/, '').split('\n')
   // The hints as boardScreen prints them, so only those exact lines go.
-  const hints = new Set([s.archiveLive, ...items.flatMap(one => (one.type === 'ask' ? [replyHint(one.ask, s).where] : []))].filter(hint => hint !== '').map(hint => `    ${fit(hint, cols - 6)}`.trimEnd()))
+  const hints = new Set(items.flatMap(one => (one.type === 'ask' && one.ask.where === 'other' ? [s.boardAnswerIn(agentLabel(one.ask.agent || 'claude', s))] : [])).map(hint => `    ${fit(hint, cols - 6)}`.trimEnd()))
   const isHint = (i: number): boolean => hints.has((plain[i] ?? '').trimEnd())
   const withNames = (line: string): string =>
     COVER_AGENTS.reduce((text, agent) => text.replace(`${s.agentWorking(agentLabel(agent, s))} · ${agent}`, s.agentWorking(COVER_NAMES[agent])).replace(` · ${agent} › `, ` · ${COVER_NAMES[agent]} › `), line)
-  return ansiGrid(`${lines.slice(0, -2).filter((_, i) => !isHint(i)).map(withNames).join('\n')}\n`, coverPalette(mode))
+  return ansiGrid(`${lines.slice(0, -2).filter((_, i) => !isHint(i)).map(withNames).join('\n')}\n`, coverPalette(mode), mode)
 }
 
 // The board's width on the cover for a theme: as wide as its widest line in any language, so the
@@ -1073,8 +1080,8 @@ const coverColsByMode = new Map<Mode, number>()
 const coverCols = (mode: Mode): number => {
   const known = coverColsByMode.get(mode)
   if (known !== undefined) return known
-  const whole = LANGS.flatMap(one => Array.from({ length: COVER_MOMENTS }, (_, m) => coverBoard(one, mode, m, 400).map(row => lineText(row).trimEnd())))
-  const isWhole = (n: number): boolean => LANGS.every((one, l) => Array.from({ length: COVER_MOMENTS }, (_, m) => m).every(m => coverBoard(one, mode, m, n).map(row => lineText(row).trimEnd()).join('\n') === (whole[l * COVER_MOMENTS + m] ?? []).join('\n')))
+  const whole = LANGS.flatMap(one => Array.from({ length: COVER_MOMENTS }, (_, m) => coverBoard(one, mode, m, 400).map(row => shapeOf(lineText(row)))))
+  const isWhole = (n: number): boolean => LANGS.every((one, l) => Array.from({ length: COVER_MOMENTS }, (_, m) => m).every(m => coverBoard(one, mode, m, n).map(row => shapeOf(lineText(row))).join('\n') === (whole[l * COVER_MOMENTS + m] ?? []).join('\n')))
   let cols = Math.max(...whole.flatMap(rows => rows.map(widthCells)))
   while (!isWhole(cols)) {
     cols++
@@ -1185,7 +1192,8 @@ const cover = (lang: Lang, mode: Mode): string => {
     return runs.map(([a, b]) => `<rect class="a ${glow(COVER_AT[m] ?? 0, 0.8, isAsking ? (mode === 'dark' ? 0.12 : 0.2) : 0.15)}" x="1" y="${rowY(a) - 1}" width="${num(winW - 2)}" height="${(b - a + 1) * LINE + 2}" fill="${isAsking ? pal.waiting : pal.accent}"/>`).join('')
   }).join('')
   // Scene 5: Codex's line lights up when the person's message reaches it, and again when it replies.
-  const codexAt = boards[MOMENT.opened]?.findIndex(row => lineText(row).replace(/^[›\s]+/, '').trimEnd() === c.tasks.codex.title) ?? -1
+  // A title line ends where the gap before its agent and age starts.
+  const codexAt = boards[MOMENT.opened]?.findIndex(row => lineText(row).replace(/^[›\s]+/, '').replace(/ {2,}.*$/, '').trimEnd() === c.tasks.codex.title) ?? -1
   if (codexAt < 0) throw new Error(`Codex has no line on the board when the message is sent, language ${lang}`)
   const reached = [[T.arrive, pal.accent], [T.replied, pal.done]].map(([at, colour]) => `<rect class="a ${glow(at as number, 1, 0.22)}" x="1" y="${rowY(codexAt) - 1}" width="${num(winW - 2)}" height="${2 * LINE + 2}" fill="${colour}"/>`).join('')
   // The shadow is cast by a still rect the window's size under it, not by the window, so a change

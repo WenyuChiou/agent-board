@@ -24,15 +24,15 @@ import { serverMemoryArgs } from './server-runtime'
 import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RuntimeFolderError, writePrivateRuntimeFile } from './runtime-folder'
 import { idleTimeout } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
-import { boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, peekInbox, boardItems, pinned, redact } from '../hooks/board'
-import type { BoardAction, BoardState } from '../hooks/board'
+import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
+import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, missingEntries, parseJournal, unwrittenEntries } from '../hooks/journal'
 import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
-import { langOf, plainReason, STRINGS } from '../hooks/strings'
+import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
@@ -487,10 +487,14 @@ const freshView = () => {
 
 const pad = (n: number): string => String(n).padStart(2, '0')
 
+// The questions the running page can answer into their session, as it last said (`refreshRoutes`).
+let routes: Record<string, AnswerRoute> = {}
+
 const options = () => ({
   width: Math.max(40, Math.min(process.stdout.columns || 80, 120)),
-  isColor: process.stdout.isTTY === true && !process.env.NO_COLOR && !args.includes('--no-color'),
+  ...terminalLook(process.env, args, process.stdout.isTTY === true),
   isIdleOpen: args.includes('--all'),
+  routes,
 })
 
 // How many times `rewrite` makes a change; it tells the change which try is the last.
@@ -1017,13 +1021,26 @@ const failureNote = (error: unknown): string => {
   return note
 }
 
-const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean } => {
+type Send = Extract<BoardAction, { type: 'send' }>
+
+const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean; send?: Send } => {
   const shown = freshView()
   const items = boardItems(shown, pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false)
-  const { state: next, action } = boardKey(state, key, items, s)
+  const { state: next, action } = boardKey(state, key, items, s, routes)
   if (action === null) return { state: next, isQuit: false, isHtml: false, isWrite: false }
   if (action.type === 'quit') return { state: next, isQuit: true, isHtml: false, isWrite: false }
   if (action.type === 'html') return { state: { ...next, note: s.pressPending, tone: 'quiet' }, isQuit: false, isHtml: true, isWrite: false }
+  // The page sends it; the note says so until its answer comes back.
+  if (action.type === 'send') return { state: { ...next, note: s.serveSending(agentLabel(action.route.agent || 'claude', s)), tone: 'quiet' }, isQuit: false, isHtml: false, isWrite: false, send: action }
+  if (action.type === 'tidy') {
+    let note: string
+    try {
+      note = tidy()
+    } catch (error) {
+      note = failureNote(error)
+    }
+    return { state: { ...next, key: null, note, tone: note === s.boardWriteFailed ? 'alert' : 'done' }, isQuit: false, isHtml: false, isWrite: true }
+  }
 
   // After a write the lines move; the choice is made again from the screen drawn next.
   let note: string
@@ -1036,10 +1053,73 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
   return { state: { ...next, key: null, note, tone: fallback.tone, copyText: fallback.copyText, result: next.result === undefined ? undefined : { ...next.result, revision: null } }, isQuit: false, isHtml: false, isWrite: action.type !== 'copy' }
 }
 
-const screen = (state: BoardState): string => boardScreen(view(), pending(), state, s, options())
+// The agents that reported here, for an empty board to name: from the turns their hooks left.
+const agentsHere = (shown: ReturnType<typeof view>, turns: ReturnType<typeof pending>): string[] => {
+  if (!isEmptyBoard(shown, turns)) return []
+  let names: string[] = []
+  try {
+    names = readdirSync(join(dirname(path), 'progress-inbox'))
+  } catch {}
+  return boardAgents(names, shown, turns)
+}
+
+const screen = (state: BoardState): string => {
+  const shown = view()
+  const turns = pending()
+  return boardScreen(shown, turns, state, s, { ...options(), agents: agentsHere(shown, turns) })
+}
 
 // What the screen shows is what the next key acts on.
 const pin = (state: BoardState): BoardState => pinned(state, boardItems(view(), pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false))
+
+// The running page, found without making its folder: the terminal board only looks for one.
+const runningAddress = (): Running | null => {
+  const runtime = process.env.XDG_RUNTIME_DIR
+  const folder = process.platform === 'win32' ? (runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board')) : runtime && isOwnFolder(runtime) ? runtime : join(homedir(), '.cache', 'agent-board')
+  if (!existsSync(folder)) return null
+  try {
+    return readRunning()
+  } catch {
+    return null
+  }
+}
+
+// Which questions the running page answers into their session; true when that changed. With no
+// page, or none that answers, every answer key copies.
+const refreshRoutes = async (): Promise<boolean> => {
+  const running = runningAddress()
+  let next: Record<string, AnswerRoute> = {}
+  if (running !== null) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${running.port}/api/board`, { headers: { 'x-board-token': tokenOf(running.url) }, signal: AbortSignal.timeout(1500) })
+      if (res.ok) next = routesOf(((await res.json()) as { model?: unknown } | null)?.model)
+    } catch {}
+  }
+  const isChanged = JSON.stringify(next) !== JSON.stringify(routes)
+  routes = next
+  return isChanged
+}
+
+// An answer key's answer, sent by the running page as its own button sends it: the page checks
+// the line, the question and the session again, and answers with what came of it.
+const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 'alert' }> => {
+  const running = runningAddress()
+  if (running === null) return { note: s.messagesFailed, tone: 'alert' }
+  const { route } = action
+  const body = route.mode === 'connected' && route.delivery !== undefined
+    ? { key: action.key, type: 'message', id: `AB-${randomUUID()}`, text: action.text, connection: route.delivery.id, turn: route.delivery.turn, session: route.session, asked: route.asked, fp: route.fp }
+    : { key: action.key, type: 'send', text: action.text, session: route.session, asked: route.asked, fp: route.fp }
+  try {
+    // A closed session is started to take it, and answers only once it is done.
+    const res = await fetch(`http://127.0.0.1:${running.port}/api/act`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(route.mode === 'send' ? 300_000 : 5000) })
+    const data = (await res.json().catch(() => null)) as { note?: unknown } | null
+    const note = typeof data?.note === 'string' && data.note !== '' ? data.note : res.ok ? s.messagesQueued : s.messagesFailed
+    // What was sent leads the note, so a key pressed by mistake shows at once.
+    return res.ok ? { note: s.boardAnswered(action.text, note), tone: 'done' } : { note, tone: 'alert' }
+  } catch {
+    return { note: s.messagesFailed, tone: 'alert' }
+  }
+}
 
 // A block pasted into the page from a web chat, merged the way the remote reporter's merge
 // does: read, change only that block, write, read back.
@@ -1454,18 +1534,27 @@ const runWatchTerminal = async (): Promise<void> => {
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) {
     const server = await ensureServer()
     if (server) {
-      sshHint = `\n\u001b[90m${s.serveSshHint(server.port, sshHost(), server.url)}\u001b[0m\n`
+      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshHost(), server.url), options())}\n`
     }
   }
   let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }
+  // What is on the screen now: a redraw that would show the same writes nothing.
+  let drawn: string | null = null
+  const paintScreen = (text: string, focus: readonly [number, number] | null = null): void => {
+    const out = frame(drawn, text, process.stdout.rows || 0, focus)
+    drawn = text
+    if (out !== null) process.stdout.write(out)
+  }
   const draw = (): void => {
     try {
       const shown = freshView()
       const turns = pending()
       state = pinned(state, boardItems(shown, turns, state.isIdleOpen ?? false, state.isOlderOpen ?? false))
-      process.stdout.write(`\u001b[2J\u001b[H${boardScreen(shown, turns, state, s, options())}${sshHint}`)
+      // The window follows the selected line, so a key never acts on a line off the screen.
+      const { screen, focus } = boardLayout(shown, turns, state, s, { ...options(), agents: agentsHere(shown, turns) })
+      paintScreen(`${screen}${sshHint}`, focus)
     } catch (error) {
-      process.stdout.write(`\u001b[2J\u001b[H${failureNote(error)}\n`)
+      paintScreen(`${failureNote(error)}\n`)
     }
   }
   const quit = (): void => {
@@ -1474,9 +1563,20 @@ const runWatchTerminal = async (): Promise<void> => {
   }
   if (typeof process.stdin.setRawMode === 'function') process.stdin.setRawMode(true)
   process.stdin.setEncoding('utf8')
-  process.stdout.write('\u001b[?25l')
-  process.on('exit', () => process.stdout.write('\u001b[?25h\n'))
+  process.stdout.write(SCREEN_ENTER)
+  process.on('exit', () => process.stdout.write(SCREEN_LEAVE))
   for (const signal of ['SIGTERM', 'SIGHUP'] as const) process.on(signal, () => process.exit(process.exitCode ?? 0))
+  // A new size redraws everything: the old lines are where the terminal put them.
+  process.stdout.on('resize', () => {
+    drawn = null
+    draw()
+  })
+  const send = (action: Send): void => {
+    void sendAnswer(action).then(({ note, tone }) => {
+      state = { ...state, note, tone, result: state.result === undefined ? undefined : { ...state.result, revision: null } }
+      void refreshRoutes().finally(draw)
+    })
+  }
   process.stdin.on('data', (chunk: string) => {
     try {
       for (const key of keysIn(chunk)) {
@@ -1490,6 +1590,10 @@ const runWatchTerminal = async (): Promise<void> => {
             draw()
           })
         }
+        if (pressed.send !== undefined) {
+          send(pressed.send)
+          break
+        }
         if (pressed.isWrite) break
       }
       draw()
@@ -1499,7 +1603,12 @@ const runWatchTerminal = async (): Promise<void> => {
     }
   })
   draw()
-  setInterval(draw, 2000)
+  setInterval(() => {
+    draw()
+    // Whether a key answers into a session or copies follows the page's own connections.
+    void refreshRoutes().then(isChanged => { if (isChanged) draw() })
+  }, 2000)
+  void refreshRoutes().then(isChanged => { if (isChanged) draw() })
 }
 
 const run = async (): Promise<void> => {
@@ -1530,10 +1639,16 @@ const run = async (): Promise<void> => {
     process.stdout.write(boardText(view(), pending(), s, options()))
   } else if (flag('--keys') !== undefined) {
     let state = emptyBoardState
+    await refreshRoutes()
     for (const key of (flag('--keys') ?? '').split(/\s+/).filter(one => one !== '')) {
       const pressed = press(pin(state), key)
       state = pressed.state
       if (pressed.isQuit) break
+      if (pressed.send !== undefined) {
+        const sent = await sendAnswer(pressed.send)
+        state = { ...state, ...sent, result: state.result === undefined ? undefined : { ...state.result, revision: null } }
+        await refreshRoutes()
+      }
       if (pressed.isHtml) {
         await new Promise<void>(done => {
           try { openHtml((note, isOpen) => { state = { ...state, note, tone: isOpen ? 'done' : 'alert' }; done() }) }
@@ -1542,18 +1657,33 @@ const run = async (): Promise<void> => {
       }
     }
     process.stdout.write(screen(pin(state)))
+  } else if (args.includes('--watch') && process.stdout.isTTY !== true) {
+    // Into a pipe or a log: the board once, as plain text with no control codes (FORCE_COLOR
+    // still paints it, for `| less -R`).
+    try {
+      process.stdout.write(boardText(view(), pending(), s, options()))
+    } catch (error) {
+      process.stdout.write(`${failureNote(error)}\n`)
+    }
   } else if (args.includes('--watch') && process.stdin.isTTY) {
     await runWatchTerminal()
   } else if (args.includes('--watch')) {
-    // Not a terminal (piped, or an agent's tool): no keys to read, so it only redraws.
+    // A terminal to draw on with no keys to read (an agent's tool): it only redraws.
+    let drawn: string | null = null
     const tick = () => {
+      let text: string
       try {
-        const shown = freshView()
-        process.stdout.write(`\u001b[2J\u001b[H${boardText(shown, pending(), s, options())}\n${s.boardWatching}\n`)
+        text = `${boardText(freshView(), pending(), s, options())}\n${s.boardWatching}\n`
       } catch (error) {
-        process.stdout.write(`\u001b[2J\u001b[H${failureNote(error)}\n`)
+        text = `${failureNote(error)}\n`
       }
+      const out = frame(drawn, text, process.stdout.rows || 0)
+      drawn = text
+      if (out !== null) process.stdout.write(out)
     }
+    process.stdout.write(SCREEN_ENTER)
+    process.on('exit', () => process.stdout.write(SCREEN_LEAVE))
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(signal, () => process.exit(process.exitCode ?? 0))
     tick()
     setInterval(tick, 2000)
   } else {

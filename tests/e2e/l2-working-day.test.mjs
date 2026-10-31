@@ -310,7 +310,9 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       assert.match(await watch.press('\r'), /Measure routes/)
       // Finish startup and the first idle poll before measuring a producer's
       // steady-state update. Opening a card is a separate user interaction.
-      await watch.next(text => text.includes('0/2') && text.includes('Measure routes'), 10000)
+      // The board writes nothing while its screen is unchanged (#545), so this waits one poll
+      // rather than for another frame.
+      await new Promise(done => setTimeout(done, 2500))
       block(world, { ...original, steps: ['- [x] Measure routes', '- [~] Publish gateway'] })
       assert.match(world.read('progress.md'), /\[x\] Measure routes/)
       const [observed] = await Promise.all([

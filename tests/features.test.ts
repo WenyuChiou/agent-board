@@ -413,8 +413,11 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
       if (item?.type !== 'row') throw new Error('Missing synthetic row')
       expect(item.row.archive === null).toBe(live)
       const drawn = pinned({ ...emptyBoardState, isIdleOpen: true }, items)
-      expect(boardKey(drawn, 'a', items, s).action?.type ?? null).toBe(live ? null : 'archive')
-      expect(boardScreen(view, [], drawn, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(live)
+      const pressed = boardKey(drawn, 'a', items, s)
+      expect(pressed.action?.type ?? null).toBe(live ? null : 'archive')
+      // The terminal says why only once a is pressed (#545).
+      expect(boardScreen(view, [], drawn, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(false)
+      expect(boardScreen(view, [], pressed.state, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(live)
       const model = serveModel(view, [], s)
       const page = [...model.groups.flatMap(group => group.rows), ...model.stopped][0]
       expect(page?.canArchive).toBe(!live)
@@ -428,7 +431,8 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
     }
     const asked = `## Demo\n<!-- auto session=11223344 agent=${agent} state=waiting updated=${new Date(now).toISOString()} -->\n### Question\n- [?] Choose a limit?\n<!-- /auto session=11223344 -->\n`
     const view = buildView(parseProgress(asked), [], null, now, 0, {}, s)
-    expect(boardScreen(view, [], emptyBoardState, s, { width: 160, isColor: false })).toContain(s.archiveLive)
+    expect(boardScreen(view, [], emptyBoardState, s, { width: 160, isColor: false })).not.toContain(s.archiveLive)
+    expect(boardKey(pinned(emptyBoardState, boardItems(view, [])), 'a', boardItems(view, []), s).state.note).toBe(s.archiveLive)
     expect(serveModel(view, [], s).asks[0]?.archiveNote).toBe(s.archiveLive)
     // A selected stopped block that resumes before the queued write stays owned.
     expect(takeTask(asked, { project: 'Demo', title: 'Question', line: 2, session: '11223344' }, now, s)).toBe(null)
@@ -2145,12 +2149,12 @@ test('the board for other agents puts what waits on you first, then each project
   const text = boardText(buildView(parseProgress(BOARD_FILE), [], null, now, 0, {}, STRINGS.en), pending, STRINGS.en, { width: 80, isColor: false })
   const at = (part: string): number => text.indexOf(part)
   expect(text.startsWith('Progress  ● 2 waiting')).toBe(true)
-  expect(at('api-gateway · codex › Rate-limit the public endpoints')).toBeGreaterThan(at('Waiting on you'))
+  expect(at('api-gateway · Codex › Rate-limit the public endpoints')).toBeGreaterThan(at('Waiting on you'))
   expect(text).toContain('[Choose] Per-key limit — 100 or 300 a minute?')
-  expect(text).toContain('OpenClaw · openclaw\n    Ship it to staging now?')
+  expect(text).toContain('OpenClaw · OpenClaw\n    Ship it to staging now?')
   expect(at('▸ acme-web')).toBeGreaterThan(at('Ship it to staging'))
   expect(text).toContain('▸ 2 Settings page')
-  expect(at('docs-site · gemini: Fixed 12 broken links.')).toBeGreaterThan(at('▸ acme-web'))
+  expect(at('docs-site · Gemini CLI: Fixed 12 broken links.')).toBeGreaterThan(at('▸ acme-web'))
   expect(text).not.toContain('\u001b[')
 })
 
@@ -3749,11 +3753,11 @@ test('the board you work in marks the chosen line and lists only the keys that d
   const onAsk = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
   expect(onAsk).toContain('› [Choose] Per-key limit')
   expect(onAsk).toContain('    2 300 a minute')
-  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · ↑↓ select')
+  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · ↑↓/jk select')
   const onJob = boardScreen(view, [], { selected: job, key: null, open: items[job]?.key ?? null, note: 'Copied: 300' }, STRINGS.en, { width: 100, isColor: false })
   expect(onJob).toContain('› Fabrikam fellowship')
   expect(onJob).toContain('    ✓ 1 Draft the statement')
-  expect(onJob).toContain('x done · d confirm done · a archive · ↑↓ select')
+  expect(onJob).toContain('x done · d confirm done · a archive · ↑↓/jk select')
   expect(onJob.trimEnd().endsWith('Copied: 300')).toBe(true)
 })
 
@@ -3779,16 +3783,18 @@ test('the terminal board, progress.html and the board page name the session that
   // A command longer than the terminal is cut short on its line, so c copies it whole.
   const whole = `cd '/home/someone/projects/data-pipeline-with-a-long-name/services/events' && claude --resume a1b2c3d4-1111-2222-3333`
   expect(boardKey({ ...emptyBoardState, selected: claude }, 'c', items, STRINGS.en).action).toEqual({ type: 'copy', text: whole })
+  // The way back is shown whole, wrapped at 80 columns, with the command c copies (#545).
   const narrow = boardScreen(view, [], { ...emptyBoardState, selected: claude }, STRINGS.en, { width: 80, isColor: false })
-  expect(narrow).not.toContain(whole)
-  expect(narrow).toContain('c copy resume command')
+  expect(narrow.split('\n').map(line => line.trim()).join(' ')).toContain(STRINGS.en.boardAnswerInCopy('Claude Code', 'claude --resume …'))
+  // The footer's line keys give way at 80 columns; the keys that move and quit stay.
+  expect(narrow).toContain(STRINGS.en.boardKeysMove)
   // A block written by hand under the AGENTS.md rule leaves no id: there is nothing to copy.
   expect(boardKey({ ...emptyBoardState, selected: codex }, 'c', items, STRINGS.en).action).toBeNull()
   const screen = boardScreen(view, [], { ...emptyBoardState, selected: claude }, STRINGS.en, { width: 120, isColor: false })
-  expect(screen).toContain(`Reply in the "Backfill the events" session. Can't reply from here.`)
+  expect(screen).toContain('Answer in Claude Code — c copies: claude --resume …')
   expect(screen).toContain('c copy resume command')
   const onCodex = boardScreen(view, [], { ...emptyBoardState, selected: codex }, STRINGS.en, { width: 120, isColor: false })
-  expect(onCodex).toContain(`Reply in the "Rename the export job" session (codex). Can't reply from here.`)
+  expect(onCodex).toContain('Answer in Codex for a longer reply.')
   expect(onCodex).not.toContain('c copy session ID')
   expect(onCodex).not.toContain('c9d8e7f6')
 

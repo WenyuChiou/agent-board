@@ -94,7 +94,9 @@ describe('L1 first run', () => {
       await watch.next(text => text.includes('Prepare the gateway'), 10000)
       await server.page()
       // Measure an update after a steady-state poll, excluding startup and first ledger writes.
-      await watch.next(text => text.includes('Prepare the gateway'), 10000)
+      // The board writes nothing while its screen is unchanged (#545), so this waits one poll
+      // rather than for another frame.
+      await new Promise(done => setTimeout(done, 2500))
       block(world, { state: 'waiting', steps: ['- [?] Publish the gateway, OK?'] })
       const [frame, elapsed] = await Promise.all([
         watch.next(text => text.includes('Publish the gateway, OK?'), PANE_MS),
