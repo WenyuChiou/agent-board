@@ -4191,7 +4191,7 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
   }
 }))
 
-test('concurrent writers wait for autonomous recovery before asserting every block exactly once', { timeout: 30000 }, t => fixture(async f => {
+test('concurrent writers wait for autonomous recovery before asserting every block exactly once', t => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   f.save(f.progress, '## FORMAT concurrency\n\nManual text must survive\n')
   const gate = join(f.home, 'recovery-writers-start')
