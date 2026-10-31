@@ -85,6 +85,12 @@ export const foldText = ({ text, fragments = [], version, date }) => {
   }
 }
 
+export const ambitionQuestions = [
+  "What goal sits above this version's goal?",
+  'Which one hard number should the next version move?',
+  'Which other field has already solved a problem like ours?',
+]
+
 export const parseArgs = (argv, now = new Date()) => {
   const [version, ...args] = argv
   const options = { version, date: now.toISOString().slice(0, 10), isWrite: false }
@@ -118,7 +124,12 @@ export const runFold = ({ cwd = process.cwd(), argv = process.argv.slice(2), now
   log(`${options.isWrite ? 'Wrote' : 'Dry run:'} ${folded.heading}`)
   log(`Fragments (${folded.fragments.length}):${folded.fragments.length ? '\n' + folded.fragments.join('\n') : ' none'}`)
   log(`Unreleased entries kept: ${folded.unreleasedCount}`)
-  if (options.isWrite) log(`Removed ${folded.fragments.length} folded fragment(s).`)
+  if (options.isWrite) {
+    log(`Removed ${folded.fragments.length} folded fragment(s).`)
+    // Output only: the questions never prompt or block the release.
+    log('\nBefore planning the next version, answer in its plan:')
+    ambitionQuestions.forEach((question, index) => log(`${index + 1}. ${question}`))
+  }
   return folded
 }
 

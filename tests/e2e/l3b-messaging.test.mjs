@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { describe, test } from 'node:test'
+import { after, before, describe, test } from 'node:test'
 import { performance } from 'node:perf_hooks'
-import { CONNECTOR_POLL_MS, GAPS, NATIVE_RECEIVERS, RECEIVERS, SENDERS, receiptBudget, withHub } from './lib/hub.mjs'
+import { CONNECTOR_POLL_MS, GAPS, NATIVE_RECEIVERS, RECEIVERS, SENDERS, openHub, receiptBudget, withHub } from './lib/hub.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { noMachineIds, noSilentPress, seenWithin } from './lib/expect.mjs'
 import { chat, terminal } from './lib/surfaces.mjs'
@@ -14,8 +14,8 @@ const nativeDelivery = async (hub, source, receiver, id = 'AB-synthetic-message'
   await hub.cleanPage(sent)
   return { ...result, sent }
 }
-const nativeOrFallback = async (hub, source, receiver, issue) => {
-  if (receiver.connector) await nativeDelivery(hub, source, receiver)
+const nativeOrFallback = async (hub, source, receiver, issue, id = 'AB-synthetic-message') => {
+  if (receiver.connector) await nativeDelivery(hub, source, receiver, id)
   else {
     await hub.fallback(receiver, text)
     await hub.cleanPage()
@@ -145,16 +145,27 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
   }))
 })
 
-// The matrix keeps its own budget instead of sharing the other journeys' watchdog.
-test('messages: every sender-receiver pair either delivers with a receipt or names the fallback in words', { timeout: 80000, concurrency: 2 }, async t => {
+// The matrix shares one world: its server, page and every sender and receiver are set up once,
+// and the pairs run one after another, each as its own test with its own bound and its own
+// message id and cards. On a Windows runner a world's server start costs about 3 s (the private
+// runtime folder's PowerShell and icacls calls, #591), so one world per pair put the whole
+// matrix, as one test, at its watchdog (#575).
+describe('messages: every sender-receiver pair either delivers with a receipt or names the fallback in words', () => {
   const pairs = SENDERS.flatMap(from => RECEIVERS.map(to => ({ from, to, relation: from === to ? 'own' : 'other' })))
-  await Promise.all(pairs.map(({ from, to, relation }) => t.test(`${from} → ${to} (${relation})`, { timeout: 20000 }, async () => withHub([
-    ...(from === 'page' ? [] : [{ agent: from, title: 'Prepare message sender' }]),
-    { agent: to, title: 'Review message receiver' },
-  ], async hub => {
-    const receiver = hub.actors.at(-1)
-    const source = from === 'page' ? 'page' : hub.actors[0]
+  const senderTitle = from => `Prepare ${from} sender`
+  const receiverTitle = to => `Review ${to} receiver`
+  let hub
+  before(async () => {
+    hub = await openHub([
+      ...SENDERS.filter(from => from !== 'page').map(from => ({ agent: from, title: senderTitle(from) })),
+      ...RECEIVERS.map(to => ({ agent: to, title: receiverTitle(to) })),
+    ])
+  }, { timeout: 20000 })
+  after(async () => { await hub?.close() }, { timeout: 20000 })
+  pairs.forEach(({ from, to, relation }, index) => test(`messages: ${from} → ${to} (${relation}) delivers with a receipt or names the fallback in words`, { timeout: 20000 }, async () => {
+    const receiver = hub.actors.find(actor => actor.title === receiverTitle(to))
+    const source = from === 'page' ? 'page' : hub.actors.find(actor => actor.title === senderTitle(from))
     if (source !== 'page') assert.notEqual(source.session, receiver.session)
-    await nativeOrFallback(hub, source, receiver, GAPS[to])
-  }))))
+    await nativeOrFallback(hub, source, receiver, GAPS[to], `AB-pair-${index + 1}`)
+  }))
 })

@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
+import { bundleFiles, bundleFromDir } from '../scripts/bundle-text.mjs'
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
 const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
@@ -80,11 +81,7 @@ const packed = f => {
   }
   return pkg
 }
-const bundle = pkg => {
-  const source = readFileSync(join(pkg, 'hooks/board-script.ts'), 'utf8')
-  const marker = 'export const BOARD_SCRIPT = '
-  return JSON.parse(source.slice(source.indexOf(marker) + marker.length, source.lastIndexOf(']') + 1)).join('\n')
-}
+const bundle = pkg => bundleFromDir(pkg)
 const bodyHash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
 const boardPath = f => join(f.home, '.agent-board/agent-board.mjs')
 const prelude = f => `globalThis.AGENT_BOARD = ${JSON.stringify({ path: join(f.home, '.agent-board/progress.md'), lang: 'en', codexRoot: dirname(boardPath(f)) })}\n`
@@ -97,6 +94,29 @@ const unnamed = (result, pkg) => {
 test('npm pack publishes only the files package.json lists', () => {
   assert.deepEqual(pack(), [...manifest.files, 'package.json', 'README.md', 'README.zh-CN.md', 'README.zh-TW.md', 'LICENSE'].sort())
 })
+
+test('the npm package lists every bundle part and the reader, and the installed command reads them', () => fixture(f => {
+  const files = bundleFiles(repo)
+  assert.ok(files.length >= 3, 'the bundle is kept in its entry and at least two parts')
+  const listed = pack()
+  for (const path of [...files, 'scripts/bundle-text.mjs']) assert.ok(listed.includes(path), `${path} is published`)
+  // A part left in hooks/ that the entry no longer imports would be a stale file the package ships.
+  assert.deepEqual(readdirSync(join(repo, 'hooks')).filter(name => /^board-script(?:-\d+)?\.ts$/.test(name)).map(name => `hooks/${name}`).sort(), [...files].sort())
+  const pkg = packed(f)
+  // The installed copy is this package's own bundle, so the command finds nothing to say.
+  save(boardPath(f), `${prelude(f)}${bundle(pkg)}`)
+  const same = f.run(pkg)
+  success(same)
+  assert.ok(same.stdout.trim())
+  assert.equal(same.stderr, '')
+  // One part missing from the package: the installed script still runs, and the command says it could not compare.
+  rmSync(join(pkg, 'hooks/board-script-2.ts'))
+  const unreadable = f.run(pkg)
+  success(unreadable)
+  assert.ok(unreadable.stderr.includes('could not compare'))
+  assert.ok(unreadable.stderr.includes('ENOENT'))
+  assert.equal(unreadable.stderr.trim().split('\n').length, 1)
+}))
 
 test('the package has no dependencies and no install scripts', () => {
   for (const key of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies', 'bundledDependencies', 'scripts', 'main']) {
@@ -123,6 +143,24 @@ test('the npm command and package.json keep LF line endings on every checkout', 
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.stdout.replace(/\r/g, ''), 'bin/agent-board.mjs: eol: lf\npackage.json: eol: lf\n')
   for (const path of ['bin/agent-board.mjs', 'package.json']) assert.equal(readFileSync(join(repo, path), 'utf8').includes('\r'), false, path)
+}))
+
+test('the board bundle keeps LF on every checkout and stays under the Claude Code module limit', () => fixture(f => {
+  // The bundle has one line per line, so a Windows checkout with CRLF adds a byte per line and
+  // takes it past the 1 MiB that Claude Code reads from one module (#582).
+  // When a size check fails, add a split point to PART_STARTS in scripts/build-board.ts; do not trim
+  // features to fit.
+  const files = bundleFiles(repo)
+  assert.ok(files.length > 1, files.join(', '))
+  const result = spawnSync('git', ['check-attr', 'eol', '--', ...files], { cwd: repo, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.ifError(result.error)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout.replace(/\r/g, ''), files.map(path => `${path}: eol: lf\n`).join(''))
+  for (const path of files) {
+    const bundle = readFileSync(join(repo, path))
+    assert.equal(bundle.includes(13), false, path)
+    assert.ok(bundle.length < 1048576, `${path}: ${bundle.length} bytes`)
+  }
 }))
 
 test('package.json, plugin.json and agent-board --version report one version', () => fixture(f => {

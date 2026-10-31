@@ -263,13 +263,27 @@ test('dependency walking records missing literal files without throwing', async 
   })
 })
 
-test('dependency walking records the generated board bundle without parsing its imports', async () => {
+test('dependency walking follows the generated board bundle to its parts without parsing the parts', async () => {
   await withFixture(async root => {
     await writeFixture(root, 'scripts/entry.mjs', "import '../hooks/board-script.ts'")
-    await writeFixture(root, 'hooks/board-script.ts', "import './generated-internal.ts'")
+    await writeFixture(root, 'hooks/board-script.ts', "import { LINES as PART_1 } from './board-script-1.ts'\nexport const BOARD_SCRIPT = [...PART_1].join('\\n')")
+    await writeFixture(root, 'hooks/board-script-1.ts', "import './generated-internal.ts'\nexport const LINES = []")
     await writeFixture(root, 'hooks/generated-internal.ts', 'export const internal = true')
     const dependencies = await walkDependencies(root, ['scripts/entry.mjs'])
-    assert.deepEqual([...dependencies].sort(), ['hooks/board-script.ts', 'scripts/entry.mjs'])
+    assert.deepEqual([...dependencies].sort(), ['hooks/board-script-1.ts', 'hooks/board-script.ts', 'scripts/entry.mjs'])
+  })
+})
+
+test('a change to one board bundle part alone counts as a bundle change and selects the npm and installer checks', async () => {
+  const { buildPlan } = await import('../scripts/ci-impact.mjs')
+  assert.equal(makePlan(['hooks/board-script-1.ts'], options()).generated.bundle, true)
+  await withFixture(async root => {
+    await writeFixture(root, 'hooks/board-script.ts', "import { LINES as PART_1 } from './board-script-1.ts'\nexport const BOARD_SCRIPT = [...PART_1].join('\\n')")
+    await writeFixture(root, 'hooks/board-script-1.ts', 'export const LINES = []')
+    const plan = await buildPlan(['hooks/board-script-1.ts'], { roots: [root] })
+    assert.equal(plan.full, false)
+    assert.equal(plan.generated.bundle, true)
+    assertOnly(plan, ['npm', 'installers', 'generated'])
   })
 })
 
