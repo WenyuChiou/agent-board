@@ -1,10 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { EN } from '../../hooks/strings-en.ts'
 import { STALE_MS } from '../../hooks/parse.ts'
 import { makeWorld } from './lib/world.mjs'
 import { observeHookRecovery } from './lib/recovery-observation.mjs'
+import { seenWithin } from './lib/expect.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { formatWriters, holdNextRename, keptHookEvents, lockFile, storageFault, tear } from './lib/faults.mjs'
 import { chat, html, pageDom, run, serve } from './lib/surfaces.mjs'
@@ -348,12 +350,61 @@ const raceOnce = async isWindows => {
     assert.equal(warmed.status, 0, whyFailed(warmed))
     const rounds = isWindows ? 40 : 30
     // Test-only headroom lets a loaded CI machine schedule every competing writer.
-    const writers = await formatWriters(world, RACE_WRITERS, { rounds, spacingMs: isWindows ? 75 : 25, lockWaitMs: 8000 })
+    const overlap = { held: join(world.claudeDir, 'format-overlap-held'), release: join(world.claudeDir, 'format-overlap-release') }
+    const overlapSeen = join(world.claudeDir, 'hook-overlap-seen')
+    const hookReady = join(world.claudeDir, 'hook-overlap-ready')
+    const writers = await formatWriters(world, RACE_WRITERS, { rounds, spacingMs: isWindows ? 75 : 25, lockWaitMs: 8000, overlap })
     const start = () => RACE_HOOKS.map(session => hook(world, 'codex', 'UserPromptSubmit', { session_id: session, prompt: 'Review the synthetic routes', cwd: world.root }))
-    writers.go()
-    const hooks = start()
+    const preload = world.write('hook-overlap.cjs', `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const open = fs.openSync
+const lock = ${JSON.stringify(`${world.path}.agent-board-lock`)}
+const isReporter = process.argv.includes('--hook-recovery-parent')
+fs.openSync = (file, ...args) => {
+  const isTarget = isReporter && String(file) === lock && args[0] === 'wx'
+  if (isTarget && !fs.existsSync(${JSON.stringify(overlap.held)})) {
+    fs.writeFileSync(${JSON.stringify(hookReady)}, 'hook at lock')
+    const until = performance.now() + 8000
+    while (!fs.existsSync(${JSON.stringify(overlap.held)})) {
+      if (performance.now() >= until) throw new Error('no writer took the lock')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+    }
+  }
+  try { return open(file, ...args) } catch (error) {
+    if (isTarget && ['EEXIST', 'EPERM'].includes(error.code)) {
+      try {
+        const owner = JSON.parse(fs.readFileSync(lock, 'utf8'))
+        if (String(owner.pid) === fs.readFileSync(${JSON.stringify(overlap.held)}, 'utf8')) fs.writeFileSync(${JSON.stringify(overlapSeen)}, 'hook contended with writer')
+      } catch {}
+    }
+    throw error
+  }
+}
+syncBuiltinESMExports()
+`)
+    const before = world.env.NODE_OPTIONS
+    let hooks = []
+    let settledHooks = Promise.resolve([])
+    try {
+      world.env.NODE_OPTIONS += ` --require=${JSON.stringify(preload)}`
+      hooks = start()
+      settledHooks = Promise.allSettled(hooks)
+      await seenWithin(() => world.exists('hook-overlap-ready') ? 'ready' : '', text => text === 'ready', 8000)
+      writers.go()
+      await seenWithin(() => world.exists('hook-overlap-seen') ? 'seen' : '', text => text === 'seen', 8000)
+    } catch (error) {
+      writers.go()
+      world.write('format-overlap-release', '')
+      await settledHooks
+      await writers.stop()
+      throw error
+    } finally {
+      world.env.NODE_OPTIONS = before
+      world.write('format-overlap-release', '')
+    }
     const written = await writers.finished()
     const ran = await Promise.all(hooks)
+    assert.ok(world.exists('hook-overlap-seen'), 'a foreground hook reporter contended with a FORMAT writer')
     // Recovery may finish between the separate reads of the board and pending files.
     // Observe the existing recovery bound without another foreground event.
     const sessions = [warmup, ...RACE_HOOKS]
@@ -426,6 +477,8 @@ test('L5 FORMAT.md writer: a block whose rename is refused while another program
     const held = await holder.finished()
     assert.equal(held.status, 0, held.stderr)
     assert.match(held.stdout, /HOLDER_RELEASED/)
+    const retry = holder.retry()
+    assert.equal(retry.succeeded, retry.refused, 'the same temp file was renamed after the refusal, not a later outer write attempt')
     t.diagnostic(result.stdout.trim())
     assert.match(world.read('progress.md'), /Manual text must survive\n/)
     assert.match(world.read('progress.md'), /- \[~\] Round 1\n<!-- \/auto session=f2000001 -->/)

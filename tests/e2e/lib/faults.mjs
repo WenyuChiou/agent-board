@@ -76,6 +76,7 @@ export const holdNextRename = async world => {
   const request = join(world.root, 'rename-request')
   const ready = join(world.root, 'rename-held')
   const refused = join(world.root, 'rename-refused')
+  const succeeded = join(world.root, 'rename-succeeded')
   const quote = value => value.replace(/'/g, "''")
   const worker = childIn(world, 'powershell.exe', ['-NoProfile', '-Command', `
 $ErrorActionPreference = 'Stop'
@@ -124,8 +125,12 @@ fs.writeFileSync = (target, ...rest) => {
   return result
 }
 fs.renameSync = (from, to) => {
-  try { return rename(from, to) } catch (error) {
-    if (to === file && ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) write(${JSON.stringify(refused)}, error.code)
+  try {
+    const result = rename(from, to)
+    if (to === file) write(${JSON.stringify(succeeded)}, String(from))
+    return result
+  } catch (error) {
+    if (to === file && ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) write(${JSON.stringify(refused)}, String(from))
     throw error
   }
 }
@@ -134,7 +139,7 @@ syncBuiltinESMExports()
     const before = world.env.NODE_OPTIONS
     world.env.NODE_OPTIONS += ` --require=${JSON.stringify(preload)}`
     world.cleanups.push(() => { world.env.NODE_OPTIONS = before })
-    return { finished: () => worker.done }
+    return { finished: () => worker.done, retry: () => ({ refused: readFileSync(refused, 'utf8'), succeeded: readFileSync(succeeded, 'utf8') }) }
   } catch (error) {
     await worker.stop()
     throw error
@@ -255,7 +260,7 @@ syncBuiltinESMExports()
 // The two gates (the start signal, and the writer before it) are waited for at most gateMs: after
 // a hard kill of the driver nobody opens them, and without a deadline this process would poll for ever.
 export const formatWriter = async (fs, config) => {
-  const { file, session, rounds, spacingMs, gate, after, gateMs, lockWaitMs = 2000 } = config
+  const { file, session, rounds, spacingMs, gate, after, gateMs, lockWaitMs = 2000, overlap } = config
   const pause = ms => new Promise(done => setTimeout(done, ms))
   const isWindows = process.platform === 'win32'
   const lock = `${file}.agent-board-lock`
@@ -313,6 +318,22 @@ export const formatWriter = async (fs, config) => {
     let isWritten = false
     if (fd !== undefined) {
       try {
+        // All writers start together. The first lock owner waits only for a real hook collision.
+        if (overlap && round === 0) {
+          let isGateOwner = false
+          try {
+            fs.writeFileSync(overlap.held, String(process.pid), { flag: 'wx' })
+            isGateOwner = true
+          }
+          catch (error) { if (error.code !== 'EEXIST') throw error }
+          if (isGateOwner) {
+            const until = performance.now() + gateMs
+            while (!fs.existsSync(overlap.release)) {
+              if (performance.now() >= until) throw new Error('overlap gate stayed closed')
+              await pause(2)
+            }
+          }
+        }
         for (let attempt = 1; attempt <= 3 && !isWritten; attempt++) {
           const temp = `${file}.${token}.${attempt}.format-tmp`
           try {
@@ -368,10 +389,10 @@ const WRITER_GATE_MS = 20000
 // One process per session id, all waiting on a gate file so they start together. With
 // isSequential each waits for the one before it to finish instead, so no two overlap. rounds
 // and spacingMs repeat the whole procedure to keep writers busy while other writers are active.
-export const formatWriters = async (world, sessions, { rounds = 1, spacingMs = 0, isSequential = false, gateMs = WRITER_GATE_MS, lockWaitMs = 2000 } = {}) => {
+export const formatWriters = async (world, sessions, { rounds = 1, spacingMs = 0, isSequential = false, gateMs = WRITER_GATE_MS, lockWaitMs = 2000, overlap } = {}) => {
   const gate = join(world.root, 'format-writers-go')
   const workers = sessions.map((session, index) => {
-    const config = { file: world.path, session, rounds, spacingMs, gate, gateMs, lockWaitMs, after: isSequential && index > 0 ? join(world.root, `format-writer-done-${index - 1}`) : undefined }
+    const config = { file: world.path, session, rounds, spacingMs, gate, gateMs, lockWaitMs, overlap, after: isSequential && index > 0 ? join(world.root, `format-writer-done-${index - 1}`) : undefined }
     return childIn(world, process.execPath, ['--input-type=module', '-e', `import * as fs from 'node:fs'
 const main = ${formatWriter.toString()}
 process.exitCode = await main(fs, ${JSON.stringify(config)}) ? 0 : 2
