@@ -1,0 +1,2 @@
+- **Reporters / Pending event time** · Events queued by a late-starting hook worker now retain the same UTC event time as other pending events. Recovery keeps the original millisecond ordering and applies that event time to the board (#590).
+  Tests: `a late Codex worker queues an ISO event time and recovery preserves it`, `recovery derives the original event time for legacy raw entries without now`, `concurrent writers wait for autonomous recovery before asserting every block exactly once`.
