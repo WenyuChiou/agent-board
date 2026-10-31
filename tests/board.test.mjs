@@ -4784,19 +4784,24 @@ const countPowerShell = (board, firstMs = 0) => {
   const starts = () => existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : []
   // Each start's paths and result and each icacls call, for the message of a failing count.
   starts.detail = () => existsSync(`${log}.detail`) ? `\n${readFileSync(`${log}.detail`, 'utf8')}` : ''
+  // A new folder whose first read shows another account's grant has it removed and is read once
+  // more: the one second start the folder check allows. An elevated built-in Administrator (the
+  // GitHub Windows runner) gets SYSTEM and Administrators grants that /inheritance:r leaves.
+  starts.cold = () => /^parent icacls .* \/remove /m.test(starts.detail()) ? ['parent', 'parent'] : ['parent']
   return starts
 }
 
-test('a cold Windows page start runs one PowerShell for the command and the server it starts together', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 60_000 }, async () => {
+test('a cold Windows page start runs one PowerShell for the command and the server it starts together, and one more only to read again a folder it took another account\'s grant from', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 60_000 }, async () => {
   const board = serveIn()
   const starts = countPowerShell(board)
   let url = null
   try {
     url = board.urlOf(await board.serve(['--quiet-board']))
     assert.ok(url)
-    assert.deepEqual(starts(), ['parent'], `the command reads the folder once; the server reuses that check and reads its new address file through icacls${starts.detail()}`)
+    const cold = starts.cold()
+    assert.deepEqual(starts(), cold, `the command reads the folder once; the server reuses that check and reads its new address file through icacls${starts.detail()}`)
     assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
-    assert.deepEqual(starts(), ['parent', 'parent'], `a second start reads the folder and the running page's address file in one start${starts.detail()}`)
+    assert.deepEqual(starts(), [...cold, 'parent'], `a second start reads the folder and the running page's address file in one start${starts.detail()}`)
   } finally { await board.end([url]) }
 })
 
@@ -4808,7 +4813,7 @@ test('a Windows page start whose first PowerShell start takes over 10 s still op
     const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
     url = board.urlOf(out)
     assert.ok(url, out)
-    assert.deepEqual(starts(), ['parent'], starts.detail())
+    assert.deepEqual(starts(), starts.cold(), starts.detail())
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
   } finally { await board.end([url]) }
 })
