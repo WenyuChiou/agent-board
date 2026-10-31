@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
+import { EN } from '../../../hooks/strings-en.ts'
 import { spawnIsolated } from './spawn.mjs'
 import { makeWorld } from './world.mjs'
 
@@ -165,13 +166,17 @@ export const report = async (f, id, state) => {
 export const assertWorking = (text, id) => {
   assert.ok(text.includes(titleOf(id)), `${id || 'Claude Code'}: working title`)
   assert.ok(text.includes('Compare the staging routes'), `${id || 'Claude Code'}: working step`)
-  if (id) assert.ok(text.includes(` · ${id}`), `${id}: the working card names the agent`)
+  if (id) assert.ok(namesOf(id).some(name => text.includes(` · ${name}`)), `${id}: the working card names the agent`)
 }
+
+// The board names an agent by its display name (#545); --chat keeps the agent's own id.
+const namesOf = id => [EN.agentNames[id] ?? id, id]
 
 export const assertWaiting = (text, id) => {
   const heading = text.indexOf('Waiting on you')
   assert.ok(heading >= 0, `${id || 'Claude Code'}: Waiting on you heading`)
-  const card = `api-gateway${id ? ` · ${id}` : ''} › ${titleOf(id)}`
+  const cards = (id ? namesOf(id) : ['']).map(name => `api-gateway${name ? ` · ${name}` : ''} › ${titleOf(id)}`)
+  const card = cards.find(one => text.indexOf(one, heading) > heading) ?? cards[0]
   const at = text.indexOf(card, heading)
   assert.ok(at > heading, `${id || 'Claude Code'}: waiting card ${card}\n${text}`)
   const nextLine = text.slice(at + card.length).trimStart().split('\n')[0]
