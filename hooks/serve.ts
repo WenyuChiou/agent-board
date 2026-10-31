@@ -786,7 +786,8 @@ div.row-btn .r-chev{visibility:hidden}
 .steps{list-style:none;margin:0;padding:0;display:grid;gap:var(--s1)}
 .steps li{display:grid;grid-template-columns:22px minmax(0,1fr);gap:var(--s2);align-items:baseline}
 /* A step's Done button sits under its text, one line wide at most; the whole step is its title. */
-.steps li>button{grid-column:2;justify-self:start;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.steps li>button{grid-column:2;justify-self:start;max-width:100%;min-width:0}
+.steps li>button>span{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .steps .now .t{font-weight:600}
 .steps .mk{text-align:center}
 .t-quiet .short,.t-quiet .whole{color:var(--muted)}
@@ -1417,7 +1418,9 @@ const PAGE_SCRIPT = String.raw`
       var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
       add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '○'), clipped(clean(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)));
       if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled') {
-        var tick = button(w('serveTickNext', clean(step.text)), function () { act(row.key, 'tick', step.text, '', '', '', row.fp); });
+        // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
+        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp); }, 'btn');
+        add(tick, el('span', '', w('serveTickNext', clean(step.text))));
         tick.title = step.text;
         add(line, tick);
       }
@@ -1620,11 +1623,13 @@ const PAGE_SCRIPT = String.raw`
   // Whether an agent can be reached from here, from what the model already holds. connected: a session of it has a
   // delivery connection. open: a session is open in its own window or in the pane, or it worked in the last 30
   // minutes. offline: the board can tell its sessions are closed (a line whose session ended) and none is open.
-  // notseen: the board cannot tell (it has no line of that agent that says either).
+  // notseen: the board cannot tell (it has no line of that agent that says either). An agent that reported in the
+  // last 30 minutes is open whatever its older lines say: a Codex turn that ended and waits on you is no closed session.
   function presenceMap(view) {
     var map = {};
     pg.ids.forEach(function (id) {
-      var isOpen = view.working.some(function (ref) { return agentOf(ref) === id; });
+      var group = view.agents.filter(function (one) { return one.agent === id; })[0];
+      var isOpen = view.working.some(function (ref) { return agentOf(ref) === id; }) || !!group && group.last > 0 && view.now - group.last <= 30 * 60 * 1000;
       var isGone = false;
       Object.keys(pg.sources).forEach(function (key) {
         var one = pg.sources[key];

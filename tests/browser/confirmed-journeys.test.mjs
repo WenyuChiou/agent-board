@@ -84,8 +84,10 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
       for (const tick of await ticks.all()) {
         const place = await tick.evaluate(node => {
           const box = node.getBoundingClientRect(), text = node.parentElement.querySelector('.clip').getBoundingClientRect()
-          return { left: box.left, right: box.right, width: box.width, height: box.height, textLeft: text.left, textRight: text.right, title: node.title }
+          return { left: box.left, right: box.right, width: box.width, height: box.height, textLeft: text.left, textRight: text.right, title: node.title, cls: node.className }
         })
+        // The page's button, as Confirm done and Copy are.
+        assert.equal(place.cls, 'btn', JSON.stringify(place))
         assert.ok(place.width >= 44 && place.left >= place.textLeft - 1 && place.right <= place.textRight + 1, JSON.stringify(place))
         assert.ok(place.height <= 56, JSON.stringify(place))
         assert.ok([chinese, english, unbroken].includes(place.title), place.title)

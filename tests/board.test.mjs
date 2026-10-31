@@ -7596,6 +7596,19 @@ test('an agent with no open session shows as offline and its answers copy', asyn
   await copying.settle()
   assert.ok(copying.copies.includes('Yes'))
   assert.ok(shownWords(card).includes(EN.pgPasteLater('Yes', EN.agentNames.gemini)), shownWords(card))
+  // An agent that reported just now has a session open, with no delivery connection too, whatever its older lines
+  // say: a Codex turn that ended and waits on you is no closed session. Half an hour later the old lines count again.
+  for (const [ago, presence] of [[60_000, 'open'], [31 * 60_000, 'offline']]) {
+    const reported = viewed(model)
+    reported.view.now = Date.UTC(2026, 9, 31, 12)
+    reported.view.agents.find(one => one.agent === 'gemini').last = reported.view.now - ago
+    const dom = await pageDom(await sourcePage(), reported, { width: 1280 })
+    for (const node of [rowAgent(dom, 'gemini'), sideAgent(dom, 'gemini')]) {
+      assert.equal(node.getAttribute('data-presence'), presence)
+      assert.equal(node.getAttribute('aria-label').includes(EN.pgOffline), presence === 'offline', node.getAttribute('aria-label'))
+    }
+    assert.equal(shownWords(sideAgent(dom, 'gemini')).includes(EN.pgOffline), presence === 'offline')
+  }
 })
 
 test('on a wide screen the sidebar lists views, agents and projects', async () => {
@@ -8623,6 +8636,10 @@ test('a Done button names a long step by its first words', async () => {
     assert.ok(Array.from(words).length <= 36 && words.endsWith('…'), words)
     assert.ok(LONG_STEP.startsWith(words.slice(0, -1)))
   }
+  // Each step's own Done button is the page's button, as Confirm done and Copy are, not the browser's grey one.
+  const stepDone = dom.buttons().filter(button => button.className !== 'primary' && button.textContent.startsWith('Done: '))
+  assert.ok(stepDone.length >= 1, dom.buttons().map(button => `${button.className}: ${button.textContent}`).join(' | '))
+  for (const button of stepDone) assert.equal(button.className, 'btn', button.textContent)
   // A press still names the whole step, so it ticks that step and no other.
   for (const button of done) button.click()
   await dom.flush()
