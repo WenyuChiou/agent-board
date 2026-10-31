@@ -67,7 +67,10 @@ export const ZH_TW = {
   codexTask: 'Codex 本機任務',
   codexProject: 'Codex',
   codexLifecycle: "等待下一個工作指令",
-  codexTrust: 'Codex 安裝不會自動信任 hooks。先查明實際 Codex 執行檔，以 --codex-trust --codex-bin 加該完整路徑預覽；主動列出六個目前定義、雜湊與 config.toml 變更範圍，請使用者確認一次，再對同一命令加 --apply。此流程透過 Codex 設定 API 只信任指定雜湊，保留其他設定，不使用全域略過。API 不支援時才引導 CLI /hooks，不假設桌面有相同入口。完成後讀回信任並觀察真實事件；未觸發仍列未驗收。',
+  codexTrust: 'Codex 安裝不會自動信任 hooks。先查明實際 Codex 執行檔，以 --codex-trust --codex-bin 加該完整路徑與 --json 預覽；主動列出六個目前定義、雜湊與 config.toml 變更範圍，請使用者確認一次，再對同一命令加 --apply。此流程透過 Codex 設定 API 只信任指定雜湊，保留其他設定，不使用全域略過。API 不支援時才引導 CLI /hooks，不假設桌面有相同入口。完成後讀回信任並觀察真實事件；未觸發仍列未驗收。',
+  codexTrustPreview: (n: number): string => `Codex：將信任看板的 ${n} 個 hooks。加上 --apply 再執行同一命令。`,
+  codexTrustApplied: (n: number): string => `Codex：已信任看板的 ${n} 個 hooks。開始新的 Codex 工作階段。`,
+  codexTrustNone: 'Codex：看板的 hooks 已受信任。開始新的 Codex 工作階段。',
   codexPrivacy: '只保留 session、turn、狀態及明確回報的任務摘要；不讀對話紀錄，不保存 hook 的 prompt、工具輸入或回覆，不傳送給其他模型。',
   codexDoctor: '檢查檔案與 hook 定義，不能證明 hooks 已獲信任或實際觸發；仍須在 CLI 和桌面版分別驗收。',
   setupSummary: {
