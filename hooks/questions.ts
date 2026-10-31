@@ -392,13 +392,12 @@ export const questionFilesKey = (
 
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
-const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string, agent?: string): boolean => {
+const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string): boolean => {
   let count = 0
   let unresumed = 0
-  const matchAgent = agent ?? task.auto?.agent
   for (const p of projects) {
     for (const t of p.tasks) {
-      if (t.auto !== null && (matchAgent === undefined || t.auto.agent === undefined || t.auto.agent === matchAgent) && t.auto.session === ownId) {
+      if (t.auto !== null && (t.auto.agent === undefined || t.auto.agent === 'claude') && t.auto.session === ownId) {
         count += 1
         if (t.auto.resume === null || t.auto.resume === undefined) unresumed += 1
       }
@@ -430,10 +429,10 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       const isMine = mine !== null && (
         task.auto?.resume !== null && mine.sessionId
           ? task.auto?.resume === mine.sessionId
-          : (Boolean(mine.sessionId) && task.auto?.session === own && (task.auto?.agent === undefined || mine.agent === undefined || task.auto?.agent === mine.agent) && mine.isRun !== true && isUniqueUnresumedTask(task, projects, own, mine.agent))
+          : (Boolean(mine.sessionId) && task.auto?.session === own && (task.auto?.agent === undefined || task.auto?.agent === 'claude') && mine.isRun !== true && isUniqueUnresumedTask(task, projects, own))
       )
       if (isMine) continue
-      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', (task.auto?.resume ?? task.auto?.session) ?? task.title)
+      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
       if (frozen.has(scope)) continue
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
@@ -441,7 +440,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       // are worked out once per task rather than once per step (#371).
       const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? (task.auto === null ? task.notes.join('\n') : '')
       const data = sourceData(task)
-      task.steps.forEach((step, index) => rows.push({ scope, session: (task.auto?.resume ?? task.auto?.session) ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: (task.auto?.resume ?? task.auto?.session) ?? '', data } }))
+      task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
     }
   }
   if (mine !== null) rows.push(...ownObservations(mine))
