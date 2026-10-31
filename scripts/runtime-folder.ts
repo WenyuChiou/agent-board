@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import type { BigIntStats, Stats } from 'node:fs'
-import { hostname, tmpdir } from 'node:os'
+import { hostname } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 export class RuntimeFolderError extends Error {
@@ -28,16 +28,22 @@ const currentAccount = (): Account => {
   return (account = { sid, aliases })
 }
 
-// Owner, group and access list of each path, one PowerShell start for all of them, in order.
+// Owner, group and access list of each path, one PowerShell start for all of them, in order. The
+// first path must be readable, or the call fails. Each later path is an address file that may be
+// removed by an old page's shutdown, or be unreadable for this account, while the call runs: its
+// line is then '-', which no check accepts, and the later read of that file decides, as it did
+// when each file had a call of its own.
 const acls = (files: string[]): string[] => {
   const lines = execFileSync(join(system(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
     '-NoProfile', '-NonInteractive', '-Command',
     "$ErrorActionPreference = 'Stop'; $PSModuleAutoLoadingPreference = 'None'; "
       + "$sections = [System.Security.AccessControl.AccessControlSections]'Access,Owner,Group'; "
       // A Windows path cannot hold a pipe, so it can separate the paths.
-      + "foreach ($target in $env:AGENT_BOARD_RUNTIME_ACL_PATH.Split('|')) { "
-      + '$security = if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::GetAccessControl($target, $sections) } else { [System.IO.File]::GetAccessControl($target, $sections) }; '
-      + '$security.GetSecurityDescriptorSddlForm($sections) }',
+      + "$targets = $env:AGENT_BOARD_RUNTIME_ACL_PATH.Split('|'); "
+      + 'for ($at = 0; $at -lt $targets.Length; $at++) { $target = $targets[$at]; '
+      + 'try { $security = if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::GetAccessControl($target, $sections) } else { [System.IO.File]::GetAccessControl($target, $sections) }; '
+      + '$security.GetSecurityDescriptorSddlForm($sections) } '
+      + "catch { if ($at -eq 0) { throw }; '-' } }",
   ], {
     ...powerShellOptions,
     // Fresh isolated profiles need no command discovery, and a PowerShell parent's module
@@ -51,11 +57,14 @@ const acls = (files: string[]): string[] => {
 const acl = (file: string): string => acls([file])[0] ?? ''
 
 // The access list alone as SDDL, without starting PowerShell: icacls saves it to a file in a
-// folder made for this call. It carries no owner, so it only follows a call that set the owner.
+// folder made inside the file's own folder. It carries no owner, so it only follows a call that
+// set the owner. The folder is the private runtime folder, not %TEMP%, which grants other
+// accounts on this computer modify rights: one of them could rewrite or lock the saved list
+// between its write and its read.
 const dacl = (file: string): string => {
-  const holder = mkdtempSync(join(tmpdir(), 'agent-board-acl-'))
+  const holder = mkdtempSync(join(dirname(resolve(file)), '.acl-'))
+  const saved = join(holder, 'dacl.txt')
   try {
-    const saved = join(holder, 'dacl.txt')
     execFileSync(join(system(), 'icacls.exe'), [resolve(file), '/save', saved, '/L'], options)
     // UTF-16: the name of the path on the first line, its access list on the second.
     const lines = readFileSync(saved).toString('utf16le').replace(/^\uFEFF/, '').split(/\r?\n/).filter(line => line !== '')
@@ -63,8 +72,10 @@ const dacl = (file: string): string => {
     if (lines.length !== 2 || found === undefined || !found.startsWith('D:')) throw new RuntimeFolderError()
     return found
   } finally {
-    // A temp folder left behind holds only a list of accounts; it is not worth failing the start.
-    try { rmSync(holder, { recursive: true, force: true }) } catch {}
+    // unlink and rmdir take away a link itself and never follow it. A folder left behind holds only
+    // a list of accounts; it is not worth failing the start.
+    try { unlinkSync(saved) } catch {}
+    try { rmdirSync(holder) } catch {}
   }
 }
 
@@ -175,8 +186,16 @@ export const privateRuntimeFolder = (dir: string, names: string[] = []): string 
     // As in the message hub, /L never changes the destination of a planted link.
     execFileSync(icacls, [root, '/setowner', `*${sid}`, '/L'], options)
     execFileSync(icacls, [root, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '/L'], options)
-    const present = names.map(name => join(root, name)).filter(file => { try { return isPlain(file, false) } catch { return false } })
-    const stamps = present.map(file => lstatSync(file))
+    // A file that is gone or not a plain file by now is left to the later read, which refuses it.
+    const present: string[] = []
+    const stamps: Stats[] = []
+    for (const name of names) {
+      const file = join(root, name)
+      try {
+        const found = lstatSync(file)
+        if (found.isFile() && !found.isSymbolicLink() && found.nlink === 1) { present.push(file); stamps.push(found) }
+      } catch {}
+    }
     const read = acls([root, ...present])
     let descriptor = read[0] ?? ''
     const aliases: Record<string, string> = {

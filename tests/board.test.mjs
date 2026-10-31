@@ -8,7 +8,7 @@ import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { registerHooks } from 'node:module'
-import { join, resolve, sep } from 'node:path'
+import { basename, join, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { test } from 'node:test'
@@ -4831,6 +4831,34 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
+test('a Windows page start opens the page when an old page removes its address file during the access check', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'old-page-removes-file.cjs')
+  const marker = join(board.dir, 'address-file-removed')
+  // A leftover address file, as an old page that is stopping leaves it for a moment.
+  writeFileSync(board.served, '{"synthetic":"leftover"}')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+const target = ${JSON.stringify(board.served)}
+cp.execFileSync = (file, args, options) => {
+  // The file goes just before the access list of the folder and the file is read together.
+  if (/powershell\\.exe$/i.test(String(file)) && String(options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH).toLowerCase().includes(target.toLowerCase())) {
+    fs.rmSync(target, { force: true })
+    fs.writeFileSync(${JSON.stringify(marker)}, 'removed during the access check')
+  }
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    assert.equal(readFileSync(marker, 'utf8'), 'removed during the access check')
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+  } finally { await board.end([url]) }
+})
+
 // The server child is told which folder the command just checked. It starts the page on that
 // folder when it is still the same plain folder, and checks in full when it is not.
 const startChild = (board, handoff) => new Promise(done => {
@@ -4873,6 +4901,40 @@ test('a Windows server child reuses the folder its command checked and checks an
     assert.deepEqual(starts(), ['child', 'child'])
     const acl = windowsAcl(folder, board.env)
     assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the full check removed the other account\'s grant')
+  } finally { await board.end([url]) }
+})
+
+test('a Windows server child checks the folder in full when its handoff is missing, malformed or for another folder', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 120_000 }, async () => {
+  const board = serveIn()
+  const starts = countPowerShell(board)
+  const log = board.env.AGENT_BOARD_TEST_PS_LOG
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  let url = null
+  try {
+    privateRuntimeFolder(folder)
+    const handed = JSON.parse(runtimeFolderHandoff())
+    const variants = {
+      'no variable': undefined,
+      'the text null': 'null',
+      'not JSON': '{"path":',
+      'an array': '[]',
+      'a path that is not text': JSON.stringify({ path: 7, identity: handed.identity }),
+      'no identity': JSON.stringify({ path: handed.path }),
+      'an identity that is not text': JSON.stringify({ path: handed.path, identity: 7 }),
+      'the identity of this folder for another path': JSON.stringify({ path: join(board.dir, 'elsewhere'), identity: handed.identity }),
+    }
+    for (const [name, handoff] of Object.entries(variants)) {
+      rmSync(log, { force: true })
+      const started = await startChild(board, handoff)
+      url = started.url
+      assert.ok(url, `${name}: ${started.err}`)
+      // The full check reads the folder in one PowerShell start; a trusted handoff reads nothing.
+      assert.deepEqual(starts(), ['child'], name)
+      await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': new URL(url).searchParams.get('t'), 'content-type': 'application/json' }, body: '{}' })
+      for (let tries = 0; existsSync(board.served) && tries < 50; tries++) await delay(100)
+      assert.ok(!existsSync(board.served), name)
+      url = null
+    }
   } finally { await board.end([url]) }
 })
 
@@ -4968,6 +5030,52 @@ require('node:module').syncBuiltinESMExports()
       assert.ok(!ran.stdout.includes('http:'))
     } finally { await board.end([]) }
   }
+})
+
+test('Windows page access lists are saved inside the private runtime folder and the scratch folder is removed afterwards', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'acl-save-targets.cjs')
+  const log = join(board.dir, 'acl-save-targets.log')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+cp.execFileSync = (file, args, options) => {
+  if (/icacls\\.exe$/i.test(String(file)) && args.includes('/save')) fs.appendFileSync(${JSON.stringify(log)}, args[args.indexOf('/save') + 1] + '\\n')
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  const folder = resolve(join(board.env.XDG_RUNTIME_DIR, 'agent-board'))
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    // The second start reads the running page's address file back, which saves its list again.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
+    const saves = readFileSync(log, 'utf8').split('\n').filter(Boolean)
+    assert.ok(saves.length >= 2, `${saves.length} saves`)
+    for (const saved of saves) {
+      // %TEMP% grants modify to other accounts on this computer; the private folder does not.
+      assert.ok(saved.toLowerCase().startsWith(`${folder.toLowerCase()}${sep}.acl-`), saved)
+      assert.ok(!saved.toLowerCase().startsWith(resolve(board.env.TEMP).toLowerCase()), saved)
+    }
+    assert.deepEqual(readdirSync(folder), [basename(board.served)], 'no scratch folder is left behind')
+  } finally { await board.end([url]) }
+})
+
+test('a Windows page start leaves its new address file and its folder owned by this account', { skip: process.platform !== 'win32' && 'Windows token owner only', timeout: 40_000 }, async () => {
+  const board = serveIn()
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    // A new file's owner is taken from the token, and an elevated one (a CI runner) defaults it to
+    // the Administrators group. The page start sets the owner and does not read it back, so this
+    // is where a start that stopped setting it shows.
+    for (const target of [board.served, join(board.env.XDG_RUNTIME_DIR, 'agent-board')]) {
+      const acl = windowsAcl(target, board.env)
+      assert.equal(acl.OwnerSid, acl.CurrentSid, target)
+    }
+  } finally { await board.end([url]) }
 })
 
 test('server memory arguments retain explicit heap choices and ignore unrelated Node flags', () => {

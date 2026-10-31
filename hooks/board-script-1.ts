@@ -8410,7 +8410,7 @@ export const LINES = [
 "// scripts/board-cli.ts",
 "import { chmodSync, closeSync as closeSync8, existsSync as existsSync6, linkSync, lstatSync as lstatSync5, mkdirSync as mkdirSync6, openSync as openSync8, readdirSync as readdirSync6, readFileSync as readFileSync11, readSync as readSync4, renameSync as renameSync5, statSync as statSync9, unlinkSync as unlinkSync7, writeFileSync as writeFileSync7 } from \"node:fs\";",
 "import { createHash as createHash5, randomUUID as randomUUID2 } from \"node:crypto\";",
-"import { homedir as homedir4, tmpdir as tmpdir2 } from \"node:os\";",
+"import { homedir as homedir4, tmpdir } from \"node:os\";",
 "import { basename as basename4, dirname as dirname7, join as join14, resolve as resolve8 } from \"node:path\";",
 "",
 "// scripts/board-serve.ts",
