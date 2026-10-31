@@ -166,10 +166,12 @@ Installation and hook trust are separate. Agent-assisted trust needs one explici
 confirmation for six exact definitions, instead of asking the person to navigate a CLI:
 
 ```sh
-node /path/to/installed/agent-board.mjs --codex-trust --codex-bin /absolute/path/to/codex
+node /path/to/installed/agent-board.mjs --codex-trust --codex-bin /absolute/path/to/codex --json
 # After the person approves the displayed config.toml scope and six hashes:
-node /path/to/installed/agent-board.mjs --codex-trust --codex-bin /absolute/path/to/codex --apply
+node /path/to/installed/agent-board.mjs --codex-trust --codex-bin /absolute/path/to/codex --json --apply
 ```
+
+Without `--json`, both commands print one plain line for the person: what would be or was trusted, and the next step.
 
 Resolve the actual executable; do not guess a desktop binary location. Preview does not
 write. Apply requires an intact owned installation, rediscovers the same definitions,

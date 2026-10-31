@@ -7,6 +7,7 @@ import type { AskKind } from './ask'
 import { confirmKey, shortId, stepWords, upsertAutoBlock } from './blocks'
 import type { ConfirmRef } from './blocks'
 import { isLifecycleStep } from './codex'
+import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
@@ -310,18 +311,29 @@ export const mirrorMatchesTask = (mirror: ProgressMirror, project: string, task:
   return source.title === task.title && steps(source) === steps(task) && contextOf(source) === contextOf(task) && handoffOf(source) === handoffOf(task)
 }
 
+// The words a step shows. A step an agent wrote as a whole JSON record has none of its own
+// (`recordStepWords`), so the person reads its text field or a plain line, never the braces,
+// ids and paths inside. A hand-kept task's steps are the person's own words and stay as written,
+// which also keeps a press on one matching the line the file holds.
+const shownStep = (task: ProgressTask, text: string, s: Strings): { text: string; note: string } => {
+  const words = task.auto === null ? null : recordStepWords(text, s)
+
+  return words === null ? splitNote(text) : { text: words, note: '' }
+}
+
 // `isAsked` leaves out a question the person marked answered.
 const stepPhrase = (task: ProgressTask, s: Strings, isAsked: (index: number) => boolean = () => true): { status: string; tone: Tone } => {
   const blocked = task.steps.find(step => step.status === 'blocked')
-  if (blocked !== undefined) return { status: s.stuck(splitNote(blocked.text).text), tone: 'alert' }
+  if (blocked !== undefined) return { status: s.stuck(shownStep(task, blocked.text, s).text), tone: 'alert' }
   const waiting = task.steps.find((step, index) => step.status === 'waiting' && isAsked(index))
-  if (waiting !== undefined) return { status: s.waitsOnYou(splitNote(waiting.text).text), tone: 'warn' }
+  if (waiting !== undefined) return { status: s.waitsOnYou(shownStep(task, waiting.text, s).text), tone: 'warn' }
   const running = task.steps.find(step => step.status === 'running')
-  if (running !== undefined) return { status: s.runningStep(splitNote(running.text).text), tone: 'running' }
+  if (running !== undefined) return { status: s.runningStep(shownStep(task, running.text, s).text), tone: 'running' }
   const current = task.steps[currentStepIndex(task)]
   if (current === undefined) return { status: s.noSteps, tone: 'quiet' }
+  const words = task.auto === null ? current.text : recordStepWords(current.text, s) ?? current.text
 
-  return { status: current.status === 'doing' ? s.doingStep(current.text) : s.nextStep(current.text), tone: 'quiet' }
+  return { status: current.status === 'doing' ? s.doingStep(words) : s.nextStep(words), tone: 'quiet' }
 }
 
 // Every status a glyph carries is also said in words.
@@ -513,7 +525,7 @@ const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
 
   return foldSteps(
     task.steps.map((step, index) => ({
-      ...splitNote(step.text),
+      ...shownStep(task, step.text, s),
       status: step.status,
       depth: step.depth,
       isCurrent: index === current,
