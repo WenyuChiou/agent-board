@@ -2,6 +2,6 @@
 # breaks `#!/usr/bin/env node` on Linux and macOS, and the tests compare package.json byte for byte.
 bin/agent-board.mjs text eol=lf
 package.json text eol=lf
-# The board bundle is one line per line and over 1 MB: with CRLF it passes Claude Code's 1 MiB module
+# The board bundle and its parts are one line per line and over 1 MB: with CRLF it passes Claude Code's 1 MiB module
 # limit on a Windows checkout and the plugin cannot load it (#582).
-hooks/board-script.ts text eol=lf
+hooks/board-script*.ts text eol=lf
