@@ -545,11 +545,11 @@ describe('L0 discover and install from the README', () => {
       // A chat app is reached through an agent that answers there.
       for (const agent of ['Hermes Agent', 'OpenClaw']) assert.ok(surfaces[2][0].includes(agent), `${name}: the chat app row names ${agent}`)
       // The steps after setup are a list under Quick start: Claude Code's plugin, Codex's hooks,
-      // the plugin reloads and dot's paste.
+      // the plugin reloads and dot's merge.
       const quick = section(text, SECTIONS[lang][0])
       const steps = quick.slice(0, quick.indexOf('<details>')).split('\n').filter(line => line.startsWith('- ') && !/^- \*\*(?:I use |我用 )/.test(line)).join('\n')
       for (const agent of ['Claude Code', 'Codex', 'OpenCode', 'OpenClaw', 'dot']) assert.ok(steps.includes(agent), `${name}: the steps after setup name ${agent}`)
-      for (const link of ['docs/CODEX.md', 'AGENTS.md#report-your-progress-to-the-progress-pane', anchorOf(words.page)]) assert.ok(steps.includes(`](${link})`), `${name}: the steps after setup link to ${link}`)
+      for (const link of ['docs/CODEX.md', 'AGENTS.md#report-your-progress-to-the-progress-pane', 'docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste']) assert.ok(steps.includes(`](${link})`), `${name}: the steps after setup link to ${link}`)
       // Each old command is still there: a board command once for each agent that uses it, any other once.
       const spans = codeSpans([steps, inAgent, anywhere].join('\n'))
       for (const command of OLD_COMMANDS) {
