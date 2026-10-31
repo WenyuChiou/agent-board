@@ -756,12 +756,13 @@ const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 const runAgents = (group: RunGroup, s: Strings): string => group.agents.map(agent => s.agentNames[agent] ?? agentName(agent)).join(' / ')
 const runsText = (group: RunGroup, now: number, s: Strings): string => s.runsLine(group.count, runAgents(group, s), relativeTime(group.last, now, s))
 
-const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string): boolean => {
+const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string, agent?: string): boolean => {
   let count = 0
   let unresumed = 0
+  const matchAgent = agent ?? task.auto?.agent
   for (const p of projects) {
     for (const t of p.tasks) {
-      if (t.auto !== null && (t.auto.agent === undefined || t.auto.agent === 'claude') && t.auto.session === ownId) {
+      if (t.auto !== null && (matchAgent === undefined || t.auto.agent === undefined || t.auto.agent === matchAgent) && t.auto.session === ownId) {
         count += 1
         if (t.auto.resume === null || t.auto.resume === undefined) unresumed += 1
       }
@@ -842,7 +843,7 @@ export const buildView = (
       const isMine = task.auto !== null && (
         task.auto.resume !== null && mine !== null && mine.sessionId
           ? task.auto.resume === mine.sessionId
-          : (mine !== null && mine.sessionId && task.auto.session === ownId && (task.auto.agent === undefined || task.auto.agent === 'claude') && mine.isRun !== true && isUniqueUnresumedTask(task, folded.projects, ownId))
+          : (mine !== null && mine.sessionId && task.auto.session === ownId && (task.auto.agent === undefined || mine.agent === undefined || task.auto.agent === mine.agent) && mine.isRun !== true && isUniqueUnresumedTask(task, folded.projects, ownId, mine.agent))
       )
       if (isMine) {
         const own = folded.runs.get(task)

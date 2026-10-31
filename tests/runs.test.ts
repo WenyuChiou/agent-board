@@ -464,7 +464,6 @@ test('upsertAutoBlock preserves concurrent subagents with identical 8-character 
 
 test('old ledger records under short-id scopes migrate to full session id scopes and settled records do not resurface', () => {
   const shortScope = questionScope('Demo', 'claude', 'aaaa1111')
-  const fullScope = questionScope('Demo', 'claude', PERSON)
   const initialLedger = {
     ...emptyQuestions(),
     records: [{
@@ -489,8 +488,8 @@ test('old ledger records under short-id scopes migrate to full session id scopes
   }
   const reconciled = observeQuestions(initialLedger, [], mine, [], NOW, true, 'reconcile-test')
   const record = reconciled.ledger.records.find(r => r.id === 'question:deadbeef:1')
-  expect(record?.scope).toBe(fullScope)
-  expect(record?.source?.session).toBe(PERSON)
+  expect(record?.scope).toBe(shortScope)
+  expect(record?.source?.session).toBe('aaaa1111')
   expect(record?.isUnresolved).toBe(false)
   expect(reconciled.ledger.records.filter(r => r.isUnresolved)).toHaveLength(0)
 })
@@ -515,15 +514,17 @@ test('a block with a long session value but no resume attribute does not acquire
 })
 
 test('upsertAutoBlock refuses an ambiguous match against an old block without resume', () => {
-  const oldBlock = ['<!-- auto session=12345678 agent=claude state=working updated=2026-10-27T12:00:00Z -->', '### Old task', '- [~] Doing', '<!-- /auto session=12345678 -->'].join('\n')
-  const initial = `## Demo\n${oldBlock}\n`
+  const oldBlock1 = ['<!-- auto session=12345678 agent=claude state=working updated=2026-10-27T12:00:00Z -->', '### Old task 1', '- [~] Doing 1', '<!-- /auto session=12345678 -->'].join('\n')
+  const oldBlock2 = ['<!-- auto session=12345678 agent=claude state=working updated=2026-10-27T12:00:00Z -->', '### Old task 2', '- [~] Doing 2', '<!-- /auto session=12345678 -->'].join('\n')
+  const initial = `## Demo\n${oldBlock1}\n${oldBlock2}\n`
   const mirror: ProgressMirror = {
     ...emptyMirror('12345678-0000-4000-8000-000000000001', 'Demo', NOW, ''),
     title: 'New Task',
     tasks: [{ subject: 'Step 1', status: 'in_progress', blocked: null, waiting: null, why: null }],
   }
   const result = upsertAutoBlock(initial, mirror, en)
-  expect(result).toContain('### Old task')
+  expect(result).toContain('### Old task 1')
+  expect(result).toContain('### Old task 2')
   expect(result).toContain('### New Task')
 })
 
