@@ -308,9 +308,10 @@ const soak = async ({ minutes, out }) => {
     // The terminal board beside it: the same tty preload as terminal.watch, but only counts of what
     // it prints are kept, and its pipes are always drained.
     const startWatch = () => {
-      const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
+      const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
       const child = spawnIsolated(process.execPath, ['--import', pathToFileURL(preload).href, world.script, '--watch'], { env: world.env, cwd: world.root, stdio: ['pipe', 'pipe', 'pipe'] })
-      const clear = '\x1b[2J\x1b[H'
+      // Each redraw starts at the cursor's home; an unchanged screen is not drawn again.
+      const clear = '\x1b[H'
       const board = { child, frames: 0, headed: 0, lastAt: 0, errors: '' }
       let carry = ''
       child.stdout.setEncoding('utf8').on('data', chunk => {
