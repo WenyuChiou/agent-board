@@ -94,6 +94,19 @@ test('the pane names agents by brand name', async ($, on) => {
   await ui.unmount()
 })
 
+test('writeMine with empty tasks removes only matching agent block when same session id exists across agents', async ($, on) => {
+  const claudeBlock = `<!-- auto session=${SESSION.slice(0, 8)} agent=claude state=working updated=2026-10-16T12:00:00Z resume=${SESSION} -->\n### Claude task\n- [~] Doing\n<!-- /auto session=${SESSION.slice(0, 8)} -->\n`
+  const codexBlock = `<!-- auto session=${SESSION.slice(0, 8)} agent=codex state=working updated=2026-10-16T12:00:00Z resume=${SESSION} -->\n### Codex task\n- [~] Doing\n<!-- /auto session=${SESSION.slice(0, 8)} -->\n`
+  const initial = `# Progress\n\n## Demo\n${claudeBlock}\n${codexBlock}`
+  const world: World = { files: new Map([[FILE, initial]]), mtime: 1, hasTasks: true, store: { autoConnectOff: true } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  await clock.advance(10)
+  const after = world.files.get(FILE) ?? ''
+  expect(after).not.toContain('### Claude task')
+  expect(after).toContain('### Codex task')
+})
+
 test('a task handoff removes Continue while retaining the recipient in the pane and file', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
   const clock = engineBeneath(on, world)

@@ -180,13 +180,11 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
 // checked again at the write, against the file as it is then.
 export const isOutranked = (tasks: readonly ProgressTask[], task: ProgressTask): boolean => {
   const auto = task.auto
-  if (auto === null) return false
-  const id = auto.resume ?? auto.session
+  if (auto === null || auto.resume === null) return false
 
   return tasks.some(other => {
-    if (other === task || other.auto === null) return false
-    const otherId = other.auto.resume ?? other.auto.session
-    return other.auto.agent === auto.agent && otherId === id &&
+    if (other === task || other.auto === null || other.auto.resume === null) return false
+    return other.auto.agent === auto.agent && other.auto.resume === auto.resume &&
       (other.auto.updated > auto.updated || other.auto.updated === auto.updated && other.line > task.line)
   })
 }

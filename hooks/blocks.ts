@@ -321,7 +321,7 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
   let existing: BlockSpan | undefined
   if (fullId !== null) {
     const byResume = sameAgent.filter(span => span.resume !== null && span.resume !== undefined && span.resume === fullId)
-    if (byResume.length === 1) {
+    if (byResume.length >= 1) {
       existing = byResume[0]
     } else if (byResume.length === 0) {
       const sameShort = sameAgent.filter(span => span.session === id)
