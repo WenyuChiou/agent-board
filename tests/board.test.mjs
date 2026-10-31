@@ -5212,6 +5212,72 @@ test('an answer key on the terminal board sends to a connected session through t
   }
 })
 
+test('an answer key the page refuses shows the page note, sends nothing and never says it answered', { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, {}, ['--messages-dir', messages])
+  // A page in front of the real one that refuses every press, as the page does for a line,
+  // question or session that no longer matches.
+  const front = createServer((req, res) => {
+    if (req.url === '/api/act') return req.resume().on('end', () => res.writeHead(409, { 'content-type': 'application/json' }).end(JSON.stringify({ note: 'Synthetic refusal from the page' })))
+    const back = request({ host: '127.0.0.1', port: board.port, method: req.method, path: req.url, headers: { ...req.headers, host: `127.0.0.1:${board.port}` }, agent: false }, answer => {
+      res.writeHead(answer.statusCode ?? 502, answer.headers)
+      answer.pipe(res)
+    })
+    req.pipe(back)
+  })
+  await new Promise(done => front.listen(0, '127.0.0.1', done))
+  const served = readFileSync(board.served, 'utf8')
+  const address = JSON.parse(served)
+  const url = new URL(address.url)
+  url.port = String(front.address().port)
+  writeFileSync(board.served, JSON.stringify({ ...address, url: url.href, ...('port' in address ? { port: Number(url.port) } : {}) }))
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  // Not spawnSync: the page in front answers from this process.
+  const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
+  try {
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })).json()
+    const refused = await play('y')
+    assert.ok(refused.includes('Synthetic refusal from the page'), refused)
+    assert.ok(!refused.includes('You answered'), refused)
+    const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
+    assert.deepEqual(polled.messages, [])
+  } finally {
+    writeFileSync(board.served, served)
+    await new Promise(done => front.close(done))
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('t on the terminal board archives what finished at once and leaves the work in progress', () => {
+  const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
+  const file = `# Progress
+
+## docs-site
+<!-- auto session=c0ffee12 agent=codex state=done updated=${now} -->
+### Fix the synthetic typo
+- [x] Fix it
+<!-- /auto session=c0ffee12 -->
+
+## sample-api
+<!-- auto session=e5f6a7b8 agent=codex state=working updated=${now} -->
+### Add a synthetic health check
+- [~] Write the handler
+<!-- /auto session=e5f6a7b8 -->
+`
+  const ran = chatRun(['--keys', 't'], { file: () => file, inspect: cutFiles })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(!ran.board.includes('Fix the synthetic typo'), ran.board)
+  assert.ok(ran.archive.includes('Fix the synthetic typo'), ran.archive)
+  assert.ok(ran.board.includes('Add a synthetic health check'), ran.board)
+})
+
 test('a newer --serve does not start a second page while the page it would replace is sending a reply, shows that page with a note, and replaces it once the reply is in', { timeout: 60_000 }, async t => {
   const held = await holdingPage(t.signal)
   const { board } = held
