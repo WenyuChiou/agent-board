@@ -35,7 +35,7 @@ An old progress card is not proof that a process is running. Equally, an open ap
 
 ## The board in every agent
 
-Use the installed command `agent-board` in any terminal:
+After `npm install -g @wenyuchiou/agent-board`, the `agent-board` command works in any terminal; without it, write `npx @wenyuchiou/agent-board` in its place:
 
 ```sh
 agent-board
@@ -49,9 +49,11 @@ agent-board --help all
 | `agent-board` | Open the board where you are: desktop window, live board over SSH, text for agents |
 | `agent-board stop` | Stop the board page server for this progress file |
 | `--serve` | Interactive local web board; reusable background service |
-| `--watch` | Terminal board; arrows/Enter to select, `x` tick, `d` confirm done, `a` archive, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` HTML, `q` quit |
+| `--watch` | Terminal board; arrows or `j`/`k` and Enter to select, `x` tick, `d` confirm done, `a` archive, `t` archive the done list now, `y`/`n` or `1`–`9` answer, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` HTML, `q` quit. Into a pipe it prints the board once as plain text |
 | `--chat` | Compact plain text; no page, link, browser or writes |
 | `--html` | Writes/opens a read-only page; no message delivery |
+
+The terminal board uses the page's colours: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the nearest of 256. It takes the light set with `--theme light` or when `COLORFGBG` names a light background; `NO_COLOR` or `--no-color` turns colour off and `FORCE_COLOR` turns it on for `| less -R`. An answer key sends the answer when the running page (`--serve`) can send it into the question's session; otherwise it copies it, and the line says so. The Chinese boards count symbols such as ● and ✓ as two columns.
 
 Add `--lang en`, `zh-TW` or `zh-CN` to select the board language. Windows/custom installations use the printed absolute paths. `$agent-board` is the Codex skill entry; OpenCode installs `/board`. Other hosts must load their installed skill/command first.
 

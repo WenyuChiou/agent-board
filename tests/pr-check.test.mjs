@@ -673,7 +673,20 @@ test('pr-check leaves the bundle to CI in a checkout that converts line endings'
   setup.put('hooks/board-script.ts', ['// Synthetic bundle', 'export const BOARD_SCRIPT = ""', ''].join('\r\n'))
   const execution = await runMain(['--body-file', join(setup.directory, 'body.txt'), '--title', 'fix: synthetic check', '--base', setup.base, '--repo-dir', setup.directory, '--offline'])
   assert.equal(execution.status, 0, execution.stdout + execution.stderr)
-  assert.match(execution.stdout, /info bundle not checked: hooks\/board-script\.ts has CRLF line endings/)
+  assert.match(execution.stdout, /info bundle not checked: hooks\/board-script\*\.ts have CRLF line endings/)
+})
+
+test('pr-check leaves the bundle to CI when only a bundle part has CRLF line endings', async t => {
+  const setup = fixture(t)
+  setup.put('scripts/synthetic.mjs', 'export const synthetic = true\n')
+  setup.git('add', '--', 'scripts/synthetic.mjs')
+  setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'fix: synthetic script')
+  // The entry is short and keeps LF; the part that holds the lines is the file a converting checkout rewrites.
+  setup.put('hooks/board-script.ts', ['// Synthetic entry', "import { LINES as PART_1 } from './board-script-1.ts'", "export const BOARD_SCRIPT = [...PART_1].join('\\n')", ''].join('\n'))
+  setup.put('hooks/board-script-1.ts', ['// Synthetic part', 'export const LINES = [', '"a"', ']', ''].join('\r\n'))
+  const execution = await runMain(['--body-file', join(setup.directory, 'body.txt'), '--title', 'fix: synthetic check', '--base', setup.base, '--repo-dir', setup.directory, '--offline'])
+  assert.equal(execution.status, 0, execution.stdout + execution.stderr)
+  assert.match(execution.stdout, /info bundle not checked: hooks\/board-script\*\.ts have CRLF line endings/)
 })
 
 test('pr-check reads gh API lists line by line and reports a missing issue as missing, not as a network error', async () => {
@@ -1041,8 +1054,8 @@ test('pr-check only notes, and does not fail, a large or governance-touching out
   const many = outsidePr({ numstat: files(16) })
   assert.deepEqual(checkPr(many).problems, [])
   assert.match(notes(many)[0], /16 changed lines in 16 files/)
-  // Changelog fragments and the two generated files are not counted.
-  const generated = [stat('changelog.d/42-synthetic-check.md', 900), stat('hooks/board-script.ts', 900, 900), stat('hooks/released.ts', 900), stat('scripts/pr-check.mjs', 10), ...files(14)]
+  // Changelog fragments and the generated files (the bundle entry, its parts and the release table) are not counted.
+  const generated = [stat('changelog.d/42-synthetic-check.md', 900), stat('hooks/board-script.ts', 900, 900), stat('hooks/board-script-1.ts', 900, 900), stat('hooks/board-script-2.ts', 900, 900), stat('hooks/released.ts', 900), stat('scripts/pr-check.mjs', 10), ...files(14)]
   assert.deepEqual(notes(outsidePr({ numstat: generated })), [])
   // A change to a file the maintainer looks at first is noted by name and still passes.
   for (const path of ['AGENTS.md', 'CONTRIBUTING.md', '.github/workflows/test.yml', 'package.json', '.claude-plugin/plugin.json']) {
@@ -1060,13 +1073,14 @@ test('pr-check only notes, and does not fail, a large or governance-touching out
   setup.put('docs/synthetic.md', `${Array.from({ length: 501 }, (_, index) => `Line ${index}.`).join('\n')}\n`)
   setup.put('docs/synthetic.dat', 'binary\0data\n')
   setup.put('hooks/board-script.ts', 'generated\n'.repeat(600))
-  setup.git('add', '--', 'docs/synthetic.md', 'docs/synthetic.dat', 'hooks/board-script.ts')
+  setup.put('hooks/board-script-1.ts', 'generated\n'.repeat(600))
+  setup.git('add', '--', 'docs/synthetic.md', 'docs/synthetic.dat', 'hooks/board-script.ts', 'hooks/board-script-1.ts')
   setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'docs: synthetic size')
   const head = setup.git('rev-parse', 'HEAD')
   setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body, draft: false, created_at: '2030-01-01T00:00:00Z', labels: [], author_association: 'NONE', user: { login: 'newcomer' }, head: { ref: branch, sha: head }, base: { sha: setup.base } } }))
   const execution = await runMain(['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory, '--offline'])
   assert.equal(execution.status, 0, execution.stdout + execution.stderr)
-  // 501 lines of the new page and 2 of the fixture's CHANGELOG entry, in three files; the generated bundle is left out.
+  // 501 lines of the new page and 2 of the fixture's CHANGELOG entry, in three files; the generated bundle and its parts are left out.
   assert.match(execution.stdout, /info outside note: 503 changed lines in 3 files/)
 })
 

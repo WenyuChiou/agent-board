@@ -4,7 +4,7 @@ import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
-import { request } from 'node:http'
+import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { registerHooks } from 'node:module'
@@ -534,8 +534,8 @@ const run = (lang, args = [], beside = {}, source = FILE, code = BOARD_SCRIPT) =
 test('the board script prints the board from the file it was written for, in its language', () => {
   const text = run('en')
   assert.ok(text.startsWith('Progress  ● 1 waiting'), text)
-  assert.ok(text.includes('api-gateway · codex › Rate-limit the public endpoints'), text)
-  assert.ok(text.includes('docs-site · gemini: Fixed 12 broken links.'), text)
+  assert.ok(text.includes('api-gateway · Codex › Rate-limit the public endpoints'), text)
+  assert.ok(text.includes('docs-site · Gemini CLI: Fixed 12 broken links.'), text)
   assert.ok(run('zh-TW').startsWith('進度  ● 1 等你'))
   assert.ok(run('en', ['--lang', 'zh-CN']).startsWith('进度'))
 })
@@ -1463,11 +1463,13 @@ const watchPress = (initial, replacement, keys, args = []) => {
     writeFileSync(preload, `import fs from 'node:fs'
 Object.defineProperty(process.stdin, 'isTTY', { value: true })
 process.stdin.setRawMode = () => {}
+// The board draws only on a terminal; a pipe gets it once as plain text.
+Object.defineProperty(process.stdout, 'isTTY', { value: true })
 const write = process.stdout.write.bind(process.stdout)
 let drawn = false
 process.stdout.write = function (text, ...rest) {
   const result = write(text, ...rest)
-  if (!drawn && String(text).startsWith('\\x1b[2J\\x1b[H')) {
+  if (!drawn && String(text).startsWith('\\x1b[H')) {
     drawn = true
     fs.writeFileSync(${JSON.stringify(path)}, ${JSON.stringify(replacement)})
     queueMicrotask(() => {
@@ -1486,6 +1488,32 @@ process.stdout.write = function (text, ...rest) {
 }
 
 const LINE_CHANGED = 'That line just changed; check the one chosen now and press again.'
+
+test('--watch into a pipe prints the board once as plain text', { timeout: 30_000 }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-watch-pipe-'))
+  try {
+    const path = join(dir, 'progress.md')
+    const script = join(dir, 'agent-board.mjs')
+    const updated = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
+    writeFileSync(path, `# Progress\n\n## docs-site\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${updated} -->\n### Ship the synthetic docs\n- [?] Publish them to staging, OK?\n<!-- /auto session=a1b2c3d4 -->\n\n## sample-api\n<!-- auto session=e5f6a7b8 agent=claude state=working updated=${updated} -->\n### Add a synthetic health check\n- [~] Write the handler\n<!-- /auto session=e5f6a7b8 -->\n`)
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const { NO_COLOR: _none, FORCE_COLOR: _force, ...env } = process.env
+    // It returns by itself: no redraw loop, nothing waits for keys.
+    const plain = spawnSync(process.execPath, [script, '--watch'], { encoding: 'utf8', timeout: 10_000, windowsHide: true, env: { ...env, CLAUDE_PROGRESS_FILE: '' } })
+    assert.equal(plain.status, 0, plain.stderr)
+    assert.ok(!plain.stdout.includes('\u001b'), JSON.stringify(plain.stdout))
+    assert.ok(!plain.stdout.includes(EN.boardWatching), plain.stdout)
+    assert.equal(plain.stdout.split(EN.paneTitle).length - 1, 1, plain.stdout)
+    for (const words of ['Publish them to staging, OK?', 'Add a synthetic health check', 'Codex', 'Claude Code']) assert.ok(plain.stdout.includes(words), plain.stdout)
+    // FORCE_COLOR paints it for `| less -R`, still with no screen codes.
+    const painted = spawnSync(process.execPath, [script, '--watch'], { encoding: 'utf8', timeout: 10_000, windowsHide: true, env: { ...env, CLAUDE_PROGRESS_FILE: '', FORCE_COLOR: '1' } })
+    assert.equal(painted.status, 0, painted.stderr)
+    assert.match(painted.stdout, /\u001b\[1;38;5;\d+m/)
+    assert.ok(!/\u001b\[(?:2J|H|\?1049h|\?25l)/.test(painted.stdout), JSON.stringify(painted.stdout))
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
 
 test('terminal Confirm done finishes every open step and refuses changes below the next step', () => {
   const file = '## Synthetic\n### Finish the task\n- [ ] First\n- [~] Later\n- [>] Running\n- [!] Blocked\n- [-] Canceled\n- [x] Already done\n'
@@ -1516,7 +1544,7 @@ test('the terminal board ticks with x only the step it drew: a step that became 
   const initial = `# Progress\n\n## synthetic\n### Synthetic manual task\n- [ ] Step one\n- [ ] Step two\n`
   const replacement = `# Progress\n\n## synthetic\n### Synthetic manual task\n- [x] Step one\n- [ ] Step two\n`
   const refused = watchPress(initial, replacement, ['x'])
-  assert.ok(refused.out.split('\u001b[2J\u001b[H')[1].includes('Step one'))
+  assert.ok(refused.out.split('\u001b[H')[1].includes('Step one'))
   assert.equal(refused.after, replacement)
   assert.ok(refused.out.includes(LINE_CHANGED), refused.out)
   // Nothing changed between the draw and the key: the step shown is ticked.
@@ -1637,7 +1665,9 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   const call = (method, target, { body, headers = {} } = {}) =>
     new Promise((done, fail) => {
       const sent = { host: `127.0.0.1:${port}`, 'x-board-token': token, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }
-      const req = request({ host: '127.0.0.1', port, method, path: target, headers: sent }, res => {
+      // A connection of its own for each call: a test that blocks on spawnSync past the server's
+      // 5 s keep-alive would otherwise reuse a socket the server already closed (ECONNRESET).
+      const req = request({ host: '127.0.0.1', port, method, path: target, headers: sent, agent: false }, res => {
         let data = ''
         res.setEncoding('utf8')
         res.on('data', chunk => (data += chunk))
@@ -1693,7 +1723,7 @@ test('live blocks of every agent refuse forged web archives without writes and t
       assert.equal(readFileSync(board.path, 'utf8'), file)
       assert.deepEqual(readdirSync(board.dir).sort(), files)
     }
-    const terminal = execFileSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', Array.from({ length: 24 }, () => 'a down').join(' ')], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8', timeout: 5000 })
+    const terminal = execFileSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', `${Array.from({ length: 24 }, () => 'a down').join(' ')} a`], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8', timeout: 5000 })
     assert.match(terminal, /Still running; archive after it stops\./)
     assert.equal(readFileSync(board.path, 'utf8'), file)
     assert.deepEqual(readdirSync(board.dir).sort(), files)
@@ -2257,7 +2287,7 @@ process.stdout.write = (chunk, ...args) => { const result = write(chunk, ...args
 ` })
       assert.equal(watched.status, 1, watched.stderr)
       assert.equal(watched.stderr, `${note}\n`)
-      assert.equal(watched.stdout, `\u001b[2J\u001b[H${note}\n`)
+      assert.equal(watched.stdout, `${note}\n`)
     }
     const faults = mkdtempSync(join(tmpdir(), 'board-locked-'))
     const preload = join(faults, 'fault.cjs')
@@ -2827,12 +2857,14 @@ test('the serve page and the terminal board answer every action with a visible l
       const terminal = run('en', ['--keys', key])
       const lines = terminal.trimEnd().split('\n')
       const footer = lines.findIndex(line => /[↑↓]/.test(line))
-      assert.ok(lines.some((line, index) => index !== footer && /nothing to change|Done:|Copied|copy it from here|Hidden:|Shown|Opened|Closed|Archived/.test(line)), `no press result for ${key}: ${terminal}`)
+      assert.ok(lines.some((line, index) => index !== footer && /nothing to change|Done:|Copied|copy it from here|Hidden:|Shown|Opened|Closed|Archived|Still running/.test(line)), `no press result for ${key}: ${terminal}`)
     }
   } finally { await board.close() }
 })
 
 
+// The terminal board's dark palette in 256 colours (hooks/palette.ts), as it paints notes.
+const INK = { alert: '\u001b[38;5;167m', done: '\u001b[38;5;72m', muted: '\u001b[38;5;145m' }
 const PRESS_HOSTS = ['claude', 'codex', 'antigravity', 'hermes', 'openclaw', 'grok', 'opencode', 'cursor']
 const PRESS_KINDS = ['needs-you', 'live-ask', 'stopped', 'unknown-session', 'blocked', 'done', 'hidden', 'own-block', 'ended', 'hand-kept', 'retained', 'inbox']
 const PRESS_CELLS = PRESS_HOSTS.flatMap(agent => ['own', 'other'].flatMap(source => PRESS_KINDS.map(kind => ({ agent, source, kind, title: `${kind} ${agent} ${source}` }))))
@@ -3262,7 +3294,7 @@ test('a long press result under a card wraps to the width instead of being cut',
     assert.ok(wrapped.every(line => line.startsWith('    ')))
     assert.ok(wrapped.every(line => [...line].length <= width), lines.join('\n'))
     const colored = runtime.boardScreen(view, [], state, runtime.s, { width, isColor: true })
-    for (const line of wrapped) assert.ok(colored.includes(`    \u001b[31m${line.trim()}\u001b[0m`))
+    for (const line of wrapped) assert.ok(colored.includes(`    ${INK.alert}${line.trim()}\u001b[0m`))
   } finally { fixture.close() }
 })
 
@@ -3532,11 +3564,13 @@ test('a failed page write on the watch board names the file without its folder',
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
     writeFileSync(preload, `Object.defineProperty(process.stdin, 'isTTY', { value: true })
 process.stdin.setRawMode = () => {}
+// The board draws only on a terminal; a pipe gets it once as plain text.
+Object.defineProperty(process.stdout, 'isTTY', { value: true })
 const write = process.stdout.write.bind(process.stdout)
 let drawn = false
 process.stdout.write = function (text, ...rest) {
   const result = write(text, ...rest)
-  if (!drawn && String(text).startsWith('\\x1b[2J\\x1b[H')) {
+  if (!drawn && String(text).startsWith('\\x1b[H')) {
     drawn = true
     queueMicrotask(() => {
       process.stdin.emit('data', 'o')
@@ -3551,7 +3585,8 @@ process.stdout.write = function (text, ...rest) {
     assert.ok(result.stdout.includes(EN.fileNamed('progress.html')), result.stdout)
     assert.ok(!result.stdout.includes(root), result.stdout)
     assert.ok(!result.stderr.includes(root), result.stderr)
-    assert.ok(result.stdout.replace(/\s/g, '').includes(result.stderr.replace(/\s/g, '')), result.stdout)
+    // Each screen line ends with a clear-to-end code; the words are compared without them.
+    assert.ok(result.stdout.replace(/\u001b\[[\d;?]*[A-Za-z]/g, '').replace(/\s/g, '').includes(result.stderr.replace(/\s/g, '')), result.stdout)
     assert.ok([EN.storageIsFolder, EN.storageReadOnly].some(reason => result.stderr.trim() === EN.boardStorageFailed(EN.fileNamed('progress.html'), reason)), result.stderr)
   } finally { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
@@ -3569,6 +3604,8 @@ import { EventEmitter } from 'node:events'
 import { syncBuiltinESMExports } from 'node:module'
 Object.defineProperty(process.stdin, 'isTTY', { value: true })
 process.stdin.setRawMode = () => {}
+// The board draws only on a terminal; a pipe gets it once as plain text.
+Object.defineProperty(process.stdout, 'isTTY', { value: true })
 let browser
 childProcess.spawn = () => { browser = new EventEmitter(); browser.unref = () => {}; return browser }
 syncBuiltinESMExports()
@@ -3576,7 +3613,7 @@ const write = process.stdout.write.bind(process.stdout)
 let drawn = false
 process.stdout.write = function (text, ...rest) {
   const result = write(text, ...rest)
-  if (!drawn && String(text).startsWith('\\x1b[2J\\x1b[H')) {
+  if (!drawn && String(text).startsWith('\\x1b[H')) {
     drawn = true
     queueMicrotask(() => {
       process.stdin.emit('data', 'o')
@@ -3590,7 +3627,7 @@ process.stdout.write = function (text, ...rest) {
 `)
     const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, script, '--watch'], { encoding: 'utf8', timeout: 10000, windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' } })
     assert.equal(result.status, 0, result.stderr)
-    const frame = result.stdout.split('\x1b[2J\x1b[H').at(-1)
+    const frame = result.stdout.split('\x1b[H').at(-1)
     assert.ok(frame.includes('Synthetic task'), frame)
     assert.match(frame, /^Opened the board page/m)
     assert.doesNotMatch(frame, /^\s+Opened the board page/m)
@@ -3730,16 +3767,16 @@ test('terminal refusals and storage errors use the alert colour while successes 
       assert.equal(opening.tone, 'quiet')
       assert.equal(opening.note, runtime.s.pressPending)
       const pending = runtime.boardScreen(current, [], opening, runtime.s, { width: 200, isColor: true })
-      assert.ok(pending.includes(`\u001b[2m${runtime.s.pressPending}`))
-      assert.ok(!pending.includes(`\u001b[31m${runtime.s.pressPending}`))
+      assert.ok(pending.includes(`${INK.muted}${runtime.s.pressPending}`))
+      assert.ok(!pending.includes(`${INK.alert}${runtime.s.pressPending}`))
       const refusal = runtime.press(runtime.pinned(state, items), 'a').state
       const refused = runtime.boardScreen(current, [], refusal, runtime.s, { width: 200, isColor: true })
-      assert.ok(refused.includes(`\u001b[31m${refusal.note}`))
+      assert.ok(refused.includes(`${INK.alert}${refusal.note}`))
       fixture.enable(failing)
       const pressed = runtime.press(runtime.pinned(state, items), 'x').state
       const shown = runtime.boardScreen(runtime.view(), [], pressed, runtime.s, { width: 1000, isColor: true })
       assert.equal(pressed.tone, failing ? 'alert' : 'done')
-      assert.ok(shown.includes(`\u001b[${failing ? '31' : '32'}m${pressed.note}`))
+      assert.ok(shown.includes(`${failing ? INK.alert : INK.done}${pressed.note}`))
       fixture.disable()
     }
   } finally { fixture.close() }
@@ -4402,6 +4439,57 @@ test('agent-board stop stops this file\'s page and says so, and says when none i
   } finally {
     await board.end([])
   }
+})
+
+test('stop says the board page did not stop and exits 1 when the page refuses to close', { timeout: 40_000 }, async () => {
+  const board = serveIn()
+  const requests = []
+  const built = String(statSync(board.script).mtimeMs)
+  const fake = createServer((req, res) => {
+    requests.push([req.method, req.url, req.headers['x-board-token']])
+    if (req.url === '/api/ping') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ path: board.path, built, allowResume: false }))
+    } else if (req.url === '/api/close') {
+      res.writeHead(409)
+      res.end()
+    } else {
+      res.writeHead(404)
+      res.end()
+    }
+  })
+  try {
+    await new Promise(done => fake.listen(0, '127.0.0.1', done))
+    const { port } = fake.address()
+    const url = `http://127.0.0.1:${port}/?t=synthetic-busy`
+    const address = JSON.stringify({ pid: process.pid, port, url, path: board.path, built })
+    addressFixture(board.served, address)
+    const result = await new Promise(done => {
+      execFile(process.execPath, [board.script, 'stop'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => {
+        done({ code: error?.code ?? 0, stdout, stderr })
+      })
+    })
+    assert.deepEqual(requests, [['GET', '/api/ping', 'synthetic-busy'], ['POST', '/api/close', 'synthetic-busy']])
+    assert.equal(result.code, 1, result.stderr)
+    assert.equal(result.stdout.trim(), 'The board page did not stop; it may be sending a reply. Run stop again in a moment.')
+    assert.ok(!result.stdout.includes('Stopped the board page.'))
+    assert.equal(readFileSync(board.served, 'utf8'), address)
+  } finally {
+    if (fake.listening) await new Promise(done => fake.close(done))
+    await fs.promises.rm(board.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('the SSH hint links to the page with its token', () => {
+  const port = 43210
+  const host = 'board.example'
+  const url = `http://127.0.0.1:${port}/?t=synthetic-ssh-token`
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const hint = words.serveSshHint(port, host, url)
+    assert.ok(hint.includes(`ssh -L ${port}:127.0.0.1:${port} ${host}`), hint)
+    assert.ok(hint.includes(url), hint)
+  }
+  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshHost(), server.url)'))
 })
 
 test('an agent or a pipe running agent-board gets today\'s text and no window', async () => {
@@ -5094,6 +5182,101 @@ const timer = setInterval(() => {
     },
   }
 }
+
+test('an answer key on the terminal board sends to a connected session through the open page and says what it sent; with the page closed it only copies', { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, {}, ['--messages-dir', messages])
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  const play = keys => spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }).stdout
+  try {
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })).json()
+    const sent = play('y')
+    assert.ok(sent.includes('You answered “Yes, go ahead”.'), sent)
+    const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
+    assert.deepEqual(polled.messages.map(message => message.text), ['Yes, go ahead'])
+    // With the page gone the key has nowhere to send: it copies, and never says it sent.
+    await board.call('POST', '/api/close', { body: {} })
+    await board.exited
+    const closed = play('y')
+    assert.ok(closed.includes('copies the answer'), closed)
+    assert.ok(!closed.includes('You answered'), closed)
+  } finally {
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('an answer key the page refuses shows the page note, sends nothing and never says it answered', { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, {}, ['--messages-dir', messages])
+  // A page in front of the real one that refuses every press, as the page does for a line,
+  // question or session that no longer matches.
+  const front = createServer((req, res) => {
+    if (req.url === '/api/act') return req.resume().on('end', () => res.writeHead(409, { 'content-type': 'application/json' }).end(JSON.stringify({ note: 'Synthetic refusal from the page' })))
+    const back = request({ host: '127.0.0.1', port: board.port, method: req.method, path: req.url, headers: { ...req.headers, host: `127.0.0.1:${board.port}` }, agent: false }, answer => {
+      res.writeHead(answer.statusCode ?? 502, answer.headers)
+      answer.pipe(res)
+    })
+    req.pipe(back)
+  })
+  await new Promise(done => front.listen(0, '127.0.0.1', done))
+  const served = readFileSync(board.served, 'utf8')
+  const address = JSON.parse(served)
+  const url = new URL(address.url)
+  url.port = String(front.address().port)
+  writeFileSync(board.served, JSON.stringify({ ...address, url: url.href, ...('port' in address ? { port: Number(url.port) } : {}) }))
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  // Not spawnSync: the page in front answers from this process.
+  const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
+  try {
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })).json()
+    const refused = await play('y')
+    assert.ok(refused.includes('Synthetic refusal from the page'), refused)
+    assert.ok(!refused.includes('You answered'), refused)
+    const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
+    assert.deepEqual(polled.messages, [])
+  } finally {
+    writeFileSync(board.served, served)
+    await new Promise(done => front.close(done))
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('t on the terminal board archives what finished at once and leaves the work in progress', () => {
+  const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
+  const file = `# Progress
+
+## docs-site
+<!-- auto session=c0ffee12 agent=codex state=done updated=${now} -->
+### Fix the synthetic typo
+- [x] Fix it
+<!-- /auto session=c0ffee12 -->
+
+## sample-api
+<!-- auto session=e5f6a7b8 agent=codex state=working updated=${now} -->
+### Add a synthetic health check
+- [~] Write the handler
+<!-- /auto session=e5f6a7b8 -->
+`
+  const ran = chatRun(['--keys', 't'], { file: () => file, inspect: cutFiles })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(!ran.board.includes('Fix the synthetic typo'), ran.board)
+  assert.ok(ran.archive.includes('Fix the synthetic typo'), ran.archive)
+  assert.ok(ran.board.includes('Add a synthetic health check'), ran.board)
+})
 
 test('a newer --serve does not start a second page while the page it would replace is sending a reply, shows that page with a note, and replaces it once the reply is in', { timeout: 60_000 }, async t => {
   const held = await holdingPage(t.signal)
@@ -6383,8 +6566,11 @@ test("the page's server runs the hourly sweep and writes nothing when the seen f
     assert.deepEqual(snapshot(), before)
     // Damaged for good (older than a write in progress) or the wrong shape: still nothing is written.
     for (const text of ['not json at all', '{"seen":[]}']) {
-      writeFileSync(record, text)
-      utimesSync(record, (TIDY_NOW - 60_000) / 1000, (TIDY_NOW - 60_000) / 1000)
+      // A sweep must not see the empty file a direct write exposes before its contents are written.
+      const next = `${record}.next`
+      writeFileSync(next, text)
+      utimesSync(next, (TIDY_NOW - 60_000) / 1000, (TIDY_NOW - 60_000) / 1000)
+      renameSync(next, record)
       const damaged = snapshot()
       await delay(600)
       assert.deepEqual(snapshot(), damaged)
@@ -7349,9 +7535,12 @@ fs.readFileSync = (file, ...args) => {
   if (isHeld && file === path.join(__dirname, 'progress.md')) throw Object.assign(new Error('injected busy read'), { code: 'EBUSY' })
   return read(file, ...args)
 }
+// A terminal with no keys to read redraws; into a pipe the board is printed once.
+Object.defineProperty(process.stdout, 'isTTY', { value: true })
 const write = process.stdout.write.bind(process.stdout)
 process.stdout.write = (chunk, ...args) => {
   const result = write(chunk, ...args)
+  if (String(chunk).startsWith('\\u001b[?1049h')) return result
   if (isHeld) process.exit(1)
   isHeld = true
   return result

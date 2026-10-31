@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror } from '../types'
 import { addManualTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, removeAutoBlock, scanBlocks, takeArchivable, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { boardScreen, boardText, chatText } from '../hooks/board'
+import { boardScreen, boardText, chatText, mutedLine } from '../hooks/board'
 import type { PendingTurn } from '../hooks/board'
 import { dashboardHtml } from '../hooks/dashboard'
 import { localDay } from '../hooks/journal'
@@ -129,14 +129,16 @@ test('the text board lists a cut-off block on a muted line at the bottom', () =>
   const notice = EN.blockCutOff('Codex', day)
   const view = { ...buildView(parseProgress(BOARD), [], null, NOW, 0, {}, EN), health }
   const state = { selected: 0, key: null, open: null, seen: null, note: '' }
+  // The palette's muted colour, as the board paints secondary text.
+  const [muted = '', reset = ''] = mutedLine('x', { isColor: true }).split('x')
   // Wide enough for the whole notice on one row; at 80 columns it wraps onto rows that fit, as
   // recovery advice does, and loses no word.
-  expect(boardText(view, [], EN, { width: 120, isColor: true }).trimEnd().endsWith(`\u001b[2m${notice}\u001b[0m`)).toBe(true)
-  expect(boardScreen(view, [], state, EN, { width: 120, isColor: true }).trimEnd().endsWith(`\u001b[2m${notice}\u001b[0m`)).toBe(true)
+  expect(boardText(view, [], EN, { width: 120, isColor: true }).trimEnd().endsWith(`${muted}${notice}${reset}`)).toBe(true)
+  expect(boardScreen(view, [], state, EN, { width: 120, isColor: true }).trimEnd().endsWith(`${muted}${notice}${reset}`)).toBe(true)
   for (const out of [boardText(view, [], EN, { width: 80, isColor: true }), boardScreen(view, [], state, EN, { width: 80, isColor: true })]) {
     const tail = out.trimEnd().split('\n').slice(-2)
-    expect(tail.every(line => line.startsWith('\u001b[2m') && line.endsWith('\u001b[0m'))).toBe(true)
-    const parts = tail.map(line => line.slice(4, -4))
+    expect(tail.every(line => line.startsWith(muted) && line.endsWith(reset))).toBe(true)
+    const parts = tail.map(line => line.slice(muted.length, -reset.length))
     expect(parts.join(' ')).toBe(notice)
     expect(parts.every(part => part.length <= 78)).toBe(true)
   }
