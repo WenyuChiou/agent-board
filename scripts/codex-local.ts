@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -74,6 +74,54 @@ const atomic = (file: string, text: string | Buffer, current: () => void = () =>
     if (isOpen) closeSync(fd)
     if (existsSync(temporary)) unlinkSync(temporary)
   }
+}
+
+// Only board-defined codes may be copied from an error into the diagnostic log.
+const pendingErrorCodes = new Set([
+  'INVALID_JSON_OBJECT', 'INVALID_RAW_ENTRY', 'INVALID_RAW_ARGV', 'INVALID_RAW_MODE', 'INVALID_RAW_ENV',
+  'INVALID_SESSION', 'INVALID_EVENT', 'INVALID_STATE', 'INVALID_EVENT_STATE', 'SESSION_CONFLICT',
+  'UNBOUND_SESSION', 'MISSING_TURN', 'STALE_TURN', 'INVALID_TEXT', 'INVALID_STEPS', 'INVALID_STEP',
+  'UNFINISHED_STEPS', 'INVALID_OWNER', 'BLOCK_CONFLICT', 'BLOCK_NOT_VISIBLE',
+])
+const pendingErrorCode = (error: unknown): string => {
+  if (error instanceof SyntaxError) return 'INVALID_JSON'
+  return error instanceof Error && pendingErrorCodes.has(error.message) ? error.message : 'UNREADABLE'
+}
+
+// Log failures must never change replay, and queued content is never diagnostic text.
+const logPendingDrop = (home: string, stored: Json | undefined, code: string): void => {
+  try {
+    const args = Array.isArray(stored?.argv) ? stored.argv : []
+    const rawFlag = (name: string): unknown => {
+      for (let index = 1; index + 1 < args.length; index += 2) if (args[index] === name) return args[index + 1]
+      return undefined
+    }
+    const candidate = Array.isArray(stored?.argv) ? rawFlag('--agent') : stored?.agent
+    const agent = typeof candidate === 'string' && localAgents.includes(candidate as LocalAgent) ? candidate : 'unknown'
+    const payload: Json = stored?.payload && typeof stored.payload === 'object' && !Array.isArray(stored.payload) ? stored.payload as Json : {}
+    const eventValue = rawFlag('--hook-event') ?? rawFlag('--event') ?? stored?.event ?? payload.hook_event_name ?? payload.hookEventName
+    const events: readonly string[] = [...codexEvents, ...Object.keys(cursorEvents), ...Object.values(cursorEvents), ...Object.values(statusEvents).flatMap(events => Object.keys(events ?? {}))]
+    const event = typeof eventValue === 'string' && events.includes(eventValue) ? eventValue : 'unknown'
+    const file = join(home, '.agent-board', 'hook-errors.log')
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    let previous = ''
+    try {
+      if (!lstatSync(file).isFile()) throw new Error('UNSAFE_LOG')
+      const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+      try {
+        const info = fstatSync(fd)
+        if (!info.isFile()) throw new Error('UNSAFE_LOG')
+        const length = Math.min(info.size, 65536), bytes = Buffer.alloc(length)
+        const count = readSync(fd, bytes, 0, length, info.size - length)
+        previous = bytes.subarray(0, count).toString('utf8')
+        if (info.size > length) previous = previous.slice(previous.indexOf('\n') + 1)
+      } finally { closeSync(fd) }
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'ENOENT') throw error
+    }
+    const line = `${new Date().toISOString()} ${agent} ${event} PENDING_DROPPED_${code}`
+    atomic(file, `${[...previous.trimEnd().split('\n').filter(Boolean).slice(-199), line].join('\n')}\n`)
+  } catch {}
 }
 const input = async (): Promise<Json> => {
   let text = ''
@@ -483,22 +531,31 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             }
             const file = join(pending, name)
             if (file === queuedFile) continue
+            let stored: Json | undefined
+            let dropped: string | undefined
             try {
-              const stored = readPending(file)
+              stored = readPending(file)
               const entry = name.endsWith('.raw.json') ? rawEntry(stored) : stored as Pending
               if (entry.version === 1 && typeof entry.progress === 'string' && isHookEntry(entry)) {
                 if (entry.progress !== progress) continue
                 const signal = cleanSignal(entry.run)
                 if (!isOverdue(entry) || signal !== undefined && isStrongRun(signal)) apply(entry)
-              }
+                else dropped = 'OVERDUE'
+              } else dropped = 'UNKNOWN_VERSION'
             } catch (error) {
               const code = (error as { code?: unknown } | null)?.code
               if (isBusy(error) || typeof code === 'string' && code !== 'ENOENT' || error instanceof Error && ['INCOMPLETE_PROGRESS_TAIL', 'HOOK_TIMEOUT'].includes(error.message)) throw error
+              dropped = pendingErrorCode(error)
             }
             // Two boards sharing one data folder can both drop the same entry.
-            try { unlinkSync(file) } catch (error) {
+            let isRemoved = false
+            try {
+              unlinkSync(file)
+              isRemoved = true
+            } catch (error) {
               if ((error as { code?: string }).code !== 'ENOENT') throw error
             }
+            if (isRemoved && dropped !== undefined) logPendingDrop(home, stored, dropped)
             processed += 1
           }
           if (current === undefined) return
