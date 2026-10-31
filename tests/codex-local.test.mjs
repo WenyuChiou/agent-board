@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 import { formatWriter } from './e2e/lib/faults.mjs'
+import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { HOOK_INPUT_TIMEOUT, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
@@ -1251,6 +1252,64 @@ test('the hook deadline counts from the process start, not from when the worker 
     assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`))).state, 'working')
     assert.deepEqual(pendingFiles(f), [])
   }
+}))
+
+test('a late Codex worker queues an ISO event time and recovery preserves it', t => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  holdAutomaticRecovery(f)
+  const at = Date.now() - 3000
+  const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const payload = { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'late-iso-turn' }
+  const result = spawnSync(process.execPath, [worker, '--hook-version', '1', '--hook-event', 'UserPromptSubmit', '--codex-event', '--agent', 'codex', '--progress-file', f.progress, '--hook-started', String(at)], {
+    env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000,
+  })
+  assert.equal(result.status, 0, hookFailure(result))
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1)
+  assert.match(files[0], /\.raw\.json$/)
+  const queued = JSON.parse(readFileSync(join(f.root, 'pending', files[0]), 'utf8'))
+  t.diagnostic(JSON.stringify({ reporter: 'node-worker', kind: queued.kind, at: queued.at, hasNow: Object.hasOwn(queued, 'now'), now: queued.now ?? null }))
+  assert.equal(queued.kind, 'raw')
+  assert.equal(queued.payload.session_id, session)
+  assert.equal(queued.payload.turn_id, 'late-iso-turn')
+  assert.equal(queued.at, at)
+  assert.equal(queued.now, now)
+  assert.ok(Number.isFinite(Date.parse(queued.now)))
+  assert.equal(f.command(['--recover-hooks']).status, 0)
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex')
+  const saved = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+  assert.equal(saved.turn, 'late-iso-turn')
+  assert.equal(saved.appliedAt, at)
+  assert.equal(saved.updated, now)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.equal(text.split(`<!-- auto session=${owner.slice(0, 8)} `).length - 1, 1)
+  assert.equal(text.split(`<!-- /auto session=${owner.slice(0, 8)} -->`).length - 1, 1)
+  assert.match(text, new RegExp(`updated=${now}`))
+  assert.deepEqual(pendingFiles(f), [])
+}))
+
+test('recovery derives the original event time for legacy raw entries without now', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const at = Date.now() - 3000
+  const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  const file = join(f.root, 'pending', `${String(at).padStart(15, '0')}-legacy.raw.json`)
+  f.save(file, JSON.stringify({
+    version: 1, kind: 'raw', at,
+    argv: ['--codex-event', '--agent', 'codex', '--progress-file', f.progress], env: {},
+    payload: { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'legacy-raw-turn' },
+  }))
+  assert.equal(f.command(['--recover-hooks']).status, 0)
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex')
+  const saved = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+  assert.equal(saved.turn, 'legacy-raw-turn')
+  assert.equal(saved.appliedAt, at)
+  assert.equal(saved.updated, now)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.equal(text.split(`<!-- auto session=${owner.slice(0, 8)} `).length - 1, 1)
+  assert.equal(text.split(`<!-- /auto session=${owner.slice(0, 8)} -->`).length - 1, 1)
+  assert.match(text, new RegExp(`updated=${now}`))
+  assert.deepEqual(pendingFiles(f), [])
 }))
 
 test('an Antigravity worker delayed past ten seconds preserves its event time without overwriting newer work', () => fixture(f => {
@@ -4563,9 +4622,8 @@ test('queued status events use their start time and reject invalid timestamps', 
 
 // Runs /progress connect from a copy of the bundle, as the plugin does, outside the installer's folder.
 const legacyConnect = (f, progress, mode = 'connect', lang = 'en') => {
-  const source = readFileSync(resolve('hooks/board-script.ts'), 'utf8')
   const runner = join(f.home, 'connect-runner.mjs')
-  if (!existsSync(runner)) f.save(runner, JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length, source.lastIndexOf(']') + 1)).join('\n'))
+  if (!existsSync(runner)) f.save(runner, bundleFromDir(resolve('.')))
   const request = { mode, home: f.home, progress, lang, node: process.version, codexExecutable: join(f.home, 'missing-control.exe') }
   const result = spawnSync(process.execPath, [runner, '--legacy-connect-request', JSON.stringify(request)], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
   assert.equal(result.status, 0, result.stderr + result.stdout)

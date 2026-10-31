@@ -4,6 +4,7 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
+import { bundleFiles, isBundleFile } from './bundle-text.mjs'
 
 // The open pull request cap the owner approved for CONTRIBUTING.md rule 10 (#229): per author, and in all.
 export const AUTHOR_CAP = 2
@@ -486,8 +487,8 @@ export const outsideIssue = (issueData, number) => {
   return output
 }
 
-// Changelog fragments and the two generated files are not the author's lines to review.
-const isGeneratedPath = path => path.startsWith('changelog.d/') || path === 'hooks/board-script.ts' || path === 'hooks/released.ts'
+// Changelog fragments and the generated files (the board bundle and its parts, the release table) are not the author's lines to review.
+const isGeneratedPath = path => path.startsWith('changelog.d/') || isBundleFile(path) || path === 'hooks/released.ts'
 const isOutsideGovernance = path => path === 'AGENTS.md' || path === 'CONTRIBUTING.md' || path === 'package.json' || path.startsWith('.github/') || path.startsWith('.claude-plugin/')
 
 // Notes for the reviewer, never a failure: a large change, and a change to a file the maintainer looks at first.
@@ -898,9 +899,9 @@ export const main = async (argv = process.argv.slice(2)) => {
       else if (git(cwd, 'rev-parse', 'HEAD').trim() !== data.head) checked.info.push('bundle not checked: check out the pull request\'s head.')
       // A checkout that converts line endings (core.autocrlf, eol=crlf) writes the bundle with CRLF,
       // and the bundle check would fail on a current bundle; so the file itself is looked at.
-      else if (existsSync(join(cwd, 'hooks', 'board-script.ts')) && readFileSync(join(cwd, 'hooks', 'board-script.ts'), 'utf8').includes('\r\n')) checked.info.push('bundle not checked: hooks/board-script.ts has CRLF line endings in this checkout; CI checks the bundle, or clone with -c core.autocrlf=false.')
+      else if (bundleFiles(cwd).some(path => existsSync(join(cwd, path)) && readFileSync(join(cwd, path), 'utf8').includes('\r\n'))) checked.info.push('bundle not checked: hooks/board-script*.ts have CRLF line endings in this checkout; CI checks the bundle, or clone with -c core.autocrlf=false.')
       else if (bundleIsCurrent(cwd)) checked.info.push('bundle: board bundle is current.')
-      else checked.problems.push(problem('bundle', 'hooks/board-script.ts is out of date.', 'run "npx --yes bun@1.4.2 scripts/build-board.ts" and commit hooks/board-script.ts with the source change.'))
+      else checked.problems.push(problem('bundle', 'the board bundle (hooks/board-script.ts and its parts) is out of date.', 'run "npx --yes bun@1.4.2 scripts/build-board.ts" and commit hooks/board-script*.ts with the source change.'))
     }
     const header = `${data.number === null ? 'new pull request' : `#${data.number}`} ${data.branch} at ${data.head.slice(0, 7)}`
     if (process.env.GITHUB_STEP_SUMMARY) {

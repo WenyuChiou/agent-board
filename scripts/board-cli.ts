@@ -4,7 +4,7 @@
 // and opens it. `--serve` prints the board and opens the board's page in the browser, where it
 // can be clicked (board-serve.ts). `--chat` prints the board as plain text short enough for a
 // chat app, with no link and no secrets, for an agent that answers there. `/progress connect` writes the bundled copy of this file
-// beside progress.md (scripts/build-board.ts bundles it into hooks/board-script.ts), with the
+// beside progress.md (scripts/build-board.ts bundles it into hooks/board-script.ts and its parts), with the
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
