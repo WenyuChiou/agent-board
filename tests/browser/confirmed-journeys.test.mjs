@@ -78,6 +78,18 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
       const noteWhole = await noted.locator('.clip.context .whole').textContent()
       for (const note of notes) assert.ok(noteWhole.includes(note))
       assert.deepEqual(await task.locator('.steps .whole').allTextContents(), [chinese, english, unbroken])
+      // Each step's Done button sits under its text, as wide as its one-line label allows (not squeezed into the mark's column).
+      const ticks = task.locator('.steps li > button')
+      assert.equal(await ticks.count(), 3)
+      for (const tick of await ticks.all()) {
+        const place = await tick.evaluate(node => {
+          const box = node.getBoundingClientRect(), text = node.parentElement.querySelector('.clip').getBoundingClientRect()
+          return { left: box.left, right: box.right, width: box.width, height: box.height, textLeft: text.left, textRight: text.right, title: node.title }
+        })
+        assert.ok(place.width >= 44 && place.left >= place.textLeft - 1 && place.right <= place.textRight + 1, JSON.stringify(place))
+        assert.ok(place.height <= 56, JSON.stringify(place))
+        assert.ok([chinese, english, unbroken].includes(place.title), place.title)
+      }
       await task.getByRole('button', { name: `Done: ${chinese}`, exact: true }).first().click()
       await waitFor(() => readFileSync(progress, 'utf8').includes(`- [x] ${chinese}`))
       assert.ok(readFileSync(progress, 'utf8').includes(`- [ ] ${english}`))
