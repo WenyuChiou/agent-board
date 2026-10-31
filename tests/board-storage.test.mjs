@@ -261,7 +261,7 @@ test('a pre-existing temp is neither truncated nor deleted by a failed board act
 
 test('watch recovers on its next redraw after a read error and restores raw mode on quit', () => fixture(({ paths, play }) => {
   // Mock the TTY boundary only; the real watch loop, timer and bundled filesystem code run.
-  const fault = `let reads = 0\nconst original = fs.readFileSync\nfs.readFileSync = (path, ...args) => { if (String(path) === ${JSON.stringify(paths.board)} && ++reads === 1) throw Object.assign(new Error('injected transient read failure'), { code: 'EIO' }); return original(path, ...args) }\nObject.defineProperty(process.stdin, 'isTTY', { value: true })\nprocess.stdin.setRawMode = value => { if (!value) process.stderr.write('RAW_RESTORED\\n') }\nsetTimeout(() => process.stdin.emit('data', 'q'), 2300)`
+  const fault = `let reads = 0\nconst original = fs.readFileSync\nfs.readFileSync = (path, ...args) => { if (String(path) === ${JSON.stringify(paths.board)} && ++reads === 1) throw Object.assign(new Error('injected transient read failure'), { code: 'EIO' }); return original(path, ...args) }\nObject.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = value => { if (!value) process.stderr.write('RAW_RESTORED\\n') }\nsetTimeout(() => process.stdin.emit('data', 'q'), 2300)`
   const result = play('', fault, 'en', true)
   assert.equal(result.error, undefined)
   assert.equal(result.status, 1, result.stdout + result.stderr)
@@ -272,7 +272,7 @@ test('watch recovers on its next redraw after a read error and restores raw mode
 }))
 
 test('watch can quit while its board remains unreadable', () => fixture(({ paths, play }) => {
-  const fault = `const original = fs.readFileSync\nfs.readFileSync = (path, ...args) => { if (String(path) === ${JSON.stringify(paths.board)}) throw Object.assign(new Error('injected persistent read failure'), { code: 'EACCES' }); return original(path, ...args) }\nObject.defineProperty(process.stdin, 'isTTY', { value: true })\nprocess.stdin.setRawMode = value => { if (!value) process.stderr.write('RAW_RESTORED\\n') }\nsetTimeout(() => process.stdin.emit('data', 'q'), 50)`
+  const fault = `const original = fs.readFileSync\nfs.readFileSync = (path, ...args) => { if (String(path) === ${JSON.stringify(paths.board)}) throw Object.assign(new Error('injected persistent read failure'), { code: 'EACCES' }); return original(path, ...args) }\nObject.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = value => { if (!value) process.stderr.write('RAW_RESTORED\\n') }\nsetTimeout(() => process.stdin.emit('data', 'q'), 50)`
   const result = play('', fault, 'en', true)
   failed(result, paths.board, 'EACCES')
   assert.ok(result.stderr.includes('RAW_RESTORED'))
