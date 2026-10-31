@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { GROUPS, checkResults, makePlan, walkDependencies } from '../scripts/ci-impact.mjs'
 
 const groups = [
@@ -447,6 +448,57 @@ test('README-only changes run the README contract rather than every product jour
   })
 })
 
+const bothSystems = ['ubuntu-latest', 'windows-latest']
+
+test('a pull request that changes the plugin\'s hooks or bundle runs the plugin check on Windows too', () => {
+  // As in the real planner, the plugin's own walk reaches each hooks/ path here (bundle parts included).
+  const loaded = path => options({ deps: { ...options().deps, plugin: new Set([path]) }, pluginRuntime: new Set([path]) })
+  for (const path of ['hooks/pane.tsx', 'hooks/hooks.json', 'hooks/board-script.ts', 'hooks/board-script-2.ts', '.claude-plugin/plugin.json', 'package.json', '.gitattributes', '.github/workflows/test.yml']) {
+    const plan = makePlan([path], loaded(path))
+    assert.equal(plan.checks.plugin, true, path)
+    assert.deepEqual(plan.pluginMatrix, bothSystems, path)
+  }
+  // A hooks/ file the plugin does not load selects no plugin check, so it names no Windows row either.
+  const unloaded = makePlan(['hooks/board-only-example.ts'], options({ deps: { ...options().deps, board: new Set(['hooks/board-only-example.ts']) } }))
+  assert.equal(unloaded.checks.plugin, false)
+  assert.deepEqual(unloaded.pluginMatrix, ['ubuntu-latest'])
+  // One path in a mixed change is enough, and a file the plugin's own walk reaches counts like a hook.
+  assert.deepEqual(makePlan(['README.md', 'hooks/pane.tsx'], loaded('hooks/pane.tsx')).pluginMatrix, bothSystems)
+  assert.deepEqual(makePlan(['types/index.d.ts'], loaded('types/index.d.ts')).pluginMatrix, bothSystems)
+})
+
+test('a pull request that changes only a plugin test file runs the plugin check on Ubuntu only', () => {
+  const plan = makePlan(['tests/pane.test.tsx'], options())
+  assert.equal(plan.checks.plugin, true)
+  assert.deepEqual(plan.pluginMatrix, ['ubuntu-latest'])
+  assert.deepEqual(makePlan(['docs/dev/CI.md'], options()).pluginMatrix, ['ubuntu-latest'])
+  assert.equal(makePlan(['docs/dev/CI.md'], options()).checks.plugin, false)
+  // A code walk that only reaches the plugin's tests does not make them run-time files.
+  assert.deepEqual(makePlan(['tests/fixtures/helper.ts'], options({ deps: { ...options().deps, plugin: new Set(['tests/fixtures/helper.ts']) } })).pluginMatrix, ['ubuntu-latest'])
+})
+
+test('the planner writes the plugin systems for the workflow and reads the plugin run-time files from the walk', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const { readFile } = await import('node:fs/promises')
+  const repository = fileURLToPath(new URL('..', import.meta.url))
+  await withFixture(async root => {
+    const pluginOs = async paths => {
+      const output = join(root, 'output-' + paths.length + '-' + paths[0].replaceAll('/', '_'))
+      await writeFile(output, '')
+      const run = spawnSync(process.execPath, [join(repository, 'scripts/ci-impact.mjs'), 'plan'], {
+        cwd: repository,
+        encoding: 'utf8',
+        env: { ...process.env, CI_SOURCE_ROOTS: JSON.stringify([repository]), CI_CHANGED_FILES: JSON.stringify(paths), GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: '' },
+      })
+      assert.equal(run.status, 0, run.stderr)
+      return JSON.parse((await readFile(output, 'utf8')).split('\n').find(line => line.startsWith('plugin_os=')).slice('plugin_os='.length))
+    }
+    assert.deepEqual(await pluginOs(['hooks/pane.tsx']), bothSystems)
+    assert.deepEqual(await pluginOs(['types/index.d.ts']), bothSystems)
+    assert.deepEqual(await pluginOs(['tests/pane.test.tsx']), ['ubuntu-latest'])
+  })
+})
+
 const workflow = async () => {
   const { readFile } = await import('node:fs/promises')
   return readFile(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8')
@@ -458,7 +510,9 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   const four = '[{"os":"ubuntu-latest","node":22},{"os":"ubuntu-latest","node":24},{"os":"windows-latest","node":22},{"os":"windows-latest","node":24}]'
   const onPr = "(github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):'))"
   assert.ok(text.includes(`node_matrix: \${{ ${onPr} && '${two}' || '${four}' }}`))
-  assert.ok(text.includes(`plugin_os: \${{ ${onPr} && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest"]' }}`))
+  // On a pull request the planner picks the plugin systems; an empty planner output falls through to both.
+  assert.ok(text.includes(`plugin_os: \${{ ${onPr} && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}`))
+  assert.match(text, /plugin_os:'\["ubuntu-latest","windows-latest"\]'/)
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
     assert.ok(block, group)
