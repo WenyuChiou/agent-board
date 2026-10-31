@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { boardAgents, boardItems, boardKey, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, pinned, routesOf, terminalLook } from '../hooks/board'
+import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, pinned, routesOf, terminalLook } from '../hooks/board'
 import type { AnswerRoute } from '../hooks/board'
 import { DARK, LIGHT } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
@@ -100,6 +100,26 @@ test('the terminal board redraws without clearing the screen and writes nothing 
   // The board itself has no clearing codes.
   const view = viewOf(BOARD)
   expect(boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 80, isColor: true })).not.toContain(`${ESC}[2J`)
+})
+
+test('a terminal board taller than the screen moves its window to show the selected line the keys act on', () => {
+  // The window ends on the focus when it fits, starts on it when it does not, and keeps the keys line.
+  expect(frame(null, 'a\nb\nc\nd\nkeys\n', 3, [3, 3])).toBe(`${ESC}[Hc${ESC}[K\nd${ESC}[K\nkeys${ESC}[K${ESC}[J`)
+  expect(frame(null, 'a\nb\nc\nd\nkeys\n', 3, [1, 3])).toBe(`${ESC}[Hb${ESC}[K\nc${ESC}[K\nkeys${ESC}[K${ESC}[J`)
+  expect(frame(null, 'a\nb\nc\nd\nkeys\n', 3, [0, 0])).toBe(`${ESC}[Ha${ESC}[K\nb${ESC}[K\nkeys${ESC}[K${ESC}[J`)
+  const s = STRINGS.en
+  const tasks = Array.from({ length: 12 }, (_, n) => `### Synthetic task ${n + 1}\n- [ ] Step of task ${n + 1}\n`).join('')
+  const view = viewOf(`# Progress\n\n## notes\n${tasks}`)
+  const items = boardItems(view, [])
+  const last = items.findIndex(item => item.type === 'row' && item.row.title === 'Synthetic task 12')
+  const state = pinned({ ...emptyBoardState, selected: last }, items)
+  const { screen, focus } = boardLayout(view, [], state, s, { width: 80, isColor: false })
+  const shown = frame(null, screen, 24, focus) ?? ''
+  // x ticks task 12's step, and task 12 is on the 24 rows the person sees.
+  expect(boardKey(state, 'x', items, s).action).toMatchObject({ type: 'tick' })
+  expect(shown).toContain('› Synthetic task 12')
+  expect(shown).toContain('Step of task 12')
+  expect(shown.split('\n').length).toBeLessThanOrEqual(24)
 })
 
 test('a yes/no or two-option question is answered with one key on the terminal board', () => {

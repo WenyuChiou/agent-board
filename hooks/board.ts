@@ -799,15 +799,24 @@ export const SCREEN_LEAVE = '\u001b[?25h\u001b[?1049l'
 // home, each line cleared to its end, and everything below the last cleared. Null when the screen
 // is what was drawn last, so nothing is written. With the terminal's height known, a board longer
 // than the screen keeps its last line and drops what does not fit, so the terminal never scrolls.
-export const frame = (previous: string | null, screen: string, rows = 0): string | null => {
+// `focus` is the selected line's first and last screen line: the window moves to show it, since
+// the keys act on that line and the second screen has no scrollback to find it in.
+export const frame = (previous: string | null, screen: string, rows = 0, focus: readonly [number, number] | null = null): string | null => {
   if (screen === previous) return null
   const all = screen.replace(/\n+$/, '').split('\n')
-  const shown = rows > 1 && all.length > rows ? [...all.slice(0, rows - 1), all.at(-1) ?? ''] : all
+  const room = rows - 1
+  const body = all.slice(0, -1)
+  const from = focus === null ? 0 : Math.max(0, Math.min(focus[0], focus[1] - room + 1, body.length - room))
+  const shown = rows > 1 && all.length > rows ? [...body.slice(from, from + room), all.at(-1) ?? ''] : all
 
   return `\u001b[H${shown.map(line => `${line}\u001b[K`).join('\n')}\u001b[J`
 }
 
-export const boardScreen = (view: View, pending: readonly PendingTurn[], state: BoardState, s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
+export const boardScreen = (view: View, pending: readonly PendingTurn[], state: BoardState, s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string =>
+  boardLayout(view, pending, state, s, o).screen
+
+// The screen and where on it the selected line is (its heading, row and open lines), for `frame`.
+export const boardLayout = (view: View, pending: readonly PendingTurn[], state: BoardState, s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): { screen: string, focus: readonly [number, number] | null } => {
   const c = paint(o)
   const isWide = isWideLang(s)
   const cut = (raw: string, width: number): string => fit(raw, width, isWide)
@@ -857,7 +866,8 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
   const isOrphan = result !== undefined && resultItem === undefined && hasResult && state.note !== ''
   const host = isOrphan ? items.find(item => item.type === 'row' && item.row.title === result.label)?.key ?? null : null
   let section = ''
-  items.forEach((item, index) => {
+  let focus: readonly [number, number] | null = null
+  const drawItem = (item: BoardItem, index: number): void => {
     const isHere = index === at
     const isOpen = state.open === item.key
     const mark = isHere ? c('accent', '›', true) : ' '
@@ -930,6 +940,11 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
     const { turn } = item
     lines.push(`${mark} ${titled(2, `${[turn.project, agentLabel(turn.agent, s)].filter(part => part !== '').join(' · ')}: ${turn.text}`, '', isHere)}`)
     if (result?.key === item.key) resultLines('    ')
+  }
+  items.forEach((item, index) => {
+    const from = lines.length
+    drawItem(item, index)
+    if (index === at) focus = [from, lines.length - 1]
   })
   if (isOrphan && host === null) {
     lines.push('', `  ${cut(result.label, o.width - 4)}`)
@@ -956,5 +971,5 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
   if (result === undefined) resultLines('')
   for (const line of view.health ?? []) lines.push(...wrap(line, o.width - 2).map(part => c('quiet', part)))
 
-  return `${lines.join('\n')}\n`
+  return { screen: `${lines.join('\n')}\n`, focus }
 }

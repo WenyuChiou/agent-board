@@ -24,7 +24,7 @@ import { serverMemoryArgs } from './server-runtime'
 import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RuntimeFolderError, writePrivateRuntimeFile } from './runtime-folder'
 import { idleTimeout } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
-import { boardAgents, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
+import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
@@ -1539,8 +1539,8 @@ const runWatchTerminal = async (): Promise<void> => {
   let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }
   // What is on the screen now: a redraw that would show the same writes nothing.
   let drawn: string | null = null
-  const paintScreen = (text: string): void => {
-    const out = frame(drawn, text, process.stdout.rows || 0)
+  const paintScreen = (text: string, focus: readonly [number, number] | null = null): void => {
+    const out = frame(drawn, text, process.stdout.rows || 0, focus)
     drawn = text
     if (out !== null) process.stdout.write(out)
   }
@@ -1549,7 +1549,9 @@ const runWatchTerminal = async (): Promise<void> => {
       const shown = freshView()
       const turns = pending()
       state = pinned(state, boardItems(shown, turns, state.isIdleOpen ?? false, state.isOlderOpen ?? false))
-      paintScreen(`${boardScreen(shown, turns, state, s, { ...options(), agents: agentsHere(shown, turns) })}${sshHint}`)
+      // The window follows the selected line, so a key never acts on a line off the screen.
+      const { screen, focus } = boardLayout(shown, turns, state, s, { ...options(), agents: agentsHere(shown, turns) })
+      paintScreen(`${screen}${sshHint}`, focus)
     } catch (error) {
       paintScreen(`${failureNote(error)}\n`)
     }
