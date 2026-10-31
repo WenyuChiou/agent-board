@@ -55,6 +55,8 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
       for (const clip of all) {
         const summary = clip.locator(':scope > summary')
         const short = clip.locator('.short')
+        // A fold that was just opened may still be growing; measure once the line has its width.
+        await short.evaluate(node => new Promise(done => { const at = Date.now(); const check = () => (node.clientWidth > 0 || Date.now() - at > 3000 ? done() : requestAnimationFrame(check)); check() }))
         const metrics = await short.evaluate(node => {
           const style = getComputedStyle(node)
           return { height: node.parentElement.getBoundingClientRect().height, font: parseFloat(style.fontSize), width: node.clientWidth, scroll: node.scrollWidth, whiteSpace: style.whiteSpace, overflow: style.overflow, ellipsis: style.textOverflow }
