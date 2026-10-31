@@ -536,6 +536,20 @@ test('removeAutoBlock with agent parameter removes only matching agent block', (
   expect(removedClaude).toContain('### Codex task')
 })
 
+test('empty mirror remove removes only matching agent block when same session id exists across agents', () => {
+  const claudeBlock = ['<!-- auto session=aaaa1111 agent=claude state=working updated=2026-10-27T12:00:00Z resume=aaaa1111-0000-4000-8000-000000000001 -->', '### Claude task', '- [~] Doing', '<!-- /auto session=aaaa1111 -->'].join('\n')
+  const codexBlock = ['<!-- auto session=aaaa1111 agent=codex state=working updated=2026-10-27T12:00:00Z resume=aaaa1111-0000-4000-8000-000000000001 -->', '### Codex task', '- [~] Doing', '<!-- /auto session=aaaa1111 -->'].join('\n')
+  const initial = `## Demo\n${claudeBlock}\n\n${codexBlock}\n`
+  const emptyClaudeMirror: ProgressMirror = {
+    ...emptyMirror('aaaa1111-0000-4000-8000-000000000001', 'Demo', NOW, ''),
+    agent: 'claude',
+    tasks: [],
+  }
+  const removed = emptyClaudeMirror.tasks.length === 0 ? removeAutoBlock(initial, emptyClaudeMirror.sessionId, emptyClaudeMirror.agent || 'claude') : upsertAutoBlock(initial, emptyClaudeMirror, en)
+  expect(removed).not.toContain('### Claude task')
+  expect(removed).toContain('### Codex task')
+})
+
 test('foldRuns keeps two blocks with the same agent and short id apart when full id is unknown', () => {
   const oldA: Spec = { session: 'bbbb0001', agent: 'claude', title: 'Old Block A' }
   const oldB: Spec = { session: 'bbbb0001', agent: 'claude', title: 'Old Block B' }

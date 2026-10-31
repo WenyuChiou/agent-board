@@ -1499,9 +1499,9 @@ const writeMine = async ($: EngineInterface): Promise<void> => {
         await poll($)
         return AGAIN
       }
-      return mirror.tasks.length === 0 ? removeAutoBlock(before, mirror.sessionId) : upsertAutoBlock(before, mirror, s)
+      return mirror.tasks.length === 0 ? removeAutoBlock(before, mirror.sessionId, mirror.agent || 'claude') : upsertAutoBlock(before, mirror, s)
     },
-    (check, after) => extractAutoBlock(check, mirror.sessionId) === extractAutoBlock(after, mirror.sessionId),
+    (check, after) => extractAutoBlock(check, mirror.sessionId, mirror.agent || 'claude') === extractAutoBlock(after, mirror.sessionId, mirror.agent || 'claude'),
   )
   await poll($)
 }
@@ -2067,7 +2067,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     rememberAnswered(answers)
     const path = await progressPath($)
     const isKept = (check: string): boolean =>
-      extractAutoBlock(check, written.sessionId) === extractAutoBlock(upsertAutoBlock(check, written, s), written.sessionId)
+      extractAutoBlock(check, written.sessionId, written.agent || 'claude') === extractAutoBlock(upsertAutoBlock(check, written, s), written.sessionId, written.agent || 'claude')
     const wrote = await rewrite($, path, async before => {
       const current = await $.store.get(owner) as ProgressMirror | undefined
       if (JSON.stringify(current ?? null) !== JSON.stringify(written) || JSON.stringify((await agentProjection($, last.id, current)).mirror ?? null) !== JSON.stringify(written)) {
@@ -2114,17 +2114,17 @@ const takeAgentPrompt = async ($: EngineInterface, prompt: AgentTurn): Promise<v
       if (JSON.stringify((await agentMirror($, prompt.id)) ?? null) !== JSON.stringify(stored)) throw new Error('PROMPT_CHANGED')
       const matches = parseProgress(before).flatMap(project => project.tasks).filter(task => task.auto?.session === prompt.id)
       if (matches.length !== 1 || matches[0]?.auto?.agent !== prompt.agent || matches[0]?.auto?.resume !== prompt.session) return null
-      const spans = scanBlocks(before.split(/\r?\n/)).filter(span => span.session === prompt.id)
+      const spans = scanBlocks(before.split(/\r?\n/)).filter(span => span.session === prompt.id && (span.agent === undefined || span.agent === prompt.agent))
       if (spans.length !== 1 || !spans[0]?.isClosed) return null
-      const block = extractAutoBlock(before, prompt.id)
+      const block = extractAutoBlock(before, prompt.id, prompt.agent)
       if (block === null) return null
       if (original !== undefined && block !== original) return null
       original = block
-      written = extractAutoBlock(upsertAutoBlock(before, next, s), prompt.id)
+      written = extractAutoBlock(upsertAutoBlock(before, next, s), prompt.id, prompt.agent)
       return upsertAutoBlock(before, next, s)
-    }, check => extractAutoBlock(check, prompt.id) === written)
+    }, check => extractAutoBlock(check, prompt.id, prompt.agent) === written)
     if (written === null) return
-    if (extractAutoBlock(await readText($, path), prompt.id) !== written) throw new Error(NOT_KEPT)
+    if (extractAutoBlock(await readText($, path), prompt.id, prompt.agent) !== written) throw new Error(NOT_KEPT)
     // No owner-key write: a later owner may advance while this await is pending.
     // Every receipt has its own key, so simultaneous prompts do not erase barriers.
     const key = `agentPrompt:${prompt.id}:${next.promptOrder}:${updated}`

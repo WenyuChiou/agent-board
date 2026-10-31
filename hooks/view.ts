@@ -519,7 +519,7 @@ const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
 const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, string>>): WaitingItem[] => {
   const title = mine.title || fallbackTitle(mine)
   const context = contextFor(mine)
-  const ownId = mine.sessionId ?? shortId(mine.sessionId)
+  const ownId = shortId(mine.sessionId)
   // Keyed on the steps this session's block marks [?]: a blocked one is written [!], which no
   // other reader lists as a question, so it cannot be marked answered.
   const keys = askKeys(
@@ -756,6 +756,20 @@ const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 const runAgents = (group: RunGroup, s: Strings): string => group.agents.map(agent => s.agentNames[agent] ?? agentName(agent)).join(' / ')
 const runsText = (group: RunGroup, now: number, s: Strings): string => s.runsLine(group.count, runAgents(group, s), relativeTime(group.last, now, s))
 
+const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string): boolean => {
+  let count = 0
+  let unresumed = 0
+  for (const p of projects) {
+    for (const t of p.tasks) {
+      if (t.auto !== null && (t.auto.agent === undefined || t.auto.agent === 'claude') && t.auto.session === ownId) {
+        count += 1
+        if (t.auto.resume === null || t.auto.resume === undefined) unresumed += 1
+      }
+    }
+  }
+  return count === 1 && unresumed === 1
+}
+
 export const buildView = (
   projects: readonly ProgressProject[],
   here: readonly string[],
@@ -782,7 +796,7 @@ export const buildView = (
   const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const recordsById = new Map((observed?.ledger.records ?? []).map(record => [record.id, record]))
-  const ownId = mine === null ? '' : (mine.sessionId ?? shortId(mine.sessionId))
+  const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
   const inactiveHidden: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
@@ -825,7 +839,12 @@ export const buildView = (
     const name = project.name || s.uncategorized
     const isHere = isHereProject(name, here)
     for (const task of project.tasks) {
-      if (task.auto !== null && (task.auto.resume !== null && mine !== null && mine.sessionId ? task.auto.resume === mine.sessionId : task.auto.session === ownId)) {
+      const isMine = task.auto !== null && (
+        task.auto.resume !== null && mine !== null && mine.sessionId
+          ? task.auto.resume === mine.sessionId
+          : (mine !== null && mine.sessionId && task.auto.session === ownId && (task.auto.agent === undefined || task.auto.agent === 'claude') && mine.isRun !== true && isUniqueUnresumedTask(task, folded.projects, ownId))
+      )
+      if (isMine) {
         const own = folded.runs.get(task)
         if (own !== undefined) {
           ownRuns = own
@@ -1010,9 +1029,9 @@ export const buildView = (
           : null,
         archive:
           isManual && task.line >= 0
-            ? { project: name, title: task.title, line: task.line, session: null, resume: null }
+            ? { project: name, title: task.title, line: task.line, session: null }
             : auto === 'ended' && task.auto !== null
-              ? { project: name, title: task.title, line: task.line, session: task.auto.session, resume: task.auto.resume ?? null }
+              ? { project: name, title: task.title, line: task.line, session: task.auto.session, ...(task.auto.resume ? { resume: task.auto.resume } : {}) }
               : null,
         target: targetOf(task.auto),
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
@@ -1064,7 +1083,7 @@ export const buildView = (
         project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
         when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], left: [], next: null, due: null, pr: '',
         agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
-        archive: { project: name, title: task.title, line: task.line, session: auto.session, resume: auto.resume ?? null, isDuplicate: true }, target: null,
+        archive: { project: name, title: task.title, line: task.line, session: auto.session, ...(auto.resume ? { resume: auto.resume } : {}), isDuplicate: true }, target: null,
       },
     })
   }

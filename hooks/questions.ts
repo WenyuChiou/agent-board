@@ -392,9 +392,23 @@ export const questionFilesKey = (
 
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
+const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string): boolean => {
+  let count = 0
+  let unresumed = 0
+  for (const p of projects) {
+    for (const t of p.tasks) {
+      if (t.auto !== null && (t.auto.agent === undefined || t.auto.agent === 'claude') && t.auto.session === ownId) {
+        count += 1
+        if (t.auto.resume === null || t.auto.resume === undefined) unresumed += 1
+      }
+    }
+  }
+  return count === 1 && unresumed === 1
+}
+
 const ownObservations = (mine: ProgressMirror): Observation[] => {
   if (mine.isRun === true) return []
-  const own = mine.sessionId ?? shortId(mine.sessionId)
+  const own = shortId(mine.sessionId)
   const scope = questionScope(mine.project, 'claude', own)
   return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: 'claude', session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
 }
@@ -403,16 +417,21 @@ const ownObservations = (mine: ProgressMirror): Observation[] => {
 // Its times, turn state and background jobs change with every hook of a running session and
 // are left out, so they do not make an idle poll pass again (#416).
 export const ownQuestionsKey = (mine: ProgressMirror | null): string =>
-  JSON.stringify(mine === null ? null : [mine.sessionId ?? shortId(mine.sessionId), mine.project, ownObservations(mine)])
+  JSON.stringify(mine === null ? null : [mine === null ? '' : shortId(mine.sessionId), mine.project, ownObservations(mine)])
 
 const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): Observation[] => {
-  const own = mine === null ? '' : (mine.sessionId ?? shortId(mine.sessionId))
+  const own = mine === null ? '' : shortId(mine.sessionId)
   const rows: Observation[] = []
   const scopes = new Set<string>()
   const ambiguous = new Set<string>()
   for (const project of projects) {
     for (const task of project.tasks) {
-      if (mine !== null && ((task.auto?.resume !== null && mine.sessionId ? task.auto?.resume === mine.sessionId : task.auto?.session === own))) continue
+      const isMine = mine !== null && (
+        task.auto?.resume !== null && mine.sessionId
+          ? task.auto?.resume === mine.sessionId
+          : (Boolean(mine.sessionId) && task.auto?.session === own && (task.auto?.agent === undefined || task.auto?.agent === 'claude') && mine.isRun !== true && isUniqueUnresumedTask(task, projects, own))
+      )
+      if (isMine) continue
       const scope = questionScope(project.name, task.auto?.agent ?? 'manual', (task.auto?.resume ?? task.auto?.session) ?? task.title)
       if (frozen.has(scope)) continue
       if (scopes.has(scope)) ambiguous.add(scope)
@@ -454,7 +473,7 @@ export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: read
   const seen = observations(projects, mine, pending, frozen)
   const scopes = new Set([
     ...projects.flatMap(project => project.tasks.map(task => questionScope(project.name, task.auto?.agent ?? 'manual', (task.auto?.resume ?? task.auto?.session) ?? task.title))),
-    ...(mine === null ? [] : [questionScope(mine.project, 'claude', mine.sessionId ?? shortId(mine.sessionId))]),
+    ...(mine === null ? [] : [questionScope(mine.project, 'claude', shortId(mine.sessionId))]),
     ...seen.map(row => row.scope),
   ])
   return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !frozen.has(record.scope) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
@@ -478,12 +497,6 @@ export const observeQuestions = (
 ): { ledger: QuestionLedger; keys: Record<string, string>; marked: string[] } => {
   const records = ledger.records.map(row => ({ ...row }))
   const scopeMigrations = new Map<string, string>()
-  if (mine !== null && mine.sessionId) {
-    const short = shortId(mine.sessionId)
-    if (short !== mine.sessionId) {
-      scopeMigrations.set(questionScope(mine.project, 'claude', short), questionScope(mine.project, 'claude', mine.sessionId))
-    }
-  }
   for (const project of projects) {
     for (const task of project.tasks) {
       if (task.auto !== null && task.auto.resume !== null && task.auto.resume !== task.auto.session) {
@@ -496,9 +509,7 @@ export const observeQuestions = (
     if (migrated !== undefined) {
       record.scope = migrated
       if (record.source !== undefined && record.source.session) {
-        const full = mine !== null && mine.sessionId && record.source.session === shortId(mine.sessionId)
-          ? mine.sessionId
-          : projects.flatMap(p => p.tasks).find(t => t.auto?.session === record.source?.session)?.auto?.resume
+        const full = projects.flatMap(p => p.tasks).find(t => t.auto?.session === record.source?.session)?.auto?.resume
         if (full) record.source.session = full
       }
     }

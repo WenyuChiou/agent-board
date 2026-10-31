@@ -2892,6 +2892,14 @@ test('OpenCode honors its config override for installation, doctor and removal',
   assert.ok(!existsSync(plugin))
 }))
 
+test('--codex-doctor for adapter-pending agents reports ready false', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  for (const agent of ['dot', 'duet', 'bot']) {
+    const doctor = JSON.parse(f.command(['--codex-doctor', '--agent', agent]).stdout)
+    assert.equal(doctor.ready, false)
+  }
+}))
+
 test('auto setup detects overridden host directories without scanning sessions', () => fixture(f => {
   f.env.OPENCODE_CONFIG_DIR = join(f.home, 'opencode-dir')
   f.env.OPENCLAW_STATE_DIR = join(f.home, 'openclaw-dir')
