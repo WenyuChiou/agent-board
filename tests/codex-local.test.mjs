@@ -4462,6 +4462,279 @@ test('queued hook events stop at 64 and the next one fails in one plain line', (
   assert.deepEqual(readFileSync(f.progress), before)
 }))
 
+// Exercise the current TypeScript source without changing the checked-in board bundle.
+const useSourceForPendingReplay = f => {
+  f.save(f.script, `import { registerHooks } from 'node:module'
+import { extname } from 'node:path'
+registerHooks({ resolve(specifier, context, nextResolve) {
+  if ((specifier.startsWith('./') || specifier.startsWith('../')) && !extname(specifier)) specifier += '.ts'
+  return nextResolve(specifier, context)
+} })
+const { runCodexLocal } = await import(${JSON.stringify(pathToFileURL(resolve('scripts/codex-local.ts')).href)})
+const { STRINGS } = await import(${JSON.stringify(pathToFileURL(resolve('hooks/strings.ts')).href)})
+try { await runCodexLocal(process.argv.slice(2), ${JSON.stringify(f.progress)}, STRINGS.en) }
+catch (error) { process.stderr.write(String(error.stack || error) + '\\n'); process.exitCode = 1 }
+`)
+}
+
+test('a queued hook event that fails validation is dropped with one hook-errors.log line naming its event and reason', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const pending = join(f.root, 'pending', 'invalid.raw.json')
+  f.save(pending, JSON.stringify({
+    version: 1, kind: 'raw', at: Date.now(),
+    argv: ['--codex-event', '--agent', 'codex', '--hook-event', 'UserPromptSubmit', '--progress-file', f.progress, '--unexpected', 'PRIVATE_ARGUMENT'],
+    env: {}, payload: { session_id: 'private-session-123', hook_event_name: 'UserPromptSubmit', prompt: 'PRIVATE_PAYLOAD' },
+  }))
+  const result = f.event('SessionStart')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(pending), false)
+  const lines = hookLog(f).trim().split('\n')
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /^\S+ codex UserPromptSubmit PENDING_DROPPED_INVALID_RAW_ARGV$/)
+  assert.ok(Number.isFinite(Date.parse(lines[0].split(' ')[0])))
+  assert.doesNotMatch(lines[0], /[\\/]|private-session-123|PRIVATE_PAYLOAD|PRIVATE_ARGUMENT/)
+}))
+
+test('a malformed pending JSON event is dropped with an unknown agent and event in the hook error log', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const pending = join(f.root, 'pending', 'invalid.raw.json')
+  f.save(pending, '{"PRIVATE_PAYLOAD":')
+  const result = f.event('SessionStart')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(pending), false)
+  const lines = hookLog(f).trim().split('\n')
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /^\S+ unknown unknown PENDING_DROPPED_INVALID_JSON$/)
+  assert.doesNotMatch(lines[0], /[\\/]|PRIVATE_PAYLOAD/)
+}))
+
+test('pending diagnostics allow only known agents, events and board error codes', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const entry = {
+    version: 1, kind: 'raw', at: Date.now(),
+    argv: ['--codex-event', '--agent', 'codex', '--progress-file', f.progress],
+    env: { PRIVATE_ENV: 'secret' }, payload: { session_id: session, hook_event_name: 'Stop' },
+  }
+  f.save(join(f.root, 'pending', '001.raw.json'), JSON.stringify({
+    ...entry, argv: ['--codex-event', '--agent', 'PRIVATE_AGENT', '--progress-file', f.progress],
+    payload: { session_id: session, hook_event_name: 'PRIVATE_EVENT' },
+  }))
+  f.save(join(f.root, 'pending', '002.raw.json'), JSON.stringify(entry))
+  const result = f.event('SessionStart')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(pendingFiles(f), [])
+  const lines = hookLog(f).trimEnd().split('\n')
+  assert.equal(lines.length, 2)
+  assert.match(lines[0], /^\S+ unknown unknown PENDING_DROPPED_INVALID_RAW_ARGV$/)
+  assert.match(lines[1], /^\S+ codex Stop PENDING_DROPPED_INVALID_RAW_ENV$/)
+  assert.doesNotMatch(hookLog(f), /PRIVATE_|secret/)
+}))
+
+test('a pending event with an unknown version is logged and another board event stays queued', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const entry = {
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session,
+    now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+    payload: { session_id: session, hook_event_name: 'PermissionRequest' },
+  }
+  f.save(join(f.root, 'pending', '001.json'), JSON.stringify({ ...entry, version: 2 }))
+  const foreign = join(f.root, 'pending', '002.json')
+  const foreignEntry = JSON.stringify({ ...entry, progress: join(f.home, 'other-progress.md') })
+  f.save(foreign, foreignEntry)
+  const result = f.event('SessionStart')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(pendingFiles(f), ['002.json'])
+  assert.equal(readFileSync(foreign, 'utf8'), foreignEntry)
+  assert.match(hookLog(f), /^\S+ codex PermissionRequest PENDING_DROPPED_UNKNOWN_VERSION\n$/)
+}))
+
+test('an overdue queued hook event is dropped with its pending reason without changing its session', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  assert.equal(f.event('UserPromptSubmit').status, 0)
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex')
+  const record = join(f.root, 'sessions', `${owner}.json`)
+  const before = readFileSync(record, 'utf8')
+  const at = Date.now() - 60000
+  f.save(join(f.root, 'pending', '001.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session, at,
+    now: new Date(at).toISOString(), isBoardPrompt: false, isPrompt: false,
+    payload: { session_id: session, hook_event_name: 'Stop' },
+  }))
+  const result = f.event('SessionStart', null, { session_id: 'test-codex-session-456' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(pendingFiles(f), [])
+  assert.equal(readFileSync(record, 'utf8'), before)
+  assert.match(hookLog(f), /^\S+ codex Stop PENDING_DROPPED_OVERDUE\n$/)
+}))
+
+test('pending replay still applies an older event carrying strong run evidence', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  assert.equal(f.event('UserPromptSubmit', 'turn-newer').status, 0)
+  const owner = createHash('sha256').update(`codex:${session}`).digest('hex')
+  const record = join(f.root, 'sessions', `${owner}.json`)
+  const before = JSON.parse(readFileSync(record, 'utf8'))
+  const at = before.appliedAt - 1
+  f.save(join(f.root, 'pending', '001.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session, at,
+    now: new Date(at).toISOString(), isBoardPrompt: false, isPrompt: false, run: { origin: 'run' },
+    payload: { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-older' },
+  }))
+  const result = f.event('SessionStart', null, { session_id: 'test-codex-session-456' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(pendingFiles(f), [])
+  const after = JSON.parse(readFileSync(record, 'utf8'))
+  assert.equal(after.origin, 'run')
+  assert.equal(after.state, before.state)
+  assert.equal(after.turn, before.turn)
+  assert.equal(hookLog(f), '')
+}))
+
+test('a pending event that fails during application records the board refusal code', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const missing = 'test-unbound-session-123'
+  f.save(join(f.root, 'pending', '001.json'), JSON.stringify({
+    version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session: missing,
+    now: new Date().toISOString(), isBoardPrompt: false, isPrompt: false,
+    payload: { session_id: missing, hook_event_name: 'Stop', turn_id: 'turn-1' },
+  }))
+  const result = f.event('SessionStart')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(pendingFiles(f), [])
+  assert.match(hookLog(f), /^\S+ codex Stop PENDING_DROPPED_UNBOUND_SESSION\n$/)
+}))
+
+test('pending drop logging bounds old lines and uses the supplied home with a separate data directory', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const log = join(f.home, '.agent-board', 'hook-errors.log')
+  const old = Array.from({ length: 205 }, (_, index) => `old-${index}`)
+  f.save(log, `${old.join('\n')}\n`)
+  const data = join(f.home, 'other-data')
+  f.save(join(data, 'pending', '001.json'), '{')
+  const result = f.command(['--codex-event', '--data-dir', data], { session_id: session, hook_event_name: 'SessionStart' })
+  assert.equal(result.status, 0, result.stderr)
+  const lines = readFileSync(log, 'utf8').trimEnd().split('\n')
+  assert.equal(lines.length, 200)
+  assert.deepEqual(lines.slice(0, 199), old.slice(-199))
+  assert.match(lines[199], /^\S+ unknown unknown PENDING_DROPPED_INVALID_JSON$/)
+  assert.equal(existsSync(join(data, 'hook-errors.log')), false)
+  if (process.platform !== 'win32') assert.equal(statSync(log).mode & 0o777, 0o600)
+}))
+
+test('pending replay ignores an unsafe hook error log without losing the current event', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const log = join(f.root, 'hook-errors.log')
+  mkdirSync(log)
+  f.save(join(f.root, 'pending', '001.json'), '{')
+  const result = f.event('UserPromptSubmit')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(pendingFiles(f), [])
+  assert.ok(statSync(log).isDirectory())
+  assert.match(readFileSync(f.progress, 'utf8'), /state=working/)
+}))
+
+test('pending replay refuses a symlink hook error log', t => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const target = join(f.home, 'untouched.txt'), log = join(f.root, 'hook-errors.log')
+  f.save(target, 'keep this file')
+  let isRealLink = true
+  let extraEnv = {}
+  try { symlinkSync(target, log, 'file') } catch (error) {
+    if (process.platform !== 'win32' || !['EPERM', 'EACCES'].includes(error.code)) throw error
+    isRealLink = false
+    t.diagnostic('Windows refused symlink creation; exercising the same lstat refusal with a stub')
+    f.save(log, 'untouched log')
+    const preload = join(f.home, 'symlink-log.cjs')
+    f.save(preload, `const fs = require('node:fs')
+const lstat = fs.lstatSync
+fs.lstatSync = (file, ...args) => {
+  const stat = lstat(file, ...args)
+  if (file === ${JSON.stringify(log)}) { stat.isFile = () => false; stat.isSymbolicLink = () => true }
+  return stat
+}
+require('node:module').syncBuiltinESMExports()
+`)
+    extraEnv = { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+  }
+  f.save(join(f.root, 'pending', '001.json'), '{')
+  const result = f.event('SessionStart', 'turn-1', {}, extraEnv)
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(pendingFiles(f), [])
+  if (isRealLink) assert.ok(lstatSync(log).isSymbolicLink())
+  else assert.equal(readFileSync(log, 'utf8'), 'untouched log')
+  assert.equal(readFileSync(target, 'utf8'), 'keep this file')
+}))
+
+test('pending replay keeps a system-error entry and writes no dropped-event log', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const pending = join(f.root, 'pending', '001.json')
+  f.save(pending, '{}')
+  const preload = join(f.home, 'refuse-pending.cjs')
+  f.save(preload, `const fs = require('node:fs')
+const read = fs.readFileSync
+fs.readFileSync = (file, ...args) => {
+  if (file === ${JSON.stringify(pending)}) throw Object.assign(new Error('denied'), { code: 'EACCES' })
+  return read(file, ...args)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const result = f.event('SessionStart', 'turn-1', {}, { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  assert.equal(result.status, 1)
+  assert.equal(existsSync(pending), true)
+  assert.equal(hookLog(f), '')
+}))
+
+test('pending replay does not log an event another board removed first', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const pending = join(f.root, 'pending', '001.json')
+  f.save(pending, '{')
+  const preload = join(f.home, 'remove-pending.cjs')
+  f.save(preload, `const fs = require('node:fs')
+const unlink = fs.unlinkSync
+fs.unlinkSync = (file, ...args) => {
+  if (file === ${JSON.stringify(pending)}) { unlink(file, ...args); throw Object.assign(new Error('gone'), { code: 'ENOENT' }) }
+  return unlink(file, ...args)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const result = f.event('SessionStart', 'turn-1', {}, { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(pending), false)
+  assert.equal(hookLog(f), '')
+}))
+
+test('pending replay never copies an unexpected error message into the hook log', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  useSourceForPendingReplay(f)
+  const pending = join(f.root, 'pending', '001.json')
+  f.save(pending, '{}')
+  const preload = join(f.home, 'unreadable-pending.cjs')
+  f.save(preload, `const fs = require('node:fs')
+const read = fs.readFileSync
+fs.readFileSync = (file, ...args) => {
+  if (file === ${JSON.stringify(pending)}) throw new Error('PRIVATE_PAYLOAD')
+  return read(file, ...args)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const result = f.event('SessionStart', 'turn-1', {}, { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(pending), false)
+  assert.match(hookLog(f), /^\S+ unknown unknown PENDING_DROPPED_UNREADABLE\n$/)
+  assert.doesNotMatch(hookLog(f), /PRIVATE_PAYLOAD/)
+}))
+
 test('a queued event that can no longer apply is dropped without blocking the others', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   assert.equal(f.event('UserPromptSubmit').status, 0)
