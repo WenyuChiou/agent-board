@@ -40,10 +40,12 @@ jobs:
       full: ${{ steps.plan.outputs.full }}
       installers_os: ${{ steps.plan.outputs.installers_os }}
       # A pull request runs each Node line once and each system once (Node 22 on Ubuntu, Node 24 on
-      # Windows) and plugin on Ubuntu only. main, the weekly run, a manual run and a release PR run
-      # every pair, so a failure only one pair shows is still caught before a release.
+      # Windows). Its plugin check runs on Ubuntu, and also on Windows when the changed paths reach the
+      # plugin's runtime (the planner's plugin_os). main, the weekly run, a manual run and a release PR
+      # run every pair, so a failure only one pair shows is still caught before a release.
       node_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22},{"os":"windows-latest","node":24}]' || '[{"os":"ubuntu-latest","node":22},{"os":"ubuntu-latest","node":24},{"os":"windows-latest","node":22},{"os":"windows-latest","node":24}]' }}
-      plugin_os: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest"]' }}
+      # An empty planner output (the base selector predates plugin_os) falls through to both systems.
+      plugin_os: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}
       bundle: ${{ steps.plan.outputs.bundle }}
       released: ${{ steps.plan.outputs.released }}
       board: ${{ steps.plan.outputs.board }}
@@ -101,7 +103,7 @@ jobs:
           }
           for (const [g,f] of [['journeys','e2e'],['browser','browser']]) tests[g] = readdirSync('source/tests/'+f).filter(n=>n.endsWith('.test.mjs')).map(n=>'tests/'+f+'/'+n)
           const plan = {version:1,full:true,checks:Object.fromEntries(groups.map(g=>[g,true])),files:[],reason:'base selector unavailable: full bootstrap'}
-          const values = {plan:JSON.stringify(plan),full:'true',installers_os:'["ubuntu-latest","windows-latest"]',bundle:'true',released:'true',...Object.fromEntries(groups.map(g=>[g,'true']))}
+          const values = {plan:JSON.stringify(plan),full:'true',installers_os:'["ubuntu-latest","windows-latest"]',plugin_os:'["ubuntu-latest","windows-latest"]',bundle:'true',released:'true',...Object.fromEntries(groups.map(g=>[g,'true']))}
           for (const g of ["board","messaging","tooling","npm","journeys","browser"]) values[g+'_tests'] = JSON.stringify(tests[g])
           appendFileSync(process.env.GITHUB_OUTPUT,Object.entries(values).map(([k,v])=>k+'='+v).join('\n')+'\n')
           appendFileSync(process.env.GITHUB_STEP_SUMMARY,'Full bootstrap: base has no selector; every group selected.\n')
