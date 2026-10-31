@@ -294,6 +294,22 @@ test('preflight follows transitive bundle imports and accepts a rebuilt bundle',
   assert.ok(has(await f.check(), 'PASS', 'board bundle and its sources changed together'))
 })
 
+test('preflight treats a change to a bundle part alone as a hand edit and a rebuilt part with its source as current', async t => {
+  const f = fixture(t)
+  f.write('hooks/source.ts', "import { LINES } from './board-script-1.ts'\nexport const value = LINES.length\n")
+  f.write('hooks/board-script-1.ts', 'export const LINES = ["original"]\n')
+  f.commit()
+  f.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+  // A part is generated output like the entry: it is never one of the bundle's sources.
+  assert.equal(bundleSources(f.cwd).has('hooks/board-script-1.ts'), false)
+  f.write('hooks/board-script-1.ts', 'export const LINES = ["edited"]\n')
+  assert.ok(has(await f.check(), 'FAIL', 'never edit the bundle by hand'))
+  f.write('hooks/source.ts', "import { LINES } from './board-script-1.ts'\nexport const value = LINES.length + 1\n")
+  const rebuilt = await f.check()
+  assert.ok(has(rebuilt, 'PASS', 'board bundle and its sources changed together'))
+  assert.equal(has(rebuilt, 'FAIL', 'never edit the bundle by hand'), false)
+})
+
 test('preflight accepts a builder change with its rebuilt bundle', async t => {
   const f = fixture(t)
   f.write('scripts/build-board.ts', '// changed builder\n')

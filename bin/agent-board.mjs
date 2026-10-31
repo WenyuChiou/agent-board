@@ -5,6 +5,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { bundleFromDir } from '../scripts/bundle-text.mjs'
 
 const pkg = fileURLToPath(new URL('..', import.meta.url))
 const { name, version: v } = JSON.parse(readFileSync(join(pkg, 'package.json'), 'utf8'))
@@ -235,9 +236,8 @@ language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? langOf(process.env.
 const hash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
 if (!isChat) {
   try {
-    const source = readFileSync(join(pkg, 'hooks/board-script.ts'), 'utf8')
-    const marker = 'export const BOARD_SCRIPT = '
-    const bundled = JSON.parse(source.slice(source.indexOf(marker) + marker.length, source.lastIndexOf(']') + 1)).join('\n')
+    // The bundle is kept in hooks/board-script.ts and its parts; the shared reader joins them.
+    const bundled = bundleFromDir(pkg)
     const digest = hash(readFileSync(installed, 'utf8'))
     // Setup prepends account settings to the raw bundle; align that header here.
     if (digest !== hash(`\n${bundled}`)) {
