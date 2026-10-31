@@ -22,6 +22,15 @@ const promptParts = prompt => {
   return { id: match[1], from: match[2], text: prompt.slice(prompt.indexOf('\n\n') + 2), prompt }
 }
 
+// A reply that names how many messages this receiver has had, so its card's receipt line
+// differs from the one an earlier message left on the same card (the page strips "ACK <id>").
+const ackReply = (message, actor) => `ACK ${message.id} reply ${actor.received.length}`
+const receiptText = (receipt, s = 'Replied') => {
+  const ack = 'ACK ' + receipt.id
+  const rest = receipt.reply.startsWith(ack) ? receipt.reply.slice(ack.length).trim() : receipt.reply
+  return rest ? `${s} · ${rest}` : s
+}
+
 // The owned transport shapes come from tests/messaging.test.mjs:584 and :735.
 // Only these adapters represent native receivers; generic client registration
 // alone must never make an unsupported host count as native delivery.
@@ -43,7 +52,7 @@ const ownedCodex = async (hub, actor) => {
         await pause(80)
         throw new Error('ACK_TIMEOUT')
       }
-      listener({ method: 'item/completed', params: { threadId: actor.session, turnId: turn, item: { type: 'agentMessage', text: 'ACK ' + message.id } } })
+      listener({ method: 'item/completed', params: { threadId: actor.session, turnId: turn, item: { type: 'agentMessage', text: ackReply(message, actor) } } })
       current = { thread: actor.session, status: 'idle', turn: null }
       listener({ method: 'turn/completed', params: { threadId: actor.session, turn: { id: turn, status: 'completed' } } })
       return { turn: { id: turn } }
@@ -64,7 +73,7 @@ const ownedAntigravity = async (hub, actor) => {
       const turns = current.turns + 1, step = current.step + 1
       listener({ event: 'step_update', step_update: { conversation_id: actor.session, step_type: 'user_input', state: 'DONE', step_index: step } })
       current = { session: actor.session, status: 'idle', turns, step }
-      listener({ event: 'result', result: { conversation_id: actor.session, num_turns: turns, status: 'SUCCESS', response: 'ACK ' + message.id } })
+      listener({ event: 'result', result: { conversation_id: actor.session, num_turns: turns, status: 'SUCCESS', response: ackReply(message, actor) } })
     },
   }
   const connector = await attachAntigravitySession({ boardUrl: hub.server.url, transport, session: actor.session, state: () => current, verifyOwner: one => one === transport, surface: 'Synthetic Antigravity stream', onError: error => actor.errors.push(error.message) })
@@ -187,7 +196,10 @@ export const receiptBudget = async hub => {
   return { pagePollMs, measuredMs: combined + RECEIPT_SLACK_MS }
 }
 
-export const withHub = async (specs, fn) => {
+// A hub that stays open until close(): a world, its server and page, and one actor per spec,
+// each native one attached. withHub closes it after fn; a suite that shares one hub across
+// its tests opens it in before() and closes it in after().
+export const openHub = async specs => {
   const world = makeWorld()
   // Messaging leases and latency use real clocks in both parent and server; with no jump,
   // world.now is the real time too.
@@ -255,7 +267,7 @@ export const withHub = async (specs, fn) => {
           receipt = snapshot.messaging.messages.find(one => one.id === sent.id)
           card = (await hub.card(actor)).textContent
           return card
-        }, text => receipt?.status === 'acknowledged' && receipt.reply.startsWith('ACK ' + sent.id) && text.includes('Replied'), Math.max(1, budget.measuredMs - budget.pagePollMs - (performance.now() - sent.started)))
+        }, text => receipt?.status === 'acknowledged' && receipt.reply.startsWith('ACK ' + sent.id) && text.includes(receiptText(receipt)), Math.max(1, budget.measuredMs - budget.pagePollMs - (performance.now() - sent.started)))
         const elapsed = performance.now() - sent.started + budget.pagePollMs
         assert.ok(elapsed <= budget.measuredMs, `${elapsed} ms including the page poll exceeds ${budget.measuredMs} ms`)
         actor.refresh?.()
@@ -278,7 +290,10 @@ export const withHub = async (specs, fn) => {
         assert.equal(draft.button.textContent, 'Copy', draft.card.textContent)
         assert.match(draft.card.textContent, /Copy/)
         const before = dom.text()
+        // A shared page keeps every earlier copy, so this press must add exactly one.
+        const copies = dom.copied.length
         await hub.click(draft)
+        assert.equal(dom.copied.length, copies + 1, 'Copy did not reach the clipboard')
         assert.equal(dom.copied.at(-1), text)
         noSilentPress({ surface: 'serve', card: actor.title, button: 'Copy', before, after: dom.text() })
         noMachineIds((await hub.card(actor)).textContent, world)
@@ -291,8 +306,19 @@ export const withHub = async (specs, fn) => {
         world.cleanups.push(() => actor.connector.close())
       }
     }
+    hub.close = () => world.close()
+    return hub
+  } catch (error) {
+    await world.close()
+    throw error
+  }
+}
+
+export const withHub = async (specs, fn) => {
+  const hub = await openHub(specs)
+  try {
     await fn(hub)
   } finally {
-    await world.close()
+    await hub.close()
   }
 }
