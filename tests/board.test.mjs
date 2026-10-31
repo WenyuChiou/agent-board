@@ -6566,8 +6566,11 @@ test("the page's server runs the hourly sweep and writes nothing when the seen f
     assert.deepEqual(snapshot(), before)
     // Damaged for good (older than a write in progress) or the wrong shape: still nothing is written.
     for (const text of ['not json at all', '{"seen":[]}']) {
-      writeFileSync(record, text)
-      utimesSync(record, (TIDY_NOW - 60_000) / 1000, (TIDY_NOW - 60_000) / 1000)
+      // A sweep must not see the empty file a direct write exposes before its contents are written.
+      const next = `${record}.next`
+      writeFileSync(next, text)
+      utimesSync(next, (TIDY_NOW - 60_000) / 1000, (TIDY_NOW - 60_000) / 1000)
+      renameSync(next, record)
       const damaged = snapshot()
       await delay(600)
       assert.deepEqual(snapshot(), damaged)
