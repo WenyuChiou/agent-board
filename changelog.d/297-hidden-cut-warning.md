@@ -1,0 +1,2 @@
+- **Progress / Hidden cut markers** · A cut report marker now warns when it hides task headings inside a comment, while ordinary comments and fenced examples remain quiet. Hidden task text is preserved (#297).
+  Tests: `a cut marker that only task lines follow warns that tasks may be hidden`, `an ordinary comment that hides tasks and does not start like a marker shows no warning`.

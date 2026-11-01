@@ -1,0 +1,2 @@
+- **Remote reporters / Report clocks** · The Python importer refuses live reports more than three days old and reports dated in the future before writing anything. Old done and ended reports still merge as history (#220).
+  Tests: `merge.py refuses a working block whose clock is weeks behind and writes nothing`, `merge.py still merges a done block with an old clock`, `merge.py refuses a future report and validates every fragment before writing the batch`, `the remote live-report age limit accepts exactly three days and rejects the next instant`.

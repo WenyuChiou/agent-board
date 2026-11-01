@@ -37,8 +37,29 @@ def run(cmd, env=None):
     return subprocess.run(cmd, capture_output=True, text=True, cwd=T, env=env or ENV)
 
 
+class MergeClock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 10, 20, tzinfo=timezone.utc)
+
+
 def py(name, *args, env=None):
-    return run([sys.executable, "-B", script(name), *args], env=env)
+    if name not in ("merge.py", "reporter.py"):
+        return run([sys.executable, "-B", script(name), *args], env=env)
+    # Keep historical fixtures deterministic; reporter bursts have room to advance their clock.
+    day, hour = (19, 12) if name == "reporter.py" else (20, 0)
+    launch = f"""import runpy, sys
+from datetime import datetime, timezone
+from unittest.mock import patch
+class Clock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 10, {day}, {hour}, tzinfo=timezone.utc)
+sys.argv = sys.argv[1:]
+with patch('datetime.datetime', Clock):
+    runpy.run_path(sys.argv[0], run_name='__main__')
+"""
+    return run([sys.executable, "-B", "-c", launch, script(name), *args], env=env)
 
 
 def check(name, cond, detail=""):
@@ -567,7 +588,9 @@ def merge_repairs():
                 check(name, "did not read back as written" in str(e), str(e))
 
 
-def cut_off_block():
+@patch.object(merge_mod, "datetime", wraps=datetime)
+def cut_off_block(clock):
+    clock.now.return_value = datetime(2026, 10, 22, tzinfo=timezone.utc)
     # A block cut off in the middle of the board: no end marker, more sections after it.
     cut = "<!-- auto session=55fb44cb agent=codex state=waiting updated=2026-10-20T01:17:08.128Z -->"
     before = "# Progress\n\n## demo-152\n\n" + cut + "\n### Add a shelf\n> waiting on your repl\n"
@@ -641,6 +664,7 @@ def reporter_order():
               "After the bad bytes" in r(bad) and "updated=2026-10-17T12:00:00Z" in r(bad))
 
 
+@patch.object(merge_mod, "datetime", MergeClock)
 def main():
     global T, ENV
     with tempfile.TemporaryDirectory() as tmp:

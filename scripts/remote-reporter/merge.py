@@ -24,7 +24,7 @@ import os
 import stat
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from validate import (  # noqa: E402
@@ -132,17 +132,26 @@ def updated_time(marker):
         return None
 
 
-def merge_text(board_text, fragments, under=None, with_outcomes=False):
-    """Return the board text with fragments merged. Pure function (testable).
+def merge_text(board_text, fragments, under=None, with_outcomes=False, now=None):
+    """Return the board text with fragments merged; now may fix the comparison clock.
 
     With with_outcomes, return (text, [(session, outcome), ...]). Raises
     ValueError for an invalid fragment, or for a new block with no project
     heading to go under.
     """
+    parsed = parse_fragments(fragments, under)
+    now = now if now is not None else datetime.now(timezone.utc)
+    for _, _, block in parsed:
+        stamp = updated_time(block[0])
+        state = parse_attrs(START_RE.match(block[0]).group(1)).get("state")
+        if stamp is not None and stamp > now:
+            raise ValueError("This report is dated in the future. Check the source clock and report again.")
+        if stamp is not None and state in ("working", "waiting") and now - stamp > timedelta(days=3):
+            raise ValueError("This live report is more than three days old. Refresh it in the source agent and try again.")
     lines, eol = split_lines(board_text)
     outcomes = []
     changed = False
-    for session, project, block in parse_fragments(fragments, under):
+    for session, project, block in parsed:
         existing = next((s for s in scan_blocks(lines) if s["session"] == session), None)
         if existing is not None:
             previous = lines[existing["start"]:existing["end"] + 1]
@@ -208,7 +217,10 @@ def merge_file(board_path, fragment_paths, retries=3, under=None, with_outcomes=
 
     last_err = None
     for attempt in range(1, retries + 1):
-        current = read_text(board_path)
+        try:
+            current = read_text(board_path)
+        except FileNotFoundError:
+            current = ""
         try:
             new_text, outcomes = merge_text(current, fragments, under=under, with_outcomes=True)
         except ValueError as e:
@@ -248,10 +260,6 @@ def main():
         print(USAGE, file=sys.stderr)
         return 2
     board, frags = args[0], args[1:]
-    if not os.path.exists(board):
-        # FORMAT.md: a missing file reads as empty and the first writer creates it.
-        with open(board, "w", encoding="utf-8"):
-            pass
     attempts, outcomes = merge_file(board, frags, under=under, with_outcomes=True)
     for session, outcome in outcomes:
         print(f"session {session}: {outcome}")

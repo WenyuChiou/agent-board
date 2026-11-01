@@ -132,7 +132,7 @@ python3 scripts/remote-reporter/merge.py ~/.claude/progress.md muse.md
 For the same session, `merge.py` reports and skips older fragments, reports a
 conflict and keeps the existing block when equal `updated=` times have
 different content, and leaves identical imports unchanged.
-A newer fragment replaces the block. A board block with no end marker takes
+A newer fragment replaces the block. The importer refuses a working or waiting report more than three days old, and any report dated in the future, before writing anything. Refresh the source report or correct its clock before retrying. Old done and ended reports can still merge as history. A board block with no end marker takes
 the fragment regardless of its timestamp: the fragment replaces only that
 block's start marker line, and the block's old lines stay below it as plain
 text, to delete by hand. If the block on the board has no
