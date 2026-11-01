@@ -397,12 +397,14 @@ test('pr-check finds a session id, a home-folder path and a token link in added 
 })
 
 test('pr-check finds an email address in added docs and the body, but not git, noreply or example addresses', () => {
-  for (const value of ['Contact private.synthetic@gmail.com', 'mailto:synthetic.person@university.edu']) {
+  // An address inside a link counts as much as one on its own, in the body or in added docs.
+  for (const value of ['Contact private.synthetic@gmail.com', 'mailto:synthetic.person@university.edu', 'https://forms.example.org/x?to=private.synthetic@gmail.com', 'https://host.example.org/people/synthetic.person@university.edu/']) {
     const checked = privateData({ added: [{ path: 'docs/validation/synthetic-usersim.md', line: 3, text: value }], body: '' })
     assert.equal(checked.problems.length, 1, value)
     assert.match(checked.problems[0].message, /email address in docs\/validation\/synthetic-usersim\.md line 3/)
     assert.equal(report(checked, 'synthetic').includes('private.synthetic'), false)
   }
+  assert.equal(privateData({ added: [], body: 'See https://forms.example.org/x?to=private.synthetic@gmail.com' }).problems.length, 1)
   for (const value of ['git@github.com:WenyuChiou/agent-board.git', 'Co-Authored-By: Synthetic <noreply@anthropic.com>', '12345+octocat@users.noreply.github.com', 'name@example.com', 'synthetic@example.invalid', 'npx @wenyuchiou/agent-board@next', 'claude plugin install agent-board@agent-board', 'react@18.3.1', 'https://synthetic@host.invalid/x']) {
     assert.equal(privateData({ added: [], body: value }).problems.length, 0, value)
   }
@@ -420,6 +422,12 @@ test('pr-check asks for the rules page when CONTRIBUTING.md, team-process.md or 
     assert.equal(rulesPage({ paths: [path], body: 'Rules page: unchanged, ' }).problems.length, 1)
   }
   assert.equal(rulesPage({ paths: ['README.md', 'docs/GUIDE.md'], body: '' }).problems.length, 0)
+  // Deleting or renaming the rules page away does not count as changing it.
+  const without = ['CONTRIBUTING.md', 'README.md']
+  assert.match(rulesPage({ paths: ['CONTRIBUTING.md', 'docs/dev/RULES.md'], body: '', headPaths: new Set(without) }).problems[0].message, /not in the head/)
+  assert.match(rulesPage({ paths: ['CONTRIBUTING.md', 'docs/dev/RULES.md', 'docs/dev/OLD-RULES.md'], body: '', headPaths: new Set([...without, 'docs/dev/OLD-RULES.md']) }).problems[0].message, /not in the head/)
+  assert.equal(rulesPage({ paths: ['CONTRIBUTING.md'], body: 'Rules page: unchanged, a typo.', headPaths: new Set(without) }).problems.length, 1)
+  assert.equal(rulesPage({ paths: ['CONTRIBUTING.md', 'docs/dev/RULES.md'], body: '', headPaths: new Set([...without, 'docs/dev/RULES.md']) }).problems.length, 0)
   assert.equal(checkPr({ ...syntheticPr(), paths: ['CONTRIBUTING.md'], changedPaths: ['CONTRIBUTING.md'] }).problems.some(item => item.check === 'rules-page'), true)
 })
 
