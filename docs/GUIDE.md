@@ -51,6 +51,7 @@ agent-board --help all
 | `--serve` | Interactive local web board; reusable background service |
 | `--watch` | Terminal board; arrows or `j`/`k` and Enter to select, `x` tick, `d` confirm done, `a` archive, `t` archive the done list now, `y`/`n` or `1`–`9` answer, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` HTML, `q` quit. Into a pipe it prints the board once as plain text |
 | `--chat` | Compact plain text; no page, link, browser or writes |
+| `--status` | One line for tmux or a shell prompt, e.g. `2 need you · 3 working`. Reads only `progress.md` once; no sidecar/inbox reads, writes, browser or service. Counts follow the page's Needs you and Working now rules for that snapshot; questions retained only in sidecars are not included. Always plain text, even with `FORCE_COLOR`. |
 | `--html` | Writes/opens a read-only page; no message delivery |
 
 The terminal board uses the page's colours: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the nearest of 256. It takes the light set with `--theme light` or when `COLORFGBG` names a light background; `NO_COLOR` or `--no-color` turns colour off and `FORCE_COLOR` turns it on for `| less -R`. An answer key sends the answer when the running page (`--serve`) can send it into the question's session; otherwise it copies it, and the line says so. The Chinese boards count symbols such as ● and ✓ as two columns.
