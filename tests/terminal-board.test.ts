@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, pinned, routesOf, terminalLook } from '../hooks/board'
 import type { AnswerRoute } from '../hooks/board'
+import { isLifecycleStep, LIFECYCLE_STEPS } from '../hooks/codex'
 import { DARK, LIGHT } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
 import { STRINGS } from '../hooks/strings'
@@ -246,4 +247,67 @@ test('a question hidden with h on the terminal board leaves its task title shown
   const out = boardScreen(after, [], state, s, { width: 80, isColor: false })
   expect(out.split('Ship the synthetic docs').length - 1).toBe(1)
   expect(out).toContain('Hidden: “Publish them to staging, OK?”')
+})
+
+// #612, with the made-up projects of the page's tests: an agent that asks and one that stopped 2
+// minutes ago are both on the board, which never says that no agent did anything.
+const ASKING_AND_STOPPED = `# Progress
+
+## demo-garden
+<!-- auto session=61200001 agent=codex state=waiting updated=${at(1)} -->
+### Choose the seed mix
+- [x] Compare
+- [?] Clover or rye?
+<!-- /auto session=61200001 -->
+
+## demo-orchard
+<!-- auto session=61200002 agent=gemini state=ended updated=${at(2)} -->
+### Prune the synthetic rows
+- [x] Prune
+- [ ] Water
+<!-- /auto session=61200002 -->
+`
+
+test('the terminal board shows an agent that asks and one that just stopped, and never says no agent did anything', () => {
+  const s = STRINGS.en
+  const view = viewOf(ASKING_AND_STOPPED)
+  for (const out of [boardScreen(view, [], pinned(emptyBoardState, boardItems(view, [])), s, { width: 100, isColor: false }), boardText(view, [], s, { width: 100, isColor: false })]) {
+    expect(out).toContain('Clover or rye?')
+    expect(out).toContain(s.stoppedCount(1))
+    expect(out).not.toContain(s.pgNoWorking)
+  }
+})
+
+const lifecycleBoard = (state: string, step: string): string => `# Progress
+
+## demo-garden
+<!-- auto session=61200003 agent=codex state=${state} updated=${at(2)} -->
+### Demo-Garden
+- [ ] ${step}
+<!-- /auto session=61200003 -->
+`
+
+test('a working Codex session with no block of its own names its project once on the terminal board and does not say it waits', () => {
+  const s = STRINGS.en
+  // Today's words, and those an earlier release wrote, which old blocks still hold.
+  for (const step of [s.codexLifecycle, s.localAgentLifecycle, 'Local session activity; Codex explicitly reports task steps', STRINGS['zh-TW'].codexLifecycle]) {
+    const view = viewOf(lifecycleBoard('working', step))
+    const screen = boardScreen(view, [], pinned(emptyBoardState, boardItems(view, [])), s, { width: 100, isColor: false })
+    expect(screen.toLowerCase().split('demo-garden').length - 1).toBe(1)
+    // The printed board groups rows under their project's heading; the row itself does not repeat it.
+    for (const out of [screen, boardText(view, [], s, { width: 100, isColor: false })]) expect(out).not.toContain(step)
+  }
+  // Once it waits, the hook's words are true and the board says them.
+  const waiting = viewOf(lifecycleBoard('waiting', s.codexLifecycle))
+  expect(boardScreen(waiting, [], pinned(emptyBoardState, boardItems(waiting, [])), s, { width: 100, isColor: false })).toContain(s.codexLifecycle)
+})
+
+test('every placeholder step a hook writes, in every language and as earlier releases wrote it, is known as one', () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    expect(isLifecycleStep(STRINGS[lang].codexLifecycle)).toBe(true)
+    expect(isLifecycleStep(STRINGS[lang].localAgentLifecycle)).toBe(true)
+  }
+  for (const earlier of ['Native session activity; the current agent explicitly reports task steps', '本地 session 活动状态；任务步骤由 Codex 明确报告']) expect(isLifecycleStep(earlier)).toBe(true)
+  expect(isLifecycleStep('Water the synthetic rows')).toBe(false)
+  expect([...LIFECYCLE_STEPS].length).toBeGreaterThanOrEqual(9)
 })

@@ -6,6 +6,7 @@ import { agentLabel } from './strings'
 import type { AskKind } from './ask'
 import { confirmKey, shortId, stepWords, upsertAutoBlock } from './blocks'
 import type { ConfirmRef } from './blocks'
+import { isLifecycleStep } from './codex'
 import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
@@ -228,6 +229,14 @@ const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 export const IDLE_MS = 7 * DAY
 export const OLDER_SHOWN = 10
+
+// A session titled by its folder has its project's name for a title; a row then names it once.
+// Case and the path separator do not make two names (#612). The page's script keeps a copy.
+export const isSameName = (project: string, title: string): boolean => {
+  const key = (name: string): string => name.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+
+  return key(project) !== '' && key(project) === key(title)
+}
 
 export const relativeTime = (then: number, now: number, s: Strings = ZH_TW): string => {
   if (then <= 0) return ''
@@ -1000,7 +1009,9 @@ export const buildView = (
       // One whose questions were all marked answered is back with the work in progress.
       if (!isIdle && auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index))) continue
 
-      const { done, total } = countSteps(task)
+      // A hook's placeholder step says the session waits; while it works the row shows no step (#612).
+      const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
+      const { done, total } = countSteps(shown)
       const phrase =
         auto === 'working'
           ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
@@ -1025,7 +1036,7 @@ export const buildView = (
         ...(clock.isFuture ? { hasFutureTime: true } : {}),
         isHere,
         auto,
-        steps: rowSteps(task, s),
+        steps: rowSteps(shown, s),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
         questions: isInactive ? unresolved : [],
         question: isInactive ? unresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
