@@ -50,7 +50,7 @@ describe('L2 desktop app', () => {
 
       assert.equal((await server.get('/api/board')).json().model.counts.waiting, 1)
       noSilentPress(await server.press('Ship the gateway', 'Already answered, hide'))
-      await seenPageWithin(server, text => text.includes('Nothing needs you'), PAGE_MS)
+      await seenPageWithin(server, text => text.includes(EN.pgNothing), PAGE_MS)
       assert.equal((await server.get('/api/board')).json().model.counts.waiting, 0)
       assert.match(await terminal.screen(world), /\b0 waiting\b/)
 
