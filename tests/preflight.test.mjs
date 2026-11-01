@@ -289,11 +289,15 @@ test('a failed touched Node check includes its redacted failing test name', asyn
     'issue #123 has a hash',
   ]
   f.write('tests/failing-name.test.mjs', "import test from 'node:test'\n" + names.map(name => `test(${JSON.stringify(name)}, () => { throw new Error('private diagnostic') })`).join('\n') + '\n')
+  f.write('tests/failing-unix-name.test.mjs', "import test from 'node:test'\ntest('reads /tmp/synthetic/Private Projects/repository/secret-plan.txt now', () => { throw new Error('private diagnostic') })\n")
   const checks = await f.check()
   const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-name.test.mjs:'))
   assert.match(failed?.message ?? '', /failed: reads <path> with \?t=<token> <token>/)
   assert.match(failed?.message ?? '', /; reads <path> now; issue #123 has a hash\.$/)
   assert.doesNotMatch(failed?.message ?? '', /Synthetic|Person|Files|syntheticBoardToken|syntheticToken|private diagnostic/)
+  const unix = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-unix-name.test.mjs:'))
+  assert.match(unix?.message ?? '', /failed: reads <path> now\.$/)
+  assert.doesNotMatch(unix?.message ?? '', /Private|Projects|repository|secret-plan/)
 })
 
 test('nested touched Node TAP failures keep a bounded useful case name', async t => {

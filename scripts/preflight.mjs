@@ -72,12 +72,16 @@ const acquireTestLock = (directory, onPublished) => {
 }
 
 // Child diagnostics can contain private paths or terminal control characters.
-export const safeLine = value => {
+export const safeLine = (value, { hasSpacedUnixPaths = false } = {}) => {
   let text = String(value).replace(/[\r\n\u0085\u2028\u2029]+/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '')
   // Home directory names can contain spaces even in unquoted diagnostics.
+  // TAP names need conservative path removal; status lines keep adjacent relative paths.
+  const unixPath = hasSpacedUnixPaths
+    ? /(^|[\s"'`(])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g
+    : /(^|[\s"'`(])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g
   text = text.replace(/(?:[A-Za-z]:[\\/]Users[\\/]|\/(?:home|Users)\/)[^\\/"'`<>]+(?=[\\/])/gi, match => match.replaceAll(' ', '\ue000'))
   text = text.replace(/(?:[A-Za-z]:[\\/]|\\\\)(?:[^\s\\/"'`<>:|?]+(?: [^\s\\/"'`<>:|?]+)*[\\/])*(?:[^\s\\/"'`<>:|?]+(?: [^\s\\/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g, '<path>')
-    .replace(/(^|[\s"'`(])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g, '$1<path>')
+    .replace(unixPath, '$1<path>')
     .replace(/([?&]t=)[^\s&#"'`<>]+/gi, '$1<token>')
     .replace(/\b(?:ghp_|github_pat_|sk-)[A-Za-z0-9_-]+/gi, '<token>')
   for (const name of [process.env.USERNAME, process.env.USER].filter(value => value && value.length > 2)) {
@@ -103,7 +107,7 @@ const failedTapNames = output => {
     const match = /^\s*not ok \d+ - (.+?)\s*$/.exec(line)
     if (!match || /\s+#\s*(?:TODO|SKIP)\b/i.test(match[1])) continue
     // TAP escapes paths and hashes; decode before the path sanitizer sees them.
-    const name = safeLine(match[1].replace(/\\(.)/g, '$1')).slice(0, 160)
+    const name = safeLine(match[1].replace(/\\(.)/g, '$1'), { hasSpacedUnixPaths: true }).slice(0, 160)
     if (name && !names.includes(name)) names.push(name)
     if (names.length === 3) break
   }
