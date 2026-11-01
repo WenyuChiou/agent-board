@@ -19,6 +19,8 @@ export const ZH_CN: Strings = {
   messagesRejected: '已拒绝／未发送',
   messagesFailed: '未能发送；目标可能已离线或绑定已改变。',
   messagesConflict: '相同消息编号已有不同内容，已拒绝重发。',
+  hookDeliveryPrompt: (id: string, from: string, text: string): string =>
+    `来自 ${from} 的 Agent Board 消息 ${id}。请在单独一行回复“ACK ${id}”，接着回复消息内容。一般文字回复不代表批准工具执行或 PR 合并。\n\n${text}`,
   localAgentTask: (agent: string): string => `${agent} 本地任务`,
   localAgentSkillDescription: '打开本地交互看板，跟踪当前已接线 session 的实际任务进度。',
   localAgentStepFormat: '一行 Markdown 任务：“- [x] 完成”、“- [~] 进行中”、“- [ ] 下一步”、“- [?] 等用户回答”、“- [!] 卡住”、“- [>] 在别处运行或已交接”、“- [-] 取消”',

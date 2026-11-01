@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { withLocalLock } from './local-lock'
 import { claimMessages, disconnectMessages, messageFields, messageId, messageReceipt, messageText, observeSession, queueMessage } from '../hooks/messaging'
 import type { Connection, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 
@@ -19,6 +20,7 @@ export const createMessaging = (directory: string) => {
   if (lstatSync(root).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_DIRECTORY')
   const file = join(root, 'messages.json')
   const lock = join(root, 'server.lock')
+  const messagesLock = join(root, 'messages.lock')
   writeFileSync(lock, String(process.pid), { flag: 'wx', mode: 0o600 })
   let state: MessageState = { messages: [] }
   const connections = new Map<string, Live>()
@@ -59,13 +61,15 @@ export const createMessaging = (directory: string) => {
   }
   const save = (next: MessageState): void => {
     if (next === state) return
-    const merged = syncHookMessages(next)
-    const temp = `${file}.${process.pid}.tmp`
-    try {
-      writeFileSync(temp, JSON.stringify({ version: 1, ...merged }), { mode: 0o600, flag: 'wx' })
-      renameSync(temp, file)
-      state = merged
-    } finally { if (existsSync(temp)) unlinkSync(temp) }
+    withLocalLock(messagesLock, () => {
+      const merged = syncHookMessages(next)
+      const temp = `${file}.${process.pid}.tmp`
+      try {
+        writeFileSync(temp, JSON.stringify({ version: 1, ...merged }), { mode: 0o600, flag: 'wx' })
+        renameSync(temp, file)
+        state = merged
+      } finally { if (existsSync(temp)) unlinkSync(temp) }
+    })
   }
   // Persist reconciliation even if a server closes before a browser polls it again.
   if (existsSync(file)) { const next = state; state = { messages: [] }; save(next) }

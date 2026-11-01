@@ -57,6 +57,8 @@ export const ZH_TW = {
   messagesRejected: '已拒絕／未送出',
   messagesFailed: '未能送出；目標可能已離線或綁定已變更。',
   messagesConflict: '相同訊息編號已有不同內容，已拒絕重送。',
+  hookDeliveryPrompt: (id: string, from: string, text: string): string =>
+    `來自 ${from} 的 Agent Board 訊息 ${id}。請在獨立一行回覆「ACK ${id}」，接著回覆訊息內容。一般文字回覆不代表批准工具執行或 PR 合併。\n\n${text}`,
   localAgentTask: (agent: string): string => `${agent} 本機任務`,
   localAgentSkillDescription: '開啟本機互動看板，追蹤目前已接線 session 的實際任務進度。',
   localAgentStepFormat: '一行 Markdown 任務：「- [x] 完成」、「- [~] 進行中」、「- [ ] 下一步」、「- [?] 等使用者回答」、「- [!] 卡住」、「- [>] 在別處執行或已交棒」、「- [-] 取消」',

@@ -314,6 +314,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
   const messagesDir = flag('--messages-dir') ? resolve(flag('--messages-dir')!) : root
   const messagesFile = join(messagesDir, 'messages.json')
+  const messagesLock = join(messagesDir, 'messages.lock')
   const readHookMessages = (): MessageState => {
     const text = readLocal(messagesFile)
     if (text === null) return { messages: [] }
@@ -330,7 +331,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const targetAgent = (typeof raw.agent === 'string' ? raw.agent : agent) as LocalAgent
     if (!localAgents.includes(targetAgent)) throw new Error('UNSUPPORTED_AGENT')
     const targetSession = flag('--session') ?? (typeof raw.session === 'string' ? raw.session : typeof raw.target === 'string' ? raw.target.replace(/^[a-z]+:/, '') : undefined)
-    const sent = withLocalLock(`${progress}.agent-board-lock`, () => {
+    const sent = withLocalLock(messagesLock, () => {
       const recordPath = typeof targetSession === 'string' ? join(root, 'sessions', `${hash(`${targetAgent}:${targetSession}`)}.json`) : ''
       const saved = recordPath && existsSync(recordPath) ? readLocal(recordPath) : null
       const record = saved === null ? null : object(JSON.parse(saved))
@@ -608,11 +609,24 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     let report: CodexReport | undefined
     let acknowledgedIds: string[] = []
     let deliveredMessage: string | undefined
-    const canDeliverHookMessage = current !== undefined && ['antigravity', 'codex', 'cursor'].includes(current.agent) && (
-      (current.agent === 'antigravity' && (current.event === 'SessionStart' || current.event === 'PreInvocation')) ||
-      (current.agent === 'codex' && (mode === '--codex-event' || current.event === 'SessionStart' || current.event === 'UserPromptSubmit')) ||
-      (current.agent === 'cursor' && (mode === '--codex-event' || current.event === 'sessionStart' || current.event === 'beforeSubmitPrompt'))
+    const isContextConsumingEvent = (
+      (current?.agent === 'antigravity' && (current.event === 'SessionStart' || current.event === 'PreInvocation')) ||
+      (current?.agent === 'codex' && (
+        current.payload.hook_event_name === 'SessionStart' ||
+        current.payload.hook_event_name === 'UserPromptSubmit' ||
+        raw.hook_event_name === 'SessionStart' ||
+        raw.hook_event_name === 'UserPromptSubmit' ||
+        raw.hookEventName === 'SessionStart' ||
+        raw.hookEventName === 'UserPromptSubmit'
+      )) ||
+      (current?.agent === 'cursor' && (
+        raw.hook_event_name === 'sessionStart' ||
+        raw.hook_event_name === 'beforeSubmitPrompt' ||
+        current.payload.hook_event_name === 'SessionStart' ||
+        current.payload.hook_event_name === 'UserPromptSubmit'
+      ))
     )
+    const canDeliverHookMessage = mode !== '--codex-report' && Boolean(isContextConsumingEvent)
     for (;;) {
       try {
         checkDeadline()
@@ -678,25 +692,29 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           const applied = apply(current)
           if (existsSync(messagesFile)) {
             if (mode === '--codex-report') {
-              const state = readHookMessages()
-              const candidates = [
-                typeof raw.reply === 'string' ? raw.reply : '',
-                typeof raw.ack === 'string' ? raw.ack : '',
-                applied.title,
-                ...applied.steps,
-              ]
-              const acked = acknowledgeHookMessages(state, current.agent, current.session, candidates, Date.now())
-              if (acked.acknowledged.length > 0) {
-                writeHookMessages(acked.state, checkDeadline)
-                acknowledgedIds = acked.acknowledged.map(one => one.id)
-              }
+              withLocalLock(messagesLock, () => {
+                const state = readHookMessages()
+                const candidates = [
+                  typeof raw.reply === 'string' ? raw.reply : '',
+                  typeof raw.ack === 'string' ? raw.ack : '',
+                  applied.title,
+                  ...applied.steps,
+                ]
+                const acked = acknowledgeHookMessages(state, current.agent, current.session, candidates, Date.now())
+                if (acked.acknowledged.length > 0) {
+                  writeHookMessages(acked.state, checkDeadline)
+                  acknowledgedIds = acked.acknowledged.map(one => one.id)
+                }
+              })
             } else if (canDeliverHookMessage) {
-              const state = readHookMessages()
-              const claimed = claimHookMessages(state, current.agent, current.session, Date.now())
-              if (claimed.messages.length > 0) {
-                writeHookMessages(claimed.state, checkDeadline)
-                deliveredMessage = hookDeliveryPrompt(claimed.messages[0]!)
-              }
+              withLocalLock(messagesLock, () => {
+                const state = readHookMessages()
+                const claimed = claimHookMessages(state, current.agent, current.session, Date.now())
+                if (claimed.messages.length > 0) {
+                  writeHookMessages(claimed.state, checkDeadline)
+                  deliveredMessage = hookDeliveryPrompt(claimed.messages[0]!, s)
+                }
+              })
             }
           }
           if (queuedFile !== undefined) {

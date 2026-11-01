@@ -7,6 +7,9 @@ import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { acknowledgeHookMessages, claimHookMessages, claimMessages, disconnectMessages, HOOK_CLAIM_TIMEOUT_MS, hookDeliveryPrompt, hookTargetId, messageReceipt, queueHookMessage, queueMessage } from '../hooks/messaging.ts'
+import { EN } from '../hooks/strings-en.ts'
+import { ZH_TW } from '../hooks/i18n.ts'
+import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { boardClient, connectionPrompt } from '../scripts/message-client.mjs'
 import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
@@ -907,6 +910,48 @@ test('hook-queued messages claim once on turn start and transition to acknowledg
   assert.equal(acked.state.messages[0].reply, 'ACK AB-HOOK-001 ready')
 })
 
+test('hook claims are restricted to hook-owned messages and do not touch live connector messages', () => {
+  const liveTarget = { id: 'conn-live-1', agent: 'antigravity', session: 'ag-session-1', turn: 'turn-1', surface: 'fixture', expires: 2000 }
+  const liveQueued = queueMessage({ messages: [] }, { id: 'AB-LIVE-001', target: liveTarget.id, turn: liveTarget.turn, text: 'Live message' }, 'board', liveTarget, 1000)
+  assert.equal(liveQueued.message.status, 'queued')
+  assert.equal(liveQueued.message.to, 'antigravity:ag-session-1')
+  assert.equal(liveQueued.message.target, 'conn-live-1')
+
+  // claimHookMessages for same recipient does NOT claim live connector message
+  const hookClaim = claimHookMessages(liveQueued.state, 'antigravity', 'ag-session-1', 1010)
+  assert.equal(hookClaim.messages.length, 0)
+  assert.equal(hookClaim.state.messages[0].status, 'queued')
+
+  // Expired logic in claimHookMessages also does NOT touch live message
+  const acceptedLiveState = { messages: [{ ...liveQueued.message, status: 'accepted', updated: 1000 }] }
+  const expiredClaim = claimHookMessages(acceptedLiveState, 'antigravity', 'ag-session-1', 1000 + HOOK_CLAIM_TIMEOUT_MS + 10)
+  assert.equal(expiredClaim.messages.length, 0)
+  assert.equal(expiredClaim.state.messages[0].status, 'accepted')
+
+  // acknowledgeHookMessages does NOT touch live message
+  const acked = acknowledgeHookMessages(acceptedLiveState, 'antigravity', 'ag-session-1', ['ACK AB-LIVE-001'], 2000)
+  assert.equal(acked.acknowledged.length, 0)
+  assert.equal(acked.state.messages[0].status, 'accepted')
+})
+
+test('hookDeliveryPrompt formats localized instructions across all three string tables', () => {
+  const msg = { id: 'AB-I18N-1', from: 'agent-a', text: 'Hello task' }
+  const en = hookDeliveryPrompt(msg, EN)
+  assert.match(en, /Agent Board message AB-I18N-1 from agent-a/)
+  assert.match(en, /Reply with ACK AB-I18N-1 on its own line/)
+  assert.match(en, /Hello task/)
+
+  const zhTw = hookDeliveryPrompt(msg, ZH_TW)
+  assert.match(zhTw, /來自 agent-a 的 Agent Board 訊息 AB-I18N-1/)
+  assert.match(zhTw, /ACK AB-I18N-1/)
+  assert.match(zhTw, /Hello task/)
+
+  const zhCn = hookDeliveryPrompt(msg, ZH_CN)
+  assert.match(zhCn, /来自 agent-a 的 Agent Board 消息 AB-I18N-1/)
+  assert.match(zhCn, /ACK AB-I18N-1/)
+  assert.match(zhCn, /Hello task/)
+})
+
 test('starting message server after a hook send preserves queued hook messages without DISCONNECTED or INVALID_ID', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-messages-hook-'))
   const messagesDir = join(dir, 'messages')
@@ -976,6 +1021,11 @@ test('--codex-send queues hook-driven messages and delivers them via lifecycle h
     const agSession = 'ag-hook-msg-12345678'
     const cursorSession = 'cursor-hook-msg-12345678'
     const opencodeSession = 'opencode-hook-msg-12345678'
+    const codexSession = 'codex-hook-msg-12345678'
+    assert.equal(command(['--codex-event', '--agent', 'codex'], {
+      session_id: codexSession,
+      hook_event_name: 'SessionStart',
+    }).status, 0)
 
     // Offline / non-existent session is rejected
     const offline = command(['--codex-send', '--agent', 'antigravity', '--session', agSession], {
@@ -1062,6 +1112,28 @@ test('--codex-send queues hook-driven messages and delivers them via lifecycle h
     const storedAfterOpencode = JSON.parse(readFileSync(join(root, 'messages.json'), 'utf8'))
     const opencodeMsg = storedAfterOpencode.messages.find(m => m.id === 'AB-HOOK-003')
     assert.equal(opencodeMsg.status, 'queued')
+
+    // Verify terminal events (e.g. SessionEnd, sessionEnd, Stop) do not claim queued hook messages
+    assert.equal(command(['--codex-send', '--agent', 'codex', '--session', codexSession], {
+      id: 'AB-HOOK-TERMINAL',
+      from: 'board',
+      text: 'Must not deliver on SessionEnd',
+    }).status, 0)
+    const sessionEndEvent = command(['--codex-event', '--agent', 'codex'], {
+      session_id: codexSession,
+      hook_event_name: 'SessionEnd',
+    })
+    assert.equal(sessionEndEvent.status, 0)
+    const storedTerminal = JSON.parse(readFileSync(join(root, 'messages.json'), 'utf8'))
+    const terminalMsg = storedTerminal.messages.find(m => m.id === 'AB-HOOK-TERMINAL')
+    assert.equal(terminalMsg.status, 'queued')
+    const promptEvent = command(['--codex-event', '--agent', 'codex'], {
+      session_id: codexSession,
+      turn_id: 'turn-terminal-check',
+      hook_event_name: 'UserPromptSubmit',
+    })
+    assert.equal(promptEvent.status, 0)
+    assert.match(JSON.parse(promptEvent.stdout).hookSpecificOutput.additionalContext, /AB-HOOK-TERMINAL/)
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
