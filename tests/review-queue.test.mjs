@@ -689,6 +689,39 @@ test('a notice is cancelled by a Reviewing comment from someone else, a REQUEST 
   assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted, after('Reviewing: bob')] }, now)), /\n {4}notice cancelled\n/)
 })
 
+test('a merge notice after an unresolved current-head change request is cancelled', () => {
+  const posted = notice('2026-10-23 12:00 UTC')
+  const at = '2026-10-23T12:00:00.000Z'
+  const changes = comment(`Review: REQUEST CHANGES ${head} by bob`, '2026-10-20T09:30:00Z', 4)
+  assert.deepEqual(noticeOf([changes, posted], { current: '2026-10-24T12:00:00Z' }), { state: 'cancelled', at })
+  assert.deepEqual(noticeOf([changes, posted], { current: '2026-10-21T12:00:00Z' }), { state: 'cancelled', at })
+  // A later approval on the same head resolves it.
+  const approval = comment(`Review: APPROVE ${head} by bob`, '2026-10-20T10:30:00Z', 5)
+  assert.deepEqual(noticeOf([changes, approval, posted], { current: '2026-10-24T12:00:00Z' }), { state: 'due', at })
+})
+
+test('reposting Ready on the same head does not revive a notice over a change request', () => {
+  const posted = notice('2026-10-23 12:00 UTC')
+  const at = '2026-10-23T12:00:00.000Z'
+  const changes = comment(`Review: REQUEST CHANGES ${head} by bob`, '2026-10-20T09:30:00Z', 4)
+  const repostedReady = ready(head, '2026-10-20T10:00:00Z', 5)
+  const dueNow = '2026-10-24T12:00:00Z'
+  assert.deepEqual(noticeOf([changes, repostedReady, posted], { current: dueNow }), { state: 'cancelled', at })
+  assert.deepEqual(noticeOf([changes, posted, repostedReady], { current: dueNow }), { state: 'cancelled', at })
+  const formatted = formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), changes, repostedReady, posted] }, dueNow))
+  assert.match(formatted, /\n {4}notice cancelled\n/)
+  assert.doesNotMatch(formatted, /notice due/)
+})
+
+test('an earlier-head change request does not cancel a current-head notice', () => {
+  const posted = notice('2026-10-23 12:00 UTC')
+  const at = '2026-10-23T12:00:00.000Z'
+  const oldChanges = comment(`Review: REQUEST CHANGES ${oldHead} by bob`, '2026-10-20T09:30:00Z', 4)
+  assert.deepEqual(noticeOf([oldChanges, posted], { current: '2026-10-24T12:00:00Z' }), { state: 'due', at })
+  const afterNoticeOldChanges = comment(`Review: REQUEST CHANGES ${oldHead} by bob`, '2026-10-20T11:00:00Z', 5)
+  assert.deepEqual(noticeOf([posted, afterNoticeOldChanges], { current: '2026-10-24T12:00:00Z' }), { state: 'due', at })
+})
+
 test('a notice naming a time less than 48 hours after the notice or after Ready is too early', () => {
   assert.equal(noticeOf([notice('2026-10-22 09:59 UTC')]).state, 'too-early')
   assert.equal(noticeOf([notice('2026-10-22 10:00 UTC')]).state, 'waiting')
