@@ -5,7 +5,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 ## Start here
 
 - **What it is.** Agent Board shows what every coding agent on a computer is doing, on one board. Try it: `npx @wenyuchiou/agent-board setup`.
-- **Find work.** Take an open issue labelled `ready` that has no assignee, and assign it to yourself: that is your claim (R4). Work mainly on your own issues.
+- **Find work.** Take an open issue labelled `ready` that has no assignee. The team assigns itself: that is its claim (R4). A contributor outside the team, who cannot assign themselves, claims with a `Claim:` comment ([CONTRIBUTING rule 3](../../CONTRIBUTING.md#pull-requests)). Work mainly on your own issues.
 - **Talk on the issue.** Questions, hand-overs and decisions go in comments on the issue or its pull request. If it is not on GitHub, the next person cannot see it.
 - **Done means closed.** The pull request says `Fixes #N`; the issue closes when it merges, with how the change was checked.
 
@@ -34,7 +34,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 
 ## R4. One issue, one owner
 
-- Assign yourself before you start; one assignee per issue. If someone is assigned, comment on the issue instead of starting a competing pull request.
+- The team assigns itself before it starts; one assignee per issue. A contributor outside the team claims with a `Claim:` comment instead (CONTRIBUTING rule 3). If someone is assigned or holds a live claim, comment on the issue instead of starting a competing pull request.
 - An issue with no activity from its assignee for 24 hours may be unassigned by anyone, with a comment, and goes back to `ready`.
 - One pull request is one feature, or up to three bug fixes, branched from current `main`. A finding outside your issue becomes an issue of its own.
 
@@ -72,4 +72,4 @@ This repository is public: anyone can read every issue, pull request, comment, c
 - **Never anywhere in the repository:** tokens, keys, passwords and links that carry one. They live only in GitHub Actions secrets and environments. A leaked one is revoked first, then removed.
 - **Kept off GitHub:** session logs and transcripts, write-ups of what went wrong in someone's session, anyone's home-folder paths, computer user names, email addresses and machine names, a person's own agent or harness settings, internal budgets such as GPU hours or spend, and anything someone said in private. They stay with the person they belong to, or in a private place the owner sets up and gives access to; an issue here says in plain words what the next person needs, without them.
 - **Security problems** go to GitHub's private vulnerability report ([SECURITY.md](../../SECURITY.md#reporting-a-problem)), never to a public issue. Only the owner, and the people the owner adds to that report, can read it.
-- **Checks.** The PR check fails a pull request that adds a home-folder path, a session id, a token or an email address to a document or its body. GitHub's secret scanning and push protection, turned on in the repository's settings, stop a known kind of token before it lands.
+- **Checks.** The PR check fails a pull request that adds a home-folder path, a session id, a token or an email address to a document or its body. Once the owner turns them on in the repository's settings, GitHub's secret scanning and push protection will also stop a known kind of token before it lands; they are not on yet.
