@@ -283,25 +283,24 @@ test('preflight names a failing touched Node test and its failure count', async 
 
 test('a failed touched Node check includes its redacted failing test name', async t => {
   const f = fixture(t)
-  f.write('tests/failing-name.test.mjs', '')
-  const run = (program, args, options) => args.includes('--test')
-    ? {
-        status: 1,
-        stdout: 'TAP version 13\nnot ok 1 - reads C:\\Users\\Synthetic User\\private.txt with ?t=syntheticBoardToken ghp_syntheticToken\n# tests 1\n# fail 1\n',
-        stderr: '',
-      }
-    : f.run(program, args, options)
-  const checks = await f.check({ run })
+  const names = [
+    String.raw`reads C:\Users\Synthetic Person\private.txt with ?t=syntheticBoardToken ghp_syntheticToken`,
+    String.raw`reads D:\Work Files\plan.txt now`,
+    'issue #123 has a hash',
+  ]
+  f.write('tests/failing-name.test.mjs', "import test from 'node:test'\n" + names.map(name => `test(${JSON.stringify(name)}, () => { throw new Error('private diagnostic') })`).join('\n') + '\n')
+  const checks = await f.check()
   const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-name.test.mjs:'))
   assert.match(failed?.message ?? '', /failed: reads <path> with \?t=<token> <token>/)
-  assert.doesNotMatch(failed?.message ?? '', /Synthetic User|syntheticBoardToken|syntheticToken/)
+  assert.match(failed?.message ?? '', /; reads <path> now; issue #123 has a hash\.$/)
+  assert.doesNotMatch(failed?.message ?? '', /Synthetic|Person|Files|syntheticBoardToken|syntheticToken|private diagnostic/)
 })
 
 test('nested touched Node TAP failures keep a bounded useful case name', async t => {
   const f = fixture(t)
   f.write('tests/nested-failures.test.mjs', '')
   const names = [
-    'the first nested case fails',
+    'the first nested case fails ' + 'x'.repeat(200),
     'the second nested case fails',
     'the third nested case fails',
     'the fourth nested case is outside the bound',
@@ -316,7 +315,8 @@ test('nested touched Node TAP failures keep a bounded useful case name', async t
     : f.run(program, args, options)
   const checks = await f.check({ run })
   const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/nested-failures.test.mjs:'))
-  assert.match(failed?.message ?? '', /failed: the first nested case fails; the second nested case fails; the third nested case fails/)
+  const listed = (failed?.message.split('; failed: ')[1] ?? '').replace(/\.$/, '').split('; ')
+  assert.deepEqual(listed, names.slice(0, 3).map(name => name.slice(0, 160)))
   assert.doesNotMatch(failed?.message ?? '', /planned nested|skipped nested|private diagnostic|fourth nested|parent case/)
 })
 
@@ -328,6 +328,11 @@ test('missing or interrupted TAP remains a failed touched Node check', async t =
     : f.run(program, args, options)
   const missing = await f.check({ run: missingRun })
   assert.ok(has(missing, 'FAIL', 'tests/missing-tap.test.mjs: unknown tests, unknown failed'))
+  const noCounterRun = (program, args, options) => args.includes('--test')
+    ? { status: 0, stdout: 'TAP version 13\nok 1 - incomplete counters\n# tests 1\n', stderr: '' }
+    : f.run(program, args, options)
+  const noCounter = await f.check({ run: noCounterRun })
+  assert.ok(has(noCounter, 'FAIL', 'tests/missing-tap.test.mjs: 1 tests, unknown failed'))
   const interruptedRun = (program, args, options) => args.includes('--test')
     ? { status: null, signal: 'SIGTERM', error: new Error('synthetic interruption'), stdout: '', stderr: '' }
     : f.run(program, args, options)

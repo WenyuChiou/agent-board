@@ -102,7 +102,8 @@ const failedTapNames = output => {
     }
     const match = /^\s*not ok \d+ - (.+?)\s*$/.exec(line)
     if (!match || /\s+#\s*(?:TODO|SKIP)\b/i.test(match[1])) continue
-    const name = safeLine(match[1]).slice(0, 160)
+    // TAP escapes paths and hashes; decode before the path sanitizer sees them.
+    const name = safeLine(match[1].replace(/\\(.)/g, '$1')).slice(0, 160)
     if (name && !names.includes(name)) names.push(name)
     if (names.length === 3) break
   }
