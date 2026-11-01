@@ -806,6 +806,36 @@ test('lexical apostrophes stay in choice options from questions and extracted re
   }
 })
 
+test('paired question wrappers preserve inferred kinds and confirmation notes', () => {
+  const pairs = [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]
+  for (const question of ['可以推到 main 嗎？', '合併可以嗎？', 'Ready, OK?']) {
+    for (const [open, close] of pairs) {
+      const wrapped = `${open}${question}${close}`
+      const extracted = lastQuestionInProse(wrapped, true)
+      expect(extracted).toBe(wrapped)
+      expect(askOf(wrapped, '')).toMatchObject({ kind: 'confirm', options: [] })
+      expect(askOf(extracted ?? '', '')).toMatchObject({ kind: 'confirm', options: [] })
+      expect(askOf('Top shelf or bottom shelf?', extracted ?? '')).toMatchObject({ kind: 'confirm', options: [] })
+    }
+  }
+  for (const [question, kind] of [
+    ['waiting for the report?', 'wait'],
+    ['Which folder?', 'input'],
+    ['Please review the diff?', 'review'],
+    ['Run `npm test`?', 'do'],
+    ['Review https://example.com/report?', 'review'],
+  ] as const) {
+    const direct = askOf(question, '')
+    const extracted = askOf('Task', lastQuestionInProse(question, true) ?? '')
+    expect(direct.kind).toBe(kind)
+    for (const [open, close] of pairs) {
+      const wrapped = `${open}${question}${close}`
+      expect(askOf(wrapped, '')).toEqual(direct)
+      expect(askOf('Task', lastQuestionInProse(wrapped, true) ?? '')).toEqual(extracted)
+    }
+  }
+})
+
 test('options the agent gave win over options found in the question or the note', () => {
   expect(askOf('win rate or Elo?', 'A or B?', { options: [' X ', 'Y', '', null] })).toMatchObject({ kind: 'choose', options: ['X', 'Y'] })
   expect(askOf('win rate or Elo?', 'A or B?', { ask: 'choose', options: ['X'] }).options).toEqual(['X'])

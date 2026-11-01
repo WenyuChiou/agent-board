@@ -32,11 +32,9 @@ const INPUT = /(提供|給我|给我|告訴我|告诉我|哪個|哪个|哪裡|�
 const URL = /https?:\/\/\S+/
 const CODE = /`([^`]+)`/
 
-// Splits `0.6.0 還是 1.0.0？` or a list Claude gave into options. The first option is the
-// clause right before 還是 / or, so `先開旗標，還是全部開？` and `A first, or B?` read too.
-const optionsOf = (text: string): string[] => {
-  // Strip only paired wrappers around the whole question before splitting it. Trimming
-  // each option independently would remove quotes that belong inside an option.
+// Whole-question wrappers do not change any inferred reading, including confirmation.
+// A wrapper closed inside an option, or a word's own apostrophe, belongs to the text.
+const questionWords = (text: string): string => {
   let question = text.trim()
   const pairs: Record<string, string> = { '"': '"', "'": "'", '“': '”', '「': '」', '『': '』', '(': ')' }
   while (question.length >= 2 && pairs[question[0]!] === question[question.length - 1]) {
@@ -56,7 +54,13 @@ const optionsOf = (text: string): string[] => {
     if (end !== question.length - 1) break
     question = question.slice(1, -1).trim()
   }
-  const match = CHOICE.exec(question)
+  return question
+}
+
+// Splits `0.6.0 還是 1.0.0？` or a list Claude gave into options. The first option is the
+// clause right before 還是 / or, so `先開旗標，還是全部開？` and `A first, or B?` read too.
+const optionsOf = (text: string): string[] => {
+  const match = CHOICE.exec(text)
   if (match === null) return []
   const clauses = (match[1] ?? '')
     .split(/[，,：:；;。]/)
@@ -96,19 +100,21 @@ export const askOf = (
   note: string,
   given: { ask?: unknown; options?: unknown; command?: unknown; link?: unknown } = {},
 ): Ask => {
-  const text = `${note} ${subject}`.trim()
+  const subjectWords = questionWords(subject)
+  const noteWords = questionWords(note)
+  const text = `${noteWords} ${subjectWords}`.trim()
   // What the agent gave wins whole.
   const options = Array.isArray(given.options)
     ? given.options.filter((one): one is string => typeof one === 'string' && one.trim() !== '').map(one => one.trim())
-    : optionsRead(subject, note)
+    : optionsRead(subjectWords, noteWords)
   const command = typeof given.command === 'string' && given.command.trim() !== '' ? given.command.trim() : (CODE.exec(text)?.[1] ?? null)
   const link = typeof given.link === 'string' && given.link.trim() !== '' ? given.link.trim() : (URL.exec(text)?.[0] ?? null)
   const said = kindOf(given.ask)
   if (said !== null) return { kind: said, options, command, link }
 
-  const words = note || subject
+  const words = noteWords || subjectWords
   let kind: AskKind = 'reply'
-  if (WAIT.test(note) || (note === '' && WAIT.test(subject))) kind = 'wait'
+  if (WAIT.test(noteWords) || (noteWords === '' && WAIT.test(subjectWords))) kind = 'wait'
   else if (options.length >= 2) kind = 'choose'
   else if (CONFIRM.test(words) || YES_NO.test(words)) kind = 'confirm'
   else if (link !== null || REVIEW.test(words)) kind = 'review'
