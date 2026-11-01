@@ -86,6 +86,29 @@ export const safeLine = value => {
   return text
 }
 
+const failedTapNames = output => {
+  const names = []
+  let diagnosticIndent
+  for (const line of output.split(/\r?\n/)) {
+    const opening = /^(\s*)---\s*$/.exec(line)
+    if (diagnosticIndent === undefined && opening) {
+      diagnosticIndent = opening[1]
+      continue
+    }
+    if (diagnosticIndent !== undefined) {
+      const closing = /^(\s*)\.\.\.\s*$/.exec(line)
+      if (closing?.[1] === diagnosticIndent) diagnosticIndent = undefined
+      continue
+    }
+    const match = /^\s*not ok \d+ - (.+?)\s*$/.exec(line)
+    if (!match || /\s+#\s*(?:TODO|SKIP)\b/i.test(match[1])) continue
+    const name = safeLine(match[1]).slice(0, 160)
+    if (name && !names.includes(name)) names.push(name)
+    if (names.length === 3) break
+  }
+  return names
+}
+
 // Keep literals as tokens so braces and helper names inside prose cannot become code.
 export const codeTokens = text => {
   const tokens = []
@@ -326,7 +349,9 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
             const count = output.match(/^# fail (\d+)\s*$/m)?.[1]
             const total = output.match(/^# tests (\d+)\s*$/m)?.[1]
             const isPassed = !tested.error && tested.status === 0 && count === '0'
-            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
+            const failedNames = isPassed ? [] : failedTapNames(output)
+            const failedDetail = failedNames.length ? `; failed: ${failedNames.join('; ')}` : ''
+            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
           } finally {
             rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
           }
