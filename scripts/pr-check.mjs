@@ -582,6 +582,33 @@ export const verdict = (comments, head) => {
   return output
 }
 
+// Every agent may post from the owner's account, so GitHub cannot tell the author from the reviewer; the names
+// in the Author line and in the verdict do (docs/dev/REVIEWING.md). The name is the words after "by", read as
+// authorKey reads the Author line.
+export const reviewerOf = body => {
+  const line = (body ?? '').match(/^Review:\s*(?:APPROVE|REQUEST CHANGES)\s+`?[0-9a-fA-F]{7,40}\b`?[ \t]+by[ \t]+(.+)$/m)?.[1] ?? ''
+  return line.replace(/`/g, '').replace(/[.,;:]+\s*$/, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
+}
+
+// --review-gate: passes only when the newest verdict approves the current head and names a reviewer other than the
+// author. The merging agent runs it before `gh pr merge` (docs/dev/REVIEWING.md, Merging).
+export const reviewGate = ({ body, comments, head }) => {
+  const output = result()
+  const fail = (message, fix) => output.problems.push(problem('review-gate', message, fix))
+  const verdicts = (comments ?? []).map(comment => ({ ...reviewOf(comment.body), reviewer: reviewerOf(comment.body) })).filter(item => item.kind)
+  const last = verdicts.at(-1)
+  const author = authorKey(body)
+  const ask = 'ask an agent or person who did not write it to review it as docs/dev/REVIEWING.md says.'
+  if (!last) return fail('no review verdict yet.', ask), output
+  if (!String(head).toLowerCase().startsWith(last.sha)) return fail(`the newest verdict is for ${last.sha.slice(0, 7)}, not the current head ${String(head).slice(0, 7)}.`, 'the current head needs a new verdict; ' + ask), output
+  if (last.kind !== 'APPROVE') return fail('the newest verdict for the current head requests changes.', 'fix the findings, push, and ask for a new verdict.'), output
+  if (!last.reviewer) return fail('the approval does not name its reviewer.', 'the reviewer posts `Review: APPROVE <full head sha> by <agent or login>`.'), output
+  if (!author) return fail('the body has no Author line, so the reviewer cannot be told from the author.', 'add `Author: <agent>, <branch>` to the body.'), output
+  if (last.reviewer === author) return fail(`the approval is by the author (${last.reviewer}).`, ask), output
+  output.info.push(`review gate: approved for the current head by ${last.reviewer}, not the author (${author}).`)
+  return output
+}
+
 export const checkPr = data => {
   const output = result()
   const add = checked => {
@@ -646,6 +673,10 @@ export const checkPr = data => {
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
   else add(verdict(data.prComments, data.head))
+  if (data.isReviewGate) {
+    if (data.prComments === null) output.problems.push(problem('review-gate', 'the review gate needs the pull request\'s comments.', 'run it with --pr <N>, without --offline.'))
+    else add(reviewGate({ body: data.body, comments: data.prComments, head: data.head }))
+  }
   if (data.isDraft) output.info.push(`draft: the reviewer starts when you run \`gh pr ready ${data.number}\` and comment \`Ready for review ${data.head}\`.`)
   return output
 }
@@ -681,6 +712,7 @@ const usage = `Usage:
 Options:
   --offline       Skip issue, claim, open-PR cap and review network checks
   --no-bundle     Skip the Bun board bundle check
+  --review-gate   Also fail unless the newest verdict approves the current head and names someone other than the author
   --help          Print this usage
 
 Default repository: WenyuChiou/agent-board. Default base: origin/main.
@@ -689,7 +721,7 @@ Exit codes: 0 passed, 1 check problems, 2 usage or environment error.
 
 const parseArgs = argv => {
   const options = {}
-  const flags = new Set(['--offline', '--no-bundle', '--help'])
+  const flags = new Set(['--offline', '--no-bundle', '--review-gate', '--help'])
   const values = new Set(['--pr', '-R', '--repo-dir', '--body-file', '--title', '--base', '--event'])
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i]
@@ -895,6 +927,7 @@ export const main = async (argv = process.argv.slice(2)) => {
       }
       data.prComments = data.number === null ? [] : await api(`issues/${data.number}/comments`, { isList: true })
     }
+    data.isReviewGate = Boolean(options['--review-gate'])
     const checked = checkPr(data)
     if (needsBundle(data.paths)) {
       if (options['--event']) checked.info.push('bundle: checked by test.yml ("Board bundle up to date").')

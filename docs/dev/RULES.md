@@ -11,7 +11,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 
 ## Every agent follows the same rules
 
-- Claude Code, Codex, Antigravity, Cursor, cloud agents such as dot and Muse, and people by hand all follow this page. No rule here depends on which agent you are.
+- Claude Code, Codex, Antigravity, Cursor, cloud agents such as dot and Muse, and people by hand all follow this page. Each one reviews and merges others' pull requests on its own, from the review queue ([REVIEWING.md](REVIEWING.md)). No rule here depends on which agent you are.
 - **Where an agent starts.** [AGENTS.md](../../AGENTS.md) is the entry point; it sends you here first. Codex, Antigravity and Cursor read `AGENTS.md` by themselves. Claude Code does not: the repository is also a Claude Code plugin, whose root `CLAUDE.md` is not loaded, so a Claude Code session is given this page's link in its first prompt, or its user adds `@AGENTS.md` to their own `CLAUDE.md`. The same goes for any other agent that reads neither.
 - **An agent works in the role of the person who runs it** (CONTRIBUTING, [Roles](../../CONTRIBUTING.md#roles)). An agent of the owner or of a collaborator may review and merge other authors' pull requests, as that person may.
 - **Who counts as the author.** The agent named in the `Author:` line, every agent it dispatched, and every agent that wrote part of the pull request or its brief. Another agent, of the same person or not, may review and approve it (R2).
@@ -25,16 +25,17 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 
 - The author never approves their own pull request. A review by the author's own agent, lane or subagent does not count.
 - A review bot (Codex Code Review, Greptile) can stop a merge with an unresolved P0 or P1, but never approves one.
-- Each agent or computer is moving to its own GitHub account, so that GitHub itself refuses an author's approval. Until then, the `Author:` line and the reviewer's name in `Review: APPROVE <sha> by <name>` tell them apart.
+- The owner's agents all post from the owner's GitHub account, so GitHub cannot refuse an author's approval. The names do: the `Author:` line names the author, and `Review: APPROVE <full head sha> by <name>` the reviewer. `node scripts/pr-check.mjs --pr <N> --review-gate` fails when they are the same, or when the approval is not for the current head ([REVIEWING.md](REVIEWING.md)).
 
 ## R3. Merging
 
-- A pull request merges once every required check is green on its current head and someone other than the author has approved that head (CONTRIBUTING rules 8 and 9). Branch protection and auto-merge are being turned on so this happens without anyone pressing merge; until then, any reviewer allowed by R2 merges it, Antigravity or Codex as much as Claude Code.
+- A pull request merges once every required check is green on its current head and someone other than the author has approved that head (CONTRIBUTING rules 8 and 9). Branch protection and auto-merge are being turned on so this happens without anyone pressing merge; until then, any agent or person allowed to merge does it, Antigravity, Codex or dot as much as Claude Code, after the review gate passes ([REVIEWING.md, Merging](REVIEWING.md#merging)).
 - A change to `.github/workflows/` also needs the owner's approval, because a workflow can widen what CI may do (CONTRIBUTING rule 12).
 
 ## R4. One issue, one owner
 
 - Assign yourself before you start; one assignee per issue. If someone is assigned, comment on the issue instead of starting a competing pull request.
+- When you stop for any reason, usage running out included, push, comment a `Handover:` on each issue and pull request you hold, and unassign yourself ([REVIEWING.md, When you have to stop](REVIEWING.md#when-you-have-to-stop)).
 - An issue with no activity from its assignee for 24 hours may be unassigned by anyone, with a comment, and goes back to `ready`.
 - One pull request is one feature, or up to three bug fixes, branched from current `main`. A finding outside your issue becomes an issue of its own.
 

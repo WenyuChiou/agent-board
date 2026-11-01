@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr,
   isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
-  privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
+  privateData, report, reportMarkdown, reviewGate, reviewerOf, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -421,6 +421,35 @@ test('pr-check asks for the rules page when CONTRIBUTING.md, team-process.md or 
   }
   assert.equal(rulesPage({ paths: ['README.md', 'docs/GUIDE.md'], body: '' }).problems.length, 0)
   assert.equal(checkPr({ ...syntheticPr(), paths: ['CONTRIBUTING.md'], changedPaths: ['CONTRIBUTING.md'] }).problems.some(item => item.check === 'rules-page'), true)
+})
+
+test('pr-check reads the reviewer named in a verdict', () => {
+  assert.equal(reviewerOf('Review: APPROVE abcdef1234567890abcdef1234567890abcdef12 by Codex (desktop).'), 'codex (desktop)')
+  assert.equal(reviewerOf('Review: REQUEST CHANGES `abcdef1` by `antigravity`'), 'antigravity')
+  assert.equal(reviewerOf('Review: APPROVE abcdef1234567890abcdef1234567890abcdef12'), null)
+  assert.equal(reviewerOf('Looks good, by dot'), null)
+})
+
+test('the review gate passes only an approval of the current head by someone other than the author', () => {
+  const head = 'abcdef1234567890abcdef1234567890abcdef12'
+  const body = 'Fixes #42\nAuthor: claude (cloud), docs/x\n'
+  const gate = (...texts) => reviewGate({ body, head, comments: texts.map(text => ({ body: text })) })
+  assert.deepEqual(gate(`Review: APPROVE ${head} by codex (desktop)`).problems, [])
+  assert.match(gate(`Review: APPROVE ${head} by codex (desktop)`).info[0], /by codex \(desktop\), not the author \(claude \(cloud\)\)/)
+  // Another session of the same agent is another reviewer; the same name is the author.
+  assert.deepEqual(gate(`Review: APPROVE ${head} by claude (desktop)`).problems, [])
+  assert.match(gate(`Review: APPROVE ${head} by Claude (cloud)`).problems[0].message, /by the author/)
+  assert.match(gate().problems[0].message, /no review verdict/)
+  assert.match(gate(`Review: APPROVE ${head}`).problems[0].message, /does not name its reviewer/)
+  assert.match(gate('Review: APPROVE 1234567 by dot').problems[0].message, /not the current head/)
+  // The newest verdict decides: an approval followed by a request for changes fails, and the reverse passes.
+  assert.match(gate(`Review: APPROVE ${head} by dot`, `Review: REQUEST CHANGES ${head} by antigravity`).problems[0].message, /requests changes/)
+  assert.deepEqual(gate(`Review: REQUEST CHANGES ${head} by antigravity`, `Review: APPROVE ${head} by antigravity`).problems, [])
+  assert.match(reviewGate({ body: 'Fixes #42\n', head, comments: [{ body: `Review: APPROVE ${head} by dot` }] }).problems[0].message, /no Author line/)
+  // checkPr runs the gate only when asked, and not offline.
+  assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true }).problems.some(item => item.check === 'review-gate'), true)
+  assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true, prComments: null }).problems.some(item => item.check === 'review-gate'), true)
+  assert.equal(checkPr(syntheticPr()).problems.some(item => item.check === 'review-gate'), false)
 })
 
 test('pr-check requires synthetic alt text for images in the body', () => {
