@@ -160,7 +160,7 @@ export const LINES = [
 "  const clauses = (match[1] ?? \"\").split(/[，,：:；;。]/).map((one) => one.trim()).filter((one) => one !== \"\");",
 "  const lead = clauses[clauses.length - 1] ?? \"\";",
 "  const rest = (match[2] ?? \"\").trim();",
-"  return [lead.replace(/^(要|用|選|是)/, \"\").trim(), rest].filter((one) => one !== \"\" && [...one].length <= 24);",
+"  return [lead.replace(/^(要|用|選|是)/, \"\").trim(), rest].filter((one) => one !== \"\");",
 "};",
 "var NOTE_LOOK = /^(請|请|please\\s+)?\\s*(看一下|看看|檢查|检查|確認一下|确认一下|過目|过目|review(?![\\w-])|take a look|look at|check(?![\\w-]))/i;",
 "var NOTE_ACT = /^(請|请|please\\s+)?\\s*(在|到|去|幫我|帮我)?\\s*(跑|執行|执行|按(?!照)|點|点|run(?![\\w-])|install(?![\\w-])|click(?![\\w-])|open(?![\\w-])|paste(?![\\w-])|set up(?![\\w-])|log ?in(?![\\w-])|sign in(?![\\w-]))/i;",

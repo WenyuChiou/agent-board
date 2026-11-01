@@ -1,0 +1,2 @@
+- **Page / Current waiting list** · The empty Needs you message now names the current list, including when filtering by agent. It no longer suggests there are no unanswered questions elsewhere, while older-question counts and navigation remain available in all three languages (#522).
+  Tests: `the default page scopes empty Waiting wording and preserves older-question navigation in every language and viewport`.
