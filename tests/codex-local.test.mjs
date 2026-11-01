@@ -2452,9 +2452,9 @@ test('--codex-doctor auto-discovers Codex on PATH and verifies hook trust', { sk
   const mockCodex = join(binDir, 'codex')
 
   const hooksManifest = JSON.parse(readFileSync(join(f.home, '.codex', 'hooks.json'), 'utf8'))
-  const expectedHooks = Object.entries(hooksManifest.groups).map(([event, group]) => ({
+  const expectedHooks = Object.entries(hooksManifest.hooks).map(([event, list]) => ({
     event: event[0].toLowerCase() + event.slice(1),
-    command: group.hooks[0].command,
+    command: list[0].hooks[0].command,
   }))
 
   const stateFile = join(f.home, 'mock-codex-state.json')
