@@ -733,7 +733,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const groups: Json = {}
   // Codex runs its hooks through PowerShell on Windows (#623).
   const isPowerShellHost = agent === 'codex' && process.platform === 'win32'
-  const hostNode = isPowerShellHost ? windowsHookNode(process.execPath) : undefined
+  // Only the program is kept from the last install; every other word is written from this run.
+  const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
+  const earlier = commandsOf(Object.values(manifest.groups)).filter((command): command is string => typeof command === 'string')
+  const hostNode = isPowerShellHost ? windowsHookNode(process.execPath, earlier) : undefined
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
     const eventCommand = isPowerShellHost ? windowsHookCommand(hookArgs(event, state), quote, hostNode) : hookArgs(event, state).map(quote).join(' ')

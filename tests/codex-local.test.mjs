@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test } from 'node:test'
@@ -147,6 +147,7 @@ const importTs = async path => {
   } })
   try { return await import(path) } finally { resolver.deregister() }
 }
+const launchOf = command => Buffer.from(command.split(' ').at(-1), 'base64').toString('utf16le')
 const turnOf = f => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`codex:${session}`).digest('hex') + '.json'))).turn
 
 const hookLog = f => existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(join(f.root, 'hook-errors.log'), 'utf8') : ''
@@ -934,6 +935,8 @@ test('on Windows a Codex hook command for a Node path with no quote-free name ru
   const argv = hookCommandArgs(process.execPath, f.home, 'codex', join(f.root, 'agent-board-hook.mjs'), f.progress, 'UserPromptSubmit')
   const command = windowsHookCommand(argv, value => `"${value}"`, undefined)
   assert.match(command, /^powershell\.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/]+=*$/)
+  // The launch hands on its own start time, as the Antigravity one does (#625).
+  assert.match(launchOf(command), /' --hook-started \(\[DateTimeOffset\]::new\(\[Diagnostics\.Process\]::GetCurrentProcess\(\)\.StartTime\)\.ToUnixTimeMilliseconds\(\)\); exit \$LASTEXITCODE$/)
   for (const [shell, fire] of [['PowerShell', firePowerShell], ['cmd', fireCommand]]) {
     const turn = `encoded-${shell.toLowerCase()}-turn`
     const result = await fire(f, command, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: turn }))
@@ -941,6 +944,66 @@ test('on Windows a Codex hook command for a Node path with no quote-free name ru
     assert.equal(turnOf(f), turn, shell)
   }
   assert.throws(() => windowsHookCommand(argv, value => `"${value}"`, 'C:\\Program Files\\nodejs\\node.exe'), /UNSAFE_HOOK_EXECUTABLE/)
+}))
+
+test('on Windows a Codex hook command whose paths hold curly quotes runs from PowerShell and cmd', { skip: process.platform !== 'win32' && 'Windows shells only' }, () => fixture(async f => {
+  const { hookCommandArgs, windowsHookCommand } = await importTs('../hooks/local-agents.ts')
+  assert.equal(f.install('--apply').status, 0)
+  const safeNode = /^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i.test(process.execPath) ? process.execPath : 'C:\\Windows\\node.exe'
+  // PowerShell reads ’ as a single quote and ” as a double quote.
+  for (const [mark, node] of [['\u2019', undefined], ['\u201D', safeNode]]) {
+    const folder = join(f.home, `it${mark}s`)
+    mkdirSync(folder)
+    const argv = hookCommandArgs(process.execPath, f.home, 'codex', join(f.root, 'agent-board-hook.mjs'), join(folder, 'progress.md'), 'UserPromptSubmit')
+    const command = windowsHookCommand(argv, value => `"${value}"`, node)
+    assert.match(command, /^powershell\.exe .* -EncodedCommand /, mark)
+    for (const [shell, fire] of [['PowerShell', firePowerShell], ['cmd', fireCommand]]) {
+      const turn = `quote-${mark.charCodeAt(0).toString(16)}-${shell.toLowerCase()}-turn`
+      const result = await fire(f, command, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: turn }))
+      assert.equal(result.status, 0, `${shell}: ${hookFailure(result)}`)
+      assert.equal(turnOf(f), turn, `${shell} ${mark}`)
+    }
+  }
+}))
+
+test('sharing the encoded launch with Codex leaves the Antigravity command the same bytes', async () => {
+  const { antigravityCommand, hookCommandArgs } = await importTs('../hooks/local-agents.ts')
+  const quote = value => `"${value}"`
+  const argv = hookCommandArgs('C:\\Program Files\\nodejs\\node.exe', 'C:\\Users\\Ann O\'Neil', 'antigravity', 'C:\\Users\\Ann O\'Neil\\.agent-board\\agent-board-hook.mjs', 'C:\\Users\\Ann O\'Neil\\.agent-board\\progress.md', 'SessionStart', 'working')
+  // What 0.24.1 wrote, spelled out here so a change to the shared launch shows.
+  const launch = `& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')} --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE`
+  assert.equal(antigravityCommand(argv, true, quote, undefined), `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(launch, 'utf16le').toString('base64')}`)
+  assert.equal(antigravityCommand(argv, false, quote, undefined), argv.map(quote).join(' '))
+})
+
+test('on Windows setup keeps the Node program it wrote last time when the short-name probe cannot run', { skip: process.platform !== 'win32' && 'Windows only' }, () => fixture(async f => {
+  const { windowsHookNode } = await importTs('../scripts/windows-hook-node.ts')
+  const spaced = join(f.home, 'node runtime', 'node.exe')
+  mkdirSync(dirname(spaced))
+  try { linkSync(process.execPath, spaced) } catch { copyFileSync(process.execPath, spaced) }
+  const short = windowsHookNode(spaced)
+  // A volume with 8.3 names turned off has nothing to keep.
+  if (short === undefined) return
+  const other = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'where.exe')
+  const missing = join(f.home, 'missing', 'cmd.exe')
+  const comSpec = process.env.ComSpec
+  process.env.ComSpec = missing
+  try {
+    // Without the last install, a probe that cannot run leaves the encoded launch.
+    assert.equal(windowsHookNode(spaced), undefined)
+    assert.equal(windowsHookNode(spaced, [`${short} "--input-type=commonjs" "-e" "x"`]), short)
+    // A program that is another file, or a command of another form, is not kept.
+    assert.equal(windowsHookNode(spaced, [`${other} "--input-type=commonjs"`, 'powershell.exe -NoLogo -EncodedCommand AAAA']), undefined)
+  } finally { process.env.ComSpec = comSpec }
+  // Setup on that Node, then again with the probe failing: Codex keeps trusting the same commands.
+  const install = env => spawnSync(spaced, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+  const first = install(f.env)
+  assert.equal(first.status, 0, first.stderr)
+  const written = readFileSync(f.hooks, 'utf8')
+  assert.ok(written.includes(JSON.stringify(short).slice(1, -1)), 'the first install starts Node by its short name')
+  const again = install({ ...f.env, ComSpec: missing })
+  assert.equal(again.status, 0, again.stderr)
+  assert.equal(readFileSync(f.hooks, 'utf8'), written)
 }))
 
 test('setup replaces a Codex hook command an earlier release wrote with every word quoted, without the person removing it', () => fixture(async f => {
