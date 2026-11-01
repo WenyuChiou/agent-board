@@ -673,6 +673,8 @@ export const ZH_TW = {
   pgWorking: '正在做',
   pgWorkingHint: '最近 30 分鐘有動作的任務',
   pgNoWorking: '過去 30 分鐘沒有代理程式有動作。',
+  pgQuietAsking: (n: number): string => `現在沒有代理程式在工作。它們問你的事在「需要你」裡（${n}）。`,
+  pgQuietStopped: (agent: string, minutes: number): string => `現在沒有代理程式在工作。${agent} ${minutes} 分鐘前還在做。`,
   pgNothing: '目前沒有需要你的事。',
   pgNothingHint: '代理程式問你問題或卡住時，會顯示在這裡，分頁標題也會顯示數字。',
   pgOlder: (n: number): string => `${n} 個較早的問題尚未回答（對話已停止）`,

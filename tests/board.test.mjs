@@ -27,7 +27,7 @@ import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { immutableQuestionFiles } from '../scripts/question-files.ts'
 import { recentInboxFiles } from '../scripts/inbox-files.ts'
-import { serverMemoryArgs } from '../scripts/server-runtime.ts'
+import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from '../scripts/server-runtime.ts'
 import { isPrivateRuntimeDacl, isPrivateRuntimeSddl, privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
 import { AGENT_ICONS } from '../hooks/agent-icons.ts'
 import { bigBoard, bigBoardNow } from './fixtures/big-board.mjs'
@@ -5079,12 +5079,28 @@ test('server memory arguments retain explicit heap choices and ignore unrelated 
   assert.deepEqual(serverMemoryArgs([], '--require "a path/--max-old-space-size.cjs"'), ['--optimize-for-size'])
 })
 
+test('on Linux the page server starts with two malloc arenas unless the account chose a number, and drops the setting once started', () => {
+  const linux = serverMemoryEnv({ PATH: '/bin' }, 'linux')
+  assert.equal(linux.MALLOC_ARENA_MAX, '2')
+  assert.equal(linux.PATH, '/bin')
+  assert.deepEqual(serverMemoryEnv({ MALLOC_ARENA_MAX: '8' }, 'linux'), { MALLOC_ARENA_MAX: '8' })
+  for (const platform of ['win32', 'darwin']) assert.deepEqual(serverMemoryEnv({ PATH: '/bin' }, platform), { PATH: '/bin' })
+  dropServerMemoryEnv(linux)
+  assert.deepEqual(linux, { PATH: '/bin' })
+  const chosen = { MALLOC_ARENA_MAX: '8' }
+  dropServerMemoryEnv(chosen)
+  assert.deepEqual(chosen, { MALLOC_ARENA_MAX: '8' })
+})
+
 test('a background page uses its memory policy without changing the account\'s Node options', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'runtime.cjs')
   const received = join(board.dir, 'runtime.json')
-  writeFileSync(preload, `if (process.argv.includes('--serve-child')) require('node:fs').writeFileSync(${JSON.stringify(received)}, JSON.stringify({ argv: process.execArgv, options: process.env.NODE_OPTIONS }))\n`)
+  const later = join(board.dir, 'runtime-later.json')
+  // The arena setting as the child starts (glibc reads it then), and when the page serves its first request.
+  writeFileSync(preload, `if (process.argv.includes('--serve-child')) { const fs = require('node:fs'); const http = require('node:http'); fs.writeFileSync(${JSON.stringify(received)}, JSON.stringify({ argv: process.execArgv, options: process.env.NODE_OPTIONS, arena: process.env.MALLOC_ARENA_MAX ?? null })); const emit = http.Server.prototype.emit; http.Server.prototype.emit = function (event, ...rest) { if (event === 'request' && !fs.existsSync(${JSON.stringify(later)})) fs.writeFileSync(${JSON.stringify(later)}, JSON.stringify({ arena: process.env.MALLOC_ARENA_MAX ?? null })); return emit.call(this, event, ...rest) } }\n`)
   board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  delete board.env.MALLOC_ARENA_MAX
   let url = null
   try {
     url = board.urlOf(await board.serve(['--quiet-board']))
@@ -5092,9 +5108,12 @@ test('a background page uses its memory policy without changing the account\'s N
     const runtime = JSON.parse(readFileSync(received, 'utf8'))
     assert.deepEqual(runtime.argv, ['--optimize-for-size'])
     assert.equal(runtime.options, board.env.NODE_OPTIONS)
+    assert.equal(runtime.arena, process.platform === 'linux' ? '2' : null)
     const response = await fetch(new URL('/api/board', url), { headers: { 'x-board-token': new URL(url).searchParams.get('t') } })
     assert.equal(response.status, 200)
     await response.arrayBuffer()
+    // Programs the page starts get the account's environment, not the page's arena limit.
+    assert.equal(JSON.parse(readFileSync(later, 'utf8')).arena, null)
   } finally { await board.end([url]) }
 })
 
@@ -7778,6 +7797,47 @@ test('progress.html follows the page\'s order', () => {
   for (const word of [EN.pgNeeds, EN.pgWorking, EN.pgDone]) assert.ok(html.includes(word), word)
   assert.doesNotMatch(html, /<div class="legend">|id="paste"|data-theme-pick/)
   assert.match(html, /data-theme-toggle/)
+})
+
+// #612: an agent that asks, and one that stopped 2 minutes ago, are not "nothing"; the same made-up projects on the page and in progress.html.
+const quietAsking = () => groupedBlock('61200001', 'codex', 'waiting', 'demo-garden', 'Choose the seed mix', ['- [x] Compare', '- [?] Clover or rye?'], 1)
+const quietStopped = () => groupedBlock('61200002', 'gemini', 'ended', 'demo-orchard', 'Prune the synthetic rows', ['- [x] Prune', '- [ ] Water'], 2)
+
+test('Working now says an agent waits on you or just stopped, and that no agent did anything only when none moved', async () => {
+  for (const [label, source, expected] of [
+    ['asking', [quietAsking(), quietStopped()].join('\n'), EN.pgQuietAsking(1)],
+    ['stopped', quietStopped(), EN.pgQuietStopped(EN.agentNames.gemini, 2)],
+    ['none', quietStopped().replace(/updated=[^ ]+/, `updated=${new Date(groupedNow - 90 * 60_000).toISOString()}`), EN.pgNoWorking],
+  ]) {
+    const { board, model, html } = await groupedPage(source)
+    try {
+      const working = sectionWords(await pageDom(html, model), 'working')
+      assert.ok(working.includes(expected), `${label}: ${working}`)
+      if (label !== 'none') assert.ok(!working.includes(EN.pgNoWorking), `${label}: ${working}`)
+    } finally { await board.close() }
+    const file = htmlRun({ file: source, now: groupedNow })
+    const dash = file.slice(file.indexOf('id="dash-working"'), file.indexOf('</section>', file.indexOf('id="dash-working"')))
+    assert.ok(dash.includes(expected.replace(/&/g, '&amp;')), `progress.html ${label}: ${dash}`)
+  }
+})
+
+test('a working Codex session with no block of its own names its project once and does not say it waits', async () => {
+  const lifecycle = state => groupedBlock('61200003', 'codex', state, 'demo-garden', 'Demo-Garden', [`- [ ] ${EN.codexLifecycle}`], 2)
+  const { board, model, html } = await groupedPage(lifecycle('working'))
+  try {
+    const working = sectionWords(await pageDom(html, model), 'working')
+    assert.equal(working.toLowerCase().split('demo-garden').length - 1, 1, working)
+    assert.ok(!working.includes(EN.codexLifecycle), working)
+  } finally { await board.close() }
+  const dash = htmlRun({ file: lifecycle('working'), now: groupedNow })
+  const row = dash.slice(dash.indexOf('id="dash-working"'), dash.indexOf('</section>', dash.indexOf('id="dash-working"'))).replace(/<[^>]*>/g, ' ')
+  assert.equal(row.toLowerCase().split('demo-garden').length - 1, 1, row)
+  assert.ok(!row.includes(EN.codexLifecycle), row)
+  // Once it waits, the hook's words are true and the row says them.
+  const waiting = await groupedPage(lifecycle('waiting'))
+  try {
+    assert.ok(sectionWords(await pageDom(waiting.html, waiting.model), 'working').includes(EN.codexLifecycle))
+  } finally { await waiting.board.close() }
 })
 
 test('a reply button on an unconnected question says it copies and the card then says where to paste it', async () => {
