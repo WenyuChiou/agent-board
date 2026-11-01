@@ -1028,6 +1028,14 @@ test('pr-check only notes, and does not fail, a large or governance-touching out
   assert.match(execution.stdout, /info outside note: 503 changed lines in 3 files/)
 })
 
+test('pr-check notes an outside change to the team process page like any other governance file', () => {
+  const checked = checkPr(outsidePr({ paths: [...syntheticPr().paths, 'docs/dev/team-process.md'] }))
+  assert.deepEqual(checked.problems, [])
+  assert.ok(checked.info.some(line => line.startsWith('outside note:') && line.includes('docs/dev/team-process.md') && /ask on the issue first/.test(line)))
+  // The team's own change to the page is not noted.
+  assert.deepEqual(checkPr({ ...outsidePr({ paths: [...syntheticPr().paths, 'docs/dev/team-process.md'] }), association: 'OWNER' }).info.filter(line => line.startsWith('outside note:')), [])
+})
+
 // A local run that does not know the author says the claim and the cap were not checked, rather than pass them silently.
 const unknownAuthorNote = 'claim and cap: not checked, the author is unknown here. The team needs neither; a contributor from outside the team needs both (CONTRIBUTING rules 3 and 10), and CI checks them.'
 

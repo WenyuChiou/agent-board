@@ -458,7 +458,8 @@ export const outsideIssue = (issueData, number) => {
 
 // Changelog fragments and the generated files (the board bundle and its parts, the release table) are not the author's lines to review.
 const isGeneratedPath = path => path.startsWith('changelog.d/') || isBundleFile(path) || path === 'hooks/released.ts'
-const isOutsideGovernance = path => path === 'AGENTS.md' || path === 'CONTRIBUTING.md' || path === 'package.json' || path.startsWith('.github/') || path.startsWith('.claude-plugin/')
+// team-process.md holds the sections CONTRIBUTING rule 12 calls governance (From claim to merge, Standing approvals).
+const isOutsideGovernance = path => path === 'AGENTS.md' || path === 'CONTRIBUTING.md' || path === 'docs/dev/team-process.md' || path === 'package.json' || path.startsWith('.github/') || path.startsWith('.claude-plugin/')
 
 // Notes for the reviewer, never a failure: a large change, and a change to a file the maintainer looks at first.
 // numstat: { path, added, deleted } for each changed file; without it the size is not judged.
