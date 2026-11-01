@@ -48,7 +48,7 @@ const fixture = (t, testTitle = coveringTitle) => {
     writeFileSync(target, text)
   }
   const git = (...args) => {
-    const execution = spawnSync('git', args, { cwd: directory, encoding: 'utf8' })
+    const execution = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: directory, encoding: 'utf8' })
     assert.equal(execution.status, 0, execution.stderr || execution.error?.message)
     return execution.stdout.trim()
   }
