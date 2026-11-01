@@ -103,6 +103,11 @@ const noticeFor = ({ comments, head, ready, readyHours, takenBy, nowMs, isInQueu
   if (last < 0) return isAllowed ? { state: 'allowed', at: null } : null
   const notice = authorNotice(comments[last])
   const at = new Date(notice.at).toISOString()
+  // A notice must be posted while the notice path is open.
+  if (!ready || comments[last].time < ready.time) return { state: 'too-early', at }
+  const isTakenBeforeNotice = comments.slice(ready.order + 1, last).some(({ comment }) => /^Reviewing:[ \t]*\S/m.test(comment.body ?? '') && !isByAuthor(comment))
+  if (isTakenBeforeNotice) return { state: 'cancelled', at }
+  if (!(comments[last].time - ready.time > noticeWaitHours * hour || isAllAway)) return { state: 'too-early', at }
   // The author's own Reviewing comment does not take the review, so it does not end the notice.
   const isCancelled = comments.slice(last + 1).some(({ comment }) => (/^Reviewing:[ \t]*\S/m.test(comment.body ?? '') && !isByAuthor(comment))
     || reviewOf(comment.body)?.kind === 'REQUEST CHANGES' || /^\s*Objection\b/i.test(comment.body ?? ''))
@@ -439,7 +444,7 @@ const noticeText = notice => {
   if (notice.state === 'waiting') return `notice: merges after ${formatUtc(Date.parse(notice.at))}`
   if (notice.state === 'due') return 'notice due: merge if checks are green and the author\'s code-review subagent approved this head and no bot P0/P1 is open'
   if (notice.state === 'not-allowed') return 'no notice: governance, workflow or release pull requests merge only with an approval (CONTRIBUTING rules 8 and 12)'
-  if (notice.state === 'too-early') return `notice too early: the time named must be ${noticeGapHours} hours after the notice and after Ready`
+  if (notice.state === 'too-early') return `notice too early: post it once Ready is ${noticeWaitHours} hours old with nobody reviewing, or everyone else away, naming a time ${noticeGapHours} hours after the notice and after Ready`
   return 'notice cancelled'
 }
 // The groups a reviewer or merger acts on show the bot state and the notice under each pull request.
