@@ -8,6 +8,9 @@ import { noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
 
+// The page's empty board: the agents that report here and what to do next, in place of the sections.
+const EMPTY_PAGE = /Your board is ready[\s\S]*Start a new session in an agent you set up; its work shows here/
+
 describe('L1 first run', () => {
   test('L1 first run: an empty board says how to connect the first agent', async () => {
     const world = makeWorld()
@@ -15,7 +18,8 @@ describe('L1 first run', () => {
       assert.equal(world.exists('progress.md'), false)
       const screens = await inspectSurfaces(world)
       for (const surface of ['terminal', 'chat', 'page', 'html']) {
-        assert.match(screens[surface], /Nothing needs you|No work in progress/, surface)
+        // The page has no Needs you section yet: its empty board is the "Your board is ready" card.
+        assert.match(screens[surface], surface === 'page' ? EMPTY_PAGE : /Nothing needs you|No work in progress/, surface)
         await knownFailure('hold:empty-board-connect', () => assert.match(screens[surface], /\b(?:connect|set up|install)\b.*(?:agent|setup-agent)|setup-agent.*--apply/i, surface))
       }
     } finally { await world.close() }
@@ -111,7 +115,7 @@ describe('L1 first run', () => {
     try {
       assert.equal(world.exists('progress.md'), false)
       const screens = await inspectSurfaces(world)
-      for (const [name, text] of Object.entries(screens)) assert.match(text, /Nothing needs you|No work in progress/, name)
+      for (const [name, text] of Object.entries(screens)) assert.match(text, name === 'page' ? EMPTY_PAGE : /Nothing needs you|No work in progress/, name)
     } finally { await world.close() }
   })
 
@@ -149,7 +153,7 @@ describe('L1 first run', () => {
     let server
     try {
       server = await serve.start(world)
-      assert.match(await server.page(), /No work in progress/)
+      assert.match(await server.page(), EMPTY_PAGE)
       block(world, { title: 'First gateway route' })
       const elapsed = await seenPageWithin(server, text => text.includes('First gateway route'), PAGE_MS)
       assert.ok(elapsed <= PAGE_MS)

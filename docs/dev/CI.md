@@ -11,6 +11,7 @@ the same rules. The PR metadata checker still runs separately on every PR.
 | New root Node test | Automatically included in the board group |
 | README only | README contract (on a PR: Node 22 on Ubuntu, Node 24 on Windows) |
 | Pane code | Its consumers, including plugin tests |
+| Hooks, board bundle, plugin manifest, `package.json`, `.gitattributes`, the test workflow | The same, and the plugin checks, on Windows too |
 | Board bundle source | Bundle verification and every bundle consumer |
 | Package/plugin manifests, governance, planner, unknown paths | Every group |
 
@@ -28,17 +29,23 @@ fail planning; they never become an empty passing plan.
 On a pull request the test jobs check out GitHub's merge of the pull request into
 main (`github.sha`), not its head, so a pull request that is behind main is tested
 with main's newer changes. GitHub makes that merge when the pull request is
-opened, pushed or reopened; when main moves on later, merge main or push again
-before merging. A pull request with a merge conflict gets no run until main is
-merged. The planner and pr-check still read the pull request's own base and head.
+opened, pushed or reopened. A pull request that is only behind main merges as
+it is once its checks pass. A pull request with a merge conflict gets no run
+until main is merged. The planner and pr-check still read the pull request's own base and head.
 A test file the planner selects from the head must also exist in the merge, so a
 pull request whose selected test main deleted or renamed fails until it merges
 main.
 
 On a pull request, selected Node groups run Node 22 on Ubuntu and Node 24 on
-Windows, and plugin checks run on Ubuntu only. Pushes to main, the weekly run, a
-manual run and a release PR run Node 22 and 24 on both systems and plugin
-on both. Browser checks use
+Windows, and plugin checks run on Ubuntu. They also run on Windows when a changed
+path is under `hooks/` (the generated board bundle included) or `.claude-plugin/`,
+is `package.json`, `.gitattributes` or `.github/workflows/test.yml` (its Claude Code
+version pin), or is a file the plugin loads from outside
+`hooks/` (found by the same dependency walk, from the plugin's entry points only);
+a plugin test file or a doc alone stays on Ubuntu, and so does a full plan on a pull
+request (governance, planner or an unknown path) unless one of those paths changed. The planner writes the systems as `plugin_os`, as it
+does `installers_os`. Pushes to main, the weekly run, a manual run and a release PR
+run Node 22 and 24 on both systems and plugin on both. Browser checks use
 Node 24/Chromium on both systems. Plugin checks keep the pinned offline Claude
 runner. Legacy installers and the Python reporter run without installing Claude.
 Board and messaging have separate ten-minute jobs. No product dependency is
@@ -53,9 +60,12 @@ Branch protection must require affected checks, CI validation and pr-check from
 GitHub Actions. Requiring old expanded matrix row names would leave unaffected
 PRs waiting for contexts that a skipped matrix never creates. The approved
 migration runs the rollout in full first and preserves all other protections.
-Existing PRs then merge main before using the new gate.
-Branch protection also requires a pull request to be up to date with main before
-it merges, so the merge CI tested is the one that lands.
+That migration is done; a pull request now merges main only when GitHub reports
+a conflict, or when the maintainer rebuilds the bundle that the merged result needs.
+Branch protection does not require a pull request to be up to date with main
+(the owner turned that off on 2026-10-31; the required checks are unchanged), so
+the merge CI tested may be older than main when it lands. The run on the push to
+main checks what landed.
 
 A weekly full run and workflow_dispatch with full=true exercise the complete
 catalog. Releases, manifest/governance/planner changes and unknown paths also

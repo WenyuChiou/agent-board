@@ -1,4 +1,6 @@
+import { LANGS } from './i18n'
 import type { Strings } from './i18n'
+import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
 import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
 import { scanBlocks } from './blocks'
@@ -48,6 +50,23 @@ export const folderProject = (cwd: unknown): string => {
 
 // This is the one place a new local session title comes from (#246).
 export const sessionTitle = (folder: string, fallback: string): string => line(folder || fallback)
+
+// The step a hook writes for a session that has reported none of its own (`codexLifecycle` here,
+// `localAgentLifecycle` in codex-local.ts). The view tells it from an agent's step by these words:
+// every language's, and those earlier releases wrote, which stay in old blocks (#612).
+const EARLIER_LIFECYCLE_STEPS = [
+  'Local session activity; Codex explicitly reports task steps',
+  '本機 session 活動狀態；任務步驟由 Codex 明確回報',
+  '本地 session 活动状态；任务步骤由 Codex 明确报告',
+  'Native session activity; the current agent explicitly reports task steps',
+  '原生 session 活動狀態；任務步驟由目前 agent 明確回報',
+  '原生 session 活动状态；任务步骤由当前 agent 明确报告',
+]
+export const LIFECYCLE_STEPS: ReadonlySet<string> = new Set([
+  ...LANGS.flatMap(lang => [STRINGS[lang].codexLifecycle, STRINGS[lang].localAgentLifecycle]),
+  ...EARLIER_LIFECYCLE_STEPS,
+])
+export const isLifecycleStep = (text: string): boolean => LIFECYCLE_STEPS.has(text.trim())
 
 // Hooks describe lifecycle, not task completion. Only an explicit report can say done.
 export const codexEvent = (previous: CodexReport | null, input: Record<string, unknown>, now: string, s: Strings): CodexReport => {

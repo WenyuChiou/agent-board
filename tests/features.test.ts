@@ -17,7 +17,7 @@ import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
-import { LANGS, RELAY, ZH_TW } from '../hooks/i18n'
+import { LANGS, ZH_TW } from '../hooks/i18n'
 import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
@@ -57,7 +57,8 @@ test('an unanswered question in an ended session adds to one stopped-sessions li
     expect(boardScreen(view, [], emptyBoardState, s)).toContain(s.stoppedAsking(3))
     expect(dashboardHtml(view, s, '/synthetic/progress.md', '')).toContain(s.stoppedAsking(3))
     expect(serveModel(view, [], s).stoppedAsking).toBe(3)
-    expect(servePage(s, 'n')).toContain("w('stoppedAsking'")
+    // The page words the line as the count of its Older questions, from the same model number.
+    expect(servePage(s, 'n')).toContain("plural('pgOlder', count.older)")
     for (const quiet of [[], parseProgress('## Synthetic\n### Quiet work\n- [ ] Finish\n')]) {
       const empty = buildView(quiet, [], null, STOPPED_NOW, 0, {}, s, [], {}, emptyQuestions())
       expect(Object.hasOwn(empty, 'stoppedAsking')).toBe(false)
@@ -156,8 +157,10 @@ test('Older lists ten questions and a Show all control for the rest on the page 
     else expect(html).not.toContain(STRINGS.en.showAllQuestions(count))
   }
   const page = servePage(STRINGS.en, 'n')
-  expect(page).toContain("w('showAllQuestions'")
-  expect(page).toContain(`? ${OLDER_SHOWN} : questions.length`)
+  expect(page).toContain("w('showAllQuestions', older.length)")
+  // Ten are drawn until Show all; pressing it appends the rest.
+  expect(page).toContain(`var shownOlder = opened['older:all'] ? older.length : ${OLDER_SHOWN};`)
+  expect(page).toContain('older.slice(shownOlder).forEach(drawOlder);')
 })
 
 test('the chat text tells the question of a stopped session once, under its row, and counts it in the stopped-sessions line', () => {
@@ -190,7 +193,9 @@ test('every language has the stopped-sessions line and the Show all words', () =
   for (const s of Object.values(STRINGS)) {
     expect(s.stoppedAsking(3)).toContain('3')
     expect(s.showAllQuestions(12)).toContain('12')
-    expect(pageWords(s).stoppedAsking).toContain('\u0001')
+    // The page words the stopped-sessions line as its Older count, in the singular and the plural, each with the number blank.
+    expect(pageWords(s).pgOlder).toContain('\u0001')
+    expect(pageWords(s).pgOlderOne).toContain('\u0001')
     expect(pageWords(s).showAllQuestions).toContain('\u0001')
   }
 })
@@ -1037,13 +1042,19 @@ test('progress.html shows the whole file: counts, the focus, folded sections, st
   expect(html.startsWith('<!doctype html>')).toBe(true)
   expect(html).toContain('<html lang="zh-Hant">')
   expect(html).toContain('@media (prefers-color-scheme:dark)')
-  expect(html).toContain('● 2</span> 等你')
-  expect(html).toContain('✓ 3</span> 今天完成')
-  expect(html).toContain('<div class="label">現在最需要你</div>')
+  // The counts line and the focus box are gone: the Needs you sheet heads its own count, and the question an agent asked comes first in it.
+  expect(html).toContain('<h2 class="flag">需要你<b id="needs-n">2</b></h2>')
+  expect(html).toContain('<p class="empty" id="needs-empty" hidden>')
+  expect(html.indexOf('用 win rate 還是 Elo？')).toBeLessThan(html.indexOf('等王教授回覆'))
+  expect(html).toContain('<h2 class="sec-title">正在做<span class="count">0</span></h2>')
+  // The agent row counts what each agent waits on.
+  expect(html).toContain('<span class="c-name">Codex</span><span class="badge">1</span>')
   // Drawn as a pill, the chip shows the word without the terminal's brackets.
   expect(html).toContain('>選一個</span>')
   expect(html).toContain('AutoResearchAgent › Stage 2 · codex')
-  expect(html).toContain('data-key="section:waiting" open')
+  // A task with a due date sits in a folded section and shows its steps.
+  expect(html).toContain('<details class="section" data-key="section:due">')
+  expect(html).toContain('<ol class="steps">')
   expect(html).toContain('Google &lt;script&gt;alert(1)&lt;/script&gt;')
   expect(html).not.toContain('<script>alert(1)')
   expect(html).toContain('location.reload()')
@@ -3349,8 +3360,17 @@ test('on the local network the page answers only its own address, with its own t
   expect(requestProblem({ ...post, origin: 'http://127.0.0.1:5000' }, lan, 'phone')).toBe(403)
   // And it says when it closes, which is sooner than the computer's page.
   expect(servePage(STRINGS.en, 'n', true)).toContain('after 10 minutes unused')
-  expect(servePage(STRINGS.en, 'n')).toContain('The local board stays running')
   expect(servePage(STRINGS.en, 'n', false, 30 * 60000)).toContain('after 30 minutes unused')
+  // With no limit the footer says nothing about closing; the sentence that the board stays running is gone from the page.
+  expect(servePage(STRINGS.en, 'n')).not.toContain(STRINGS.en.serveIdle)
+  for (const s of Object.values(STRINGS)) {
+    expect(servePage(s, 'n', true)).toContain(s.serveLanIdle)
+    expect(servePage(s, 'n', false, 30 * 60000)).toContain(s.serveIdleTimed(30))
+    // The network's limit is the one it shows, even when the computer's page has a longer one.
+    expect(servePage(s, 'n', true, 30 * 60000)).not.toContain(s.serveIdleTimed(30))
+    expect(servePage(s, 'n')).not.toContain(s.serveLanIdle)
+    expect(servePage(s, 'n')).not.toContain(s.serveIdleTimed(30))
+  }
 })
 
 test('from the local network a reply to an agent is offered as a copy, and refused if sent, since it would run a program on the computer', () => {
@@ -3438,20 +3458,29 @@ test("the page runs only its own script, and the chat prompt in it cannot close 
   // Words from the file are set as text by the page's script, never as HTML.
   expect(page).not.toContain('innerHTML')
   expect(page).not.toContain('insertAdjacentHTML')
-  // The relay prompt has a comment marker in it; inside the words it is escaped.
+  // No comment marker reaches the page. The paste box and its chat prompt (which had one) are gone from it, and the words sit in a JSON block with no raw '<' to close the script with.
   expect(page).not.toContain('<!-- auto')
-  expect(pageWords(STRINGS.en).relayPrompt).toBe(RELAY)
+  expect(Object.hasOwn(pageWords(STRINGS.en), 'relayPrompt')).toBe(false)
+  const block = page.split('<script type="application/json" id="words">')[1]!.split('</script>')[0]!
+  expect(block).not.toContain('<')
+  expect(JSON.parse(block)).toEqual(pageWords(STRINGS.en))
   expect(Object.values(pageWords(STRINGS['zh-CN'])).every(word => typeof word === 'string' && word !== '')).toBe(true)
 })
 
 // A word the page script asks for but is not given would show as the text "undefined".
 test('every word the page script asks for is one the page is given', () => {
-  // One script serves both pages; the words of the agent-first page (?group=agent) go only to that page.
-  const words = pageWords(STRINGS.en, true)
-  const named = [...servePage(STRINGS.en, 'n').matchAll(/\bw\(([^)]*)\)/g)].flatMap(found => [...found[1].matchAll(/(?<!=== )'([A-Za-z]+)'/g)].map(key => key[1]))
+  // The words go only to the live page, so its pg words are all in.
+  const words = pageWords(STRINGS.en)
+  const page = servePage(STRINGS.en, 'n')
+  // The plural helper joins 'One' to a key itself; that literal is not a word.
+  const named = [...page.matchAll(/\bw\(([^)]*)\)/g)].flatMap(found => [...found[1].matchAll(/(?<!=== |\+ )'([A-Za-z]+)'/g)].map(key => key[1]))
   expect(named.length).toBeGreaterThan(20)
   expect(named.filter(key => !(key in words))).toEqual([])
-  expect(Object.keys(pageWords(STRINGS.en)).filter(key => key.startsWith('pg'))).toEqual([])
+  // Every word passed to plural() has both forms, so a count of one never shows "undefined".
+  const plurals = [...page.matchAll(/\bplural\('([A-Za-z]+)'/g)].map(key => key[1])
+  expect(plurals.length).toBeGreaterThan(0)
+  expect(plurals.flatMap(key => [key, `${key}One`]).filter(key => !(key in words))).toEqual([])
+  expect(Object.keys(words).filter(key => key.startsWith('pg')).length).toBeGreaterThan(20)
 })
 
 const oldClockFragment = (at: number, state = 'working'): string =>
@@ -3894,7 +3923,7 @@ test('every agent keeps exact resume bindings without showing session identifier
   expect(html).not.toContain('對話 ID')
   // The web card keeps the actionable resume command without another id-only button.
   expect(servePage(STRINGS.en, 'n')).not.toContain("copy(ask.sessionId)")
-  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen, ask.key)")
+  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen, key)")
 
   // Ended, a session whose agent reopens one by id offers that command, in its own folder.
   const ended = buildView(parseProgress(file.replaceAll('state=waiting', 'state=ended')), [], null, now, 0, {}, STRINGS.en).stopped
@@ -4181,7 +4210,8 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(press('unhide', codexKey)).toEqual({ type: 'refuse', note: STRINGS.en.pressNothing })
   // The page's script and words carry the buttons.
   const page = servePage(STRINGS.en, 'n')
-  expect(page).toContain("act(ask.key, 'hide')")
+  expect(page).toContain("button(w('answeredHide'), function () { act(key, 'hide'); })")
+  expect(page).toContain("button(w('pgAnswered'), function () { act(key, 'hide'); }, 'primary')")
   expect(page).toContain("act(one.key, 'unhide')")
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
 })
@@ -4214,7 +4244,8 @@ test('a reply on the line of a task whose question was marked answered goes as i
   expect(row(resumeModel(view, [], STRINGS.en))?.question).toBe('')
   const stale = { key: grok, type: 'send', text: 'Use Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?' }
   expect(resumeAction(items, stale, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
-  expect(servePage(STRINGS.en, 'n')).toContain('var asked = row.question;')
+  // A row's message box is drawn with the question the row names, which the reply carries back.
+  expect(servePage(STRINGS.en, 'n')).toContain("replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery)")
   // Still asked, it opens by itself and a reply goes as its answer.
   expect([row(resumeModel(serveView(), [], STRINGS.en))?.isAsking, row(resumeModel(serveView(), [], STRINGS.en))?.question]).toEqual([true, 'Redis or Memcached?'])
   const asking = boardItems(serveView(), [])
@@ -4304,10 +4335,13 @@ test('progress.html and the serve page show stopped tasks in a closed shelf', ()
   expect(boardScreen(view, [], toggled, STRINGS.en)).toContain('Stopped <plan>')
   expect(boardScreen(view, [], emptyBoardState, STRINGS.en)).not.toContain('Stopped <plan>')
   expect(boardScreen(view, [], emptyBoardState, STRINGS.en)).not.toContain(STRINGS.en.empty)
+  // The page keeps them on a shelf that stays closed until it is opened, one row each, under the Stopped word.
   const page = servePage(STRINGS.en, 'nonce')
-  expect(page).toContain("opened['stopped:'] === true")
-  expect(page).toContain("w('stoppedCount', model.stopped.length)")
-  expect(page).toContain('rowCard(row)')
+  expect(page).toContain("shelf('stopped', w('pgStopped')")
+  expect(page).toContain("fold.inert = opened['shelf:' + name] !== true;")
+  expect(page).toContain('var one = rowItem(ref, name, section, true);')
+  const grouped = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] }).view
+  expect(grouped?.all.stopped.map(one => one.key)).toEqual([row?.key])
 })
 
 test('every language has the stopped count words', () => {
@@ -4377,7 +4411,9 @@ test('every language has the idle count words', () => {
   for (const words of Object.values(STRINGS)) {
     expect(words.boardKeyIdle).toMatch(/^i /)
     expect(words.boardUsage).toContain('--all')
-    expect(pageWords(words).idleCount).toBe(words.idleCount(1).replace('1', '\u0001'))
+    // The page has no idle shelf: an idle task joins the Stopped shelf, so the page asks for that word, not the idle count.
+    expect(Object.hasOwn(pageWords(words), 'idleCount')).toBe(false)
+    expect(pageWords(words).pgStopped).toBe(words.pgStopped)
   }
 })
 
@@ -4409,7 +4445,14 @@ test('the idle shelf keeps terminal and page row actions without putting its que
   expect(row?.canArchive).toBe(true)
   expect(serveAction(boardItems(view, []), { key: row?.key ?? '', type: 'tick', text: row?.next ?? '', session: '', fp: row?.fp }, STRINGS.en).type).toBe('tick')
   expect(serveAction(boardItems(view, []), { key: row?.key ?? '', type: 'archive', text: '', session: '', fp: row?.fp }, STRINGS.en).type).toBe('archive')
-  expect(servePage(STRINGS.en, 'nonce')).toContain("opened['idle:'] === true")
+  // The page lists an idle task on its closed Stopped shelf, not among the questions, and draws it with the same row buttons.
+  const grouped = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] }).view
+  expect([...(grouped?.all.stopped ?? []), ...(grouped?.own.stopped ?? [])].map(one => one.key)).toEqual([row?.key])
+  expect(grouped?.needs.cards).toEqual([])
+  const page = servePage(STRINGS.en, 'nonce')
+  expect(page).toContain("shelf('stopped', w('pgStopped')")
+  expect(page).toContain("act(key, 'tick', row.next")
+  expect(page).toContain("act(key, 'archive'")
 })
 
 test('an ordinary board never resumes a closed session even without messaging enabled', () => {
@@ -4457,23 +4500,24 @@ test('quoted connection paths after equals and opening parentheses decode their 
 
 
 test("the redesigned pages speak the page's language in every new word", () => {
-  const keys = ['viewAll', 'viewStopped', 'viewCount', 'sideViews', 'sideProjects', 'sideAgents', 'sideOwnTasks', 'viewEmptyDue', 'viewEmptyStopped', 'viewEmptyRecent', 'viewEmptyFiltered', 'clearFilters', 'removeFilter', 'sectionActive', 'sectionDue'] as const
+  // The words the page script fills in; the words the server writes into the page itself are checked below.
+  const keys = ['pgNeeds', 'pgWorking', 'pgOthers', 'pgStopped', 'pgDone', 'pgAgents', 'pgOlder', 'pgOlderOne', 'pgSideFold', 'pgSideOpen', 'showAllQuestions'] as const
   for (const s of Object.values(STRINGS)) {
     const view = buildView(parseProgress('## Synthetic\n### Plan\n- [ ] Continue\n'), [], null, NOW, 0, {}, s)
     const live = servePage(s, 'synthetic')
     const snapshot = dashboardHtml(view, s, 'synthetic', 'synthetic')
     for (const page of [live, snapshot]) {
-      for (const label of [s.themeLabel, s.themeSystem, s.themeLight, s.themeDark]) expect(page).toContain(label)
-      expect(page).toContain('data-theme-pick="system"')
-      expect(page).toContain('data-theme-pick="light"')
-      expect(page).toContain('data-theme-pick="dark"')
+      // One icon button switches between light and dark; it names the theme it switches to, in the page's language.
+      for (const label of [s.themeToDark, s.themeToLight]) expect(page).toContain(label)
+      expect(page).toContain('data-theme-toggle')
+      expect(page).not.toContain('data-theme-pick')
     }
-    expect(live).toContain(s.sideTitle)
+    for (const label of [s.pgViews, s.pgOverview, s.pgNeeds, s.pgWorking, s.pgOthers, s.pgDone, s.pgProjects, s.pgAgents, s.pgSideFold]) expect(live).toContain(label)
     expect(live).toContain(s.serveLive)
     expect(live).toContain(s.serveLiveHint)
     expect(live).toContain(s.sideClose)
-    expect(snapshot).toContain(s.dashSections)
-    expect(snapshot).toContain('data-section="dash-others"')
+    for (const label of [s.pgNeeds, s.pgWorking, s.pgAgents]) expect(snapshot).toContain(label)
+    expect(snapshot).toContain('data-key="section:others"')
     expect(snapshot).not.toContain('href="#')
     const words = pageWords(s)
     for (const key of keys) {

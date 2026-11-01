@@ -6,10 +6,12 @@ import { agentLabel } from './strings'
 import type { AskKind } from './ask'
 import { confirmKey, shortId, stepWords, upsertAutoBlock } from './blocks'
 import type { ConfirmRef } from './blocks'
+import { isLifecycleStep } from './codex'
+import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
 import { sha256 } from './sha256'
 import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
@@ -228,6 +230,14 @@ const DAY = 24 * HOUR
 export const IDLE_MS = 7 * DAY
 export const OLDER_SHOWN = 10
 
+// A session titled by its folder has its project's name for a title; a row then names it once.
+// Case and the path separator do not make two names (#612). The page's script keeps a copy.
+export const isSameName = (project: string, title: string): boolean => {
+  const key = (name: string): string => name.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+
+  return key(project) !== '' && key(project) === key(title)
+}
+
 export const relativeTime = (then: number, now: number, s: Strings = ZH_TW): string => {
   if (then <= 0) return ''
   const gap = Math.max(0, now - then)
@@ -301,18 +311,29 @@ export const mirrorMatchesTask = (mirror: ProgressMirror, project: string, task:
   return source.title === task.title && steps(source) === steps(task) && contextOf(source) === contextOf(task) && handoffOf(source) === handoffOf(task)
 }
 
+// The words a step shows. A step an agent wrote as a whole JSON record has none of its own
+// (`recordStepWords`), so the person reads its text field or a plain line, never the braces,
+// ids and paths inside. A hand-kept task's steps are the person's own words and stay as written,
+// which also keeps a press on one matching the line the file holds.
+const shownStep = (task: ProgressTask, text: string, s: Strings): { text: string; note: string } => {
+  const words = task.auto === null ? null : recordStepWords(text, s)
+
+  return words === null ? splitNote(text) : { text: words, note: '' }
+}
+
 // `isAsked` leaves out a question the person marked answered.
 const stepPhrase = (task: ProgressTask, s: Strings, isAsked: (index: number) => boolean = () => true): { status: string; tone: Tone } => {
   const blocked = task.steps.find(step => step.status === 'blocked')
-  if (blocked !== undefined) return { status: s.stuck(splitNote(blocked.text).text), tone: 'alert' }
+  if (blocked !== undefined) return { status: s.stuck(shownStep(task, blocked.text, s).text), tone: 'alert' }
   const waiting = task.steps.find((step, index) => step.status === 'waiting' && isAsked(index))
-  if (waiting !== undefined) return { status: s.waitsOnYou(splitNote(waiting.text).text), tone: 'warn' }
+  if (waiting !== undefined) return { status: s.waitsOnYou(shownStep(task, waiting.text, s).text), tone: 'warn' }
   const running = task.steps.find(step => step.status === 'running')
-  if (running !== undefined) return { status: s.runningStep(splitNote(running.text).text), tone: 'running' }
+  if (running !== undefined) return { status: s.runningStep(shownStep(task, running.text, s).text), tone: 'running' }
   const current = task.steps[currentStepIndex(task)]
   if (current === undefined) return { status: s.noSteps, tone: 'quiet' }
+  const words = task.auto === null ? current.text : recordStepWords(current.text, s) ?? current.text
 
-  return { status: current.status === 'doing' ? s.doingStep(current.text) : s.nextStep(current.text), tone: 'quiet' }
+  return { status: current.status === 'doing' ? s.doingStep(words) : s.nextStep(words), tone: 'quiet' }
 }
 
 // Every status a glyph carries is also said in words.
@@ -504,7 +525,7 @@ const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
 
   return foldSteps(
     task.steps.map((step, index) => ({
-      ...splitNote(step.text),
+      ...shownStep(task, step.text, s),
       status: step.status,
       depth: step.depth,
       isCurrent: index === current,
@@ -774,6 +795,7 @@ export const buildView = (
   pending: readonly PendingTurn[] = [],
   frozen: ReadonlySet<string> = new Set(),
   observe: typeof observeQuestions = observeQuestions,
+  staleMs: number = STALE_MS,
 ): View => {
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
   // pair is no second row. What is left is what the rows, the questions and the counts read.
@@ -852,7 +874,7 @@ export const buildView = (
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
-      const stale = isStale(task.auto, now, updated)
+      const stale = isStale(task.auto, now, updated, staleMs)
       const isInactive = !isManual && (isComplete || stale || task.auto?.state === 'ended')
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
@@ -961,7 +983,9 @@ export const buildView = (
       // One whose questions were all marked answered is back with the work in progress.
       if (!isIdle && auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index))) continue
 
-      const { done, total } = countSteps(task)
+      // A hook's placeholder step says the session waits; while it works the row shows no step (#612).
+      const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
+      const { done, total } = countSteps(shown)
       const phrase =
         auto === 'working'
           ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
@@ -986,7 +1010,7 @@ export const buildView = (
         ...(clock.isFuture ? { hasFutureTime: true } : {}),
         isHere,
         auto,
-        steps: rowSteps(task, s),
+        steps: rowSteps(shown, s),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
         questions: isInactive ? unresolved : [],
         question: isInactive ? unresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
@@ -1172,7 +1196,7 @@ export const buildView = (
     let isInactiveSource = false
     if (source.kind === 'block' && !liveScopes.has(record.scope)) {
       // Unknown historical source shapes retain the existing review behavior.
-      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated) || isMarksComplete(saved.steps))
+      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated, staleMs) || isMarksComplete(saved.steps))
     }
     const isStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
     const stage = isStopped ? 'older' : age.stage

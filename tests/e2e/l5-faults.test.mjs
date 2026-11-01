@@ -1,10 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { EN } from '../../hooks/strings-en.ts'
 import { STALE_MS } from '../../hooks/parse.ts'
 import { makeWorld } from './lib/world.mjs'
 import { observeHookRecovery } from './lib/recovery-observation.mjs'
+import { seenWithin } from './lib/expect.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { formatWriters, holdNextRename, keptHookEvents, lockFile, storageFault, tear } from './lib/faults.mjs'
 import { chat, html, pageDom, run, serve } from './lib/surfaces.mjs'
@@ -62,12 +64,17 @@ test('L5 read-only file: a failed tick writes no journal line and shows a one-li
     })
     const card = page.cards().find(one => one.textContent.includes('First card'))
     assert.ok(card, page.text())
-    // The button names this long step by its first words (#463); the whole step is its title and is what a press sends.
-    const button = page.buttons(card).find(one => one.textContent.startsWith('Done: ') && one.title === step)
+    // The row's Done button names this long step by its first words (#463); the whole step is its title, the row lists it and the press sends it.
+    // Each step in the open row has its own Done button too, named by the whole step; this is the row's one.
+    const button = page.buttons(card).find(one => one.textContent.startsWith('Done: ') && one.title === step && (one.className || '').split(' ').includes('primary'))
+    assert.ok(button?.textContent.endsWith('…'), card.textContent)
     assert.ok(button, card.textContent)
-    assert.ok(button.textContent.endsWith('…'), button.textContent)
+    assert.ok(card.textContent.includes(step), card.textContent)
+    // A person opens the row before pressing what is inside it.
+    assert.ok(page.reveal(button), 'The tick button must be reachable')
     button.click()
     await page.flush()
+    assert.equal(page.requests.at(-1).body.text, step)
     assert.equal(response.status, 409)
     const result = descendants(card).find(one => one.className?.split(' ').includes('press-result'))
     assert.equal(result?.textContent, unsaved)
@@ -215,7 +222,11 @@ test('L5 torn tail: the terminal, --chat, html view and page each warn once and 
         const label = `${shape.name} on ${surface}`
         // Once, and whole: a warning cut over two lines or shown twice does not count.
         assert.equal(occurrences(text, cutOff), 1, `${label}:\n${text}`)
-        for (const title of shape.complete) assert.ok(text.includes(title), `${label} lost ${title}:\n${text}`)
+        for (const title of shape.complete) {
+          // A waiting session is a card of its question on the page, which does not name the task.
+          const shown = surface === 'page' && title === 'Second complete card' ? 'Publish the synthetic docs, OK?' : title
+          assert.ok(text.includes(shown), `${label} lost ${title}:\n${text}`)
+        }
       }
       for (const surface of ['terminal', 'chat']) assert.equal(screens[surface].split('\n').filter(line => line.trim() === cutOff).length, 1, surface)
       assert.equal((await server.get('/api/board')).json().model.warning, cutOff)
@@ -339,12 +350,61 @@ const raceOnce = async isWindows => {
     assert.equal(warmed.status, 0, whyFailed(warmed))
     const rounds = isWindows ? 40 : 30
     // Test-only headroom lets a loaded CI machine schedule every competing writer.
-    const writers = await formatWriters(world, RACE_WRITERS, { rounds, spacingMs: isWindows ? 75 : 25, lockWaitMs: 8000 })
+    const overlap = { held: join(world.claudeDir, 'format-overlap-held'), release: join(world.claudeDir, 'format-overlap-release') }
+    const overlapSeen = join(world.claudeDir, 'hook-overlap-seen')
+    const hookReady = join(world.claudeDir, 'hook-overlap-ready')
+    const writers = await formatWriters(world, RACE_WRITERS, { rounds, spacingMs: isWindows ? 75 : 25, lockWaitMs: 8000, overlap })
     const start = () => RACE_HOOKS.map(session => hook(world, 'codex', 'UserPromptSubmit', { session_id: session, prompt: 'Review the synthetic routes', cwd: world.root }))
-    writers.go()
-    const hooks = start()
+    const preload = world.write('hook-overlap.cjs', `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const open = fs.openSync
+const lock = ${JSON.stringify(`${world.path}.agent-board-lock`)}
+const isReporter = process.argv.includes('--hook-recovery-parent')
+fs.openSync = (file, ...args) => {
+  const isTarget = isReporter && String(file) === lock && args[0] === 'wx'
+  if (isTarget && !fs.existsSync(${JSON.stringify(overlap.held)})) {
+    fs.writeFileSync(${JSON.stringify(hookReady)}, 'hook at lock')
+    const until = performance.now() + 8000
+    while (!fs.existsSync(${JSON.stringify(overlap.held)})) {
+      if (performance.now() >= until) throw new Error('no writer took the lock')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+    }
+  }
+  try { return open(file, ...args) } catch (error) {
+    if (isTarget && ['EEXIST', 'EPERM'].includes(error.code)) {
+      try {
+        const owner = JSON.parse(fs.readFileSync(lock, 'utf8'))
+        if (String(owner.pid) === fs.readFileSync(${JSON.stringify(overlap.held)}, 'utf8')) fs.writeFileSync(${JSON.stringify(overlapSeen)}, 'hook contended with writer')
+      } catch {}
+    }
+    throw error
+  }
+}
+syncBuiltinESMExports()
+`)
+    const before = world.env.NODE_OPTIONS
+    let hooks = []
+    let settledHooks = Promise.resolve([])
+    try {
+      world.env.NODE_OPTIONS += ` --require=${JSON.stringify(preload)}`
+      hooks = start()
+      settledHooks = Promise.allSettled(hooks)
+      await seenWithin(() => world.exists('hook-overlap-ready') ? 'ready' : '', text => text === 'ready', 8000)
+      writers.go()
+      await seenWithin(() => world.exists('hook-overlap-seen') ? 'seen' : '', text => text === 'seen', 8000)
+    } catch (error) {
+      writers.go()
+      world.write('format-overlap-release', '')
+      await settledHooks
+      await writers.stop()
+      throw error
+    } finally {
+      world.env.NODE_OPTIONS = before
+      world.write('format-overlap-release', '')
+    }
     const written = await writers.finished()
     const ran = await Promise.all(hooks)
+    assert.ok(world.exists('hook-overlap-seen'), 'a foreground hook reporter contended with a FORMAT writer')
     // Recovery may finish between the separate reads of the board and pending files.
     // Observe the existing recovery bound without another foreground event.
     const sessions = [warmup, ...RACE_HOOKS]
@@ -417,6 +477,8 @@ test('L5 FORMAT.md writer: a block whose rename is refused while another program
     const held = await holder.finished()
     assert.equal(held.status, 0, held.stderr)
     assert.match(held.stdout, /HOLDER_RELEASED/)
+    const retry = holder.retry()
+    assert.equal(retry.succeeded, retry.refused, 'the same temp file was renamed after the refusal, not a later outer write attempt')
     t.diagnostic(result.stdout.trim())
     assert.match(world.read('progress.md'), /Manual text must survive\n/)
     assert.match(world.read('progress.md'), /- \[~\] Round 1\n<!-- \/auto session=f2000001 -->/)
@@ -424,23 +486,12 @@ test('L5 FORMAT.md writer: a block whose rename is refused while another program
   } finally { await world.close() }
 })
 
-// pageDom (lib/surfaces.mjs) answers /api/board itself and has no document.querySelectorAll, so it
-// cannot show a tab whose server has gone. This gives the shipped page script both, inside the
-// script only and after its 'use strict': polls go to the real server as a POST the test
-// forwards, and the missing selector is answered from the buttons the page drew.
+// pageDom (lib/surfaces.mjs) answers /api/board itself, so it cannot show a tab whose server has
+// gone. This gives the shipped page script a fetch of its own, inside the script only and after its
+// 'use strict': polls go to the real server as a POST the test forwards.
 const reachableTab = source => source.replace("'use strict';", () => `'use strict';
-  document.querySelectorAll = function (selector) {
-    var found = []
-    function walk(node) { if (node.tag === 'button') found.push(node); node.childNodes.forEach(walk) }
-    ['summary', 'counts', 'status', 'board', 'note', 'main'].forEach(function (id) { walk(document.getElementById(id)) })
-    return found.filter(function (node) {
-      if (selector.indexOf('data-local') >= 0) return node.getAttribute('data-local') === null
-      if (selector.indexOf('data-static') >= 0) return node.getAttribute('data-static') !== null
-      return true
-    })
-  }
   var send = fetch
-  fetch = function (target, options) { return target === '/api/board' ? send('/api/poll', { method: 'POST', body: '{}' }) : send(target, options) }`)
+  fetch = function (target, options) { return String(target).indexOf('/api/board') === 0 ? send('/api/poll', { method: 'POST', body: '{}' }) : send(target, options) }`)
 
 test('L5 restarted server: after a real restart an old page tab disables every button that needs the server and says how to reconnect', async () => {
   const world = makeWorld()
@@ -516,7 +567,9 @@ test('L5 OpenCode exit: a row whose end report missed the hook limit reads as st
       assert.ok(at >= 0, `${surface} lost the row:\n${text}`)
       const row = text.slice(at, at + 300)
       assert.doesNotMatch(row, /is working/, `${surface} still calls a silent agent working`)
-      assert.ok(row.includes(saysWhy), `${surface} never says "${saysWhy}": ${row}`)
+      // The page puts the row on its Stopped shelf: "Stopped at:" the step, and the age beside it.
+      if (surface === 'page') assert.ok(row.includes(EN.pgStoppedAt('Synthetic next step')) && row.includes(EN.hoursAgo(STALE_MS / 3600000)), `${surface} never says it stopped ${EN.hoursAgo(STALE_MS / 3600000)}: ${row}`)
+      else assert.ok(row.includes(saysWhy), `${surface} never says "${saysWhy}": ${row}`)
     }
   } finally { await world.close() }
 })
@@ -539,6 +592,9 @@ test('L5 crashed agent: a working row with no event for the stale time of its ho
     // The age is whole hours rounded down, so the extra minute past the stale time still reads as
     // the stale time itself (12 h).
     const saysWhy = EN.sessionStopped(EN.hoursAgo(STALE_MS / 3600000))
-    for (const [surface, row] of Object.entries(rows)) assert.ok(row.includes(saysWhy), `${surface} never says "${saysWhy}": ${row}`)
+    for (const [surface, row] of Object.entries(rows)) {
+      if (surface === 'page') assert.ok(row.includes(EN.pgStoppedAt('Check the synthetic routes')) && row.includes(EN.hoursAgo(STALE_MS / 3600000)), `${surface} never says it stopped ${EN.hoursAgo(STALE_MS / 3600000)}: ${row}`)
+      else assert.ok(row.includes(saysWhy), `${surface} never says "${saysWhy}": ${row}`)
+    }
   } finally { await world.close() }
 })

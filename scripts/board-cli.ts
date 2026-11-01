@@ -20,8 +20,8 @@ import { startServer } from './board-serve'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
-import { serverMemoryArgs } from './server-runtime'
-import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RuntimeFolderError, writePrivateRuntimeFile } from './runtime-folder'
+import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
+import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
 import { idleTimeout } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
@@ -30,7 +30,7 @@ import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, missingEntries, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
-import { parseProgress, progressTail } from '../hooks/parse'
+import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
@@ -53,6 +53,10 @@ const idleMs = (): number => {
   const value = flag('--idle-minutes')
   if (args.includes('--idle-minutes') && value === undefined) throw new Error('INVALID_IDLE_MINUTES')
   return idleTimeout(value)
+}
+const staleTimeoutMs = (): number => {
+  if (args.includes('--stale-ms') && flag('--stale-ms') === undefined) throw new Error('INVALID_STALE_MS')
+  return parseStaleMs(flag('--stale-ms') ?? process.env.AGENT_BOARD_STALE_MS)
 }
 
 const progressFile = (): string => {
@@ -470,7 +474,7 @@ const readBoardView = (source: string, now: number) => {
   const finished = countManualDone(projects, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now))
   const details = storageDetails(sizes, finished, s)
   const health = progressHealthCache.lines
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns, frozen, observeViewQuestions), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(health.length === 0 ? {} : { health }) }
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const view = (source = read(path), now = Date.now()) => {
@@ -683,11 +687,12 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
 }
 
 const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
-  const now = new Date()
+  // Through Date.now, so a test clock reaches progress.html's Working now as it reaches the rest.
+  const now = new Date(Date.now())
   const stamp = s.dashStamp(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`)
   const html = path.replace(/\.md$/i, '') + '.html'
   const home = homeOrNone()
-  const page = dashboardHtml(view(), s, path, stamp, pending(text => redact(text, home, process.platform === 'win32')))
+  const page = dashboardHtml(view(), s, path, stamp, pending(text => redact(text, home, process.platform === 'win32')), now.getTime())
   // Named like any other file the board cannot write, so --watch reports it and runs on.
   try {
     writeFileSync(html, page)
@@ -794,7 +799,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     try {
       wrote = rewrite(path, text => {
         if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-        const next = confirmTask(text, action.ref, now, s, lastSeen)
+        const next = confirmTask(text, action.ref, now, s, lastSeen, staleTimeoutMs())
         if (next === null) return null
         const lines = next.entries.map(entry => journalLine(entry, now, s))
         rewrite(journal, past => {
@@ -866,7 +871,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         retentionFailed = true
         return { text, entries: [] }
       }
-      return takeTask(text, action.ref, now, s, lastSeen)
+      return takeTask(text, action.ref, now, s, lastSeen, staleTimeoutMs())
     }, now)
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
@@ -894,7 +899,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       const source = read(path)
       const projects = parseProgress(source)
       const frozen = cutOffScopes(projects, cutOffSpans(source, isCutSettledAt(now)))
-      const fresh = buildView(projects, [], null, now, 0, {}, s, answered ?? [], {}, latest, proofs, pending(), frozen)
+      const fresh = buildView(projects, [], null, now, 0, {}, s, answered ?? [], {}, latest, proofs, pending(), frozen, undefined, staleTimeoutMs())
       if (isHidden && keys.some(key => ![...fresh.waiting, ...(fresh.reminder ?? []), ...(fresh.older ?? []), ...fresh.hidden].some(item => item.canHide !== false && item.hideKey === key))) return null
       const aliases = observeQuestions(latest, projects, null, answered ?? [], now, true, 'preview', undefined, [], [], frozen).ledger
       return answered === null ? null : answeredJson(withAnswered(answered, isHidden ? keys : keys.flatMap(key => acknowledgementKeys(aliases, key)), isHidden))
@@ -1020,6 +1025,10 @@ const keysIn = (chunk: string): string[] => (chunk.replace(/\r\n/g, '\r').match(
 
 const failureNote = (error: unknown): string => {
   process.exitCode = 1
+  if (error instanceof Error && error.message === 'INVALID_STALE_MS') {
+    process.stderr.write(`INVALID_STALE_MS: ${s.invalidStaleMs}\n`)
+    return s.invalidStaleMs
+  }
   if (!(error instanceof BoardFileError)) {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
     return s.pressFailed
@@ -1160,9 +1169,10 @@ const isOwnFolder = (dir: string): boolean => {
 
 // Windows temp folders can grant sandbox accounts access. Protect only our dedicated child,
 // never the caller's whole runtime directory, before a token can be written.
-const runFolder = (): string => {
+// `name` is the address file: it is read in the same check as the folder when it is already there.
+const runFolder = (name: string): string => {
   const runtime = process.env.XDG_RUNTIME_DIR
-  if (process.platform === 'win32') return privateRuntimeFolder(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'))
+  if (process.platform === 'win32') return privateRuntimeFolder(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'), [name])
   if (runtime && isOwnFolder(runtime)) return runtime
   const own = join(homedir(), '.cache', 'agent-board')
   try {
@@ -1180,7 +1190,11 @@ const runFolder = (): string => {
 let served: string | undefined
 // The same progress.md named two ways (C:/x and C:\x) is one board, with one page.
 const board = (file: string): string => resolve(file)
-const serveFile = (): string => (served ??= join(runFolder(), `agent-board-${createHash('sha256').update(board(path)).digest('hex').slice(0, 16)}.json`))
+const serveFile = (): string => {
+  if (served !== undefined) return served
+  const name = `agent-board-${createHash('sha256').update(board(path)).digest('hex').slice(0, 16)}.json`
+  return (served = join(runFolder(name), name))
+}
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
@@ -1258,7 +1272,7 @@ const serveChild = (): void => {
     reports: () => parseProgress(read(path)).flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }])),
     s,
     port: Number(flag('--port') ?? 0) || 0,
-    ping: { path, built, idleMs: idleMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
+    ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
     // Every page request starts by reading the board.
     view: freshView,
     pending: (isFresh = true) => pending(undefined, isFresh),
@@ -1341,7 +1355,8 @@ const runningPage = async (isStarting = false): Promise<{ page: Running; isKept:
   const first = await ping(running)
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === resolve(flag('--messages-dir')!))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  const requestedStale = staleTimeoutMs()
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === resolve(flag('--messages-dir')!)) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
@@ -1388,13 +1403,15 @@ const ensureServer = async (): Promise<RunningServer | null> => {
   if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
   const found = await runningPage()
   if (found !== null) return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
-  const rest = ['--lang', '--port', '--messages-dir', '--idle-minutes'].flatMap(name => {
+  const rest = ['--lang', '--port', '--messages-dir', '--idle-minutes', '--stale-ms'].flatMap(name => {
     const value = flag(name)
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
   // In the board's own folder, not the agent's, so the server holds no project folder open.
-  const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+  // On Windows the server child is told which folder was just checked, so it does not check it again.
+  const handoff = runtimeFolderHandoff()
+  const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: serverMemoryEnv(handoff === undefined ? process.env : { ...process.env, [RUNTIME_FOLDER_ENV]: handoff }) })
   const readyBy = performance.now() + 10_000
   // The child prints its address once it listens; it exits at once when it cannot.
   const url = await new Promise<string | null>(done => {
@@ -1633,6 +1650,7 @@ const run = async (): Promise<void> => {
   } else if (args[0] === 'stop' || args.includes('--stop')) {
     await stopBoard()
   } else if (args.includes('--serve-child')) {
+    dropServerMemoryEnv(process.env)
     serveChild()
   } else if (args.includes('--chat')) {
     // Before the flags that serve, open or write: a chat reply never starts a page.

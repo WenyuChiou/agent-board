@@ -875,6 +875,37 @@ test('explicit actions on an observed future-dated stopped task recheck the same
   expect(takeArchivable(original, at, undefined, ZH_TW, true).text).toBe(original)
 })
 
+test('configurable staleness allows completion and archive on quiet sessions and forbids them when active', () => {
+  const customStale = 5 * 60 * 1000
+  const text = (stamp: number): string => `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=working updated=${new Date(stamp).toISOString()} -->\n### Quiet task\n- [~] Doing\n<!-- /auto session=a1b2c3d4 -->`
+  const original = text(NOW)
+  const projects = parseProgress(original)
+  const seen = withSeen({}, projects, NOW)
+
+  // Active within customStale
+  const activeAt = NOW + 4 * 60 * 1000
+  const activeView = buildView(projects, [], null, activeAt, 0, {}, ZH_TW, [], seen, undefined, undefined, [], undefined, undefined, customStale)
+  expect(activeView.stopped).toHaveLength(0)
+
+  // Stopped past customStale
+  const stoppedAt = NOW + 5 * 60 * 1000 + 1
+  const stoppedView = buildView(projects, [], null, stoppedAt, 0, {}, ZH_TW, [], seen, undefined, undefined, [], undefined, undefined, customStale)
+  expect(stoppedView.stopped).toHaveLength(1)
+  const row = stoppedView.stopped[0]
+  expect(row?.confirm).not.toBe(null)
+  expect(row?.archive).not.toBe(null)
+  if (!row?.confirm || !row.archive) throw new Error('stopped row actions missing')
+  expect(confirmTask(original, row.confirm, stoppedAt, ZH_TW, seen, customStale)?.text).toContain('state=done')
+  const archived = takeTask(original, row.archive, stoppedAt, ZH_TW, seen, customStale)
+  expect(archived).not.toBe(null)
+  expect(archived?.text).not.toContain('Quiet task')
+
+  // When resumed (newer update within customStale), archive and confirm are disallowed
+  const resumed = text(stoppedAt)
+  expect(confirmTask(resumed, row.confirm, stoppedAt, ZH_TW, seen, customStale)).toBe(null)
+  expect(takeTask(resumed, row.archive, stoppedAt, ZH_TW, seen, customStale)).toBe(null)
+})
+
 test('a task idle exactly seven days stays on the board and one idle a millisecond longer is hidden', () => {
   const file = (at: number): string => `## demo
 <!-- auto session=a1b2c3d4 state=ended updated=${new Date(at).toISOString()} -->

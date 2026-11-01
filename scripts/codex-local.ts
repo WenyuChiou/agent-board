@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -10,9 +10,10 @@ import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { parseProgress, progressTail, STALE_MS } from '../hooks/parse'
+import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
-import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents } from '../hooks/local-agents'
+import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents, windowsHookCommand } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
 import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
@@ -24,6 +25,7 @@ import { PROMPT_EVENTS } from '../hooks/inbox'
 import { windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
+import { RELEASED } from '../hooks/released'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown> }
@@ -42,6 +44,53 @@ const readBytes = (file: string): Buffer | null => {
   }
 }
 const readLocal = (file: string): string | null => readBytes(file)?.toString('utf8') ?? null
+
+// The repository name in a remote's address: `demo` from `https://host/x/demo.git` or `git@host:x/demo.git`.
+// `origin` when there is one, else the first remote; only that section's own `url` counts.
+const remoteName = (config: string): string => {
+  const remotes = config.split(/^(?=\s*\[)/m).filter(section => /^\s*\[remote\s/.test(section))
+  const remote = remotes.find(section => /^\s*\[remote\s+"origin"\s*\]/.test(section)) ?? remotes[0] ?? ''
+  const url = /^\s*url\s*=\s*(.+?)\s*$/m.exec(remote)?.[1] ?? ''
+
+  return (url.split(/[\\/:]/).filter(Boolean).pop() ?? '').replace(/\.git$/, '')
+}
+
+// Names this folder's project may go by, as the Claude mod's `detectHere` has them: the folder
+// Codex files its block under, the main repository's folder for a git worktree, and the
+// repository's name in its remote. Read from `.git`, `commondir` and `config`, without
+// starting git inside the host's time limit; anything unreadable leaves the folder alone.
+const hereNames = (cwd: unknown): string[] => {
+  const folder = folderProject(cwd)
+  const names = new Set(folder === '' ? [] : [folder])
+  if (typeof cwd !== 'string' || folder === '' || !isAbsolute(cwd)) return [...names]
+  try {
+    const dotGit = join(cwd, '.git')
+    if (!existsSync(dotGit)) return [...names]
+    // A checkout has a `.git` folder; a worktree has a `.git` file that names its own folder.
+    const gitDir = statSync(dotGit).isDirectory() ? dotGit : resolve(cwd, /^gitdir:\s*(.+)$/im.exec(readLocal(dotGit) ?? '')?.[1]?.trim() ?? '.git')
+    const common = readLocal(join(gitDir, 'commondir'))?.trim()
+    const commonDir = common === undefined ? gitDir : resolve(gitDir, common)
+    // Only a worktree has `commondir`; a submodule's git folder sits under `.git/modules`, not in a checkout.
+    if (common !== undefined) names.add(basename(dirname(commonDir)))
+    names.add(remoteName(readLocal(join(commonDir, 'config')) ?? ''))
+  } catch {}
+
+  return [...names].filter(name => name !== '')
+}
+
+// A Codex session a person starts gets, on its SessionStart, the note the Claude mod gives a
+// first turn (#502). A run another agent started gets none, by the signal #501 keeps (`run`);
+// a resumed, cleared or compacted session already had its chance.
+export const codexStartNote = (raw: Json, run: RunSignal | undefined, session: string, progress: string, s: Strings, now = Date.now()): string | null => {
+  if (raw.hook_event_name !== 'SessionStart' || raw.source !== undefined && raw.source !== 'startup') return null
+  if (run !== undefined && isStrongRun(run)) return null
+  // A board the hook cannot read now (busy, no access) gives no note rather than a failed event.
+  let text: string | null = null
+  try { text = readLocal(progress) } catch {}
+  if (text === null) return null
+
+  return othersNote(parseProgress(text), hereNames(raw.cwd), hash(`codex:${session}`).slice(0, 8), now, s, s.othersTailCodex)
+}
 const withoutBom = (text: string): string => text.startsWith('\uFEFF') ? text.slice(1) : text
 const object = (value: unknown): Json => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_JSON_OBJECT')
@@ -75,6 +124,63 @@ const atomic = (file: string, text: string | Buffer, current: () => void = () =>
     if (existsSync(temporary)) unlinkSync(temporary)
   }
 }
+
+// Only board-defined codes may be copied from an error into the diagnostic log.
+const pendingErrorCodes = new Set([
+  'INVALID_JSON_OBJECT', 'INVALID_RAW_ENTRY', 'INVALID_RAW_ARGV', 'INVALID_RAW_MODE', 'INVALID_RAW_ENV',
+  'INVALID_SESSION', 'INVALID_EVENT', 'INVALID_STATE', 'INVALID_EVENT_STATE', 'SESSION_CONFLICT',
+  'UNBOUND_SESSION', 'MISSING_TURN', 'STALE_TURN', 'INVALID_TEXT', 'INVALID_STEPS', 'INVALID_STEP',
+  'UNFINISHED_STEPS', 'INVALID_OWNER', 'BLOCK_CONFLICT', 'BLOCK_NOT_VISIBLE',
+])
+const pendingErrorCode = (error: unknown): string => {
+  if (error instanceof SyntaxError) return 'INVALID_JSON'
+  return error instanceof Error && pendingErrorCodes.has(error.message) ? error.message : 'UNREADABLE'
+}
+
+// Log failures must never change replay, and queued content is never diagnostic text.
+const logPendingDrop = (home: string, stored: Json | undefined, code: string): void => {
+  try {
+    const args = Array.isArray(stored?.argv) ? stored.argv : []
+    const rawFlag = (name: string): unknown => {
+      for (let index = 1; index + 1 < args.length; index += 2) if (args[index] === name) return args[index + 1]
+      return undefined
+    }
+    const candidate = Array.isArray(stored?.argv) ? rawFlag('--agent') : stored?.agent
+    const agent = typeof candidate === 'string' && localAgents.includes(candidate as LocalAgent) ? candidate : 'unknown'
+    const payload: Json = stored?.payload && typeof stored.payload === 'object' && !Array.isArray(stored.payload) ? stored.payload as Json : {}
+    const eventValue = rawFlag('--hook-event') ?? rawFlag('--event') ?? stored?.event ?? payload.hook_event_name ?? payload.hookEventName
+    const events: readonly string[] = [...codexEvents, ...Object.keys(cursorEvents), ...Object.values(cursorEvents), ...Object.values(statusEvents).flatMap(events => Object.keys(events ?? {}))]
+    const event = typeof eventValue === 'string' && events.includes(eventValue) ? eventValue : 'unknown'
+    const file = join(home, '.agent-board', 'hook-errors.log')
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    let previous = ''
+    try {
+      if (!lstatSync(file).isFile()) throw new Error('UNSAFE_LOG')
+      const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+      try {
+        const info = fstatSync(fd)
+        if (!info.isFile()) throw new Error('UNSAFE_LOG')
+        const length = Math.min(info.size, 65536), bytes = Buffer.alloc(length)
+        const count = readSync(fd, bytes, 0, length, info.size - length)
+        previous = bytes.subarray(0, count).toString('utf8')
+        if (info.size > length) previous = previous.slice(previous.indexOf('\n') + 1)
+      } finally { closeSync(fd) }
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'ENOENT') throw error
+    }
+    const line = `${new Date().toISOString()} ${agent} ${event} PENDING_DROPPED_${code}`
+    // The same temporary name as the reporters' writer, so their sweep removes one a kill leaves.
+    const temporary = `${file}.${process.pid}.tmp`
+    const fd = openSync(temporary, 'wx', 0o600)
+    try {
+      try { writeFileSync(fd, `${[...previous.trimEnd().split('\n').filter(Boolean).slice(-199), line].join('\n')}\n`) } finally { closeSync(fd) }
+      renameSync(temporary, file)
+    } catch (error) {
+      try { unlinkSync(temporary) } catch {}
+      throw error
+    }
+  } catch {}
+}
 const input = async (): Promise<Json> => {
   let text = ''
   for await (const chunk of process.stdin) {
@@ -90,6 +196,12 @@ const quote = (path: string): string => {
 
 export const localProgressPath = (explicit: string | undefined, fallback: string, stored?: unknown): string =>
   resolve(explicit ?? (process.env.CLAUDE_PROGRESS_FILE || (typeof stored === 'string' ? stored : fallback)))
+
+export const codexTrustOutput = (result: { changes: number; applied: boolean }, s: Strings, isJson: boolean): string => {
+  if (isJson) return `${JSON.stringify(result, null, 2)}\n`
+  const line = result.changes === 0 ? s.codexTrustNone : result.applied ? s.codexTrustApplied(result.changes) : s.codexTrustPreview(result.changes)
+  return `${line}\n`
+}
 
 // What a person reads when a setup mode fails (#465): one sentence with its next step, never the code name, a stack or a path.
 export const setupFailure = (error: unknown, agent: string, s: Strings): { code: string; message: string } => {
@@ -228,7 +340,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // Who started the session, as far as the host's own words say (#399); absent when they say nothing.
       run?: RunSignal
     }
-    const reportSession = (): string | undefined => {
+    const reportSession = (targetAgent: LocalAgent = agent): string | undefined => {
       const digest = cwdDigest(process.cwd())
       if (digest === undefined || !existsSync(join(root, 'sessions'))) return undefined
       const candidates: string[] = []
@@ -237,7 +349,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         try {
           const record = object(JSON.parse(readLocal(join(root, 'sessions', file)) ?? '{}'))
           const updated = Date.parse(String(record.updated))
-          if (record.agent === 'codex' && record.folderDigest === digest && record.origin !== 'run' && (record.state === 'working' || record.state === 'waiting') && updated <= started && started - updated <= STALE_MS && typeof record.session === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(record.session)) candidates.push(record.session)
+          if (record.agent === targetAgent && record.folderDigest === digest && record.origin !== 'run' && (record.state === 'working' || record.state === 'waiting') && updated <= started && started - updated <= STALE_MS && typeof record.session === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(record.session)) candidates.push(record.session)
         } catch {}
         if (candidates.length > 1) return undefined
       }
@@ -245,13 +357,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     const buildEntry = (mode: string, agent: LocalAgent, raw: Json, flag: (name: string) => string | undefined, env: NodeJS.ProcessEnv, progress: string, at: number): Pending => {
       const payload = agent === 'cursor' && mode === '--codex-event' ? cursorEvent(raw) : raw
+      const rawCwd = raw.cwd || (agent === 'cursor' && Array.isArray(raw.workspace_roots) && raw.workspace_roots.every(root => typeof root === 'string') ? raw.workspace_roots[0] : undefined) || (typeof raw.workspaceRoot === 'string' ? raw.workspaceRoot : undefined)
       // Read before Cursor's adapter drops workspace_roots; a queued raw event keeps cwd and workspace_roots for this (#246).
-      const folder = filesByFolder(mode, agent) ? folderProject(raw.cwd || (agent === 'cursor' && Array.isArray(raw.workspace_roots) && raw.workspace_roots.every(root => typeof root === 'string') ? raw.workspace_roots[0] : undefined)) : ''
+      const folder = filesByFolder(mode, agent) ? folderProject(rawCwd) : ''
       // Only metadata selected below is retained. Save no prompts, tool inputs,
       // last_assistant_message, or permission decisions from a hook payload. transcript_path is
       // opened, when it is this session's own history file, for its first record at a session's
       // start or prompt, which says whether a person started it (#399), and for nothing else.
-      const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined)
+      const session = mode !== '--codex-report'
+        ? agent === 'antigravity'
+          ? (typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID)
+          : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined)
+        : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : (env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined) ?? reportSession())
       if (session === undefined && mode === '--codex-report' && agent === 'codex') throw new Error('UNBOUND_REPORT')
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
       const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
@@ -270,11 +387,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const opens = agent === 'codex' && mode === '--codex-event' && /^(?:SessionStart|UserPromptSubmit)$/.test(String(payload.hook_event_name))
       const path = payload.transcript_path
       const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path, session) : null) : undefined
+      const digest = mode !== '--codex-report' ? cwdDigest(rawCwd) : undefined
       // A queued event keeps metadata only: the host's own fields stay out, as they do above.
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
         ...(filesByFolder(mode, agent) ? { folder } : {}),
-        ...(agent === 'codex' && mode === '--codex-event' ? { folderDigest: cwdDigest(raw.cwd) } : {}),
+        ...(digest !== undefined && (agent !== 'codex' || folderProject(rawCwd) !== '') ? { folderDigest: digest } : {}),
         ...(run === undefined ? {} : { run }),
         payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
@@ -283,7 +401,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
-    const isInferredReport = mode === '--codex-report' && agent === 'codex' && flag('--session') === undefined && process.env.CODEX_THREAD_ID === undefined
+    const isInferredReport = mode === '--codex-report' && flag('--session') === undefined && (agent === 'codex' ? process.env.CODEX_THREAD_ID === undefined : !(process.env.AGENT_BOARD_AGENT === agent && process.env.AGENT_BOARD_SESSION_ID !== undefined))
     const rawEntry = (raw: Json): Pending => {
       if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
       if (!Array.isArray(raw.argv) || !raw.argv.every(value => typeof value === 'string')) throw new Error('INVALID_RAW_ARGV')
@@ -329,11 +447,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const next = Buffer.from(dropCodexBlock(before.toString('latin1'), owner), 'latin1')
       if (!next.equals(before)) atomic(progress, next, checkDeadline)
     }
-    const apply = ({ mode, agent, session, now, at, status, event, folder = '', folderDigest, isBoardPrompt, payload, run }: Pending): CodexReport => {
+    let isFirstSessionEvent = false
+    const apply = (entry: Pending): CodexReport => {
+      const { mode, agent, session, now, at, status, event, folder = '', folderDigest, isBoardPrompt, payload, run } = entry
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
       const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number }
+      if (entry === current && original === null) isFirstSessionEvent = true
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
       // Direct events can arrive out of order too, before they ever enter the pending queue.
       if (mode !== '--codex-report' && original !== null && (at ?? Date.parse(now)) < (original.appliedAt ?? Date.parse(original.updated))) {
@@ -372,7 +493,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const { origin: _origin, parent: _parent, isWeak: _isWeak, ...lifecycle } = initial
       const directory = agent === 'codex' && mode === '--codex-event' && name !== ''
         ? { folder: name, folderDigest }
-        : { folder: original?.folder, folderDigest: original?.folderDigest }
+        : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest }
       const report = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       if (isRun) {
         // A lazy history file can prove that a block written from a hint is a run.
@@ -483,22 +604,31 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             }
             const file = join(pending, name)
             if (file === queuedFile) continue
+            let stored: Json | undefined
+            let dropped: string | undefined
             try {
-              const stored = readPending(file)
+              stored = readPending(file)
               const entry = name.endsWith('.raw.json') ? rawEntry(stored) : stored as Pending
               if (entry.version === 1 && typeof entry.progress === 'string' && isHookEntry(entry)) {
                 if (entry.progress !== progress) continue
                 const signal = cleanSignal(entry.run)
                 if (!isOverdue(entry) || signal !== undefined && isStrongRun(signal)) apply(entry)
-              }
+                else dropped = 'OVERDUE'
+              } else dropped = 'UNKNOWN_VERSION'
             } catch (error) {
               const code = (error as { code?: unknown } | null)?.code
               if (isBusy(error) || typeof code === 'string' && code !== 'ENOENT' || error instanceof Error && ['INCOMPLETE_PROGRESS_TAIL', 'HOOK_TIMEOUT'].includes(error.message)) throw error
+              dropped = pendingErrorCode(error)
             }
             // Two boards sharing one data folder can both drop the same entry.
-            try { unlinkSync(file) } catch (error) {
+            let isRemoved = false
+            try {
+              unlinkSync(file)
+              isRemoved = true
+            } catch (error) {
               if ((error as { code?: string }).code !== 'ENOENT') throw error
             }
+            if (isRemoved && dropped !== undefined) logPendingDrop(home, stored, dropped)
             processed += 1
           }
           if (current === undefined) return
@@ -549,7 +679,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // The host supplies the binding; the agent supplies semantic summaries. A first
       // invocation also covers resumed conversations that have no SessionStart event.
       const isStart = current.event === 'SessionStart'
-      const isFirst = current.event === 'PreInvocation' && raw.invocationNum === 0
+      const isFirst = current.event === 'PreInvocation' && (raw.invocationNum === 0 || isFirstSessionEvent)
       // Legacy connect runs a bundle beside its chosen progress file, outside root.
       const context = isStart || isFirst ? s.localAgentAntigravityContext(boardRun(process.argv[1] ?? script, [
         '--codex-report', '--agent', 'antigravity', '--session', session,
@@ -557,6 +687,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       ])) : ''
       output(isStart ? { injectSteps: [{ systemMessage: { systemMessage: context } }] } : isFirst ? { injectSteps: [{ ephemeralMessage: context }] } : {})
     } else if (agent === 'gemini') output({})
+    else if (agent === 'codex' && mode === '--codex-event') {
+      const note = codexStartNote(raw, current.run, session, progress, s)
+      // Codex adds `additionalContext` to the conversation as developer context.
+      if (note !== null) output({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: note } })
+    }
     return true
   }
 
@@ -596,9 +731,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const changes: { file: string; action: string }[] = []
   const nextHooks: Json = { ...hooks }
   const groups: Json = {}
+  // Codex runs its hooks through PowerShell on Windows (#623).
+  const isPowerShellHost = agent === 'codex' && process.platform === 'win32'
+  const hostNode = isPowerShellHost ? windowsHookNode(process.execPath) : undefined
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
-    const eventCommand = hookArgs(event, state).map(quote).join(' ')
+    const eventCommand = isPowerShellHost ? windowsHookCommand(hookArgs(event, state), quote, hostNode) : hookArgs(event, state).map(quote).join(' ')
     const group = agent === 'cursor' ? { command: eventCommand, timeout: hostHookTimeout(agent, event) } : { hooks: [{ type: 'command', command: eventCommand, timeout: hostHookTimeout(agent, event) }] }
     if (hooks[event] !== undefined && !Array.isArray(hooks[event])) throw new Error('INVALID_HOOK_GROUP')
     const entries = (hooks[event] ?? []) as unknown[]
@@ -690,11 +828,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (agent === 'antigravity') files[antigravitySkill] = skillText
   if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'board.toml')] = `description = ${JSON.stringify(s.boardCommandDescription)}\nprompt = '''${s.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)} --serve}\n'''\n`
   if (agent === 'opencode') files[join(opencodeDir, 'commands', 'board.md')] = `---\ndescription: ${JSON.stringify(s.boardCommandDescription)}\n---\n\n${s.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)} --serve\`\n`
+  const isReleasedBoard = (text: string): boolean => {
+    const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))
+    return RELEASED.some(release => release.board.includes(bodyHash))
+  }
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
     if (remove && shared && otherManifests.some(one => one.files !== undefined)) continue
-    const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing))))
+    const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing))))
     if (existing !== null && !owned && existing !== desired) conflicts.push(file)
     else if (remove ? owned : existing !== desired) changes.push({ file, action: remove ? 'remove' : existing === null ? 'create' : 'update' })
   }
@@ -719,7 +861,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (agent !== 'codex' || conflicts.length || changes.length || readLocal(manifestFile) === null) throw new Error('OWNED_CODEX_INSTALL_REQUIRED')
     const executable = flag('--codex-bin')
     if (!executable) throw new Error('CODEX_BINARY_REQUIRED')
-    output(await trustCodex(executable, config, manifest.groups, args.includes('--apply')))
+    const result = await trustCodex(executable, config, manifest.groups, args.includes('--apply'))
+    process.stdout.write(codexTrustOutput(result, s, args.includes('--json')))
     return true
   }
   if (mode === '--codex-doctor') {
@@ -765,7 +908,26 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     if (remove) {
       if (readLocal(manifestFile) !== null) unlinkSync(manifestFile)
-    } else atomic(manifestFile, nextManifest)
+    } else {
+      atomic(manifestFile, nextManifest)
+      for (const other of localAgents.filter(one => one !== agent)) {
+        const siblingFile = join(root, `install-${other}.json`)
+        const siblingText = initial(siblingFile)
+        if (siblingText === null) continue
+        const sibling = object(JSON.parse(siblingText))
+        if (sibling.files === undefined) continue
+        const siblingFiles = { ...object(sibling.files) } as Record<string, string>
+        let updatedSibling = false
+        for (const sharedFile of [script, worker, skill]) {
+          const nextText = files[sharedFile]
+          if (Object.hasOwn(siblingFiles, sharedFile) && nextText !== undefined && changes.some(change => change.file === sharedFile) && siblingFiles[sharedFile] !== hash(nextText)) {
+            siblingFiles[sharedFile] = hash(nextText)
+            updatedSibling = true
+          }
+        }
+        if (updatedSibling) atomic(siblingFile, `${JSON.stringify({ ...sibling, files: siblingFiles }, null, 2)}\n`)
+      }
+    }
   })
   output({ ...plan, applied: true })
   return true
