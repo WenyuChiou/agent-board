@@ -1,12 +1,14 @@
 import { expect, test } from 'claude-code/testing'
 
 import { boardItems, boardScreen, boardText, chatText, emptyBoardState } from '../hooks/board'
-import { renderAutoBlock, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { removeAutoBlock, renderAutoBlock, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { dashboardHtml } from '../hooks/dashboard'
-import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../hooks/mirror'
+import type { ProgressMirror } from '../hooks/mirror'
 import { autoOf, parseProgress } from '../hooks/parse'
-import { emptyQuestions, observeQuestions, withCaptures } from '../hooks/questions'
+import { archiveQuestionsKept, captureJson, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionKey, questionScope, questionSlot, questionWords, questionsJson, withCaptures } from '../hooks/questions'
 import { cleanSignal, codexSignal, foldRuns, isStrongRun, pickParent, withRunMark, withSignal } from '../hooks/runs'
+import { sha256 } from '../hooks/sha256'
 import { serveModel } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
 import { buildView } from '../hooks/view'
@@ -18,7 +20,7 @@ const PERSON = 'aaaa1111-0000-4000-8000-000000000001'
 const OTHER = 'cccc3333-0000-4000-8000-000000000003'
 const en = STRINGS.en
 
-type Spec = { session: string; agent?: string; state?: string; ageMinutes?: number; resume?: string; run?: boolean; parent?: string; title?: string }
+type Spec = { session: string; agent?: string; state?: string; ageMinutes?: number; resume?: string; run?: boolean; parent?: string; title?: string; stepText?: string }
 
 const block = (spec: Spec): string => {
   const attrs = [
@@ -31,7 +33,7 @@ const block = (spec: Spec): string => {
     spec.parent === undefined ? '' : `parent=${spec.parent}`,
   ].filter(part => part !== '')
 
-  return [`<!-- auto ${attrs.join(' ')} -->`, `### ${spec.title ?? 'Synthetic task'}`, '- [~] A step', `<!-- /auto session=${spec.session} -->`, ''].join('\n')
+  return [`<!-- auto ${attrs.join(' ')} -->`, `### ${spec.title ?? 'Synthetic task'}`, spec.stepText ?? '- [~] A step', `<!-- /auto session=${spec.session} -->`, ''].join('\n')
 }
 
 const file = (...specs: Spec[]): string => `## Demo\n${specs.map(block).join('\n')}`
@@ -135,6 +137,16 @@ test('an archived twin loser adds no second question under Older and no stopped-
   expect(view.waiting).toHaveLength(1)
   expect(view.older ?? []).toHaveLength(0)
   expect(view.stoppedAsking).toBe(undefined)
+})
+
+test('archiving one of two twin blocks that share a resume id checks that block\'s own questions and keeps them', () => {
+  const winner: Spec = { session: 'aaaa1111', agent: 'codex', resume: PERSON, state: 'waiting', ageMinutes: 1 }
+  const loser: Spec = { ...winner, session: 'bbbb2222', ageMinutes: 2 }
+  const question = '- [?] Which database should we use? — Postgres or SQLite?'
+  const projects = parseProgress(file(winner, loser).replaceAll('- [~] A step', question))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'fixture:twins').ledger
+  const task = projects[0]!.tasks.find(task => task.auto?.session === loser.session)!
+  expect(archiveQuestionsKept(projects, { project: 'Demo', title: task.title, line: task.line, session: loser.session, resume: PERSON, isDuplicate: true }, ledger)).toBe(true)
 })
 
 test('an archived helper run whose starter is live keeps its question under the starter\'s agent and counts it once', () => {
@@ -388,4 +400,498 @@ test('a strong run is suppressed while a weak hint remains eligible for the lega
   expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { source: 'exec' })))).toBe(true)
   expect(isStrongRun(withSignal(null, codexSignal(true, null, null)))).toBe(false)
   expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { originator: 'Codex Desktop' })))).toBe(false)
+})
+
+test('concurrent subagents sharing the same 8-character session prefix are tracked independently and do not clobber each other', () => {
+  const sub1 = delegate(1, { session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000a', parent: PERSON, title: 'Subagent A' })
+  const sub2 = delegate(2, { session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000b', parent: PERSON, title: 'Subagent B' })
+  const text = file(person, sub1, sub2)
+  const view = viewOf(text)
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.title).toBe('Ship the export feature')
+  expect(rows[0]?.runs).toBe('+2 runs by Codex, last 21 min ago')
+
+  const qBoard = file(person, sub1, sub2)
+    .replace('### Subagent A\n- [~] A step', '### Subagent A\n- [?] Question from Subagent A?')
+    .replace('### Subagent B\n- [~] A step', '### Subagent B\n- [?] Question from Subagent B?')
+  const projects = parseProgress(qBoard)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'fixture:collision').ledger
+  const unresolved = ledger.records.filter(r => r.isUnresolved)
+  expect(unresolved).toHaveLength(2)
+  // Each block's questions are keyed by its full id and its block id together; the copy names the block.
+  expect(unresolved.map(r => r.scope)).toEqual([
+    questionScope('Demo', 'codex', questionKey('bbbb0001', 'bbbb0001-0000-4000-8000-00000000000a')),
+    questionScope('Demo', 'codex', questionKey('bbbb0001', 'bbbb0001-0000-4000-8000-00000000000b')),
+  ])
+  expect(unresolved.map(r => r.source?.session)).toEqual(['bbbb0001', 'bbbb0001'])
+})
+
+test('Antigravity subagents fold into parent session row as runs without creating duplicate top-level rows', () => {
+  const antigravitySub: Spec = {
+    session: '8d21f0b4',
+    agent: 'antigravity',
+    resume: '8d21f0b4-1111-4000-8000-000000000001',
+    run: true,
+    parent: PERSON,
+    ageMinutes: 5,
+    title: 'Audit subagent task',
+  }
+  const view = viewOf(file(person, antigravitySub))
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.title).toBe('Ship the export feature')
+  expect(rows[0]?.runs).toBe('+1 run by Antigravity, last 5 min ago')
+  expect(view.background).toBe(undefined)
+  expect(view.overview.active).toBe(1)
+})
+
+test('upsertAutoBlock preserves concurrent subagents with identical 8-character prefix', () => {
+  const mirrorA: ProgressMirror = {
+    ...emptyMirror('abcdef01-0000-4000-8000-000000000001', 'Demo', NOW, ''),
+    title: 'Subagent Alpha',
+    tasks: [{ subject: 'Alpha step', status: 'in_progress', blocked: null, waiting: null, why: null }],
+    isRun: true,
+  }
+  const mirrorB: ProgressMirror = {
+    ...emptyMirror('abcdef01-0000-4000-8000-000000000002', 'Demo', NOW, ''),
+    title: 'Subagent Beta',
+    tasks: [{ subject: 'Beta step', status: 'in_progress', blocked: null, waiting: null, why: null }],
+    isRun: true,
+  }
+  const withA = upsertAutoBlock(file(person), mirrorA, en)
+  expect(withA).toContain('Subagent Alpha')
+  const withBoth = upsertAutoBlock(withA, mirrorB, en)
+  expect(withBoth).toContain('Subagent Alpha')
+  expect(withBoth).toContain('Subagent Beta')
+
+  const updatedA: ProgressMirror = {
+    ...mirrorA,
+    tasks: [{ subject: 'Alpha finished', status: 'completed', blocked: null, waiting: null, why: null }],
+  }
+  const reUpserted = upsertAutoBlock(withBoth, updatedA, en)
+  expect(reUpserted).toContain('Subagent Alpha')
+  expect(reUpserted).toContain('Alpha finished')
+  expect(reUpserted).toContain('Subagent Beta')
+  expect(reUpserted).toContain('Beta step')
+})
+
+test('old ledger records keyed by the block id alone are read under the scope with the full session id and settled records do not resurface', () => {
+  const shortScope = questionScope('Demo', 'claude', 'aaaa1111')
+  const fullScope = questionScope('Demo', 'claude', questionKey('aaaa1111', PERSON))
+  const initialLedger = {
+    ...emptyQuestions(),
+    records: [{
+      id: 'question:deadbeef:1',
+      scope: shortScope,
+      words: 'Confirm export format',
+      occurrence: 1,
+      copies: 1,
+      isWaiting: false,
+      isPresent: false,
+      isUnresolved: false,
+      resolvedAt: NOW - 5000,
+      firstObserved: NOW - 10000,
+      incarnation: 'init',
+      source: { kind: 'own' as const, project: 'Demo', task: 'Ship the export feature', text: 'Confirm export format', agent: 'claude', session: 'aaaa1111', data: '{}' },
+    }],
+  }
+  const mine: ProgressMirror = {
+    ...emptyMirror(PERSON, 'Demo', NOW, ''),
+    title: 'Ship the export feature',
+    tasks: [{ subject: 'Confirm export format', status: 'in_progress', blocked: null, waiting: 'you', why: null }],
+  }
+  const reconciled = observeQuestions(initialLedger, [], mine, [], NOW, true, 'reconcile-test')
+  const record = reconciled.ledger.records.find(r => r.id === 'question:deadbeef:1')
+  // The record keeps the scope its id is made from and is the answer to the step under the new one.
+  expect(record?.scope).toBe(shortScope)
+  expect(record?.source?.session).toBe('aaaa1111')
+  expect(record?.isUnresolved).toBe(false)
+  expect(reconciled.keys[questionSlot(fullScope, 0)]).toBe('question:deadbeef:1')
+  expect(reconciled.ledger.records.filter(r => r.isUnresolved)).toHaveLength(0)
+})
+
+test('archiveQuestionsKept distinguishes subagents with colliding short id when resume is specified', () => {
+  const sub1 = delegate(1, { session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000a', parent: PERSON, title: 'Sub A', stepText: '- [?] Proceed with Sub A?' })
+  const sub2 = delegate(2, { session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000b', parent: PERSON, title: 'Sub B', stepText: '- [?] Proceed with Sub B?' })
+  const text = file(person, sub1, sub2)
+  const projects = parseProgress(text)
+  const scopeA = questionScope('Demo', 'codex', questionKey('bbbb0001', 'bbbb0001-0000-4000-8000-00000000000a'))
+  const scopeB = questionScope('Demo', 'codex', questionKey('bbbb0001', 'bbbb0001-0000-4000-8000-00000000000b'))
+  const ledger = {
+    ...emptyQuestions(),
+    records: [
+      {
+        id: 'question:sub1:1',
+        scope: scopeA,
+        words: questionWords('Proceed with Sub A?'),
+        occurrence: 1,
+        copies: 1,
+        isWaiting: false,
+        isPresent: true,
+        isUnresolved: false,
+        resolvedAt: NOW - 1000,
+        firstObserved: NOW - 2000,
+        incarnation: 'test',
+        producer: '',
+        source: { kind: 'block' as const, project: 'Demo', task: 'Sub A', text: 'Proceed with Sub A?', agent: 'codex', session: 'bbbb0001', data: '' },
+      },
+      {
+        id: 'question:sub2:1',
+        scope: scopeB,
+        words: questionWords('Proceed with Sub B?'),
+        occurrence: 1,
+        copies: 1,
+        isWaiting: false,
+        isPresent: true,
+        isUnresolved: false,
+        resolvedAt: NOW - 1000,
+        firstObserved: NOW - 2000,
+        incarnation: 'test',
+        producer: '',
+        source: { kind: 'block' as const, project: 'Demo', task: 'Sub B', text: 'Proceed with Sub B?', agent: 'codex', session: 'bbbb0001', data: '' },
+      },
+    ],
+  }
+  const refA = { project: 'Demo', title: 'Sub A', line: 1, session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000a' }
+  const refB = { project: 'Demo', title: 'Sub B', line: 1, session: 'bbbb0001', resume: 'bbbb0001-0000-4000-8000-00000000000b' }
+  expect(archiveQuestionsKept(projects, refA, ledger)).toBe(true)
+  expect(archiveQuestionsKept(projects, refB, ledger)).toBe(true)
+})
+
+test('when subagent B appears, subagent A answered question remains resolved and does not resurface', () => {
+  const sub1 = delegate(1, { session: 'cccc0001', resume: 'cccc0001-0000-4000-8000-00000000000a', parent: PERSON, title: 'Sub A', stepText: '- [?] Format disk?' })
+  const textSolo = file(person, sub1)
+  const projectsSolo = parseProgress(textSolo)
+  const initialObs = observeQuestions(emptyQuestions(), projectsSolo, null, [], NOW, false, 'init')
+  const recordA = initialObs.ledger.records.find(r => r.words === questionWords('Format disk?'))
+  expect(recordA).toBeDefined()
+  const answeredLedger = {
+    ...initialObs.ledger,
+    records: initialObs.ledger.records.map(r => r.id === recordA!.id ? { ...r, isWaiting: false, isUnresolved: false, resolvedAt: NOW } : r),
+  }
+  const sub2 = delegate(2, { session: 'cccc0001', resume: 'cccc0001-0000-4000-8000-00000000000b', parent: PERSON, title: 'Sub B', stepText: '- [?] Run tests?' })
+  const textBoth = file(person, sub1, sub2)
+  const projectsBoth = parseProgress(textBoth)
+  const secondObs = observeQuestions(answeredLedger, projectsBoth, null, [], NOW + 1000, false, 'second')
+  const recAFinal = secondObs.ledger.records.find(r => r.id === recordA!.id)
+  expect(recAFinal?.isUnresolved).toBe(false)
+  const unresolvedForA = secondObs.ledger.records.filter(r => r.words === questionWords('Format disk?') && r.isUnresolved)
+  expect(unresolvedForA).toHaveLength(0)
+})
+
+test('upsertAutoBlock on twin blocks sharing agent and full id updates first without growing total block count', () => {
+  const twin1 = ['<!-- auto session=dddd0001 agent=claude state=working updated=2026-10-27T12:00:00Z resume=dddd0001-0000-4000-8000-000000000001 -->', '### Twin task 1', '- [~] Doing step 1', '<!-- /auto session=dddd0001 -->'].join('\n')
+  const twin2 = ['<!-- auto session=dddd0001 agent=claude state=working updated=2026-10-27T12:01:00Z resume=dddd0001-0000-4000-8000-000000000001 -->', '### Twin task 2', '- [~] Doing step 2', '<!-- /auto session=dddd0001 -->'].join('\n')
+  let current = `## Demo\n${twin1}\n\n${twin2}\n`
+  const mirror: ProgressMirror = {
+    ...emptyMirror('dddd0001-0000-4000-8000-000000000001', 'Demo', NOW, ''),
+    title: 'Twin task 1 updated',
+    tasks: [{ subject: 'Doing step 1 modified', status: 'in_progress', blocked: null, waiting: null, why: null }],
+  }
+  current = upsertAutoBlock(current, mirror, en)
+  current = upsertAutoBlock(current, mirror, en)
+  current = upsertAutoBlock(current, mirror, en)
+  const matches = current.match(/<!-- auto session=dddd0001/g) ?? []
+  expect(matches).toHaveLength(2)
+})
+
+test('a block with a long session value but no resume attribute does not acquire resume authority', () => {
+  const line = '<!-- auto session=1234567890abcdef agent=codex state=working updated=2026-10-27T12:00:00Z -->'
+  const auto = autoOf(line)
+  expect(auto?.session).toBe('1234567890abcdef')
+  expect(auto?.resume).toBeNull()
+})
+
+test('upsertAutoBlock refuses an ambiguous match against an old block without resume', () => {
+  const oldBlockA = ['<!-- auto session=12345678 agent=claude state=working updated=2026-10-27T12:00:00Z -->', '### Old task', '- [~] Doing', '<!-- /auto session=12345678 -->'].join('\n')
+  const oldBlockB = ['<!-- auto session=12345678 agent=claude state=working updated=2026-10-27T12:01:00Z -->', '### Second old task', '- [~] Doing', '<!-- /auto session=12345678 -->'].join('\n')
+  const initial = `## Demo\n${oldBlockA}\n\n${oldBlockB}\n`
+  const mirror: ProgressMirror = {
+    ...emptyMirror('12345678-0000-4000-8000-000000000001', 'Demo', NOW, ''),
+    title: 'New Task',
+    tasks: [{ subject: 'Step 1', status: 'in_progress', blocked: null, waiting: null, why: null }],
+  }
+  const result = upsertAutoBlock(initial, mirror, en)
+  expect(result).toContain('### Old task')
+  expect(result).toContain('### Second old task')
+  expect(result).toContain('### New Task')
+})
+
+test('removeAutoBlock with agent parameter removes only matching agent block', () => {
+  const claudeBlock = ['<!-- auto session=aaaa1111 agent=claude state=working updated=2026-10-27T12:00:00Z resume=aaaa1111-0000-4000-8000-000000000001 -->', '### Claude task', '- [~] Doing', '<!-- /auto session=aaaa1111 -->'].join('\n')
+  const codexBlock = ['<!-- auto session=aaaa1111 agent=codex state=working updated=2026-10-27T12:00:00Z resume=aaaa1111-0000-4000-8000-000000000001 -->', '### Codex task', '- [~] Doing', '<!-- /auto session=aaaa1111 -->'].join('\n')
+  const initial = `## Demo\n${claudeBlock}\n\n${codexBlock}\n`
+  const removedClaude = removeAutoBlock(initial, 'aaaa1111-0000-4000-8000-000000000001', 'claude')
+  expect(removedClaude).not.toContain('### Claude task')
+  expect(removedClaude).toContain('### Codex task')
+})
+
+test('empty mirror remove removes only matching agent block when same session id exists across agents', () => {
+  const claudeBlock = ['<!-- auto session=aaaa1111 agent=claude state=working updated=2026-10-27T12:00:00Z resume=aaaa1111-0000-4000-8000-000000000001 -->', '### Claude task', '- [~] Doing', '<!-- /auto session=aaaa1111 -->'].join('\n')
+  const codexBlock = ['<!-- auto session=aaaa1111 agent=codex state=working updated=2026-10-27T12:00:00Z resume=aaaa1111-0000-4000-8000-000000000001 -->', '### Codex task', '- [~] Doing', '<!-- /auto session=aaaa1111 -->'].join('\n')
+  const initial = `## Demo\n${claudeBlock}\n\n${codexBlock}\n`
+  const emptyClaudeMirror: ProgressMirror = {
+    ...emptyMirror('aaaa1111-0000-4000-8000-000000000001', 'Demo', NOW, ''),
+    agent: 'claude',
+    tasks: [],
+  }
+  const removed = emptyClaudeMirror.tasks.length === 0 ? removeAutoBlock(initial, emptyClaudeMirror.sessionId, emptyClaudeMirror.agent || 'claude') : upsertAutoBlock(initial, emptyClaudeMirror, en)
+  expect(removed).not.toContain('### Claude task')
+  expect(removed).toContain('### Codex task')
+})
+
+test('moving a live session block to a new project heading supersedes its old project question record', () => {
+  for (const resume of [undefined, 'session-move-1234-0000-4000-8000-000000000001']) {
+    const oldBlock = block({ session: 'session-move-1234', agent: 'codex', resume, state: 'waiting', title: 'Old Task', stepText: '- [?] Confirm moving block' })
+    const initial = observeQuestions(emptyQuestions(), parseProgress(`## OldProject\n${oldBlock}`), null, [], NOW - 5000, false, 'init')
+    const oldRecord = initial.ledger.records.find(record => record.words === questionWords('Confirm moving block'))!
+    const newBlock = block({ session: 'session-move-1234', agent: 'codex', resume, state: 'waiting', title: 'New Task', stepText: '- [?] New question under new project?' })
+    const observed = observeQuestions(initial.ledger, parseProgress(`## NewProject\n${newBlock}`), null, [], NOW, false, 'moved-test')
+    const retired = observed.ledger.records.find(record => record.id === oldRecord.id)
+    const live = observed.ledger.records.find(record => record.words === questionWords('New question under new project?'))
+    expect(retired?.isUnresolved).toBe(false)
+    expect(retired?.isPresent).toBe(false)
+    expect(retired?.isWaiting).toBe(false)
+    expect(live?.isUnresolved).toBe(true)
+  }
+})
+
+const collidingProjectBoard = (isAlphaPresent: boolean): string => {
+  const alpha = block({ session: 'deadbeef', agent: 'codex', resume: 'deadbeef-0000-4000-8000-000000000001', state: 'waiting', title: 'Alpha task', stepText: '- [?] Keep alpha unanswered?' })
+  const beta = block({ session: 'deadbeef', agent: 'codex', resume: 'deadbeef-0000-4000-8000-000000000002', state: 'waiting', title: 'Beta task', stepText: '- [?] Keep beta unanswered?' })
+  return `${isAlphaPresent ? `## Alpha\n${alpha}` : ''}\n## Beta\n${beta}`
+}
+
+const collidingProjectLedger = () => observeQuestions(emptyQuestions(), parseProgress(collidingProjectBoard(true)), null, [], NOW - 5000, false, 'collision-init').ledger
+
+test('removing one project does not answer its question when another full session shares its short id', () => {
+  const initial = collidingProjectLedger()
+  const alpha = initial.records.find(record => record.words === questionWords('Keep alpha unanswered?'))!
+  for (const isSettled of [false, true]) {
+    const observed = observeQuestions(initial, parseProgress(collidingProjectBoard(false)), null, [], NOW, isSettled, `collision-${isSettled}`)
+    const retained = observed.ledger.records.find(record => record.id === alpha.id)
+    expect(retained?.isUnresolved).toBe(true)
+    expect(retained?.id).toBe(alpha.id)
+    expect(retained?.firstObserved).toBe(alpha.firstObserved)
+    expect(retained?.source).toEqual(alpha.source)
+    if (isSettled) {
+      expect(retained?.isPresent).toBe(false)
+      expect(retained?.isWaiting).toBe(false)
+    }
+  }
+})
+
+test('an archived question stays unanswered when another project has a different full session with its short id', () => {
+  const initial = collidingProjectLedger()
+  const alpha = initial.records.find(record => record.words === questionWords('Keep alpha unanswered?'))!
+  const archived = { ...initial, records: initial.records.map(record => record.id === alpha.id ? { ...record, isArchived: true } : record) }
+  for (const isSettled of [false, true]) {
+    const observed = observeQuestions(archived, parseProgress(collidingProjectBoard(false)), null, [], NOW, isSettled, `archived-${isSettled}`)
+    const retained = observed.ledger.records.find(record => record.id === alpha.id)
+    expect(retained?.isUnresolved).toBe(true)
+    expect(retained?.isArchived).toBe(true)
+    expect(retained?.id).toBe(alpha.id)
+    expect(retained?.firstObserved).toBe(alpha.firstObserved)
+    expect(retained?.source).toEqual(alpha.source)
+  }
+})
+
+test('an unreadable saved snapshot does not answer a missing project question from a colliding short id', () => {
+  const initial = collidingProjectLedger()
+  const alpha = initial.records.find(record => record.words === questionWords('Keep alpha unanswered?'))!
+  const unreadable = {
+    ...initial,
+    records: initial.records.map(record => record.id === alpha.id && record.source !== undefined
+      ? { ...record, source: { ...record.source, data: '{not-json' } }
+      : record),
+  }
+  const observed = observeQuestions(unreadable, parseProgress(collidingProjectBoard(false)), null, [], NOW, true, 'unreadable')
+  const retained = observed.ledger.records.find(record => record.id === alpha.id)
+  expect(retained?.isUnresolved).toBe(true)
+  expect(retained?.id).toBe(alpha.id)
+  expect(retained?.firstObserved).toBe(alpha.firstObserved)
+  expect(retained?.source?.data).toBe('{not-json')
+})
+
+test('foldRuns keeps two blocks with the same agent and short id apart when full id is unknown', () => {
+  const oldA: Spec = { session: 'bbbb0001', agent: 'claude', title: 'Old Block A' }
+  const oldB: Spec = { session: 'bbbb0001', agent: 'claude', title: 'Old Block B' }
+  const view = viewOf(file(oldA, oldB))
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(2)
+  expect(rows.map(r => r.title).sort()).toEqual(['Old Block A', 'Old Block B'].sort())
+})
+
+test('concurrent reports with identical 8-hex owner hash prefix do not trigger false block conflicts', () => {
+  const sessionA = 'collision-32464'
+  const sessionB = 'collision-89260'
+  const initial = ''
+  const mirrorA: ProgressMirror = {
+    ...emptyMirror(sessionA, 'Demo', NOW, ''),
+    agent: 'antigravity',
+    title: 'Subagent Alpha task',
+    tasks: [{ subject: 'Alpha in progress', status: 'in_progress', blocked: null, waiting: null, why: null }],
+  }
+  const mirrorB: ProgressMirror = {
+    ...emptyMirror(sessionB, 'Demo', NOW, ''),
+    agent: 'antigravity',
+    title: 'Subagent Beta task',
+    tasks: [{ subject: 'Beta in progress', status: 'in_progress', blocked: null, waiting: null, why: null }],
+  }
+  const withA = upsertAutoBlock(initial, mirrorA, en)
+  const withBoth = upsertAutoBlock(withA, mirrorB, en)
+  expect(withBoth).toContain('Subagent Alpha task')
+  expect(withBoth).toContain('Subagent Beta task')
+
+  const updateA: ProgressMirror = {
+    ...emptyMirror(sessionA, 'Demo', NOW, ''),
+    agent: 'antigravity',
+    title: 'Subagent Alpha task',
+    tasks: [{ subject: 'Alpha complete', status: 'completed', blocked: null, waiting: null, why: null }],
+  }
+  const updated = upsertAutoBlock(withBoth, updateA, en)
+  expect(updated).toContain('Alpha complete')
+  expect(updated).toContain('Subagent Beta task')
+  expect(updated).toContain('Beta in progress')
+})
+
+test('Antigravity subagent report with origin run and parent writes run block and folds into parent', () => {
+  const parentSession = 'parent-session-12345678'
+  const subagentSession = 'subagent-session-87654321'
+  const parentSpec: Spec = { session: parentSession, agent: 'antigravity', resume: parentSession, title: 'Parent Task', state: 'working' }
+  const subSpec: Spec = { session: subagentSession, agent: 'antigravity', resume: subagentSession, title: 'Child Subagent Task', state: 'working', run: true, parent: parentSession }
+  const text = file(parentSpec, subSpec)
+  expect(text).toContain('origin=run')
+  expect(text).toContain(`parent=${parentSession}`)
+  expect(text).toContain('Child Subagent Task')
+  const view = viewOf(text)
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.title).toBe('Parent Task')
+  expect(rows[0]?.runs).toContain('+1 run by Antigravity')
+})
+
+const questionRun = (index: number, title: string, stepText: string): Spec => delegate(index, {
+  session: 'cccc0001', resume: `cccc0001-0000-4000-8000-00000000000${index}`, title, stepText,
+})
+const questionA = questionRun(1, 'Sub A', '- [?] Format disk?')
+const questionB = questionRun(2, 'Sub B', '- [?] Run tests?')
+const unresolvedFor = (ledger: ReturnType<typeof emptyQuestions>, words: string) => ledger.records.filter(record => record.words === questionWords(words) && record.isUnresolved)
+const answerQuestion = (ledger: ReturnType<typeof emptyQuestions>, words: string, at: number) => ({
+  ...ledger,
+  records: ledger.records.map(record => record.words === questionWords(words) ? { ...record, isWaiting: false, isUnresolved: false, resolvedAt: at } : record),
+})
+
+test('an answered run question stays resolved when a colliding sibling appears first', () => {
+  const solo = observeQuestions(emptyQuestions(), parseProgress(file(person, questionA)), null, [], NOW, false, 'i1')
+  const answered = answerQuestion(solo.ledger, 'Format disk?', NOW)
+  const both = observeQuestions(answered, parseProgress(file(person, questionB, questionA)), null, [], NOW + 1000, false, 'i2')
+  expect(unresolvedFor(both.ledger, 'Format disk?')).toHaveLength(0)
+})
+
+test('an answered run question stays resolved after a colliding sibling appears and disappears', () => {
+  const solo = observeQuestions(emptyQuestions(), parseProgress(file(person, questionA)), null, [], NOW, false, 'i1')
+  const answered = answerQuestion(solo.ledger, 'Format disk?', NOW)
+  const both = observeQuestions(answered, parseProgress(file(person, questionA, questionB)), null, [], NOW + 1000, false, 'i2')
+  expect(unresolvedFor(both.ledger, 'Format disk?')).toHaveLength(0)
+  const soloAgain = observeQuestions(both.ledger, parseProgress(file(person, questionA)), null, [], NOW + 2000, false, 'i3')
+  expect(unresolvedFor(soloAgain.ledger, 'Format disk?')).toHaveLength(0)
+})
+
+test('settled observations keep an answered run question resolved after a sibling disappears', () => {
+  const solo = observeQuestions(emptyQuestions(), parseProgress(file(person, questionA)), null, [], NOW, false, 'i1')
+  const answered = answerQuestion(solo.ledger, 'Format disk?', NOW)
+  const both = observeQuestions(answered, parseProgress(file(person, questionA, questionB)), null, [], NOW + 1000, true, 'i2')
+  const soloAgain = observeQuestions(both.ledger, parseProgress(file(person, questionA)), null, [], NOW + 2000, true, 'i3')
+  expect(unresolvedFor(soloAgain.ledger, 'Format disk?')).toHaveLength(0)
+})
+
+test('the owner pane and another reader share one record for the same question', () => {
+  let mine = emptyMirror(PERSON, 'Demo', NOW, '')
+  mine = { ...mine, title: 'Person task' }
+  mine = applyTaskCreate(mine, { subject: 'Approve deploy?' }, '1', NOW)
+  mine = applyTaskUpdate(mine, { taskId: '1', metadata: { waiting: 'you', why: 'Approve deploy?' } }, NOW)
+  const projects = parseProgress(upsertAutoBlock('## Demo\n', mine, en))
+  const ownerPass = observeQuestions(emptyQuestions(), projects, mine, [], NOW, true, 'o1')
+  const readerPass = observeQuestions(ownerPass.ledger, projects, null, [], NOW + 1000, true, 'r1')
+  expect(readerPass.ledger.records.filter(record => record.isUnresolved)).toHaveLength(1)
+})
+
+// A record as a version before the block's full id went into the key wrote it: keyed by the block
+// id alone, answered, its copy naming the block by that id.
+const legacyRecord = (agent: string, session: string, task: string, words: string) => ({
+  ...emptyQuestions(),
+  records: [{
+    id: 'question:legacy:1', scope: questionScope('Demo', agent, session), words: questionWords(words), occurrence: 1, copies: 1,
+    isWaiting: false, isPresent: false, isUnresolved: false, resolvedAt: NOW - 5000, firstObserved: NOW - 9000, incarnation: 'legacy',
+    source: { kind: 'block' as const, project: 'Demo', task, text: words, agent, session, data: '' },
+  }],
+})
+const scopeOf = (spec: Spec): string => questionScope('Demo', spec.agent ?? 'claude', questionKey(spec.session, spec.resume))
+
+test('a record keyed by a block id alone is read as the one block with that id whatever its title, and among several as the one with its task', () => {
+  const initial = legacyRecord('codex', 'cccc0001', 'Sub A', 'Format disk?')
+  const pass = (...specs: Spec[]) => observeQuestions(initial, parseProgress(file(person, ...specs)), null, [], NOW + 1000, false, 'next')
+  const legacy = (out: ReturnType<typeof observeQuestions>) => out.ledger.records.find(row => row.id === 'question:legacy:1')!
+  // One block with the id: the record is its answer, and keeps its scope and copy as written.
+  const alone = pass({ ...questionB, stepText: '- [?] Format disk?' })
+  expect(legacy(alone).scope).toBe(questionScope('Demo', 'codex', 'cccc0001'))
+  expect(legacy(alone).source?.task).toBe('Sub A')
+  expect(legacy(alone).source?.session).toBe('cccc0001')
+  expect(alone.keys[questionSlot(scopeOf(questionB), 0)]).toBe('question:legacy:1')
+  expect(unresolvedFor(alone.ledger, 'Format disk?')).toHaveLength(0)
+  // Two blocks with the id: the one with the record's task.
+  const two = pass(questionA, questionB)
+  expect(two.keys[questionSlot(scopeOf(questionA), 0)]).toBe('question:legacy:1')
+  expect(unresolvedFor(two.ledger, 'Format disk?')).toHaveLength(0)
+  // Two blocks with the id and the record's task: the record is neither's, and the step asks anew.
+  const twins = pass(questionA, { ...questionB, title: 'Sub A' })
+  expect(twins.keys[questionSlot(scopeOf(questionA), 0)]).not.toBe('question:legacy:1')
+  expect(unresolvedFor(twins.ledger, 'Format disk?')).toHaveLength(1)
+})
+
+test('an answered question of a block whose id is not the start of its full id stays resolved after the upgrade', () => {
+  // A Codex or Cursor block id is a hash of the session id, not its first characters.
+  const hashed: Spec = { session: 'a1b2c3d4', agent: 'codex', resume: '019a0000-aaaa-4000-8000-000000000001', state: 'waiting', title: 'Task X', stepText: '- [?] Ship it, OK?' }
+  const out = observeQuestions(legacyRecord('codex', 'a1b2c3d4', 'Task X', 'Ship it, OK?'), parseProgress(file(hashed)), null, [], NOW, false, 'up')
+  expect(unresolvedFor(out.ledger, 'Ship it, OK?')).toHaveLength(0)
+})
+
+test('an answered question of a block retitled since the answer stays resolved after the upgrade', () => {
+  const retitled: Spec = { ...person, state: 'waiting', title: 'New title', stepText: '- [?] Ship it, OK?' }
+  const out = observeQuestions(legacyRecord('claude', 'aaaa1111', 'Old title', 'Ship it, OK?'), parseProgress(file(retitled)), null, [], NOW, false, 'up')
+  expect(unresolvedFor(out.ledger, 'Ship it, OK?')).toHaveLength(0)
+})
+
+test('a record read as its block\'s under the new key keeps the scope its id is made from, so the ledger and its copy still parse', () => {
+  // A record's id is a hash over its scope (parseQuestions): a record given its block's new scope
+  // in place no longer parses, and with it neither the ledger nor its copy, which no pass gets past.
+  const words = questionWords('Ship it, OK?')
+  const scope = questionScope('Demo', 'claude', 'aaaa1111')
+  const id = `question:${sha256(JSON.stringify([scope, words, 1, 1, 'legacy']))}:1`
+  const legacy = legacyRecord('claude', 'aaaa1111', 'Old title', 'Ship it, OK?').records[0]!
+  const ledger = { ...emptyQuestions(), next: 2, records: [{ ...legacy, id, source: { ...legacy.source, context: '' } }] }
+  const asking: Spec = { ...person, state: 'waiting', title: 'New title', stepText: '- [?] Ship it, OK?' }
+  const out = observeQuestions(ledger, parseProgress(file(asking)), null, [], NOW, true, 'up')
+  expect(unresolvedFor(out.ledger, 'Ship it, OK?')).toHaveLength(0)
+  expect(out.keys[questionSlot(scopeOf(asking), 0)]).toBe(id)
+  expect(parseQuestions(questionsJson(out.ledger))).not.toBeNull()
+  const copy = captureJson(out.ledger.records[0]!, 'resolved')
+  expect(parseCapture(copy, sha256(copy))).not.toBeNull()
+})
+
+test('an inbox question and the same [?] step of a resumed block make one record', () => {
+  const asking: Spec = { session: '55fb44cb', agent: 'codex', resume: 'synthetic-resume-1', state: 'waiting', title: 'Task X', stepText: '- [?] Ship it, OK?' }
+  const pending = { id: '55fb44cb', agent: 'codex', project: 'Demo', text: 'Ship it, OK?', isQuestion: true, at: NOW }
+  const out = observeQuestions(emptyQuestions(), parseProgress(file(asking)), null, [], NOW, true, 'x', undefined, [pending])
+  expect(unresolvedFor(out.ledger, 'Ship it, OK?')).toHaveLength(1)
+  expect(out.ledger.records[0]?.scope).toBe(scopeOf(asking))
+})
+
+test('twin blocks of one session with different block ids keep one question each', () => {
+  const first: Spec = { session: 'aaaa1111', agent: 'codex', resume: 'synthetic-resume-1', state: 'waiting', title: 'Task', stepText: '- [?] First?' }
+  const second: Spec = { ...first, session: 'bbbb2222', stepText: '- [?] Second?' }
+  const out = observeQuestions(emptyQuestions(), parseProgress(file(first, second)), null, [], NOW, true, 'x')
+  expect(out.ledger.records.filter(record => record.isUnresolved).map(record => record.scope)).toEqual([scopeOf(first), scopeOf(second)])
 })

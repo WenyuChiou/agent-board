@@ -13,7 +13,7 @@ import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
 import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
 import { sha256 } from './sha256'
-import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot, questionWords, sourceSnapshot } from './questions'
+import { blockScopes, inboxScope, inboxScopes, observeQuestions, ownQuestionKey, pendingQuestionSlot, questionScope, questionSlot, questionWords, sourceSnapshot, taskQuestionScope } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
 import { closedCopies, mergeCopies, recordFolder } from './question-merge'
@@ -60,7 +60,7 @@ export type StepRef = { project: string; title: string; step: string; line: numb
 // heading line, checked against the title so a task that moved is still found once.
 // `isDuplicate` marks the older block of two for one session (#399): its archive is allowed
 // while it still looks live, once the file shows a newer block for the same agent and id.
-export type TaskRef = { project: string; title: string; line: number; session: string | null; isDuplicate?: true }
+export type TaskRef = { project: string; title: string; line: number; session: string | null; resume?: string | null; isDuplicate?: true }
 
 // Another agent's session, as its block names it: its block id, the session id its hook gave
 // (`resume=`), the folder it ran in (`dir=`), and whether it has closed (`state=ended`). The
@@ -540,15 +540,16 @@ const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
 const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, string>>): WaitingItem[] => {
   const title = mine.title || fallbackTitle(mine)
   const context = contextFor(mine)
+  const ownId = shortId(mine.sessionId)
   // Keyed on the steps this session's block marks [?]: a blocked one is written [!], which no
   // other reader lists as a question, so it cannot be marked answered.
   const keys = askKeys(
-    shortId(mine.sessionId),
+    ownId,
     mine.tasks.map(task => (waitsOnYou(mine, task) && task.blocked === null ? stepWords(task).trim() : null)),
   )
 
   return mine.tasks
-    .map((task, index) => ({ task, hideKey: stable?.[questionSlot(questionScope(mine.project, 'claude', shortId(mine.sessionId)), index)] ?? keys[index] ?? '' }))
+    .map((task, index) => ({ task, hideKey: stable?.[questionSlot(questionScope(mine.project, (mine.agent || 'claude').toLowerCase(), ownQuestionKey(mine)), index)] ?? keys[index] ?? '' }))
     .filter(({ task }) => waitsOnYou(mine, task))
     .map(({ task, hideKey }) => ({
       key: `mine::${task.id}`,
@@ -776,6 +777,20 @@ const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 const runAgents = (group: RunGroup, s: Strings): string => group.agents.map(agent => s.agentNames[agent] ?? agentName(agent)).join(' / ')
 const runsText = (group: RunGroup, now: number, s: Strings): string => s.runsLine(group.count, runAgents(group, s), relativeTime(group.last, now, s))
 
+const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string, ownAgent = 'claude'): boolean => {
+  let count = 0
+  let unresumed = 0
+  for (const p of projects) {
+    for (const t of p.tasks) {
+      if (t.auto !== null && (t.auto.agent ?? 'claude') === ownAgent && t.auto.session === ownId) {
+        count += 1
+        if (t.auto.resume === null || t.auto.resume === undefined) unresumed += 1
+      }
+    }
+  }
+  return count === 1 && unresumed === 1
+}
+
 export const buildView = (
   projects: readonly ProgressProject[],
   here: readonly string[],
@@ -830,8 +845,8 @@ export const buildView = (
   let ownRuns: RunGroup | null = null
   // A run's own question is no question for anyone: its saved records stay in the ledger but are not asked again.
   const keptTasks = new Set(folded.projects.flatMap(project => project.tasks))
-  const keptScopes = new Set(folded.projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [questionScope(project.name, task.auto.agent, task.auto.session)])))
-  const foldedScopes = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto === null || keptTasks.has(task) ? [] : [questionScope(project.name, task.auto.agent, task.auto.session)])).filter(scope => !keptScopes.has(scope)))
+  const keptScopes = new Set(folded.projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : blockScopes(project.name, task.auto))))
+  const foldedScopes = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto === null || keptTasks.has(task) ? [] : blockScopes(project.name, task.auto))).filter(scope => !keptScopes.has(scope)))
   const repeats = new Map<string, number>()
   // How many tasks share each project and title, counted once rather than for every row (#371).
   const twins = new Map<string, number>()
@@ -845,8 +860,14 @@ export const buildView = (
   for (const project of folded.projects) {
     const name = project.name || s.uncategorized
     const isHere = isHereProject(name, here)
+    const ownAgent = (mine?.agent || 'claude').toLowerCase()
     for (const task of project.tasks) {
-      if (task.auto !== null && task.auto.session === ownId) {
+      const isMine = task.auto !== null && (
+        task.auto.resume !== null && mine !== null && mine.sessionId
+          ? task.auto.resume === mine.sessionId && (task.auto.agent ?? 'claude') === ownAgent
+          : (mine !== null && mine.sessionId && task.auto.session === ownId && (task.auto.agent ?? 'claude') === ownAgent && mine.isRun !== true && isUniqueUnresumedTask(task, folded.projects, ownId, ownAgent))
+      )
+      if (isMine) {
         const own = folded.runs.get(task)
         if (own !== undefined) {
           ownRuns = own
@@ -866,7 +887,7 @@ export const buildView = (
       const when = clock.isFuture ? updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(updated, now, s)) : relativeTime(updated, now, s)
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
       const isManual = task.auto === null
-      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+      const scope = taskQuestionScope(project.name, task)
       const isFrozen = frozen.has(scope)
       const lastActive = hasTime(updated) ? updated : seen[taskFingerprint(project.name, task)]
       const days = task.due === null ? null : dueDays(task.due, now)
@@ -876,8 +897,13 @@ export const buildView = (
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now, updated, staleMs)
       const isInactive = !isManual && (isComplete || stale || task.auto?.state === 'ended')
-      if (isInactive) inactiveScopes.set(scope, updated)
-      else if (!isManual) liveScopes.add(scope)
+      // A record an earlier version keyed by the block id alone is read under that form too
+      // (`blockScopes`), as the question pass reads it.
+      const scopes = task.auto === null ? [scope] : blockScopes(project.name, task.auto)
+      for (const one of scopes) {
+        if (isInactive) inactiveScopes.set(one, updated)
+        else if (!isManual) liveScopes.add(one)
+      }
       const taskQuestions: WaitingItem[] = []
       const keys = task.auto === null || observed === null
         ? blockKeys(task)
@@ -887,7 +913,7 @@ export const buildView = (
       // shown by that saved question in the loop over the ledger below, or not at all once it is
       // answered or hidden. Any other [?] step asks as written, with no question id, as before the
       // ledger first sees it.
-      const scopeRecords = isFrozen ? (observed?.ledger.records.filter(record => record.scope === scope) ?? []) : []
+      const scopeRecords = isFrozen ? (observed?.ledger.records.filter(record => scopes.includes(record.scope)) ?? []) : []
       // A question that should show but does not is worse than one shown twice. Only one saved
       // candidate covers a step, and an answer needs the same token or saved source revisions.
       const savedFor = (index: number) => {
@@ -897,7 +923,7 @@ export const buildView = (
         const covering = scopeRecords.filter(record => {
           if (record.producer && token !== '' && record.producer !== token) return false
           if (record.isUnresolved) return record.source !== undefined
-          return token !== '' && token === record.producer || pending.some(turn => turn.isQuestion && turn.id !== undefined && questionScope(turn.project, turn.agent, turn.id) === scope && questionWords(turn.text) === record.words && turn.sourceRevisions !== undefined && turn.sourceRevisions.length > 0 && turn.sourceRevisions.every(revision => record.producerRevisions?.includes(revision)))
+          return token !== '' && token === record.producer || pending.some(turn => turn.isQuestion && turn.id !== undefined && inboxScope(folded.projects, turn) === scope && questionWords(turn.text) === record.words && turn.sourceRevisions !== undefined && turn.sourceRevisions.length > 0 && turn.sourceRevisions.every(revision => record.producerRevisions?.includes(revision)))
         })
         const same = covering.filter(record => record.words === words)
         const candidates = same.length > 0 || words === '' || index !== task.steps.length - 1 ? same : covering.filter(record => record.words.startsWith(words))
@@ -1029,13 +1055,13 @@ export const buildView = (
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142).
         confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || auto === 'ended')
-          ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
+          ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, resume: task.auto?.resume ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
             : auto === 'ended' && task.auto !== null
-              ? { project: name, title: task.title, line: task.line, session: task.auto.session }
+              ? { project: name, title: task.title, line: task.line, session: task.auto.session, ...(task.auto.resume ? { resume: task.auto.resume } : {}) }
               : null,
         target: targetOf(task.auto),
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
@@ -1087,7 +1113,7 @@ export const buildView = (
         project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
         when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], left: [], next: null, due: null, pr: '',
         agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
-        archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
+        archive: { project: name, title: task.title, line: task.line, session: auto.session, ...(auto.resume ? { resume: auto.resume } : {}), isDuplicate: true }, target: null,
       },
     })
   }
@@ -1129,10 +1155,11 @@ export const buildView = (
   }
 
   const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined).flatMap(turn => {
-    const updated = inactiveScopes.get(questionScope(turn.project, turn.agent, turn.id ?? ''))
+    const scope = inboxScope(folded.projects, turn)
+    const scopes = inboxScopes(folded.projects, turn)
+    const updated = inactiveScopes.get(scope)
     if (updated !== undefined && turn.at <= updated) return []
-    const scope = questionScope(turn.project, turn.agent, turn.id ?? '')
-    const id = observed?.keys[pendingQuestionSlot(scope, turn.text)] ?? observed?.ledger.records.find(record => record.scope === scope && record.isUnresolved && record.producerSources?.includes(JSON.stringify(turn)))?.id
+    const id = observed?.keys[pendingQuestionSlot(scope, turn.text)] ?? observed?.ledger.records.find(record => scopes.includes(record.scope) && record.isUnresolved && record.producerSources?.includes(JSON.stringify(turn)))?.id
     if (id === undefined || waiting.some(item => item.questionId === id)) return []
     const parts = splitNote(turn.text)
     return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]

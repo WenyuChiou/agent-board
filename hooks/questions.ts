@@ -1,7 +1,7 @@
 import type { CutBlock, ProgressAuto, ProgressMirror, ProgressProject, ProgressStepStatus, ProgressTask, QuestionLedger, QuestionProofs, QuestionRecord, QuestionSource } from '../types'
 import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
-import { cutOffTest, scanBlocks, shortId, stepWords } from './blocks'
+import { cutOffTest, mirrorResume, scanBlocks, shortId, stepWords } from './blocks'
 import { questionToken, waitsOnYou } from './mirror'
 import { sha256 } from './sha256'
 import type { TaskRef } from './view'
@@ -15,6 +15,31 @@ export const emptyQuestions = (): QuestionLedger => ({ version: 1, next: 1, reco
 export const questionsPath = (path: string): string => `${path.replace(/\.md$/i, '')}-questions.json`
 export const questionWords = (text: string): string => text.trim().replace(/\s+/g, ' ')
 export const questionScope = (project: string, agent: string, session: string): string => JSON.stringify([project, agent || 'claude', session])
+// The key a block's questions are kept under: its block id, and for a block with `resume=` its
+// full session id in front, so two subagents whose block ids collide (#539) and two blocks of one
+// session (#399) each keep their own questions. A block without `resume=` keeps its block id, a
+// hand-kept task its title, as before. Every reader builds the key this way, this session's own
+// rows included (`ownQuestionKey`, from the fields `markerOf` in blocks.ts writes).
+export const questionKey = (session: string, resume: string | null | undefined): string => resume ? `${resume}/${session}` : session
+export const taskQuestionKey = (task: Pick<ProgressTask, 'title' | 'auto'>): string => task.auto === null ? task.title : questionKey(task.auto.session, task.auto.resume)
+export const taskQuestionScope = (project: string, task: Pick<ProgressTask, 'title' | 'auto'>): string => questionScope(project, task.auto?.agent ?? 'manual', taskQuestionKey(task))
+export const ownQuestionKey = (mine: Pick<ProgressMirror, 'sessionId' | 'resume'>): string => questionKey(shortId(mine.sessionId), mirrorResume(mine))
+// A block's scope and the one an earlier version keyed it by (its block id alone), for a reader
+// that holds the scopes of the blocks on the board against records not moved to the new key yet.
+export const blockScopes = (project: string, auto: Pick<ProgressAuto, 'agent' | 'session' | 'resume'>): string[] =>
+  [...new Set([questionScope(project, auto.agent, questionKey(auto.session, auto.resume)), questionScope(project, auto.agent, auto.session)])]
+// The scope an inbox turn's question goes under. The turn names its block by its block id, so it
+// is the block's scope when that id names one block of the turn's agent and project on the board;
+// else a scope of its own under the block id, as before the block is there.
+export const inboxScope = (projects: readonly ProgressProject[], turn: Pick<PendingTurn, 'project' | 'agent' | 'id'>): string => {
+  const scopes = new Set(projects.flatMap(project => project.name !== turn.project ? [] : project.tasks.flatMap(task => task.auto !== null && task.auto.agent === turn.agent && task.auto.session === turn.id ? [taskQuestionScope(project.name, task)] : [])))
+  const [scope] = scopes
+  return scopes.size === 1 && scope !== undefined ? scope : questionScope(turn.project, turn.agent, turn.id ?? '')
+}
+// The scopes an inbox turn's records are under: its block's (`inboxScope`) and, for a record from
+// before the block was on the board, the block id alone.
+export const inboxScopes = (projects: readonly ProgressProject[], turn: Pick<PendingTurn, 'project' | 'agent' | 'id'>): string[] =>
+  [...new Set([inboxScope(projects, turn), questionScope(turn.project, turn.agent, turn.id ?? '')])]
 export const questionSlot = (scope: string, index: number | string): string => JSON.stringify([scope, index])
 export const pendingQuestionSlot = (scope: string, text: string): string => questionSlot(scope, `inbox:${questionWords(text)}`)
 export const migrationKey = (legacy: string): string => `question-migrated:${sha256(legacy)}`
@@ -34,8 +59,8 @@ export const cutOffScopes = (projects: readonly ProgressProject[], cut: readonly
   const sessions = new Set(cut.map(one => one.session))
 
   return new Set([
-    ...cut.map(one => questionScope(one.project, one.agent.toLowerCase(), one.session)),
-    ...projects.flatMap(project => project.tasks.flatMap(task => task.auto !== null && sessions.has(task.auto.session) ? [questionScope(project.name, task.auto.agent, task.auto.session)] : [])),
+    ...cut.flatMap(one => blockScopes(one.project, { agent: one.agent.toLowerCase(), session: one.session, resume: one.resume })),
+    ...projects.flatMap(project => project.tasks.flatMap(task => task.auto !== null && sessions.has(task.auto.session) ? blockScopes(project.name, task.auto) : [])),
   ])
 }
 // A question's copy of its block or hand-kept task: the marker fields and each step's mark, which
@@ -83,7 +108,14 @@ const normalizeSource = (source: QuestionSource): QuestionSource => {
 }
 
 export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: TaskRef, ledger: QuestionLedger): boolean => {
-  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : task.auto?.session === ref.session)
+  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => {
+    if (ref.session === null) return task.title === ref.title
+    // The block id picks the block, so twins that share a resume (#399) stay apart; the resume
+    // only separates subagents whose block ids collide (#539).
+    if (task.auto?.session !== ref.session) return false
+    if (ref.resume === undefined || ref.resume === null) return true
+    return task.auto?.resume === ref.resume || (task.auto?.resume === null && task.auto?.session === ref.resume)
+  })
   if (tasks.length !== 1) return false
   const task = tasks[0]
   if (task === undefined) return false
@@ -91,12 +123,14 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
   // token has no live identity, and an old copy of it cannot justify archiving the block.
   const tokens = task.steps.map(step => step.questionToken ?? '').filter(token => token !== '')
   if (task.steps.some(step => step.status === 'waiting' && (step.questionToken ?? '') !== '' && tokens.filter(token => token === step.questionToken).length > 1)) return false
-  const scope = questionScope(ref.project, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+  const scope = taskQuestionScope(ref.project, task)
+  // A record an earlier version keyed by the block id alone keeps that scope (`readAs`).
+  const legacyScope = questionScope(ref.project, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
   // The copy no longer holds the title, so the record is tied to this task by its title and
   // session; two hand-kept tasks that ask the same have the same marks.
   return task.steps.filter(step => step.status === 'waiting').every(step => ledger.records.some(record => record.isUnresolved
     ? isAskedBy(record, ref) && record.source?.text === step.text && record.source.data === sourceData(task) && (record.producer ?? '') === (step.questionToken ?? '')
-    : record.resolvedAt !== undefined && record.source !== undefined && record.scope === scope && record.words === questionWords(step.text) && (record.producer ?? '') === (step.questionToken ?? '') && !ledger.records.some(other => other.isUnresolved && other.scope === scope && other.words === questionWords(step.text))))
+    : record.resolvedAt !== undefined && record.source !== undefined && (record.scope === scope || record.scope === legacyScope) && record.words === questionWords(step.text) && (record.producer ?? '') === (step.questionToken ?? '') && !ledger.records.some(other => other.isUnresolved && (other.scope === scope || other.scope === legacyScope) && other.words === questionWords(step.text))))
 }
 // The questions of one block in the ledger: its project and title and, for an agent's block, its
 // session, so a block of another session with the same title is not taken for it. A hand-kept
@@ -386,28 +420,50 @@ export const questionFilesKey = (
 
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
+const isUniqueUnresumedTask = (task: ProgressTask, projects: readonly ProgressProject[], ownId: string, ownAgent = 'claude'): boolean => {
+  let count = 0
+  let unresumed = 0
+  for (const p of projects) {
+    for (const t of p.tasks) {
+      if (t.auto !== null && (t.auto.agent ?? 'claude') === ownAgent && t.auto.session === ownId) {
+        count += 1
+        if (t.auto.resume === null || t.auto.resume === undefined) unresumed += 1
+      }
+    }
+  }
+  return count === 1 && unresumed === 1
+}
+
+// This session's own rows, keyed as a reader of its block keys them: the block id is the session
+// id's first 8 characters and the full id its `resume=`, both as `markerOf` writes them.
 const ownObservations = (mine: ProgressMirror): Observation[] => {
   if (mine.isRun === true) return []
   const own = shortId(mine.sessionId)
-  const scope = questionScope(mine.project, 'claude', own)
-  return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: 'claude', session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
+  const scope = questionScope(mine.project, (mine.agent || 'claude').toLowerCase(), ownQuestionKey(mine))
+  return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: (mine.agent || 'claude').toLowerCase(), session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
 }
 
 // All a question pass reads from this session's own list: whose it is and the rows it gives.
 // Its times, turn state and background jobs change with every hook of a running session and
 // are left out, so they do not make an idle poll pass again (#416).
 export const ownQuestionsKey = (mine: ProgressMirror | null): string =>
-  JSON.stringify(mine === null ? null : [shortId(mine.sessionId), mine.project, ownObservations(mine)])
+  JSON.stringify(mine === null ? null : [ownQuestionKey(mine), mine.project, ownObservations(mine)])
 
 const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): Observation[] => {
   const own = mine === null ? '' : shortId(mine.sessionId)
+  const ownAgent = (mine?.agent || 'claude').toLowerCase()
   const rows: Observation[] = []
   const scopes = new Set<string>()
   const ambiguous = new Set<string>()
   for (const project of projects) {
     for (const task of project.tasks) {
-      if (mine !== null && task.auto?.session === own) continue
-      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+      const isMine = mine !== null && (
+        task.auto?.resume !== null && mine.sessionId
+          ? task.auto?.resume === mine.sessionId && (task.auto?.agent ?? 'claude') === ownAgent
+          : (Boolean(mine.sessionId) && task.auto?.session === own && (task.auto?.agent ?? 'claude') === ownAgent && mine.isRun !== true && isUniqueUnresumedTask(task, projects, own, ownAgent))
+      )
+      if (isMine) continue
+      const scope = taskQuestionScope(project.name, task)
       if (frozen.has(scope)) continue
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
@@ -415,13 +471,16 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       // are worked out once per task rather than once per step (#371).
       const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? (task.auto === null ? task.notes.join('\n') : '')
       const data = sourceData(task)
-      task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
+      // A row and its copy name the block by its block id, which every other reader of a block
+      // (an archive, an inbox turn, an answered key) names it by.
+      const session = task.auto?.session ?? ''
+      task.steps.forEach((step, index) => rows.push({ scope, session, index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session, data } }))
     }
   }
   if (mine !== null) rows.push(...ownObservations(mine))
   for (const turn of pending) {
     if (!turn.isQuestion || turn.id === undefined) continue
-    const scope = questionScope(turn.project, turn.agent, turn.id)
+    const scope = inboxScope(projects, turn)
     if (frozen.has(scope)) continue
     const matching = rows.filter(row => row.isWaiting && row.scope === scope && questionWords(row.text) === questionWords(turn.text))
     if (matching.length === 1 && matching[0] !== undefined) {
@@ -442,16 +501,46 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
   return rows.filter(row => !ambiguous.has(row.scope) && (row.producer === '' || tokens.get(JSON.stringify([row.scope, row.producer])) === 1))
 }
 
+// The row a record is read against when no row carries its scope. A record an earlier version
+// keyed by the block id alone keeps that scope, which its id is made from (`parseQuestions`), and
+// a pass reads it as its block's, under the scope the block has now (`questionKey`), so an answer
+// given before the upgrade holds. The record's scope is the block id form of one block of its
+// project and agent: the record is that block's when the id names one block on the board,
+// whatever that block's title now, or, among several (two subagents whose ids collide, #539),
+// when exactly one has the record's task.
+const readAs = (seen: readonly Observation[], records: readonly QuestionRecord[]): Map<string, Observation> => {
+  const current = new Set(seen.map(row => row.scope))
+  const blocksByLegacyScope = new Map<string, Observation[]>()
+  for (const row of seen) {
+    if (row.source.kind === 'manual' || row.session === '') continue
+    const legacy = questionScope(row.source.project, row.source.agent, row.session)
+    const blocks = blocksByLegacyScope.get(legacy)
+    if (blocks === undefined) blocksByLegacyScope.set(legacy, [row])
+    else if (!blocks.some(other => other.scope === row.scope)) blocks.push(row)
+  }
+  const targets = new Map<string, Observation>()
+  for (const record of records) {
+    if (current.has(record.scope)) continue
+    const blocks = blocksByLegacyScope.get(record.scope) ?? []
+    const same = blocks.filter(row => row.source.task === record.source?.task)
+    const target = blocks.length === 1 ? blocks[0] : same.length === 1 ? same[0] : undefined
+    if (target !== undefined && target.scope !== record.scope) targets.set(record.id, target)
+  }
+  return targets
+}
+
 // Seeing the source without its question ends a no-token resolution's lifetime.
 // A missing source alone cannot prove that an unchanged question was renewed.
 export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): string[] => {
   const seen = observations(projects, mine, pending, frozen)
+  const targets = readAs(seen, ledger.records)
+  const scopeOf = (record: QuestionRecord): string => targets.get(record.id)?.scope ?? record.scope
   const scopes = new Set([
-    ...projects.flatMap(project => project.tasks.map(task => questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))),
-    ...(mine === null ? [] : [questionScope(mine.project, 'claude', shortId(mine.sessionId))]),
+    ...projects.flatMap(project => project.tasks.map(task => taskQuestionScope(project.name, task))),
+    ...(mine === null ? [] : [questionScope(mine.project, (mine.agent || 'claude').toLowerCase(), ownQuestionKey(mine))]),
     ...seen.map(row => row.scope),
   ])
-  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !frozen.has(record.scope) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
+  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(scopeOf(record)) && !frozen.has(record.scope) && !frozen.has(scopeOf(record)) && !seen.some(row => row.scope === scopeOf(record) && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
 }
 
 // Words identify candidates, not questions. A durable sequence identifies each incarnation;
@@ -486,6 +575,11 @@ export const observeQuestions = (
   // Producer receipts and an explicit resolution suppress only the resolved incarnation.
   // A new file/content revision can still prove a fresh ask without changing its words.
   const seen = observations(projects, mine, pending, frozen)
+  // A record an earlier version keyed by the block id alone is read as its block's (`readAs`),
+  // under the scope its id is made from. Read so, it is the block's whatever the block's title
+  // now, so a block retitled since the answer does not ask it again.
+  const targets = readAs(seen, records)
+  const scopeOf = (record: QuestionRecord): string => targets.get(record.id)?.scope ?? record.scope
   // Each row's copies (the rows of its scope with the same words, in order), indexed once:
   // comparing every row with every other took seconds on a board of a few thousand steps (#371).
   const copyKey = (row: Observation): string => JSON.stringify([row.scope, questionWords(row.text)])
@@ -500,7 +594,7 @@ export const observeQuestions = (
   // between the rows of a group, so they are read only.
   const copiesOf = (row: Observation): readonly Observation[] => copyIndex.get(copyKey(row)) ?? []
   const hasNewRevision = (row: Observation, record: QuestionRecord): boolean =>
-    [row, ...records.filter(other => other.scope === row.scope && other.words === record.words && other.isPresent && other.isUnresolved)]
+    [row, ...records.filter(other => scopeOf(other) === row.scope && other.words === record.words && other.isPresent && other.isUnresolved)]
       .some(other => other.producerRevisions?.some(revision => !record.producerRevisions?.includes(revision)))
   // Each row's words, each record's hash and the retired set are worked out once a pass, not once
   // for every pair of row and record (#416).
@@ -516,12 +610,12 @@ export const observeQuestions = (
     if (!row.isWaiting) return []
     const copies = copiesOf(row)
     const words = questionWords(row.text)
-    const record = records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === words && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && record.source?.task === row.source.task && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
+    const record = records.find(record => scopeOf(record) === row.scope && (record.producer ?? '') === row.producer && record.words === words && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && (targets.has(record.id) || record.source?.task === row.source.task) && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
     return record === undefined ? [] : [{ row, record }]
   })
   const resolvedRows = new Set(resolved.map(item => item.row))
   // The revisions a settled record of each scope already holds.
-  const settledRevisions = new Set(records.filter(record => record.isUnresolved === false).flatMap(record => (record.producerRevisions ?? []).map(revision => JSON.stringify([record.scope, revision]))))
+  const settledRevisions = new Set(records.filter(record => record.isUnresolved === false).flatMap(record => (record.producerRevisions ?? []).map(revision => JSON.stringify([scopeOf(record), revision]))))
   const rows = seen.filter(row => !resolvedRows.has(row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => settledRevisions.has(JSON.stringify([row.scope, revision])))))
   for (const record of records) {
     if (isRetired(record)) {
@@ -545,7 +639,7 @@ export const observeQuestions = (
     const first = alike[0]
     if (first === undefined) continue
     const words = questionWords(first.text)
-    const candidates = records.filter(row => row.scope === first.scope && row.words === words && row.isPresent)
+    const candidates = records.filter(row => scopeOf(row) === first.scope && row.words === words && row.isPresent)
     const copies = copiesOf(first)
     const isAmbiguous = candidates.some(row => !row.producer && row.copies !== copies.length)
     if (isAmbiguous) for (const old of candidates.filter(record => !record.producer)) {
@@ -557,7 +651,7 @@ export const observeQuestions = (
       if (row.producer !== '') {
         const owner = row.producer.split(':')[0]
         for (const old of records) {
-          if (old.scope === row.scope && old.producer?.split(':')[0] === owner && (old.producer !== row.producer || old.words !== words)) {
+          if (scopeOf(old) === row.scope && old.producer?.split(':')[0] === owner && (old.producer !== row.producer || old.words !== words)) {
             old.isPresent = false
             old.isWaiting = false
             old.isUnresolved = false
@@ -587,6 +681,19 @@ export const observeQuestions = (
       assigned.add(record.id)
       if (row.isWaiting) keys[questionSlot(row.scope, row.index)] = record.id
     })
+  }
+  for (const record of records) {
+    const source = record.source
+    if (assigned.has(record.id) || frozen.has(record.scope) || source?.kind !== 'block' || source.agent === '' || source.session === '' || seen.some(row => row.scope === scopeOf(record))) continue
+    // The saved full block identity proves a move; a colliding sibling keeps its own question.
+    const auto = sourceSnapshot(source.data)?.auto
+    if (auto === undefined || auto === null) continue
+    const key = questionKey(auto.session, auto.resume)
+    if (seen.some(row => row.source.kind === 'block' && row.source.agent === source.agent && row.source.session === source.session && row.source.project !== source.project && row.scope === questionScope(row.source.project, source.agent, key))) {
+      record.isUnresolved = false
+      record.isPresent = false
+      record.isWaiting = false
+    }
   }
   if (isSettled) {
     for (const record of records) {

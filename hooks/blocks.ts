@@ -69,17 +69,24 @@ const markOf = (task: ProgressMirrorTask): string => {
   return task.status === 'in_progress' ? '~' : ' '
 }
 
+// The full id a session's own block carries as `resume=`: another agent's block carries that
+// agent's own session id, for a reply from the board's page; a session's own, its id when it is
+// longer than its block id. The question key of the session's own rows is built from it too, so
+// the owner pane and a reader of the block agree on the key (`ownQuestionKey` in questions.ts).
+export const mirrorResume = (mirror: Pick<ProgressMirror, 'sessionId' | 'resume'>): string | null =>
+  mirror.resume !== undefined && RESUME.test(mirror.resume) ? mirror.resume : mirror.sessionId.length > 8 ? mirror.sessionId : null
+
 // The marker carries what another session's pane needs: the full id and folder for a
 // resume command, and how the pull request stands.
 const markerOf = (mirror: ProgressMirror, parent?: string): string => {
   const pr = mirror.pr ?? null
+  const resume = mirrorResume(mirror)
   const attrs = [
     `session=${shortId(mirror.sessionId)}`,
     `agent=${mirror.agent || 'claude'}`,
     `state=${mirror.state}`,
     `updated=${new Date(mirror.updated).toISOString()}`,
-    // Another agent's block carries that agent's own session id, for a reply from the board's page.
-    mirror.resume !== undefined && RESUME.test(mirror.resume) ? `resume=${mirror.resume}` : mirror.sessionId.length > 8 ? `resume=${mirror.sessionId}` : '',
+    resume === null ? '' : `resume=${resume}`,
     mirror.cwd ? `dir=${encodeURIComponent(mirror.cwd)}` : '',
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
@@ -127,6 +134,8 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
 export type BlockSpan = {
   session: string
+  agent?: string
+  resume?: string | null
   state: ProgressSessionState
   updated: number
   project: string
@@ -228,6 +237,9 @@ const cutBlockOf = (span: BlockSpan, raw: string): CutBlock => {
     project: span.project,
     session: span.session,
     agent: attrs.agent ?? '',
+    // The question pass keys a resumed block by its full id too (`questionKey`), so a cut-off
+    // block is frozen under the scope the pass would read it by.
+    resume: span.resume ?? null,
     updated: Number.isNaN(parsed) ? null : parsed,
   }
 }
@@ -312,7 +324,28 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
   const eol = eolOf(text)
   const lines = linesOf(text)
   const id = shortId(mirror.sessionId)
-  const existing = scanBlocks(lines).find(span => span.session === id)
+  const fullId = mirror.resume ?? (mirror.sessionId.length > 8 ? mirror.sessionId : null)
+  const agent = (mirror.agent || 'claude').toLowerCase()
+  const spans = scanBlocks(lines)
+  const sameAgent = spans.filter(span => span.agent === undefined || span.agent === agent)
+  let existing: BlockSpan | undefined
+  if (fullId !== null) {
+    const byResume = sameAgent.filter(span => span.resume !== null && span.resume !== undefined && span.resume === fullId)
+    if (byResume.length >= 1) {
+      existing = byResume[0]
+    } else if (byResume.length === 0) {
+      const sameShort = sameAgent.filter(span => span.session === id)
+      const legacy = sameShort.filter(span => span.resume === null || span.resume === undefined)
+      if (legacy.length === 1 && sameShort.length === 1 && mirror.isRun !== true) {
+        existing = legacy[0]
+      }
+    }
+  } else {
+    const matching = sameAgent.filter(span => span.session === id && (span.resume === null || span.resume === undefined))
+    if (matching.length === 1) {
+      existing = matching[0]
+    }
+  }
   // A run keeps the parent its block already names; until one is named, it takes the person's
   // session working in the same project right now when exactly one is (#399), else none, and
   // counts as a background run.
@@ -362,18 +395,39 @@ const removeSpans = (text: string, spans: readonly BlockSpan[]): string => {
   return lines.length === 0 ? '' : lines.join(eol) + eol
 }
 
-export const removeAutoBlock = (text: string, sessionId: string): string => {
+export const removeAutoBlock = (text: string, sessionId: string, agent?: string): string => {
   const id = shortId(sessionId)
-  const spans = scanBlocks(linesOf(text)).filter(span => span.session === id)
+  const normAgent = agent?.toLowerCase()
+  const matching = scanBlocks(linesOf(text)).filter(span => {
+    if (normAgent !== undefined && (span.agent ?? 'claude') !== normAgent) return false
+    return span.session === id
+  })
+  if (matching.length <= 1) {
+    return matching.length === 0 ? text : removeSpans(text, matching)
+  }
+  const byResume = matching.filter(span => span.resume === sessionId)
+  const spans = byResume.length === 1 ? byResume : matching
 
-  return spans.length === 0 ? text : removeSpans(text, spans)
+  return removeSpans(text, spans)
 }
 
-export const extractAutoBlock = (text: string, sessionId: string): string | null => {
+export const extractAutoBlock = (text: string, sessionId: string, agent?: string): string | null => {
   const lines = linesOf(text)
-  const span = scanBlocks(lines).find(one => one.session === shortId(sessionId))
+  const id = shortId(sessionId)
+  const normAgent = agent?.toLowerCase()
+  const matching = scanBlocks(lines).filter(one => {
+    if (normAgent !== undefined && (one.agent ?? 'claude') !== normAgent) return false
+    return one.session === id
+  })
+  if (matching.length === 0) return null
+  if (matching.length === 1) {
+    const span = matching[0]!
+    return lines.slice(span.start, span.end + 1).join('\n')
+  }
+  const byResume = matching.filter(one => one.resume === sessionId)
+  const span = byResume.length === 1 ? byResume[0]! : matching[0]!
 
-  return span === undefined ? null : lines.slice(span.start, span.end + 1).join('\n')
+  return lines.slice(span.start, span.end + 1).join('\n')
 }
 
 // Done blocks leave after half a day; anything else (ended, or a session that stopped

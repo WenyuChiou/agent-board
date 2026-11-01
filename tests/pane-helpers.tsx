@@ -497,6 +497,9 @@ const engineBeneath = (on: On, world: World): MockClock => {
   on('tool.call', { tool: 'TaskUpdate' }, ($, e) => ({
     result: { success: true, taskId: e.taskId, updatedFields: ['status'] },
   }))
+  on('tool.call', { tool: 'TodoWrite' }, () => ({
+    result: { success: true },
+  }))
 
   return clock
 }

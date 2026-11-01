@@ -9,7 +9,7 @@ import type { CodexReport } from '../hooks/codex'
 import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
-import { parseProgress, progressTail, STALE_MS } from '../hooks/parse'
+import { parseProgress, progressTail, RESUME, STALE_MS } from '../hooks/parse'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
@@ -384,9 +384,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
       // Only Codex says it, and only as a session opens or takes a prompt; the other local agents
       // give no signal, so their sessions stay rows as they were.
+      const explicitOrigin = raw.origin === 'run' || payload.origin === 'run' || raw.is_run === true || raw.isRun === true || payload.is_run === true || payload.isRun === true ? 'run' : raw.origin === 'person' || payload.origin === 'person' ? 'person' : undefined
+      const explicitParent = typeof raw.parent === 'string' && RESUME.test(raw.parent) ? raw.parent : typeof payload.parent === 'string' && RESUME.test(payload.parent) ? payload.parent : undefined
+      const explicitSignal: RunSignal | undefined = explicitOrigin !== undefined ? { origin: explicitOrigin, ...(explicitParent !== undefined ? { parent: explicitParent } : {}) } : undefined
       const opens = agent === 'codex' && mode === '--codex-event' && /^(?:SessionStart|UserPromptSubmit)$/.test(String(payload.hook_event_name))
       const path = payload.transcript_path
-      const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path, session) : null) : undefined
+      const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path, session) : null) : explicitSignal
       const digest = mode !== '--codex-report' ? cwdDigest(rawCwd) : undefined
       // A queued event keeps metadata only: the host's own fields stay out, as they do above.
       return {
@@ -471,7 +474,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const history = agent === 'codex' && mode === '--codex-report' && original === null ? findSessionFile(dirname(configs.codex!), session) : null
       const meta = history === null ? null : readSessionMeta(history, session)
       const origin = withSignal(original, cleanSignal(run) ?? (meta === null ? undefined : codexSignal(true, history, meta)))
-      const isRun = isStrongRun(origin)
+      const isRun = isStrongRun(origin) && agent === 'codex'
       const bytes = isRun ? Buffer.alloc(0) : readBytes(progress) ?? Buffer.alloc(0)
       const text = bytes.toString('utf8')
       const previous = original === null || mode === '--codex-report' || isRun ? original : boardConfirmedReport(text, original, owner)

@@ -150,21 +150,29 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   // missing close must never reach past the next project or another agent's block.
   // Keep raw CR bytes in these lines so offsets preserve even mixed line endings.
   const lines = text.split('\n')
-  const found = scanBlocks(lines).filter(span => span.session === id)
-  if (found.length > 1) throw new Error('BLOCK_CONFLICT')
-  const existing = found[0]
+  const spans = scanBlocks(lines)
+  const ownMatches = spans.filter(span => {
+    const attrs = parseAttrs(lines[span.start] ?? '')
+    return attrs.owner === owner && attrs.agent === agent
+  })
+  const foreignConflict = spans.some(span => {
+    const attrs = parseAttrs(lines[span.start] ?? '')
+    return attrs.owner === owner && attrs.agent !== agent
+  })
+  if (foreignConflict || ownMatches.length > 1) throw new Error('BLOCK_CONFLICT')
+  const existing = ownMatches[0]
   // Append a section rather than reformat another writer's bytes.
   const append = (text: string): string => `${text}${text && !text.endsWith('\n') ? eol : ''}${eol}## ${report.project}${eol}${block}${eol}`
   let next: string
   if (existing) {
     const attrs = parseAttrs(lines[existing.start] ?? '')
-    if (attrs.owner !== owner || attrs.agent !== agent) throw new Error('BLOCK_CONFLICT')
+    if ((attrs.owner !== undefined && attrs.owner !== owner) || attrs.agent !== agent) throw new Error('BLOCK_CONFLICT')
     const last = existing.isClosed ? existing.end : existing.start
     const offset = (index: number): number => lines.slice(0, index).reduce((total, line) => total + line.length + 1, 0)
     const end = offset(last) + (lines[last] ?? '').replace(/\r$/, '').length
     // Only a report that changes the project moves the block (#246). Any other write keeps
     // its place, so a block someone moved, or a heading the parser reads differently, stays.
-    const project = isProjectChanged ? parseProgress(text).find(project => project.tasks.some(task => task.auto?.session === id)) : undefined
+    const project = isProjectChanged ? parseProgress(text).find(project => project.tasks.some(task => (RESUME.test(report.session) ? task.auto?.resume === report.session : task.auto?.session === id))) : undefined
     // Compare names as the parser reads them: it drops a heading's trailing `#`.
     next = isProjectChanged && project?.name !== (parseProgress(`## ${report.project}`)[0]?.name ?? report.project)
       ? append(text.slice(0, offset(existing.start)) + text.slice(offset(last + 1)))
@@ -172,7 +180,10 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   } else {
     next = append(text)
   }
-  const visible = parseProgress(next).flatMap(project => project.tasks).filter(task => task.auto?.session === id && task.auto.agent === agent)
+  const visible = parseProgress(next).flatMap(project => project.tasks).filter(task =>
+    task.auto?.agent === agent &&
+    (RESUME.test(report.session) ? (task.auto.resume === report.session || (task.auto.session === id && task.auto.resume === null)) : task.auto.session === id)
+  )
   if (visible.length !== 1) throw new Error('BLOCK_NOT_VISIBLE')
   return next
 }
@@ -180,7 +191,10 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
 export const dropCodexBlock = (text: string, owner: string): string => {
   if (!/^[a-f0-9]{64}$/.test(owner)) return text
   const lines = text.split('\n')
-  const spans = scanBlocks(lines).filter(span => span.session === owner.slice(0, 8))
+  const spans = scanBlocks(lines).filter(span => {
+    const attrs = parseAttrs(lines[span.start] ?? '')
+    return attrs.owner === owner && attrs.agent === 'codex'
+  })
   const span = spans[0]
   if (spans.length !== 1 || span === undefined) return text
   const attrs = parseAttrs(lines[span.start] ?? '')

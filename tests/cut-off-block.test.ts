@@ -6,8 +6,8 @@ import type { PendingTurn } from '../hooks/board'
 import { dashboardHtml } from '../hooks/dashboard'
 import { localDay } from '../hooks/journal'
 import { parseProgress, progressTail } from '../hooks/parse'
-import { putCodexBlock } from '../hooks/codex'
-import { cutOffScopes, emptyQuestions, isQuestionSnapshot, ledgerLeftovers, observeQuestions, resolvedQuestionsToRetire, resolveQuestion } from '../hooks/questions'
+import { dropCodexBlock, putCodexBlock } from '../hooks/codex'
+import { cutOffScopes, emptyQuestions, isQuestionSnapshot, ledgerLeftovers, observeQuestions, questionKey, questionScope, resolvedQuestionsToRetire, resolveQuestion } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 import { STRINGS } from '../hooks/strings'
 import { buildView, viewCache } from '../hooks/view'
@@ -47,8 +47,24 @@ const mirror = (sessionId: string, project: string): ProgressMirror => ({
   tasks: [{ id: '1', subject: 'Next step', status: 'pending', activeForm: '', waiting: null, why: null, ask: null, options: [], command: null, link: null, blocked: null, blockedBy: [] }],
 } as ProgressMirror)
 
+test('putCodexBlock keeps two owners sharing the first 8 digest characters as two blocks', () => {
+  const otherOwner = 'aaaaaaaa' + 'b'.repeat(56)
+  const report = (session: string, title: string): Parameters<typeof putCodexBlock>[1] => ({
+    session, agent: 'codex', project: 'demo', title, steps: ['- [ ] Step'], state: 'working', updated: new Date(NOW).toISOString(),
+  } as Parameters<typeof putCodexBlock>[1])
+  const first = putCodexBlock('', report('synthetic-session-a', 'First owner'), OWNER)
+  const both = putCodexBlock(first, report('synthetic-session-b', 'Second owner'), otherOwner)
+  expect(scanBlocks(both.split('\n'))).toHaveLength(2)
+  expect(both).toContain('First owner')
+  expect(both).toContain('Second owner')
+  const remaining = dropCodexBlock(both, OWNER)
+  expect(scanBlocks(remaining.split('\n'))).toHaveLength(1)
+  expect(remaining).not.toContain('First owner')
+  expect(remaining).toContain('Second owner')
+})
+
 test('a block with no end marker that more of the file follows is cut off, and one at the end of the file is not', () => {
-  expect(cutOffBlocks(BOARD)).toEqual([{ line: 5, project: 'demo-152', session: '55fb44cb', agent: 'codex', updated: Date.parse('2026-10-20T01:17:08.128Z') }])
+  expect(cutOffBlocks(BOARD)).toEqual([{ line: 5, project: 'demo-152', session: '55fb44cb', agent: 'codex', resume: null, updated: Date.parse('2026-10-20T01:17:08.128Z') }])
   expect(cutOffBlocks([...BEFORE, ''].join('\n'))).toEqual([])
   expect(cutOffBlocks([...BEFORE, '', '', ''].join('\n'))).toEqual([])
   expect(cutOffBlocks([...BEFORE.slice(0, 5), '### Add a shelf', '<!-- /auto session=55fb44cb -->', ...AFTER].join('\n'))).toEqual([])
@@ -67,6 +83,15 @@ test('a block with no end marker followed only by text a reader may catch halfwa
     expect(cutOffBlocks(text)).toEqual([])
     expect(isQuestionSnapshot(text)).toBe(false)
   }
+})
+
+test('a cut-off block with a full id is frozen under the scope the question pass reads it by', () => {
+  const text = ['## demo', '<!-- auto session=55fb44cb agent=codex state=waiting updated=2026-10-22T11:30:00Z resume=synthetic-resume-1 -->', '### Add a shelf', '- [?] Ship it, OK?', '## next', ''].join('\n')
+  const projects = parseProgress(text)
+  const frozen = cutOffScopes(projects, cutOffSpans(text))
+  expect(frozen.has(questionScope('demo', 'codex', questionKey('55fb44cb', 'synthetic-resume-1')))).toBe(true)
+  // Frozen, the block's question is neither recorded nor answered by the pass.
+  expect(observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'x', undefined, [], [], frozen).ledger.records).toEqual([])
 })
 
 test('a block whose own end marker was cut is named once, by the line about the cut-off end', () => {
