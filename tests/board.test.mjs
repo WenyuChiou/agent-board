@@ -2167,7 +2167,8 @@ test('the board script refuses a pasted working block with a weeks-old clock in 
       const files = readdirSync(board.dir).sort()
       const mtime = statSync(board.path).mtimeMs
       for (const state of ['working', 'waiting']) {
-        const fragment = relayFragment(ago(21 * 24 * 60 * 60 * 1000), state, '- [~] Outline')
+        // An hour past 21 days, so a small clock step between the test and the board cannot turn the day count into 20 (#493).
+        const fragment = relayFragment(ago(21 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000), state, '- [~] Outline')
         const result = await board.call('POST', '/api/paste', { body: { text: fragment } })
         assert.equal(result.status, 409, result.body)
         assert.match(result.json().note, note)
@@ -7797,6 +7798,47 @@ test('progress.html follows the page\'s order', () => {
   for (const word of [EN.pgNeeds, EN.pgWorking, EN.pgDone]) assert.ok(html.includes(word), word)
   assert.doesNotMatch(html, /<div class="legend">|id="paste"|data-theme-pick/)
   assert.match(html, /data-theme-toggle/)
+})
+
+// #612: an agent that asks, and one that stopped 2 minutes ago, are not "nothing"; the same made-up projects on the page and in progress.html.
+const quietAsking = () => groupedBlock('61200001', 'codex', 'waiting', 'demo-garden', 'Choose the seed mix', ['- [x] Compare', '- [?] Clover or rye?'], 1)
+const quietStopped = () => groupedBlock('61200002', 'gemini', 'ended', 'demo-orchard', 'Prune the synthetic rows', ['- [x] Prune', '- [ ] Water'], 2)
+
+test('Working now says an agent waits on you or just stopped, and that no agent did anything only when none moved', async () => {
+  for (const [label, source, expected] of [
+    ['asking', [quietAsking(), quietStopped()].join('\n'), EN.pgQuietAsking(1)],
+    ['stopped', quietStopped(), EN.pgQuietStopped(EN.agentNames.gemini, 2)],
+    ['none', quietStopped().replace(/updated=[^ ]+/, `updated=${new Date(groupedNow - 90 * 60_000).toISOString()}`), EN.pgNoWorking],
+  ]) {
+    const { board, model, html } = await groupedPage(source)
+    try {
+      const working = sectionWords(await pageDom(html, model), 'working')
+      assert.ok(working.includes(expected), `${label}: ${working}`)
+      if (label !== 'none') assert.ok(!working.includes(EN.pgNoWorking), `${label}: ${working}`)
+    } finally { await board.close() }
+    const file = htmlRun({ file: source, now: groupedNow })
+    const dash = file.slice(file.indexOf('id="dash-working"'), file.indexOf('</section>', file.indexOf('id="dash-working"')))
+    assert.ok(dash.includes(expected.replace(/&/g, '&amp;')), `progress.html ${label}: ${dash}`)
+  }
+})
+
+test('a working Codex session with no block of its own names its project once and does not say it waits', async () => {
+  const lifecycle = state => groupedBlock('61200003', 'codex', state, 'demo-garden', 'Demo-Garden', [`- [ ] ${EN.codexLifecycle}`], 2)
+  const { board, model, html } = await groupedPage(lifecycle('working'))
+  try {
+    const working = sectionWords(await pageDom(html, model), 'working')
+    assert.equal(working.toLowerCase().split('demo-garden').length - 1, 1, working)
+    assert.ok(!working.includes(EN.codexLifecycle), working)
+  } finally { await board.close() }
+  const dash = htmlRun({ file: lifecycle('working'), now: groupedNow })
+  const row = dash.slice(dash.indexOf('id="dash-working"'), dash.indexOf('</section>', dash.indexOf('id="dash-working"'))).replace(/<[^>]*>/g, ' ')
+  assert.equal(row.toLowerCase().split('demo-garden').length - 1, 1, row)
+  assert.ok(!row.includes(EN.codexLifecycle), row)
+  // Once it waits, the hook's words are true and the row says them.
+  const waiting = await groupedPage(lifecycle('waiting'))
+  try {
+    assert.ok(sectionWords(await pageDom(waiting.html, waiting.model), 'working').includes(EN.codexLifecycle))
+  } finally { await waiting.board.close() }
 })
 
 test('a reply button on an unconnected question says it copies and the card then says where to paste it', async () => {

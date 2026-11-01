@@ -629,6 +629,8 @@ export const ZH_CN: Strings = {
   pgWorking: '正在做',
   pgWorkingHint: '最近 30 分钟有动作的任务',
   pgNoWorking: '过去 30 分钟没有代理有动作。',
+  pgQuietAsking: (n: number): string => `现在没有代理在工作。它们问你的事在“需要你”里（${n}）。`,
+  pgQuietStopped: (agent: string, minutes: number): string => `现在没有代理在工作。${agent} ${minutes} 分钟前还在做。`,
   pgNothing: '目前没有需要你的事。',
   pgNothingHint: '代理问你问题或卡住时，会显示在这里，标签页标题也会显示数字。',
   pgOlder: (n: number): string => `${n} 个较早的问题尚未回答（对话已停止）`,
