@@ -479,6 +479,8 @@ test('a failed lookup of away notices, collaborators or claims adds one note eac
   const extra = fetchContext({ repo: 'alice/board', roadmap: 209 }, { run: () => { throw new Error('ghp_abc123 C:\\private\\gh.exe') } })
   assert.deepEqual([extra.roadmapComments, extra.collaborators, extra.claimed], [null, null, null])
   assert.equal(extra.notes.length, 3)
+  // Without the roadmap comments a Back cannot be seen, and the note says a waiting or due notice may be stale.
+  assert.match(extra.notes[0], /^away notices could not be read.* a Back cannot be seen: a waiting or due notice may be stale$/)
   const fetch = () => ({ prs: [pull(1)], commentsByNumber: { 1: [ready()] } })
   const lanes = () => ({ stale: [], notes: [] })
   const output = []
@@ -578,7 +580,8 @@ test('away notices and expired claims print after the queue and appear in the JS
   assert.equal('notes' in queue, false)
 })
 
-const notice = (time, sha = head, posted = '2026-10-20T10:00:00Z', id) => comment(`Merging after ${time} unless someone objects\nHead: ${sha}`, posted, id)
+// A notice is the pull request author's to give, and the pull requests of these tests are alice's.
+const notice = (time, sha = head, posted = '2026-10-20T10:00:00Z', id, login = 'alice') => by(login, comment(`Merging after ${time} unless someone objects\nHead: ${sha}`, posted, id))
 // The notice of pull request 1, Ready at readyAt for the current head, with the given comments after it.
 const noticeOf = (items, { readyAt = '2026-10-20T09:00:00Z', current = now, context, fields } = {}) => {
   const queue = classify([pull(1, fields)], { 1: [ready(head, readyAt, 1), ...items] }, current, null, context)
@@ -631,14 +634,14 @@ test('a Merging after notice for the current head waits until its time and is th
   assert.equal(noticeOf([posted], { current: '2026-10-22T12:00:00Z' }).state, 'due')
   assert.match(formatQueue(classify([pull(1)], { 1: [ready(), posted] }, now)), /\n {4}notice: merges after 2026-10-22 12:00 UTC\n/)
   const dueNow = '2026-10-23T08:00:00Z'
-  assert.match(formatQueue(classify([pull(1)], { 1: [ready(), posted] }, dueNow)), /\n {4}notice due: merge if checks are green and the author's code-review subagent approved this head\n/)
+  assert.match(formatQueue(classify([pull(1)], { 1: [ready(), posted] }, dueNow)), /\n {4}notice due: merge if checks are green and the author's code-review subagent approved this head and no bot P0\/P1 is open\n/)
   // The author's own subagent approval moves the pull request to the approved group, and the notice still shows there.
   const approved = classify([pull(1)], { 1: [ready(), posted, verdict('APPROVE', head, '2026-10-20T11:00:00Z', 3)] }, dueNow)
   assert.deepEqual([approved.needsReviewer.length, approved.approved.length, approved.approved[0].notice.state], [0, 1, 'due'])
   assert.match(formatQueue(approved), /One at a time.*\n#1 .*\n {4}codex: .*\n {4}notice due: /)
 })
 
-test('a notice is cancelled by a push, a Reviewing comment, a REQUEST CHANGES or an Objection after it', () => {
+test('a notice is cancelled by a Reviewing comment from someone else, a REQUEST CHANGES or an Objection after it', () => {
   const posted = notice('2026-10-23 12:00 UTC')
   const after = body => comment(body, '2026-10-20T11:00:00Z', 5)
   assert.equal(noticeOf([posted, after('Thanks for the notice')]).state, 'waiting')
@@ -647,11 +650,8 @@ test('a notice is cancelled by a push, a Reviewing comment, a REQUEST CHANGES or
   for (const body of ['Reviewing: bob', `Review: REQUEST CHANGES ${head} by bob`, 'Objection: I need more time', 'objection from the owner']) {
     assert.equal(noticeOf([posted, after(body)]).state, 'cancelled', body)
   }
-  // A push after the notice: it names the old head, and the current head is another.
-  const other = 'fedcba9876543210fedcba9876543210fedcba98'
-  const pushed = noticeOf([posted, ready(other, '2026-10-20T11:00:00Z', 6)], { fields: { headRefOid: other } })
-  assert.deepEqual(pushed, { state: 'cancelled', at: '2026-10-23T12:00:00.000Z' })
-  assert.match(formatQueue(classify([pull(1, { headRefOid: other })], { 1: [ready(head), posted, ready(other, '2026-10-20T11:00:00Z', 6)] }, now)), /\n {4}notice cancelled\n/)
+  assert.deepEqual(noticeOf([posted, after('Reviewing: bob')]), { state: 'cancelled', at: '2026-10-23T12:00:00.000Z' })
+  assert.match(formatQueue(classify([pull(1)], { 1: [ready(), posted, after('Reviewing: bob')] }, now)), /\n {4}notice cancelled\n/)
 })
 
 test('a notice naming a time less than 48 hours after the notice or after Ready is too early', () => {
@@ -795,4 +795,56 @@ test('a Back from the pull request author does not cancel its notice', () => {
   assert.equal(noticeOf([posted], { context: { collaborators: null, backs } }).state, 'waiting')
   // The login is compared without regard to case.
   assert.equal(noticeOf([posted], { context: { collaborators: null, backs }, fields: { author: { login: 'Alice' } } }).state, 'waiting')
+})
+
+test('a governance, workflow or release pull request shows that a notice is not possible', () => {
+  const touching = (...paths) => ({ files: paths.map(path => ({ path, additions: 1, deletions: 0 })) })
+  const refusal = '    no notice: governance, workflow or release pull requests merge only with an approval (CONTRIBUTING rules 8 and 12)'
+  const refused = { state: 'not-allowed', at: null }
+  // A workflow change with a notice that has come due.
+  const due = classify([pull(1, touching('.github/workflows/test.yml'))], { 1: [ready(), notice('2026-10-22 12:00 UTC')] }, '2026-10-23T08:00:00Z')
+  assert.deepEqual(due.needsReviewer[0].notice, refused)
+  assert.ok(formatQueue(due).split('\n').includes(refusal))
+  // The same with no notice at all, Ready for more than 24 hours, for each kind of file the rule names.
+  const governed = ['.github/workflows/test.yml', '.github/pull_request_template.md', 'AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/team-process.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json']
+  for (const path of governed) {
+    assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z', fields: touching('scripts/a.mjs', path) }), refused, path)
+  }
+  const text = formatQueue(classify([pull(1, touching('CONTRIBUTING.md'))], { 1: [ready(head, '2026-10-19T11:00:00Z')] }, now))
+  assert.ok(text.split('\n').includes(refusal))
+  // Everyone being away does not change it, and without a notice or a way to give one there is nothing to say.
+  const awayContext = { collaborators: ['alice', 'bob'], awayLogins: ['bob'] }
+  assert.deepEqual(noticeOf([], { context: awayContext, fields: touching('AGENTS.md') }), refused)
+  assert.equal(noticeOf([], { fields: touching('AGENTS.md') }), null)
+  assert.equal(noticeOf([notice('2026-10-22 12:00 UTC', head, undefined, undefined, 'bob')], { fields: touching('AGENTS.md') }), null)
+  // Other pull requests keep the notice, with or without a file list.
+  assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z', fields: touching('docs/CONTRIBUTOR-PATH.md', 'scripts/review-queue.mjs') }), { state: 'allowed', at: null })
+  assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z' }), { state: 'allowed', at: null })
+})
+
+test('a push drops the old notice and a new Ready that nobody takes for 24 hours allows a new one', () => {
+  const other = 'fedcba9876543210fedcba9876543210fedcba98'
+  const fields = { headRefOid: other }
+  const items = [notice('2026-10-23 12:00 UTC'), ready(other, '2026-10-20T11:00:00Z', 6)]
+  // The old notice names the old head, so the new head has none yet.
+  assert.equal(noticeOf(items, { fields }), null)
+  assert.deepEqual(noticeOf(items, { fields, current: '2026-10-21T12:00:00Z' }), { state: 'allowed', at: null })
+  assert.match(formatQueue(classify([pull(1, fields)], { 1: [ready(head), ...items] }, '2026-10-21T12:00:00Z')), /\n {4}notice allowed if only a collaborator or the owner may approve it /)
+  // A notice for the new head is read as usual.
+  const again = notice('2026-10-24 12:00 UTC', other, '2026-10-21T12:00:00Z', 7)
+  assert.deepEqual(noticeOf([...items, again], { fields, current: '2026-10-21T13:00:00Z' }), { state: 'waiting', at: '2026-10-24T12:00:00.000Z' })
+})
+
+test('only a Merging after comment from the pull request author counts and only a Reviewing from someone else cancels it', () => {
+  const posted = notice('2026-10-23 12:00 UTC')
+  const fromBob = notice('2026-10-23 12:00 UTC', head, '2026-10-20T10:00:00Z', undefined, 'bob')
+  assert.equal(noticeOf([fromBob]), null)
+  assert.deepEqual(noticeOf([fromBob], { readyAt: '2026-10-19T11:00:00Z' }), { state: 'allowed', at: null })
+  assert.equal(noticeOf([{ body: fromBob.body, created_at: fromBob.created_at, id: 2 }]), null)
+  assert.equal(noticeOf([posted]).state, 'waiting')
+  assert.equal(noticeOf([notice('2026-10-23 12:00 UTC', head, undefined, undefined, 'Alice')]).state, 'waiting')
+  const reviewing = login => by(login, comment(`Reviewing: ${login}`, '2026-10-20T11:00:00Z', 5))
+  assert.equal(noticeOf([posted, reviewing('alice')]).state, 'waiting')
+  assert.equal(noticeOf([posted, reviewing('Alice')]).state, 'waiting')
+  assert.equal(noticeOf([posted, reviewing('bob')]).state, 'cancelled')
 })

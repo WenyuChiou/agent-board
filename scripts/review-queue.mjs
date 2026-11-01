@@ -87,15 +87,24 @@ export const parseNotice = body => {
   return Number.isFinite(at) && shas.length ? { at, shas } : null
 }
 
-// Where the merge-after-notice stands for a pull request (team-process, From claim to merge). The latest notice is the one that counts.
-const noticeFor = ({ comments, head, ready, readyHours, takenBy, nowMs, isInQueue, isAllAway, hasBackSince }) => {
-  const last = comments.findLastIndex(entry => parseNotice(entry.comment.body))
-  if (last < 0) return isInQueue && !takenBy && ((readyHours ?? 0) > noticeWaitHours || isAllAway) ? { state: 'allowed', at: null } : null
-  const notice = parseNotice(comments[last].comment.body)
+// Governance files, workflows and the release files: a pull request touching one never merges after a notice (team-process, From claim to merge).
+const governedPaths = new Set(['AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/team-process.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json'])
+const isGovernedPath = path => governedPaths.has(path) || path.startsWith('.github/')
+
+// Where the merge-after-notice stands for a pull request (team-process, From claim to merge). Only the pull request's own author can
+// give a notice, and the latest one that names the current head is the one that counts: a push leaves the old notice behind, so the
+// check for a first notice starts over for the new head.
+const noticeFor = ({ comments, head, ready, readyHours, takenBy, nowMs, isInQueue, isAllAway, hasBackSince, isGoverned, author }) => {
+  const isByAuthor = comment => author !== '' && (comment.user?.login ?? '').toLowerCase() === author
+  const authorNotice = entry => isByAuthor(entry.comment) ? parseNotice(entry.comment.body) : null
+  const isAllowed = isInQueue && !takenBy && ((readyHours ?? 0) > noticeWaitHours || isAllAway)
+  if (isGoverned) return comments.some(authorNotice) || isAllowed ? { state: 'not-allowed', at: null } : null
+  const last = comments.findLastIndex(entry => authorNotice(entry)?.shas.some(word => head.startsWith(word)))
+  if (last < 0) return isAllowed ? { state: 'allowed', at: null } : null
+  const notice = authorNotice(comments[last])
   const at = new Date(notice.at).toISOString()
-  // The notice names the head it was written for, so a different current head means a push came after it.
-  if (!notice.shas.some(word => head.startsWith(word))) return { state: 'cancelled', at }
-  const isCancelled = comments.slice(last + 1).some(({ comment }) => /^Reviewing:[ \t]*\S/m.test(comment.body ?? '')
+  // The author's own Reviewing comment does not take the review, so it does not end the notice.
+  const isCancelled = comments.slice(last + 1).some(({ comment }) => (/^Reviewing:[ \t]*\S/m.test(comment.body ?? '') && !isByAuthor(comment))
     || reviewOf(comment.body)?.kind === 'REQUEST CHANGES' || /^\s*Objection\b/i.test(comment.body ?? ''))
   // A collaborator's Back on the roadmap issue after the notice ends it too (team-process, From claim to merge).
   if (isCancelled || hasBackSince(comments[last].time)) return { state: 'cancelled', at }
@@ -207,7 +216,9 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
         comments, head, ready, takenBy, nowMs,
         readyHours: ready && Number.isFinite(ready.time) ? Math.max(0, nowMs - ready.time) / hour : null,
         isInQueue: Boolean(ready && !reviewAfterReady),
-        isAllAway: isEveryOtherAway(collaborators, awayLogins, author), hasBackSince,
+        isAllAway: isEveryOtherAway(collaborators, awayLogins, author), hasBackSince, author,
+        // Without a file list a pull request cannot be shown to be clear of the governance files, but nothing is claimed about it either.
+        isGoverned: Array.isArray(pr.files) && pr.files.some(file => isGovernedPath(file?.path ?? '')),
       }),
     }
     if (ready && !reviewAfterReady) {
@@ -258,7 +269,7 @@ export const fetchContext = ({ repo, roadmap }, { run = execFileSync } = {}) => 
       return null
     }
   }
-  const roadmapComments = attempt('away notices could not be read, so nobody is shown as away',
+  const roadmapComments = attempt('away notices could not be read, so nobody is shown as away and a Back cannot be seen: a waiting or due notice may be stale',
     () => jsonLines(run('gh', ['api', '--paginate', '--jq', '.[] | tojson', `repos/${repo}/issues/${roadmap}/comments?per_page=100`], options)))
   const collaborators = attempt('collaborators could not be listed (this needs push access), so a notice for everyone away is not suggested',
     () => run('gh', ['api', '--paginate', '--jq', '.[] | select(.permissions.push or .permissions.admin) | .login', `repos/${repo}/collaborators?per_page=100`], options)
@@ -426,7 +437,8 @@ const botText = bots => [codexText[bots?.codex], bots?.greptile ? 'greptile: rev
 const noticeText = notice => {
   if (notice.state === 'allowed') return 'notice allowed if only a collaborator or the owner may approve it (team-process, From claim to merge)'
   if (notice.state === 'waiting') return `notice: merges after ${formatUtc(Date.parse(notice.at))}`
-  if (notice.state === 'due') return 'notice due: merge if checks are green and the author\'s code-review subagent approved this head'
+  if (notice.state === 'due') return 'notice due: merge if checks are green and the author\'s code-review subagent approved this head and no bot P0/P1 is open'
+  if (notice.state === 'not-allowed') return 'no notice: governance, workflow or release pull requests merge only with an approval (CONTRIBUTING rules 8 and 12)'
   if (notice.state === 'too-early') return `notice too early: the time named must be ${noticeGapHours} hours after the notice and after Ready`
   return 'notice cancelled'
 }
@@ -478,7 +490,7 @@ export const main = (argv = process.argv.slice(2), { fetch = fetchQueue, context
     const current = now()
     // Each extra lookup is optional: a failure leaves its part out and adds one note.
     let extra
-    try { extra = context(options) ?? {} } catch { extra = { roadmapComments: null, collaborators: null, claimed: null, notes: ['GitHub lookups for away notices, collaborators and claims failed'] } }
+    try { extra = context(options) ?? {} } catch { extra = { roadmapComments: null, collaborators: null, claimed: null, notes: ['GitHub lookups for away notices, collaborators and claims failed, so a Back cannot be seen: a waiting or due notice may be stale'] } }
     let sources
     try { sources = bundle() } catch { sources = { sources: null, note: bundleNote } }
     const away = extra.roadmapComments ? readAway(extra.roadmapComments, current) : { active: [], notes: [], backs: [] }
