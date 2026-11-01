@@ -1,0 +1,2 @@
+- **CI / Preflight** · A failed touched Node check now names up to three failing cases while keeping paths and tokens redacted, so its diagnostic identifies the useful failure without exposing the raw test log (#639).
+  Tests: `a failed touched Node check includes its redacted failing test name`, `nested touched Node TAP failures keep a bounded useful case name`, `missing or interrupted TAP remains a failed touched Node check`, `passing touched Node output keeps its existing message and outcome`.

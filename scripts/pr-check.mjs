@@ -577,9 +577,40 @@ export const binaryImages = paths => {
   return output
 }
 
+export const cleanReviewText = text => {
+  if (typeof text !== 'string') return ''
+  const withoutComments = text.replace(/<!--[\s\S]*?(?:-->|$)/g, '')
+  const withoutFences = withoutComments
+    .replace(/(?:^|\n)```[\s\S]*?(?:```|$)/g, '\n')
+    .replace(/(?:^|\n)~~~[\s\S]*?(?:~~~|$)/g, '\n')
+  return withoutFences
+    .split(/\r?\n/)
+    .filter(line => !/^\s*>/.test(line))
+    .join('\n')
+}
+
+export const cleanReviewer = text =>
+  (text ?? '').replace(/`/g, '').replace(/[.,;:]+\s*$/, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
+
+export const fullVerdictOf = body => {
+  const clean = cleanReviewText(body)
+  const lines = clean.split(/\r?\n/)
+  for (const line of lines) {
+    const match = line.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})\b`?(?:[ \t]+by[ \t]+(.+))?$/)
+    if (match) {
+      return {
+        kind: match[1],
+        sha: match[2].toLowerCase(),
+        reviewer: match[3] ? cleanReviewer(match[3]) : null,
+      }
+    }
+  }
+  return null
+}
+
 export const reviewOf = body => {
-  const match = (body ?? '').match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})\b/m)
-  return match ? { kind: match[1], sha: match[2].toLowerCase() } : null
+  const verdict = fullVerdictOf(body)
+  return verdict ? { kind: verdict.kind, sha: verdict.sha } : null
 }
 
 export const verdict = (comments, head) => {
@@ -594,8 +625,8 @@ export const verdict = (comments, head) => {
 // in the Author line and in the verdict do (docs/dev/REVIEWING.md). The name is the words after "by", read as
 // authorKey reads the Author line.
 export const reviewerOf = body => {
-  const line = (body ?? '').match(/^Review:\s*(?:APPROVE|REQUEST CHANGES)\s+`?[0-9a-fA-F]{7,40}\b`?[ \t]+by[ \t]+(.+)$/m)?.[1] ?? ''
-  return line.replace(/`/g, '').replace(/[.,;:]+\s*$/, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
+  const verdict = fullVerdictOf(body)
+  return verdict ? verdict.reviewer : null
 }
 
 // A verdict counts only when it is posted by the owner, a member or a collaborator, and not by a bot: anyone can
@@ -611,10 +642,10 @@ export const isTeamComment = comment => {
 export const reviewGate = ({ body, comments, head }) => {
   const output = result()
   const fail = (message, fix) => output.problems.push(problem('review-gate', message, fix))
-  const all = (comments ?? []).filter(comment => reviewOf(comment.body))
+  const all = (comments ?? []).map(comment => ({ ...comment, verdict: fullVerdictOf(comment.body) })).filter(c => c.verdict)
   const ignored = all.filter(comment => !isTeamComment(comment)).length
   if (ignored) output.info.push(`review gate: ${ignored} verdict${ignored === 1 ? '' : 's'} from outside the team or from a bot ignored.`)
-  const verdicts = all.filter(isTeamComment).map(comment => ({ ...reviewOf(comment.body), reviewer: reviewerOf(comment.body) }))
+  const verdicts = all.filter(isTeamComment).map(comment => comment.verdict)
   const last = verdicts.at(-1)
   const author = authorKey(body)
   const ask = 'ask an agent or person who did not write it to review it as docs/dev/REVIEWING.md says.'

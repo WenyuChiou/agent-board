@@ -1,11 +1,11 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { bundleSources, engineProblems, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { accountTestLockPath, bundleSources, engineProblems, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
 
 const script = fileURLToPath(new URL('../scripts/preflight.mjs', import.meta.url))
 const currentRegister = readFileSync(new URL('../hooks/register.tsx', import.meta.url), 'utf8')
@@ -57,8 +57,11 @@ const fixture = t => {
     cpSync(cwd, templateRepo, { recursive: true })
   }
   const lockPath = join(root, 'preflight.lock')
+  // Module-only injection keeps CLI fixtures off the real account lock, even inside preflight.
+  const cli = join(root, 'preflight-cli.mjs')
+  writeFileSync(cli, `import { main } from ${JSON.stringify(pathToFileURL(script).href)}\nprocess.exitCode = await main(process.argv.slice(2), { lockPath: ${JSON.stringify(lockPath)} })\n`)
   const check = options => runPreflight({ cwd, isNoFetch: true, run, lockPath, ...options })
-  return { root, cwd, home, env, lockPath, write, git, commit, check, run }
+  return { root, cwd, home, env, lockPath, cli, write, git, commit, check, run }
 }
 
 const has = (checks, state, text) => checks.some(item => item.state === state && item.message.includes(text))
@@ -148,7 +151,7 @@ test('preflight streams each completed check and names a touched Node file befor
   assert.ok(events.indexOf('RUN tests/stream.test.mjs') < events.indexOf('INVOKE tests/stream.test.mjs'))
   assert.ok(has(checks, 'PASS', 'tests/stream.test.mjs: 0 tests, 0 failed'))
   const childEnv = { ...f.env, TEMP: f.home, TMP: f.home, TMPDIR: f.home }
-  const result = spawnSync(process.execPath, [script, '--no-fetch'], { cwd: f.cwd, env: childEnv, encoding: 'utf8', timeout: 15000 })
+  const result = spawnSync(process.execPath, [f.cli, '--no-fetch'], { cwd: f.cwd, env: childEnv, encoding: 'utf8', timeout: 15000 })
   assert.equal(result.error, undefined)
   assert.equal(result.status, 0, result.stdout + result.stderr)
   const lines = result.stdout.trim().split(/\r?\n/)
@@ -163,7 +166,7 @@ test('preflight refuses a second live local test run without starting another te
   const f = fixture(t)
   f.write('tests/live.test.mjs', '')
   mkdirSync(f.lockPath)
-  writeFileSync(join(f.lockPath, `${process.pid}-live-owner.lock`), '')
+  writeFileSync(join(f.lockPath, `${process.pid}-00000000-0000-4000-8000-000000000001.lock`), '')
   let hasStarted = false
   const run = (program, args, options) => {
     if (args.includes('--test')) hasStarted = true
@@ -178,7 +181,7 @@ test('preflight recovers a stale test lock and releases its own lock after a fai
   const f = fixture(t)
   f.write('tests/stale.test.mjs', '')
   mkdirSync(f.lockPath)
-  writeFileSync(join(f.lockPath, '2147483647-stale-owner.lock'), '')
+  writeFileSync(join(f.lockPath, '2147483647-00000000-0000-4000-8000-000000000001.lock'), '')
   const run = (program, args, options) => args.includes('--test')
     ? { status: 1, stdout: '# tests 1\n# fail 1\n', stderr: '' }
     : f.run(program, args, options)
@@ -189,7 +192,7 @@ test('preflight recovers a stale test lock and releases its own lock after a fai
 test('preflight does not remove a lock acquired by a replacement owner', async t => {
   const f = fixture(t)
   f.write('tests/replacement.test.mjs', '')
-  const replacement = `${process.pid}-replacement-owner.lock`
+  const replacement = `${process.pid}-00000000-0000-4000-8000-000000000002.lock`
   const run = (program, args, options) => {
     if (args.includes('--test')) {
       writeFileSync(join(f.lockPath, replacement), '')
@@ -205,7 +208,7 @@ test('simultaneous stale preflight claimants never run test files together', asy
   const f = fixture(t)
   f.write('tests/claim.test.mjs', '')
   mkdirSync(f.lockPath)
-  writeFileSync(join(f.lockPath, '2147483647-stale-owner.lock'), '')
+  writeFileSync(join(f.lockPath, '2147483647-00000000-0000-4000-8000-000000000001.lock'), '')
   let firstRuns = 0
   let secondRuns = 0
   const runner = counter => (program, args, options) => {
@@ -230,7 +233,7 @@ test('preflight recovers an interrupted owner record after its process has exite
   const f = fixture(t)
   f.write('tests/interrupted.test.mjs', '')
   mkdirSync(f.lockPath)
-  writeFileSync(join(f.lockPath, '2147483647-interrupted-owner.lock'), '')
+  writeFileSync(join(f.lockPath, '2147483647-00000000-0000-4000-8000-000000000001.lock'), '')
   const checks = await f.check()
   assert.ok(checks.some(item => item.state === 'PASS' && item.message.startsWith('tests/interrupted.test.mjs:') && item.message.includes('0 failed')))
   assert.deepEqual(readdirSync(f.lockPath), [])
@@ -243,13 +246,129 @@ test('preflight gives different accounts separate default test lock directories'
   const unixOne = module.accountTestLockPath({ platform: 'linux', temp: shared, account: { uid: 1001, homedir: '/synthetic/one' } })
   const unixTwo = module.accountTestLockPath({ platform: 'linux', temp: shared, account: { uid: 1002, homedir: '/synthetic/two' } })
   assert.notEqual(unixOne, unixTwo)
-  assert.equal(module.accountTestLockPath({ platform: 'linux', temp: shared, account: { uid: 1001, homedir: '/changed/by-env' } }), unixOne)
+  assert.notEqual(module.accountTestLockPath({ platform: 'linux', temp: shared, account: { uid: 1002, homedir: '/synthetic/one' } }), unixOne)
   const windowsOne = module.accountTestLockPath({ platform: 'win32', temp: shared, account: { uid: -1, homedir: 'C:\\Users\\Synthetic One' } })
   const windowsTwo = module.accountTestLockPath({ platform: 'win32', temp: shared, account: { uid: -1, homedir: 'C:\\Users\\Synthetic Two' } })
   assert.notEqual(windowsOne, windowsTwo)
   assert.equal(module.accountTestLockPath({ platform: 'win32', temp: shared, account: { uid: 999, homedir: 'C:\\Users\\Synthetic One' } }), windowsOne)
-  for (const path of [unixOne, unixTwo, windowsOne, windowsTwo]) assert.equal(dirname(path), shared)
-  assert.equal(windowsOne.includes('Synthetic One'), false)
+  assert.equal(dirname(unixOne), '/synthetic/one'.replaceAll('/', process.platform === 'win32' ? '\\' : '/'))
+  assert.equal(dirname(windowsOne), 'C:\\Users\\Synthetic One')
+})
+
+test('preflight keeps the same account lock when TEMP changes', () => {
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    const account = { uid: 1001, homedir: join('synthetic-root', 'account-home') }
+    const first = accountTestLockPath({ platform, account, temp: join('synthetic-root', 'temp-one') })
+    const second = accountTestLockPath({ platform, account, temp: join('synthetic-root', 'temp-two') })
+    assert.equal(first, second)
+    assert.equal(dirname(first), account.homedir)
+  }
+})
+
+test('preflight CLI runs with different TEMP values still exclude each other', t => {
+  const f = fixture(t)
+  f.write('tests/temp-lock.test.mjs', '')
+  const firstTemp = join(f.root, 'temp-one')
+  const secondTemp = join(f.root, 'temp-two')
+  mkdirSync(firstTemp)
+  mkdirSync(secondTemp)
+  const account = { uid: 1001, homedir: f.home }
+  const secondCli = join(f.root, 'second-cli.mjs')
+  const firstCli = join(f.root, 'first-cli.mjs')
+  const resultPath = join(f.root, 'second-result.json')
+  const header = `import { accountTestLockPath, main } from ${JSON.stringify(pathToFileURL(script).href)}\nconst lockPath = accountTestLockPath({ account: ${JSON.stringify(account)} })\n`
+  writeFileSync(secondCli, `${header}process.exitCode = await main(['--no-fetch'], { lockPath })\n`)
+  writeFileSync(firstCli, `${header}import { spawnSync } from 'node:child_process'\nimport { writeFileSync } from 'node:fs'\nprocess.exitCode = await main(['--no-fetch'], { lockPath, onLockPublished: () => {\n  const result = spawnSync(process.execPath, [${JSON.stringify(secondCli)}], { cwd: process.cwd(), env: { ...process.env, TEMP: ${JSON.stringify(secondTemp)}, TMP: ${JSON.stringify(secondTemp)}, TMPDIR: ${JSON.stringify(secondTemp)} }, encoding: 'utf8', timeout: 15000 })\n  writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ status: result.status, stdout: result.stdout, stderr: result.stderr, error: result.error?.message }))\n} })\n`)
+  const first = spawnSync(process.execPath, [firstCli], {
+    cwd: f.cwd, env: { ...f.env, TEMP: firstTemp, TMP: firstTemp, TMPDIR: firstTemp }, encoding: 'utf8', timeout: 30000,
+  })
+  assert.equal(first.error, undefined)
+  assert.equal(first.status, 0, first.stdout + first.stderr)
+  assert.match(first.stdout, /RUN tests\/temp-lock\.test\.mjs/)
+  const second = JSON.parse(readFileSync(resultPath, 'utf8'))
+  assert.equal(second.error, undefined)
+  assert.equal(second.status, 1, second.stdout + second.stderr)
+  assert.match(second.stdout, /FAIL another preflight test run is already active/)
+  assert.doesNotMatch(second.stdout, /RUN tests\//)
+  assert.deepEqual(readdirSync(accountTestLockPath({ account })), [])
+})
+
+test('preflight ignores unfamiliar lock entries without deleting them', async t => {
+  const f = fixture(t)
+  f.write('tests/stray.test.mjs', '')
+  mkdirSync(f.lockPath)
+  const names = ['notes.txt', `${process.pid}-not-a-uuid.lock`, `${process.pid}-00000000-0000-4000-8000-000000000003.lock`]
+  for (const name of names) writeFileSync(join(f.lockPath, name), 'synthetic stray')
+  const impossibleOwners = ['2147483648', '9007199254740992', '9'.repeat(80)].map(pid => `${pid}-00000000-0000-4000-8000-000000000004.lock`)
+  for (const name of impossibleOwners) writeFileSync(join(f.lockPath, name), '')
+  const directory = '2147483647-00000000-0000-4000-8000-000000000001.lock'
+  mkdirSync(join(f.lockPath, directory))
+  const checks = await f.check()
+  assert.ok(has(checks, 'PASS', 'tests/stray.test.mjs: 1 tests, 0 failed'))
+  assert.deepEqual(readdirSync(f.lockPath).sort(), [...names, ...impossibleOwners, directory].sort())
+  for (const name of names) assert.equal(readFileSync(join(f.lockPath, name), 'utf8'), 'synthetic stray')
+  for (const name of impossibleOwners) assert.equal(readFileSync(join(f.lockPath, name), 'utf8'), '')
+})
+
+test('preflight rejects a non-directory lock root without starting tests or exposing its path', async t => {
+  const f = fixture(t)
+  f.write('tests/unsafe-root.test.mjs', '')
+  writeFileSync(f.lockPath, 'synthetic sentinel')
+  const checks = await f.check({ onProgress: () => assert.fail('tests must not start'), onLockPublished: () => assert.fail('a marker must not be published') })
+  assert.ok(has(checks, 'FAIL', 'test lock directory is not a directory'))
+  assert.equal(readFileSync(f.lockPath, 'utf8'), 'synthetic sentinel')
+  assert.equal(JSON.stringify(checks).includes(f.root), false)
+})
+
+test('preflight reports a deidentified failure when a synthetic lock root cannot be created', async t => {
+  const f = fixture(t)
+  f.write('tests/missing-root.test.mjs', '')
+  const checks = await f.check({ lockPath: join(f.root, 'missing-parent', 'private-lock'), onLockPublished: () => assert.fail('a marker must not be published') })
+  assert.ok(has(checks, 'FAIL', 'test lock directory could not be created'))
+  assert.equal(JSON.stringify(checks).includes(f.root), false)
+  assert.equal(existsSync(join(f.root, 'missing-parent')), false)
+})
+
+test('preflight rejects a symbolic-link lock root without changing its target', async t => {
+  const f = fixture(t)
+  f.write('tests/symlink-root.test.mjs', '')
+  const target = join(f.root, 'synthetic-target')
+  mkdirSync(target)
+  writeFileSync(join(target, 'sentinel'), 'untouched')
+  try { symlinkSync(target, f.lockPath, process.platform === 'win32' ? 'junction' : 'dir') } catch (error) {
+    if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) return t.skip('this platform cannot create a synthetic directory link')
+    throw error
+  }
+  const checks = await f.check({ onProgress: () => assert.fail('tests must not start') })
+  assert.ok(has(checks, 'FAIL', 'test lock directory is a symbolic link'))
+  assert.deepEqual(readdirSync(target), ['sentinel'])
+  assert.equal(lstatSync(f.lockPath).isSymbolicLink(), true)
+})
+
+test('preflight rejects synthetic Unix lock ownership and writable directory modes', async () => {
+  const { testLockDirectoryProblem } = await import('../scripts/preflight.mjs')
+  const stat = { isSymbolicLink: () => false, isDirectory: () => true, uid: 1001, mode: 0o40700 }
+  const unix = { platform: 'linux', uid: 1001 }
+  assert.equal(testLockDirectoryProblem(stat, unix), null)
+  assert.match(testLockDirectoryProblem({ ...stat, isSymbolicLink: () => true }, unix), /symbolic link/)
+  assert.match(testLockDirectoryProblem({ ...stat, isDirectory: () => false }, unix), /not a directory/)
+  assert.match(testLockDirectoryProblem({ ...stat, uid: 1002 }, unix), /belongs to another account/)
+  for (const mode of [0o40720, 0o40702, 0o41777]) assert.match(testLockDirectoryProblem({ ...stat, mode }, unix), /writable by group or others/)
+  assert.equal(testLockDirectoryProblem({ ...stat, mode: 0o40755 }, unix), null)
+})
+
+test('preflight creates private Unix lock directories and refuses writable fixtures without chmod', { skip: process.platform === 'win32' ? 'native Unix mode checks are unavailable on Windows' : false }, async t => {
+  const f = fixture(t)
+  f.write('tests/mode-root.test.mjs', '')
+  assert.ok(has(await f.check(), 'PASS', 'tests/mode-root.test.mjs: 1 tests, 0 failed'))
+  assert.equal(lstatSync(f.lockPath).mode & 0o777, 0o700)
+  for (const mode of [0o720, 0o702]) {
+    chmodSync(f.lockPath, mode)
+    const checks = await f.check({ onProgress: () => assert.fail('tests must not start') })
+    assert.ok(has(checks, 'FAIL', 'test lock directory is writable by group or others'))
+    assert.equal(lstatSync(f.lockPath).mode & 0o777, mode)
+    assert.deepEqual(readdirSync(f.lockPath), [])
+  }
 })
 
 test('preflight runs a touched nested e2e test', async t => {
@@ -279,6 +398,96 @@ test('preflight names a failing touched Node test and its failure count', async 
   const checks = await f.check()
   assert.ok(has(checks, 'FAIL', 'tests/failing.test.mjs: 1 tests, 1 failed'))
   assert.equal(JSON.stringify(checks).includes('private diagnostic'), false)
+})
+
+test('a failed touched Node check includes its redacted failing test name', async t => {
+  const f = fixture(t)
+  const names = [
+    String.raw`reads C:\Users\Synthetic Person\private.txt with ?t=syntheticBoardToken ghp_syntheticToken`,
+    String.raw`reads D:\Work Files\plan.txt now`,
+    'issue #123 has a hash',
+  ]
+  f.write('tests/failing-name.test.mjs', "import test from 'node:test'\n" + names.map(name => `test(${JSON.stringify(name)}, () => { throw new Error('private diagnostic') })`).join('\n') + '\n')
+  f.write('tests/failing-unix-name.test.mjs', "import test from 'node:test'\ntest('reads /tmp/synthetic/Private Projects/repository/secret-plan.txt now', () => { throw new Error('private diagnostic') })\n")
+  const fileUrls = [
+    'reads file:///tmp/synthetic/Private Projects/repository/secret-plan.txt unix',
+    'loads file:///C:/Users/Synthetic Person/Private Projects/plan.txt windows',
+    'copies file://synthetic-host/share/Private Projects/secret-plan.txt network',
+  ]
+  f.write('tests/failing-file-url-name.test.mjs', "import test from 'node:test'\n" + fileUrls.map(name => `test(${JSON.stringify(name)}, () => { throw new Error('private diagnostic') })`).join('\n') + '\n')
+  const urlBoundaries = [
+    'reads url=file:///home/Synthetic/private.txt assigned',
+    'reads [file:///home/Synthetic/private.txt] bracketed',
+  ]
+  f.write('tests/failing-url-boundary.test.mjs', "import test from 'node:test'\n" + urlBoundaries.map(name => `test(${JSON.stringify(name)}, () => { throw new Error('private diagnostic') })`).join('\n') + '\n')
+  const checks = await f.check()
+  const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-name.test.mjs:'))
+  assert.match(failed?.message ?? '', /failed: reads <path> with \?t=<token> <token>/)
+  assert.match(failed?.message ?? '', /; reads <path> now; issue #123 has a hash\.$/)
+  assert.doesNotMatch(failed?.message ?? '', /Synthetic|Person|Files|syntheticBoardToken|syntheticToken|private diagnostic/)
+  const unix = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-unix-name.test.mjs:'))
+  assert.match(unix?.message ?? '', /failed: reads <path> now\.$/)
+  assert.doesNotMatch(unix?.message ?? '', /Private|Projects|repository|secret-plan/)
+  const urls = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-file-url-name.test.mjs:'))
+  assert.match(urls?.message ?? '', /failed: reads <path> unix; loads (?:<path>)+ windows; copies <path> network\.$/)
+  assert.doesNotMatch(urls?.message ?? '', /file:|fil<path>|Synthetic|Person|Private|Projects|repository|secret-plan|synthetic-host|share/)
+  const punctuation = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-url-boundary.test.mjs:'))
+  assert.match(punctuation?.message ?? '', /failed: reads url=<path> assigned; reads \[<path>\]? bracketed\.$/)
+  assert.doesNotMatch(punctuation?.message ?? '', /\/home|Synthetic|private\.txt|file:/)
+})
+
+test('nested touched Node TAP failures keep a bounded useful case name', async t => {
+  const f = fixture(t)
+  f.write('tests/nested-failures.test.mjs', '')
+  const names = [
+    'the first nested case fails ' + 'x'.repeat(200),
+    'the second nested case fails',
+    'the third nested case fails',
+    'the fourth nested case is outside the bound',
+  ]
+  const nested = names.map((name, index) => `    not ok ${index + 1} - ${name}`).join('\n')
+  const run = (program, args, options) => args.includes('--test')
+    ? {
+        status: 1,
+        stdout: `TAP version 13\n# Subtest: a parent case\n    not ok 1 - a planned nested case # TODO later\n    not ok 2 - a skipped nested case # SKIP unavailable\n    ---\n    error: |-\n      assertion context\n      ...\n      not ok 99 - private diagnostic is not a case name\n    ...\n${nested}\nnot ok 1 - a parent case\n# tests 7\n# fail 5\n`,
+        stderr: '',
+      }
+    : f.run(program, args, options)
+  const checks = await f.check({ run })
+  const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/nested-failures.test.mjs:'))
+  const listed = (failed?.message.split('; failed: ')[1] ?? '').replace(/\.$/, '').split('; ')
+  assert.deepEqual(listed, names.slice(0, 3).map(name => name.slice(0, 160)))
+  assert.doesNotMatch(failed?.message ?? '', /planned nested|skipped nested|private diagnostic|fourth nested|parent case/)
+})
+
+test('missing or interrupted TAP remains a failed touched Node check', async t => {
+  const f = fixture(t)
+  f.write('tests/missing-tap.test.mjs', '')
+  const missingRun = (program, args, options) => args.includes('--test')
+    ? { status: 1, stdout: 'not TAP output', stderr: '' }
+    : f.run(program, args, options)
+  const missing = await f.check({ run: missingRun })
+  assert.ok(has(missing, 'FAIL', 'tests/missing-tap.test.mjs: unknown tests, unknown failed'))
+  const noCounterRun = (program, args, options) => args.includes('--test')
+    ? { status: 0, stdout: 'TAP version 13\nok 1 - incomplete counters\n# tests 1\n', stderr: '' }
+    : f.run(program, args, options)
+  const noCounter = await f.check({ run: noCounterRun })
+  assert.ok(has(noCounter, 'FAIL', 'tests/missing-tap.test.mjs: 1 tests, unknown failed'))
+  const interruptedRun = (program, args, options) => args.includes('--test')
+    ? { status: null, signal: 'SIGTERM', error: new Error('synthetic interruption'), stdout: '', stderr: '' }
+    : f.run(program, args, options)
+  const interrupted = await f.check({ run: interruptedRun })
+  assert.ok(has(interrupted, 'FAIL', safeLine('tests/missing-tap.test.mjs: unknown tests, unknown failed; the runner did not finish')), JSON.stringify(interrupted))
+})
+
+test('passing touched Node output keeps its existing message and outcome', async t => {
+  const f = fixture(t)
+  f.write('tests/passing-output.test.mjs', '')
+  const run = (program, args, options) => args.includes('--test')
+    ? { status: 0, stdout: 'TAP version 13\nok 1 - a passing case\nnot ok 2 - a planned case # TODO later\n# tests 2\n# fail 0\n', stderr: '' }
+    : f.run(program, args, options)
+  const checks = await f.check({ run })
+  assert.ok(checks.some(item => item.state === 'PASS' && item.message === 'tests/passing-output.test.mjs: 2 tests, 0 failed.'))
 })
 
 test('preflight detects committed staged and untracked tests while skipping untouched slow suites', async t => {
@@ -604,7 +813,7 @@ test('preflight hides a home path with a space and a token in its output', t => 
 test('preflight prints safe status lines counts and a failing CLI exit code', t => {
   const f = fixture(t)
   const run = args => {
-    const result = spawnSync(process.execPath, [script, ...args], { cwd: f.cwd, env: f.env, encoding: 'utf8', timeout: 15000 })
+    const result = spawnSync(process.execPath, [f.cli, ...args], { cwd: f.cwd, env: f.env, encoding: 'utf8', timeout: 15000 })
     assert.equal(result.error, undefined)
     return result
   }

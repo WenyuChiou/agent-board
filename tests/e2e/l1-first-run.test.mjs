@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { performance } from 'node:perf_hooks'
+import { basename } from 'node:path'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { inspectSurfaces, terminal, seenPageWithin, serve, run } from './lib/surfaces.mjs'
@@ -25,23 +26,23 @@ describe('L1 first run', () => {
     } finally { await world.close() }
   })
 
-  test('L1 first Codex session: the row title comes from the first prompt, not "Local codex task"', async () => {
+  test('L1 first Codex session: the hook reports its project without reading the prompt', async () => {
     const world = makeWorld()
     try {
       const prompt = 'Prepare the synthetic gateway release'
+      const expectedTitle = basename(world.root)
       const result = await hook(world, 'codex', 'UserPromptSubmit', { prompt, cwd: world.root })
       assert.equal(result.status, 0, result.stderr || result.stdout)
       assert.match(world.read('progress.md'), /agent=codex .*state=working/)
       const server = await serve.start(world)
       const rows = (await server.get('/api/board')).json().model.groups.flatMap(group => group.rows)
       assert.equal(rows.length, 1)
-      await knownFailure('hold:codex-first-prompt-title', () => assert.equal(rows[0].title, prompt))
+      assert.equal(rows[0].title, expectedTitle)
       for (const [surface, text] of Object.entries({ terminal: await terminal.screen(world), page: await server.page() })) {
         noMachineIds(text, world)
-        await knownFailure('hold:codex-first-prompt-title', () => {
-          assert.ok(text.includes(prompt), `${surface}: ${text}`)
-          assert.ok(!text.includes('Local codex task'), surface)
-        })
+        assert.ok(text.includes(expectedTitle), `${surface}: ${text}`)
+        assert.ok(!text.includes('Local codex task'), surface)
+        assert.ok(!text.includes(prompt), surface)
       }
     } finally { await world.close() }
   })

@@ -465,12 +465,17 @@ test('the review gate passes only an approval of the current head by someone oth
   assert.match(reviewGate({ body, head, comments: [{ body: `Review: APPROVE ${head} by dot` }] }).problems[0].message, /no review verdict/)
   assert.match(reviewGate({ body, head, comments: [team(`Review: REQUEST CHANGES ${head} by dot`), outsider] }).problems[0].message, /requests changes/)
   assert.match(reviewGate({ body, head, comments: [outsider, team(`Review: APPROVE ${head} by dot`)] }).info[0], /1 verdict from outside the team or from a bot ignored/)
+  // Mixed-line comments parse kind and reviewer atomically from one verdict line
+  assert.match(gate(`Review: APPROVE ${head}\nReview: REQUEST CHANGES ${head} by dot`).problems[0].message, /does not name its reviewer/)
+  // Fenced, hidden or quoted text does not count as a genuine verdict
+  assert.match(gate('```\nReview: APPROVE ' + head + ' by dot\n```').problems[0].message, /no review verdict/)
+  assert.match(gate('<!-- Review: APPROVE ' + head + ' by dot -->').problems[0].message, /no review verdict/)
+  assert.match(gate('> Review: APPROVE ' + head + ' by dot').problems[0].message, /no review verdict/)
   // checkPr runs the gate only when asked, and not offline.
   assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true }).problems.some(item => item.check === 'review-gate'), true)
   assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true, prComments: null }).problems.some(item => item.check === 'review-gate'), true)
   assert.equal(checkPr(syntheticPr()).problems.some(item => item.check === 'review-gate'), false)
 })
-
 test('pr-check requires synthetic alt text for images in the body', () => {
   for (const text of ['![Board](example.svg)', '<img src="example.svg">', '<img alt="Board" src="example.svg">', '<img data-alt="Synthetic board" src="example.svg">', '<img title=\' alt="Synthetic"\'>']) {
     assert.equal(privateData({ added: [], body: text }).problems.length, 1)
