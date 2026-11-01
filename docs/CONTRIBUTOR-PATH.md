@@ -247,6 +247,6 @@ gh issue comment <N> -R WenyuChiou/agent-board --body "Fixed by #<PR>, merged as
 
 Don't sit and watch CI. Once you approve, start the wait in the background (`gh pr checks <PR> -R WenyuChiou/agent-board --watch`, then the merge above when every check passes) and take the next pull request in the queue.
 
-A pull request that changes the board page's messages, the setup output or the one-line row summaries also needs `Acceptance: PASS <full head sha>` from a collaborator who did not write it, after walking the steps in #572 on their own machine.
+A pull request that changes the board page's messages, the setup output or the one-line row summaries also needs `Acceptance: PASS <full head sha>` from a collaborator or the owner who did not write it, after walking the steps in #572 on their own machine.
 
 GitHub deletes a merged branch from this repository. A governance pull request also needs the owner's approval quoted in its body (rule 12), and a release pull request stays with the maintainer ([Releases](../CONTRIBUTING.md#releases)).
