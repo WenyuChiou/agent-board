@@ -770,7 +770,7 @@ test('a quoted choice extracted from prose keeps clean answer options and inner 
   for (const [open, close] of [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]) {
     for (const [question, options] of choices) {
       const extracted = lastQuestionInProse(`The labels are ready.\n\n${open}${question}${close}`, true)
-      expect(extracted).not.toBeNull()
+      expect(extracted).toBe(`${open}${question}${close}`)
       expect(askOf(extracted ?? '', '')).toMatchObject({ kind: 'choose', options: [...options] })
       expect(askOf('Shelf placement', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
     }
@@ -790,6 +790,20 @@ test('a quoted choice extracted from prose keeps clean answer options and inner 
     expect(askOf('Shelf placement', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
   }
   expect(askOf('"Top shelf or bottom shelf? Explain your choice', '').options).toEqual(['"Top shelf', 'bottom shelf'])
+})
+
+test('lexical apostrophes stay in choice options from questions and extracted replies', () => {
+  for (const [question, options] of [
+    ["'90s or modern?", ["'90s", 'modern']],
+    ["'80s or retro?", ["'80s", 'retro']],
+    ["'em or them?", ["'em", 'them']],
+  ] as const) {
+    expect(askOf(question, '')).toMatchObject({ kind: 'choose', options: [...options] })
+    expect(askOf('Pick', question)).toMatchObject({ kind: 'choose', options: [...options] })
+    const extracted = lastQuestionInProse(question, true)
+    expect(extracted).toBe(question)
+    expect(askOf('Pick', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+  }
 })
 
 test('options the agent gave win over options found in the question or the note', () => {
@@ -1414,7 +1428,7 @@ test('JSON scalars remain prose as written while objects and arrays without text
     expect(pending?.fullText).toBe(answer)
     expect(pending?.text).not.toBe(STRINGS.en.turnUnreadable)
   }
-  expect(lastQuestion('"Ship it?"')).toBe('"Ship it?')
+  expect(lastQuestion('"Ship it?"')).toBe('"Ship it?"')
   expect(parseDigest('TITLE: work\nASK: "Ship it?"')?.ask).toBe('"Ship it?"')
   for (const answer of ['{}', '[]']) {
     const file = { name: 'codex-turn-30-1.json', body: JSON.stringify({ session_id: 'structured', cwd: '/w/app', last_assistant_message: answer }), at: 30 }
