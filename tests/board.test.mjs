@@ -6383,7 +6383,10 @@ const conditionalPollBoard = async () => {
     for (const [name, text] of Object.entries(seed.files)) writeFileSync(join(board.dir, name), text)
     const probe = join(board.dir, 'poll-reads.json')
     const clock = join(board.dir, 'poll-clock.txt')
-    const now = Math.floor(Date.now() / 60000) * 60000 + 10000
+    // The seed and the starting command run on the real clock and date the ledger's first records.
+    // A server clock before them shows those asks without a time until it passes them, a change no
+    // poll made, so the server's minute starts after the real one.
+    const now = (Math.floor(Date.now() / 60000) + 1) * 60000 + 10000
     writeFileSync(clock, String(now))
     const preload = join(board.dir, 'poll-reads.cjs')
     writeFileSync(preload, questionFault(`if (process.argv.includes('--serve-child')) {
@@ -6423,17 +6426,13 @@ const conditionalPollBoard = async () => {
 test('unchanged page polls return 304 with an ETag and no body', { timeout: 30_000 }, async () => {
   const board = await conditionalPollBoard()
   try {
-    await (await board.poll()).arrayBuffer()
-    // The first poll comes before progress.md has held still for a second, and the first settled
-    // poll may still change the board. Take the tag from a settled board, then let time pass.
-    writeFileSync(board.clock, String(board.now + 3000))
     const first = await board.poll()
     assert.equal(first.status, 200)
     const before = await first.json()
     assert.ok(before.model.view)
     const etag = first.headers.get('etag')
     assert.match(etag, /^W\/"[a-f0-9]{64}"$/)
-    writeFileSync(board.clock, String(board.now + 6000))
+    writeFileSync(board.clock, String(board.now + 3000))
     const same = await board.poll(`"another-board", ${etag.slice(2)}`)
     assert.equal(same.status, 304, await changedFields(same, before))
     assert.equal(same.headers.get('etag'), etag)
