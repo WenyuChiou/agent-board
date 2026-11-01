@@ -79,7 +79,7 @@ export const safeLine = (value, { hasSpacedUnixPaths = false } = {}) => {
   // Home directory names can contain spaces even in unquoted diagnostics.
   // TAP names need conservative path removal; status lines keep adjacent relative paths.
   const unixPath = hasSpacedUnixPaths
-    ? /(^|[\s"'`(])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g
+    ? /(^|[^\w])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g
     : /(^|[\s"'`(])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g
   text = text.replace(/(?:[A-Za-z]:[\\/]Users[\\/]|\/(?:home|Users)\/)[^\\/"'`<>]+(?=[\\/])/gi, match => match.replaceAll(' ', '\ue000'))
   text = text.replace(/(?:[A-Za-z]:[\\/]|\\\\)(?:[^\s\\/"'`<>:|?]+(?: [^\s\\/"'`<>:|?]+)*[\\/])*(?:[^\s\\/"'`<>:|?]+(?: [^\s\\/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g, '<path>')
