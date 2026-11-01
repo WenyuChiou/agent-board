@@ -11,7 +11,7 @@ import { boardRun } from '../hooks/board-commands'
 import { dashboardHtml } from '../hooks/dashboard'
 import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
-import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
+import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, progressReport, unwrittenEntries } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
@@ -757,6 +757,39 @@ test('a choice wrapped in quote marks gives options without the quotes in every 
   expect(askOf('(Top (high) shelf or bottom?)', '').options).toEqual(['Top (high) shelf', 'bottom'])
   expect(askOf(String.raw`"a \"red\" shelf or blue?"`, '').options).toEqual([String.raw`a \"red\" shelf`, 'blue'])
   expect(askOf('Please review "the shelf"', '').options).toEqual([])
+})
+
+test('a quoted choice extracted from prose keeps clean answer options and inner quotes', () => {
+  const choices = [
+    ['Top shelf or bottom shelf?', ['Top shelf', 'bottom shelf']],
+    ['Left row or right row?', ['Left row', 'right row']],
+    ['A first, or B?', ['A first', 'B']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['先开旗标，还是全部开？', ['先开旗标', '全部开']],
+  ] as const
+  for (const [open, close] of [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]) {
+    for (const [question, options] of choices) {
+      const extracted = lastQuestionInProse(`The labels are ready.\n\n${open}${question}${close}`, true)
+      expect(extracted).not.toBeNull()
+      expect(askOf(extracted ?? '', '')).toMatchObject({ kind: 'choose', options: [...options] })
+      expect(askOf('Shelf placement', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+    }
+  }
+  for (const [reply, options] of [
+    ['(「Top shelf or bottom shelf?」)', ['Top shelf', 'bottom shelf']],
+    ['“the "red" row or the blue row?”', ['the "red" row', 'the blue row']],
+    ["'Alice's row or Bob's row?'", ["Alice's row", "Bob's row"]],
+    ['(Top (high) shelf or bottom?)', ['Top (high) shelf', 'bottom']],
+    ['(Top shelf) or (bottom shelf?)', ['(Top shelf)', '(bottom shelf']],
+    [String.raw`"a \"red\" row or blue?"`, [String.raw`a \"red\" row`, 'blue']],
+    ['"red" row or "blue row?"', ['"red" row', '"blue row']],
+    ['「先開旗標」還是「全部開？」', ['「先開旗標」', '「全部開']],
+  ] as const) {
+    const extracted = lastQuestionInProse(reply, true)
+    expect(extracted).not.toBeNull()
+    expect(askOf('Shelf placement', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+  }
+  expect(askOf('"Top shelf or bottom shelf? Explain your choice', '').options).toEqual(['"Top shelf', 'bottom shelf'])
 })
 
 test('options the agent gave win over options found in the question or the note', () => {

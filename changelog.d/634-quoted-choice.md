@@ -1,2 +1,2 @@
-- **Questions / Quoted choices** · Answer buttons no longer keep quote marks or brackets that wrap a choice question, in every language. Quotes inside an option stay unchanged (#634).
-  Tests: `a choice wrapped in quote marks gives options without the quotes in every language`.
+- **Questions / Quoted choices** · Answer buttons no longer keep quote marks or brackets that wrap a choice question, including questions extracted from an agent's reply, in every language. Quotes inside an option stay unchanged (#634).
+  Tests: `a choice wrapped in quote marks gives options without the quotes in every language`, `a quoted choice extracted from prose keeps clean answer options and inner quotes`.

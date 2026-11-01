@@ -35,11 +35,11 @@ const CODE = /`([^`]+)`/
 // Splits `0.6.0 還是 1.0.0？` or a list Claude gave into options. The first option is the
 // clause right before 還是 / or, so `先開旗標，還是全部開？` and `A first, or B?` read too.
 const optionsOf = (text: string): string[] => {
-  // Strip only paired wrappers around the whole question before splitting it. Trimming
-  // each option independently would remove quotes that belong inside an option.
+  // Strip wrappers around the whole question before splitting it. Trimming each
+  // option independently would remove quotes that belong inside an option.
   let question = text.trim()
   const pairs: Record<string, string> = { '"': '"', "'": "'", '“': '”', '「': '」', '『': '』', '(': ')' }
-  while (question.length >= 2 && pairs[question[0]!] === question[question.length - 1]) {
+  while (question.length >= 2 && pairs[question[0]!] !== undefined) {
     const open = question[0]!
     const close = pairs[open]!
     let depth = 1
@@ -52,9 +52,11 @@ const optionsOf = (text: string): string[] => {
       if (open !== close && char === open) depth += 1
       else if (char === close && --depth === 0) { end = i; break }
     }
-    // The first wrapper must enclose the whole question, not just its first option.
-    if (end !== question.length - 1) break
-    question = question.slice(1, -1).trim()
+    // Prose extraction ends at the question mark and can omit the outer close.
+    // A close inside an option still means the opening quote belongs to that option.
+    const isCut = end === -1 && /[?？]$/.test(question)
+    if (end !== question.length - 1 && !isCut) break
+    question = question.slice(1, isCut ? undefined : -1).trim()
   }
   const match = CHOICE.exec(question)
   if (match === null) return []
