@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { createHash, randomUUID } from 'node:crypto'
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
+import { tmpdir, userInfo } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { addedLines, testTitles, titleKnown } from './pr-check.mjs'
@@ -13,6 +14,62 @@ const maxBuffer = 64 * 1024 * 1024
 const read = path => readFileSync(path, 'utf8')
 const isTest = path => /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|ts|tsx)$/.test(path)
 const splitPaths = text => text.split('\0').filter(Boolean)
+
+export const accountTestLockPath = ({ platform = process.platform, temp = tmpdir(), account = userInfo() } = {}) => {
+  const identity = platform === 'win32'
+    ? createHash('sha256').update(String(account.homedir)).digest('hex')
+    : String(account.uid)
+  return join(temp, `agent-board-preflight-tests-${identity}`)
+}
+
+const isLiveProcess = pid => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code !== 'ESRCH'
+  }
+}
+
+const releaseTestLock = path => {
+  try {
+    unlinkSync(path)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+}
+
+const acquireTestLock = (directory, onPublished) => {
+  mkdirSync(directory, { recursive: true })
+  const marker = `${process.pid}-${randomUUID()}.lock`
+  const path = join(directory, marker)
+  let isPublished = false
+  try {
+    const file = openSync(path, 'wx')
+    isPublished = true
+    closeSync(file)
+    onPublished?.()
+    let isBlocked = false
+    for (const name of readdirSync(directory)) {
+      if (name === marker) continue
+      const match = /^(\d+)-[^.]+\.lock$/.exec(name)
+      if (!match || isLiveProcess(Number(match[1]))) {
+        isBlocked = true
+        continue
+      }
+      releaseTestLock(join(directory, name))
+    }
+    if (isBlocked) {
+      releaseTestLock(path)
+      return null
+    }
+    return { path }
+  } catch (error) {
+    if (isPublished) releaseTestLock(path)
+    throw error
+  }
+}
 
 // Child diagnostics can contain private paths or terminal control characters.
 export const safeLine = value => {
@@ -193,9 +250,13 @@ const parseArgs = argv => {
   return options
 }
 
-export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync } = {}) => {
+export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), onCheck, onProgress, onLockPublished } = {}) => {
   const checks = []
-  const add = (state, message) => checks.push({ state, message: safeLine(message) })
+  const add = (state, message) => {
+    const item = { state, message: safeLine(message) }
+    checks.push(item)
+    onCheck?.(item)
+  }
   const command = (program, args, options = {}) => run(program, args, {
     cwd, encoding: 'utf8', maxBuffer, timeout: 120000,
     env: { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' }, ...options,
@@ -247,22 +308,31 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   await check('touched Node tests', () => {
     const paths = [...changed].filter(path => isTest(path) && path.endsWith('.mjs') && existsSync(join(cwd, path)))
     if (!paths.length) add('PASS', 'no touched Node test files need running.')
-    for (const path of paths) {
-      const temp = mkdtempSync(join(tmpdir(), 'agent-board-preflight-'))
+    const owner = paths.length ? acquireTestLock(lockPath, onLockPublished) : null
+    if (paths.length && !owner) add('FAIL', 'another preflight test run is already active on this computer; finish it before running preflight again.')
+    if (owner) {
       try {
-        const env = { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' }
-        // A nested test runner must emit its own TAP, not the parent's IPC protocol.
-        delete env.NODE_TEST_CONTEXT
-        for (const name of Object.keys(env)) if (/^(GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY)$/i.test(name)) delete env[name]
-        for (const name of homeNames) env[name] = name === 'CLAUDE_PROGRESS_FILE' ? join(temp, 'progress.md') : temp
-        const tested = command(process.execPath, ['--test', '--test-reporter=tap', path], { env, timeout: 600000 })
-        const output = `${tested.stdout ?? ''}\n${tested.stderr ?? ''}`
-        const count = output.match(/^# fail (\d+)\s*$/m)?.[1]
-        const total = output.match(/^# tests (\d+)\s*$/m)?.[1]
-        const isPassed = !tested.error && tested.status === 0 && count === '0'
-        add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
+        for (const path of paths) {
+          const temp = mkdtempSync(join(tmpdir(), 'agent-board-preflight-'))
+          try {
+            const env = { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' }
+            // A nested test runner must emit its own TAP, not the parent's IPC protocol.
+            delete env.NODE_TEST_CONTEXT
+            for (const name of Object.keys(env)) if (/^(GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY)$/i.test(name)) delete env[name]
+            for (const name of homeNames) env[name] = name === 'CLAUDE_PROGRESS_FILE' ? join(temp, 'progress.md') : temp
+            onProgress?.(`RUN ${safeLine(path)}`)
+            const tested = command(process.execPath, ['--test', '--test-reporter=tap', path], { env, timeout: 600000 })
+            const output = `${tested.stdout ?? ''}\n${tested.stderr ?? ''}`
+            const count = output.match(/^# fail (\d+)\s*$/m)?.[1]
+            const total = output.match(/^# tests (\d+)\s*$/m)?.[1]
+            const isPassed = !tested.error && tested.status === 0 && count === '0'
+            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
+          } finally {
+            rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+          }
+        }
       } finally {
-        rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+        releaseTestLock(owner.path)
       }
     }
     if ([...changed].some(path => /^tests\/.*\.test\.tsx?$/.test(path))) add('WARN', 'run `claude plugin test .` once before Ready (not run here)')
@@ -382,8 +452,11 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
 
 export const main = async (argv = process.argv.slice(2)) => {
   let checks
-  try { checks = await runPreflight(parseArgs(argv)) } catch (error) { checks = [{ state: 'FAIL', message: safeLine(error.message) }] }
-  for (const item of checks) console.log(`${item.state} ${item.message}`)
+  const print = item => console.log(`${item.state} ${item.message}`)
+  try { checks = await runPreflight({ ...parseArgs(argv), onCheck: print, onProgress: console.log }) } catch (error) {
+    checks = [{ state: 'FAIL', message: safeLine(error.message) }]
+    print(checks[0])
+  }
   const counts = Object.fromEntries(['PASS', 'WARN', 'FAIL'].map(state => [state, checks.filter(item => item.state === state).length]))
   console.log(`preflight: ${counts.PASS} PASS, ${counts.WARN} WARN, ${counts.FAIL} FAIL`)
   return counts.FAIL ? 1 : 0

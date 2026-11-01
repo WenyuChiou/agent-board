@@ -1,7 +1,7 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -56,8 +56,9 @@ const fixture = t => {
     git('update-ref', 'refs/remotes/origin/main', 'HEAD')
     cpSync(cwd, templateRepo, { recursive: true })
   }
-  const check = options => runPreflight({ cwd, isNoFetch: true, run, ...options })
-  return { root, cwd, home, env, write, git, commit, check, run }
+  const lockPath = join(root, 'preflight.lock')
+  const check = options => runPreflight({ cwd, isNoFetch: true, run, lockPath, ...options })
+  return { root, cwd, home, env, lockPath, write, git, commit, check, run }
 }
 
 const has = (checks, state, text) => checks.some(item => item.state === state && item.message.includes(text))
@@ -125,6 +126,130 @@ test('preflight runs touched Node tests with an isolated home and removes it aft
   assert.notEqual(homes[0], f.home)
   assert.equal(existsSync(homes[0]), false)
   assert.equal(existsSync(join(f.home, 'marker')), false)
+})
+
+test('preflight streams each completed check and names a touched Node file before running it', async t => {
+  const f = fixture(t)
+  f.write('tests/stream.test.mjs', '')
+  const events = []
+  const run = (program, args, options) => {
+    if (args.includes('--test')) {
+      events.push(`INVOKE ${args.at(-1)}`)
+      return { status: 0, stdout: '# tests 0\n# fail 0\n', stderr: '' }
+    }
+    return f.run(program, args, options)
+  }
+  const checks = await f.check({
+    run,
+    onCheck: item => events.push(`${item.state} ${item.message}`),
+    onProgress: line => events.push(line),
+  })
+  assert.ok(events.indexOf('PASS the branch contains the base.') < events.indexOf('RUN tests/stream.test.mjs'))
+  assert.ok(events.indexOf('RUN tests/stream.test.mjs') < events.indexOf('INVOKE tests/stream.test.mjs'))
+  assert.ok(has(checks, 'PASS', 'tests/stream.test.mjs: 0 tests, 0 failed'))
+  const childEnv = { ...f.env, TEMP: f.home, TMP: f.home, TMPDIR: f.home }
+  const result = spawnSync(process.execPath, [script, '--no-fetch'], { cwd: f.cwd, env: childEnv, encoding: 'utf8', timeout: 15000 })
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  const lines = result.stdout.trim().split(/\r?\n/)
+  const runAt = lines.indexOf('RUN tests/stream.test.mjs')
+  const resultAt = lines.findIndex(line => /^PASS tests\/stream\.test\.mjs:/.test(line))
+  assert.ok(runAt > 0)
+  assert.ok(resultAt > runAt)
+  assert.equal(lines.filter(line => /^PASS the branch contains the base\.$/.test(line)).length, 1)
+})
+
+test('preflight refuses a second live local test run without starting another test file', async t => {
+  const f = fixture(t)
+  f.write('tests/live.test.mjs', '')
+  mkdirSync(f.lockPath)
+  writeFileSync(join(f.lockPath, `${process.pid}-live-owner.lock`), '')
+  let hasStarted = false
+  const run = (program, args, options) => {
+    if (args.includes('--test')) hasStarted = true
+    return f.run(program, args, options)
+  }
+  const checks = await f.check({ run })
+  assert.ok(has(checks, 'FAIL', 'another preflight test run is already active'))
+  assert.equal(hasStarted, false)
+})
+
+test('preflight recovers a stale test lock and releases its own lock after a failed run', async t => {
+  const f = fixture(t)
+  f.write('tests/stale.test.mjs', '')
+  mkdirSync(f.lockPath)
+  writeFileSync(join(f.lockPath, '2147483647-stale-owner.lock'), '')
+  const run = (program, args, options) => args.includes('--test')
+    ? { status: 1, stdout: '# tests 1\n# fail 1\n', stderr: '' }
+    : f.run(program, args, options)
+  assert.ok(has(await f.check({ run }), 'FAIL', 'tests/stale.test.mjs: 1 tests, 1 failed'))
+  assert.deepEqual(readdirSync(f.lockPath), [])
+})
+
+test('preflight does not remove a lock acquired by a replacement owner', async t => {
+  const f = fixture(t)
+  f.write('tests/replacement.test.mjs', '')
+  const replacement = `${process.pid}-replacement-owner.lock`
+  const run = (program, args, options) => {
+    if (args.includes('--test')) {
+      writeFileSync(join(f.lockPath, replacement), '')
+      return { status: 1, stdout: '# tests 1\n# fail 1\n', stderr: '' }
+    }
+    return f.run(program, args, options)
+  }
+  await f.check({ run })
+  assert.deepEqual(readdirSync(f.lockPath), [replacement])
+})
+
+test('simultaneous stale preflight claimants never run test files together', async t => {
+  const f = fixture(t)
+  f.write('tests/claim.test.mjs', '')
+  mkdirSync(f.lockPath)
+  writeFileSync(join(f.lockPath, '2147483647-stale-owner.lock'), '')
+  let firstRuns = 0
+  let secondRuns = 0
+  const runner = counter => (program, args, options) => {
+    if (args.includes('--test')) {
+      counter()
+      return { status: 0, stdout: '# tests 0\n# fail 0\n', stderr: '' }
+    }
+    return f.run(program, args, options)
+  }
+  let second
+  const first = f.check({
+    run: runner(() => { firstRuns++ }),
+    onLockPublished: () => { second = f.check({ run: runner(() => { secondRuns++ }) }) },
+  })
+  const [firstChecks, secondChecks] = await Promise.all([first, second])
+  assert.equal(firstRuns + secondRuns, 1)
+  assert.ok([firstChecks, secondChecks].some(checks => has(checks, 'FAIL', 'another preflight test run is already active')))
+  assert.deepEqual(readdirSync(f.lockPath), [])
+})
+
+test('preflight recovers an interrupted owner record after its process has exited', async t => {
+  const f = fixture(t)
+  f.write('tests/interrupted.test.mjs', '')
+  mkdirSync(f.lockPath)
+  writeFileSync(join(f.lockPath, '2147483647-interrupted-owner.lock'), '')
+  const checks = await f.check()
+  assert.ok(checks.some(item => item.state === 'PASS' && item.message.startsWith('tests/interrupted.test.mjs:') && item.message.includes('0 failed')))
+  assert.deepEqual(readdirSync(f.lockPath), [])
+})
+
+test('preflight gives different accounts separate default test lock directories', async () => {
+  const module = await import('../scripts/preflight.mjs')
+  assert.equal(typeof module.accountTestLockPath, 'function')
+  const shared = join('synthetic-root', 'shared-temp')
+  const unixOne = module.accountTestLockPath({ platform: 'linux', temp: shared, account: { uid: 1001, homedir: '/synthetic/one' } })
+  const unixTwo = module.accountTestLockPath({ platform: 'linux', temp: shared, account: { uid: 1002, homedir: '/synthetic/two' } })
+  assert.notEqual(unixOne, unixTwo)
+  assert.equal(module.accountTestLockPath({ platform: 'linux', temp: shared, account: { uid: 1001, homedir: '/changed/by-env' } }), unixOne)
+  const windowsOne = module.accountTestLockPath({ platform: 'win32', temp: shared, account: { uid: -1, homedir: 'C:\\Users\\Synthetic One' } })
+  const windowsTwo = module.accountTestLockPath({ platform: 'win32', temp: shared, account: { uid: -1, homedir: 'C:\\Users\\Synthetic Two' } })
+  assert.notEqual(windowsOne, windowsTwo)
+  assert.equal(module.accountTestLockPath({ platform: 'win32', temp: shared, account: { uid: 999, homedir: 'C:\\Users\\Synthetic One' } }), windowsOne)
+  for (const path of [unixOne, unixTwo, windowsOne, windowsTwo]) assert.equal(dirname(path), shared)
+  assert.equal(windowsOne.includes('Synthetic One'), false)
 })
 
 test('preflight runs a touched nested e2e test', async t => {
