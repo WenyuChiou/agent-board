@@ -738,7 +738,17 @@ test('options the agent gave win over options found in the question or the note'
   expect(askOf('win rate or Elo?', 'A or B?', { options: [' X ', 'Y', '', null] })).toMatchObject({ kind: 'choose', options: ['X', 'Y'] })
   expect(askOf('win rate or Elo?', 'A or B?', { ask: 'choose', options: ['X'] }).options).toEqual(['X'])
   expect(askOf('Which one?', 'A or B?', { options: 'X or Y?' })).toMatchObject({ kind: 'choose', options: ['A', 'B'] })
-  expect(askOf('Pick', `A or ${'B'.repeat(25)}?`, { ask: 'choose' }).options).toEqual(['A'])
+})
+
+test('inferred choices retain complete long options with and without an explicit choose kind', () => {
+  for (const [first, second] of [['A', 'B'.repeat(25)], ['A'.repeat(25), 'B'], ['A'.repeat(25), 'B'.repeat(25)]]) {
+    const question = `${first} or ${second}?`
+    for (const given of [{}, { ask: 'choose' }]) {
+      expect(askOf(question, '', given)).toMatchObject({ kind: 'choose', options: [first, second] })
+      expect(askOf('Pick', question, given)).toMatchObject({ kind: 'choose', options: [first, second] })
+    }
+    expect(askOf('Pick', question, { ask: 'choose', options: ['Only'] }).options).toEqual(['Only'])
+  }
 })
 
 test('a question with no choice still takes its options from the note', () => {
