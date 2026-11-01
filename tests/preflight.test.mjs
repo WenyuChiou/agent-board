@@ -332,7 +332,7 @@ test('missing or interrupted TAP remains a failed touched Node check', async t =
     ? { status: null, signal: 'SIGTERM', error: new Error('synthetic interruption'), stdout: '', stderr: '' }
     : f.run(program, args, options)
   const interrupted = await f.check({ run: interruptedRun })
-  assert.ok(has(interrupted, 'FAIL', 'tests/missing-tap.test.mjs: unknown tests, unknown failed; the runner did not finish'))
+  assert.ok(has(interrupted, 'FAIL', safeLine('tests/missing-tap.test.mjs: unknown tests, unknown failed; the runner did not finish')), JSON.stringify(interrupted))
 })
 
 test('passing touched Node output keeps its existing message and outcome', async t => {
