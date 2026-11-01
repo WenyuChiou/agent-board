@@ -25,7 +25,7 @@ type Entry = { project: ProgressProject; task: ProgressTask; auto: ProgressAuto;
 
 const MAX_HOPS = 8
 
-const sessionKey = (auto: ProgressAuto): string | null => (auto.resume === null ? `${auto.agent}\u0000${auto.session}` : `${auto.agent}\u0000${auto.resume}`)
+const sessionKey = (auto: ProgressAuto): string | null => (auto.resume === null ? null : `${auto.agent}\u0000${auto.resume}`)
 
 // The key two blocks of one session share (agent and full id), for a reader that holds a block's
 // saved copy instead of the block.
@@ -190,12 +190,10 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
 // checked again at the write, against the file as it is then.
 export const isOutranked = (tasks: readonly ProgressTask[], task: ProgressTask): boolean => {
   const auto = task.auto
-  if (auto === null) return false
-  const id = auto.resume ?? auto.session
+  if (auto === null || auto.resume === null) return false
 
   return tasks.some(other =>
-    other !== task && other.auto !== null && other.auto.agent === auto.agent &&
-    (other.auto.resume ?? other.auto.session) === id &&
+    other !== task && other.auto !== null && other.auto.agent === auto.agent && other.auto.resume === auto.resume &&
     (other.auto.updated > auto.updated || other.auto.updated === auto.updated && other.line > task.line),
   )
 }
