@@ -1004,6 +1004,7 @@ const PAGE_SCRIPT = String.raw`
   var presence = null;
   var GLYPH = { done: '✓', doing: '▸', todo: '•', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
+  var boardEtag = '';
   var opened = {};
   var timer = null;
   var isClosed = false;
@@ -1128,6 +1129,7 @@ const PAGE_SCRIPT = String.raw`
     note.className = tone || '';
   }
   function unreachable() {
+    boardEtag = '';
     if (!isUnreachable) offlineButtons = Array.from(document.querySelectorAll('button:not([data-local])')).filter(function (node) { return !node.disabled; });
     isUnreachable = true;
     if (offline.textContent !== w('serveOffline')) offline.textContent = w('serveOffline');
@@ -1148,9 +1150,15 @@ const PAGE_SCRIPT = String.raw`
   function call(path, body) {
     if (isUnreachable && body !== undefined) return Promise.reject();
     var headers = { 'x-board-token': token };
+    if (path === '/api/board' && body === undefined && boardEtag) headers['if-none-match'] = boardEtag;
     if (body !== undefined) headers['content-type'] = 'application/json';
     return fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' }).then(function (res) {
-      return res.json().catch(function () { return {}; }).then(function (data) { data.ok = res.ok && data.ok !== false; return data; });
+      if (path === '/api/board' && res.status === 304) return { ok: true, unchanged: true };
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        data.ok = res.ok && data.ok !== false;
+        if (path === '/api/board') boardEtag = data.ok && data.model && res.headers ? res.headers.get('etag') || '' : '';
+        return data;
+      });
     }).catch(function (error) { unreachable(); throw error; });
   }
   // onCopied: what to do once the text is on the clipboard; the card then says where to paste it. Without it the
@@ -2280,6 +2288,7 @@ const PAGE_SCRIPT = String.raw`
     if (isClosed) return;
     clearTimeout(timer);
     call('/api/board').then(function (data) {
+      if (data.unchanged) { reachable(); return; }
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }
         else unreachable();

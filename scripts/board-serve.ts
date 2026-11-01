@@ -5,7 +5,7 @@
 // (board-cli.ts passes them in), so the page changes progress.md the way the pane does.
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
@@ -376,7 +376,20 @@ export const startServer = (o: ServeOptions): void => {
           const state = isLan ? undefined : messaging?.snapshot(now, o.reports?.())
           const view = o.view()
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          return json(res, 200, { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now })
+          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now }
+          // The page already compares its clock at minute precision. Keep that refresh boundary
+          // without treating each millisecond as changed content; replies and receipts stay exact.
+          const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
+          const etag = `W/"${createHash('sha256').update(fingerprint).digest('hex')}"`
+          const matches = req.headers['if-none-match']?.split(',').some(value => value.trim() === '*' || value.trim().replace(/^W\//, '') === etag.slice(2))
+          if (matches) {
+            res.writeHead(304, { ...HEADERS, etag })
+            res.end()
+            return
+          }
+          res.writeHead(200, { ...HEADERS, etag, 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify(payload))
+          return
         } catch (error) {
           const note = o.failure(error, isLan)
           if (note === null) {
