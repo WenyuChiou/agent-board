@@ -1,0 +1,2 @@
+- **Core / Runs** · Prevent session ID truncation and prefix collisions across concurrent subagents and multi-agent runs, using full canonical identifiers and composite keys for ledger indexing, parent scoping, and observation caches (#539).
+  Tests: `concurrent subagents sharing session id prefix remain distinct without overwriting or collision`, `subagents across different agents sharing block session id do not collide`, `upsertAutoBlock preserves peer subagents when session id prefixes match`.

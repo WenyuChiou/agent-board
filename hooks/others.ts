@@ -18,7 +18,7 @@ export const othersNote = (projects: readonly ProgressProject[], here: readonly 
     if (!isHereProject(project.name, here)) continue
     for (const task of project.tasks) {
       const auto = task.auto
-      if (auto === null || auto.session === own || auto.state === 'done' || isTaskComplete(task)) continue
+      if (auto === null || auto.session === own || (auto.resume !== null && auto.resume === own) || auto.state === 'done' || isTaskComplete(task)) continue
       if (now - auto.updated > 7 * DAY) continue
       const { done, total } = countSteps(task)
       const open = task.steps.find(step => step.status !== 'done' && step.status !== 'cancelled')

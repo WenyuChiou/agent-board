@@ -6,7 +6,7 @@ import { dashboardHtml } from '../hooks/dashboard'
 import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
 import { autoOf, parseProgress } from '../hooks/parse'
 import { emptyQuestions, observeQuestions, withCaptures } from '../hooks/questions'
-import { cleanSignal, codexSignal, foldRuns, isStrongRun, pickParent, withRunMark, withSignal } from '../hooks/runs'
+import { cleanSignal, codexSignal, foldRuns, isStrongRun, pickParent, startersOf, withRunMark, withSignal } from '../hooks/runs'
 import { serveModel } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
 import { buildView } from '../hooks/view'
@@ -388,4 +388,70 @@ test('a strong run is suppressed while a weak hint remains eligible for the lega
   expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { source: 'exec' })))).toBe(true)
   expect(isStrongRun(withSignal(null, codexSignal(true, null, null)))).toBe(false)
   expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { originator: 'Codex Desktop' })))).toBe(false)
+})
+
+test('concurrent subagents sharing session id prefix remain distinct without overwriting or collision', () => {
+  const sub1 = delegate(1, {
+    session: 'subagent',
+    agent: 'antigravity',
+    resume: 'subagent-1111-0000-4000-8000-000000000001',
+    parent: PERSON,
+    title: 'subagent alpha task',
+  })
+  const sub2 = delegate(2, {
+    session: 'subagent',
+    agent: 'antigravity',
+    resume: 'subagent-2222-0000-4000-8000-000000000002',
+    parent: PERSON,
+    title: 'subagent beta task',
+  })
+  const view = viewOf(file(person, sub1, sub2))
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.title).toBe('Ship the export feature')
+  expect(rows[0]?.runs).toBe('+2 runs by Antigravity, last 21 min ago')
+  expect(view.background).toBe(undefined)
+
+  const projects = parseProgress(file(person, sub1, sub2))
+  const starter = startersOf(projects)
+  const auto1 = autoOf(block(sub1).split('\n')[0]!)!
+  const auto2 = autoOf(block(sub2).split('\n')[0]!)!
+  expect(starter(auto1)?.session).toBe('aaaa1111')
+  expect(starter(auto2)?.session).toBe('aaaa1111')
+})
+
+test('subagents across different agents sharing block session id do not collide', () => {
+  const subCodex = delegate(1, {
+    session: 'sub00001',
+    agent: 'codex',
+    resume: 'codex-uuid-0000-4000-8000-000000000001',
+    parent: PERSON,
+    title: 'codex subagent',
+  })
+  const subAntigravity = delegate(2, {
+    session: 'sub00001',
+    agent: 'antigravity',
+    resume: 'antigravity-uuid-0000-4000-8000-000000000002',
+    parent: PERSON,
+    title: 'antigravity subagent',
+  })
+  const view = viewOf(file(person, subCodex, subAntigravity))
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.runs).toContain('+2 runs by')
+  expect(rows[0]?.runs).toContain('Antigravity')
+  expect(rows[0]?.runs).toContain('Codex')
+  expect(view.background).toBe(undefined)
+})
+
+test('upsertAutoBlock preserves peer subagents when session id prefixes match', () => {
+  const subA = { ...emptyMirror('subagent-1111-0000-4000-8000-000000000001', 'Demo', NOW, ''), agent: 'antigravity', title: 'Subagent Alpha', isRun: true as const }
+  const subB = { ...emptyMirror('subagent-2222-0000-4000-8000-000000000002', 'Demo', NOW + 1000, ''), agent: 'antigravity', title: 'Subagent Beta', isRun: true as const }
+  const first = upsertAutoBlock(file(person), subA, en)
+  const second = upsertAutoBlock(first, subB, en)
+  const projects = parseProgress(second)
+  const tasks = projects.find(project => project.name === 'Demo')?.tasks ?? []
+  const subTasks = tasks.filter(task => task.auto?.isRun === true)
+  expect(subTasks).toHaveLength(2)
+  expect(subTasks.map(task => task.title).sort()).toEqual(['Subagent Alpha', 'Subagent Beta'])
 })

@@ -127,6 +127,8 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
 export type BlockSpan = {
   session: string
+  agent?: string
+  resume?: string | null
   state: ProgressSessionState
   updated: number
   project: string
@@ -277,7 +279,10 @@ const sectionRange = (raws: readonly string[], project: string): { heading: numb
   const heading = lines.findIndex(line => {
     const match = PROJECT.exec(line)
     if (match?.[1] === undefined) return false
-    return head === '' ? match[1].trim() === project.trim() : projectHead(match[1]) === head
+    const cand = match[1].trim()
+    const target = project.trim()
+    if (cand.toLowerCase() === target.toLowerCase()) return true
+    return head === '' ? cand === target : projectHead(cand) === head
   })
   if (heading < 0) return null
   const next = lines.findIndex((line, index) => index > heading && PROJECT.test(line))
@@ -312,11 +317,17 @@ export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings
   const eol = eolOf(text)
   const lines = linesOf(text)
   const id = shortId(mirror.sessionId)
-  const existing = scanBlocks(lines).find(span => span.session === id)
+  const fullId = mirror.resume ?? (mirror.sessionId.length > 8 ? mirror.sessionId : null)
+  const agent = (mirror.agent || 'claude').toLowerCase()
+  const existing = scanBlocks(lines).find(span => {
+    if (span.agent !== agent) return false
+    if (fullId !== null && span.resume !== null) return span.resume === fullId
+    return span.session === mirror.sessionId || span.session === id
+  })
   // A run keeps the parent its block already names; until one is named, it takes the person's
   // session working in the same project right now when exactly one is (#399), else none, and
   // counts as a background run.
-  const parent = mirror.isRun !== true ? undefined : (existing === undefined ? undefined : parseAttrs(lines[existing.start] ?? '').parent) ?? pickParent(parseProgress(text), mirror.project, mirror.updated, [id, mirror.sessionId]) ?? undefined
+  const parent = mirror.isRun !== true ? undefined : (existing === undefined ? undefined : parseAttrs(lines[existing.start] ?? '').parent) ?? pickParent(parseProgress(text), mirror.project, mirror.updated, [id, mirror.sessionId, ...(fullId ? [fullId] : [])]) ?? undefined
   const block = renderAutoBlock(mirror, s, parent)
 
   if (existing !== undefined) {

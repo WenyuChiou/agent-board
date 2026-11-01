@@ -488,7 +488,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }, clock, s) : base
       const priorActivity = previous?.activity ?? []
       // Only a weak hint needs a parent; a strong run keeps its record without a block.
-      const parent = origin.origin !== 'run' ? undefined : isRun ? origin.parent : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner.slice(0, 8), session]) ?? undefined
+      const parent = origin.origin !== 'run' ? undefined : isRun ? origin.parent : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner, owner.slice(0, 8), session]) ?? undefined
       const marked = { ...(origin.origin === undefined ? {} : { origin: origin.origin }), ...(parent === undefined ? {} : { parent }), ...(origin.isWeak === true ? { isWeak: true as const } : {}) }
       const { origin: _origin, parent: _parent, isWeak: _isWeak, ...lifecycle } = initial
       const directory = agent === 'codex' && mode === '--codex-event' && name !== ''
