@@ -1042,7 +1042,7 @@ test('/progress tidy when archive write fails after note is written: task stays 
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
-  await expect($.command.run(TIDY)).rejects.toThrow()
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
   expect(world.files.get(FILE)).toContain('Synthetic twin')
   expect(world.files.has(pending)).toBe(true)
   expect(world.files.has(ARCHIVE)).toBe(false)
@@ -1066,7 +1066,7 @@ test('/progress tidy when note write fails: nothing is archived and board is unc
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
-  await expect($.command.run(TIDY)).rejects.toThrow()
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
   expect(world.files.get(FILE)).toContain('Synthetic twin')
   expect(world.files.has(pending)).toBe(false)
   expect(world.files.has(ARCHIVE)).toBe(false)
@@ -1086,6 +1086,7 @@ test('archiveOne when archive write fails after note is written: task stays on b
   await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
+    await ui.press({ key: 'section::others' })
     await ui.press({ key: 'Synthetic::Manual task' })
     await ui.press({ key: 'Synthetic::Manual task::archive' })
     expect(world.files.get(FILE)).toContain('Manual task')
