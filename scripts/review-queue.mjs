@@ -88,7 +88,7 @@ export const parseNotice = body => {
 }
 
 // Where the merge-after-notice stands for a pull request (team-process, From claim to merge). The latest notice is the one that counts.
-const noticeFor = ({ comments, head, ready, readyHours, takenBy, nowMs, isInQueue, isAllAway }) => {
+const noticeFor = ({ comments, head, ready, readyHours, takenBy, nowMs, isInQueue, isAllAway, hasBackSince }) => {
   const last = comments.findLastIndex(entry => parseNotice(entry.comment.body))
   if (last < 0) return isInQueue && !takenBy && ((readyHours ?? 0) > noticeWaitHours || isAllAway) ? { state: 'allowed', at: null } : null
   const notice = parseNotice(comments[last].comment.body)
@@ -97,7 +97,8 @@ const noticeFor = ({ comments, head, ready, readyHours, takenBy, nowMs, isInQueu
   if (!notice.shas.some(word => head.startsWith(word))) return { state: 'cancelled', at }
   const isCancelled = comments.slice(last + 1).some(({ comment }) => /^Reviewing:[ \t]*\S/m.test(comment.body ?? '')
     || reviewOf(comment.body)?.kind === 'REQUEST CHANGES' || /^\s*Objection\b/i.test(comment.body ?? ''))
-  if (isCancelled) return { state: 'cancelled', at }
+  // A collaborator's Back on the roadmap issue after the notice ends it too (team-process, From claim to merge).
+  if (isCancelled || hasBackSince(comments[last].time)) return { state: 'cancelled', at }
   const isTooEarly = notice.at - comments[last].time < noticeGapHours * hour || Boolean(ready && notice.at - ready.time < noticeGapHours * hour)
   if (isTooEarly) return { state: 'too-early', at }
   return { state: nowMs >= notice.at ? 'due' : 'waiting', at }
@@ -156,8 +157,9 @@ export const suggestReviewer = (map, { author, isOverFourHours }, openCounts) =>
   return { suggested: eligible[isEscalated ? 1 : 0] ?? null, isEscalated }
 }
 
-// context: { collaborators, awayLogins, bundleSources } from the GitHub lookups. Every part may be missing, and a missing part only
+// context: { collaborators, awayLogins, backs, bundleSources } from the GitHub lookups. Every part may be missing, and a missing part only
 // leaves its hint out: no collaborator list means no "everyone is away" notice, no bundle sources means only the generated files count.
+// With no collaborator list, a Back from anyone but the author cancels a notice, since the safe reading is that the notice no longer stands.
 export const classify = (prs, commentsByNumber, now, reviewers = null, context = {}) => {
   const result = { needsReviewer: [], needsMain: [], approved: [], approvedNow: [], approvedOneAtATime: [], waitingForAuthor: [], drafts: 0 }
   const nowMs = new Date(now).getTime()
@@ -165,6 +167,7 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
   const openCounts = reviewers ? countOpenReviews(prs, commentsByNumber) : null
   const collaborators = Array.isArray(context.collaborators) ? context.collaborators : null
   const awayLogins = new Set(context.awayLogins ?? [])
+  const backs = context.backs ?? []
   // The bundle's sources and the release table change the generated files, so a pull request touching one conflicts with the others that do.
   const isSharedPath = path => sharedPath.test(path) || path === 'hooks/released.ts' || Boolean(context.bundleSources?.has(path))
   for (const pr of prs) {
@@ -195,6 +198,8 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     const takenBy = ready ? comments.slice(ready.order + 1)
       .map(entry => (entry.comment.body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1]?.trim())
       .filter(Boolean).at(-1) ?? null : null
+    const author = (pr.author?.login ?? '').toLowerCase()
+    const hasBackSince = since => backs.some(back => back.time > since && back.login !== author && (!collaborators || collaborators.includes(back.login)))
     // What the review bots and the merge-after-notice say about the head. A missing bot review never moves a pull request between groups.
     const extras = {
       bots: { codex: codexStateOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
@@ -202,7 +207,7 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
         comments, head, ready, takenBy, nowMs,
         readyHours: ready && Number.isFinite(ready.time) ? Math.max(0, nowMs - ready.time) / hour : null,
         isInQueue: Boolean(ready && !reviewAfterReady),
-        isAllAway: isEveryOtherAway(collaborators, awayLogins, (pr.author?.login ?? '').toLowerCase()),
+        isAllAway: isEveryOtherAway(collaborators, awayLogins, author), hasBackSince,
       }),
     }
     if (ready && !reviewAfterReady) {
@@ -271,10 +276,12 @@ export const collaboratorLogins = (logins, repo) => {
 
 // "Away: until YYYY-MM-DD" as the first line of a comment on the roadmap issue sets that login away through that UTC date; a later
 // comment by the same login starting "Back" ends it. A date more than 14 days after the comment is ignored and noted.
+// backs lists every Back comment (lower case login, time in ms), since a notice to merge also ends when a collaborator is back.
 export const readAway = (comments, now) => {
   const nowMs = new Date(now).getTime()
   const away = new Map()
   const ignored = new Map()
+  const backs = []
   for (const { comment } of entriesOf(comments)) {
     const login = comment.user?.login
     if (!login) continue
@@ -283,6 +290,8 @@ export const readAway = (comments, now) => {
     if (/^Back\b/i.test(first)) {
       away.delete(key)
       ignored.delete(key)
+      const time = Date.parse(comment.created_at)
+      if (Number.isFinite(time)) backs.push({ login: key, time })
       continue
     }
     const until = first.match(/^Away:[ \t]*until[ \t]+(\d{4}-\d{2}-\d{2})\b/i)?.[1]
@@ -301,7 +310,7 @@ export const readAway = (comments, now) => {
   const standing = [...away.values()].filter(item => item.untilMs + day > nowMs).sort((a, b) => a.login.localeCompare(b.login))
   const notes = [...ignored.values()].filter(item => item.untilMs + day > nowMs)
     .map(item => `Away notice by ${item.login} ignored: ${item.until} is more than ${awayLimitDays} days after the comment`)
-  return { active: standing.map(({ login, until }) => ({ login, until })), notes }
+  return { active: standing.map(({ login, until }) => ({ login, until })), notes, backs }
 }
 
 // Open issues labelled claimed whose latest claim has run out (CONTRIBUTING rule 3) while no open pull request names them.
@@ -472,10 +481,10 @@ export const main = (argv = process.argv.slice(2), { fetch = fetchQueue, context
     try { extra = context(options) ?? {} } catch { extra = { roadmapComments: null, collaborators: null, claimed: null, notes: ['GitHub lookups for away notices, collaborators and claims failed'] } }
     let sources
     try { sources = bundle() } catch { sources = { sources: null, note: bundleNote } }
-    const away = extra.roadmapComments ? readAway(extra.roadmapComments, current) : { active: [], notes: [] }
+    const away = extra.roadmapComments ? readAway(extra.roadmapComments, current) : { active: [], notes: [], backs: [] }
     const collaborators = extra.collaborators ? collaboratorLogins(extra.collaborators, options.repo) : null
     const queue = classify(prs, commentsByNumber, current, suggestions.map, {
-      collaborators, awayLogins: away.active.map(item => item.login.toLowerCase()), bundleSources: sources.sources,
+      collaborators, awayLogins: away.active.map(item => item.login.toLowerCase()), backs: away.backs, bundleSources: sources.sources,
     })
     const expiredClaims = extra.claimed ? readClaims(extra.claimed, prs, current) : []
     let staleLanes

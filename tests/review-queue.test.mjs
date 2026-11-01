@@ -755,3 +755,44 @@ test('a reviewers file that starts with a byte order mark is read', () => {
   assert.equal(loaded.note, null)
   assert.equal(loaded.map.maxOpenReviews, 2)
 })
+
+const backAt = (login, at) => ({ login, time: Date.parse(at) })
+
+test('a collaborator Back on the roadmap issue after the notice cancels it', () => {
+  const posted = notice('2026-10-23 12:00 UTC')
+  const collaborators = ['alice', 'bob', 'carol']
+  assert.equal(noticeOf([posted], { context: { collaborators, backs: [] } }).state, 'waiting')
+  assert.equal(noticeOf([posted], { context: { collaborators, backs: [backAt('bob', '2026-10-20T11:00:00Z')] } }).state, 'cancelled')
+  // A Back from someone who is not a collaborator does not end it, but with no collaborator list any Back besides the author's does.
+  assert.equal(noticeOf([posted], { context: { collaborators, backs: [backAt('dave', '2026-10-20T11:00:00Z')] } }).state, 'waiting')
+  assert.equal(noticeOf([posted], { context: { collaborators: null, backs: [backAt('dave', '2026-10-20T11:00:00Z')] } }).state, 'cancelled')
+  // readAway hands over every Back comment with its login and time, and main passes them on.
+  const comments = [away('Bob', 'Back', '2026-10-20T11:00:00Z', 1), away('carol', 'Away: until 2026-10-25', '2026-10-20T08:00:00Z', 2), away('dave', 'Back from the clinic', '2026-10-19T08:00:00Z', 3)]
+  assert.deepEqual(readAway(comments, now).backs.sort((a, b) => a.time - b.time), [backAt('dave', '2026-10-19T08:00:00Z'), backAt('bob', '2026-10-20T11:00:00Z')])
+  const output = []
+  const status = main(['--json'], {
+    fetch: () => ({ prs: [pull(1)], commentsByNumber: { 1: [ready(), posted] } }),
+    context: () => ({ roadmapComments: comments, collaborators: ['alice', 'bob'], claimed: [], notes: [] }), bundle: noBundle,
+    lanes: () => ({ stale: [], notes: [] }), now: () => now, log: text => output.push(text), error: text => assert.fail(text),
+  })
+  assert.equal(status, 0)
+  assert.equal(JSON.parse(output[0]).needsReviewer[0].notice.state, 'cancelled')
+})
+
+test('a Back posted before the notice does not cancel it', () => {
+  const posted = notice('2026-10-23 12:00 UTC')
+  const context = { collaborators: ['alice', 'bob'], backs: [backAt('bob', '2026-10-20T09:30:00Z')] }
+  assert.equal(noticeOf([posted], { context }).state, 'waiting')
+  // Posted at the same moment as the notice is not after it either.
+  assert.equal(noticeOf([posted], { context: { ...context, backs: [backAt('bob', '2026-10-20T10:00:00Z')] } }).state, 'waiting')
+  assert.equal(noticeOf([posted], { context: { collaborators: null, backs: context.backs } }).state, 'waiting')
+})
+
+test('a Back from the pull request author does not cancel its notice', () => {
+  const posted = notice('2026-10-23 12:00 UTC')
+  const backs = [backAt('alice', '2026-10-20T11:00:00Z')]
+  assert.equal(noticeOf([posted], { context: { collaborators: ['alice', 'bob'], backs } }).state, 'waiting')
+  assert.equal(noticeOf([posted], { context: { collaborators: null, backs } }).state, 'waiting')
+  // The login is compared without regard to case.
+  assert.equal(noticeOf([posted], { context: { collaborators: null, backs }, fields: { author: { login: 'Alice' } } }).state, 'waiting')
+})
