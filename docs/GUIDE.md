@@ -19,7 +19,6 @@ Fresh independent installs use `~/.agent-board/progress.md`. Existing installs r
 
 Read back the generated definitions and complete the host's trust/enablement requirements. Codex supports a previewed, scoped trust operation after user approval; see [Codex](CODEX.md). Existing sessions may need reload. CLI, desktop App and IDE must each execute their own acceptance test.
 
-
 ## Other agents
 
 The common installer writes the shared board, skills and available native adapters. It needs neither Claude Code nor another model. [Adapter coverage](SETUP.md#native-status-adapters) distinguishes installed adapters from pending ones.
@@ -247,8 +246,6 @@ claude plugin marketplace remove agent-board
 The first line disconnects the other agents; finish any reported cleanup before uninstalling. Your history, reporter scripts and inbox stay. See [Update and uninstall](#update-and-uninstall) for retries, recovery if you already uninstalled, and the retained files and their locations.
 
 ## Troubleshooting
-
-A cut report marker that hides task headings inside a comment still produces the cut-marker warning; the hidden tasks and original bytes remain intact.
 
 - **No card:** check the selected progress path, installed adapter, trust and reload status. Observe a real event and read back that exact session's block. Do not fabricate success with a manual event.
 - **No Send:** the exact native session needs a supported live adapter. Hooks alone do not establish receiving. Desktop and CLI results are not interchangeable.

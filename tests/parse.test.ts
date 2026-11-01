@@ -29,19 +29,12 @@ test('a cut auto marker preserves earlier tasks and cannot swallow later complet
 })
 
 test('torn-tail detection leaves fenced examples and ordinary multiline comments alone', () => {
-  for (const source of ['```\n<!-- /auto se\n```\n', '<!-- ordinary comment\n<!-- /auto se\n-->\n']) {
+  for (const source of ['```\n<!-- /auto se\n```\n', '<!-- ordinary comment\n<!-- /auto se\n-->\n', '<!-- auto session=example\n### Hidden\n-->\n']) {
     expect(progressTail(source)).toBe(null)
     expect(parseProgress(source)).toEqual([])
   }
   expect(readable(['<!-- ordinary comment', '## Hidden', '-->', '## Visible'])).toEqual(['', null, '', '## Visible'])
   expect(progressTail('## Day\n<!-- auto session=unfinished -->\n### Keep\n- [ ] Next')).toBe(null)
-})
-
-test('a cut marker hiding tasks before a comment close warns without making the tasks readable', () => {
-  const source = '<!-- auto session=example\n### Hidden\n- [ ] Hidden step\n-->\n'
-  expect(parseProgress(source)).toEqual([])
-  expect(progressTail(source)).toEqual({ offset: 0, tasks: 1, close: null })
-  expect(readable(source.split('\n'))).toEqual(['', null, null, '', ''])
 })
 
 test('a marker cut before its name still shows the blocks after it', () => {

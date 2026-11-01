@@ -9,8 +9,7 @@ import type { CodexReport } from '../hooks/codex'
 import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
-import { parseProgress, STALE_MS } from '../hooks/parse'
-import { reporterTail } from './reporter-tail'
+import { parseProgress, progressTail, STALE_MS } from '../hooks/parse'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
@@ -223,6 +222,20 @@ export const setupFailure = (error: unknown, agent: string, s: Strings): { code:
     : code === 'OWNED_CODEX_INSTALL_REQUIRED' ? s.setupErrorCodexInstall
     : s.setupErrorOther(host)
   return { code, message }
+}
+
+const reporterTail = (original: Buffer): { bytes: Buffer; fragment: Buffer | null } => {
+  // Latin-1 keeps offsets in bytes, even when the last UTF-8 character was interrupted.
+  const tail = progressTail(original.toString('latin1'))
+  if (tail === null) return { bytes: original, fragment: null }
+  const fragment = original.subarray(tail.offset)
+  const lines = fragment.toString('latin1').split('\n')
+  if (/\S/.test(lines.slice(1).join('\n'))) return { bytes: original, fragment: null }
+  const eol = original.includes(Buffer.from('\r\n')) ? '\r\n' : '\n'
+  const replacement = Buffer.from(tail.close === null ? '' : `<!-- /auto session=${tail.close} -->${eol}`, 'latin1')
+  const bytes = Buffer.concat([original.subarray(0, tail.offset), replacement])
+  if (progressTail(bytes.toString('latin1')) !== null) throw new Error('INCOMPLETE_PROGRESS_TAIL')
+  return { bytes, fragment }
 }
 
 const saveReporterTail = (progress: string, fragment: Buffer): string => {
