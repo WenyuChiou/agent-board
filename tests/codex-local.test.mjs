@@ -971,7 +971,8 @@ test('sharing the encoded launch with Codex leaves the Antigravity command the s
   const quote = value => `"${value}"`
   const argv = hookCommandArgs('C:\\Program Files\\nodejs\\node.exe', 'C:\\Users\\Ann O\'Neil', 'antigravity', 'C:\\Users\\Ann O\'Neil\\.agent-board\\agent-board-hook.mjs', 'C:\\Users\\Ann O\'Neil\\.agent-board\\progress.md', 'SessionStart', 'working')
   // What 0.24.1 wrote, spelled out here so a change to the shared launch shows.
-  const launch = `& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')} --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE`
+  const single = value => "'" + value.split("'").join("''") + "'"
+  const launch = '& ' + argv.map(single).join(' ') + ' --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE'
   assert.equal(antigravityCommand(argv, true, quote, undefined), `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(launch, 'utf16le').toString('base64')}`)
   assert.equal(antigravityCommand(argv, false, quote, undefined), argv.map(quote).join(' '))
 })
