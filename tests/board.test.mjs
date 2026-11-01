@@ -2167,7 +2167,8 @@ test('the board script refuses a pasted working block with a weeks-old clock in 
       const files = readdirSync(board.dir).sort()
       const mtime = statSync(board.path).mtimeMs
       for (const state of ['working', 'waiting']) {
-        const fragment = relayFragment(ago(21 * 24 * 60 * 60 * 1000), state, '- [~] Outline')
+        // An hour past 21 days, so a small clock step between the test and the board cannot turn the day count into 20 (#493).
+        const fragment = relayFragment(ago(21 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000), state, '- [~] Outline')
         const result = await board.call('POST', '/api/paste', { body: { text: fragment } })
         assert.equal(result.status, 409, result.body)
         assert.match(result.json().note, note)

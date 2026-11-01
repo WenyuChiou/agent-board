@@ -4206,19 +4206,66 @@ test('concurrent writers wait for autonomous recovery before asserting every blo
   const selectedHash = createHash('sha256').update(`codex:${selectedHook}`).digest('hex')
   const selectedOwner = selectedHash.slice(0, 8)
   const selectedMarker = `<!-- auto session=${selectedOwner} `
+  // Keep phase evidence inside the fixture; a timeout must say where recovery stopped.
+  const timing = join(f.home, 'recovery-timing')
+  f.save(join(timing, 'parent.jsonl'), '')
+  const stamp = phase => writeFileSync(join(timing, 'parent.jsonl'), JSON.stringify({ at: Date.now(), pid: process.pid, phase }) + '\n', { flag: 'a' })
+  stamp('test-start')
   f.save(barrier, `const fs = require('node:fs')
 const path = require('node:path')
 const { performance } = require('node:perf_hooks')
+const trace = (phase, detail) => fs.appendFileSync(path.join(${JSON.stringify(timing)}, process.pid + '.jsonl'), JSON.stringify({ at: Date.now(), pid: process.pid, phase, detail }) + '\\n')
+const role = ['--recover-pending', '--recover-hooks', '--codex-event'].find(flag => process.argv.includes(flag)) || 'writer'
+trace('start', role)
+process.on('exit', code => trace('exit', { role, code }))
+const originalOpen = fs.openSync
+let isAwaitingLock = false
+fs.openSync = function(file, flags) {
+  const isLock = String(file).endsWith('.agent-board-lock') && flags === 'wx'
+  if (isLock && !isAwaitingLock) { trace('lock-attempt'); isAwaitingLock = true }
+  const fd = originalOpen.apply(this, arguments)
+  if (isLock) { trace('lock-taken'); isAwaitingLock = false }
+  return fd
+}
+const originalRead = fs.readFileSync
+fs.readFileSync = function(file) {
+  if (role === '--recover-hooks' && path.dirname(String(file)) === ${JSON.stringify(join(f.root, 'pending'))}) trace('pending-read', path.basename(String(file)))
+  return originalRead.apply(this, arguments)
+}
+const originalUnlink = fs.unlinkSync
+fs.unlinkSync = function(file) {
+  const result = originalUnlink.apply(this, arguments)
+  if (String(file).endsWith('.agent-board-lock')) trace('lock-released')
+  if (path.dirname(String(file)) === ${JSON.stringify(join(f.root, 'pending'))}) trace('pending-removed', path.basename(String(file)))
+  return result
+}
+const child = require('node:child_process')
+const originalSpawnSync = child.spawnSync
+child.spawnSync = function(command, args) {
+  if (args?.includes('--recover-hooks')) trace('pass-start')
+  const result = originalSpawnSync.apply(this, arguments)
+  if (args?.includes('--recover-hooks')) {
+    let outcome
+    try { outcome = JSON.parse(result.stdout) } catch {}
+    trace('pass-end', { status: result.status, error: result.error?.code, processed: outcome?.processed, pending: outcome?.pending, owner: outcome?.owner })
+  }
+  return result
+}
 const originalRename = fs.renameSync
+let isBusyRecorded = false
 fs.renameSync = function(from, to) {
   if (String(to) === ${JSON.stringify(f.progress)}) {
+    if (role === '--recover-hooks') trace('progress-rename')
     const next = fs.readFileSync(from, 'utf8')
     const prior = fs.existsSync(to) ? fs.readFileSync(to, 'utf8') : ''
     if (next.includes(${JSON.stringify(selectedMarker)}) && !prior.includes(${JSON.stringify(selectedMarker)}) && !fs.existsSync(${JSON.stringify(release)})) {
+      if (!isBusyRecorded) { trace('rename-blocked'); isBusyRecorded = true }
       throw Object.assign(new Error('synthetic selected event is temporarily busy'), { code: 'EBUSY' })
     }
   }
-  return originalRename.apply(this, arguments)
+  const result = originalRename.apply(this, arguments)
+  if (String(to) === ${JSON.stringify(f.progress)}) trace('progress-written')
+  return result
 }
 require('node:module').syncBuiltinESMExports()
 if (process.argv.includes('--recover-pending')) {
@@ -4226,19 +4273,23 @@ if (process.argv.includes('--recover-pending')) {
   fs.writeFileSync(path.join(${JSON.stringify(recoveryPids)}, String(process.pid)), '')
 }
 fs.writeFileSync(process.env.WRITER_READY, '')
+trace('start-gate-wait')
 const until = performance.now() + 15000
 while (!fs.existsSync(process.env.WRITERS_START)) {
   if (performance.now() >= until) throw new Error('START_TIMEOUT')
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
 }
+trace('start-gate-passed')
 // The original twelve-writer test covers lock contention. Queue this event only
 // after FORMAT writers finish so its deliberate busy write cannot starve them.
 if (process.argv.includes('--codex-event')) {
+  trace('format-writers-wait')
   const writers = ${JSON.stringify(writerDone)}
   while (!writers.every(file => fs.existsSync(file))) {
     if (performance.now() >= until) throw new Error('FORMAT_WRITERS_TIMEOUT')
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
   }
+  trace('format-writers-passed')
 }
 `)
   // Keep this independent of product helpers, using the same documented procedure as the L5 journey.
@@ -4264,6 +4315,8 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
   }
   const environment = i => ({ ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(barrier)}`, WRITER_READY: ready[i], WRITERS_START: gate })
   const recoveryPidValues = () => existsSync(recoveryPids) ? readdirSync(recoveryPids).map(Number).filter(Number.isSafeInteger) : []
+  const timeline = () => readdirSync(timing).flatMap(name => readFileSync(join(timing, name), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(line => JSON.parse(line))).sort((a, b) => a.at - b.at)
+  let beforeRecovery
   try {
     for (const [i, id] of hooks.entries()) {
       track(fireHook({ ...f, env: { ...environment(i), CODEX_THREAD_ID: id } }, JSON.stringify({ session_id: id, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }), 20000, after))
@@ -4277,6 +4330,7 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
       await new Promise(done => setTimeout(done, 5))
     }
     f.save(gate, '')
+    stamp('gate-open')
     const results = await Promise.all(runs)
     for (const result of results) {
       assert.equal(result.status, 0, hookFailure(result))
@@ -4304,8 +4358,9 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
     await waitForAutomaticRecovery(() => recoveryPidValues().length > 0, 'the queued event must launch an owned automatic recovery helper')
     const ownedRecoveryPids = recoveryPidValues()
     assert.ok(ownedRecoveryPids.some(isReporterAlive), `an owned recovery helper must be live before release: ${ownedRecoveryPids}`)
-    t.diagnostic(JSON.stringify({ phase: 'before-release', exits: results.map(result => result.status), missing: missingBeforeRelease, pending: pendingFiles(f), recoveryPids: ownedRecoveryPids }))
+    beforeRecovery = { exits: results.map(result => result.status), missing: missingBeforeRelease, pending: pendingFiles(f), recoveryPids: ownedRecoveryPids }
     f.save(release, '')
+    stamp('released')
     let settled = beforeRelease
     await waitForAutomaticRecovery(() => {
       settled = readFileSync(f.progress, 'utf8')
@@ -4313,6 +4368,7 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
       return !isSelectedPending && owners.every(id => settled.includes(`<!-- auto session=${id} `))
     }, 'automatic recovery must drain the selected event and restore all twelve blocks')
     await waitForAutomaticRecovery(() => ownedRecoveryPids.every(pid => !isReporterAlive(pid)), 'every owned recovery helper must exit after draining', 3000)
+    stamp('recovered')
     const saved = JSON.parse(readFileSync(join(f.root, 'sessions', `${selectedHash}.json`), 'utf8'))
     assert.equal(saved.appliedAt, selectedPending.at)
     assert.equal(Date.parse(saved.updated), Date.parse(selectedPending.now))
@@ -4325,6 +4381,18 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
     assert.deepEqual(pendingFiles(f), [])
     const leftovers = readdirSync(f.root, { recursive: true }).filter(name => /\.agent-board-lock(?:\.recover)?$|\.(?:tmp|format-tmp|board-tmp)$/.test(name))
     assert.deepEqual(leftovers, [])
+  } catch (error) {
+    // Snapshot before cleanup releases the barrier or stops an owned helper.
+    try {
+      const events = timeline()
+      const origin = events.find(event => event.phase === 'released')?.at ?? events[0]?.at ?? Date.now()
+      const roles = new Map(events.filter(event => event.phase === 'start').map(event => [event.pid, event.detail]))
+      const phases = events.filter(event => event.pid === process.pid || ['--recover-pending', '--recover-hooks'].includes(roles.get(event.pid)))
+      const latest = [...new Map(events.map(event => [event.pid, event])).values()]
+      const relative = event => ({ ...event, at: event.at - origin })
+      error.message += '\n' + JSON.stringify({ beforeRecovery, elapsedSinceReleaseMs: Date.now() - origin, pending: pendingFiles(f), missing: owners.filter(id => !readFileSync(f.progress, 'utf8').includes(`<!-- auto session=${id} `)), lockExists: existsSync(`${f.progress}.agent-board-lock`), helpers: recoveryPidValues().map(pid => ({ pid, isAlive: isReporterAlive(pid) })), phases: phases.map(relative), latest: latest.map(relative) })
+    } catch (failure) { error.message += `\nRecovery diagnostics unavailable: ${failure.code ?? failure.name}` }
+    throw error
   } finally {
     f.save(release, '')
     for (const stop of stops) stop()
