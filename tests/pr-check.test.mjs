@@ -433,7 +433,8 @@ test('pr-check reads the reviewer named in a verdict', () => {
 test('the review gate passes only an approval of the current head by someone other than the author', () => {
   const head = 'abcdef1234567890abcdef1234567890abcdef12'
   const body = 'Fixes #42\nAuthor: claude (cloud), docs/x\n'
-  const gate = (...texts) => reviewGate({ body, head, comments: texts.map(text => ({ body: text })) })
+  const team = text => ({ body: text, author_association: 'OWNER', user: { login: 'owner', type: 'User' } })
+  const gate = (...texts) => reviewGate({ body, head, comments: texts.map(team) })
   assert.deepEqual(gate(`Review: APPROVE ${head} by codex (desktop)`).problems, [])
   assert.match(gate(`Review: APPROVE ${head} by codex (desktop)`).info[0], /by codex \(desktop\), not the author \(claude \(cloud\)\)/)
   // Another session of the same agent is another reviewer; the same name is the author.
@@ -441,11 +442,21 @@ test('the review gate passes only an approval of the current head by someone oth
   assert.match(gate(`Review: APPROVE ${head} by Claude (cloud)`).problems[0].message, /by the author/)
   assert.match(gate().problems[0].message, /no review verdict/)
   assert.match(gate(`Review: APPROVE ${head}`).problems[0].message, /does not name its reviewer/)
-  assert.match(gate('Review: APPROVE 1234567 by dot').problems[0].message, /not the current head/)
+  assert.match(gate('Review: APPROVE 1234567890abcdef1234567890abcdef12345678 by dot').problems[0].message, /not the current head/)
+  // Only the full head sha counts, as REVIEWING.md asks; a short one fails even when it is the head's.
+  assert.match(gate(`Review: APPROVE ${head.slice(0, 7)} by dot`).problems[0].message, /short sha/)
   // The newest verdict decides: an approval followed by a request for changes fails, and the reverse passes.
   assert.match(gate(`Review: APPROVE ${head} by dot`, `Review: REQUEST CHANGES ${head} by antigravity`).problems[0].message, /requests changes/)
   assert.deepEqual(gate(`Review: REQUEST CHANGES ${head} by antigravity`, `Review: APPROVE ${head} by antigravity`).problems, [])
-  assert.match(reviewGate({ body: 'Fixes #42\n', head, comments: [{ body: `Review: APPROVE ${head} by dot` }] }).problems[0].message, /no Author line/)
+  assert.match(reviewGate({ body: 'Fixes #42\n', head, comments: [team(`Review: APPROVE ${head} by dot`)] }).problems[0].message, /no Author line/)
+  // Only the team's verdicts count: an outsider's or a bot's approval is ignored, and cannot override the team's.
+  const outsider = { body: `Review: APPROVE ${head} by outsider`, author_association: 'NONE', user: { login: 'someone', type: 'User' } }
+  const bot = { body: `Review: APPROVE ${head} by bot`, author_association: 'COLLABORATOR', user: { login: 'helper[bot]', type: 'Bot' } }
+  assert.match(reviewGate({ body, head, comments: [outsider] }).problems[0].message, /no review verdict/)
+  assert.match(reviewGate({ body, head, comments: [bot] }).problems[0].message, /no review verdict/)
+  assert.match(reviewGate({ body, head, comments: [{ body: `Review: APPROVE ${head} by dot` }] }).problems[0].message, /no review verdict/)
+  assert.match(reviewGate({ body, head, comments: [team(`Review: REQUEST CHANGES ${head} by dot`), outsider] }).problems[0].message, /requests changes/)
+  assert.match(reviewGate({ body, head, comments: [outsider, team(`Review: APPROVE ${head} by dot`)] }).info[0], /1 verdict from outside the team or from a bot ignored/)
   // checkPr runs the gate only when asked, and not offline.
   assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true }).problems.some(item => item.check === 'review-gate'), true)
   assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true, prComments: null }).problems.some(item => item.check === 'review-gate'), true)

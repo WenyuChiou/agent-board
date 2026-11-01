@@ -590,17 +590,29 @@ export const reviewerOf = body => {
   return line.replace(/`/g, '').replace(/[.,;:]+\s*$/, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
 }
 
-// --review-gate: passes only when the newest verdict approves the current head and names a reviewer other than the
-// author. The merging agent runs it before `gh pr merge` (docs/dev/REVIEWING.md, Merging).
+// A verdict counts only when it is posted by the owner, a member or a collaborator, and not by a bot: anyone can
+// comment on this public repository, and a contributor's review is advice (CONTRIBUTING.md rule 8).
+export const isTeamComment = comment => {
+  const association = String(comment?.author_association ?? comment?.authorAssociation ?? '').trim().toUpperCase()
+  const login = String(comment?.user?.login ?? comment?.author?.login ?? '')
+  return ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association) && comment?.user?.type !== 'Bot' && !login.endsWith('[bot]')
+}
+
+// --review-gate: passes only when the newest verdict from the team approves the current head, by its full sha, and
+// names a reviewer other than the author. The merging agent runs it before `gh pr merge` (docs/dev/REVIEWING.md, Merging).
 export const reviewGate = ({ body, comments, head }) => {
   const output = result()
   const fail = (message, fix) => output.problems.push(problem('review-gate', message, fix))
-  const verdicts = (comments ?? []).map(comment => ({ ...reviewOf(comment.body), reviewer: reviewerOf(comment.body) })).filter(item => item.kind)
+  const all = (comments ?? []).filter(comment => reviewOf(comment.body))
+  const ignored = all.filter(comment => !isTeamComment(comment)).length
+  if (ignored) output.info.push(`review gate: ${ignored} verdict${ignored === 1 ? '' : 's'} from outside the team or from a bot ignored.`)
+  const verdicts = all.filter(isTeamComment).map(comment => ({ ...reviewOf(comment.body), reviewer: reviewerOf(comment.body) }))
   const last = verdicts.at(-1)
   const author = authorKey(body)
   const ask = 'ask an agent or person who did not write it to review it as docs/dev/REVIEWING.md says.'
   if (!last) return fail('no review verdict yet.', ask), output
-  if (!String(head).toLowerCase().startsWith(last.sha)) return fail(`the newest verdict is for ${last.sha.slice(0, 7)}, not the current head ${String(head).slice(0, 7)}.`, 'the current head needs a new verdict; ' + ask), output
+  if (last.sha.length !== 40) return fail(`the newest verdict names ${last.sha}, a short sha.`, 'the reviewer posts the full 40-character head sha: `Review: APPROVE <full head sha> by <name>`.'), output
+  if (String(head).toLowerCase() !== last.sha) return fail(`the newest verdict is for ${last.sha.slice(0, 7)}, not the current head ${String(head).slice(0, 7)}.`, 'the current head needs a new verdict; ' + ask), output
   if (last.kind !== 'APPROVE') return fail('the newest verdict for the current head requests changes.', 'fix the findings, push, and ask for a new verdict.'), output
   if (!last.reviewer) return fail('the approval does not name its reviewer.', 'the reviewer posts `Review: APPROVE <full head sha> by <agent or login>`.'), output
   if (!author) return fail('the body has no Author line, so the reviewer cannot be told from the author.', 'add `Author: <agent>, <branch>` to the body.'), output

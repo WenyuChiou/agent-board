@@ -48,7 +48,7 @@ After the verdict, merging is a separate step, and any agent or person who may m
 node scripts/pr-check.mjs --pr <PR> --review-gate
 ```
 
-It fails unless the newest verdict approves the current head and names someone other than the author. Merge only when it passes and every required check is green on that head, as CONTRIBUTOR-PATH step 11 says (`gh pr merge <PR> --squash --match-head-commit <head sha>`). Never use an administrator's bypass.
+It fails unless the newest verdict approves the current head by its full 40-character sha and names someone other than the author. Only verdicts posted by the owner, a member or a collaborator count; one from outside the team or from a bot is ignored, since anyone can comment here. Merge only when it passes and every required check is green on that head, as CONTRIBUTOR-PATH step 11 says (`gh pr merge <PR> --squash --match-head-commit <head sha>`). Never use an administrator's bypass.
 
 ## When you have to stop
 
