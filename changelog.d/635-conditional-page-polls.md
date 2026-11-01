@@ -1,0 +1,2 @@
+- **Page / Polling** · An unchanged page poll now returns an empty response and keeps the current view. A changed board arrives in one response, and each poll reads the question ledger once instead of twice (#635).
+  Tests: `unchanged page polls return 304 with an ETag and no body`, `a changed page poll sends the full board once and then returns 304 again`, `each unchanged page poll reads the question ledger once`, `the page sends its ETag and keeps its current view on a 304`, `the page requests a full board when reconnecting after a failed poll`.
