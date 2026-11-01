@@ -524,7 +524,8 @@ export const privateData = ({ added, body }) => {
     if (tokenPatterns.some(pattern => [...text.matchAll(pattern)].length > 0)) {
       add('token or token link', 'remove it, and revoke the token if it was real.')
     }
-    if ([...text.replace(webAddress, ' ').matchAll(emailPattern)].some(match => !isPlaceholderEmail(match))) {
+    // Addresses inside a link count too: a link can carry one in its path or query.
+    if ([...text.matchAll(emailPattern)].some(match => !isPlaceholderEmail(match))) {
       add('email address', 'use a GitHub login or a placeholder such as name@example.com; this repository is public (docs/dev/RULES.md, R8).')
     }
     if (path && /\.svg$/i.test(path) && /data:image\/(png|jpe?g|gif|webp)/i.test(text)) {
@@ -546,10 +547,17 @@ export const privateData = ({ added, body }) => {
 // docs/dev/RULES.md is the one-page summary of these three files (its R5): a change to one of them changes it too,
 // or the body says why not.
 const rulesSources = ['CONTRIBUTING.md', 'docs/dev/team-process.md', 'docs/RELEASING.md']
-export const rulesPage = ({ paths = [], body = '' }) => {
+export const rulesPage = ({ paths = [], body = '', headPaths }) => {
   const output = result()
   const changed = paths.filter(path => rulesSources.includes(path))
-  if (!changed.length || paths.includes('docs/dev/RULES.md')) return output
+  if (!changed.length) return output
+  // A deleted or renamed-away page is not a changed one; headPaths is unknown only where the tree cannot be listed.
+  const isPresent = headPaths === undefined || headPaths === null || [...headPaths].includes('docs/dev/RULES.md')
+  if (!isPresent) {
+    output.problems.push(problem('rules-page', `${changed.join(', ')} changed, and docs/dev/RULES.md is not in the head.`, 'keep docs/dev/RULES.md, changed to match (docs/dev/RULES.md, R5).'))
+    return output
+  }
+  if (paths.includes('docs/dev/RULES.md')) return output
   if (linesOf(stripComments(body)).some(line => /^\s*Rules page: unchanged, \S/.test(line))) {
     output.info.push('rules page: unchanged, with a reason in the body.')
     return output
@@ -604,7 +612,7 @@ export const checkPr = data => {
   add(sections(data.body, data.template))
   add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, issues: issue.issues, titles: testTitles(data.testFiles), isRelease, isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) }))
   add(privateData({ added: data.added, body: data.body }))
-  add(rulesPage({ paths: data.paths, body: data.body }))
+  add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
   if (issue.issue !== null) {
     // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
