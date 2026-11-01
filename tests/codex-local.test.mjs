@@ -6412,3 +6412,51 @@ test('a Codex start note finds the project by a checkout folder, a worktree main
   assert.match(spacedNote, /Synthetic spaced work/)
   assert.doesNotMatch(spacedNote, /Synthetic first word work/)
 }))
+
+test('a Codex start note drops an empty remote url without reading following lines', () => fixture(f => {
+  f.install('--apply')
+  const at = new Date(Date.now() - 3600000).toISOString()
+  const block = (id, title) => `<!-- auto session=${id} agent=claude state=working updated=${at} -->\n### ${title}\n- [~] One\n<!-- /auto session=${id} -->\n`
+  f.save(f.progress, ['## *', block('b1b2c3e7', 'Synthetic asterisk work')].join('\n'))
+  const empty = join(f.home, 'empty-remote')
+  mkdirSync(join(empty, '.git'), { recursive: true })
+  writeFileSync(join(empty, '.git', 'config'), '[remote "origin"]\n\turl =\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n')
+  const result = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd: empty, source: 'startup', transcript_path: null })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '')
+}))
+
+test('a Codex start note strips quotes from remote urls before stripping .git', () => fixture(f => {
+  f.install('--apply')
+  const at = new Date(Date.now() - 3600000).toISOString()
+  const block = (id, title) => `<!-- auto session=${id} agent=claude state=working updated=${at} -->\n### ${title}\n- [~] One\n<!-- /auto session=${id} -->\n`
+  f.save(f.progress, ['## demo', block('b1b2c3e8', 'Synthetic quoted work')].join('\n'))
+  const quoted = join(f.home, 'quoted-checkout')
+  mkdirSync(join(quoted, '.git'), { recursive: true })
+  writeFileSync(join(quoted, '.git', 'config'), '[remote "origin"]\n\turl = "https://example.invalid/someone/demo.git"\n')
+  const result = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd: quoted, source: 'startup', transcript_path: null })
+  assert.equal(result.status, 0, result.stderr)
+  const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext
+  assert.match(context, /Synthetic quoted work/)
+}))
+
+test('a Codex start note uses the folder name for a bare repository worktree and drops modules', () => fixture(f => {
+  f.install('--apply')
+  const at = new Date(Date.now() - 3600000).toISOString()
+  const block = (id, title) => `<!-- auto session=${id} agent=claude state=working updated=${at} -->\n### ${title}\n- [~] One\n<!-- /auto session=${id} -->\n`
+  f.save(f.progress, [
+    '## demo', block('b1b2c3e9', 'Synthetic bare work'),
+    '## repos', block('b1b2c3e10', 'Synthetic parent folder work'),
+  ].join('\n'))
+  const bare = join(f.home, 'repos', 'demo.git')
+  mkdirSync(join(bare, 'worktrees', 'demo-feature'), { recursive: true })
+  writeFileSync(join(bare, 'worktrees', 'demo-feature', 'commondir'), '../..\n')
+  const worktree = join(f.home, 'demo-feature')
+  mkdirSync(worktree, { recursive: true })
+  writeFileSync(join(worktree, '.git'), `gitdir: ${join(bare, 'worktrees', 'demo-feature')}\n`)
+  const result = f.event('SessionStart', null, { session_id: 'synthetic-person-start', cwd: worktree, source: 'startup', transcript_path: null })
+  assert.equal(result.status, 0, result.stderr)
+  const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext
+  assert.match(context, /Synthetic bare work/)
+  assert.doesNotMatch(context, /Synthetic parent folder work/)
+}))

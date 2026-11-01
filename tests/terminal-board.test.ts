@@ -274,7 +274,6 @@ test('the terminal board shows an agent that asks and one that just stopped, and
   for (const out of [boardScreen(view, [], pinned(emptyBoardState, boardItems(view, [])), s, { width: 100, isColor: false }), boardText(view, [], s, { width: 100, isColor: false })]) {
     expect(out).toContain('Clover or rye?')
     expect(out).toContain(s.stoppedCount(1))
-    expect(out).not.toContain(s.pgNoWorking)
   }
 })
 

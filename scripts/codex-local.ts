@@ -50,7 +50,8 @@ const readLocal = (file: string): string | null => readBytes(file)?.toString('ut
 const remoteName = (config: string): string => {
   const remotes = config.split(/^(?=\s*\[)/m).filter(section => /^\s*\[remote\s/.test(section))
   const remote = remotes.find(section => /^\s*\[remote\s+"origin"\s*\]/.test(section)) ?? remotes[0] ?? ''
-  const url = /^\s*url\s*=\s*(.+?)\s*$/m.exec(remote)?.[1] ?? ''
+  const rawUrl = /^\s*url[ \t]*=[ \t]*(.+?)\s*$/m.exec(remote)?.[1] ?? ''
+  const url = rawUrl.replace(/^["']|["']$/g, '')
 
   return (url.split(/[\\/:]/).filter(Boolean).pop() ?? '').replace(/\.git$/, '')
 }
@@ -71,7 +72,10 @@ const hereNames = (cwd: unknown): string[] => {
     const common = readLocal(join(gitDir, 'commondir'))?.trim()
     const commonDir = common === undefined ? gitDir : resolve(gitDir, common)
     // Only a worktree has `commondir`; a submodule's git folder sits under `.git/modules`, not in a checkout.
-    if (common !== undefined) names.add(basename(dirname(commonDir)))
+    if (common !== undefined) {
+      if (basename(commonDir) === '.git') names.add(basename(dirname(commonDir)))
+      else if (commonDir.endsWith('.git')) names.add(basename(commonDir).replace(/\.git$/, ''))
+    }
     names.add(remoteName(readLocal(join(commonDir, 'config')) ?? ''))
   } catch {}
 
