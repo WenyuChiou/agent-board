@@ -56,7 +56,10 @@ export const startersOf = (projects: readonly ProgressProject[]): ((auto: Progre
     for (let hop = 0; hop < MAX_HOPS; hop += 1) {
       const parentId = at.parent
       if (parentId === undefined) return null
-      const next = byId.get(`${at.agent}:${parentId}`) ?? byId.get(parentId)
+      const bare = byId.get(parentId)
+      const next = (bare !== undefined && bare.isRun !== true)
+        ? bare
+        : (byId.get(`${at.agent}:${parentId}`) ?? bare)
       if (next === undefined || seen.has(next)) return null
       if (next.isRun !== true) return next
       seen.add(next)
@@ -145,7 +148,10 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
     for (let hop = 0; hop < MAX_HOPS; hop += 1) {
       const id = parentOf(at)
       if (id === undefined) return null
-      const next = byId.get(`${at.auto.agent}:${id}`) ?? byId.get(id)
+      const bare = byId.get(id)
+      const next = (bare !== undefined && !isRun(bare))
+        ? bare
+        : (byId.get(`${at.auto.agent}:${id}`) ?? bare)
       if (next === undefined || next === at) return null
       if (!isRun(next)) return next
       at = next
@@ -211,10 +217,13 @@ export const pickParent = (projects: readonly ProgressProject[], project: string
   for (const one of projects) {
     for (const task of one.tasks) {
       if (task.auto?.isRun === true) {
-        runs.add(task.auto.session)
-        if (task.auto.resume !== null) runs.add(task.auto.resume)
-        runs.add(`${task.auto.agent}:${task.auto.session}`)
-        if (task.auto.resume !== null) runs.add(`${task.auto.agent}:${task.auto.resume}`)
+        if (task.auto.resume !== null) {
+          runs.add(task.auto.resume)
+          runs.add(`${task.auto.agent}:${task.auto.resume}`)
+        } else {
+          runs.add(task.auto.session)
+          runs.add(`${task.auto.agent}:${task.auto.session}`)
+        }
       }
     }
   }
@@ -224,9 +233,12 @@ export const pickParent = (projects: readonly ProgressProject[], project: string
     for (const task of one.tasks) {
       const auto = task.auto
       if (auto === null || auto.isRun === true || auto.state !== 'working' || now - auto.updated > STALE_MS) continue
-      if (self.includes(auto.session) || (auto.resume !== null && self.includes(auto.resume)) || self.includes(`${auto.agent}:${auto.session}`)) continue
-      const id = auto.resume ?? auto.session
-      if (!runs.has(id) && !runs.has(auto.session)) found.add(id)
+      const autoKey = auto.resume ?? auto.session
+      if (self.includes(auto.session) || (auto.resume !== null && self.includes(auto.resume)) || self.includes(`${auto.agent}:${autoKey}`)) continue
+      const isRunTwin = auto.resume !== null
+        ? (runs.has(auto.resume) || runs.has(`${auto.agent}:${auto.resume}`))
+        : (runs.has(auto.session) || runs.has(`${auto.agent}:${auto.session}`))
+      if (!isRunTwin) found.add(autoKey)
     }
   }
 
