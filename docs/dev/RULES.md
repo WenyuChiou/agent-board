@@ -13,6 +13,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 
 - Claude Code, Codex, Antigravity, Cursor, cloud agents such as dot and Muse, and people by hand all follow this page. Each one reviews and merges others' pull requests on its own, from the review queue ([REVIEWING.md](REVIEWING.md)). No rule here depends on which agent you are.
 - **Where an agent starts.** [AGENTS.md](../../AGENTS.md) is the entry point; it sends you here first. Codex, Antigravity and Cursor read `AGENTS.md` by themselves. Claude Code does not: the repository is also a Claude Code plugin, whose root `CLAUDE.md` is not loaded, so a Claude Code session is given this page's link in its first prompt, or its user adds `@AGENTS.md` to their own `CLAUDE.md`. The same goes for any other agent that reads neither.
+- **Your own computer.** [AGENT-SETUP.md](AGENT-SETUP.md) lists the settings that keep your agents from stalling or piling up: a timeout on every hook, and how many runs to keep going at once.
 - **An agent works in the role of the person who runs it** (CONTRIBUTING, [Roles](../../CONTRIBUTING.md#roles)). An agent of the owner or of a collaborator may review and merge other authors' pull requests, as that person may.
 - **Who counts as the author.** The agent named in the `Author:` line, every agent it dispatched, and every agent that wrote part of the pull request or its brief. Another agent, of the same person or not, may review and approve it (R2).
 
