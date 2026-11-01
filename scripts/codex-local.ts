@@ -362,11 +362,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // last_assistant_message, or permission decisions from a hook payload. transcript_path is
       // opened, when it is this session's own history file, for its first record at a session's
       // start or prompt, which says whether a person started it (#399), and for nothing else.
-      const session = mode !== '--codex-report'
-        ? agent === 'antigravity'
-          ? (typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID)
-          : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined)
-        : flag('--session') ?? (typeof payload.session === 'string' ? payload.session : typeof payload.conversationId === 'string' ? payload.conversationId : typeof payload.sessionId === 'string' ? payload.sessionId : (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined))
+      const session = mode !== '--codex-report' ? agent === 'antigravity' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined) : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined)
       if (session === undefined && mode === '--codex-report' && agent === 'codex') throw new Error('UNBOUND_REPORT')
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
       const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')

@@ -69,17 +69,24 @@ const markOf = (task: ProgressMirrorTask): string => {
   return task.status === 'in_progress' ? '~' : ' '
 }
 
+// The full id a session's own block carries as `resume=`: another agent's block carries that
+// agent's own session id, for a reply from the board's page; a session's own, its id when it is
+// longer than its block id. The question key of the session's own rows is built from it too, so
+// the owner pane and a reader of the block agree on the key (`ownQuestionKey` in questions.ts).
+export const mirrorResume = (mirror: Pick<ProgressMirror, 'sessionId' | 'resume'>): string | null =>
+  mirror.resume !== undefined && RESUME.test(mirror.resume) ? mirror.resume : mirror.sessionId.length > 8 ? mirror.sessionId : null
+
 // The marker carries what another session's pane needs: the full id and folder for a
 // resume command, and how the pull request stands.
 const markerOf = (mirror: ProgressMirror, parent?: string): string => {
   const pr = mirror.pr ?? null
+  const resume = mirrorResume(mirror)
   const attrs = [
     `session=${shortId(mirror.sessionId)}`,
     `agent=${mirror.agent || 'claude'}`,
     `state=${mirror.state}`,
     `updated=${new Date(mirror.updated).toISOString()}`,
-    // Another agent's block carries that agent's own session id, for a reply from the board's page.
-    mirror.resume !== undefined && RESUME.test(mirror.resume) ? `resume=${mirror.resume}` : mirror.sessionId.length > 8 ? `resume=${mirror.sessionId}` : '',
+    resume === null ? '' : `resume=${resume}`,
     mirror.cwd ? `dir=${encodeURIComponent(mirror.cwd)}` : '',
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
@@ -230,6 +237,9 @@ const cutBlockOf = (span: BlockSpan, raw: string): CutBlock => {
     project: span.project,
     session: span.session,
     agent: attrs.agent ?? '',
+    // The question pass keys a resumed block by its full id too (`questionKey`), so a cut-off
+    // block is frozen under the scope the pass would read it by.
+    resume: span.resume ?? null,
     updated: Number.isNaN(parsed) ? null : parsed,
   }
 }

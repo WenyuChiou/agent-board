@@ -133,7 +133,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, inboxScope, inboxScopes, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -2474,7 +2474,7 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
     const frozen = cutOffScopes(projects, cutOffSpans(text, isCutSettled))
     heldInboxQuestions.clear()
     heldInboxQuestionsAt = changedAt
-    for (const [key, turn] of pending) if (turn.id !== undefined && frozen.has(questionScope(turn.project, turn.agent, turn.id))) heldInboxQuestions.add(key)
+    for (const [key, turn] of pending) if (turn.id !== undefined && frozen.has(inboxScope(projects, turn))) heldInboxQuestions.add(key)
     pending = pending.filter(([key]) => !heldInboxQuestions.has(key))
     for (const [key, turn] of pending) {
       const words = questionWords(turn.text)
@@ -2496,10 +2496,12 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
         // A turn the pass never records (not a question, or no session) goes as before. Only this
         // turn's own evidence counts: an earlier ask of the same words by the same session, answered
         // long ago, is not a record of this one.
-        const scope = !turn.isQuestion || turn.id === undefined ? null : questionScope(turn.project, turn.agent, turn.id)
+        // The record of a turn whose block is on the board is under that block's scope, or, from
+        // before the block was there, under the block id alone (`inboxScopes`).
+        const scopes = !turn.isQuestion || turn.id === undefined ? null : inboxScopes(projects, turn)
         const json = JSON.stringify(turn)
         const revisions = turn.sourceRevisions ?? []
-        const isRecorded = scope === null || ledger.records.some(record => record.scope === scope && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
+        const isRecorded = scopes === null || ledger.records.some(record => scopes.includes(record.scope) && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
         if (isRecorded) await discard(key)
         else {
           hasUnrecorded = true

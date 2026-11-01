@@ -36,8 +36,8 @@ export const encodedCommandText = (encoded: string): string => {
   return text
 }
 
-export type LocalAgent = 'codex' | 'cursor' | 'opencode' | 'gemini' | 'grok' | 'muse' | 'hermes' | 'openclaw' | 'antigravity' | 'deepseek' | 'dot' | 'duet' | 'bot'
-export const localAgents: LocalAgent[] = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek', 'dot', 'duet', 'bot']
+export type LocalAgent = 'codex' | 'cursor' | 'opencode' | 'gemini' | 'grok' | 'muse' | 'hermes' | 'openclaw' | 'antigravity' | 'deepseek'
+export const localAgents: LocalAgent[] = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
 export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> = {
   gemini: { SessionStart: 'waiting', BeforeAgent: 'working', AfterAgent: 'waiting', SessionEnd: 'ended' },
   grok: { SessionStart: 'waiting', UserPromptSubmit: 'working', Stop: 'waiting', SessionEnd: 'ended' },
@@ -45,7 +45,7 @@ export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> =
   antigravity: { SessionStart: 'waiting', PreInvocation: 'working', PostInvocation: 'working', Stop: 'waiting' },
 }
 export const lifecycleCapability = (agent: LocalAgent): string =>
-  agent === 'hermes' ? 'adapter-pending' : ['dot', 'duet', 'bot'].includes(agent) ? 'report-only' : 'adapter-installed-unverified'
+  agent === 'hermes' ? 'adapter-pending' : 'adapter-installed-unverified'
 
 // Antigravity groups events under a named definition, rather than hooks.<event>.
 // Stop ends an execution loop, not the conversation. No session-end event is invented.

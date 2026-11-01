@@ -249,6 +249,31 @@ const fixture = async fn => {
   finally { if (isSafeToRemove) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 
+test('an antigravity report with origin run and a parent writes an origin=run block with that parent', () => fixture(f => {
+  const child = 'synthetic-antigravity-child-123'
+  const parent = 'synthetic-parent-session-456'
+  const loader = `import { registerHooks } from 'node:module'
+registerHooks({ resolve(specifier, context, next) {
+  try { return next(specifier, context) } catch (error) {
+    if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+    return next(specifier + '.ts', context)
+  }
+} })`
+  const result = spawnSync(process.execPath, [
+    '--experimental-transform-types', '--import', `data:text/javascript,${encodeURIComponent(loader)}`, resolve('scripts/board-cli.ts'),
+    '--codex-report', '--agent', 'antigravity', '--session', child, '--home', f.home,
+    '--data-dir', f.root, '--progress-file', f.progress, '--lang', 'en',
+  ], { env: f.env, input: JSON.stringify({ title: 'Child work', project: 'demo', state: 'working', steps: ['- [~] Check it'], origin: 'run', parent }), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(result.status, 0, result.stderr)
+  const text = readFileSync(f.progress, 'utf8')
+  const marker = text.split('\n').find(line => line.startsWith('<!-- auto '))
+  assert.ok(marker)
+  assert.match(marker, / agent=antigravity /)
+  assert.ok(marker.includes(` resume=${child} `))
+  assert.ok(marker.includes(` origin=run parent=${parent} `))
+  assert.match(text, /### Child work/)
+}))
+
 test('the codex-local fixture removes its own prefix\'s folders older than six hours and keeps newer ones', async () => {
   const older = mkdtempSync(join(tmpdir(), 'codex local-'))
   const newer = mkdtempSync(join(tmpdir(), 'codex local-'))
