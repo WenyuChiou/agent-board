@@ -2447,11 +2447,12 @@ test('the installed Codex host grants only six reviewed hashes and preserves unr
 test('--codex-doctor auto-discovers Codex on PATH and verifies hook trust', { skip: process.platform === 'win32' && 'Windows discovery requires native .exe' }, () => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   const config = join(f.home, '.codex', 'config.toml')
+  const hooksJson = join(f.home, '.codex', 'hooks.json')
   const binDir = join(f.home, 'bin')
   mkdirSync(binDir, { recursive: true })
   const mockCodex = join(binDir, 'codex')
 
-  const hooksManifest = JSON.parse(readFileSync(join(f.home, '.codex', 'hooks.json'), 'utf8'))
+  const hooksManifest = JSON.parse(readFileSync(hooksJson, 'utf8'))
   const expectedHooks = Object.entries(hooksManifest.hooks).map(([event, list]) => ({
     event: event[0].toLowerCase() + event.slice(1),
     command: list[0].hooks[0].command,
@@ -2473,7 +2474,7 @@ rl.on('line', line => {
       const state = JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}, 'utf8'));
       const expected = ${JSON.stringify(expectedHooks)};
       const hooks = expected.map((item, i) => ({
-        sourcePath: ${JSON.stringify(config)},
+        sourcePath: ${JSON.stringify(hooksJson)},
         eventName: item.event,
         command: item.command,
         key: 'hook-' + i,
