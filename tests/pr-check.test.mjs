@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr,
   isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
-  privateData, report, reportMarkdown, reviewOf, sections, stripComments, testTitles, titleKnown, verdict,
+  privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -394,6 +394,33 @@ test('pr-check finds a session id, a home-folder path and a token link in added 
   for (const value of ['/home/you/file', '/Users/<name>/file', 'C:/Users/runner/file', '/home/$USER/file', '/home/%USER%/file', '00000000-0000-0000-0000-000000000001', 'https://github.com/users/octocat/projects/1', 'https://example.com/home/index.html', 'https://docs.github.com/en/rest/users/users']) {
     assert.equal(privateData({ added: [], body: value }).problems.length, 0, value)
   }
+})
+
+test('pr-check finds an email address in added docs and the body, but not git, noreply or example addresses', () => {
+  for (const value of ['Contact private.synthetic@gmail.com', 'mailto:synthetic.person@university.edu']) {
+    const checked = privateData({ added: [{ path: 'docs/validation/synthetic-usersim.md', line: 3, text: value }], body: '' })
+    assert.equal(checked.problems.length, 1, value)
+    assert.match(checked.problems[0].message, /email address in docs\/validation\/synthetic-usersim\.md line 3/)
+    assert.equal(report(checked, 'synthetic').includes('private.synthetic'), false)
+  }
+  for (const value of ['git@github.com:WenyuChiou/agent-board.git', 'Co-Authored-By: Synthetic <noreply@anthropic.com>', '12345+octocat@users.noreply.github.com', 'name@example.com', 'synthetic@example.invalid', 'npx @wenyuchiou/agent-board@next', 'claude plugin install agent-board@agent-board', 'react@18.3.1', 'https://synthetic@host.invalid/x']) {
+    assert.equal(privateData({ added: [], body: value }).problems.length, 0, value)
+  }
+})
+
+test('pr-check asks for the rules page when CONTRIBUTING.md, team-process.md or RELEASING.md changes', () => {
+  for (const path of ['CONTRIBUTING.md', 'docs/dev/team-process.md', 'docs/RELEASING.md']) {
+    const checked = rulesPage({ paths: [path, 'tests/x.test.mjs'], body: '' })
+    assert.equal(checked.problems.length, 1, path)
+    assert.equal(checked.problems[0].check, 'rules-page')
+    assert.equal(rulesPage({ paths: [path, 'docs/dev/RULES.md'], body: '' }).problems.length, 0)
+    assert.equal(rulesPage({ paths: [path], body: 'Rules page: unchanged, only a typo in an example.' }).problems.length, 0)
+    // A reason inside a template comment, or with no words after the comma, does not count.
+    assert.equal(rulesPage({ paths: [path], body: '<!-- Rules page: unchanged, reason -->' }).problems.length, 1)
+    assert.equal(rulesPage({ paths: [path], body: 'Rules page: unchanged, ' }).problems.length, 1)
+  }
+  assert.equal(rulesPage({ paths: ['README.md', 'docs/GUIDE.md'], body: '' }).problems.length, 0)
+  assert.equal(checkPr({ ...syntheticPr(), paths: ['CONTRIBUTING.md'], changedPaths: ['CONTRIBUTING.md'] }).problems.some(item => item.check === 'rules-page'), true)
 })
 
 test('pr-check requires synthetic alt text for images in the body', () => {
@@ -1004,7 +1031,8 @@ test('pr-check only notes, and does not fail, a large or governance-touching out
   // A change to a file the maintainer looks at first is noted by name and still passes.
   for (const path of ['AGENTS.md', 'CONTRIBUTING.md', '.github/workflows/test.yml', 'package.json', '.claude-plugin/plugin.json']) {
     const checked = checkPr(outsidePr({ paths: [...syntheticPr().paths, path] }))
-    assert.deepEqual(checked.problems, [], path)
+    // CONTRIBUTING.md also asks for the rules page (docs/dev/RULES.md, R5), which is a check of its own.
+    assert.deepEqual(checked.problems.filter(item => item.check !== 'rules-page'), [], path)
     assert.ok(checked.info.some(line => line.startsWith('outside note:') && line.includes(path) && /ask on the issue first/.test(line)), path)
   }
   assert.deepEqual(notes(outsidePr({ paths: [...syntheticPr().paths, 'docs/CONTRIBUTOR-PATH.md', 'scripts/pr-check.mjs', 'hooks/pane.tsx'] })), [])
@@ -1030,7 +1058,8 @@ test('pr-check only notes, and does not fail, a large or governance-touching out
 
 test('pr-check notes an outside change to the team process page like any other governance file', () => {
   const checked = checkPr(outsidePr({ paths: [...syntheticPr().paths, 'docs/dev/team-process.md'] }))
-  assert.deepEqual(checked.problems, [])
+  // The page also asks for the rules page (docs/dev/RULES.md, R5), which is a check of its own.
+  assert.deepEqual(checked.problems.filter(item => item.check !== 'rules-page'), [])
   assert.ok(checked.info.some(line => line.startsWith('outside note:') && line.includes('docs/dev/team-process.md') && /ask on the issue first/.test(line)))
   // The team's own change to the page is not noted.
   assert.deepEqual(checkPr({ ...outsidePr({ paths: [...syntheticPr().paths, 'docs/dev/team-process.md'] }), association: 'OWNER' }).info.filter(line => line.startsWith('outside note:')), [])
