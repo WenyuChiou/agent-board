@@ -642,31 +642,76 @@ test('empty mirror remove removes only matching agent block when same session id
 })
 
 test('moving a live session block to a new project heading supersedes its old project question record', () => {
-  const oldScope = questionScope('OldProject', 'codex', 'session-move-1234')
-  const initialLedger = {
-    ...emptyQuestions(),
-    records: [{
-      id: 'question:move:1',
-      scope: oldScope,
-      words: 'confirm moving block',
-      occurrence: 1,
-      copies: 1,
-      isWaiting: true,
-      isPresent: true,
-      isUnresolved: true,
-      firstObserved: NOW - 5000,
-      incarnation: 'init',
-      source: { kind: 'block' as const, project: 'OldProject', task: 'Old Task', text: 'Confirm moving block', agent: 'codex', session: 'session-move-1234', data: '' },
-    }],
+  for (const resume of [undefined, 'session-move-1234-0000-4000-8000-000000000001']) {
+    const oldBlock = block({ session: 'session-move-1234', agent: 'codex', resume, state: 'waiting', title: 'Old Task', stepText: '- [?] Confirm moving block' })
+    const initial = observeQuestions(emptyQuestions(), parseProgress(`## OldProject\n${oldBlock}`), null, [], NOW - 5000, false, 'init')
+    const oldRecord = initial.ledger.records.find(record => record.words === questionWords('Confirm moving block'))!
+    const newBlock = block({ session: 'session-move-1234', agent: 'codex', resume, state: 'waiting', title: 'New Task', stepText: '- [?] New question under new project?' })
+    const observed = observeQuestions(initial.ledger, parseProgress(`## NewProject\n${newBlock}`), null, [], NOW, false, 'moved-test')
+    const retired = observed.ledger.records.find(record => record.id === oldRecord.id)
+    const live = observed.ledger.records.find(record => record.words === questionWords('New question under new project?'))
+    expect(retired?.isUnresolved).toBe(false)
+    expect(retired?.isPresent).toBe(false)
+    expect(retired?.isWaiting).toBe(false)
+    expect(live?.isUnresolved).toBe(true)
   }
-  const newProjectBlock = ['<!-- auto session=session-move-1234 agent=codex state=waiting updated=2026-10-27T12:00:00Z -->', '### New Task', '- [?] New question under new project?', '<!-- /auto session=session-move-1234 -->'].join('\n')
-  const text = `## NewProject\n${newProjectBlock}\n`
-  const projects = parseProgress(text)
-  const observed = observeQuestions(initialLedger, projects, null, [], NOW, false, 'moved-test')
-  const oldRecord = observed.ledger.records.find(r => r.id === 'question:move:1')
-  expect(oldRecord?.isUnresolved).toBe(false)
-  expect(oldRecord?.isPresent).toBe(false)
-  expect(oldRecord?.isWaiting).toBe(false)
+})
+
+const collidingProjectBoard = (isAlphaPresent: boolean): string => {
+  const alpha = block({ session: 'deadbeef', agent: 'codex', resume: 'deadbeef-0000-4000-8000-000000000001', state: 'waiting', title: 'Alpha task', stepText: '- [?] Keep alpha unanswered?' })
+  const beta = block({ session: 'deadbeef', agent: 'codex', resume: 'deadbeef-0000-4000-8000-000000000002', state: 'waiting', title: 'Beta task', stepText: '- [?] Keep beta unanswered?' })
+  return `${isAlphaPresent ? `## Alpha\n${alpha}` : ''}\n## Beta\n${beta}`
+}
+
+const collidingProjectLedger = () => observeQuestions(emptyQuestions(), parseProgress(collidingProjectBoard(true)), null, [], NOW - 5000, false, 'collision-init').ledger
+
+test('removing one project does not answer its question when another full session shares its short id', () => {
+  const initial = collidingProjectLedger()
+  const alpha = initial.records.find(record => record.words === questionWords('Keep alpha unanswered?'))!
+  for (const isSettled of [false, true]) {
+    const observed = observeQuestions(initial, parseProgress(collidingProjectBoard(false)), null, [], NOW, isSettled, `collision-${isSettled}`)
+    const retained = observed.ledger.records.find(record => record.id === alpha.id)
+    expect(retained?.isUnresolved).toBe(true)
+    expect(retained?.id).toBe(alpha.id)
+    expect(retained?.firstObserved).toBe(alpha.firstObserved)
+    expect(retained?.source).toEqual(alpha.source)
+    if (isSettled) {
+      expect(retained?.isPresent).toBe(false)
+      expect(retained?.isWaiting).toBe(false)
+    }
+  }
+})
+
+test('an archived question stays unanswered when another project has a different full session with its short id', () => {
+  const initial = collidingProjectLedger()
+  const alpha = initial.records.find(record => record.words === questionWords('Keep alpha unanswered?'))!
+  const archived = { ...initial, records: initial.records.map(record => record.id === alpha.id ? { ...record, isArchived: true } : record) }
+  for (const isSettled of [false, true]) {
+    const observed = observeQuestions(archived, parseProgress(collidingProjectBoard(false)), null, [], NOW, isSettled, `archived-${isSettled}`)
+    const retained = observed.ledger.records.find(record => record.id === alpha.id)
+    expect(retained?.isUnresolved).toBe(true)
+    expect(retained?.isArchived).toBe(true)
+    expect(retained?.id).toBe(alpha.id)
+    expect(retained?.firstObserved).toBe(alpha.firstObserved)
+    expect(retained?.source).toEqual(alpha.source)
+  }
+})
+
+test('an unreadable saved snapshot does not answer a missing project question from a colliding short id', () => {
+  const initial = collidingProjectLedger()
+  const alpha = initial.records.find(record => record.words === questionWords('Keep alpha unanswered?'))!
+  const unreadable = {
+    ...initial,
+    records: initial.records.map(record => record.id === alpha.id && record.source !== undefined
+      ? { ...record, source: { ...record.source, data: '{not-json' } }
+      : record),
+  }
+  const observed = observeQuestions(unreadable, parseProgress(collidingProjectBoard(false)), null, [], NOW, true, 'unreadable')
+  const retained = observed.ledger.records.find(record => record.id === alpha.id)
+  expect(retained?.isUnresolved).toBe(true)
+  expect(retained?.id).toBe(alpha.id)
+  expect(retained?.firstObserved).toBe(alpha.firstObserved)
+  expect(retained?.source?.data).toBe('{not-json')
 })
 
 test('foldRuns keeps two blocks with the same agent and short id apart when full id is unknown', () => {

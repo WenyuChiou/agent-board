@@ -1,2 +1,2 @@
-- **Questions / Moved project tasks** · Moving a live session to a new project heading replaces its previous project's open question instead of leaving a duplicate behind (#602).
-  Tests: `moving a live session block to a new project heading supersedes its old project question record`.
+- **Questions / Moved project tasks** · Moving a live session to a new project heading replaces its previous project's open question. Removing or archiving a different session with the same short ID keeps its unanswered question and original age (#602).
+  Tests: `moving a live session block to a new project heading supersedes its old project question record`, `removing one project does not answer its question when another full session shares its short id`, `an archived question stays unanswered when another project has a different full session with its short id`, `an unreadable saved snapshot does not answer a missing project question from a colliding short id`.
