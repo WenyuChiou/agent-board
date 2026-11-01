@@ -236,6 +236,22 @@ test('preflight recovers an interrupted owner record after its process has exite
   assert.deepEqual(readdirSync(f.lockPath), [])
 })
 
+test('preflight gives different accounts separate default test lock directories', async () => {
+  const module = await import('../scripts/preflight.mjs')
+  assert.equal(typeof module.accountTestLockPath, 'function')
+  const shared = join('synthetic-root', 'shared-temp')
+  const unixOne = module.accountTestLockPath({ platform: 'linux', temp: shared, account: { uid: 1001, homedir: '/synthetic/one' } })
+  const unixTwo = module.accountTestLockPath({ platform: 'linux', temp: shared, account: { uid: 1002, homedir: '/synthetic/two' } })
+  assert.notEqual(unixOne, unixTwo)
+  assert.equal(module.accountTestLockPath({ platform: 'linux', temp: shared, account: { uid: 1001, homedir: '/changed/by-env' } }), unixOne)
+  const windowsOne = module.accountTestLockPath({ platform: 'win32', temp: shared, account: { uid: -1, homedir: 'C:\\Users\\Synthetic One' } })
+  const windowsTwo = module.accountTestLockPath({ platform: 'win32', temp: shared, account: { uid: -1, homedir: 'C:\\Users\\Synthetic Two' } })
+  assert.notEqual(windowsOne, windowsTwo)
+  assert.equal(module.accountTestLockPath({ platform: 'win32', temp: shared, account: { uid: 999, homedir: 'C:\\Users\\Synthetic One' } }), windowsOne)
+  for (const path of [unixOne, unixTwo, windowsOne, windowsTwo]) assert.equal(dirname(path), shared)
+  assert.equal(windowsOne.includes('Synthetic One'), false)
+})
+
 test('preflight runs a touched nested e2e test', async t => {
   const f = fixture(t)
   f.write('tests/e2e/deeper/nested.test.mjs', "import test from 'node:test'\ntest('a nested fixture runs', () => {})\n")

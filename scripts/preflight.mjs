@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, userInfo } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { addedLines, testTitles, titleKnown } from './pr-check.mjs'
@@ -14,6 +14,13 @@ const maxBuffer = 64 * 1024 * 1024
 const read = path => readFileSync(path, 'utf8')
 const isTest = path => /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|ts|tsx)$/.test(path)
 const splitPaths = text => text.split('\0').filter(Boolean)
+
+export const accountTestLockPath = ({ platform = process.platform, temp = tmpdir(), account = userInfo() } = {}) => {
+  const identity = platform === 'win32'
+    ? createHash('sha256').update(String(account.homedir)).digest('hex')
+    : String(account.uid)
+  return join(temp, `agent-board-preflight-tests-${identity}`)
+}
 
 const isLiveProcess = pid => {
   if (!Number.isSafeInteger(pid) || pid <= 0) return true
@@ -243,7 +250,7 @@ const parseArgs = argv => {
   return options
 }
 
-export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = join(tmpdir(), 'agent-board-preflight-tests'), onCheck, onProgress, onLockPublished } = {}) => {
+export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), onCheck, onProgress, onLockPublished } = {}) => {
   const checks = []
   const add = (state, message) => {
     const item = { state, message: safeLine(message) }
