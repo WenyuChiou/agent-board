@@ -74,6 +74,8 @@ const acquireTestLock = (directory, onPublished) => {
 // Child diagnostics can contain private paths or terminal control characters.
 export const safeLine = (value, { hasSpacedUnixPaths = false } = {}) => {
   let text = String(value).replace(/[\r\n\u0085\u2028\u2029]+/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '')
+  // A file URL must reach the path rules before its e:/ can look like a drive.
+  if (hasSpacedUnixPaths) text = text.replace(/\bfile:\/\/[^/\s]*(?=\/)/gi, '')
   // Home directory names can contain spaces even in unquoted diagnostics.
   // TAP names need conservative path removal; status lines keep adjacent relative paths.
   const unixPath = hasSpacedUnixPaths

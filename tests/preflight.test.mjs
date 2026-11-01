@@ -290,6 +290,12 @@ test('a failed touched Node check includes its redacted failing test name', asyn
   ]
   f.write('tests/failing-name.test.mjs', "import test from 'node:test'\n" + names.map(name => `test(${JSON.stringify(name)}, () => { throw new Error('private diagnostic') })`).join('\n') + '\n')
   f.write('tests/failing-unix-name.test.mjs', "import test from 'node:test'\ntest('reads /tmp/synthetic/Private Projects/repository/secret-plan.txt now', () => { throw new Error('private diagnostic') })\n")
+  const fileUrls = [
+    'reads file:///tmp/synthetic/Private Projects/repository/secret-plan.txt unix',
+    'loads file:///C:/Users/Synthetic Person/Private Projects/plan.txt windows',
+    'copies file://synthetic-host/share/Private Projects/secret-plan.txt network',
+  ]
+  f.write('tests/failing-file-url-name.test.mjs', "import test from 'node:test'\n" + fileUrls.map(name => `test(${JSON.stringify(name)}, () => { throw new Error('private diagnostic') })`).join('\n') + '\n')
   const checks = await f.check()
   const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-name.test.mjs:'))
   assert.match(failed?.message ?? '', /failed: reads <path> with \?t=<token> <token>/)
@@ -298,6 +304,9 @@ test('a failed touched Node check includes its redacted failing test name', asyn
   const unix = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-unix-name.test.mjs:'))
   assert.match(unix?.message ?? '', /failed: reads <path> now\.$/)
   assert.doesNotMatch(unix?.message ?? '', /Private|Projects|repository|secret-plan/)
+  const urls = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-file-url-name.test.mjs:'))
+  assert.match(urls?.message ?? '', /failed: reads <path> unix; loads (?:<path>)+ windows; copies <path> network\.$/)
+  assert.doesNotMatch(urls?.message ?? '', /file:|fil<path>|Synthetic|Person|Private|Projects|repository|secret-plan|synthetic-host|share/)
 })
 
 test('nested touched Node TAP failures keep a bounded useful case name', async t => {
