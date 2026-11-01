@@ -43,7 +43,8 @@ const optionsOf = (text: string): string[] => {
     .filter(one => one !== '')
   const lead = clauses[clauses.length - 1] ?? ''
   const rest = (match[2] ?? '').trim()
-  return [lead.replace(/^(要|用|選|是)/, '').trim(), rest].filter(one => one !== '' && [...one].length <= 24)
+  // Reply length must not turn a real choice into a yes/no question; interfaces clip labels.
+  return [lead.replace(/^(要|用|選|是)/, '').trim(), rest].filter(one => one !== '')
 }
 
 // A note that opens by asking for a look or an action. These are stricter than REVIEW and DO, which

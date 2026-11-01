@@ -37,19 +37,16 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       for (const [surface, text] of Object.entries({ terminal: await terminal.screen(world), page: await server.page() })) {
         assert.ok(text.includes(question), surface)
         noMachineIds(text, world)
-        await knownFailure('hold:question-choice-options', () => {
-          assert.match(text, /Choose/, surface)
-          assert.match(text, /Merge FAQ into Troubleshooting/, surface)
-          assert.match(text, /keep separate/, surface)
-          assert.doesNotMatch(text, /Yes\s+No|\[Confirm\]/, surface)
-        })
+        // The current page shows the answer buttons directly, without a kind badge.
+        if (surface === 'terminal') assert.match(text, /Choose/, surface)
+        assert.match(text, /Merge FAQ into Troubleshooting/, surface)
+        assert.match(text, /keep separate/, surface)
+        assert.doesNotMatch(text, /Yes\s+No|\[Confirm\]/, surface)
       }
       const model = (await server.get('/api/board')).json().model
       assert.equal(model.asks.length, 1)
-      await knownFailure('hold:question-choice-options', () => {
-        assert.equal(model.asks[0].kind, 'choose')
-        assert.deepEqual(model.asks[0].options, ['Merge FAQ into Troubleshooting', 'keep separate'])
-      })
+      assert.equal(model.asks[0].kind, 'choose')
+      assert.deepEqual(model.asks[0].answers, ['Merge FAQ into Troubleshooting', 'keep separate'])
     } finally { await world.close() }
   })
 
@@ -345,7 +342,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const screens = await inspectSurfaces(world)
       assert.match(screens.terminal, /\b0 waiting\b/)
       assert.match(screens.chat, /\b0 waiting\b/)
-      assert.match(screens.page, /Nothing needs you/)
+      assert.ok(screens.page.includes(EN.pgNothing), screens.page)
     } finally { await world.close() }
   })
 
@@ -370,7 +367,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       server = await serve.start(world)
       const press = await server.press('Ship the gateway', 'Already answered, hide')
       noSilentPress(press)
-      await seenPageWithin(server, text => text.includes('Nothing needs you'), PAGE_MS)
+      await seenPageWithin(server, text => text.includes(EN.pgNothing), PAGE_MS)
       assert.equal((await server.get('/api/board')).json().model.counts.waiting, 0)
       assert.match((await terminal.screen(world)), /\b0 waiting\b/)
       await inspectSurfaces(world, server)
@@ -402,7 +399,10 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       }
       assert.match(screens.chat, /\b1 done today\b/)
       assert.match(screens.chat, /Prepare research summary/)
-      for (const [surface, text] of Object.entries(screens)) assert.match(text, /Nothing needs you|\b0 waiting\b/, surface)
+      for (const [surface, text] of Object.entries(screens)) {
+        if (surface === 'page') assert.ok(text.includes(EN.pgNothing), surface)
+        else assert.match(text, /Nothing needs you|\b0 waiting\b/, surface)
+      }
       assert.match(world.read('progress.md'), /\[\?\] Ship the gateway/)
     } finally { await world.close() }
   })

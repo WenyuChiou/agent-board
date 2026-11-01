@@ -1,5 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { EN } from '../../hooks/strings-en.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { inspectSurfaces, terminal, seenPageWithin, serve, run } from './lib/surfaces.mjs'
@@ -86,11 +87,11 @@ describe('L3 across agents and sessions', () => {
       const before = (await terminal.keys(world, ''))
       const after = (await terminal.keys(world, 'h'))
       noSilentPress({ surface: 'terminal', card: 'Publish antigravity report', button: 'h', before, after })
-      await seenPageWithin(server, text => text.includes('Nothing needs you'), PAGE_MS)
+      await seenPageWithin(server, text => text.includes(EN.pgNothing), PAGE_MS)
       const screens = await inspectSurfaces(world, server)
       assert.match(screens.chat, /\b0 waiting\b/)
       assert.match(screens.terminal, /\b0 waiting\b/)
-      assert.match(screens.page, /Nothing needs you/)
+      assert.ok(screens.page.includes(EN.pgNothing), screens.page)
     } finally {
       await world.close()
     }
