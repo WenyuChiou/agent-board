@@ -20,7 +20,7 @@ import { startServer } from './board-serve'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
-import { serverMemoryArgs } from './server-runtime'
+import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
 import { idleTimeout } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
@@ -1402,7 +1402,7 @@ const ensureServer = async (): Promise<RunningServer | null> => {
   // In the board's own folder, not the agent's, so the server holds no project folder open.
   // On Windows the server child is told which folder was just checked, so it does not check it again.
   const handoff = runtimeFolderHandoff()
-  const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: handoff === undefined ? process.env : { ...process.env, [RUNTIME_FOLDER_ENV]: handoff } })
+  const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: serverMemoryEnv(handoff === undefined ? process.env : { ...process.env, [RUNTIME_FOLDER_ENV]: handoff }) })
   const readyBy = performance.now() + 10_000
   // The child prints its address once it listens; it exits at once when it cannot.
   const url = await new Promise<string | null>(done => {
@@ -1641,6 +1641,7 @@ const run = async (): Promise<void> => {
   } else if (args[0] === 'stop' || args.includes('--stop')) {
     await stopBoard()
   } else if (args.includes('--serve-child')) {
+    dropServerMemoryEnv(process.env)
     serveChild()
   } else if (args.includes('--chat')) {
     // Before the flags that serve, open or write: a chat reply never starts a page.

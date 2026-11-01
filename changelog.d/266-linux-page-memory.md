@@ -1,0 +1,2 @@
+- **Page / Memory on Linux** · On Linux the background page no longer grows by about 50 MB outside its JavaScript memory over a long session: it starts with two malloc arenas, unless your environment already sets `MALLOC_ARENA_MAX`, and the programs it starts keep your own environment (#266).
+  Tests: `on Linux the page server starts with two malloc arenas unless the account chose a number, and drops the setting once started`, `a background page uses its memory policy without changing the account's Node options`.

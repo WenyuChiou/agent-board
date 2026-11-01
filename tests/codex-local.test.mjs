@@ -134,6 +134,20 @@ const fireCommand = (f, command, input, limit = 10000, after = callback => setTi
     after, stopNativeTree, { windowsVerbatimArguments: isWindows })
 }
 const fireHook = (f, input, limit, after) => fireCommand(f, JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.UserPromptSubmit[0].hooks[0].command, input, limit, after)
+// Codex 0.164 runs a hook's line through PowerShell on Windows (#623).
+const firePowerShell = (f, command, input, limit = 20000) => nativeProcess('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], f.env, input,
+  callback => setTimeout(callback, limit), stopNativeTree)
+// The hooks import each other without extensions, as the bundler reads them.
+const importTs = async path => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  try { return await import(path) } finally { resolver.deregister() }
+}
+const turnOf = f => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`codex:${session}`).digest('hex') + '.json'))).turn
 
 const hookLog = f => existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(join(f.root, 'hook-errors.log'), 'utf8') : ''
 
@@ -899,6 +913,61 @@ test('Codex-only setup initializes the board and skill without Claude and is ide
   const doctor = f.command(['--codex-doctor', '--home', f.home])
   assert.equal(JSON.parse(doctor.stdout).ready, true, doctor.stdout)
   assert.equal(JSON.parse(doctor.stdout).hooksTrusted, 'unknown')
+}))
+
+test('on Windows the generated Codex hook command runs through PowerShell and through cmd, with spaces in the worker and progress paths', { skip: process.platform !== 'win32' && 'Windows shells only' }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.match(f.progress, / /, 'the fixture home has a space')
+  const command = JSON.parse(readFileSync(f.hooks)).hooks.UserPromptSubmit[0].hooks[0].command
+  for (const [shell, fire] of [['PowerShell', firePowerShell], ['cmd', fireCommand]]) {
+    const turn = `windows-${shell.toLowerCase()}-turn`
+    const result = await fire(f, command, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: turn }))
+    assert.equal(result.status, 0, `${shell}: ${hookFailure(result)}`)
+    assert.equal(turnOf(f), turn, shell)
+    assert.match(readFileSync(f.progress, 'utf8'), /state=working/, shell)
+  }
+}))
+
+test('on Windows a Codex hook command for a Node path with no quote-free name runs from PowerShell and cmd through an encoded launch', { skip: process.platform !== 'win32' && 'Windows shells only' }, () => fixture(async f => {
+  const { hookCommandArgs, windowsHookCommand } = await importTs('../hooks/local-agents.ts')
+  assert.equal(f.install('--apply').status, 0)
+  const argv = hookCommandArgs(process.execPath, f.home, 'codex', join(f.root, 'agent-board-hook.mjs'), f.progress, 'UserPromptSubmit')
+  const command = windowsHookCommand(argv, value => `"${value}"`, undefined)
+  assert.match(command, /^powershell\.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/]+=*$/)
+  for (const [shell, fire] of [['PowerShell', firePowerShell], ['cmd', fireCommand]]) {
+    const turn = `encoded-${shell.toLowerCase()}-turn`
+    const result = await fire(f, command, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: turn }))
+    assert.equal(result.status, 0, `${shell}: ${hookFailure(result)}`)
+    assert.equal(turnOf(f), turn, shell)
+  }
+  assert.throws(() => windowsHookCommand(argv, value => `"${value}"`, 'C:\\Program Files\\nodejs\\node.exe'), /UNSAFE_HOOK_EXECUTABLE/)
+}))
+
+test('setup replaces a Codex hook command an earlier release wrote with every word quoted, without the person removing it', () => fixture(async f => {
+  const { hookCommandArgs } = await importTs('../hooks/local-agents.ts')
+  assert.equal(f.install('--apply').status, 0)
+  // Put back what 0.24.0 wrote: every word quoted, in hooks.json and in the install record.
+  const manifestFile = join(f.root, 'install-codex.json')
+  const old = text => {
+    const config = JSON.parse(text)
+    const groups = config.hooks ?? config.groups
+    for (const [event, entries] of Object.entries(groups)) for (const entry of [entries].flat()) for (const hook of entry.hooks ?? []) {
+      if (!hook.command.includes('agent-board') && !/EncodedCommand/.test(hook.command)) continue
+      const args = hookCommandArgs(process.execPath, f.home, 'codex', join(f.root, 'agent-board-hook.mjs'), f.progress, event, undefined)
+      hook.command = args.map(value => `"${value}"`).join(' ')
+    }
+    return `${JSON.stringify(config, null, 2)}\n`
+  }
+  writeFileSync(f.hooks, old(readFileSync(f.hooks, 'utf8')))
+  writeFileSync(manifestFile, old(readFileSync(manifestFile, 'utf8')))
+  const quoted = `"${process.execPath}" "--input-type=commonjs"`
+  assert.ok(readFileSync(f.hooks, 'utf8').includes(JSON.stringify(quoted).slice(1, -1)))
+  const again = f.install('--apply')
+  assert.equal(again.status, 0, again.stderr)
+  const now = readFileSync(f.hooks, 'utf8')
+  if (process.platform === 'win32') assert.ok(!now.includes(JSON.stringify(quoted).slice(1, -1)), 'the quoted command is gone')
+  // One group of ours per event: the old one was taken out, not left beside the new one.
+  for (const [event, entries] of Object.entries(JSON.parse(now).hooks)) assert.equal(entries.filter(entry => entry.hooks.some(hook => /agent-board|EncodedCommand/.test(hook.command))).length, 1, event)
 }))
 
 test('the generated Codex hook command runs through the platform shell with JSON on stdin', () => fixture(async f => {
@@ -3363,12 +3432,16 @@ test('generated Codex and Antigravity hook commands reach Node without a PowerSh
   const { windowsHookNode } = await import('../scripts/windows-hook-node.ts')
   const codex = f.install('--agent', 'codex', '--apply')
   assert.equal(codex.status, 0, codex.stderr)
+  const expected = windowsHookNode(process.execPath)
   let checked = 0
   for (const groups of Object.values(JSON.parse(readFileSync(f.hooks, 'utf8')).hooks)) {
     for (const group of groups) for (const { command } of group.hooks) {
-      if (!command.includes('--hook-event')) continue
-      assert.doesNotMatch(command, /powershell/i)
-      assert.ok(command.startsWith(`"${process.execPath}" "--input-type=commonjs" "-e" "eval(Buffer.from('`))
+      if (!command.includes('--hook-event') && !/^powershell\.exe /i.test(command)) continue
+      // On Windows Codex runs the line through PowerShell, so the program goes first unquoted (#623).
+      if (process.platform !== 'win32') assert.ok(command.startsWith(`"${process.execPath}" "--input-type=commonjs" "-e" "eval(Buffer.from('`))
+      else if (expected === undefined) assert.match(command, /^powershell\.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand /)
+      else assert.ok(command.startsWith(`${expected} "--input-type=commonjs" "-e" "eval(Buffer.from('`), command.slice(0, 120))
+      if (process.platform !== 'win32' || expected !== undefined) assert.doesNotMatch(command, /powershell/i)
       checked++
     }
   }
@@ -3378,7 +3451,6 @@ test('generated Codex and Antigravity hook commands reach Node without a PowerSh
   assert.equal(antigravity.status, 0, antigravity.stderr)
   const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
   assert.deepEqual(Object.keys(hooks), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
-  const expected = windowsHookNode(process.execPath)
   for (const group of Object.values(hooks)) {
     assert.equal(group.length, 1)
     for (const { command } of group) {

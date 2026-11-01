@@ -93,6 +93,20 @@ export const antigravityCommand = (argv: string[], isWindows: boolean, quote: (v
   return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${base64(utf16le(launch))}`
 }
 
+// A host's hook command on Windows, which cmd and PowerShell both run: Codex 0.164 runs hooks
+// through PowerShell, which reads a line that starts with a quoted word as a string, so the program
+// goes first unquoted (`windowsNode`, a path of safe characters or its verified 8.3 name) and the
+// other words stay quoted. A spaced path with no 8.3 name goes inside an encoded PowerShell launch,
+// which also runs from cmd but costs a PowerShell start (#533, #623).
+export const windowsHookCommand = (argv: string[], quote: (value: string) => string, windowsNode?: string): string => {
+  if (windowsNode !== undefined) {
+    if (!/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i.test(windowsNode)) throw new Error('UNSAFE_HOOK_EXECUTABLE')
+    return [windowsNode, ...argv.slice(1).map(quote)].join(' ')
+  }
+  const launch = `& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')}; exit $LASTEXITCODE`
+  return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${base64(utf16le(launch))}`
+}
+
 export const cursorEvents: Record<string, string> = {
   sessionStart: 'SessionStart', beforeSubmitPrompt: 'UserPromptSubmit',
   stop: 'Stop', afterAgentResponse: 'Stop', sessionEnd: 'SessionEnd',
