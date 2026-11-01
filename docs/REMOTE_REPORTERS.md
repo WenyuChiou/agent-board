@@ -132,7 +132,7 @@ python3 scripts/remote-reporter/merge.py ~/.claude/progress.md muse.md
 For the same session, `merge.py` reports and skips older fragments, reports a
 conflict and keeps the existing block when equal `updated=` times have
 different content, and leaves identical imports unchanged.
-A newer fragment replaces the block. A board block with no end marker takes
+A newer fragment replaces the block. The importer treats an omitted state as waiting and refuses a working or waiting report more than three days old before writing anything. It rejects timestamps in a later UTC second; fractions within the current UTC second can order rapid reports without pretending that the source clock is ahead. Refresh the source report or correct its clock before retrying. Old done and ended reports can still merge as history. A board block with no end marker takes
 the fragment regardless of its timestamp: the fragment replaces only that
 block's start marker line, and the block's old lines stay below it as plain
 text, to delete by hand. If the block on the board has no
@@ -164,6 +164,8 @@ changes the displayed progress only, never answers a question, delivers a messag
 or approves a tool. The Python importer retains its separately documented
 fallback for incomparable historical timestamps above.
 
+The two Python clock-refusal messages come from the same three language tables as the board. The CLI chooses Traditional Chinese for locales such as `zh_TW.UTF-8`, Simplified Chinese for `zh_CN.UTF-8`, and English otherwise, using `LC_ALL`, then `LC_MESSAGES`, then `LANG`. Only these new refusals are localized; existing importer diagnostics retain their prior wording. The generated `scripts/remote-reporter/strings.json` keeps the importer stdlib-only; regenerate it with `bun scripts/build-remote-strings.ts` (Bun 1.4.2), and check it with `--check`.
+
 ## Risks and mitigations
 
 | Risk | Mitigation | Status |
@@ -173,7 +175,7 @@ fallback for incomparable historical timestamps above.
 | A concurrent write drops a merged block | The merge reads, changes only its blocks, writes, reads back and retries up to 3 times. A pane write that lands *after* the read-back can still drop the merged block; it comes back on the next merge, because merges are idempotent. There is no lock | Mitigated, not prevented |
 | Two writers on the *same* block | Must not happen: one writer owns one session. Different blocks never conflict, since each writer replaces only its own | By construction |
 | A merge rewriting something that only looks like a block | The scanner reads like `hooks/parse.ts`: blocks in code fences or HTML comments are skipped; CRLF, `<!--auto` and any attribute order are read | Implemented and tested |
-| Clock skew across machines | `updated=` must be UTC; clock skew can decide which block wins, so a clock ahead can cause later work to be skipped as older, and a clock more than three days behind makes the board refuse a live paste. A skip still exits 0: read the `session <id>: ...` lines. The reporter advances each timestamp by at least one second from its previous fragment to avoid same-second ties; bursts of updates can put it ahead of the clock | Documented |
+| Clock skew across machines | `updated=` must be UTC; clock skew can decide which block wins, so a clock ahead can cause later work to be skipped as older, and a clock more than three days behind makes the board refuse a live paste. A skip still exits 0: read the `session <id>: ...` lines. The reporter starts from the current UTC second and advances ties by one millisecond, including retirement. Ordering remains exact, while the importer accepts fractions of the current UTC second and refuses later seconds. A genuine clock rollback can still make an earlier report lead the clock; it is refused instead of silently imported | Documented |
 | Truncated or malformed fragment | Validated before merge; an invalid fragment is refused outright, never partly applied. Text with newlines, control characters or comment markers is refused when the fragment is built | Implemented and tested |
 | Replay (same fragment delivered twice) | Idempotent merge | Implemented and tested |
 | Stale session looking live | The pane already shows a `working`/`waiting` block untouched for 12 hours as stopped; reporters must not fake heartbeats | Format rule |

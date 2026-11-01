@@ -617,6 +617,8 @@ export const EN: Strings = {
   pasteNoProject: 'A new block needs a "## project" line first.',
   pasteNotYours: "That id belongs to a local reporter, a session with a resume binding, another agent, or an unclosed block; it can't be replaced.",
   pasteBadTime: 'Source time is missing or invalid. Ask the reporter for its current full report with a real UTC updated= time ending in Z, then paste again.',
+  remoteReportFuture: 'This report is dated in the future. Check the source clock and report again.',
+  remoteReportStale: 'This live report is more than three days old. Refresh it in the source agent and try again.',
   pasteFutureTime: 'The source clock is ahead of this board. Check both clocks and ask for a corrected current report; paste time will not replace source time.',
   pasteOldTime: (days: number): string => `This block's clock is ${days} days behind; nothing was written. Check both clocks and ask for a current report with the correct time before pasting again.`,
   pasteOlder: 'This report is older than the board copy. Keep the newer copy; ask the reporter for its current report.',

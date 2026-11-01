@@ -613,6 +613,8 @@ export const ZH_CN: Strings = {
   pasteNoProject: '新区块的第一行要写“## 项目名称”。',
   pasteNotYours: '这个 id 属于本地报告器、有续接信息的 session、另一个 agent，或没有结尾标记的区块，不能盖掉。',
   pasteBadTime: '来源时间缺少或无效。请报告者提供当前完整进度，updated= 使用真实 UTC 时间并以 Z 结尾，再粘贴一次。',
+  remoteReportFuture: '这份报告的时间在未来。请检查来源时钟，再重新上报。',
+  remoteReportStale: '这份进行中的报告已超过三天。请在来源代理更新报告后重试。',
   pasteFutureTime: '来源时钟比看板快。请检查两端时钟并取得修正后的当前进度；粘贴时间不会取代来源时间。',
   pasteOldTime: (days: number): string => `这个区块的时钟慢了 ${days} 天，未写入任何内容。请检查两端时钟，取得时间正确的当前进度后再粘贴。`,
   pasteOlder: '这份进度比看板上的旧。保留新版，请报告者提供当前进度。',

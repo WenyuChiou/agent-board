@@ -24,9 +24,10 @@ import os
 import stat
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from clock_strings import clock_message, language_of
 from validate import (  # noqa: E402
     PROJECT_RE,
     START_RE,
@@ -132,17 +133,28 @@ def updated_time(marker):
         return None
 
 
-def merge_text(board_text, fragments, under=None, with_outcomes=False):
-    """Return the board text with fragments merged. Pure function (testable).
+def merge_text(board_text, fragments, under=None, with_outcomes=False, now=None, lang="en"):
+    """Return the board text with fragments merged; now may fix the comparison clock.
 
     With with_outcomes, return (text, [(session, outcome), ...]). Raises
     ValueError for an invalid fragment, or for a new block with no project
     heading to go under.
     """
+    parsed = parse_fragments(fragments, under)
+    now = now if now is not None else datetime.now(timezone.utc)
+    for _, _, block in parsed:
+        stamp = updated_time(block[0])
+        state = parse_attrs(START_RE.match(block[0]).group(1)).get("state", "waiting")
+        # The reporter starts at UTC-second precision and uses milliseconds only to order a burst.
+        # A later UTC second is clock skew; tie-breakers within the current second are not.
+        if stamp is not None and stamp.replace(microsecond=0) > now.replace(microsecond=0):
+            raise ValueError(clock_message("remoteReportFuture", lang))
+        if stamp is not None and state in ("working", "waiting") and now - stamp > timedelta(days=3):
+            raise ValueError(clock_message("remoteReportStale", lang))
     lines, eol = split_lines(board_text)
     outcomes = []
     changed = False
-    for session, project, block in parse_fragments(fragments, under):
+    for session, project, block in parsed:
         existing = next((s for s in scan_blocks(lines) if s["session"] == session), None)
         if existing is not None:
             previous = lines[existing["start"]:existing["end"] + 1]
@@ -197,8 +209,9 @@ def atomic_write(path, text):
             os.unlink(tmp)
 
 
-def merge_file(board_path, fragment_paths, retries=3, under=None, with_outcomes=False):
+def merge_file(board_path, fragment_paths, retries=3, under=None, with_outcomes=False, lang=None):
     """Merge with read-back retry. Return attempts, or (attempts, outcomes)."""
+    lang = language_of(os.environ) if lang is None else lang
     fragments = [read_text(p) for p in fragment_paths]
     try:
         parsed = parse_fragments(fragments, under)
@@ -208,9 +221,12 @@ def merge_file(board_path, fragment_paths, retries=3, under=None, with_outcomes=
 
     last_err = None
     for attempt in range(1, retries + 1):
-        current = read_text(board_path)
         try:
-            new_text, outcomes = merge_text(current, fragments, under=under, with_outcomes=True)
+            current = read_text(board_path)
+        except FileNotFoundError:
+            current = ""
+        try:
+            new_text, outcomes = merge_text(current, fragments, under=under, with_outcomes=True, lang=lang)
         except ValueError as e:
             raise SystemExit(f"merge aborted: {e}")
         intended = extract_blocks(new_text)
@@ -248,10 +264,6 @@ def main():
         print(USAGE, file=sys.stderr)
         return 2
     board, frags = args[0], args[1:]
-    if not os.path.exists(board):
-        # FORMAT.md: a missing file reads as empty and the first writer creates it.
-        with open(board, "w", encoding="utf-8"):
-            pass
     attempts, outcomes = merge_file(board, frags, under=under, with_outcomes=True)
     for session, outcome in outcomes:
         print(f"session {session}: {outcome}")
