@@ -19,6 +19,7 @@ node scripts/setup-agent.mjs --apply
 
 读回定义，完成 host 的信任／启用。Codex 可在用户批准后执行限定信任，详见 [Codex](CODEX.md)。已打开的 session 可能需要重新加载。CLI、桌面 App、IDE 分别验收。
 
+
 ## 其他 agent
 
 共享安装器写入看板、skill 及已实现的原生 adapter，不需要 Claude Code 或另一个模型。[支持范围](SETUP.md#native-status-adapters)会区分已安装与待实现项目。
@@ -246,6 +247,8 @@ claude plugin marketplace remove agent-board
 第一行会断开其他 agent 的连接；先处理完列出的清理问题，再卸载插件。历史记录、汇报脚本和收件箱会留着。重试方式、已经卸载插件时的补救步骤，以及保留文件的位置，请看上面的[更新和卸载](#更新和卸载)。
 
 ## 问题排查
+
+截断的报告标记即使把工作标题藏进注释，仍会显示标记未写完的警告；隐藏的工作与原始内容不会因此改写。
 
 - **没卡片：** 检查路径、adapter、信任与重新加载；观察真正事件并读回确切 session 区块，不手动制造事件宣称通过。
 - **不能发送：** 确切原生 session 需要受支持的在线 adapter，hooks 本身不等于可收信，桌面与 CLI 结果不可互代。
