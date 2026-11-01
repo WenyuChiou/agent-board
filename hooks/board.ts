@@ -7,7 +7,7 @@ import { DARK, LIGHT } from './palette'
 import type { Tone } from './palette'
 import { sha256 } from './sha256'
 import { agentLabel } from './strings'
-import { relativeTime, replyHint } from './view'
+import { isSameName, relativeTime, replyHint } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
 
@@ -523,7 +523,7 @@ export const chatText = (
   const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
     const next = (row.steps.find(step => step.isCurrent && isNext(step)) ?? row.steps.find(isNext))?.text
-    const words = `${mark} ${named(row.project)} › ${row.title}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}${row.runs ? ` · ${row.runs}` : ''}`
+    const words = `${mark} ${isSameName(row.project, row.title) ? named(row.project) : `${named(row.project)} › ${row.title}`}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}${row.runs ? ` · ${row.runs}` : ''}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
   if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) items.push(s.empty)
@@ -918,7 +918,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const badge = row.due ? `⚑ ${row.due.left}` : ''
       const reserve = badge === '' ? 0 : cols(badge) + 2
       // Under In progress a row also names its project, which has no heading there.
-      const lead = [isWorking ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
+      const lead = [isWorking && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
       // The step it is on, in the accent colour, where its status only says that it works.
       const step = row.tone === 'quiet' || row.tone === 'accent' ? row.steps.find(one => one.isCurrent && (one.status === 'doing' || one.status === 'todo')) : undefined
       const status = cut(`${lead}${step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve)
