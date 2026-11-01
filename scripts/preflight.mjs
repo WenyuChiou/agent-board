@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -15,11 +15,34 @@ const read = path => readFileSync(path, 'utf8')
 const isTest = path => /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|ts|tsx)$/.test(path)
 const splitPaths = text => text.split('\0').filter(Boolean)
 
-export const accountTestLockPath = ({ platform = process.platform, temp = tmpdir(), account = userInfo() } = {}) => {
+export const accountTestLockPath = ({ platform = process.platform, account = userInfo() } = {}) => {
   const identity = platform === 'win32'
     ? createHash('sha256').update(String(account.homedir)).digest('hex')
     : String(account.uid)
-  return join(temp, `agent-board-preflight-tests-${identity}`)
+  // userInfo reads the account database, unlike HOME, USERPROFILE or the temp environment.
+  return join(account.homedir, `.agent-board-preflight-tests-${identity}`)
+}
+
+export const testLockDirectoryProblem = (stat, { platform = process.platform, uid = userInfo().uid } = {}) => {
+  if (stat.isSymbolicLink()) return 'test lock directory is a symbolic link.'
+  if (!stat.isDirectory()) return 'test lock directory is not a directory.'
+  if (platform !== 'win32') {
+    if (stat.uid !== uid) return 'test lock directory belongs to another account.'
+    if (stat.mode & 0o022) return 'test lock directory is writable by group or others.'
+  }
+  return null
+}
+
+const prepareTestLockDirectory = directory => {
+  try { mkdirSync(directory, { mode: 0o700 }) } catch (error) {
+    if (error?.code !== 'EEXIST') throw new Error('test lock directory could not be created; check account directory access.')
+  }
+  let stat
+  try { stat = lstatSync(directory) } catch {
+    throw new Error('test lock directory could not be inspected; check account directory access.')
+  }
+  const problem = testLockDirectoryProblem(stat)
+  if (problem) throw new Error(problem)
 }
 
 const isLiveProcess = pid => {
@@ -41,20 +64,31 @@ const releaseTestLock = path => {
 }
 
 const acquireTestLock = (directory, onPublished) => {
-  mkdirSync(directory, { recursive: true })
+  prepareTestLockDirectory(directory)
   const marker = `${process.pid}-${randomUUID()}.lock`
   const path = join(directory, marker)
   let isPublished = false
   try {
-    const file = openSync(path, 'wx')
+    const file = openSync(path, 'wx', 0o600)
     isPublished = true
     closeSync(file)
     onPublished?.()
     let isBlocked = false
     for (const name of readdirSync(directory)) {
       if (name === marker) continue
-      const match = /^(\d+)-[^.]+\.lock$/.exec(name)
-      if (!match || isLiveProcess(Number(match[1]))) {
+      const match = /^([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.lock$/i.exec(name)
+      if (!match) continue
+      const pid = Number(match[1])
+      // Node's process.kill accepts signed 32-bit PIDs; larger values are not usable owner markers.
+      if (!Number.isInteger(pid) || pid > 2147483647) continue
+      let stat
+      try { stat = lstatSync(join(directory, name)) } catch (error) {
+        if (error?.code === 'ENOENT') continue
+        throw error
+      }
+      // Unfamiliar entries, including links and directories, never become stale markers.
+      if (!stat.isFile() || stat.size !== 0) continue
+      if (isLiveProcess(pid)) {
         isBlocked = true
         continue
       }
@@ -308,7 +342,11 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   await check('touched Node tests', () => {
     const paths = [...changed].filter(path => isTest(path) && path.endsWith('.mjs') && existsSync(join(cwd, path)))
     if (!paths.length) add('PASS', 'no touched Node test files need running.')
-    const owner = paths.length ? acquireTestLock(lockPath, onLockPublished) : null
+    let owner = null
+    try { owner = paths.length ? acquireTestLock(lockPath, onLockPublished) : null } catch (error) {
+      add('FAIL', error.message?.startsWith('test lock directory ') ? error.message : 'test lock directory could not be used; check account directory access.')
+      return
+    }
     if (paths.length && !owner) add('FAIL', 'another preflight test run is already active on this computer; finish it before running preflight again.')
     if (owner) {
       try {
@@ -450,10 +488,11 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   return checks
 }
 
-export const main = async (argv = process.argv.slice(2)) => {
+// Module callers can isolate synthetic CLI fixtures without a command-line lock override.
+export const main = async (argv = process.argv.slice(2), { lockPath, onLockPublished } = {}) => {
   let checks
   const print = item => console.log(`${item.state} ${item.message}`)
-  try { checks = await runPreflight({ ...parseArgs(argv), onCheck: print, onProgress: console.log }) } catch (error) {
+  try { checks = await runPreflight({ ...parseArgs(argv), lockPath, onLockPublished, onCheck: print, onProgress: console.log }) } catch (error) {
     checks = [{ state: 'FAIL', message: safeLine(error.message) }]
     print(checks[0])
   }
