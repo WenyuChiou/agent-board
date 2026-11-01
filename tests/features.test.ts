@@ -734,6 +734,31 @@ test('a note that holds a choice does not replace the options in the question', 
   expect(askOf('用 win rate 還是 Elo？', '之後用 A 還是 B？')).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
 })
 
+test('a choice wrapped in quote marks gives options without the quotes in every language', () => {
+  const choices = [
+    ['Top shelf or bottom shelf?', ['Top shelf', 'bottom shelf']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['先开旗标，还是全部开？', ['先开旗标', '全部开']],
+    ['A first, or B?', ['A first', 'B']],
+  ] as const
+  for (const [open, close] of [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]) {
+    for (const [question, options] of choices) {
+      expect(askOf(`${open}${question}${close}`, '').options).toEqual([...options])
+      expect(askOf('Pick', `${open}${question}${close}`).options).toEqual([...options])
+    }
+  }
+  expect(askOf(' (「Top shelf or bottom shelf?」) ', '').options).toEqual(['Top shelf', 'bottom shelf'])
+  expect(askOf('“the "red" shelf or the blue shelf?”', '').options).toEqual(['the "red" shelf', 'the blue shelf'])
+  expect(askOf("'Alice's shelf or Bob's shelf?'", '').options).toEqual(["Alice's shelf", "Bob's shelf"])
+  expect(askOf('Pick', '', { ask: 'choose', options: ['"quoted"', '(literal)'] }).options).toEqual(['"quoted"', '(literal)'])
+  expect(askOf('"red" shelf or "blue shelf?"', '').options).toEqual(['"red" shelf', '"blue shelf'])
+  expect(askOf('「先開旗標」還是「全部開？」', '').options).toEqual(['「先開旗標」', '「全部開'])
+  expect(askOf('(Top shelf) or (bottom shelf?)', '').options).toEqual(['(Top shelf)', '(bottom shelf'])
+  expect(askOf('(Top (high) shelf or bottom?)', '').options).toEqual(['Top (high) shelf', 'bottom'])
+  expect(askOf(String.raw`"a \"red\" shelf or blue?"`, '').options).toEqual([String.raw`a \"red\" shelf`, 'blue'])
+  expect(askOf('Please review "the shelf"', '').options).toEqual([])
+})
+
 test('options the agent gave win over options found in the question or the note', () => {
   expect(askOf('win rate or Elo?', 'A or B?', { options: [' X ', 'Y', '', null] })).toMatchObject({ kind: 'choose', options: ['X', 'Y'] })
   expect(askOf('win rate or Elo?', 'A or B?', { ask: 'choose', options: ['X'] }).options).toEqual(['X'])
