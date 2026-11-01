@@ -1,0 +1,2 @@
+- **Codex / Doctor** · Running `--codex-doctor --agent codex` without `--codex-bin` auto-discovers the installed Codex binary or inspects `config.toml` to surface missing or stale hook trust instead of reporting unknown (#601).
+  Tests: `discoverCodexBinary finds executable from PATH or Windows LOCALAPPDATA`, `inspectCodexConfigToml detects missing config.toml or missing trusted_hash without falsely confirming trust`, `--codex-doctor detects missing and stale trusted_hash without --codex-bin`, `--codex-doctor fails when explicit --codex-bin cannot be executed`.

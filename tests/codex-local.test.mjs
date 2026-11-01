@@ -59,17 +59,39 @@ test('native cleanup diagnostics allowlist unknown fields and missing markers', 
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
+const withoutCodexOnPath = pathValue => {
+  if (!pathValue) return ''
+  return pathValue
+    .split(delimiter)
+    .filter(dir => {
+      if (!dir) return false
+      try {
+        return !existsSync(join(dir, 'codex.exe')) && !existsSync(join(dir, 'codex')) && !existsSync(join(dir, 'codex.cmd'))
+      } catch {
+        return true
+      }
+    })
+    .join(delimiter)
+}
 // A runner may set XDG/host overrides. No synthetic home may inherit those and
 // write into another test or the account's actual native configuration.
-const isolatedEnv = home => ({
-  ...process.env, HOME: home, USERPROFILE: home,
-  LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
-  LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
-  CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
-  CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
-  XDG_CONFIG_HOME: join(home, '.config'), OPENCODE_CONFIG_DIR: join(home, '.config', 'opencode'),
-  OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
-})
+const isolatedEnv = home => {
+  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path')
+  const originalPath = pathKey !== undefined ? process.env[pathKey] ?? '' : ''
+  const cleanPath = withoutCodexOnPath(originalPath)
+  return {
+    ...process.env,
+    ...(pathKey !== undefined ? { [pathKey]: cleanPath } : {}),
+    PATH: cleanPath,
+    HOME: home, USERPROFILE: home,
+    LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
+    LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
+    CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
+    CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
+    XDG_CONFIG_HOME: join(home, '.config'), OPENCODE_CONFIG_DIR: join(home, '.config', 'opencode'),
+    OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
+  }
+}
 // A synchronous timeout kills cmd alone on Windows, leaving PowerShell/Node writing into
 // the fixture during cleanup. Wait for closed stdio and terminate only this owned tree.
 const stopNativeTree = child => {
@@ -913,7 +935,7 @@ test('Codex-only setup initializes the board and skill without Claude and is ide
   assert.deepEqual(JSON.parse(again.stdout).changes, [])
   const doctor = f.command(['--codex-doctor', '--home', f.home])
   assert.equal(JSON.parse(doctor.stdout).ready, true, doctor.stdout)
-  assert.equal(JSON.parse(doctor.stdout).hooksTrusted, 'unknown')
+  assert.equal(JSON.parse(doctor.stdout).hooksTrusted, false)
 }))
 
 test('on Windows the generated Codex hook command runs through PowerShell and through cmd, with spaces in the worker and progress paths', { skip: process.platform !== 'win32' && 'Windows shells only' }, () => fixture(async f => {
@@ -2417,6 +2439,44 @@ test('the installed Codex host grants only six reviewed hashes and preserves unr
   const doctor = f.command(['--codex-doctor', '--codex-bin', executable])
   assert.equal(JSON.parse(doctor.stdout).hooksTrusted, true, doctor.stderr)
   assert.equal(JSON.parse(doctor.stdout).connected, 'unverified')
+
+  // Auto-discovery without --codex-bin finds the binary on PATH and confirms matching trust
+  const binDir = dirname(executable)
+  const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  const withBinOnPath = { [pathKey]: [binDir, f.env[pathKey]].filter(Boolean).join(delimiter) }
+  const discovered = f.command(['--codex-doctor'], undefined, withBinOnPath)
+  assert.equal(JSON.parse(discovered.stdout).hooksTrusted, true, discovered.stderr)
+
+  // Auto-discovery detects stale trusted_hash when config.toml hash no longer matches
+  f.save(config, readFileSync(config, 'utf8').replace(/trusted_hash = "[^"]+"/, 'trusted_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"'))
+  const stale = f.command(['--codex-doctor'], undefined, withBinOnPath)
+  assert.equal(JSON.parse(stale.stdout).hooksTrusted, false, stale.stderr)
+  f.save(config, saved)
+}))
+
+test('--codex-doctor detects missing and stale trusted_hash without --codex-bin', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  // 1. Missing config.toml: doctor reports hooksTrusted: false
+  const initial = f.command(['--codex-doctor'])
+  assert.equal(initial.status, 0, initial.stderr)
+  assert.equal(JSON.parse(initial.stdout).hooksTrusted, false)
+
+  // 2. config.toml without trusted_hash: doctor reports hooksTrusted: false
+  const config = join(f.home, '.codex', 'config.toml')
+  f.save(config, '# Keep this comment\n[features]\nhooks = true\n')
+  const partial = f.command(['--codex-doctor'])
+  assert.equal(JSON.parse(partial.stdout).hooksTrusted, false)
+
+  // 3. config.toml with trusted_hash: unverified without Codex execution, reports 'unknown'
+  f.save(config, '[hooks.state."session_start"]\ntrusted_hash = "sha256:1"\n')
+  const unverified = f.command(['--codex-doctor'])
+  assert.equal(JSON.parse(unverified.stdout).hooksTrusted, 'unknown')
+}))
+
+test('--codex-doctor fails when explicit --codex-bin cannot be executed', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const result = f.command(['--codex-doctor', '--codex-bin', join(f.home, 'nonexistent-codex.exe')])
+  assert.notEqual(result.status, 0)
 }))
 
 test('Codex-only setup preserves unrelated hooks and refuses edited skill files', () => fixture(f => {
