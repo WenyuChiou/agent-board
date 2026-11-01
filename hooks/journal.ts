@@ -31,16 +31,30 @@ export const archivePath = (progressPath: string, now: number): string => `${pro
 export const pendingArchivePath = (progressPath: string): string =>
   `${progressPath.replace(/\.md$/i, '')}-archive.pending`
 
-export const parsePendingArchive = (text: string): string[] => {
+export type PendingArchiveRecord = { entry: string; held: number }
+
+export const parsePendingArchive = (text: string): PendingArchiveRecord[] => {
   if (text.trim() === '') return []
   try {
     const data: unknown = JSON.parse(text)
     const list = Array.isArray(data)
-      ? data.filter((item): item is string => typeof item === 'string')
+      ? data
       : data !== null && typeof data === 'object' && 'entries' in data && Array.isArray((data as { entries: unknown }).entries)
-        ? (data as { entries: unknown[] }).entries.filter((item): item is string => typeof item === 'string')
+        ? (data as { entries: unknown[] }).entries
         : []
-    return list.map(item => item.replace(/\r\n/g, '\n').replace(/\n+$/, ''))
+    const norm = (s: string): string => s.replace(/\r\n/g, '\n').replace(/\n+$/, '')
+    const result: PendingArchiveRecord[] = []
+    for (const item of list) {
+      if (typeof item === 'string') {
+        result.push({ entry: norm(item), held: NaN })
+      } else if (item !== null && typeof item === 'object') {
+        const obj = item as Record<string, unknown>
+        const entry = typeof obj.entry === 'string' ? obj.entry : typeof obj.text === 'string' ? obj.text : undefined
+        const held = typeof obj.held === 'number' && Number.isFinite(obj.held) ? obj.held : NaN
+        if (entry !== undefined) result.push({ entry: norm(entry), held })
+      }
+    }
+    return result
   } catch {
     return []
   }
@@ -64,6 +78,9 @@ export const archiveEntryCount = (past: string, entry: string): number => {
   ).length
 }
 
+export const entryArchiveCount = (pasts: readonly string[], entry: string, written: ReadonlyMap<string, number> = new Map()): number =>
+  pasts.reduce((sum, past) => sum + archiveEntryCount(past, entry), 0) - (written.get(entry) ?? 0)
+
 // The entries an earlier try of this run has not archived yet (`written` counts what it did),
 // counted with their number, so the second of two same-text entries is still new.
 export const unwrittenEntries = (entries: readonly string[], written: ReadonlyMap<string, number>): string[] => {
@@ -83,7 +100,7 @@ export const missingEntries = (
   pasts: readonly string[],
   entries: readonly string[],
   written: ReadonlyMap<string, number> = new Map(),
-  pending?: readonly string[],
+  pending?: readonly (PendingArchiveRecord | string)[],
 ): string[] => {
   const norm = (s: string): string => s.replace(/\r\n/g, '\n').replace(/\n+$/, '')
   if (pending === undefined) {
@@ -92,19 +109,22 @@ export const missingEntries = (
       const key = norm(entry)
       going.set(key, (going.get(key) ?? 0) + 1)
     }
-    const isHeld = new Map([...going].map(([key, count]) => [key, pasts.reduce((sum, past) => sum + archiveEntryCount(past, key), 0) - (written.get(key) ?? 0) >= count]))
+    const isHeld = new Map([...going].map(([key, count]) => [key, entryArchiveCount(pasts, key, written) >= count]))
     return entries.filter(entry => isHeld.get(norm(entry)) !== true)
   }
-  const pendingCount = new Map<string, number>()
-  for (const entry of pending) {
-    const key = norm(entry)
-    pendingCount.set(key, (pendingCount.get(key) ?? 0) + 1)
+  const pendingByEntry = new Map<string, number[]>()
+  for (const item of pending) {
+    const entry = typeof item === 'string' ? norm(item) : norm(item.entry)
+    const held = typeof item === 'string' ? NaN : item.held
+    const list = pendingByEntry.get(entry) ?? []
+    list.push(held)
+    pendingByEntry.set(entry, list)
   }
   const inPastCount = new Map<string, number>()
   for (const entry of entries) {
     const key = norm(entry)
     if (!inPastCount.has(key)) {
-      inPastCount.set(key, pasts.reduce((sum, past) => sum + archiveEntryCount(past, entry), 0) - (written.get(entry) ?? 0))
+      inPastCount.set(key, entryArchiveCount(pasts, key, written))
     }
   }
   const consumed = new Map<string, number>()
@@ -112,10 +132,12 @@ export const missingEntries = (
     const key = norm(entry)
     const needed = (consumed.get(key) ?? 0) + 1
     consumed.set(key, needed)
-    const inPending = pendingCount.get(key) ?? 0
-    const inPast = inPastCount.get(key) ?? 0
-    const isAlreadySaved = needed <= inPending && needed <= inPast
-    return !isAlreadySaved
+    const heldList = pendingByEntry.get(key)
+    if (!heldList || heldList.length < needed) return true
+    const held = heldList[needed - 1]!
+    if (!Number.isFinite(held)) return true
+    const nowHeld = inPastCount.get(key) ?? 0
+    return !(nowHeld >= held + needed)
   })
 }
 

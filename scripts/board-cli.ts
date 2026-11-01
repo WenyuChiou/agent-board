@@ -28,7 +28,7 @@ import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, c
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
-import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, missingEntries, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
+import { appendJournal, archivePath, countDay, entryArchiveCount, journalLine, journalPath, localDay, missingEntries, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
@@ -727,8 +727,13 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
         // A previous process may have saved the archive but failed to remove the task.
         const missing = missingEntries([past, before], fresh, archived, pending)
         if (missing.length === 0) return past
-        try { writeFileSync(pendingFile, JSON.stringify({ entries: fresh }) + '\n') } catch {}
-        pending = fresh
+        const noteEntries = missing.map(entry => ({ entry, held: entryArchiveCount([past, before], entry, archived) }))
+        try {
+          writeFileSync(pendingFile, JSON.stringify({ version: 1, entries: noteEntries }) + '\n')
+        } catch (error) {
+          throw fileError(part, error)
+        }
+        pending = noteEntries
         return `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${missing.join('\n\n')}\n`
       })
       if (kept === null) return null
@@ -738,7 +743,11 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
   })
 
   if (wrote !== null && existsSync(pendingFile)) {
-    try { unlinkSync(pendingFile) } catch {}
+    try {
+      unlinkSync(pendingFile)
+    } catch (error) {
+      process.stderr.write(`Failed to remove pending note ${pendingFile}: ${error instanceof Error ? error.message : String(error)}\n`)
+    }
   }
 
   return wrote === null ? null : [...archived.values()].reduce((sum, one) => sum + one, 0)

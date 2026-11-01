@@ -47,6 +47,7 @@ import {
   previousMonth,
   progressReport,
   missingEntries,
+  entryArchiveCount,
   parsePendingArchive,
   pendingArchivePath,
   unwrittenEntries,
@@ -3006,8 +3007,14 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
-    const isWin = await isWindows($, path)
-    await removeFiles($, [pendingArchivePath(path)], isWin)
+    const pendingFile = pendingArchivePath(path)
+    if (await $.fs.exists(pendingFile)) {
+      const isWin = await isWindows($, path)
+      const removed = await removeFiles($, [pendingFile], isWin)
+      if (!removed) {
+        process.stderr.write?.(`Failed to remove pending note ${pendingFile}\n`)
+      }
+    }
     // Another session's stale write can put the blocks back and the next try remove them again:
     // an entry counts the most copies one write removed, not the sum over the tries.
     const going = new Map<string, number>()
@@ -3058,7 +3065,8 @@ const appendArchive = async ($: EngineInterface, progressFile: string, month: st
   const past = await readText($, archive)
   const missing = missingEntries([past], entries, written, pending)
   if (missing.length === 0) return
-  await $.fs.write(pendingFile, JSON.stringify({ entries }) + '\n').catch(() => undefined)
+  const noteEntries = missing.map(entry => ({ entry, held: entryArchiveCount([past], entry, written) }))
+  await $.fs.write(pendingFile, JSON.stringify({ version: 1, entries: noteEntries }) + '\n')
   const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
   await $.fs.write(archive, head + missing.join('\n\n') + '\n')
 }
@@ -3089,8 +3097,14 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
     await appendArchive($, path, archivePath(path, at), fresh, s)
     for (const entry of pendingEntries) archived.add(entry)
     await $.fs.write(path, text)
-    const isWin = await isWindows($, path)
-    await removeFiles($, [pendingArchivePath(path)], isWin)
+    const pendingFile = pendingArchivePath(path)
+    if (await $.fs.exists(pendingFile)) {
+      const isWin = await isWindows($, path)
+      const removed = await removeFiles($, [pendingFile], isWin)
+      if (!removed) {
+        process.stderr.write?.(`Failed to remove pending note ${pendingFile}\n`)
+      }
+    }
   })
   if (wrote === null) return false
   if (ref.session === null) {

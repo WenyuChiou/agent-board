@@ -4562,11 +4562,16 @@ test('a pending archive note distinguishes crash-recovery retries from distinct 
   expect(pendingArchivePath('/work/progress.md')).toBe('/work/progress-archive.pending')
   expect(parsePendingArchive('')).toEqual([])
   expect(parsePendingArchive('broken')).toEqual([])
-  expect(parsePendingArchive(JSON.stringify({ entries: [entry] }))).toEqual([entry])
-  expect(parsePendingArchive(JSON.stringify([entry]))).toEqual([entry])
+  expect(parsePendingArchive(JSON.stringify({ entries: [entry] }))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify([entry]))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1 }])
 
-  // When pending holds the entry and archive holds it: crash recovery skips re-adding.
-  expect(missingEntries([archive], [entry], new Map(), [entry])).toEqual([])
+  // When pending recorded held = 0 and archive now holds 1: crash recovery skips re-adding.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0 }])).toEqual([])
+  // When pending recorded held = 1 and archive holds only 1: archive write failed, so missing.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 1 }])).toEqual([entry])
+  // When pending has a legacy note without held: treated as not saved so twins are never dropped.
+  expect(missingEntries([archive], [entry], new Map(), [entry])).toEqual([entry])
   // When pending does not hold the entry: a same-day twin is added even if archive already has one.
   expect(missingEntries([archive], [entry], new Map(), [])).toEqual([entry])
 })
