@@ -1073,7 +1073,7 @@ test('/progress tidy when note write fails: nothing is archived and board is unc
 })
 
 test('archiveOne when archive write fails after note is written: task stays on board, and next archive archives it once', async ($, on) => {
-  const task = '### Manual task\n- [x] Done\n'
+  const task = '### Manual task\n- [x] Done step\n- [ ] Open step\n'
   const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
   const world: World = {
     files: new Map([[FILE, `# Progress\n\n## Synthetic\n${task}`]]),
