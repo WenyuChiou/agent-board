@@ -134,7 +134,7 @@ node ~/.agent-board/agent-board.mjs --codex-remove
 node ~/.agent-board/agent-board.mjs --codex-remove --apply
 ```
 
-Doctor checks generated file hashes and hook definitions, reporting hook trust as unknown.
+Doctor checks generated file hashes and hook definitions, querying Codex trust when a binary is supplied or discovered on PATH/LOCALAPPDATA, or inspecting config.toml when Codex is not available.
 Reinstall repairs missing generated files; edited files or hooks require review. Removal
 takes only unchanged owned files and exact owned hook groups. It preserves progress,
 session records, archives, journals and foreign hooks. Close a test board with its Close

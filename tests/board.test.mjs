@@ -2800,7 +2800,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       const response = (async () => {
         if (target.startsWith('/api/board')) {
           if (!getBoard) return { ok: true, json: async () => ({ model: viewed(currentModel ? currentModel() : model), now: 1, messaging, ...currentBoard?.() }) }
-          const answer = await getBoard()
+          const answer = await getBoard(options)
           return { ...answer, json: async () => { const data = await answer.json(); return data.model ? { ...data, model: viewed(data.model) } : data } }
         }
         requests.push({ path: target, body: JSON.parse(options.body) })
@@ -6356,6 +6356,173 @@ test('a persistent page keeps question metadata work flat as immutable companion
   } finally {
     await board.end(urls)
   }
+})
+
+// What a 200 that should have been a 304 changed, so a failure names the field.
+const changedFields = async (response, before) => {
+  if (response.status === 304) return ''
+  const after = await response.json().catch(() => null)
+  const found = []
+  const walk = (a, b, path) => {
+    if (found.length >= 6) return
+    if (a && b && typeof a === 'object' && typeof b === 'object') {
+      for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) walk(a[key], b[key], `${path}.${key}`)
+    } else if (JSON.stringify(a) !== JSON.stringify(b)) found.push(`${path}: ${String(JSON.stringify(a)).slice(0, 80)} -> ${String(JSON.stringify(b)).slice(0, 80)}`)
+  }
+  walk(before, after, '')
+  return `status ${response.status}; changed ${found.join('; ') || 'nothing in the JSON'}`
+}
+
+const conditionalPollBoard = async () => {
+  const board = serveIn()
+  const urls = []
+  try {
+    const seed = chatRun(['--keys', ''], { file: askingBoard, inspect: sweepFiles })
+    assert.equal(seed.status, 0, seed.stderr)
+    writeFileSync(board.path, seed.board)
+    for (const [name, text] of Object.entries(seed.files)) writeFileSync(join(board.dir, name), text)
+    const probe = join(board.dir, 'poll-reads.json')
+    const clock = join(board.dir, 'poll-clock.txt')
+    // The seed and the starting command run on the real clock and date the ledger's first records.
+    // A server clock before them shows those asks without a time until it passes them, a change no
+    // poll made, so the server's minute starts after the real one.
+    const now = (Math.floor(Date.now() / 60000) + 1) * 60000 + 10000
+    writeFileSync(clock, String(now))
+    const preload = join(board.dir, 'poll-reads.cjs')
+    writeFileSync(preload, questionFault(`if (process.argv.includes('--serve-child')) {
+  const read = fs.readFileSync
+  let reads = 0
+  Date.now = () => Number(read(${JSON.stringify(clock)}, 'utf8'))
+  fs.readFileSync = (file, ...args) => { if (String(file) === ledger) reads += 1; return read(file, ...args) }
+  const http = require('node:http')
+  const emit = http.Server.prototype.emit
+  http.Server.prototype.emit = function (event, ...args) {
+    if (event === 'request') {
+      const response = args[1]
+      const end = response.end
+      response.end = function (...values) {
+        fs.writeFileSync(${JSON.stringify(probe)}, String(reads))
+        return end.apply(this, values)
+      }
+    }
+    return emit.call(this, event, ...args)
+  }
+}`))
+    board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+    // Exercise the installed CLI and its background child from outside the checkout.
+    const output = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open'], { cwd: board.dir, env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out, err) => error ? fail(new Error(`${error.message}\n${out}\n${err}`)) : done(out)))
+    const url = board.urlOf(output)
+    assert.ok(url)
+    urls.push(url)
+    const headers = { 'x-board-token': new URL(url).searchParams.get('t') }
+    const poll = (etag, extra = {}) => fetch(new URL('/api/board', url), { headers: { ...headers, ...(etag ? { 'if-none-match': etag } : {}), ...extra } })
+    return { ...board, url, clock, now, poll, reads: () => Number(readFileSync(probe, 'utf8')), end: () => board.end(urls) }
+  } catch (error) {
+    await board.end(urls)
+    throw error
+  }
+}
+
+test('unchanged page polls return 304 with an ETag and no body', { timeout: 30_000 }, async () => {
+  const board = await conditionalPollBoard()
+  try {
+    const first = await board.poll()
+    assert.equal(first.status, 200)
+    const before = await first.json()
+    assert.ok(before.model.view)
+    const etag = first.headers.get('etag')
+    assert.match(etag, /^W\/"[a-f0-9]{64}"$/)
+    writeFileSync(board.clock, String(board.now + 3000))
+    const same = await board.poll(`"another-board", ${etag.slice(2)}`)
+    assert.equal(same.status, 304, await changedFields(same, before))
+    assert.equal(same.headers.get('etag'), etag)
+    assert.equal(await same.text(), '')
+    const refused = await board.poll(etag, { 'x-board-token': 'wrong' })
+    assert.equal(refused.status, 403)
+    assert.equal(refused.headers.get('etag'), null)
+    writeFileSync(board.clock, String(board.now + 60000))
+    const minute = await board.poll(etag)
+    assert.equal(minute.status, 200, 'the page clock must still refresh each minute')
+    assert.notEqual(minute.headers.get('etag'), etag)
+    await minute.arrayBuffer()
+  } finally { await board.end() }
+})
+
+test('a changed page poll sends the full board once and then returns 304 again', { timeout: 30_000 }, async () => {
+  const board = await conditionalPollBoard()
+  try {
+    const first = await board.poll()
+    const etag = first.headers.get('etag')
+    await first.arrayBuffer()
+    writeFileSync(board.path, readFileSync(board.path, 'utf8') + '\n### Synthetic newly added task\n- [ ] Inspect cache\n')
+    const changed = await board.poll(etag)
+    assert.equal(changed.status, 200)
+    const text = await changed.text()
+    assert.ok(JSON.parse(text).model.view, 'the response must contain exactly one complete JSON board')
+    assert.ok(text.includes('Synthetic newly added task'))
+    const next = changed.headers.get('etag')
+    assert.notEqual(next, etag)
+    const same = await board.poll(next)
+    assert.equal(same.status, 304)
+    assert.equal(await same.text(), '')
+  } finally { await board.end() }
+})
+
+test('each unchanged page poll reads the question ledger once', { timeout: 30_000 }, async () => {
+  const board = await conditionalPollBoard()
+  try {
+    const first = await board.poll()
+    await first.arrayBuffer()
+    const etag = first.headers.get('etag')
+    for (const validator of [undefined, etag, etag]) {
+      const before = board.reads()
+      const response = await board.poll(validator)
+      assert.equal(response.status, validator ? 304 : 200)
+      await response.arrayBuffer()
+      assert.equal(board.reads() - before, 1, 'an unchanged ledger must be read just once, including on a 304')
+    }
+  } finally { await board.end() }
+})
+
+test('the page sends its ETag and keeps its current view on a 304', { timeout: 30_000 }, async () => {
+  const html = await sourcePage()
+  const model = cardsModel()
+  const etag = `W/"${'a'.repeat(64)}"`
+  const validators = []
+  let jsonReads = 0
+  const dom = await pageDom(html, model, { getBoard: async options => {
+    validators.push(options.headers['if-none-match'])
+    if (validators.length > 1) return { ok: false, status: 304, json: async () => { throw new Error('a 304 body must never be read') } }
+    return { ok: true, status: 200, headers: { get: name => name === 'etag' ? etag : null }, json: async () => { jsonReads += 1; return { model, now: 1 } } }
+  } })
+  await dom.settle()
+  const current = dom.node('board').firstChild
+  await dom.redraw(model)
+  await dom.settle()
+  assert.deepEqual(validators, [undefined, etag])
+  assert.equal(jsonReads, 1)
+  assert.equal(dom.node('board').firstChild, current, 'a 304 must preserve the rendered nodes')
+  assert.equal(dom.node('offline').textContent, '')
+})
+
+test('the page requests a full board when reconnecting after a failed poll', async () => {
+  const html = await sourcePage()
+  const model = cardsModel()
+  const etag = `W/"${'b'.repeat(64)}"`
+  const validators = []
+  const dom = await pageDom(html, model, { getBoard: async options => {
+    validators.push(options.headers['if-none-match'])
+    if (validators.length === 2) throw new Error('synthetic offline server')
+    return { ok: true, status: 200, headers: { get: () => etag }, json: async () => ({ model, now: 1 }) }
+  } })
+  await dom.settle()
+  await dom.redraw(model)
+  await dom.settle()
+  assert.ok(dom.node('offline').textContent)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.deepEqual(validators, [undefined, etag, undefined])
+  assert.equal(dom.node('offline').textContent, '')
 })
 
 test('unchanged page polls reuse canonical question evidence without reparsing the ledger', { timeout: 30_000 }, async t => {

@@ -400,6 +400,96 @@ test('preflight names a failing touched Node test and its failure count', async 
   assert.equal(JSON.stringify(checks).includes('private diagnostic'), false)
 })
 
+test('a failed touched Node check includes its redacted failing test name', async t => {
+  const f = fixture(t)
+  const names = [
+    String.raw`reads C:\Users\Synthetic Person\private.txt with ?t=syntheticBoardToken ghp_syntheticToken`,
+    String.raw`reads D:\Work Files\plan.txt now`,
+    'issue #123 has a hash',
+  ]
+  f.write('tests/failing-name.test.mjs', "import test from 'node:test'\n" + names.map(name => `test(${JSON.stringify(name)}, () => { throw new Error('private diagnostic') })`).join('\n') + '\n')
+  f.write('tests/failing-unix-name.test.mjs', "import test from 'node:test'\ntest('reads /tmp/synthetic/Private Projects/repository/secret-plan.txt now', () => { throw new Error('private diagnostic') })\n")
+  const fileUrls = [
+    'reads file:///tmp/synthetic/Private Projects/repository/secret-plan.txt unix',
+    'loads file:///C:/Users/Synthetic Person/Private Projects/plan.txt windows',
+    'copies file://synthetic-host/share/Private Projects/secret-plan.txt network',
+  ]
+  f.write('tests/failing-file-url-name.test.mjs', "import test from 'node:test'\n" + fileUrls.map(name => `test(${JSON.stringify(name)}, () => { throw new Error('private diagnostic') })`).join('\n') + '\n')
+  const urlBoundaries = [
+    'reads url=file:///home/Synthetic/private.txt assigned',
+    'reads [file:///home/Synthetic/private.txt] bracketed',
+  ]
+  f.write('tests/failing-url-boundary.test.mjs', "import test from 'node:test'\n" + urlBoundaries.map(name => `test(${JSON.stringify(name)}, () => { throw new Error('private diagnostic') })`).join('\n') + '\n')
+  const checks = await f.check()
+  const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-name.test.mjs:'))
+  assert.match(failed?.message ?? '', /failed: reads <path> with \?t=<token> <token>/)
+  assert.match(failed?.message ?? '', /; reads <path> now; issue #123 has a hash\.$/)
+  assert.doesNotMatch(failed?.message ?? '', /Synthetic|Person|Files|syntheticBoardToken|syntheticToken|private diagnostic/)
+  const unix = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-unix-name.test.mjs:'))
+  assert.match(unix?.message ?? '', /failed: reads <path> now\.$/)
+  assert.doesNotMatch(unix?.message ?? '', /Private|Projects|repository|secret-plan/)
+  const urls = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-file-url-name.test.mjs:'))
+  assert.match(urls?.message ?? '', /failed: reads <path> unix; loads (?:<path>)+ windows; copies <path> network\.$/)
+  assert.doesNotMatch(urls?.message ?? '', /file:|fil<path>|Synthetic|Person|Private|Projects|repository|secret-plan|synthetic-host|share/)
+  const punctuation = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/failing-url-boundary.test.mjs:'))
+  assert.match(punctuation?.message ?? '', /failed: reads url=<path> assigned; reads \[<path>\]? bracketed\.$/)
+  assert.doesNotMatch(punctuation?.message ?? '', /\/home|Synthetic|private\.txt|file:/)
+})
+
+test('nested touched Node TAP failures keep a bounded useful case name', async t => {
+  const f = fixture(t)
+  f.write('tests/nested-failures.test.mjs', '')
+  const names = [
+    'the first nested case fails ' + 'x'.repeat(200),
+    'the second nested case fails',
+    'the third nested case fails',
+    'the fourth nested case is outside the bound',
+  ]
+  const nested = names.map((name, index) => `    not ok ${index + 1} - ${name}`).join('\n')
+  const run = (program, args, options) => args.includes('--test')
+    ? {
+        status: 1,
+        stdout: `TAP version 13\n# Subtest: a parent case\n    not ok 1 - a planned nested case # TODO later\n    not ok 2 - a skipped nested case # SKIP unavailable\n    ---\n    error: |-\n      assertion context\n      ...\n      not ok 99 - private diagnostic is not a case name\n    ...\n${nested}\nnot ok 1 - a parent case\n# tests 7\n# fail 5\n`,
+        stderr: '',
+      }
+    : f.run(program, args, options)
+  const checks = await f.check({ run })
+  const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/nested-failures.test.mjs:'))
+  const listed = (failed?.message.split('; failed: ')[1] ?? '').replace(/\.$/, '').split('; ')
+  assert.deepEqual(listed, names.slice(0, 3).map(name => name.slice(0, 160)))
+  assert.doesNotMatch(failed?.message ?? '', /planned nested|skipped nested|private diagnostic|fourth nested|parent case/)
+})
+
+test('missing or interrupted TAP remains a failed touched Node check', async t => {
+  const f = fixture(t)
+  f.write('tests/missing-tap.test.mjs', '')
+  const missingRun = (program, args, options) => args.includes('--test')
+    ? { status: 1, stdout: 'not TAP output', stderr: '' }
+    : f.run(program, args, options)
+  const missing = await f.check({ run: missingRun })
+  assert.ok(has(missing, 'FAIL', 'tests/missing-tap.test.mjs: unknown tests, unknown failed'))
+  const noCounterRun = (program, args, options) => args.includes('--test')
+    ? { status: 0, stdout: 'TAP version 13\nok 1 - incomplete counters\n# tests 1\n', stderr: '' }
+    : f.run(program, args, options)
+  const noCounter = await f.check({ run: noCounterRun })
+  assert.ok(has(noCounter, 'FAIL', 'tests/missing-tap.test.mjs: 1 tests, unknown failed'))
+  const interruptedRun = (program, args, options) => args.includes('--test')
+    ? { status: null, signal: 'SIGTERM', error: new Error('synthetic interruption'), stdout: '', stderr: '' }
+    : f.run(program, args, options)
+  const interrupted = await f.check({ run: interruptedRun })
+  assert.ok(has(interrupted, 'FAIL', safeLine('tests/missing-tap.test.mjs: unknown tests, unknown failed; the runner did not finish')), JSON.stringify(interrupted))
+})
+
+test('passing touched Node output keeps its existing message and outcome', async t => {
+  const f = fixture(t)
+  f.write('tests/passing-output.test.mjs', '')
+  const run = (program, args, options) => args.includes('--test')
+    ? { status: 0, stdout: 'TAP version 13\nok 1 - a passing case\nnot ok 2 - a planned case # TODO later\n# tests 2\n# fail 0\n', stderr: '' }
+    : f.run(program, args, options)
+  const checks = await f.check({ run })
+  assert.ok(checks.some(item => item.state === 'PASS' && item.message === 'tests/passing-output.test.mjs: 2 tests, 0 failed.'))
+})
+
 test('preflight detects committed staged and untracked tests while skipping untouched slow suites', async t => {
   const f = fixture(t)
   for (const path of ['board', 'exchange', 'messaging']) f.write(`tests/${path}.test.mjs`, 'throw new Error("must not run")\n')

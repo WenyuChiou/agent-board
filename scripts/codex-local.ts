@@ -17,7 +17,7 @@ import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCo
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
 import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
-import { trustCodex } from './codex-host'
+import { discoverCodexBinary, inspectCodexConfigToml, trustCodex } from './codex-host'
 import { withLocalLock } from './local-lock'
 import { installControlRoot, withInstallLock } from './install-control'
 import { boardPromptHelper, boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
@@ -870,7 +870,27 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (mode === '--codex-doctor') {
     const installed = conflicts.length === 0 && changes.length === 0 && readLocal(manifestFile) !== null
-    const host = installed && agent === 'codex' && flag('--codex-bin') ? await trustCodex(flag('--codex-bin')!, config, manifest.groups, false) : null
+    const configToml = join(dirname(configs.codex!), 'config.toml')
+    const explicitBin = flag('--codex-bin')
+    const executable = installed && agent === 'codex' ? (explicitBin ?? discoverCodexBinary()) : undefined
+    let host: { hooks: { trust: string }[] } | null = null
+    if (executable) {
+      if (explicitBin) {
+        host = await trustCodex(executable, config, manifest.groups, false)
+      } else {
+        try {
+          host = await trustCodex(executable, config, manifest.groups, false)
+        } catch {
+          host = null
+        }
+      }
+    }
+    let hooksTrusted: boolean | 'unknown' = 'unknown'
+    if (host) {
+      hooksTrusted = host.hooks.every(hook => hook.trust === 'trusted')
+    } else if (installed && agent === 'codex') {
+      hooksTrusted = inspectCodexConfigToml(configToml)
+    }
     // /progress connect may have hooked the host instead, or left only its skill (#285).
     const connected = agentHooks({
       home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32', script: '', inbox: '',
@@ -890,7 +910,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connected.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
     const reportHook = installed ? 'installer' : hasConnectHook ? 'connect' : 'none'
     const isSkillOnly = reportHook === 'none' && skills.some(file => readLocal(file) !== null)
-    output({ ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted: host ? host.hooks.every(hook => hook.trust === 'trusted') : 'unknown', reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor })
+    output({ ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor })
     return true
   }
   if (!args.includes('--apply')) { output(plan); return true }

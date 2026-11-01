@@ -4,11 +4,11 @@ import childProcess from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { syncBuiltinESMExports } from 'node:module'
 import { PassThrough, Writable } from 'node:stream'
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
-import { findCodexExecutable, inspectCodexHooks } from '../scripts/codex-host.ts'
+import { discoverCodexBinary, findCodexExecutable, inspectCodexConfigToml, inspectCodexHooks } from '../scripts/codex-host.ts'
 
 const identities = ['stop', 'sessionEnd', 'userPromptSubmit'].map(event => ({event, command:`report-${event}`}))
 const npmShim = target => `@ECHO off
@@ -114,6 +114,61 @@ test('native Codex discovery preserves executable permission checks outside Wind
     chmodSync(file, 0o700)
     assert.equal(findCodexExecutable('relative:' + f.prefix, 'linux', 'x64'), realpathSync(file))
   })
+})
+
+test('discoverCodexBinary finds executable from PATH or Windows LOCALAPPDATA', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-bin-disc-'))
+  try {
+    const binDir = join(dir, 'bin')
+    mkdirSync(binDir, { recursive: true })
+    const binFile = join(binDir, process.platform === 'win32' ? 'codex.exe' : 'codex')
+    writeFileSync(binFile, '')
+    if (process.platform !== 'win32') chmodSync(binFile, 0o755)
+
+    // 1. From PATH
+    assert.equal(discoverCodexBinary({ PATH: binDir }), realpathSync(binFile))
+
+    // 2. On Windows from LOCALAPPDATA, picking the newest version directory by mtime
+    if (process.platform === 'win32') {
+      const local = join(dir, 'localappdata')
+      const vOld = join(local, 'OpenAI', 'Codex', 'bin', 'v1')
+      const vNew = join(local, 'OpenAI', 'Codex', 'bin', 'v2')
+      mkdirSync(vOld, { recursive: true })
+      mkdirSync(vNew, { recursive: true })
+      const exeOld = join(vOld, 'codex.exe')
+      const exeNew = join(vNew, 'codex.exe')
+      writeFileSync(exeOld, '')
+      writeFileSync(exeNew, '')
+      utimesSync(exeOld, new Date(1000), new Date(1000))
+      utimesSync(exeNew, new Date(5000), new Date(5000))
+      assert.equal(discoverCodexBinary({ LOCALAPPDATA: local }), realpathSync(exeNew))
+    }
+
+    // 3. Undefined when not found
+    assert.equal(discoverCodexBinary({ PATH: join(dir, 'nonexistent') }), undefined)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('inspectCodexConfigToml detects missing config.toml or missing trusted_hash without falsely confirming trust', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-toml-disc-'))
+  try {
+    const configToml = join(dir, 'config.toml')
+
+    // Missing config.toml returns false
+    assert.equal(inspectCodexConfigToml(configToml), false)
+
+    // Empty config.toml returns false
+    writeFileSync(configToml, '# Keep this comment\n[features]\nhooks = true\n')
+    assert.equal(inspectCodexConfigToml(configToml), false)
+
+    // config.toml with trusted_hash cannot be confirmed without Codex; returns 'unknown'
+    writeFileSync(configToml, '[hooks.state."session_start"]\ntrusted_hash = "sha256:1"\n')
+    assert.equal(inspectCodexConfigToml(configToml), 'unknown')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 const stubChild = receive => {
   const child = new EventEmitter()

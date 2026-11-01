@@ -106,18 +106,48 @@ const acquireTestLock = (directory, onPublished) => {
 }
 
 // Child diagnostics can contain private paths or terminal control characters.
-export const safeLine = value => {
+export const safeLine = (value, { hasSpacedUnixPaths = false } = {}) => {
   let text = String(value).replace(/[\r\n\u0085\u2028\u2029]+/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '')
+  // A file URL must reach the path rules before its e:/ can look like a drive.
+  if (hasSpacedUnixPaths) text = text.replace(/\bfile:\/\/[^/\s]*(?=\/)/gi, '')
   // Home directory names can contain spaces even in unquoted diagnostics.
+  // TAP names need conservative path removal; status lines keep adjacent relative paths.
+  const unixPath = hasSpacedUnixPaths
+    ? /(^|[^\w])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g
+    : /(^|[\s"'`(])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g
   text = text.replace(/(?:[A-Za-z]:[\\/]Users[\\/]|\/(?:home|Users)\/)[^\\/"'`<>]+(?=[\\/])/gi, match => match.replaceAll(' ', '\ue000'))
   text = text.replace(/(?:[A-Za-z]:[\\/]|\\\\)(?:[^\s\\/"'`<>:|?]+(?: [^\s\\/"'`<>:|?]+)*[\\/])*(?:[^\s\\/"'`<>:|?]+(?: [^\s\\/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g, '<path>')
-    .replace(/(^|[\s"'`(])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g, '$1<path>')
+    .replace(unixPath, '$1<path>')
     .replace(/([?&]t=)[^\s&#"'`<>]+/gi, '$1<token>')
     .replace(/\b(?:ghp_|github_pat_|sk-)[A-Za-z0-9_-]+/gi, '<token>')
   for (const name of [process.env.USERNAME, process.env.USER].filter(value => value && value.length > 2)) {
     text = text.replace(new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '<user>')
   }
   return text
+}
+
+const failedTapNames = output => {
+  const names = []
+  let diagnosticIndent
+  for (const line of output.split(/\r?\n/)) {
+    const opening = /^(\s*)---\s*$/.exec(line)
+    if (diagnosticIndent === undefined && opening) {
+      diagnosticIndent = opening[1]
+      continue
+    }
+    if (diagnosticIndent !== undefined) {
+      const closing = /^(\s*)\.\.\.\s*$/.exec(line)
+      if (closing?.[1] === diagnosticIndent) diagnosticIndent = undefined
+      continue
+    }
+    const match = /^\s*not ok \d+ - (.+?)\s*$/.exec(line)
+    if (!match || /\s+#\s*(?:TODO|SKIP)\b/i.test(match[1])) continue
+    // TAP escapes paths and hashes; decode before the path sanitizer sees them.
+    const name = safeLine(match[1].replace(/\\(.)/g, '$1'), { hasSpacedUnixPaths: true }).slice(0, 160)
+    if (name && !names.includes(name)) names.push(name)
+    if (names.length === 3) break
+  }
+  return names
 }
 
 // Keep literals as tokens so braces and helper names inside prose cannot become code.
@@ -364,7 +394,9 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
             const count = output.match(/^# fail (\d+)\s*$/m)?.[1]
             const total = output.match(/^# tests (\d+)\s*$/m)?.[1]
             const isPassed = !tested.error && tested.status === 0 && count === '0'
-            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
+            const failedNames = isPassed ? [] : failedTapNames(output)
+            const failedDetail = failedNames.length ? `; failed: ${failedNames.join('; ')}` : ''
+            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
           } finally {
             rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
           }

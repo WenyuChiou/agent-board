@@ -405,19 +405,23 @@ const readBoardView = (source: string, now: number) => {
   lastSeen = seen
   let answered = parseAnswered(read(answeredPath(path))) ?? []
   const file = questionsPath(path)
-  const record = readQuestions(file)
+  const isWritingQuestions = progressHealthCache.isSnapshot && isQuestionWriter
   let proofs = readQuestionProofs()
+  // Writers read inside rewrite, which also checks every retry against the latest ledger.
+  // Reading it here as well doubles the file work on every unchanged page poll.
+  const record = isWritingQuestions && proofs !== null ? null : readQuestions(file)
   const previewProofs = proofs
   if (record !== null) lastQuestions = record
   const frozen = progressHealthCache.frozen
   let questions: QuestionLedger | null = null
   // Chat and a one-shot read never write. Interactive readers persist before accepting hides.
-  if (record !== null && proofs !== null && progressHealthCache.isSnapshot && isQuestionWriter) {
+  if (proofs !== null && isWritingQuestions) {
     const incarnation = `${questionWriter}:${questionWrite++}`
     const wrote = rewrite(file, before => {
-      if (read(path) !== source) return null
       const current = readQuestions(file, before)
       if (current === null) return null
+      lastQuestions = current
+      if (read(path) !== source) return null
       let next = observeWriterQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs ?? undefined, turns, [], frozen).ledger
       let nextText = compactQuestionsJson(next)
       const captures = readQuestionCaptures()
