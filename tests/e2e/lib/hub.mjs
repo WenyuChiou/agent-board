@@ -170,15 +170,15 @@ export const NATIVE_RECEIVERS = {
 export const SENDERS = ['page', 'codex', 'antigravity']
 export const RECEIVERS = ['claude', 'codex', 'antigravity', 'hermes', 'grok', 'opencode', 'openclaw', 'gemini', 'cursor', 'muse', 'deepseek']
 export const GAPS = {
-  claude: 58,
+  claude: 235,
   hermes: 233,
-  grok: 'hold:grok-receiver',
-  opencode: 'hold:opencode-receiver',
-  openclaw: 'hold:openclaw-receiver',
-  gemini: 'hold:gemini-receiver',
-  cursor: 'hold:cursor-receiver',
-  muse: 'hold:muse-receiver',
-  deepseek: 'hold:deepseek-receiver',
+  grok: 235,
+  opencode: 235,
+  openclaw: 235,
+  gemini: 235,
+  cursor: 235,
+  muse: 235,
+  deepseek: 235,
 }
 // A receiver either has a native row or names the gap its fallback stands for, never both or neither.
 for (const name of RECEIVERS) assert.ok((name in NATIVE_RECEIVERS) !== (name in GAPS), `${name} must be in exactly one of NATIVE_RECEIVERS and GAPS`)
