@@ -2,6 +2,8 @@
 
 This page is for a person or an agent working on Agent Board from another computer, with `git`, `gh` (logged in to GitHub) and Node 22.18+ or 24. It gives the commands for [CONTRIBUTING.md, Pull requests](../CONTRIBUTING.md#pull-requests); where the two disagree, CONTRIBUTING.md wins. Every command runs as written in bash on Linux and in Git Bash on Windows. On macOS, the `date` in step 2 is the one command known to differ; it falls back to macOS's own form (`-v`). macOS has not been tried. Nothing here needs Claude Code, files on the maintainer's computer or a chat: everything happens in the repository, its issues and its pull requests.
 
+The rules behind these steps fit on one page: [RULES.md](dev/RULES.md). Read it first.
+
 Below, `<agent>` is your name in lower case: your agent's name (`codex`, `dot`, `muse`, `cursor`), or your GitHub login if you work by hand. An agent working for someone outside the team adds that person's GitHub login in brackets (`claude (octocat)`). An agent that a coordinating session sent adds that session's lane in brackets (`codex (phase1)`). `<N>` is the issue (each issue, when your pull request names several), `<PR>` your pull request and `<branch>` your branch, named `<type>/<short-slug>` (`fix/question-ledger-write`).
 
 ## How a pull request moves
@@ -247,6 +249,6 @@ gh issue comment <N> -R WenyuChiou/agent-board --body "Fixed by #<PR>, merged as
 
 Don't sit and watch CI. Once you approve, start the wait in the background (`gh pr checks <PR> -R WenyuChiou/agent-board --watch`, then the merge above when every check passes) and take the next pull request in the queue.
 
-A pull request that changes the board page's messages, the setup output or the one-line row summaries also needs `Acceptance: PASS <full head sha>` from a collaborator or the owner who did not write it, after walking the steps in #572 on their own machine.
+A pull request that changes the board page's messages, the setup output or the one-line row summaries also runs the journeys it touches in [USER-SIM.md](validation/USER-SIM.md) on its head, with an AI playing the new user, and puts the PASS, FRICTION or FAIL rows under Checks.
 
 GitHub deletes a merged branch from this repository. A governance pull request also needs the owner's approval quoted in its body (rule 12), and a release pull request stays with the maintainer ([Releases](../CONTRIBUTING.md#releases)).
