@@ -6481,7 +6481,7 @@ export const LINES = [
 "      windowsVerbatimArguments: true,",
 "      encoding: \"utf8\",",
 "      windowsHide: true,",
-"      timeout: 5000,",
+"      timeout: 1500,",
 "      maxBuffer: 4096",
 "    });",
 "    if (result.error || result.status !== 0)",

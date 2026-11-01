@@ -14,10 +14,9 @@ export const windowsHookNode = (executable: string, earlier: string[] = []): str
     if (isSameFile(executable, kept)) return kept
   }
   try {
-    // Setup alone runs this probe, so it may wait longer than a hook could.
     const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/v:off', '/s', '/c', 'for %I in ("%AGENT_BOARD_NODE_EXECUTABLE%") do @echo %~sI'], {
       env: { ...process.env, AGENT_BOARD_NODE_EXECUTABLE: executable }, windowsVerbatimArguments: true,
-      encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096,
+      encoding: 'utf8', windowsHide: true, timeout: 1500, maxBuffer: 4096,
     })
     if (result.error || result.status !== 0) return undefined
     const candidate = result.stdout.trim()
