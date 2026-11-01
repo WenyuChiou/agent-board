@@ -689,5 +689,7 @@ export const EN: Strings = {
   pgTipNeeds: (n: number): string => `${n} need you`,
   pgTipNeedsOne: '1 needs you',
   pgTipWorking: 'working',
+  pgTipOpen: (n: number): string => `${n} open`,
+  pgTipOpenOne: '1 open',
   pgTipCantRead: "its progress file can't be read",
 }

@@ -669,7 +669,7 @@ const PAGE_WORDS = [
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 // The chat prompt goes as it is in every language: the chat reads it, not the person.
@@ -1643,7 +1643,8 @@ const PAGE_SCRIPT = String.raw`
     var map = {};
     pg.ids.forEach(function (id) {
       var group = view.agents.filter(function (one) { return one.agent === id; })[0];
-      var isOpen = view.working.some(function (ref) { return agentOf(ref) === id; }) || !!group && group.last > 0 && view.now - group.last <= 30 * 60 * 1000;
+      var hasActive = view.working.some(function (ref) { return agentOf(ref) === id; }) || (!!group && (group.counts.open > 0 || group.counts.needs > 0));
+      var isOpen = hasActive && !!group && group.last > 0 && view.now - group.last <= 30 * 60 * 1000;
       var isGone = false;
       Object.keys(pg.sources).forEach(function (key) {
         var one = pg.sources[key];
@@ -1663,6 +1664,10 @@ const PAGE_SCRIPT = String.raw`
     if (entry.needs === 1) parts.push(w('pgTipNeedsOne'));
     else if (entry.needs > 1) parts.push(w('pgTipNeeds', entry.needs));
     if (entry.working > 0) parts.push(w('pgTipWorking'));
+    if (entry.id === 'own' && entry.open > 0) {
+      if (entry.open === 1) parts.push(w('pgTipOpenOne'));
+      else parts.push(w('pgTipOpen', entry.open));
+    }
     if (entry.unreadable) parts.push(w('pgTipCantRead'));
     var late = lateWord(entry.presence);
     return entry.name + (late ? ' · ' + late : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
@@ -1697,7 +1702,7 @@ const PAGE_SCRIPT = String.raw`
     // A sent answer no longer waits for the person, so it leaves the count on its agent's badge.
     var waiting = function (count, id) { return Math.max(0, count - (pg.sentBy[id] || 0)); };
     // Your to-dos come first, before every agent; the agents follow in their usual order.
-    if (Object.keys(view.own.counts).some(function (key) { return view.own.counts[key] > 0; })) entries.push({ id: 'own', name: w('pgOwn'), agent: '', needs: waiting(view.own.counts.needs, 'own'), working: 0, unreadable: false });
+    if (Object.keys(view.own.counts).some(function (key) { return view.own.counts[key] > 0; })) entries.push({ id: 'own', name: w('pgOwn'), agent: '', needs: waiting(view.own.counts.needs, 'own'), open: view.own.counts.open, working: 0, unreadable: false });
     pg.ids.forEach(function (id) {
       var group = view.agents.filter(function (one) { return one.agent === id; })[0];
       if (!group) return;

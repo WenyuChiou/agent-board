@@ -1,0 +1,2 @@
+- **Page / Follow-ups** · An agent whose sessions all ended in the last 30 minutes shows as offline instead of open. The your-own-tasks chip shows open to-do counts instead of "No work yet" when hand-kept tasks have open steps. Progress HTML no longer counts non-question inbox turns in Needs you (#616).
+  Tests: `an agent whose only session ended in the last 30 minutes shows as offline`, `the own tasks chip label shows open task counts instead of empty when to-dos are open`, `the HTML board does not count pending turns that are not questions in Needs you`.
