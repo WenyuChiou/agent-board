@@ -1,9 +1,9 @@
 {
   "note": "Who review-queue.mjs suggests as reviewer, by the agent in a pull request's Author line. A suggestion only: CONTRIBUTING rule 8 and docs/dev/team-process.md decide whose verdict counts.",
   "rules": [
-    { "authors": ["claude", "codex"], "reviewers": ["superd6", "wenyu"] },
-    { "authors": ["superd6"], "reviewers": ["claude", "wenyu"] },
-    { "authors": ["*"], "reviewers": ["claude", "superd6", "wenyu"] }
+    { "authors": ["claude", "codex"], "reviewers": ["superd6", "owner"] },
+    { "authors": ["superd6"], "reviewers": ["claude", "owner"] },
+    { "authors": ["*"], "reviewers": ["claude", "superd6", "owner"] }
   ],
   "maxOpenReviews": 2
 }
