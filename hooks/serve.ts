@@ -3,7 +3,7 @@ import { answersOf, boardItems, fingerprint, olderKey, remainingInbox } from './
 import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { groupBoard } from './grouping'
-import type { Bucket, Card, GroupedQuestion, GroupedTask, RepoOf } from './grouping'
+import type { Bucket, Card, GroupedQuestion, GroupedTask, Quiet, RepoOf } from './grouping'
 import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead, themeToggle } from './page-look'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -207,6 +207,7 @@ type PageView = {
   agents: Array<PageBucket & { agent: string; name: string; icon: string; last: number; isUnreadable: boolean }>
   needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[] }
   working: PageRef[]
+  quiet: Quiet
   all: PageBucket & { isHidden: boolean }
   own: PageBucket
   projects: Array<{ name: string; open: number }>
@@ -490,6 +491,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     agents: grouped.agents.map(one => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),
     needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref) },
     working: grouped.working.map(ref),
+    quiet: grouped.quiet,
     all: { ...bucket(grouped.all), isHidden: grouped.all.isHidden },
     own: bucket(grouped.own),
     projects: grouped.projects,
@@ -663,7 +665,7 @@ const PAGE_WORDS = [
   'serveClosed', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
-  'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgNothing', 'pgNothingHint',
+  'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
@@ -1353,6 +1355,17 @@ const PAGE_SCRIPT = String.raw`
     var id = agentOf(ref);
     return agentMark(id === 'own' ? '' : id === '?' ? '?' : ref.agent);
   }
+  // isSameName in view.ts: a row whose title is its project's name names it once (#612).
+  function sameName(project, title) {
+    var key = function (name) { return String(name || '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase(); };
+    return key(project) !== '' && key(project) === key(title);
+  }
+  // An agent that waits on the person, or stopped a moment ago, is not "nothing" (#612).
+  function quietLine(quiet, now) {
+    if (quiet && quiet.kind === 'asking') return w('pgQuietAsking', quiet.n);
+    if (quiet && quiet.kind === 'stopped') return w('pgQuietStopped', agentName(quiet.agent), Math.max(1, Math.round((now - quiet.at) / 60000)));
+    return w('pgNoWorking');
+  }
   function nameOf(id) { return id === 'own' ? w('pgOwn') : agentName(id); }
   // The project a card or a row belongs to, as the page names it.
   function projectOf(ref) { return clean(ref.repo || source(ref).project || ''); }
@@ -1593,9 +1606,10 @@ const PAGE_SCRIPT = String.raw`
     var step = current ? clean(current.text) : '';
     var detail = !step ? '' : section === 'working' ? step : section === 'others' ? w('pgLast', step) : section === 'stopped' ? w('pgStoppedAt', step) : '';
     var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
-    var project = showProject ? clean(ref.repo || row.project) : '';
-    var meta = add(el('span', 'r-meta'), status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
     var title = clean(fullTitle(ref));
+    var project = showProject ? clean(ref.repo || row.project) : '';
+    if (sameName(project, title)) project = '';
+    var meta = add(el('span', 'r-meta'), status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
     var titleNode = el('span', 'r-title', title);
     titleNode.setAttribute('title', title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
@@ -1790,6 +1804,7 @@ const PAGE_SCRIPT = String.raw`
     setText(pg.nodes.needsText, pg.filter ? w('pgNoQuestions', nameOf(pg.filter)) : w('pgNothing'));
     setText(pg.nodes.needsSub, pg.filter ? '' : w('pgNothingHint'));
     reveal(pg.nodes.needsEmpty, count.shown === 0);
+    if (pg.model && pg.model.view) setText(pg.nodes.workingEmpty, quietLine(pg.model.view.quiet, pg.model.view.now));
     reveal(pg.nodes.workingEmpty, count.working === 0 && !pg.filter && !pg.project);
     // The line counts every older question the filters allow, drawn or not.
     if (pg.olderRefs) count.older = pg.olderRefs.filter(function (ref) { return matches(agentOf(ref), projectOf(ref)); }).length;

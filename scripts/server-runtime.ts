@@ -29,3 +29,16 @@ export const serverMemoryArgs = (execArgv: readonly string[], nodeOptions = ''):
   }
   return chosen.length > 0 || inheritedHeap.test(nodeOptions.replaceAll('_', '-')) ? chosen : ['--optimize-for-size']
 }
+
+// glibc gives each thread that allocates its own malloc arena and keeps freed pages in it, so on
+// Linux a page grew about 50 MB outside the JS heap in a 30-minute soak; two arenas kept it flat
+// (#266). The account's own setting wins. The page drops the setting once it has started, so the
+// programs it starts get the account's environment.
+const ARENA_MARK = 'AGENT_BOARD_MALLOC_ARENA'
+export const serverMemoryEnv = (env: NodeJS.ProcessEnv, platform: string = process.platform): NodeJS.ProcessEnv =>
+  platform === 'linux' && env.MALLOC_ARENA_MAX === undefined ? { ...env, MALLOC_ARENA_MAX: '2', [ARENA_MARK]: '1' } : env
+export const dropServerMemoryEnv = (env: NodeJS.ProcessEnv): void => {
+  if (env[ARENA_MARK] !== '1') return
+  delete env.MALLOC_ARENA_MAX
+  delete env[ARENA_MARK]
+}
