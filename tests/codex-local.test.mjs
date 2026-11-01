@@ -76,13 +76,11 @@ const withoutCodexOnPath = pathValue => {
 // A runner may set XDG/host overrides. No synthetic home may inherit those and
 // write into another test or the account's actual native configuration.
 const isolatedEnv = home => {
-  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path')
-  const originalPath = pathKey !== undefined ? process.env[pathKey] ?? '' : ''
+  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  const originalPath = process.env[pathKey] ?? ''
   const cleanPath = withoutCodexOnPath(originalPath)
-  return {
+  const env = {
     ...process.env,
-    ...(pathKey !== undefined ? { [pathKey]: cleanPath } : {}),
-    PATH: cleanPath,
     HOME: home, USERPROFILE: home,
     LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
     LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
@@ -91,6 +89,11 @@ const isolatedEnv = home => {
     XDG_CONFIG_HOME: join(home, '.config'), OPENCODE_CONFIG_DIR: join(home, '.config', 'opencode'),
     OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
   }
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === 'path') delete env[key]
+  }
+  env[pathKey] = cleanPath
+  return env
 }
 // A synchronous timeout kills cmd alone on Windows, leaving PowerShell/Node writing into
 // the fixture during cleanup. Wait for closed stdio and terminate only this owned tree.
@@ -2439,22 +2442,68 @@ test('the installed Codex host grants only six reviewed hashes and preserves unr
   const doctor = f.command(['--codex-doctor', '--codex-bin', executable])
   assert.equal(JSON.parse(doctor.stdout).hooksTrusted, true, doctor.stderr)
   assert.equal(JSON.parse(doctor.stdout).connected, 'unverified')
-
-  // Auto-discovery without --codex-bin finds the binary on PATH and confirms matching trust
-  const binDir = dirname(executable)
-  const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
-  const withBinOnPath = { [pathKey]: [binDir, f.env[pathKey]].filter(Boolean).join(delimiter) }
-  const discovered = f.command(['--codex-doctor'], undefined, withBinOnPath)
-  assert.equal(JSON.parse(discovered.stdout).hooksTrusted, true, discovered.stderr)
-
-  // Auto-discovery detects stale trusted_hash when config.toml hash no longer matches
-  f.save(config, readFileSync(config, 'utf8').replace(/trusted_hash = "[^"]+"/, 'trusted_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"'))
-  const stale = f.command(['--codex-doctor'], undefined, withBinOnPath)
-  assert.equal(JSON.parse(stale.stdout).hooksTrusted, false, stale.stderr)
-  f.save(config, saved)
 }))
 
-test('--codex-doctor detects missing and stale trusted_hash without --codex-bin', () => fixture(f => {
+test('--codex-doctor auto-discovers Codex on PATH and verifies hook trust', { skip: process.platform === 'win32' && 'Windows discovery requires native .exe' }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const config = join(f.home, '.codex', 'config.toml')
+  const binDir = join(f.home, 'bin')
+  mkdirSync(binDir, { recursive: true })
+  const mockCodex = join(binDir, 'codex')
+
+  const hooksManifest = JSON.parse(readFileSync(join(f.home, '.codex', 'hooks.json'), 'utf8'))
+  const expectedHooks = Object.entries(hooksManifest.groups).map(([event, group]) => ({
+    event: event[0].toLowerCase() + event.slice(1),
+    command: group.hooks[0].command,
+  }))
+
+  const stateFile = join(f.home, 'mock-codex-state.json')
+  writeFileSync(stateFile, JSON.stringify({ trusted: true }))
+
+  const mockServerScript = `#!/usr/bin/env node
+const fs = require('fs');
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', line => {
+  try {
+    const msg = JSON.parse(line);
+    if (msg.method === 'initialize') {
+      process.stdout.write(JSON.stringify({ id: msg.id, result: { capabilities: {} } }) + '\\n');
+    } else if (msg.method === 'hooks/list') {
+      const state = JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}, 'utf8'));
+      const expected = ${JSON.stringify(expectedHooks)};
+      const hooks = expected.map((item, i) => ({
+        sourcePath: ${JSON.stringify(config)},
+        eventName: item.event,
+        command: item.command,
+        key: 'hook-' + i,
+        enabled: true,
+        currentHash: 'sha256:' + 'a'.repeat(64),
+        trustStatus: state.trusted ? 'trusted' : 'untrusted'
+      }));
+      process.stdout.write(JSON.stringify({ id: msg.id, result: { data: [{ hooks, errors: [] }] } }) + '\\n');
+    }
+  } catch {}
+});
+`
+  writeFileSync(mockCodex, mockServerScript, { mode: 0o755 })
+
+  const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  const withBinOnPath = { [pathKey]: [binDir, f.env[pathKey]].filter(Boolean).join(delimiter) }
+
+  // Auto-discovery finds mock codex on PATH and verifies matching trust
+  const discovered = f.command(['--codex-doctor'], undefined, withBinOnPath)
+  assert.equal(discovered.status, 0, discovered.stderr)
+  assert.equal(JSON.parse(discovered.stdout).hooksTrusted, true, discovered.stderr)
+
+  // Untrusted hooks report hooksTrusted: false
+  writeFileSync(stateFile, JSON.stringify({ trusted: false }))
+  const untrusted = f.command(['--codex-doctor'], undefined, withBinOnPath)
+  assert.equal(untrusted.status, 0, untrusted.stderr)
+  assert.equal(JSON.parse(untrusted.stdout).hooksTrusted, false, untrusted.stderr)
+}))
+
+test('--codex-doctor detects missing trusted_hash and unverified hash without --codex-bin', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   // 1. Missing config.toml: doctor reports hooksTrusted: false
   const initial = f.command(['--codex-doctor'])

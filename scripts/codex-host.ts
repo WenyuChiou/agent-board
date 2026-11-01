@@ -85,7 +85,9 @@ export const findCodexExecutable = (pathValue: string, platform: string, arch: s
 // Auto-discovers the installed Codex binary: checks PATH, and on Windows
 // %LOCALAPPDATA%\OpenAI\Codex\bin (picking the newest version subdirectory by mtime).
 export const discoverCodexBinary = (env: Record<string, string | undefined> = process.env, platform = process.platform, arch = process.arch): string | undefined => {
-  const fromPath = findCodexExecutable(env.PATH ?? '', platform, arch)
+  const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path')
+  const pathValue = (pathKey ? env[pathKey] : undefined) ?? env.PATH ?? env.Path ?? ''
+  const fromPath = findCodexExecutable(pathValue, platform, arch)
   if (fromPath) return fromPath
   if (platform === 'win32' && env.LOCALAPPDATA) {
     const base = join(env.LOCALAPPDATA, 'OpenAI', 'Codex', 'bin')
