@@ -90,9 +90,10 @@ def now_iso(previous=None):
     if previous:
         try:
             last = datetime.fromisoformat(previous.replace("Z", "+00:00"))
-            # Rapid updates and a clock moving backwards must still follow the previous fragment.
+            # Millisecond tie-breakers order rapid updates without adding whole seconds of clock skew.
+            # A real clock rollback still follows the prior report; the importer checks its clock.
             if last.tzinfo is not None:
-                stamp = max(stamp, last + timedelta(seconds=1))
+                stamp = max(stamp, last + timedelta(milliseconds=1))
         except (ValueError, OverflowError):
             # A previous time that is not a date, or the last one a date can hold, cannot be followed.
             pass

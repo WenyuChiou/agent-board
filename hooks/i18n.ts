@@ -657,6 +657,8 @@ export const ZH_TW = {
   pasteNoProject: '新區塊的第一行要寫「## 專案名稱」。',
   pasteNotYours: '這個 id 屬於本機回報器、有續接資訊的 session、另一個 agent，或沒有結尾標記的區塊，不能蓋掉。',
   pasteBadTime: '來源時間缺少或無效。請回報者提供目前完整進度，updated= 使用真實 UTC 時間並以 Z 結尾，再貼一次。',
+  remoteReportFuture: '這份報告的時間在未來。請檢查來源時鐘，再重新上報。',
+  remoteReportStale: '這份進行中的報告已超過三天。請在來源代理程式更新報告後再試。',
   pasteFutureTime: '來源時鐘比看板快。請檢查兩端時鐘並取得修正後的目前進度；貼上時間不會取代來源時間。',
   pasteOldTime: (days: number): string => `這個區塊的時鐘慢了 ${days} 天，未寫入任何內容。請檢查兩端時鐘，取得時間正確的目前進度後再貼上。`,
   pasteOlder: '這份進度比看板上的舊。保留新版，請回報者提供目前進度。',

@@ -46,15 +46,14 @@ class MergeClock(datetime):
 def py(name, *args, env=None):
     if name not in ("merge.py", "reporter.py"):
         return run([sys.executable, "-B", script(name), *args], env=env)
-    # Keep historical fixtures deterministic; reporter bursts have room to advance their clock.
-    day, hour = (19, 12) if name == "reporter.py" else (20, 0)
+    # Both programs share one deterministic clock; reporter bursts get no artificial head start.
     launch = f"""import runpy, sys
 from datetime import datetime, timezone
 from unittest.mock import patch
 class Clock(datetime):
     @classmethod
     def now(cls, tz=None):
-        return cls(2026, 10, {day}, {hour}, tzinfo=timezone.utc)
+        return cls(2026, 10, 20, 0, tzinfo=timezone.utc)
 sys.argv = sys.argv[1:]
 with patch('datetime.datetime', Clock):
     runpy.run_path(sys.argv[0], run_name='__main__')
@@ -624,8 +623,8 @@ def cut_off_block(clock):
 def reporter_order():
     steps = os.path.join(T, "steps1.txt")
     board = os.path.join(T, "reporter-order.md")
-    instant = datetime(2026, 10, 17, 12, tzinfo=timezone.utc)
-    with patch.dict(os.environ, ENV), patch.object(reporter_mod, "datetime", wraps=datetime) as clock:
+    instant = datetime(2026, 10, 17, 12, 0, 0, 500000, tzinfo=timezone.utc)
+    with patch.dict(os.environ, ENV), patch.object(reporter_mod, "datetime", wraps=datetime) as clock, patch.object(merge_mod, "datetime", clock):
         clock.now.return_value = instant
         reporter_mod.cmd_update("chat-order", "working", "First update", steps)
         frag = reporter_mod.fragment_path(reporter_mod.session_for("chat-order"))
@@ -638,22 +637,29 @@ def reporter_order():
         clock.now.return_value = instant.replace(second=10)
         reporter_mod.cmd_update("chat-order", "working", "Later update", steps)
         check("reporter updates within one second advance the timestamp and merge while later clock times are kept",
-              "updated=2026-10-17T12:00:01Z" in same_second and merged
+              "updated=2026-10-17T12:00:00.001000Z" in same_second and merged
               and "updated=2026-10-17T12:00:10Z" in r(frag))
 
         clock.now.return_value = instant
         reporter_mod.cmd_update("chat-order", "waiting", "Clock moved back", steps)
         check("a reporter update advances beyond the previous timestamp when the clock moves backwards",
-              "updated=2026-10-17T12:00:11Z" in r(frag))
-        merge_mod.merge_file(board, [frag])
+              "updated=2026-10-17T12:00:10.001000Z" in r(frag))
+        before_skew = r(board)
+        try:
+            merge_mod.merge_file(board, [frag])
+            check("a genuine clock rollback is refused without changing the board", False)
+        except SystemExit as error:
+            check("a genuine clock rollback is refused without changing the board",
+                  "dated in the future" in str(error) and r(board) == before_skew, str(error))
+        clock.now.return_value = instant.replace(second=10)
         reporter_mod.cmd_retire("chat-order")
         merge_mod.merge_file(board, [frag])
         check("retiring a session advances its timestamp so the ended block reaches the board",
-              "updated=2026-10-17T12:00:12Z" in r(frag) and "state=ended" in r(board)
+              "updated=2026-10-17T12:00:10.002000Z" in r(frag) and "state=ended" in r(board)
               and validate_mod.extract_blocks(r(board)) == validate_mod.extract_blocks(r(frag)))
 
         check("a reporter update after the last representable timestamp uses the clock instead of failing",
-              reporter_mod.now_iso("9999-12-31T23:59:59Z") == "2026-10-17T12:00:00Z")
+              reporter_mod.now_iso("9999-12-31T23:59:59.999999Z") == "2026-10-17T12:00:10Z")
 
         reporter_mod.cmd_update("chat-bytes", "working", "Before the bad bytes", steps)
         bad = reporter_mod.fragment_path(reporter_mod.session_for("chat-bytes"))
@@ -661,7 +667,7 @@ def reporter_order():
             f.write(b"\xff\xfe not utf-8")
         reporter_mod.cmd_update("chat-bytes", "waiting", "After the bad bytes", steps)
         check("a reporter update overwrites a previous fragment that is not valid UTF-8",
-              "After the bad bytes" in r(bad) and "updated=2026-10-17T12:00:00Z" in r(bad))
+              "After the bad bytes" in r(bad) and "updated=2026-10-17T12:00:10Z" in r(bad))
 
 
 @patch.object(merge_mod, "datetime", MergeClock)
@@ -674,6 +680,10 @@ def main():
         ENV["BOARD_AGENT_NAME"] = "muse"
         ENV["BOARD_PROJECT"] = "remote-demo"
         ENV["PYTHONDONTWRITEBYTECODE"] = "1"
+        ENV["LANG"] = "en_US.UTF-8"
+        ENV["LC_ALL"] = ""
+        ENV["LC_MESSAGES"] = ""
+        ENV["PYTHONIOENCODING"] = "utf-8"
         setup()
         pipeline()
         placement()
