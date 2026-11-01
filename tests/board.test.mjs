@@ -6358,6 +6358,21 @@ test('a persistent page keeps question metadata work flat as immutable companion
   }
 })
 
+// What a 200 that should have been a 304 changed, so a failure names the field.
+const changedFields = async (response, before) => {
+  if (response.status === 304) return ''
+  const after = await response.json().catch(() => null)
+  const found = []
+  const walk = (a, b, path) => {
+    if (found.length >= 6) return
+    if (a && b && typeof a === 'object' && typeof b === 'object') {
+      for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) walk(a[key], b[key], `${path}.${key}`)
+    } else if (JSON.stringify(a) !== JSON.stringify(b)) found.push(`${path}: ${String(JSON.stringify(a)).slice(0, 80)} -> ${String(JSON.stringify(b)).slice(0, 80)}`)
+  }
+  walk(before, after, '')
+  return `status ${response.status}; changed ${found.join('; ') || 'nothing in the JSON'}`
+}
+
 const conditionalPollBoard = async () => {
   const board = serveIn()
   const urls = []
@@ -6408,14 +6423,19 @@ const conditionalPollBoard = async () => {
 test('unchanged page polls return 304 with an ETag and no body', { timeout: 30_000 }, async () => {
   const board = await conditionalPollBoard()
   try {
+    await (await board.poll()).arrayBuffer()
+    // The first poll comes before progress.md has held still for a second, and the first settled
+    // poll may still change the board. Take the tag from a settled board, then let time pass.
+    writeFileSync(board.clock, String(board.now + 3000))
     const first = await board.poll()
     assert.equal(first.status, 200)
-    assert.ok((await first.json()).model.view)
+    const before = await first.json()
+    assert.ok(before.model.view)
     const etag = first.headers.get('etag')
     assert.match(etag, /^W\/"[a-f0-9]{64}"$/)
-    writeFileSync(board.clock, String(board.now + 3000))
+    writeFileSync(board.clock, String(board.now + 6000))
     const same = await board.poll(`"another-board", ${etag.slice(2)}`)
-    assert.equal(same.status, 304)
+    assert.equal(same.status, 304, await changedFields(same, before))
     assert.equal(same.headers.get('etag'), etag)
     assert.equal(await same.text(), '')
     const refused = await board.poll(etag, { 'x-board-token': 'wrong' })
