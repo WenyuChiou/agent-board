@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { classify, fetchQueue, findStaleLanes, formatLanes, formatQueue, main, parseArgs, parseWorktrees } from '../scripts/review-queue.mjs'
+import { classify, fetchQueue, findStaleLanes, formatLanes, formatQueue, loadReviewers, main, parseArgs, parseWorktrees } from '../scripts/review-queue.mjs'
 
 const head = 'abcdef0123456789abcdef0123456789abcdef01'
 const oldHead = '1234567890123456789012345678901234567890'
@@ -145,7 +145,7 @@ test('JSON output cleans GitHub text and has the requested group keys', () => {
   })
   assert.equal(status, 0)
   const queue = JSON.parse(output[0])
-  assert.deepEqual(Object.keys(queue), ['needsReviewer', 'needsMain', 'approved', 'waitingForAuthor', 'drafts', 'staleLanes'])
+  assert.deepEqual(Object.keys(queue), ['needsReviewer', 'needsMain', 'approved', 'approvedNow', 'approvedOneAtATime', 'waitingForAuthor', 'drafts', 'staleLanes'])
   assert.equal(queue.needsReviewer[0].title, 'hello world <token>')
 })
 
@@ -169,6 +169,7 @@ test('fetching requests pull request descriptions and reads paginated comment re
   assert.equal(calls.length, 2)
   assert.ok(calls.every(call => call.program === 'gh' && call.options.maxBuffer > 0))
   assert.equal(calls[0].args[calls[0].args.indexOf('--json') + 1].split(',').includes('body'), true)
+  assert.equal(calls[0].args[calls[0].args.indexOf('--json') + 1].split(',').includes('files'), true)
   assert.deepEqual(calls[0].args.slice(-2), ['--repo', 'alice/board'])
   assert.ok(calls[1].args.includes('--paginate'))
   assert.equal(calls[1].args.at(-1), 'repos/alice/board/issues/1/comments?per_page=100')
@@ -181,6 +182,110 @@ test('a GitHub failure is reported without printing raw diagnostics', () => {
   assert.equal(status, 1)
   assert.equal(errors.length, 1)
   assert.ok(!errors[0].includes('ghp_abc123'))
+})
+
+// The map the team's reviewers.json holds, written out with synthetic reviewer names so the tests do not move when its names do.
+const team = {
+  maxOpenReviews: 2,
+  rules: [
+    { authors: ['claude', 'codex'], reviewers: ['bot-one', 'bot-two'] },
+    { authors: ['bot-one'], reviewers: ['claude', 'bot-two'] },
+    { authors: ['*'], reviewers: ['claude', 'bot-one', 'bot-two'] },
+  ],
+}
+const byAgent = agent => pull(1, { body: `Author: ${agent}, branch` })
+const taking = (name, at = '2026-10-20T08:00:00Z') => comment(`Reviewing: ${name}`, at)
+const answered = name => comment(`Review: APPROVE ${head} by ${name}`, '2026-10-20T10:00:00Z')
+
+test('the suggested reviewer is never the agent that wrote the pull request', () => {
+  const everyone = { maxOpenReviews: 2, rules: [{ authors: ['*'], reviewers: ['claude', 'bot-one'] }] }
+  const prs = [pull(1, { body: 'Author: claude (PM), branch' }), pull(2, { body: 'Author: bot-one, branch' })]
+  const comments = { 1: [ready(head, '2026-10-20T09:00:00Z')], 2: [ready(head, '2026-10-20T09:00:00Z')] }
+  const queue = classify(prs, comments, now, everyone)
+  assert.deepEqual(queue.needsReviewer.map(item => [item.number, item.suggested]), [[1, 'bot-one'], [2, 'claude']])
+  assert.match(formatQueue(queue), /#1 .*suggested: bot-one\n#2 .*suggested: claude\n/)
+})
+
+test('a reviewer already holding two open reviews is not suggested', () => {
+  const target = [byAgent('claude')]
+  const open = { 2: [taking('bot-one')], 3: [taking('Bot-One (PM)')] }
+  const done = { 4: [taking('bot-one'), answered('bot-one')] }
+  const prs = [...target, pull(2), pull(3, { isDraft: true }), pull(4)]
+  const busy = classify(prs, { 1: [ready()], ...open, ...done }, now, team)
+  assert.equal(busy.needsReviewer[0].suggested, 'bot-two')
+  // A Reviewing comment answered by a later verdict from the same name is no longer open.
+  const free = classify(prs.filter(pr => pr.number !== 3), { 1: [ready()], 2: open[2], ...done }, now, team)
+  assert.equal(free.needsReviewer[0].suggested, 'bot-one')
+})
+
+test('a pull request Ready for more than four hours suggests the next reviewer and says it escalated', () => {
+  const prs = [byAgent('codex'), pull(2, { body: 'Author: codex, branch', additions: 20 })]
+  const comments = { 1: [ready(head, '2026-10-20T07:00:00Z')], 2: [ready(head, '2026-10-20T09:00:00Z')] }
+  const queue = classify(prs, comments, now, team)
+  assert.deepEqual(queue.needsReviewer.map(item => [item.number, item.suggested, item.isEscalated]), [[1, 'bot-two', true], [2, 'bot-one', false]])
+  const text = formatQueue(queue)
+  assert.match(text, /#1 .*over 4 h {2}suggested: bot-two escalated\n/)
+  assert.match(text, /#2 .*suggested: bot-one\n/)
+  // With only one name left there is nothing to skip to, so that name is kept and nothing counts as skipped.
+  const busy = classify([byAgent('codex'), pull(3), pull(4)], { 1: comments[1], 3: [taking('bot-one')], 4: [taking('bot-one')] }, now, team)
+  assert.deepEqual([busy.needsReviewer[0].suggested, busy.needsReviewer[0].isEscalated], ['bot-two', false])
+})
+
+test('an author with no rule of its own gets the catch-all reviewers', () => {
+  const prs = [byAgent('dot (Muse)'), pull(2, { author: { login: 'alice' } })]
+  const queue = classify(prs, { 1: [ready()], 2: [ready()] }, now, team)
+  assert.deepEqual(queue.needsReviewer.map(item => item.suggested), ['claude', 'claude'])
+  // The first rule that matches wins, even when a later one names the author.
+  const reordered = { ...team, rules: [team.rules[2], team.rules[0]] }
+  assert.equal(classify([byAgent('codex')], { 1: [ready()] }, now, reordered).needsReviewer[0].suggested, 'claude')
+})
+
+test('a missing reviewers file prints one note and suggests nobody', () => {
+  const unreadable = () => loadReviewers({ read: () => { throw Object.assign(new Error('ENOENT: C:\\private\\reviewers.json'), { code: 'ENOENT' }) } })
+  assert.equal(unreadable().map, null)
+  assert.equal(loadReviewers({ read: () => '{ not json' }).map, null)
+  assert.equal(loadReviewers({ read: () => '{"rules":[]}' }).map, null)
+  const fetch = () => ({ prs: [pull(1)], commentsByNumber: { 1: [ready()] } })
+  const text = []
+  assert.equal(main([], { fetch, lanes: () => ({ stale: [], notes: [] }), reviewers: unreadable, now: () => now, log: line => text.push(line), error: line => assert.fail(line) }), 0)
+  assert.equal(text[0].split('\n').filter(line => line.startsWith('Note:')).length, 1)
+  assert.ok(!text[0].includes('suggested:'))
+  assert.ok(!text[0].includes('private'))
+  const json = []
+  assert.equal(main(['--json'], { fetch, lanes: () => ({ stale: [], notes: [] }), reviewers: unreadable, now: () => now, log: line => json.push(line), error: line => assert.fail(line) }), 0)
+  const queue = JSON.parse(json[0])
+  assert.equal('suggested' in queue.needsReviewer[0], false)
+  assert.equal(queue.notes.length, 1)
+})
+
+test('the reviewers file in the repository is readable and ends with a catch-all rule', () => {
+  const { map, note } = loadReviewers()
+  assert.equal(note, null)
+  assert.ok(map.maxOpenReviews >= 1)
+  assert.deepEqual(map.rules.at(-1).authors, ['*'])
+})
+
+test('approved pull requests touching the bundle or the string tables merge one at a time and the rest merge smallest first', () => {
+  const touching = (...paths) => ({ files: paths.map(path => ({ path, additions: 1, deletions: 0 })) })
+  const prs = [
+    pull(1, { additions: 30, deletions: 10, ...touching('hooks/board-script-core.ts', 'scripts/x.mjs') }),
+    pull(2, { additions: 20, deletions: 10, ...touching('docs/a.md') }),
+    pull(3, { additions: 3, deletions: 2, ...touching('scripts/b.mjs') }),
+    pull(4, { additions: 5, deletions: 5, ...touching('hooks/strings-en.ts') }),
+    pull(5, { additions: 10, deletions: 5, ...touching('hooks/i18n.ts', 'hooks/strings-zh-cn.ts') }),
+    pull(6, { additions: 15, deletions: 5, ...touching('hooks/register.tsx') }),
+    pull(7, { additions: 1, deletions: 1, ...touching('hooks/board-script.ts') }),
+  ]
+  const readyAt = { 1: '08:00', 2: '05:00', 3: '05:00', 4: '06:00', 5: '07:00', 6: '05:00', 7: '09:00' }
+  const comments = Object.fromEntries(prs.map(pr => [pr.number, [ready(head, `2026-10-20T${readyAt[pr.number]}:00Z`), verdict('APPROVE', head, '2026-10-20T10:00:00Z')]]))
+  const queue = classify(prs, comments, now)
+  assert.deepEqual(queue.approvedNow.map(item => item.number), [3, 6, 2])
+  assert.deepEqual(queue.approvedOneAtATime.map(item => item.number), [4, 5, 1, 7])
+  assert.deepEqual(queue.approved.map(item => item.number), [1, 2, 3, 4, 5, 6, 7])
+  assert.match(formatQueue(queue), /Merge now, smallest first \(3\)\n#3 .*\n#6 .*\n#2 .*\nOne at a time, oldest Ready first \(4\)\n#4 .*\n#5 .*\n#1 .*\n#7 /)
+  // Without a file list a pull request cannot be shown to be clear of the shared files.
+  const unknown = classify([pull(8)], { 8: [ready(), verdict('APPROVE')] }, now)
+  assert.deepEqual([unknown.approvedNow.length, unknown.approvedOneAtATime.length], [0, 1])
 })
 
 const porcelain = [
