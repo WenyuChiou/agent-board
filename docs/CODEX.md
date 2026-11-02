@@ -263,6 +263,6 @@ This release is a common foundation; full multi-agent and desktop acceptance rem
 Progress sharing is local file interoperability. It does not imply active-session messaging,
 remote synchronization, a real dot connection, or tool/merge approval from ordinary replies.
 
-The opt-in [connected-session messaging](MESSAGING.md) feature provides a separate web
+The [connected-session messaging](MESSAGING.md) hub, which starts with `--serve`, provides a separate web
 card reply action and host-adapter API. Its live connection and ACK acceptance are independent
 of this progress integration. No receiving target is inferred from an agent name or card.

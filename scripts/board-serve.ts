@@ -26,8 +26,9 @@ import type { ProgressBinding } from '../hooks/messaging'
 
 export type ServeOptions = {
   allowResume?: boolean
-  messagesDirectory?: string
-  reports?: () => ProgressBinding[]
+  messagesDirectory: string
+  isDefaultMessagesDirectory?: boolean
+  reports?: (isFresh?: boolean) => ProgressBinding[]
   s: Strings
   port: number
   // What the server answers a second `--serve` with, so it can tell it is the same board.
@@ -247,7 +248,11 @@ const run = (plan: SendPlan, s: Strings, label: string): Promise<Result> =>
   })
 
 export const startServer = (o: ServeOptions): void => {
-  const messaging = o.messagesDirectory ? createMessaging(o.messagesDirectory) : null
+  const messaging = (() => {
+    try { return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory) }
+    // The code (EACCES, EPERM) goes along, so the person gets advice that fits the cause.
+    catch (error) { throw Object.assign(new Error(error instanceof Error ? error.message : '', { cause: 'MESSAGE_STORE_FAILED' }), { code: error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined }) }
+  })()
   const token = randomBytes(24).toString('base64url')
   const sending = new Set<string>()
   const repoOf = repoLookup(worktreeRepoName)
@@ -272,7 +277,8 @@ export const startServer = (o: ServeOptions): void => {
   const stop = (): void => {
     if (isStopping) return
     isStopping = true
-    messaging?.close()
+    // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
+    try { messaging.close() } catch {}
     closeLan()
     server.close()
     server.closeAllConnections()
@@ -359,8 +365,10 @@ export const startServer = (o: ServeOptions): void => {
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
-    lastSeen = Date.now()
-    if (side !== null) side.lastSeen = lastSeen
+    if (!url.pathname.startsWith('/api/messages/')) {
+      lastSeen = Date.now()
+      if (side !== null) side.lastSeen = lastSeen
+    }
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
@@ -373,8 +381,8 @@ export const startServer = (o: ServeOptions): void => {
         // is always the grouped one; the old ?group=agent address asks for what every address gets now.
         try {
           const now = Date.now()
-          const state = isLan ? undefined : messaging?.snapshot(now, o.reports?.())
           const view = o.view()
+          const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
           const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now }
           // The page already compares its clock at minute precision. Keep that refresh boundary
@@ -406,10 +414,10 @@ export const startServer = (o: ServeOptions): void => {
     const body = await readBody(req)
     if (body === null) return json(res, 400, {})
     if (url.pathname.startsWith('/api/messages/')) {
-      if (isLan || !messaging) return json(res, 403, {})
+      if (isLan) return json(res, 403, {})
       const action = url.pathname.slice('/api/messages/'.length)
-      // A browser can send a message, but cannot impersonate a receiving host adapter.
-      if (action !== 'send' && req.headers.origin !== undefined) return json(res, 403, {})
+      // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
+      if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
       try { return json(res, 200, messaging.act(action, body, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
       catch (error) {
         // A temporary file lock is storage unavailability, not a stale binding.
@@ -423,18 +431,21 @@ export const startServer = (o: ServeOptions): void => {
     // error stays a bare server error.
     try {
       if (url.pathname === '/api/act') {
-        const state = isLan ? undefined : messaging?.snapshot(Date.now())
+        const state = isLan ? undefined : messaging.snapshot(Date.now())
         // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
-        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, state?.connections, messaging !== null, o.allowResume)
+        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, state?.connections, true, o.allowResume)
         if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
-          if (!messaging || isLan) return json(res, 403, {})
+          if (isLan) return json(res, 403, {})
           try {
             const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text }, Date.now())
             const notes = { queued: o.s.messagesQueued, uncertain: o.s.messagesUncertain, accepted: o.s.messagesAccepted, acknowledged: o.s.messagesAcknowledged, rejected: o.s.messagesRejected }
             const note = 'status' in receipt ? notes[receipt.status] : o.s.messagesFailed
             return json(res, 200, { note, receipt })
-          } catch (error) { return json(res, 409, { note: error instanceof Error && error.message === 'ID_CONFLICT' ? o.s.messagesConflict : o.s.messagesFailed }) }
+          } catch (error) {
+            const notes: Record<string, string> = { ID_CONFLICT: o.s.messagesConflict, TARGET_BUSY: o.s.messagesBusy, PAIR_BUSY: o.s.messagesBusy, TEXT_REFUSED: o.s.messagesTextRefused, CONTESTED: o.s.messagesContested }
+            return json(res, 409, { note: error instanceof Error ? notes[error.message] ?? o.s.messagesFailed : o.s.messagesFailed })
+          }
         }
         if (action.type === 'send') {
           const sent = send(action.target, action.text, action.title, text(body.key))
@@ -487,7 +498,10 @@ export const startServer = (o: ServeOptions): void => {
       if (!res.headersSent) json(res, 500, {})
     })
   })
-  server.on('error', () => { messaging?.close(); o.onStop() })
+  server.on('error', () => {
+    try { messaging.close() } catch {}
+    o.onStop()
+  })
   // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
   // `idleMs` and no reply is on its way.
   const idle = setInterval(() => {
@@ -497,12 +511,17 @@ export const startServer = (o: ServeOptions): void => {
   server.on('close', () => clearInterval(idle))
   server.listen(o.port, '127.0.0.1', () => {
     port = (server.address() as AddressInfo).port
-    if (!o.onReady(`http://127.0.0.1:${port}/?t=${token}`, port)) {
+    const url = `http://127.0.0.1:${port}/?t=${token}`
+    if (!o.onReady(url, port)) {
       stop()
       return
     }
     // Preparing a private address can block; inactivity starts once that address is ready.
     lastSeen = Date.now()
+    if (o.isDefaultMessagesDirectory) {
+      // A later --serve asks this address before moving a lock this hub left behind.
+      try { messaging.recordOwner(port, url) } catch {}
+    }
     const sweeper = setInterval(() => { try { o.sweep() } catch {} }, o.sweepMs)
     server.on('close', () => clearInterval(sweeper))
   })

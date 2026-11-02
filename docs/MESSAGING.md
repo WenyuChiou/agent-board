@@ -22,34 +22,88 @@ Use the existing reply box on the session's card. Its Copy button becomes Send C
 live receiver. Internal connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
-An offline card retains Copy. By default, even without a message store, the web UI and
+An offline card retains Copy. By default, the web UI and
 action API cannot spawn a CLI or resume a saved session. The existing copy-resume command
 remains available where the board already offered it.
 
 The separate legacy `--serve --allow-resume` option deliberately allows a local reply to
 start an ended Codex or Grok Build session. It is disabled by default, never enabled by
-setup, and never used as fallback when `--messages-dir` is enabled. It is not live delivery.
+setup, and works for closed sessions even with the message hub running. It is not live delivery.
 Reopening without the option replaces an idle server that had it enabled. LAN sends remain
 refused. Review the native agent's permissions before choosing this legacy mode.
 
-## Enable locally
+## Local storage
 
-After approving the local message storage directory, start the installed board with:
+Starting the installed board with `--serve` also starts its local message hub:
 
 ```sh
-node /path/to/agent-board.mjs --serve --messages-dir /private/local/message-data
+node /path/to/agent-board.mjs --serve
 ```
 
-The directory holds `messages.json` (message text, target binding, id and receipts) and a
-`server.lock`. It must be private to the user and local to this machine. Do not use a shared
-drive or publish it. The board's bearer URL and connector secrets must not be posted to
-issues. This flag opens no network listener beyond the existing loopback board; messaging
-and its history are absent from the LAN page. Setup does not silently enable it or install
-a background receiver. Reopen with the same command and directory. Closing the board
+The default store is `agent-board-<16-hex-board-hash>-messages` beside the board's address
+file: on Windows, in an account-only `agent-board` child of `XDG_RUNTIME_DIR`, otherwise
+`~/.cache/agent-board`; on other systems, in the account's own `XDG_RUNTIME_DIR`, otherwise
+`~/.cache/agent-board`. The hash identifies the same progress file as
+the address file. The directory is created with mode 0700. On Windows, a newly created
+store and every default store are made your account's alone: the board makes your account
+the folder's owner, removes inherited and other accounts' access, and reads the access
+entries back (the owner is set, not read back). If it cannot, startup stops with
+`MESSAGE_STORE_ACL`. For a new or default store, a board run as SYSTEM, LocalService or
+NetworkService always stops there: run it as a person's account. An existing folder supplied with `--messages-dir`
+keeps its permissions; make that folder private yourself.
+`--messages-dir /private/local/message-data` overrides the location;
+`/api/ping` reports the actual `messagesDirectory`.
+
+The directory holds `messages.json` (the text of open messages, a hash of each finished
+one's text, target binding, id and receipts) and a
+`server.lock` containing the owning PID. It also holds `server.owner`, the address of the
+hub of the default folder, written once it listens and removed when it stops. A hub that
+takes the lock first removes any `server.owner` left from before, so a hub never starts
+beside a record written under an earlier lock. The folder is private like the address file.
+A live owner, including one returning `EPERM` to the liveness probe, causes
+`MESSAGE_STORE_IN_USE`.
+A dead owner (`ESRCH`) or malformed PID is removed; lock creation makes at most three
+attempts, including when another process removes the old lock during recovery.
+PIDs outside 1..2147483647 are malformed.
+For a legacy PID-only lock with no live or unknown ownership claim, `--serve` using the
+default folder waits up to 10 seconds for the owner's page.
+If none appears and that hub no longer answers at the address beside the lock (nothing
+listens there, or the program there refuses the hub's token or does not answer like a
+board page, as any other program would), it treats the lock as left by a hub that was
+killed: after a restart, its number can belong to another program. It moves the lock aside
+once and starts the page. If the moved lock cannot be read, it is put back and no page
+starts; if another `--serve` took the lock meanwhile, this one tries once more. A lock
+with no such address (a hub still starting, a hub killed before it listened, or another
+board using the folder through `--messages-dir`) and a folder given with `--messages-dir`
+are never taken over this way, nor is one whose hub accepts its token or does not answer
+in time.
+If the message folder cannot open, `--serve` names the folder and error code. For
+any `MESSAGE_STORE_IN_USE` that remains, stop all board servers and inspect `server.lock`,
+`server.owner` and `.message-claim-*.json` together. A valid lifetime claim whose PID is
+live or cannot be checked blocks takeover even when its old port is closed; a reused PID
+does not prove that the claim is stale. Remove only ownership metadata verified to be
+stale, after confirming that no hub is running. Keep `messages.json` and uncertain
+delivery evidence; do not resend uncertain messages. Permission errors ask you
+to check that the folder belongs to your account and other accounts cannot open it. Other
+store errors suggest moving a possibly damaged `messages.json` out before retrying.
+
+Keep the store private and local. Do not use a shared drive or publish it. Any local
+program that can read the address file or `server.owner`, which holds the same bearer URL,
+can send with it; the board cannot identify the person pressing Send. Such a program can
+also keep your sends refused: if it
+registers a session, sends, claims the message and disconnects, over and over, each round
+leaves a message in doubt for 30 minutes, and at one round every 1.8 seconds or faster the
+store stays at `MESSAGE_LIMIT` until it stops. The connection cap does not stop it, since
+each disconnect frees its place. It has to run as your account or an administrator; stop
+it, and the store frees itself within 30 minutes. Connector secrets and URLs must not be posted to
+issues. Messaging opens no listener beyond the existing loopback board; all LAN
+`/api/messages/*` requests are refused and LAN board JSON omits messaging and receipts.
+Setup installs no background receiver. Reopen with the same command and directory. Closing the board
 disconnects its receivers; they must reconnect explicitly to the new board URL. Closing
 only the browser tab leaves the local service and receivers running. Local idle shutdown
 is disabled by default; `--idle-minutes 30` opts in. The LAN listener's separate timeout
-is unchanged.
+is unchanged. Receiver traffic under `/api/messages/*` does not refresh either page's
+activity timer, so polling cannot prevent an opted-in idle shutdown.
 
 ## What the receipts mean
 
@@ -58,7 +112,7 @@ is unchanged.
 | queued | Stored locally; no external delivery yet |
 | uncertain | Claimed durably before delivery, or a disconnect/timeout after claiming |
 | accepted | Adapter reports transport acceptance; no session ACK yet |
-| acknowledged | Adapter supplies the current session's actual `ACK <message-id>` reply |
+| acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
 | rejected | Refused before claiming, or adapter reports a clean rejection |
 
 An ACK proves receipt, not successful completion of the requested task. An adapter must
@@ -67,13 +121,119 @@ are labelled synthetic. No live model or desktop acceptance is inferred from tho
 An adapter timeout after transport acceptance is persisted as `uncertain` with a bounded
 error code (for example `ACK_TIMEOUT`); it does not stay indefinitely labelled accepted.
 
-IDs are scoped to this message store. An exact retry returns the existing receipt, even
-after restart. Reusing an id with different text, source, binding or turn fails with
-`ID_CONFLICT`. A claim is never automatically replayed. The store retains up to 1000 ids
-and then refuses new messages instead of deleting deduplication history. Reconcile an
-uncertain message with its original recipient before a human chooses any new action.
-Never change its id merely to bypass uncertainty. A stale lock after a crash requires
-checking the recorded owning PID before removing that specific lock.
+### Message ids
+
+- The client mints every message id: `AB-` followed by a random UUID, as the board page
+  already does. Any id must match `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`.
+- The hub never mints an id, and it refuses a send without one (`INVALID_ID`).
+- A retry carries the same id, with the same target, turn, source and text, and gets the
+  same receipt, even after a restart. A send never returns the nonce, so a retry after the
+  message was handed out does not learn it either. Once the receiver acknowledges, the reply
+  a send or the board returns is what follows `ACK <nonce>`, without that ACK line's prefix.
+- Reusing an id with a different text, source, binding or turn fails with `ID_CONFLICT`.
+
+IDs are scoped to this message store. A claim is never automatically replayed. Before each
+action or snapshot, finished messages older than 24 hours are deleted. Finished means
+acknowledged, rejected, or uncertain with error `EXPIRED` or `DISMISSED`. A message drops its
+text the moment it finishes and keeps only a SHA-256 hash of it (of the text as a JSON
+string), which is what an exact retry is compared with, and the first 200 characters of its
+reply; a repeated receipt is compared with those. Accepted or uncertain messages
+older than 30 minutes become final `uncertain` / `EXPIRED`; they no longer block delivery,
+are never handed out again, and reject later receipts with `MESSAGE_EXPIRED`. The page
+continues to show these as no reply confirmed.
+
+The store holds at most 1,000 open messages (`MESSAGE_LIMIT`); finished ones do not count,
+so a store full of finished messages still accepts new ones, short of the 2,000-record
+ceiling below. It keeps the newest 1,000
+finished messages; past that the oldest finished ones are deleted before their 24 hours,
+so the file stops growing with the number of messages sent. Two kinds are never deleted by
+that count, only after their 24 hours: a message that was handed out and then expired or
+was dismissed, since it may have arrived and the page sends its id again, and each
+session's latest delivery, which that session's next send takes its hop count from. Those
+can still fill the file, so the store holds at most 2,000 records: past that, the ones older
+than 30 minutes go too, each session's latest delivery before a message in doubt, and only
+when none is that old is a send refused with `MESSAGE_LIMIT`, until one is. Deduplication ends when a record is deleted, and so does its part in
+counting hops. Never change its id merely to bypass uncertainty. A temp file a hub left
+when it was killed while saving is deleted at the next start, and a save that meets the file held for a moment by another program, as a
+virus scanner can on Windows, tries again for up to about 0.2 seconds before the store
+answers `MESSAGE_STORE_BUSY`.
+
+The local hub accepts `POST /api/messages/dismiss` with only `{ "id": "<message-id>" }`,
+using the board token and the same browser-origin rules as sending. No receiver secret
+is needed; LAN requests are refused. A page button will come in a later change.
+Dismissal rejects a queued message before it can be handed out. An accepted or uncertain
+message becomes final `uncertain` with error `DISMISSED`: delivery may already have happened,
+but it no longer blocks the next message. Disconnect and restart preserve that result;
+later receipts fail with `MESSAGE_DISMISSED`. Dismissed records and their text are deleted
+after 24 hours. Dismissing an already finished record fails with `MESSAGE_FINISHED`,
+and an unknown id fails with `NOT_FOUND`.
+
+Open messages are queued, accepted, or uncertain without `EXPIRED` or `DISMISSED`. Each target
+`agent:session` permits at most three (`TARGET_BUSY`), and each source/target pair permits
+one (`PAIR_BUSY`). Sourceless sends count as source `board`. The hub assigns `hops: 1`
+without a source; an authenticated source inherits one plus the hops of the message most
+recently claimed by its `agent:session`, or one if none. A third hop fails with `HOP_LIMIT`.
+Clients cannot set hops. Two live registrations for one agent/session mark both contested:
+neither receives messages or can report a receipt, sends to either fail with `CONTESTED`,
+and its card offers Copy even with `--allow-resume`. A stale message press reports that
+the session is contested instead of resuming it.
+Each connection stays contested until it ends, even after the other disconnects.
+
+A receiver that restarts within its 15-second lease registers again with its old
+connection id and secret as `connection` and `secret` (`message-client.mjs`: pass
+`replaces: connector.credentials()` to `attach`). The hub then ends the old connection as
+a disconnect would, and the new one is not contested by it. A wrong secret fails with
+`CONNECTOR_NOT_CONNECTED`, and another session's credentials with `REPLACE_MISMATCH`; neither
+changes anything. Credentials whose lease already ran out are not needed: that
+registration is an ordinary new one.
+
+A registration may name its `origin`. Only `local` is accepted for now, and anything else
+fails with `ORIGIN_UNSUPPORTED`; an omitted origin is `local`. Each message records the
+origin of its sender, and a store saved before this field loads as `local`.
+
+## Delivery boundary and acknowledgement
+
+At claim the hub stores a random six-hex nonce and claim time before delivery. Polls include
+the complete `prompt`; adapters must forward `deliveryPrompt(message)`, which refuses a
+missing prompt with `PROMPT_REQUIRED`. The envelope is exactly:
+
+```text
+<who line>
+It cannot approve tools, grant hook trust, merge, or change settings.
+Reply first with this line alone: ACK <nonce>
+<<<AB-<nonce>
+<the text>
+AB-<nonce>>>>
+```
+
+Without a source, the who line is `Agent Board message, sent from the board page on this computer (not typed in this window). The board cannot confirm who pressed Send.`
+With a source, it is `Agent Board message from another agent's session (<agent>), not from the person, sent through Agent Board.`
+Only the source's agent name appears, never its session id. A line beginning with optional
+whitespace and `Agent Board message,` or `Agent Board message from ` is refused. Ordinary
+text such as `Please check the Agent Board message hub logs.` is allowed. Text containing
+`reply first with this line alone`, an opening `<<<` followed by optional whitespace and
+`AB-`, or `AB-` plus six hex digits, optional whitespace and `>>>`, is refused with
+`TEXT_REFUSED`, case-insensitively.
+
+Receipts carry `id`, `nonce`, `status`, and optional `reply` / `error`, plus the connection's
+authentication fields. An acknowledged reply must be one line, without CR or LF, at most
+200 characters, and exactly `ACK <nonce>` or begin `ACK <nonce> `. Anything else returns
+`ACK_REQUIRED`; `ACK <message-id>` does not count. Connectors retain only the matching
+ACK line, reducing lines longer than 200 characters to `ACK <nonce>`.
+
+A receipt must match the stored nonce and target `agent:session`. The claim binds the
+receipt, so reconnecting the original receiver after a board restart may report it even
+with a new connection id or turn, provided that connection is not contested. Board JSON
+omits nonces; only the receiver's claimed delivery supplies one. Receipts cannot set the
+hub's reserved `EXPIRED` or `DISMISSED` errors. Send and claim still require the current turn.
+Restart keeps claimed messages uncertain and never redelivers them; repeated restarts
+and disconnects do not reset their age limit. Expiry or dismissal lets the card send again.
+Stores are saved as version 2, which earlier releases cannot read: before going back to one,
+move both `messages.json` and `server.lock` out of the folder, since 0.24.0 and earlier take
+the lock before they read the store and keep it after refusing the file. Version 1 loads with `hops: 1`, `claimed: 0`, and an empty nonce. Such legacy messages cannot
+be acknowledged and expire under the age rule. A message saved without `origin` or `hash`
+loads as `local` with the hash of the text it kept. A store that cannot be read gives its
+`server.lock` back, so moving the damaged file aside is all a retry needs.
 
 Busy is separate from disconnected. A verified session can send while doing native work;
 its adapter renews the lease with `receive: false` and leaves incoming messages queued
@@ -141,22 +301,25 @@ Agents attached to the **same local board and message directory** share one mess
 id namespace and receipts. Synthetic OpenClaw/OpenCode/Grok/DeepSeek adapters exchange both
 ways with Codex in the contract test, including duplicate/conflict and offline rejection.
 That test supplies simulated owners and ACKs; it does not establish native delivery for
-those products. There is no three-day message expiry. Three-day task archiving is a
-separate feature and must not erase message ids or permit replay.
+those products. Message retention and expiry follow the limits above; three-day task
+archiving is a separate feature.
 
 ## Adapter API for other agents and UIs
 
 Import `scripts/message-client.mjs` and attach an existing host transport:
 
 ```js
-import { boardClient } from './message-client.mjs'
+import { boardClient, deliveryPrompt } from './message-client.mjs'
 const receiver = await boardClient(privateBoardUrl).attach({
   agent: 'example-agent', session: actualSessionId, turn: actualTurnId, surface: 'Example host UI',
   verify: async () => host.isConnectedTo(actualSessionId, actualTurnId),
-  deliver: async (message, accepted) => {
-    const result = await host.sendToCurrentTurn(message.text)
+  deliver: async (message, accepted, begin) => {
+    const prompt = deliveryPrompt(message)
+    if (!await host.isConnectedTo(actualSessionId, actualTurnId)) throw new Error('HOST_NOT_CONNECTED')
+    begin()
+    const result = await host.sendToCurrentTurn(prompt)
     await accepted() // transport acceptance only
-    return await host.waitForActualAck(message.id, result)
+    return await host.waitForActualAck(message.nonce, result)
   },
 })
 // Cross-agent forwarding carries this receiver's authenticated source binding.
@@ -169,6 +332,13 @@ API is agent-neutral; Claude Code, legacy Gemini, Cursor and other UI adapters s
 own supported transport and live acceptance. No shell typing, transcript scraping,
 credential discovery, automatic resume, or approval RPC is implemented by this client.
 The original host remains responsible for its normal permission checks.
+
+An adapter declaring at least three parameters receives `begin()`. Finish every check that can
+refuse delivery, then call it immediately before writing to the external host. A failure
+before `begin()` reports `rejected`; a failure after it reports `uncertain` without replay.
+Calling `accepted()` also marks delivery as begun. Safe uppercase error codes are retained;
+other exception text is not stored. Adapters with fewer than three declared parameters
+keep the older behavior: entering `deliver` already counts as beginning delivery.
 
 ## Codex existing-owner adapter
 
@@ -294,3 +464,26 @@ Antigravity editor UI or TUI. Synthetic tests and observing a real zero-prompt
 native `init` are not a real delivery result. A native ACK still requires a separate
 explicitly approved disposable-session test. No permanent auto-install or host-wide
 discovery is claimed by this adapter.
+
+
+## Store ownership during restart
+
+Each current hub publishes a PID and random nonce claim before inspecting the
+store lock, and keeps it until all store methods have stopped and lock/owner
+cleanup has finished. Startup and the outer recovery path refuse other live or
+unknown claims. Only a proven-dead process's valid claim is retired. This prevents
+a delayed recovery from admitting a second current writer while it temporarily
+displaces a newer PID lock. A closed hub refuses further reads, writes and owner
+records, including calls after another hub starts.
+
+Empty, malformed or unreadable claims fail closed. Stop every board server before
+inspecting .message-claim-*.json; remove malformed metadata only after verifying
+that no hub remains. Preserve messages.json and uncertain-message evidence.
+Claims are runtime ownership records, not hook trust or a receiving connection.
+
+This protocol requires a fixed local directory with visible completed file
+creation. Older writers do not participate: stop older board processes before
+updating or sharing their message directory. Mixed-version reclaimers and network
+filesystems are not covered by the current-writer exclusivity tests. Concurrent
+contenders may both refuse; retry once the failed starts have exited. This is an
+availability tradeoff, not permission to retry an uncertain message.

@@ -19,6 +19,9 @@ export const ZH_CN: Strings = {
   messagesRejected: '已拒绝／未发送',
   messagesFailed: '未能发送；目标可能已离线或绑定已改变。',
   messagesConflict: '相同消息编号已有不同内容，已拒绝重发。',
+  messagesBusy: '未发送：给这个对话的另一条消息还在等待。',
+  messagesTextRefused: '未发送：文字里有 Agent Board 自己的消息标记。',
+  messagesContested: '未发送：有两个程序同时认领这个对话，请改用复制。',
   localAgentTask: (agent: string): string => `${agent} 本地任务`,
   localAgentSkillDescription: '打开本地交互看板，跟踪当前已接线 session 的实际任务进度。',
   localAgentStepFormat: '一行 Markdown 任务：“- [x] 完成”、“- [~] 进行中”、“- [ ] 下一步”、“- [?] 等用户回答”、“- [!] 卡住”、“- [>] 在别处运行或已交接”、“- [-] 取消”',
@@ -559,6 +562,15 @@ export const ZH_CN: Strings = {
   serveClosed: '看板已关闭，这个标签页可以关了。要再打开，可在终端运行 agent-board 或在 agent 对话中输入 /agent-board。',
   serveCloseBusy: '还有一句正在发给 agent，等它回完再关闭看板。',
   serveNotStarted: '服务器没有启动。',
+  serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
+    ? `看板无法打开消息文件夹（${code}）：${folder}。请先停止所有看板 server，一并检查 server.lock、server.owner 与 .message-claim-*.json。确认没有 hub 运行后，仅移除已核实过期的持有者数据。请保留 messages.json 与不确定是否送达的记录，不要重发这些消息。`
+    : code === 'MESSAGE_STORE_CLOSED'
+      ? `看板已停止（${code}）：${folder}。请用 --serve 重新启动；不确定是否送达的消息没有重新发送。`
+      : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
+        ? `看板无法确认消息持有者（${code}）：${folder}。请先停止所有看板 server，再检查该文件夹里的 .message-claim-*.json。确认没有 hub 运行后，才能移除损坏的 claim。请保留 messages.json，不要重发不确定是否送达的消息。`
+        : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
+          ? `看板无法打开消息文件夹（${code}）：${folder}。请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。`
+          : `看板无法打开消息文件夹（${code}）：${folder}。消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。`,
   serveOffline: '连不上看板。请用 --serve 重新启动看板；新页面会自动打开，这个标签页可以关闭。',
   serveOfflineLan: '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
   themeToDark: '切换成深色',

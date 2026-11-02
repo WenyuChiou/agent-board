@@ -3,6 +3,8 @@ import http from 'node:http'
 import { syncBuiltinESMExports } from 'node:module'
 import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
 
 // Preloaded into the soak world's board processes only. It counts what the board does (file
 // operations by kind and requests served) and appends one JSON line every 10 s and at exit. It
@@ -62,10 +64,17 @@ if (dir && role !== 'other') {
   }
   syncBuiltinESMExports()
 
+  // A soak that judges memory by what the process still holds asks for a full collection before each
+  // line, so heapAfterGc is live memory and not whatever the collector has yet to free. `external`
+  // (and `arrayBuffers`, the part of it that is Buffers) is memory outside the heap that objects hold
+  // on to. Kept Buffers grow here and not in the heap, but socket and request buffers in flight make it
+  // swing by several MB between lines, so the messaging soak sees only a leak of a few KB per message.
+  const collect = process.env.E2E_SOAK_PROBE_GC === '1' ? (() => { setFlagsFromString('--expose-gc'); return runInNewContext('gc') })() : undefined
   const sample = () => {
     try {
+      const heapAfterGc = collect === undefined ? undefined : (collect(), process.memoryUsage().heapUsed)
       const memory = process.memoryUsage()
-      const line = JSON.stringify({ at: Math.round(performance.timeOrigin + performance.now()), pid: process.pid, role, rss: memory.rss, heapUsed: memory.heapUsed, ops: { ...ops }, requests })
+      const line = JSON.stringify({ at: Math.round(performance.timeOrigin + performance.now()), pid: process.pid, role, rss: memory.rss, heapUsed: memory.heapUsed, heapAfterGc, external: memory.external, arrayBuffers: memory.arrayBuffers, ops: { ...ops }, requests })
       append(file, `${line}\n`)
     } catch {
       // A probe that cannot write stays silent; the board must not notice it.

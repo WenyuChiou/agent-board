@@ -4563,10 +4563,10 @@ test('an ordinary board never resumes a closed session even without messaging en
   expect(row).toMatchObject({ send: 'open', hasCopyBox: true })
   const items = boardItems(serveView(), [])
   expect(serveAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.messagesFailed })
-  // An explicit legacy opt-in still cannot become fallback for an enabled message hub.
+  // An explicit legacy opt-in keeps resume-Send for a closed session while the hub runs.
   const hub = { connections: [], messages: [] }
-  expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).stopped.find(one => one.title === 'Pick the cache')?.send).toBe('open')
-  expect(resumeAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en, false, [], true).type).toBe('refuse')
+  expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).stopped.find(one => one.title === 'Pick the cache')?.send).toBe('send')
+  expect(resumeAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en, false, [], true).type).toBe('send')
 })
 
 
