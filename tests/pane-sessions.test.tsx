@@ -1027,17 +1027,67 @@ test('/progress tidy with archive holding X once, board holding new identical X,
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+    expect(world.files.has(pending)).toBe(true)
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+    expect(await ui.find({ type: 'Text', text: STRINGS.en.pendingNoteRemoveFailed('progress-archive.pending') })).toBeDefined()
+
+    world.files.set(FILE, `# Progress\n\n## Synthetic\n${block2}`)
+    world.mtime += 1
+    world.unremovable.clear()
+    expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+    expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+    expect(world.files.has(pending)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: STRINGS.en.pendingNoteRemoveFailed('progress-archive.pending') })).toBeUndefined()
+  } finally { await ui.unmount() }
+})
+
+test('/progress tidy does not restamp a leftover pending record onto a later twin when another task fails to clear', async ($, on) => {
+  const blockX1 = `<!-- auto session=a1b2c410 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c410 -->\n`
+  const blockY = '### Task Y\n- [x] Done step\n- [ ] Open step\n'
+  const blockX2 = `<!-- auto session=a1b2c412 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c412 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, `# Progress\n\n## Synthetic\n${blockX1}`],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unremovable: new Set([pending]),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
   expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
   expect(world.files.has(pending)).toBe(true)
   expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
 
-  world.files.set(FILE, `# Progress\n\n## Synthetic\n${block2}`)
+  const secondBoard = `# Progress\n\n## Synthetic\n${blockY}\n${blockX2}`
+  world.files.set(FILE, secondBoard)
   world.mtime += 1
   world.unremovable.clear()
-  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
-  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
-  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
-  expect(world.files.has(pending)).toBe(false)
+  await clock.advance(60_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::others' })
+    world.unwritable = new Set([FILE])
+    await ui.press({ key: 'Synthetic::Task Y' })
+    await ui.press({ key: 'Synthetic::Task Y::archive' })
+    expect(world.files.get(FILE)).toBe(secondBoard)
+    expect(world.files.get(ARCHIVE)?.split('### Task Y').length).toBe(2)
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+
+    world.unwritable.clear()
+    expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+    expect(world.files.get(ARCHIVE)?.split('### Task Y').length).toBe(2)
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+    expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+    expect(world.files.has(pending)).toBe(false)
+  } finally { await ui.unmount() }
 })
 
 test('/progress tidy when archive write fails after note is written: task stays in progress.md, and next tidy archives it once', async ($, on) => {

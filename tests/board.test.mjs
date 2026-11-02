@@ -5929,7 +5929,7 @@ const fs = require('fs')
 const orig = fs.unlinkSync
 fs.unlinkSync = function(file, ...args) {
   if (typeof file === 'string' && file.includes('progress-archive.pending')) {
-    const err = new Error('EBUSY: resource busy or locked, unlink')
+    const err = new Error('EBUSY: resource busy or locked, unlink ' + JSON.stringify(file))
     err.code = 'EBUSY'
     throw err
   }
@@ -5939,7 +5939,8 @@ fs.unlinkSync = function(file, ...args) {
     writeFileSync(f.path, one)
     const first = f.command(['--tidy', '--lang', 'en'], failUnlink)
     assert.equal(first.status, 0)
-    assert.ok(first.stderr.includes('Could not remove pending note progress-archive.pending'))
+    assert.ok(first.stderr.includes('Could not remove pending note progress-archive.pending (EBUSY).'), first.stderr)
+    assert.ok(!first.stderr.includes(f.dir), first.stderr)
     assert.equal(copies(), 1)
     assert.ok(existsSync(pending))
     assert.ok(readFileSync(pending, 'utf8').includes('boardHash'))
@@ -5950,6 +5951,131 @@ fs.unlinkSync = function(file, ...args) {
     assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
     assert.equal(copies(), 2)
     assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy does not restamp a leftover pending record onto a later twin when another task fails to clear', () => {
+  tidyFixture(f => {
+    const copies = task => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split(task).length - 1
+    const pending = join(f.dir, 'progress-archive.pending')
+    const t1 = Date.UTC(2026, 9, 17, 20)
+    const t2 = Date.UTC(2026, 9, 17, 23)
+    const blockAt = (session, title, updatedMs) =>
+      `<!-- auto session=${session} agent=codex state=done updated=${new Date(updatedMs).toISOString()} -->\n### ${title}\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+    const runAt = (ms, extraPreload = '') => {
+      const preload = join(f.dir, `clock-${ms}.cjs`)
+      writeFileSync(preload, `Object.defineProperty(Date, 'now', { get: () => () => ${ms}, set: () => {} });\n${extraPreload}`)
+      return f.command(['--tidy', '--lang', 'en'], preload)
+    }
+
+    writeFileSync(f.path, `## Synthetic\n${blockAt('a1b2c340', 'Twin X', t1 - 13 * 3600000)}`)
+    const first = runAt(t1, `
+const fs = require('fs')
+const origUnlink = fs.unlinkSync
+fs.unlinkSync = function(file, ...args) {
+  if (typeof file === 'string' && file.includes('progress-archive.pending')) {
+    const err = new Error('EBUSY')
+    err.code = 'EBUSY'
+    throw err
+  }
+  return origUnlink.call(this, file, ...args)
+}
+`)
+    assert.equal(first.status, 0)
+    assert.equal(copies('### Twin X'), 1)
+    assert.ok(existsSync(pending))
+
+    const secondBoard = `## Synthetic\n${blockAt('a1b2c341', 'Task Y', t1 - 13 * 3600000)}\n${blockAt('a1b2c342', 'Twin X', t1 - 10 * 3600000)}`
+    writeFileSync(f.path, secondBoard)
+    const second = runAt(t1, `
+const fs = require('fs')
+const origRename = fs.renameSync
+fs.renameSync = function(from, to, ...args) {
+  if (typeof to === 'string' && to.includes('progress.md')) {
+    throw new Error('SIMULATED_BOARD_RENAME_FAILURE')
+  }
+  return origRename.call(this, from, to, ...args)
+}
+`)
+    assert.notEqual(second.status, 0)
+    assert.equal(readFileSync(f.path, 'utf8'), secondBoard)
+    assert.equal(copies('### Task Y'), 1)
+    assert.equal(copies('### Twin X'), 1)
+
+    const third = runAt(t2)
+    assert.equal(third.status, 0, third.stderr)
+    assert.equal(third.stdout, 'Archived 2 tasks.\n')
+    assert.equal(copies('### Task Y'), 1)
+    assert.equal(copies('### Twin X'), 2)
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy removing nothing preserves an interrupted manual archive note', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Manual unfinished').length - 1
+    const pending = join(f.dir, 'progress-archive.pending')
+    writeFileSync(f.path, '## Synthetic\n### Manual unfinished\n- [ ] Still open\n')
+    const failBoard = join(f.dir, 'fail-manual-board.cjs')
+    writeFileSync(failBoard, `
+const fs = require('fs')
+const orig = fs.renameSync
+fs.renameSync = function(from, to, ...args) {
+  if (typeof to === 'string' && to.includes('progress.md')) {
+    throw new Error('SIMULATED_BOARD_RENAME_FAILURE')
+  }
+  return orig.call(this, from, to, ...args)
+}
+`)
+    const crashed = f.command(['--keys', 'a', '--lang', 'en'], failBoard)
+    assert.notEqual(crashed.status, 0)
+    assert.equal(copies(), 1)
+    assert.ok(existsSync(pending))
+
+    const noopTidy = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(noopTidy.status, 0, noopTidy.stderr)
+    assert.ok(existsSync(pending))
+
+    const retried = f.command(['--keys', 'a', '--lang', 'en'])
+    assert.equal(retried.status, 0, retried.stderr)
+    assert.equal(copies(), 1)
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Manual unfinished'))
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy keeps archive copy counts across multiple part rotations', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-') && name.endsWith('.md')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c350', 'Local synthetic task', 'done', 13)}`)
+    assert.equal(f.command(['--tidy', '--lang', 'en']).status, 0)
+    const part1 = join(f.dir, 'progress-archive-2026-10.md')
+    const part2 = join(f.dir, 'progress-archive-2026-10-2.md')
+    const pad = `\n\n## Padding · 2026-10-01\n### Filler\n- [x] ${'p'.repeat(1_048_600)}\n`
+    writeFileSync(part1, readFileSync(part1, 'utf8') + pad)
+    writeFileSync(part2, `# Archive\n\n## Padding · 2026-10-02\n### Filler\n- [x] ${'q'.repeat(1_048_500)}\n`)
+
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c351', 'Local synthetic task', 'done', 13)}`)
+    const failBoard = join(f.dir, 'fail-rot-board.cjs')
+    writeFileSync(failBoard, `
+const fs = require('fs')
+const orig = fs.renameSync
+fs.renameSync = function(from, to, ...args) {
+  if (typeof to === 'string' && to.includes('progress.md')) {
+    throw new Error('SIMULATED_BOARD_RENAME_FAILURE')
+  }
+  return orig.call(this, from, to, ...args)
+}
+`)
+    const crashed = f.command(['--tidy', '--lang', 'en'], failBoard)
+    assert.notEqual(crashed.status, 0)
+    assert.equal(copies(), 2)
+    assert.ok(statSync(part2).size >= 1_048_576)
+
+    const retry = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(retry.status, 0, retry.stderr)
+    assert.equal(copies(), 2)
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
   })
 })
 

@@ -46,8 +46,7 @@ import {
   parseJournal,
   previousMonth,
   progressReport,
-  missingEntries,
-  entryArchiveCount,
+  nextPendingArchive,
   parsePendingArchive,
   pendingArchivePath,
   unwrittenEntries,
@@ -3009,14 +3008,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
-    const pendingFile = pendingArchivePath(path)
-    if (await $.fs.exists(pendingFile)) {
-      const isWin = await isWindows($, path)
-      const removed = await removeFiles($, [pendingFile], isWin)
-      if (!removed) {
-        process.stderr.write?.(`${s.pendingNoteRemoveFailed(baseName(pendingFile))}\n`)
-      }
-    }
+    await removePendingArchiveNote($, path, s)
     // Another session's stale write can put the blocks back and the next try remove them again:
     // an entry counts the most copies one write removed, not the sum over the tries.
     const going = new Map<string, number>()
@@ -3039,6 +3031,26 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   await poll($)
 
   return [...removed.values()].reduce((sum, one) => sum + one, 0)
+}
+
+const removePendingArchiveNote = async ($: EngineInterface, path: string, s: Strings): Promise<void> => {
+  const pendingFile = pendingArchivePath(path)
+  if (!(await $.fs.exists(pendingFile))) return
+  const isWin = await isWindows($, path)
+  const name = baseName(pendingFile)
+  if (await removeFiles($, [pendingFile], isWin)) {
+    await update($, answer, current =>
+      current !== null && Object.values(STRINGS).some(words => current.text === words.pendingNoteRemoveFailed(name))
+        ? null
+        : current,
+    ).catch(() => undefined)
+    return
+  }
+  await update($, answer, current =>
+    current?.isAsking || current?.copied !== undefined
+      ? current
+      : { question: s.archiveTitle, text: s.pendingNoteRemoveFailed(name), isAsking: false },
+  ).catch(() => undefined)
 }
 
 // What the explicit archive checks before it takes a block that asks (#174): the ledger settled
@@ -3071,23 +3083,16 @@ const appendArchive = async (
   let pendingText = ''
   try { pendingText = await readText($, pendingFile) } catch {}
   const pending = parsePendingArchive(pendingText)
-  const archive = await partFor($, month)
+  const sizes = await readMonthParts(month, async path => (await $.fs.stat(path).catch(() => undefined))?.size ?? null)
+  const archive = currentPart(month, path => sizes.get(path) ?? null)
+  const earlierPaths = monthParts(month, path => (sizes.get(path) ?? null) !== null).filter(one => one !== archive)
   const past = await readText($, archive)
-  const missing = missingEntries([past], entries, written, pending, currentBoardHash)
-  if (missing.length === 0) return
-  const recoveredEntries = pending.filter(p => !missing.includes(p.entry))
-  const newEntries = missing.map(entry => ({
-    entry,
-    held: entryArchiveCount([past], entry, written),
-    boardHash: currentBoardHash,
-  }))
-  const noteEntries = [
-    ...recoveredEntries.map(p => ({ entry: p.entry, held: p.held, boardHash: currentBoardHash })),
-    ...newEntries,
-  ]
-  await $.fs.write(pendingFile, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: noteEntries }) + '\n')
+  const earlier = earlierPaths.length === 0 ? [] : await Promise.all(earlierPaths.map(one => readText($, one).catch(() => '')))
+  const planned = nextPendingArchive([past, ...earlier], entries, written, pending, currentBoardHash)
+  if (planned.missing.length === 0) return
+  await $.fs.write(pendingFile, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n')
   const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
-  await $.fs.write(archive, head + missing.join('\n\n') + '\n')
+  await $.fs.write(archive, head + planned.missing.join('\n\n') + '\n')
 }
 
 // One task to the archive at the person's word, written the way archiveOld writes. False when
@@ -3118,14 +3123,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
     await appendArchive($, path, archivePath(path, at), fresh, s, new Map(), currentBoardHash)
     for (const entry of pendingEntries) archived.add(entry)
     await $.fs.write(path, text)
-    const pendingFile = pendingArchivePath(path)
-    if (await $.fs.exists(pendingFile)) {
-      const isWin = await isWindows($, path)
-      const removed = await removeFiles($, [pendingFile], isWin)
-      if (!removed) {
-        process.stderr.write?.(`${s.pendingNoteRemoveFailed(baseName(pendingFile))}\n`)
-      }
-    }
+    await removePendingArchiveNote($, path, s)
   })
   if (wrote === null) return false
   if (ref.session === null) {

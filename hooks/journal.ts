@@ -97,6 +97,58 @@ export const unwrittenEntries = (entries: readonly string[], written: ReadonlyMa
   })
 }
 
+// Records kept in the pending note for a write that adds missing entries (#560): only records
+// that matched entries moving in this run stay, keeping their original boardHash, followed by
+// records for the newly appended entries.
+export const nextPendingArchive = (
+  pasts: readonly string[],
+  entries: readonly string[],
+  written: ReadonlyMap<string, number> = new Map(),
+  pending: readonly (PendingArchiveRecord | string)[] = [],
+  boardHash?: string,
+): { missing: string[]; records: PendingArchiveRecord[] } => {
+  const norm = (s: string): string => s.replace(/\r\n/g, '\n').replace(/\n+$/, '')
+  const pendingByEntry = new Map<string, Array<{ held: number; boardHash?: string }>>()
+  for (const item of pending) {
+    const entry = typeof item === 'string' ? norm(item) : norm(item.entry)
+    const held = typeof item === 'string' ? NaN : item.held
+    const itemHash = typeof item === 'string' ? undefined : item.boardHash
+    const list = pendingByEntry.get(entry) ?? []
+    list.push({ held, boardHash: itemHash })
+    pendingByEntry.set(entry, list)
+  }
+  const inPastCount = new Map<string, number>()
+  for (const entry of entries) {
+    const key = norm(entry)
+    if (!inPastCount.has(key)) inPastCount.set(key, entryArchiveCount(pasts, key, written))
+  }
+  const consumed = new Map<string, number>()
+  const keptCount = new Map<string, number>()
+  const kept: PendingArchiveRecord[] = []
+  const missing: string[] = []
+  for (const entry of entries) {
+    const key = norm(entry)
+    const needed = (consumed.get(key) ?? 0) + 1
+    consumed.set(key, needed)
+    const heldList = pendingByEntry.get(key)
+    const record = heldList !== undefined && heldList.length >= needed ? heldList[needed - 1] : undefined
+    const isHashMatch = boardHash === undefined && record?.boardHash === undefined ? true : record?.boardHash === boardHash
+    const nowHeld = inPastCount.get(key) ?? 0
+    if (record !== undefined && Number.isFinite(record.held) && isHashMatch && nowHeld >= record.held + needed) {
+      kept.push({ entry: key, held: record.held, ...(record.boardHash === undefined ? {} : { boardHash: record.boardHash }) })
+      keptCount.set(key, (keptCount.get(key) ?? 0) + 1)
+    } else {
+      missing.push(entry)
+    }
+  }
+  const added = missing.map(entry => {
+    const key = norm(entry)
+    const held = Math.max(0, (inPastCount.get(key) ?? 0) - (keptCount.get(key) ?? 0))
+    return { entry: key, held, ...(boardHash === undefined ? {} : { boardHash }) }
+  })
+  return { missing, records: [...kept, ...added] }
+}
+
 // The entries the archive files (`pasts`) do not hold yet. When `pending` is provided, only
 // entries recorded in an interrupted save attempt and already present in the archive are skipped (#560).
 // When `pending` is omitted, an archive holding at least as many copies as are going treats them
@@ -118,37 +170,7 @@ export const missingEntries = (
     const isHeld = new Map([...going].map(([key, count]) => [key, entryArchiveCount(pasts, key, written) >= count]))
     return entries.filter(entry => isHeld.get(norm(entry)) !== true)
   }
-  const pendingByEntry = new Map<string, Array<{ held: number; boardHash?: string }>>()
-  for (const item of pending) {
-    const entry = typeof item === 'string' ? norm(item) : norm(item.entry)
-    const held = typeof item === 'string' ? NaN : item.held
-    const itemHash = typeof item === 'string' ? undefined : item.boardHash
-    const list = pendingByEntry.get(entry) ?? []
-    list.push({ held, boardHash: itemHash })
-    pendingByEntry.set(entry, list)
-  }
-  const inPastCount = new Map<string, number>()
-  for (const entry of entries) {
-    const key = norm(entry)
-    if (!inPastCount.has(key)) {
-      inPastCount.set(key, entryArchiveCount(pasts, key, written))
-    }
-  }
-  const consumed = new Map<string, number>()
-  return entries.filter(entry => {
-    const key = norm(entry)
-    const needed = (consumed.get(key) ?? 0) + 1
-    consumed.set(key, needed)
-    const heldList = pendingByEntry.get(key)
-    if (!heldList || heldList.length < needed) return true
-    const record = heldList[needed - 1]!
-    if (!Number.isFinite(record.held)) return true
-    if (boardHash !== undefined || record.boardHash !== undefined) {
-      if (record.boardHash !== boardHash) return true
-    }
-    const nowHeld = inPastCount.get(key) ?? 0
-    return !(nowHeld >= record.held + needed)
-  })
+  return nextPendingArchive(pasts, entries, written, pending, boardHash).missing
 }
 
 // The month before, so a week that spans two months reads both files.
