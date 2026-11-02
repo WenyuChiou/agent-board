@@ -469,8 +469,13 @@ test('the review gate passes only an approval of the current head by someone oth
   assert.match(gate(`Review: APPROVE ${head}\nReview: REQUEST CHANGES ${head} by dot`).problems[0].message, /does not name its reviewer/)
   // Fenced, hidden or quoted text does not count as a genuine verdict
   assert.match(gate('```\nReview: APPROVE ' + head + ' by dot\n```').problems[0].message, /no review verdict/)
+  assert.match(gate(' ```\nReview: APPROVE ' + head + ' by dot\n ```').problems[0].message, /no review verdict/)
+  assert.match(gate('   ~~~\nReview: APPROVE ' + head + ' by dot\n   ~~~').problems[0].message, /no review verdict/)
+  assert.match(gate('````\n```\nReview: APPROVE ' + head + ' by dot\n```\n````').problems[0].message, /no review verdict/)
   assert.match(gate('<!-- Review: APPROVE ' + head + ' by dot -->').problems[0].message, /no review verdict/)
   assert.match(gate('> Review: APPROVE ' + head + ' by dot').problems[0].message, /no review verdict/)
+  // Format/control characters and zero-width spaces are canonicalized before author/reviewer comparison
+  assert.match(gate('Review: APPROVE ' + head + ' by claude\u200b (cloud)').problems[0].message, /by the author/)
   // checkPr runs the gate only when asked, and not offline.
   assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true }).problems.some(item => item.check === 'review-gate'), true)
   assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true, prComments: null }).problems.some(item => item.check === 'review-gate'), true)
