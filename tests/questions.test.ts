@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
@@ -134,6 +134,14 @@ test('archiving a same-prefix peer checks that peer alone', () => {
   expect(sameTitleLedger.records.filter(record => isAskedBy(record, secondRef, second)).map(record => record.words)).toEqual(['Beta question?'])
   expect(archiveQuestionsKept(sameTitle, secondRef, sameTitleLedger)).toBe(true)
 
+  const crossText = (agent: string, step: string): string => ended('a1b2c3d4-person-a', 'Same work', step).replace('agent=claude', `agent=${agent}`)
+  const cross = parseProgress(`## demo\n${crossText('codex', '- [?] Alpha question?')}${crossText('claude', '- [?] Beta question?')}`)
+  const picked = cross[0]!.tasks[1]!
+  const crossRef = { project: 'demo', title: 'Same work', line: picked.line, session: 'a1b2c3d4' }
+  const crossLedger = observeQuestions(emptyQuestions(), cross, null, [], NOW, true).ledger
+  expect(refTasks(cross, crossRef)).toEqual([picked])
+  expect(crossLedger.records.filter(record => isAskedBy(record, crossRef, picked)).map(record => record.words)).toEqual(['Beta question?'])
+
   const twins = parseProgress(`## demo\n${ended('a1b2c3d4-person-a', 'Twin work', '- [?] Twin question?')}${ended('a1b2c3d4-person-a', 'Twin work', '- [?] Twin question?')}`)
   expect(refTasks(twins, { project: 'demo', title: 'Twin work', line: twins[0]!.tasks[1]!.line, session: 'a1b2c3d4' })).toHaveLength(2)
 })
@@ -170,6 +178,14 @@ test('a pending question pairs with the same-prefix peer block that asked it', (
   const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', text: 'Same ask?', isQuestion: true, at: NOW } as PendingTurn
   const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'pending', undefined, [turn]).ledger
   expect(ledger.records.map(record => record.words).sort()).toEqual(['Other ask?', 'Same ask?'])
+  expect(isTurnRecorded(ledger, turn)).toBe(true)
+  expect(isTurnRecorded(emptyQuestions(), turn)).toBe(false)
+  const both = parseProgress(`## demo\n${block('a1b2c3d4-person-a', 'Alpha work', 'Same ask?')}${block('a1b2c3d4-person-b', 'Beta work', 'Same ask?')}`)
+  const shared = observeQuestions(emptyQuestions(), both, null, [], NOW, true, 'pending', undefined, [turn]).ledger
+  expect(shared.records.map(record => record.source?.kind)).toEqual(['block', 'block'])
+  expect(isTurnRecorded(shared, turn)).toBe(true)
+  const twice = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} -->\n### Alpha work\n- [?] Same ask?\n- [?] Same ask?\n<!-- /auto session=a1b2c3d4 -->\n`)
+  expect(observeQuestions(emptyQuestions(), twice, null, [], NOW, true, 'pending', undefined, [turn]).ledger.records.filter(record => record.source?.kind === 'inbox')).toHaveLength(1)
 })
 
 test('compact question indexes preserve every value and parse like existing formatted indexes', () => {

@@ -182,9 +182,20 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
 export const isAskedBy = (record: QuestionRecord, ref: TaskRef, task?: ProgressTask): boolean => {
   if (record.source?.project !== ref.project || record.source.task !== ref.title || (ref.session === null ? record.source.kind !== 'manual' : record.source.session !== ref.session)) return false
   const owner = sourceOwner(record.source)
-  const asker = owner === null ? null : canonicalOf(owner)
-  const picked = task?.auto === null || task?.auto === undefined ? null : canonicalOf(task.auto)
-  return asker === null || picked === null || asker === picked
+  const picked = task?.auto ?? null
+  if (owner === null || picked === null) return true
+  const asker = canonicalOf(owner)
+  const named = canonicalOf(picked)
+  return asker === null || named === null || (asker === named && (owner.agent || 'claude').toLowerCase() === (picked.agent || 'claude').toLowerCase())
+}
+// Whether the ledger holds this turn's own ask, which a same-prefix peer's block may have paired
+// under its full id. An earlier ask of the same words by the same session is not a record of it.
+export const isTurnRecorded = (ledger: QuestionLedger, turn: PendingTurn): boolean => {
+  if (!turn.isQuestion || turn.id === undefined) return true
+  const scope = questionScope(turn.project, turn.agent, turn.id)
+  const json = JSON.stringify(turn)
+  const revisions = turn.sourceRevisions ?? []
+  return ledger.records.some(record => (record.scope === scope || (record.source?.project === turn.project && record.source.session === turn.id && (record.source.agent || 'claude') === (turn.agent || 'claude'))) && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
 }
 export const questionProofPath = (path: string, kind: keyof QuestionProofs, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-${kind}-${hash}.json`
 export const questionProofOf = (path: string, name: string): { kind: keyof QuestionProofs; hash: string } | null => {
@@ -508,10 +519,12 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
     const scope = questionScope(turn.project, turn.agent, turn.id)
     if (frozen.has(scope)) continue
     const matching = rows.filter(row => row.isWaiting && row.session === turn.id && row.source.project === turn.project && (row.source.agent || 'claude') === (turn.agent || 'claude') && questionWords(row.text) === questionWords(turn.text))
-    if (matching.length === 1 && matching[0] !== undefined) {
-      const row = matching[0]
-      row.producerRevisions = [...new Set([...(row.producerRevisions ?? []), ...(turn.sourceRevisions ?? [])])]
-      row.producerSources = [...(row.producerSources ?? []), JSON.stringify(turn)]
+    // A turn holds only the short id, so same-prefix peers asking the same words both carry it.
+    if (matching.length === 1 || (matching.length > 1 && new Set(matching.map(row => row.scope)).size === matching.length)) {
+      for (const row of matching) {
+        row.producerRevisions = [...new Set([...(row.producerRevisions ?? []), ...(turn.sourceRevisions ?? [])])]
+        row.producerSources = [...(row.producerSources ?? []), JSON.stringify(turn)]
+      }
       continue
     }
     rows.push({ scope, session: turn.id, index: `inbox:${questionWords(turn.text)}`, text: turn.text, isWaiting: true, producer: '', producerRevisions: turn.sourceRevisions, producerSources: [JSON.stringify(turn)], source: { kind: 'inbox', project: turn.project, task: '', context: '', text: turn.text, agent: turn.agent, session: turn.id, data: JSON.stringify(turn) } })
