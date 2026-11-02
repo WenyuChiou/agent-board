@@ -61,7 +61,7 @@ Keep visible state and latency distinct so an enqueue or delivery failure cannot
 - **Sending**: Immediate local UI feedback (`< 500 ms`); no durable delivery claim.
 - **Queued**: Mailbox transaction committed to disk; visible send status within **1–2 seconds**.
 - **Board update**: Overall board state refreshes in **~2 seconds**.
-- **Host accepted**: Bound host/adapter has supplied transport delivery proof (child process spawned/hook returned 0, SDK turn accepted). **Not proof that the model read or answered**.
+- **Host accepted**: Bound host/adapter has verified completed transport write (stdout pipe flushed, SDK turn submitted, or MCP tool call returned; child process spawn alone is insufficient). Persists status as `accepted`; target remains blocked. **Not proof that the model read or answered**.
 - **Semantic ACK**: Correlated acknowledgement (`ACK <nonce>` or `board_ack`) from the intended session/turn.
 - **Full reply**: Separately observed completion with its own independent model latency.
 - **Bounded wait**: A parked `board_wait` call's 45 s limit is the **maximum empty wait**; an arriving event wakes it immediately rather than waiting for the timeout.
