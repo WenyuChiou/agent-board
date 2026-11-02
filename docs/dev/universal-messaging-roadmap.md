@@ -26,7 +26,7 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
 
 | Scenario | Durable State | Waiter Cleanup | Target-Blocking Effect | No-Replay Outcome |
 | :--- | :--- | :--- | :--- | :--- |
-| **Wait Cancellation (Empty Wait)** | `queued` (messages unaffected) | Waiter unregistered from `WaitManager` | Target unblocked; queued messages remain available | N/A (no claim occurred) |
+| **Wait Cancellation (Empty Wait)** | `queued` (messages unaffected) | Waiter unregistered from `WaitManager` | Unchanged (existing open message blocking preserved; queued messages remain available) | N/A (no claim occurred) |
 | **Pre-Claim Message Withdrawal** | `rejected` (`error: 'DISMISSED'`) | Message-specific waiter notification aborted | Target unblocked immediately | Message permanently finished; never delivered |
 | **Post-Claim Cancellation / Disconnect** | `uncertain` (`error: 'DISMISSED'`) | Transport process aborted/killed; waiter closed | Target remains blocked until settled/timeout | Strict no-replay; never automatically re-injected |
 
@@ -34,7 +34,7 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
    - Retain `#388`'s target blocking: `claimMessages` blocks a target while an open message is `accepted` or `uncertain` (`hooks/messaging.ts:158–164`). This prevents out-of-order execution, split delivery, and race conditions.
    - **Receipt stages**:
      1. *Prepared envelope*: In-memory claim formed, nonce issued, prompt framed.
-     2. *Transport write / `accepted`*: Child process spawned/hook returned 0, SDK turn accepted, or MCP tool call returned. Persists status as `accepted`; **target remains blocked**. This is strictly transport receipt evidence, **never** proof of model reading or semantic comprehension.
+     2. *Completed transport write / `accepted`*: External transport write verified complete (stdout pipe flushed, SDK turn submitted, or MCP tool call returned; process spawn alone is insufficient). Persists status as `accepted`; **target remains blocked**. This is strictly transport receipt evidence, **never** proof of model reading or semantic comprehension.
      3. *Semantic ACK / `acknowledged`*: Host agent issues `ACK <nonce>` or `board_ack` within the turn. Persists status as `acknowledged`; target unblocks.
      4. *Settled / queue release*: Message text dropped, hash preserved, pruned after retention period (`FINISHED_KEEP_MS`).
    - Retain current `HOP_LIMIT=2` across all roadmaps and briefs (#603, #319, #685, #686) and six-hex ACK token (`ACK <nonce>`). The 128-bit random framing boundary used to isolate delivered peer prompts is stored and verified as a distinct field (`framingNonce`), preventing truncation or collision with the 6-character ACK token.
