@@ -213,7 +213,7 @@ export const isTurnRecorded = (ledger: QuestionLedger, turn: PendingTurn): boole
   const scope = questionScope(turn.project, turn.agent, turn.id)
   const json = JSON.stringify(turn)
   const revisions = turn.sourceRevisions ?? []
-  return ledger.records.some(record => (record.scope === scope || (turn.session !== undefined && record.source?.project === turn.project && record.source.session === turn.id && (record.source.agent || 'claude') === (turn.agent || 'claude') && isOwnerOf(record.source, turn.session))) && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
+  return ledger.records.some(record => (record.scope === scope || (record.source?.project === turn.project && record.source.session === turn.id && (record.source.agent || 'claude') === (turn.agent || 'claude') && isOwnerOf(record.source, turn.session))) && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
 }
 export const questionProofPath = (path: string, kind: keyof QuestionProofs, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-${kind}-${hash}.json`
 export const questionProofOf = (path: string, name: string): { kind: keyof QuestionProofs; hash: string } | null => {

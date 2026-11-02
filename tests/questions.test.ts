@@ -188,6 +188,12 @@ test('a pending question pairs with the same-prefix peer block that asked it', (
   expect(ledger.records.map(record => record.words).sort()).toEqual(['Other ask?', 'Same ask?'])
   expect(isTurnRecorded(ledger, turn)).toBe(true)
   expect(isTurnRecorded(emptyQuestions(), turn)).toBe(false)
+  const { session: _turnSession, ...savedTurn } = turn
+  const savedLedger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'pending', undefined, [savedTurn as PendingTurn]).ledger
+  expect(savedLedger.records.map(record => record.source?.kind)).toEqual(['block', 'block'])
+  expect(savedLedger.records.find(record => record.words === 'Same ask?')?.scope).toBe(questionScope('demo', 'codex', 'a1b2c3d4-person-a'))
+  expect(isTurnRecorded(savedLedger, savedTurn as PendingTurn)).toBe(true)
+  expect(isTurnRecorded(emptyQuestions(), savedTurn as PendingTurn)).toBe(false)
 
   const both = parseProgress(`## demo\n${block('a1b2c3d4-person-a', 'Alpha work', 'Same ask?')}${block('a1b2c3d4-person-b', 'Beta work', 'Same ask?')}`)
   const shared = observeQuestions(emptyQuestions(), both, null, [], NOW, true, 'pending', undefined, [{ ...turn, sourceRevisions: ['a'.repeat(64)] }]).ledger
