@@ -14,7 +14,7 @@ slugs. For example, `changelog.d/42-synthetic-summary.md` could contain:
   Tests: `a synthetic page opens on what needs you`.
 ```
 
-The bold part is `area / topic`. The area names what the person uses, for example Page, Terminal board, Pane, Setup, Codex, Claude Code, Antigravity, Cursor, Questions, Messaging, Storage, Docs, Tests or CI. After ` · ` come one to three plain sentences about what changed for the person, not how it was built, ending with the issue number `(#N)`.
+The bold part is `area / topic`. The area names what the person uses, for example Page, Terminal board, Pane, Setup, Codex, Claude Code, Antigravity, Cursor, Questions, Messaging, Storage, Docs, Tests or CI. After ` · ` comes one plain sentence about what changed for the person, not how it was built, ending with the issue number `(#N)`. How it was built and tested belongs in the pull request, not in the CHANGELOG.
 
 The `Tests:` line names the covering tests by their exact titles in backticks, separated by commas, for reviewers and `scripts/pr-check.mjs`. Documentation-only changes write `Tests: none (documentation only).` Existing fragments stay untouched until release.
 
@@ -23,4 +23,4 @@ preview the new section, then adds `--write` to update CHANGELOG.md and remove
 the folded fragments. Use `--date YYYY-MM-DD` to set the date; it defaults to
 today in UTC. Fragments appear by issue number descending, then by filename,
 above any remaining Unreleased entries. This README is never checked or folded
-as a fragment. The fold leaves each entry's `Tests:` line out of CHANGELOG.md.
+as a fragment. The fold leaves each entry's `Tests:` line out of CHANGELOG.md. The release pull request shortens any folded entry that runs past one sentence.
