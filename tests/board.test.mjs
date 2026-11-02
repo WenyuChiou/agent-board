@@ -1453,7 +1453,7 @@ syncBuiltinESMExports()
 // The real --watch key handler on a pretend terminal: the file is changed (or not) right after
 // the first screen is drawn, and the keys arrive before the next 2-second redraw, the way a press
 // does when an agent writes between a draw and a key.
-const watchPress = (initial, replacement, keys, args = []) => {
+const watchPress = (initial, replacement, keys, args = [], rows = 0) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-watch-'))
   try {
     const path = join(dir, 'progress.md')
@@ -1466,7 +1466,7 @@ Object.defineProperty(process.stdin, 'isTTY', { value: true })
 process.stdin.setRawMode = () => {}
 // The board draws only on a terminal; a pipe gets it once as plain text.
 Object.defineProperty(process.stdout, 'isTTY', { value: true })
-const write = process.stdout.write.bind(process.stdout)
+${rows > 0 ? `Object.defineProperty(process.stdout, 'rows', { value: ${rows} })\n` : ''}const write = process.stdout.write.bind(process.stdout)
 let drawn = false
 process.stdout.write = function (text, ...rest) {
   const result = write(text, ...rest)
@@ -1566,6 +1566,16 @@ test('the terminal board archives with a only the hand-kept task it drew: once t
   assert.ok(archived.out.includes('Archived “Weekly review”.'), archived.out)
   assert.equal(archived.after.split('### Weekly review').length - 1, 1, archived.after)
   assert.ok(archived.after.includes('Call Bob'), archived.after)
+})
+
+test('the terminal board watch view scrolls to follow the selection', { timeout: 30_000 }, () => {
+  const tasks = Array.from({ length: 15 }, (_, i) => `### Task ${(i + 1).toString().padStart(2, '0')}\n- [ ] Step\n`).join('\n')
+  const initial = `# Progress\n\n## synthetic\n${tasks}`
+  const keys = Array.from({ length: 14 }, () => 'j')
+  const scrolled = watchPress(initial, initial, keys, [], 10)
+  const last = scrolled.out.split('\u001b[H').filter(Boolean).at(-1) ?? ''
+  assert.ok(last.includes('Task 15'), 'the selected task must be visible on screen')
+  assert.ok(!last.includes('Task 01'), 'earlier tasks must have scrolled off')
 })
 
 // The page's server, started the way `--serve` starts it in the background, on a synthetic
