@@ -490,7 +490,8 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     const touched = new Set(added.filter(item => item.path === 'CHANGELOG.md').map(item => item.line))
     const titles = testDeclarations(cwd)
     const problems = []
-    const entries = []
+    // A fragment kept from before the change still names its covering tests, so the release can fold it.
+    const entries = fragmentPaths.filter(path => fragmentIssue(path) !== null).map(path => added.filter(item => item.path === path).map(item => item.text).join('\n'))
     if (start !== -1) {
       let at = start + 1
       while (at < (next === -1 ? lines.length : next)) {

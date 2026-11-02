@@ -283,6 +283,11 @@ export const changelog = ({ text, added, issue, titles, isRelease, isDocsOnly, i
     output.info.push('changelog: skipped for a release pull request.')
     return output
   }
+  // A kept fragment must still fold at release: it names its own issue and its covering tests.
+  for (const path of addedPaths.filter(path => fragmentIssue(path) !== null)) {
+    const entry = added.filter(item => item.path === path).map(item => item.text).join('\n')
+    output.problems.push(...changelogEntry({ entry, issue: fragmentIssue(path), titles, isDocsOnly, location: 'fragment' }).problems)
+  }
   const lines = linesOf(text)
   const start = lines.findIndex(line => /^## Unreleased\s*$/.test(line))
   const next = lines.findIndex((line, index) => index > start && /^## /.test(line))

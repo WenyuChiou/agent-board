@@ -721,6 +721,17 @@ test('preflight asks no CHANGELOG entry for a code change', async t => {
   assert.equal(checks.some(item => item.state === 'WARN' && /fragment/.test(item.message)), false)
 })
 
+test('preflight still checks the test titles of a kept changelog fragment', async t => {
+  const f = fixture(t)
+  f.write('scripts/synthetic.mjs', 'export const value = 1\n')
+  f.write('tests/covering.test.ts', "test('a synthetic fragment has coverage', () => {})\n")
+  const path = 'changelog.d/42-synthetic.md'
+  f.write(path, '- **A synthetic fragment (#42).** It names its tests.\n  Tests: `a synthetic fragment has coverage`.\n')
+  assert.ok(has(await f.check(), 'PASS', 'new CHANGELOG test titles each name exactly one test'))
+  f.write(path, '- **A synthetic fragment (#42).** It names its tests.\n  Tests: `an unknown fragment title`.\n')
+  assert.ok(has(await f.check(), 'FAIL', 'an unknown fragment title (0 test declarations)'))
+})
+
 test('preflight warns of a new changelog fragment, whatever its name, but not of the folder README', async t => {
   const f = fixture(t)
   f.write('scripts/synthetic.mjs', 'export const value = 1\n')

@@ -108,6 +108,10 @@ test('pr-check keeps the fragment of a pull request opened before the change and
   const kept = checkPr(fragmentPr())
   assert.deepEqual(kept.problems, [])
   assert.ok(kept.info.includes("changelog: changelog.d/42-synthetic-check.md is kept as this pull request's entry; a new pull request adds no fragment (CONTRIBUTING rule 6)."))
+  // A kept fragment still has to fold at release, so it names its issue and its covering tests.
+  assert.ok(checkPr(fragmentPr(undefined, '- A change (#42).')).problems.some(item => /does not name its covering tests/.test(item.message)))
+  assert.ok(checkPr(fragmentPr(undefined, '- A change (#42). Tests: `an unknown synthetic title`.')).problems.some(item => /is not the title/.test(item.message)))
+  assert.ok(checkPr(fragmentPr(undefined, `- A change (#43). Tests: \`${coveringTitle}\`.`)).problems.some(item => item.message === 'the new entry does not name #42.'))
   for (const name of ['0042-synthetic.md', '42-Bad.md', 'nested/42-entry.md']) {
     assert.deepEqual(checkPr(fragmentPr(`changelog.d/${name}`)).problems.map(item => item.message), [`invalid fragment name: changelog.d/${name}.`], name)
   }
@@ -151,10 +155,9 @@ test('pr-check gives only the edited fragment problem for another issue\'s fragm
 test('pr-check reads a fragment without crashing on a huge issue number', async t => {
   const digits = '9'.repeat(400)
   const hugeBody = body.replace('Fixes #42', `Fixes #${digits}`)
-  for (const path of ['changelog.d/42-synthetic.md', `changelog.d/${digits}-synthetic.md`]) {
-    const checked = checkPr({ ...fragmentPr(path), body: hugeBody })
-    assert.equal(checked.problems.some(item => item.check === 'changelog'), false, path)
-  }
+  assert.equal(checkPr({ ...fragmentPr('changelog.d/42-synthetic.md'), body: hugeBody }).problems.some(item => item.check === 'changelog'), false)
+  const huge = checkPr({ ...fragmentPr(`changelog.d/${digits}-synthetic.md`), body: hugeBody }).problems.filter(item => item.check === 'changelog')
+  assert.deepEqual(huge.map(item => item.message), [`the new entry does not name #${digits}.`])
   const f = fixture(t)
   f.put('body.txt', hugeBody)
   f.put('changelog.d/42-Synthetic.md', entry + '\n')
