@@ -10,8 +10,8 @@ This document is the repository-tracked architecture, execution map, and coordin
 The primary product goal is **a person communicating with different agents from one board** (`WenyuChiou` / `dot`). Broad autonomous agent-to-agent networking and unconstrained peer control are outside this immediate release.
 
 Two evidence-backed host paths are targeted first:
-1. **Claude Code**: In-process plugin hook/register (`[P1]`, `$.prompt.submit` / `$.clock.every`, tracked on #603).
-2. **Codex CLI**: In-process turn-start hook (`[P1]`, `scripts/codex-local.ts`, tracked on #319).
+1. **Claude Code**: In-process plugin receiver (`[P1]`, `$.clock.every` + `$.prompt.submit` in `hooks/receiver.ts` / `hooks/register.tsx`, tracked on #316).
+2. **Codex CLI**: Native prompt/turn-start hook next-turn delivery (`scripts/codex-local.ts`, tracked on #603), step-end `Stop` continuation (tracked on #319), and shared-daemon `turn/start` live push (`[P1]`, tracked on #318).
 
 All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallback until separate, versioned host evidence is recorded and checked in.
 
@@ -22,13 +22,13 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
    - The atomic lock acquisition and disk commit in `claimMessages` (`queued` -> `uncertain`) is the single immutable point of no return.
    - **Wait cancellation (empty wait)**: When a caller aborts or times out a parked wait (`board_wait` / `--wait-message`) without a message having arrived, the wait is cleanly unregistered and aborted; any queued messages in the store remain untouched (`queued`) and unconsumed (matching #685).
    - **Pre-claim message withdrawal**: When the sender explicitly cancels or dismisses a message while still `queued` (before atomic claim wins), the message transitions to `rejected` with `error: 'DISMISSED'` / `'CANCELLED'`. Text is dropped, hash is preserved, and target blocking is released immediately. It is never claimed by or delivered to any host.
-   - **Post-claim cancellation / disconnect**: Once `queued` -> `uncertain` is committed to disk, a cancellation or disconnect **cannot** roll back the message to `queued` (violates strict no-replay). In accordance with the core `#388` contract (`hooks/messaging.ts:158–164`), the message remains in or transitions to `uncertain` with `error: 'DISMISSED'` / `'CANCELLED'`; target blocking is preserved until the message settles, is acknowledged, or reaches `OPEN_LIMIT_MS` (30 minutes). The message is **never** automatically re-injected on later turns.
+   - **Post-claim cancellation / disconnect**: Once `queued` -> `uncertain` is committed to disk, a cancellation or disconnect **cannot** roll back the message to `queued` (violates strict no-replay). In accordance with the core `#388` contract (`hooks/messaging.ts:158–164`), the message remains in or transitions to `uncertain` with `error: 'DISMISSED'` / `'CANCELLED'`; target blocking is preserved until the message settles, is acknowledged, or reaches `OPEN_LIMIT_MS` (30 minutes). The message is **never** automatically re-injected on later turns. A message whose completed transport write already persisted `accepted` keeps `accepted` (it never moves back to `uncertain` or `queued`); target blocking is preserved until it is acknowledged, settled, or reaches `OPEN_LIMIT_MS`.
 
 | Scenario | Durable State | Waiter Cleanup | Target-Blocking Effect | No-Replay Outcome |
 | :--- | :--- | :--- | :--- | :--- |
 | **Wait Cancellation (Empty Wait)** | `queued` (messages unaffected) | Waiter unregistered from `WaitManager` | Unchanged (existing open message blocking preserved; queued messages remain available) | N/A (no claim occurred) |
 | **Pre-Claim Message Withdrawal** | `rejected` (`error: 'DISMISSED'`) | Message-specific waiter notification aborted | Target unblocked immediately | Message permanently finished; never delivered |
-| **Post-Claim Cancellation / Disconnect** | `uncertain` (`error: 'DISMISSED'`) | Transport process aborted/killed; waiter closed | Target remains blocked until settled/timeout | Strict no-replay; never automatically re-injected |
+| **Post-Claim Cancellation / Disconnect** | `uncertain` (`error: 'DISMISSED'`), or unchanged `accepted` if the transport write already completed | Transport process aborted/killed; waiter closed | Target remains blocked until settled/timeout | Strict no-replay; never automatically re-injected |
 
 4. **Target Blocking, Transport Evidence & Semantic Acknowledgement**:
    - Retain `#388`'s target blocking: `claimMessages` blocks a target while an open message is `accepted` or `uncertain` (`hooks/messaging.ts:158–164`). This prevents out-of-order execution, split delivery, and race conditions.
@@ -43,10 +43,11 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
      - Message store path
      - Native agent name
      - OS PID and process creation time (verifying parent-child process relationship)
+       - Implementation risk (#685): on Windows, looking up a parent PID's creation time without dependencies may exceed the hook budget. #685 must measure it; if the binding cannot be verified within budget, the caller falls back to restricted mailbox mode and never receives the lease.
      - Canonical workspace path (`canonical(cwd)` matching `canonical(workspace)`)
      - Owner generation and trusted turn boundary
    - **Permitted rights**: `board_wait`, `board_ack`, `board_post` strictly within own assigned session and turn. Cannot impersonate other sessions, cannot grant tool permissions or bypass trust.
-   - **Expiry / renewal**: Leases expire at the turn boundary or after 60 s inactivity.
+   - **Expiry / renewal**: Leases expire at the turn boundary or after 60 s inactivity. A parked `board_wait` (including its 15 s `notifications/progress`) counts as activity, so the second consecutive wait in the same turn stays valid.
    - **Revocation / reconnect**: Contested registration marks both sessions `contested`; capability lease is immediately revoked, falling back to honest `Copy` mode.
    - Model-supplied text, prompt arguments, and client JSON-RPC request IDs are **not** identity proof.
    - Callers without authenticated host binding fall back to restricted unprivileged mailbox/polling mode, and never receive the privileged two-waits-per-turn lease.
@@ -72,8 +73,8 @@ Keep visible state and latency distinct so an enqueue or delivery failure cannot
 
 | Dimension | Adopted Decision & Technical Contract | Covered Boundaries & Failure Modes | Owning Slice & Artifact |
 | :--- | :--- | :--- | :--- |
-| **1. Delivery Goal & Two-Host Proof** | Primary target: user-led communication from one board. First two verified paths: **Claude Code** (`[P1]`) and **Codex** (`[P1]` turn-start). All other surfaces keep honest `Copy` / next-turn mailbox fallback until separate native evidence is checked in. | Distinguishes UI feedback (1–2s), board refresh (~2s), and model latency; prevents fabricated delivery claims. | `#687` Roadmap, `#603` Mailbox, `#319` Codex adapter |
-| **2. Cancellation, Claim & Uncertainty** | Atomic claim commit (`queued -> uncertain`) is the single ordering boundary. Pre-claim cancel removes from queue; post-claim cancel records uncertain receipt, preserving **no-replay**. | Arrival races, disconnect after claim, timeout after claim, stale-waiter cleanup. | `#603` Mailbox state machine, `#685` MCP cancellation semantics |
+| **1. Delivery Goal & Two-Host Proof** | Primary target: user-led communication from one board. First two targeted live-push paths: **Claude Code** (`[P1]`, #316) and **Codex** (`[P1]` daemon `turn/start`, #318); #603 provides Tier 3 next-turn delivery and #319 provides Tier 2 step-end continuation. All other surfaces keep honest `Copy` / next-turn mailbox fallback until separate native evidence is checked in. | Distinguishes UI feedback (1–2s), board refresh (~2s), and model latency; prevents fabricated delivery claims. | `#687` Roadmap, `#316` Claude receiver, `#318` Codex daemon, `#603` Hook mailbox, `#319` Codex step-end |
+| **2. Cancellation, Claim & Uncertainty** | Atomic claim commit (`queued -> uncertain`) is the single ordering boundary. Pre-claim cancel removes from queue; post-claim cancel keeps an already-`accepted` message `accepted`, otherwise retains `uncertain`, preserving **no-replay**. | Arrival races, disconnect after claim, timeout after claim, stale-waiter cleanup. | `#603` Mailbox state machine, `#685` MCP cancellation semantics |
 | **3. Trusted Session/Turn Enrollment** | Local launcher/host binds capability to store path, native agent, PID/start time, canonical workspace path, owner generation, and turn boundary. Unbound callers fall back to restricted mailbox polling. | Forged identity claims, stale leases, cross-workspace leakage, restart/reconnect. | `#603` Contract, `#685` Lease manager |
 | **4. Acceptance, Ordering & Compatibility** | Retains `#388` target blocking while messages are `accepted` or `uncertain`. `accepted` is transport evidence only. Keeps `HOP_LIMIT=2` and six-hex ACK token; 128-bit framing boundary is separate `framingNonce`. **DAG: `#365` unlocks only after `#388` + `#603` + `#319` merge.** | Out-of-order delivery, late/duplicate ACK, shared-file conflicts across `#319` and `#365`. | `#603` Core, `#319` Codex, `#365` Antigravity/Gemini, `#687` DAG |
 | **5. Capability Evidence & Visible Latency** | Surfaces explicitly tiered as `Proposed`, `Implemented`, or `Verified`. Target 1–2s visible send status, ~2s board update, separate from host ACK and model reply. Empty wait 45s max; prompt wake on event. | Prevents stacked 2s polling loops; surfaces real failure states. | `#687` Matrix, `#685` Waiter, `#365` Card gating |
@@ -103,8 +104,8 @@ Keep visible state and latency distinct so an enqueue or delivery failure cannot
 
 | # | Ecosystem | Surfaces Covered | Status | Tier 1 (Idle Wake) | Tier 2 (Busy Continuation) | Tier 3 (Next-Turn) | Outbound & Receipt |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | **Claude Code & Desktop** | CLI (`Code` >= 0.2.29); Desktop `Chat` | **Proposed** | `Code`: `[P1]` `$.prompt.submit` (gated by #603); `Chat`: `[P3]` `board_wait` (blocked by #685) | `Code`: `receive: false` until `turn.complete` | Plugin / `board_inbox` | Native pane + MCP `board_send` / `turn.complete` first-line `ACK` or `board_ack` |
-| 2 | **Codex** | CLI (Codex CLI >= 0.1.0); Daemon; Desktop App | **Proposed** | CLI: turn-start `--codex-report` / stdin envelope (gated by #388 / #319); Daemon: `turn/start` (blocked by #318); App: `[P3]` (blocked by #685) | `Stop` `{"decision":"block"}` | `SessionStart` + `UserPromptSubmit` | MCP `board_send` or `--send` / `Stop` first-line `ACK` or `board_ack` |
+| 1 | **Claude Code & Desktop** | CLI (`Code` >= 0.2.29); Desktop `Chat` | **Proposed** | `Code`: `[P1]` `$.prompt.submit` (gated by #316); `Chat`: `[P3]` `board_wait` (blocked by #685) | `Code`: `receive: false` until `turn.complete` | Plugin / `board_inbox` | Native pane + MCP `board_send` / `turn.complete` first-line `ACK` or `board_ack` |
+| 2 | **Codex** | CLI (Codex CLI >= 0.1.0); Daemon; Desktop App | **Proposed** | Daemon: `[P1]` `turn/start` (blocked by #318); App: `[P3]` (blocked by #685) | `Stop` `{"decision":"block"}` (gated by #319) | CLI: `SessionStart` + `UserPromptSubmit` next-turn mailbox (gated by #388 / #603) | MCP `board_send` or `--send` / `Stop` first-line `ACK` or `board_ack` |
 | 3 | **Antigravity** | 2.0 Desktop App, IDE, `agy` TUI / Stream CLI, SDK | **Proposed** | App/IDE/TUI: `[P2]` `--wait-message` (gated by #365 / #685); Stream: `stdin` | `PreInvocation` + `Stop` `{"decision":"continue"}` | `SessionStart` + `PreInvocation` (Gated: `HAS_ANTIGRAVITY_STEP_END_RECORD=false`) | `mcp_config.json` MCP + `--send` + optional Sidecar link |
 | 4 | **OpenCode** | CLI TUI, Desktop App, Web UI | **Proposed** | `[P1]` `client.session.promptAsync` + `[P3]` (blocked by #686) | `session.idle` plugin dispatch | Plugin / `board_inbox` | Plugin `agent_board_send` & `agent_board_ack` (`context.sessionID`) |
 | 5 | **Cursor** | Cursor IDE (Composer), `cursor-agent` CLI | **Proposed** | `[P3]` `board_wait` (45 s, blocked by #685) | `stop` `{"followup_message":...}` (gated by #319) | `sessionStart` + `board_inbox` (never `beforeSubmitPrompt`) | `~/.cursor/mcp.json` MCP + `afterAgentResponse` first-line `ACK` |
@@ -122,18 +123,20 @@ Keep visible state and latency distinct so an enqueue or delivery failure cannot
 
 Every slice stays focused (`<= 500` changed lines excluding generated bundles and changelog fragments) and owns disjoint primary files within each parallel wave:
 
+Exception: `#686` and `#233` both touch `hooks/local-agents.ts`. To prevent concurrent edits, `#686` is an explicit prerequisite for `#233`: `#233` stays `blocked` until both `#603` and `#686` merge, then starts from current `main` (or merges `main` into an existing draft branch without rebasing). Neither may change installed Codex hook command strings (invariant 7).
+
 | Phase / Slice | Issue / PR | Assigned Executor | Label State | Primary Files (Non-Colliding Within Wave) | Unlocks When Merged |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Phase 1A** | `#315` (PR `#388`) | `claude` / `codex` / `antigravity` | In CI / Ready | `hooks/messaging.ts`, `scripts/board-messaging.ts`, `scripts/message-store-claim.ts`, `scripts/board-serve.ts`, `scripts/board-cli.ts` | `#603`, `#317`, `#316`, `#318` |
-| **Phase 1B** | `#603` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/hook-safety.ts`, `hooks/hook-messages.ts`, `scripts/codex-local.ts` | `#319`, `#685`, `#686`, `#233` |
+| **Phase 1B** | `#603` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/hook-safety.ts`, `hooks/hook-messages.ts`, `scripts/codex-local.ts` | `#319`, `#685`, `#686` |
 | **Phase 1C** | `#317` | **`muse`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/cli-send.ts`, `hooks/board.ts`, `scripts/board-cli.ts`, `tests/cli-send.test.mjs` | `#232` |
 | **Phase 2A** | `#319` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#603` | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Codex/Grok/Muse `Stop` `block` + Cursor `stop`) | `#365` (Phase 2B) |
 | **Phase 2B** | `#365` | **`muse`** (`for-dot`) | `blocked` -> `ready` after **`#388`, `#603`, and `#319`** | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Antigravity `Stop`/`PreInvocation` + Gemini `AfterAgent`) | Full Tier 2 Antigravity/Gemini |
 | **Phase 3A** | `#685` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/mcp-tools.ts`, `scripts/board-mcp.ts`, `scripts/board-cli.ts` (`--mcp`, `--wait-message`), `hooks/connect-pure.ts` | Universal Desktop/IDE Tier 1 |
 | **Phase 3B-1** | `#316` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#388` | `hooks/receiver.ts`, `hooks/register.tsx`, `hooks/serve.ts`, string tables | Claude Code Tier 1 |
 | **Phase 3B-2** | `#318` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#388` | `scripts/codex-receiver.mjs`, `hooks/codex.ts` | Codex Daemon Tier 1 |
-| **Phase 3C-1** | `#686` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/local-agents.ts` (`opencodePlugin`), `hooks/portable-agents.ts` (DeepSeek, OpenClaw) | OpenCode/DeepSeek/OpenClaw Tier 1 |
-| **Phase 3C-2** | `#233` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/local-agents.ts` / `scripts/hermes-session-connector.mjs`, `tests/e2e/l3b-messaging.test.mjs` | Hermes L3b parity |
+| **Phase 3C-1** | `#686` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/local-agents.ts` (`opencodePlugin`), `hooks/portable-agents.ts` (DeepSeek, OpenClaw) | `#233` (Phase 3C-2) + OpenCode/DeepSeek/OpenClaw Tier 1 |
+| **Phase 3C-2** | `#233` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` and `#686` | `hooks/local-agents.ts` / `scripts/hermes-session-connector.mjs`, `tests/e2e/l3b-messaging.test.mjs` | Hermes L3b parity |
 | **Phase 3D** | `#232` (Bug PR) | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#317` | `hooks/pane.tsx`, `hooks/board.ts`, `scripts/board-cli.ts`, `tests/e2e/l3b-messaging.test.mjs` | Cross-surface receipt parity |
 | **Phase 4A** | `#561` | **`claude`** (`for-agent`) | `ready` (`for-agent`) | `docs/validation/*-web-chat-relay.md`, `hooks/serve.ts`, `scripts/board-serve.ts` | `dot` & Web-Chat zero-paste-box |
 
@@ -161,6 +164,7 @@ gh issue list --repo WenyuChiou/agent-board --state open --label for-agent --jso
 4. **Governance Rule R2 (`docs/dev/RULES.md` #R2 — Nobody approves their own work)**:
    - Remember: any agent that wrote part of a PR **or wrote its brief** counts as an author of that PR (`team-process.md` line 58, `RULES.md` line 17).
    - Because `antigravity` authored the briefs on `#603`, `#317`, `#319`, `#365`, `#685`, `#316`, `#318`, `#686`, `#233`, `#232`, and `#561`, `antigravity` performs technical QA, bundle rebuilds, and `Review: REQUEST CHANGES <full sha>` when fixes are needed, while the formal `Review: APPROVE <full sha> by <reviewer>` must come from an independent collaborator (`SUPERD6`, `RyanGosling0508`), the owner (`WenyuChiou`), or an independent reviewer session that did not author the PR or its brief.
+   - Every `claude` executor slice is taken by `SUPERD6` (Claude Code). `SUPERD6` is then an author of that slice and cannot approve it; its `Review: APPROVE <full sha>` must come from the owner (`WenyuChiou`), `RyanGosling0508`, or another reviewer that did not write the PR or its brief.
 
 ### Step 3 — Automatic Label Unlocks After Each Merge
 Immediately after squash-merging an upstream PR (`gh pr merge <PR> --squash --match-head-commit <sha>`) and posting closing verification evidence on its issue:
@@ -172,11 +176,14 @@ Immediately after squash-merging an upstream PR (`gh pr merge <PR> --squash --ma
   gh issue edit 316 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   gh issue edit 318 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   ```
-- **When `#603` (Phase 1B) merges**, unlock Phase 2A, Phase 3A, Phase 3C-1, and Phase 3C-2:
+- **When `#603` (Phase 1B) merges**, unlock Phase 2A, Phase 3A, and Phase 3C-1:
   ```sh
   gh issue edit 319 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   gh issue edit 685 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   gh issue edit 686 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
+  ```
+- **When `#686` (Phase 3C-1) merges**, unlock Phase 3C-2 (`#233`):
+  ```sh
   gh issue edit 233 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   ```
 - **When `#319` (Phase 2A) merges**, unlock Phase 2B (`#365`):
