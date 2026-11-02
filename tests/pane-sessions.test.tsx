@@ -87,6 +87,7 @@ import {
   type ProgressMirror,
   type World,
 } from './pane-helpers'
+import { parsePendingArchive } from '../hooks/journal'
 
 
 test('the task gets a line of background with its name, and a step that needs you says why', async ($, on) => {
@@ -1134,6 +1135,42 @@ test('/progress tidy when note write fails: nothing is archived and board is unc
   expect(world.files.get(FILE)).toContain('Synthetic twin')
   expect(world.files.has(pending)).toBe(false)
   expect(world.files.has(ARCHIVE)).toBe(false)
+
+  const oldNote = JSON.stringify({ version: 1, boardHash: 'old-hash', entries: [{ entry: '## Old', held: 0, boardHash: 'old-hash' }] }) + '\n'
+  world.files.set(pending, oldNote)
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
+  expect(world.files.get(FILE)).toContain('Synthetic twin')
+  expect(world.files.has(ARCHIVE)).toBe(false)
+  expect(world.files.get(pending)).toBe(oldNote)
+})
+
+test('/progress tidy preserves pending recovery records across same-invocation board-rewrite retries when a twin arrives', async ($, on) => {
+  const block1 = `<!-- auto session=a1b2c420 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c420 -->\n`
+  const block2 = `<!-- auto session=a1b2c421 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c421 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block1}`]]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+  }
+  world.afterWrite = () => {
+    world.unwritable = new Set([FILE])
+    return `# Progress\n\n## Synthetic\n${block1}\n${block2}`
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
+  expect(world.files.get(FILE)).toContain('a1b2c420')
+  expect(world.files.get(FILE)).toContain('a1b2c421')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+  expect(parsePendingArchive(world.files.get(pending) ?? '')).toHaveLength(2)
+
+  world.unwritable.clear()
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(2))
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+  expect(world.files.has(pending)).toBe(false)
 })
 
 test('archiveOne when archive write fails after note is written: task stays on board, and next archive archives it once', async ($, on) => {

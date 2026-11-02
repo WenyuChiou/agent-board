@@ -751,7 +751,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
     if (taken === null || taken.entries.length === 0) return text
     didRemove = true
     const fresh = unwrittenEntries(taken.entries, archived)
-    if (fresh.length > 0) {
+    if (fresh.length > 0 || archived.size > 0) {
       const month = archivePath(path, now)
       const part = partOf(month)
       // Earlier parts of this month keep the copy-count baseline stable across part rotations.
@@ -759,7 +759,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
       const kept = rewrite(part, past => {
         // A previous process may have saved the archive but failed to remove the task.
         const planned = nextPendingArchive([past, ...earlier], fresh, archived, pending, currentBoardHash)
-        if (planned.missing.length === 0) return past
+        if (planned.missing.length === 0 && archived.size === 0) return past
         if (isSymlinkOrNonRegular(pendingFile)) {
           throw fileError(pendingFile, Object.assign(new Error('EEXIST: refusing to write symlinked or non-regular pending note'), { code: 'EEXIST' }))
         }
@@ -774,7 +774,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
           throw fileError(part, error)
         }
         pending = planned.records
-        return `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${planned.missing.join('\n\n')}\n`
+        return planned.missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${planned.missing.join('\n\n')}\n`
       })
       if (kept === null) return null
       for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)

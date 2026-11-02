@@ -2,7 +2,8 @@ import { BOARD_SCRIPT } from './board-script'
 import { connectRecordPath, hasOwnConnectData, recoveryUnreadableCode } from './connect-pure'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
-import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE } from './ledger-move'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
+import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } from 'claude-code'
@@ -3008,7 +3009,6 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
-    await removePendingArchiveNote($, path, s)
     // Another session's stale write can put the blocks back and the next try remove them again:
     // an entry counts the most copies one write removed, not the sum over the tries.
     const going = new Map<string, number>()
@@ -3020,6 +3020,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     await poll($)
     return 0
   }
+  await removePendingArchiveNote($, path, s)
   if (keys.size > 0) {
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([key]) => !keys.has(key))))
     await saveDoneSeen($, at, kept => Object.fromEntries(Object.entries(kept).filter(([key]) => !keys.has(key))))
@@ -3082,7 +3083,7 @@ const appendArchive = async (
   written: ReadonlyMap<string, number> = new Map(),
   currentBoardHash?: string,
 ): Promise<void> => {
-  if (entries.length === 0) return
+  if (entries.length === 0 && written.size === 0) return
   const pendingFile = pendingArchivePath(progressFile)
   const parentDir = pendingFile.replace(/[\\/][^\\/]*$/, '')
   const pendingBase = baseName(pendingFile)
@@ -3101,22 +3102,35 @@ const appendArchive = async (
   const past = await readText($, archive)
   const earlier = earlierPaths.length === 0 ? [] : await Promise.all(earlierPaths.map(one => readText($, one).catch(() => '')))
   const planned = nextPendingArchive([past, ...earlier], entries, written, pending, currentBoardHash)
-  if (planned.missing.length === 0) return
+  if (planned.missing.length === 0 && written.size === 0) return
   const list = await $.fs.list(parentDir).catch(() => [])
   const existing = list.find(entry => entry.name === pendingBase)
   if (existing && existing.kind !== 'file') {
     throw new Error('PENDING_NOTE_NOT_REGULAR_FILE')
   }
-  const isWin = await isWindows($, progressFile)
-  const tempPending = `${pendingFile}.${Date.now().toString(36)}.board-tmp`
-  await $.fs.write(tempPending, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n')
-  const replaced = await replaceFile($, tempPending, pendingFile, isWin)
-  if (!replaced) {
-    await removeFiles($, [tempPending], isWin).catch(() => {})
+  const payload = JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n'
+  const stagedRun = await $.process.run(['node', '-e', PENDING_STAGE, '--', pendingFile], { timeoutMs: 10000 }).catch(() => null)
+  let stage: PendingStage | null = null
+  if (stagedRun !== null && stagedRun.exitCode === 0 && !stagedRun.isStdoutTruncated) {
+    try {
+      stage = pendingStage(JSON.parse(stagedRun.stdout))
+    } catch {}
+  }
+  if (stage === null) throw new Error('PENDING_NOTE_WRITE_FAILED')
+  try {
+    await $.fs.write(stage.file, payload)
+  } catch {
+    await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, ''], { timeoutMs: 10000 }).catch(() => null)
     throw new Error('PENDING_NOTE_WRITE_FAILED')
   }
-  const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
-  await $.fs.write(archive, head + planned.missing.join('\n\n') + '\n')
+  const committed = await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, sha256(payload)], { timeoutMs: 10000 }).catch(() => null)
+  if (committed === null || committed.exitCode !== 0) {
+    throw new Error('PENDING_NOTE_WRITE_FAILED')
+  }
+  if (planned.missing.length > 0) {
+    const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
+    await $.fs.write(archive, head + planned.missing.join('\n\n') + '\n')
+  }
 }
 
 // One task to the archive at the person's word, written the way archiveOld writes. False when
@@ -3125,7 +3139,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const path = await progressPath($)
   const at = await $.clock.now()
   const s = await wordsOf($)
-  const archived = new Set<string>()
+  const archived = new Map<string, number>()
   const observed = await read($, firstSeen)
   let pendingEntries: string[] = []
   let currentBoardHash = ''
@@ -3143,13 +3157,13 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
     pendingEntries = taken.entries
     return taken.text
   }, undefined, async (path, text) => {
-    const fresh = pendingEntries.filter(entry => !archived.has(entry))
-    await appendArchive($, path, archivePath(path, at), fresh, s, new Map(), currentBoardHash)
-    for (const entry of pendingEntries) archived.add(entry)
+    const fresh = unwrittenEntries(pendingEntries, archived)
+    await appendArchive($, path, archivePath(path, at), fresh, s, archived, currentBoardHash)
+    for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     await $.fs.write(path, text)
-    await removePendingArchiveNote($, path, s)
   })
   if (wrote === null) return false
+  await removePendingArchiveNote($, path, s)
   if (ref.session === null) {
     const key = doneKey(ref.project, ref.title)
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([one]) => one !== key)))

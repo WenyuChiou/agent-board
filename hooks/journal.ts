@@ -108,6 +108,13 @@ export const nextPendingArchive = (
   boardHash?: string,
 ): { missing: string[]; records: PendingArchiveRecord[] } => {
   const norm = (s: string): string => s.replace(/\r\n/g, '\n').replace(/\n+$/, '')
+  const normalizedWritten = new Map<string, number>()
+  for (const [entry, count] of written) {
+    if (Number.isSafeInteger(count) && count > 0) {
+      const key = norm(entry)
+      normalizedWritten.set(key, (normalizedWritten.get(key) ?? 0) + count)
+    }
+  }
   const pendingByEntry = new Map<string, Array<{ held: number; boardHash?: string }>>()
   for (const item of pending) {
     const entry = typeof item === 'string' ? norm(item) : norm(item.entry)
@@ -118,9 +125,19 @@ export const nextPendingArchive = (
     pendingByEntry.set(entry, list)
   }
   const inPastCount = new Map<string, number>()
+  for (const [key] of normalizedWritten) {
+    inPastCount.set(key, entryArchiveCount(pasts, key, normalizedWritten))
+  }
   for (const entry of entries) {
     const key = norm(entry)
-    if (!inPastCount.has(key)) inPastCount.set(key, entryArchiveCount(pasts, key, written))
+    if (!inPastCount.has(key)) inPastCount.set(key, entryArchiveCount(pasts, key, normalizedWritten))
+  }
+  const priorWritten: PendingArchiveRecord[] = []
+  for (const [key, count] of normalizedWritten) {
+    const held = Math.max(0, inPastCount.get(key) ?? 0)
+    for (let index = 0; index < count; index += 1) {
+      priorWritten.push({ entry: key, held, ...(boardHash === undefined ? {} : { boardHash }) })
+    }
   }
   const consumed = new Map<string, number>()
   const keptCount = new Map<string, number>()
@@ -146,7 +163,7 @@ export const nextPendingArchive = (
     const held = Math.max(0, (inPastCount.get(key) ?? 0) - (keptCount.get(key) ?? 0))
     return { entry: key, held, ...(boardHash === undefined ? {} : { boardHash }) }
   })
-  return { missing, records: [...kept, ...added] }
+  return { missing, records: [...priorWritten, ...kept, ...added] }
 }
 
 // The entries the archive files (`pasts`) do not hold yet. When `pending` is provided, only

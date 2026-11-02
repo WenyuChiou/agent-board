@@ -6186,6 +6186,60 @@ fs.writeFileSync = function(file, data, ...args) {
     assert.ok(readFileSync(f.path, 'utf8').includes('Local synthetic task'))
     assert.equal(copies(), 0)
     assert.ok(!existsSync(pending))
+
+    const oldNote = JSON.stringify({ version: 1, boardHash: 'old-hash', entries: [{ entry: '## Old', held: 0, boardHash: 'old-hash' }] }) + '\n'
+    writeFileSync(pending, oldNote)
+    const crashedWithNote = f.command(['--tidy', '--lang', 'en'], failPending)
+    assert.notEqual(crashedWithNote.status, 0)
+    assert.ok(readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 0)
+    assert.equal(readFileSync(pending, 'utf8'), oldNote)
+  })
+})
+
+test('--tidy preserves pending recovery records across same-invocation board-rewrite retries when a twin arrives', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    const block1 = f.block('a1b2c360', 'Local synthetic task', 'done', 13)
+    const block2 = f.block('a1b2c361', 'Local synthetic task', 'done', 13)
+    const pending = join(f.dir, 'progress-archive.pending')
+    const hookScript = join(f.dir, 'hook-rename.cjs')
+    writeFileSync(hookScript, `
+const fs = require('fs')
+const origRename = fs.renameSync
+let injected = false
+fs.renameSync = function(from, to, ...args) {
+  if (typeof to === 'string' && to.includes('progress-archive-')) {
+    const result = origRename.call(this, from, to, ...args)
+    if (!injected) {
+      injected = true
+      fs.writeFileSync(${JSON.stringify(f.path)}, ${JSON.stringify(`## Synthetic\n`)} + ${JSON.stringify(block1 + '\n')} + ${JSON.stringify(block2)})
+    }
+    return result
+  }
+  if (typeof to === 'string' && to.includes('progress.md')) {
+    throw new Error('SIMULATED_BOARD_RENAME_FAILURE')
+  }
+  return origRename.call(this, from, to, ...args)
+}
+`)
+    writeFileSync(f.path, `## Synthetic\n${block1}`)
+    const first = f.command(['--tidy', '--lang', 'en'], hookScript)
+    assert.notEqual(first.status, 0)
+    const boardText = readFileSync(f.path, 'utf8')
+    assert.ok(boardText.includes('a1b2c360'))
+    assert.ok(boardText.includes('a1b2c361'))
+    assert.equal(copies(), 2)
+    assert.ok(existsSync(pending))
+    const parsed = JSON.parse(readFileSync(pending, 'utf8'))
+    assert.equal(parsed.entries.length, 2)
+
+    const retry = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(retry.status, 0, retry.stderr)
+    assert.equal(retry.stdout, 'Archived 2 tasks.\n')
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 2)
+    assert.ok(!existsSync(pending))
   })
 })
 
