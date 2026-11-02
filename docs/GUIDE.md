@@ -250,6 +250,8 @@ The first line disconnects the other agents; finish any reported cleanup before 
 
 A cut report marker that hides task headings inside a comment still produces the cut-marker warning; the hidden tasks and original bytes remain intact.
 
+Independent local sessions with the same short report id can both keep reporting when their full native bindings and owner digests distinguish them. Each writer preserves the other block. An unowned, contradictory or duplicated binding still refuses the write; inspect the file before retrying rather than removing another session’s block.
+
 - **No card:** check the selected progress path, installed adapter, trust and reload status. Observe a real event and read back that exact session's block. Do not fabricate success with a manual event.
 - **No Send:** the exact native session needs a supported live adapter. Hooks alone do not establish receiving. Desktop and CLI results are not interchangeable.
 - **A setup relay was ignored:** the recipient must surface missing authorization/blockers. An RPC success or ACK cannot replace observing its new progress report.

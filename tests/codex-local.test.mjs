@@ -2642,6 +2642,96 @@ test('Codex lifecycle hooks never retain conversation and approval payloads, and
   assert.ok(!existsSync(transcript))
 }))
 
+// These synthetic full ids have distinct SHA-256 owners with the same eight-character prefix.
+const collisionSessions = ['collision-fixture-9342', 'collision-fixture-29381']
+const collisionOwner = id => createHash('sha256').update(`codex:${id}`).digest('hex')
+const collisionBlock = (text, owner) => text.match(new RegExp(`<!-- auto session=${owner.slice(0, 8)} [^\\n]*owner=${owner}[^\\n]*-->[\\s\\S]*?<!-- /auto session=${owner.slice(0, 8)} -->`))?.[0]
+
+test('Codex hook events and reports preserve both independent sessions with the same short id', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const [first, second] = collisionSessions
+  assert.equal(collisionOwner(first).slice(0, 8), collisionOwner(second).slice(0, 8))
+  assert.notEqual(collisionOwner(first), collisionOwner(second))
+  const report = (id, project) => f.command(['--codex-report', '--session', id], { title: `${project} task`, project, state: 'working', steps: ['- [~] Keep this work'] })
+  assert.equal(report(first, 'First project').status, 0)
+  const firstBytes = collisionBlock(readFileSync(f.progress, 'utf8'), collisionOwner(first))
+  assert.ok(firstBytes)
+  for (const name of ['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd']) {
+    const result = f.event(name, 'collision-turn', { session_id: second })
+    assert.equal(result.status, 0, result.stderr)
+    const text = readFileSync(f.progress, 'utf8')
+    assert.equal(collisionBlock(text, collisionOwner(first)), firstBytes)
+    assert.ok(collisionBlock(text, collisionOwner(second)))
+    assert.equal((text.match(/^<!-- auto /gm) ?? []).length, 2)
+  }
+  const secondBytes = collisionBlock(readFileSync(f.progress, 'utf8'), collisionOwner(second))
+  assert.equal(report(first, 'Moved first project').status, 0)
+  const moved = readFileSync(f.progress, 'utf8')
+  assert.equal(collisionBlock(moved, collisionOwner(second)), secondBytes)
+  assert.ok(moved.includes(`## Moved first project\n${collisionBlock(moved, collisionOwner(first))}`))
+  const savedFirst = collisionBlock(moved, collisionOwner(first))
+  assert.equal(report(second, 'Moved second project').status, 0)
+  assert.equal(collisionBlock(readFileSync(f.progress, 'utf8'), collisionOwner(first)), savedFirst)
+}))
+
+test('Codex same-prefix reporting still refuses duplicate ownership and contradictory or unproven peers', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const [id, peer] = collisionSessions
+  const owner = collisionOwner(id), peerOwner = collisionOwner(peer)
+  const report = () => f.command(['--codex-report', '--session', id], { title: 'Owned task', state: 'working', steps: ['- [~] Keep this work'] })
+  assert.equal(report().status, 0)
+  const owned = readFileSync(f.progress, 'utf8')
+  const recordPath = join(f.root, 'sessions', `${owner}.json`)
+  const record = readFileSync(recordPath)
+  const block = collisionBlock(owned, owner)
+  const foreign = block.replace(`owner=${owner}`, `owner=${peerOwner}`).replace(`resume=${id}`, `resume=${peer}`)
+  for (const text of [
+    owned + owned,
+    owned.replace(`resume=${id}`, `resume=${peer}`),
+    owned.replace('agent=codex', 'agent=cursor'),
+    foreign.replace(` owner=${peerOwner}`, ''),
+    foreign.replace(`resume=${peer}`, `resume=${id}`),
+    foreign.replace(`owner=${peerOwner}`, `owner=${peerOwner.slice(0, -1)}${peerOwner.endsWith('0') ? '1' : '0'}`),
+    foreign.replace(` resume=${peer}`, ''),
+    owned + foreign.replace(` owner=${peerOwner}`, ''),
+  ]) {
+    writeFileSync(f.progress, text)
+    const result = report()
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /BLOCK_CONFLICT/)
+    assert.equal(readFileSync(f.progress, 'utf8'), text)
+    assert.deepEqual(readFileSync(recordPath), record)
+  }
+}))
+
+test('native completion and run withdrawal select the full owner beside a same-prefix peer', async () => {
+  const { boardConfirmedReport, dropCodexBlock, putCodexBlock } = await importTs('../hooks/codex.ts')
+  const [id, peer] = collisionSessions
+  const owner = collisionOwner(id), peerOwner = collisionOwner(peer)
+  const report = { session: id, agent: 'codex', turn: null, state: 'waiting', title: 'Owned task', project: 'Owned project', steps: ['- [ ] Work'], updated: '2026-10-30T00:00:00Z' }
+  const peerText = putCodexBlock('', { ...report, session: peer, title: 'Peer task', project: 'Peer project' }, peerOwner)
+  const done = { ...report, state: 'done', steps: ['- [x] Work'], updated: '2026-10-30T00:01:00.000Z' }
+  const text = putCodexBlock(peerText, done, owner)
+  assert.deepEqual(boardConfirmedReport(text, report, owner), done)
+  assert.equal(dropCodexBlock(text, owner), peerText)
+  assert.equal(dropCodexBlock(text + text, owner), text + text)
+})
+
+test('native reports preserve a different agent with the same hash prefix and mixed newline bytes', async () => {
+  const { putCodexBlock, dropCodexBlock } = await importTs('../hooks/codex.ts')
+  const id = 'cross-collision-fixture-22272', peer = 'cross-collision-fixture-63084'
+  const owner = collisionOwner(id)
+  const peerOwner = createHash('sha256').update(`cursor:${peer}`).digest('hex')
+  assert.equal(owner.slice(0, 8), peerOwner.slice(0, 8))
+  const report = { session: id, agent: 'codex', turn: null, state: 'working', title: 'Owned task', project: 'Own project', steps: ['- [~] Work'], updated: '2026-10-30T00:00:00Z' }
+  const peerText = putCodexBlock('', { ...report, session: peer, agent: 'cursor', title: 'Peer task', project: 'Peer project' }, peerOwner).replaceAll('\n', '\r\n') + 'Keep this mixed ending.\n'
+  const both = putCodexBlock(peerText, report, owner)
+  assert.ok(both.startsWith(peerText))
+  const rewritten = putCodexBlock(both, { ...report, steps: ['- [?] Keep my question'] }, owner)
+  assert.ok(rewritten.startsWith(peerText))
+  assert.equal(dropCodexBlock(rewritten, owner), peerText)
+})
+
 test('Codex reports refuse a colliding or unowned block and do not change it', () => fixture(f => {
   f.install('--apply')
   const id = createHash('sha256').update(`codex:${session}`).digest('hex').slice(0, 8)
