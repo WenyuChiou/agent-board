@@ -191,6 +191,6 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
 }
 export const disconnectMessages = (state: MessageState, target: string, now: number): MessageState => ({
   messages: state.messages.map(one => one.target !== target || isFinished(one) ? one : settled({
-    ...one, status: one.status === 'queued' ? 'rejected' : 'uncertain', error: 'DISCONNECTED', updated: one.status === 'uncertain' ? one.updated : now,
+    ...one, status: one.status === 'queued' ? 'rejected' : one.status === 'accepted' ? 'accepted' : 'uncertain', error: 'DISCONNECTED', updated: one.error === 'DISCONNECTED' || one.status === 'uncertain' ? one.updated : now,
   })),
 })

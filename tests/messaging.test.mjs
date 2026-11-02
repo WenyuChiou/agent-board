@@ -960,6 +960,8 @@ test("restarts and disconnects do not extend an uncertain message's age limit", 
     assert.equal(expired.error, 'EXPIRED')
     const accepted = messageReceipt(claimed, connection, { id: input.id, nonce: 'abcdef', status: 'accepted' }, claimedAt + 1000)
     const disconnected = disconnectMessages(accepted, target.id, claimedAt + 2000)
+    assert.equal(disconnected.messages[0].status, 'accepted')
+    assert.equal(disconnected.messages[0].error, 'DISCONNECTED')
     assert.equal(disconnected.messages[0].updated, claimedAt + 2000)
     assert.equal(disconnectMessages(disconnected, target.id, claimedAt + 3000).messages[0].updated, claimedAt + 2000)
   } finally { store?.close(); rmSync(dir, { recursive: true, force: true }) }
