@@ -3690,6 +3690,68 @@ test('Windows Antigravity binds its executable across PATH batch files and anoth
   }
 }))
 
+
+test('Windows Antigravity fallback commands stay within the command limit at long installation paths', async () => {
+  const { antigravityCommand, hookCommandArgs, windowsHookCommand } = await importTs('../hooks/local-agents.ts')
+  const { connectDataRoots } = await importTs('../hooks/connect-pure.ts')
+  const quote = value => "'" + value.replace(/['‘’‚‛]/g, mark => mark + mark) + "'"
+  for (const length of [150, 160, 180]) {
+    const home = 'C:\\synthetic ' + 'h'.repeat(length - 'C:\\synthetic '.length)
+    const folder = home + '\\.agent-board'
+    for (const name of ['agent-board-hook.mjs', 'progress-hook.mjs']) {
+      const argv = hookCommandArgs(home + '\\n s\\node.exe', home, 'antigravity', folder + '\\' + name, folder + '\\progress.md', 'Stop', 'waiting')
+      assert.ok(windowsHookCommand(argv, quote).length >= 8191, 'the fixture must reach the overlong fallback')
+      const command = antigravityCommand(argv, true, quote)
+      assert.ok(command.length < 8191, String(command.length) + ' characters at home length ' + length)
+      if (name === 'progress-hook.mjs') {
+        assert.ok(connectDataRoots(command).includes(folder))
+        assert.ok(connectDataRoots(JSON.stringify({ command })).includes(folder))
+      }
+    }
+  }
+})
+
+test('compact Antigravity fallback preserves hook arguments and Codex trust command bytes', async () => {
+  const { antigravityCommand, hookCommandArgs, windowsHookCommand } = await importTs('../hooks/local-agents.ts')
+  const quote = value => "'" + value.replace(/['‘’‚‛]/g, mark => mark + mark) + "'"
+  const goldenHome = "C:\\synthetic f'‘’‚‛雪"
+  const golden = hookCommandArgs('C:\\node space\\node.exe', goldenHome, 'codex', goldenHome + '\\.agent-board\\agent-board-hook.mjs', goldenHome + '\\.agent-board\\progress.md', 'Stop')
+  // These hashes are the main commands before #705; Codex trust binds their exact bytes.
+  assert.equal(createHash('sha256').update(windowsHookCommand(golden, quote)).digest('hex'), '456338c74f0b3302852162939307e11ad4dd1b8796e0acb34d5326f609f41cb6')
+  assert.equal(createHash('sha256').update(windowsHookCommand(golden, quote, 'C:\\NODE~1\\node.exe')).digest('hex'), '3a10d8477c5f6e44aba0025019403638c42a35aaa1145d083a867200182a1791')
+  if (process.platform !== 'win32') return
+  await fixture(async f => {
+    const prefix = "long f's 雪-"
+    const home = join(f.home, prefix + 'h'.repeat(Math.max(0, 160 - f.home.length - prefix.length - 1)))
+    const root = join(home, '.agent-board')
+    mkdirSync(root, { recursive: true })
+    const runtime = join(f.home, 'n s')
+    mkdirSync(runtime)
+    const node = join(runtime, 'node.exe')
+    copyFileSync(process.execPath, node)
+    const worker = join(root, 'agent-board-hook.mjs')
+    const capture = join(root, 'synthetic-long-fallback.json')
+    const stdout = 'synthetic compact stdout\n', stderr = 'synthetic compact stderr\n'
+    writeFileSync(worker, syntheticWindowsWrapperWorker(capture, stdout, stderr, 37))
+    const argv = hookCommandArgs(node, home, 'antigravity', worker, join(root, 'progress.md'), 'Stop', 'waiting')
+    assert.ok(windowsHookCommand(argv, quote).length >= 8191, 'exercise the compact branch')
+    const command = antigravityCommand(argv, true, quote)
+    assert.ok(command.length < 8191, String(command.length) + ' characters')
+    const input = JSON.stringify({ unicode: '雪', apostrophe: "O'Hara", quotes: '"‘’‚‛“”', newline: 'line one\nline two' }, null, 2)
+    assert.ok(input.includes('\n'), 'the command receives multiline JSON stdin')
+    const result = await fireCommand(f, command, input)
+    assert.equal(result.status, 37, hookFailure(result))
+    assert.equal(result.stdout, stdout)
+    assert.equal(result.stderr, stderr)
+    const saved = JSON.parse(readFileSync(capture, 'utf8'))
+    assert.equal(saved.worker, worker)
+    assert.equal(saved.input, input)
+    assert.deepEqual(saved.argv.slice(0, -2), argv.slice(5))
+    assert.equal(saved.argv.at(-2), '--hook-started')
+    assert.ok(Number.isSafeInteger(Number(saved.argv.at(-1))) && Number(saved.argv.at(-1)) > 0)
+  })
+})
+
 test('Windows Antigravity falls back to PowerShell when setup cannot verify a quote-free Node path', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   const home = join(f.home, "f's")
   mkdirSync(home)
