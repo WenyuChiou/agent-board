@@ -3040,7 +3040,7 @@ const spawnSync = (file, args, options) => {
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'hang') {
     const t0 = performance.now()
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, options.timeout)
-    appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ wait: session_id, asked: options.timeout, t0, t1: performance.now() }) + '\\n')
+    try { appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ wait: session_id, asked: options.timeout, t0, t1: performance.now() }) + '\\n') } catch {}
     return { error: { code: 'ETIMEDOUT' }, status: null, signal: 'SIGKILL' }
   }
   return realSpawnSync(file, args, options)
@@ -3054,7 +3054,7 @@ const spawnSync = (file, args, options) => {
   const t0 = performance.now(), file = ${JSON.stringify(join(home, '.agent-board', 'hook-errors.log'))}
   let size = 0
   try { size = fs.statSync(file).size } catch {}
-  try { return timedHookError(code) } finally { if (globalThis.isExiting) fs.appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ log: code, size, t0, t1: performance.now() }) + '\\n') }
+  try { return timedHookError(code) } finally { if (globalThis.isExiting) try { fs.appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ log: code, size, t0, t1: performance.now() }) + '\\n') } catch {} }
 }
 const timedHookError = code => {`))
   writeFileSync(copy, readFileSync(plugin))
