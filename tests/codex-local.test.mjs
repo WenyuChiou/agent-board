@@ -3029,6 +3029,7 @@ const opencodeOneShot = (home, mode, scenario = 'default') => {
   const exits = join(home, `one-shot-exits-${mode}-${scenario}.jsonl`)
   writeFileSync(calls, '')
   writeFileSync(exits, '')
+  writeFileSync(calls + '.timing', '')
   const spawnStub = `import { spawnSync as realSpawnSync } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
 const spawnSync = (file, args, options) => {
@@ -3037,21 +3038,32 @@ const spawnSync = (file, args, options) => {
   if (globalThis.isExiting) appendFileSync(${JSON.stringify(exits)}, JSON.stringify(cwd ?? null) + '\\n')
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'fail') return { status: 1, stdout: '', stderr: '' }
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'hang') {
+    const t0 = performance.now()
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, options.timeout)
+    try { appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ wait: session_id, asked: options.timeout, t0, t1: performance.now() }) + '\\n') } catch {}
     return { error: { code: 'ETIMEDOUT' }, status: null, signal: 'SIGKILL' }
   }
   return realSpawnSync(file, args, options)
 }`
   const plugin = join(home, `one-shot-plugin-${mode}-${scenario}.mjs`), main = join(home, `one-shot-${mode}-${scenario}.mjs`)
   const copy = join(home, `one-shot-plugin-${mode}-${scenario}-copy.mjs`)
-  writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub).replace("import { spawnSync } from 'node:child_process'", spawnStub))
+  assert.ok(source.includes('const hookError = code => {'), 'the timing wrapper for #576 no longer matches the plugin')
+  writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub).replace("import { spawnSync } from 'node:child_process'", spawnStub)
+    // #576: each log write made while exiting is timed, with the log's size before it.
+    .replace('const hookError = code => {', `const hookError = code => {
+  const t0 = performance.now(), file = ${JSON.stringify(join(home, '.agent-board', 'hook-errors.log'))}
+  let size = 0
+  try { size = fs.statSync(file).size } catch {}
+  try { return timedHookError(code) } finally { if (globalThis.isExiting) try { fs.appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ log: code, size, t0, t1: performance.now() }) + '\\n') } catch {} }
+}
+const timedHookError = code => {`))
   writeFileSync(copy, readFileSync(plugin))
   // Exit listeners run in order, so the ones around the plugin's own time its exit work.
   writeFileSync(main, `import { writeFileSync } from 'node:fs'
 const marks = {}
-process.on('exit', () => { marks.start = Date.now(); globalThis.isExiting = true })
+process.on('exit', () => { marks.start = Date.now(); marks.monotonicStart = performance.now(); globalThis.isExiting = true })
 const { AgentBoardLocal } = await import(${JSON.stringify(pathToFileURL(plugin).href)})
-process.on('exit', () => { marks.end = Date.now(); writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks)) })
+process.on('exit', () => { marks.end = Date.now(); marks.monotonicEnd = performance.now(); writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks)) })
 let gets = 0, release = () => {}
 const isStalled = ${JSON.stringify(scenario)} === 'stalled'
 const holdAt = { 'late-chat': 0, 'second-chat': 2 }[${JSON.stringify(scenario)}] ?? -1
@@ -3106,7 +3118,7 @@ await hooks.event({ event: { type: 'session.deleted', properties: { info: { id: 
   assert.equal(result.status, 0, result.stderr)
   if (mode === 'real') settleQueue(home)
   const lines = file => readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
-  return { calls: lines(calls), exitFolders: lines(exits), marks: JSON.parse(readFileSync(marks, 'utf8')) }
+  return { calls: lines(calls), exitFolders: lines(exits), marks: JSON.parse(readFileSync(marks, 'utf8')), segments: lines(calls + '.timing') }
 }
 // A loaded machine can push a report past the worker's 2 s limit (#241). An event the worker queued
 // is applied by settleQueue before a real-mode check reads the board. A report given up on
@@ -3173,9 +3185,13 @@ test('opencode: two sessions in one process both end within one shared deadline'
       assertNothingLost(log)
     } else {
       assert.deepEqual(exiting, [{ session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
-      assert.equal(readFileSync(log, 'utf8').match(/opencode REPORTER_TIMEOUT/g)?.length, 2)
       const spent = run.marks.end - run.marks.start
-      assert.ok(spent >= 2000 && spent < 3500, `exit took ${spent} ms`)
+      // Where the exit's time went (#576), shown on a pass too, so CI runs give the spread.
+      const ms = value => value.toFixed(1)
+      const segments = `exit took ${spent} ms, ${ms(run.marks.monotonicEnd - run.marks.monotonicStart)} ms monotonic: ${run.segments.map(({ t0, t1, ...what }) => `${JSON.stringify(what)} at ${ms(t0 - run.marks.monotonicStart)} took ${ms(t1 - t0)}`).join('; ')}`
+      t.diagnostic(segments)
+      assert.equal(readFileSync(log, 'utf8').match(/opencode REPORTER_TIMEOUT/g)?.length, 2)
+      assert.ok(spent >= 2000 && spent < 3500, segments)
       for (const session of ['synthetic-one-shot', 'synthetic-second']) assert.equal(oneShotState(text, session), 'waiting', text)
     }
   }, { retry: mode === 'real' && LOST })
