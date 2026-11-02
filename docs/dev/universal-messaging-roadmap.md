@@ -123,20 +123,20 @@ Keep visible state and latency distinct so an enqueue or delivery failure cannot
 
 Every slice stays focused (`<= 500` changed lines excluding generated bundles and changelog fragments) and owns disjoint primary files within each parallel wave:
 
-Exception: `#686` and `#233` both touch `hooks/local-agents.ts` and unlock together after `#603`. They run sequentially: start `#233` from current `main` after `#686` merges, or merge `main` into an already-pushed `#233` branch when integration is needed. Neither may change installed Codex hook command strings (invariant 7).
+Exception: `#686` and `#233` both touch `hooks/local-agents.ts`. To prevent concurrent edits, `#686` is an explicit prerequisite for `#233`: `#233` stays `blocked` until both `#603` and `#686` merge, then starts from current `main` (or merges `main` into an existing draft branch without rebasing). Neither may change installed Codex hook command strings (invariant 7).
 
 | Phase / Slice | Issue / PR | Assigned Executor | Label State | Primary Files (Non-Colliding Within Wave) | Unlocks When Merged |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Phase 1A** | `#315` (PR `#388`) | `claude` / `codex` / `antigravity` | In CI / Ready | `hooks/messaging.ts`, `scripts/board-messaging.ts`, `scripts/message-store-claim.ts`, `scripts/board-serve.ts`, `scripts/board-cli.ts` | `#603`, `#317`, `#316`, `#318` |
-| **Phase 1B** | `#603` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/hook-safety.ts`, `hooks/hook-messages.ts`, `scripts/codex-local.ts` | `#319`, `#685`, `#686`, `#233` |
+| **Phase 1B** | `#603` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/hook-safety.ts`, `hooks/hook-messages.ts`, `scripts/codex-local.ts` | `#319`, `#685`, `#686` |
 | **Phase 1C** | `#317` | **`muse`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/cli-send.ts`, `hooks/board.ts`, `scripts/board-cli.ts`, `tests/cli-send.test.mjs` | `#232` |
 | **Phase 2A** | `#319` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#603` | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Codex/Grok/Muse `Stop` `block` + Cursor `stop`) | `#365` (Phase 2B) |
 | **Phase 2B** | `#365` | **`muse`** (`for-dot`) | `blocked` -> `ready` after **`#388`, `#603`, and `#319`** | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Antigravity `Stop`/`PreInvocation` + Gemini `AfterAgent`) | Full Tier 2 Antigravity/Gemini |
 | **Phase 3A** | `#685` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/mcp-tools.ts`, `scripts/board-mcp.ts`, `scripts/board-cli.ts` (`--mcp`, `--wait-message`), `hooks/connect-pure.ts` | Universal Desktop/IDE Tier 1 |
 | **Phase 3B-1** | `#316` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#388` | `hooks/receiver.ts`, `hooks/register.tsx`, `hooks/serve.ts`, string tables | Claude Code Tier 1 |
 | **Phase 3B-2** | `#318` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#388` | `scripts/codex-receiver.mjs`, `hooks/codex.ts` | Codex Daemon Tier 1 |
-| **Phase 3C-1** | `#686` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/local-agents.ts` (`opencodePlugin`), `hooks/portable-agents.ts` (DeepSeek, OpenClaw) | OpenCode/DeepSeek/OpenClaw Tier 1 |
-| **Phase 3C-2** | `#233` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/local-agents.ts` / `scripts/hermes-session-connector.mjs`, `tests/e2e/l3b-messaging.test.mjs` | Hermes L3b parity |
+| **Phase 3C-1** | `#686` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/local-agents.ts` (`opencodePlugin`), `hooks/portable-agents.ts` (DeepSeek, OpenClaw) | `#233` (Phase 3C-2) + OpenCode/DeepSeek/OpenClaw Tier 1 |
+| **Phase 3C-2** | `#233` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` and `#686` | `hooks/local-agents.ts` / `scripts/hermes-session-connector.mjs`, `tests/e2e/l3b-messaging.test.mjs` | Hermes L3b parity |
 | **Phase 3D** | `#232` (Bug PR) | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#317` | `hooks/pane.tsx`, `hooks/board.ts`, `scripts/board-cli.ts`, `tests/e2e/l3b-messaging.test.mjs` | Cross-surface receipt parity |
 | **Phase 4A** | `#561` | **`claude`** (`for-agent`) | `ready` (`for-agent`) | `docs/validation/*-web-chat-relay.md`, `hooks/serve.ts`, `scripts/board-serve.ts` | `dot` & Web-Chat zero-paste-box |
 
@@ -176,11 +176,14 @@ Immediately after squash-merging an upstream PR (`gh pr merge <PR> --squash --ma
   gh issue edit 316 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   gh issue edit 318 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   ```
-- **When `#603` (Phase 1B) merges**, unlock Phase 2A, Phase 3A, Phase 3C-1, and Phase 3C-2:
+- **When `#603` (Phase 1B) merges**, unlock Phase 2A, Phase 3A, and Phase 3C-1:
   ```sh
   gh issue edit 319 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   gh issue edit 685 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   gh issue edit 686 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
+  ```
+- **When `#686` (Phase 3C-1) merges**, unlock Phase 3C-2 (`#233`):
+  ```sh
   gh issue edit 233 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   ```
 - **When `#319` (Phase 2A) merges**, unlock Phase 2B (`#365`):
