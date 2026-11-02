@@ -354,7 +354,15 @@ export const needsBundle = paths => paths.some(path => /^(scripts|hooks)\//.test
 // Author line: the words before its first comma, with a dispatching lane in brackets as part of the name.
 export const authorKey = body => {
   const author = stripComments(body).match(/^Author:[ \t]*(.*)$/m)?.[1] ?? ''
-  return author.split(',')[0].replace(/`/g, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
+  return author
+    .split(',')[0]
+    .normalize('NFKC')
+    .replace(/[\p{C}]/gu, '')
+    .replace(/`/g, '')
+    .replace(/[.,;:]+\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase() || null
 }
 
 const labelName = label => (typeof label === 'string' ? label : label.name)
@@ -580,17 +588,43 @@ export const binaryImages = paths => {
 export const cleanReviewText = text => {
   if (typeof text !== 'string') return ''
   const withoutComments = text.replace(/<!--[\s\S]*?(?:-->|$)/g, '')
-  const withoutFences = withoutComments
-    .replace(/(?:^|\n)```[\s\S]*?(?:```|$)/g, '\n')
-    .replace(/(?:^|\n)~~~[\s\S]*?(?:~~~|$)/g, '\n')
-  return withoutFences
-    .split(/\r?\n/)
-    .filter(line => !/^\s*>/.test(line))
-    .join('\n')
+  const lines = withoutComments.split(/\r?\n/)
+  const result = []
+  let fenceChar = null
+  let fenceLength = 0
+  for (const line of lines) {
+    if (fenceChar !== null) {
+      const closeMatch = line.match(/^[ ]{0,3}(`{3,}|~{3,})[ \t]*$/)
+      if (closeMatch && closeMatch[1][0] === fenceChar && closeMatch[1].length >= fenceLength) {
+        fenceChar = null
+        fenceLength = 0
+      }
+      continue
+    }
+    const openMatch = line.match(/^[ ]{0,3}(`{3,}|~{3,})/)
+    if (openMatch) {
+      fenceChar = openMatch[1][0]
+      fenceLength = openMatch[1].length
+      continue
+    }
+    if (/^\s*>/.test(line)) continue
+    result.push(line)
+  }
+  return result.join('\n')
 }
 
-export const cleanReviewer = text =>
-  (text ?? '').replace(/`/g, '').replace(/[.,;:]+\s*$/, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
+export const cleanReviewer = text => {
+  if (typeof text !== 'string') return null
+  const cleaned = text
+    .normalize('NFKC')
+    .replace(/[\p{C}]/gu, '')
+    .replace(/`/g, '')
+    .replace(/[.,;:]+\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+  return cleaned || null
+}
 
 export const fullVerdictOf = body => {
   const clean = cleanReviewText(body)
