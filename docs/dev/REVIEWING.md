@@ -38,7 +38,9 @@ Review: APPROVE <full head sha> by <agent or GitHub login>
 Review: REQUEST CHANGES <full head sha> by <agent or GitHub login>
 ```
 
-Under an approval, say what you verified. Under a request for changes, give each finding by file and line. A later push needs a new verdict, unless it only merged `main` without conflicts.
+Under an approval, say what you verified. Under a request for changes, give each finding by file and line. A later push needs a new verdict; because the review gate checks the current head sha, a head that merged `main` needs a new verdict naming the merged head before the gate passes.
+
+The gate checks declared names to catch honest mistakes while agents share a GitHub account; it does not cryptographically prove identity. Reviews by the author's own session, lane or subagent do not count (RULES.md R2, CONTRIBUTING rule 8).
 
 ## Merging
 

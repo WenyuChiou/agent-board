@@ -465,8 +465,10 @@ test('the review gate passes only an approval of the current head by someone oth
   assert.match(reviewGate({ body, head, comments: [{ body: `Review: APPROVE ${head} by dot` }] }).problems[0].message, /no review verdict/)
   assert.match(reviewGate({ body, head, comments: [team(`Review: REQUEST CHANGES ${head} by dot`), outsider] }).problems[0].message, /requests changes/)
   assert.match(reviewGate({ body, head, comments: [outsider, team(`Review: APPROVE ${head} by dot`)] }).info[0], /1 verdict from outside the team or from a bot ignored/)
-  // Mixed-line comments parse kind and reviewer atomically from one verdict line
-  assert.match(gate(`Review: APPROVE ${head}\nReview: REQUEST CHANGES ${head} by dot`).problems[0].message, /does not name its reviewer/)
+  // Mixed-line comments or multiple verdict lines do not count as a verdict
+  assert.match(gate(`Review: APPROVE ${head}\nReview: REQUEST CHANGES ${head} by dot`).problems[0].message, /no review verdict/)
+  assert.match(gate(`Review: APPROVE ${head} by dot\nReview: REQUEST CHANGES ${head} by antigravity`).problems[0].message, /no review verdict/)
+  assert.match(gate(`Notes before verdict (not an opening verdict)\nReview: APPROVE ${head} by dot`).problems[0].message, /no review verdict/)
   // Fenced, hidden or quoted text does not count as a genuine verdict
   assert.match(gate('```\nReview: APPROVE ' + head + ' by dot\n```').problems[0].message, /no review verdict/)
   assert.match(gate(' ```\nReview: APPROVE ' + head + ' by dot\n ```').problems[0].message, /no review verdict/)
@@ -476,6 +478,7 @@ test('the review gate passes only an approval of the current head by someone oth
   assert.match(gate('> Review: APPROVE ' + head + ' by dot').problems[0].message, /no review verdict/)
   // Format/control characters and zero-width spaces are canonicalized before author/reviewer comparison
   assert.match(gate('Review: APPROVE ' + head + ' by claude\u200b (cloud)').problems[0].message, /by the author/)
+  assert.match(reviewGate({ body: `Fixes #42\nAuthor: claude\u200b (cloud)\n`, head, comments: [team(`Review: APPROVE ${head} by claude (cloud)`)] }).problems[0].message, /by the author/)
   // checkPr runs the gate only when asked, and not offline.
   assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true }).problems.some(item => item.check === 'review-gate'), true)
   assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true, prComments: null }).problems.some(item => item.check === 'review-gate'), true)

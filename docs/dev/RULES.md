@@ -26,7 +26,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 
 - The author never approves their own pull request. A review by the author's own agent, lane or subagent does not count.
 - A review bot (Codex Code Review, Greptile) can stop a merge with an unresolved P0 or P1, but never approves one.
-- The owner's agents all post from the owner's GitHub account, so GitHub cannot refuse an author's approval. The names do: the `Author:` line names the author, and `Review: APPROVE <full head sha> by <name>` the reviewer. `node scripts/pr-check.mjs --pr <N> --review-gate` fails when they are the same, or when the approval is not for the current head ([REVIEWING.md](REVIEWING.md)).
+- Each agent or computer is moving to its own GitHub account; until then, the owner's agents all post from the owner's GitHub account, so GitHub cannot refuse an author's approval. The names do: the `Author:` line names the author, and `Review: APPROVE <full head sha> by <name>` the reviewer. `node scripts/pr-check.mjs --pr <N> --review-gate` fails when they are the same, or when the approval is not for the current head ([REVIEWING.md](REVIEWING.md)).
 
 ## R3. Merging
 

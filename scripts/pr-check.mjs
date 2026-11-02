@@ -628,23 +628,22 @@ export const cleanReviewer = text => {
 
 export const fullVerdictOf = body => {
   const clean = cleanReviewText(body)
-  const lines = clean.split(/\r?\n/)
-  for (const line of lines) {
-    const match = line.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})\b`?(?:[ \t]+by[ \t]+(.+))?$/)
-    if (match) {
-      return {
-        kind: match[1],
-        sha: match[2].toLowerCase(),
-        reviewer: match[3] ? cleanReviewer(match[3]) : null,
-      }
-    }
+  const lines = clean.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  if (lines.length === 0) return null
+  const first = lines[0]
+  const match = first.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})\b`?(?:[ \t]+by[ \t]+(.+))?$/)
+  if (!match) return null
+  if (lines.slice(1).some(line => /^Review:\s*(APPROVE|REQUEST CHANGES)\b/.test(line))) return null
+  return {
+    kind: match[1],
+    sha: match[2].toLowerCase(),
+    reviewer: match[3] ? cleanReviewer(match[3]) : null,
   }
-  return null
 }
 
 export const reviewOf = body => {
-  const verdict = fullVerdictOf(body)
-  return verdict ? { kind: verdict.kind, sha: verdict.sha } : null
+  const match = (body ?? '').match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})\b/m)
+  return match ? { kind: match[1], sha: match[2].toLowerCase() } : null
 }
 
 export const verdict = (comments, head) => {
