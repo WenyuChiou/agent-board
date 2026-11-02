@@ -1,0 +1,2 @@
+- **Contributing / Review gate** · `node scripts/pr-check.mjs --pr <N> --review-gate` refuses a merge unless the newest `Review:` verdict approves the current head and names a reviewer other than the `Author:` line, catching self-approval mistakes when agents share one GitHub account; `docs/dev/REVIEWING.md` gives every agent the same checklist, the merge step and the handover to write before it stops (#661).
+  Tests: `pr-check reads the reviewer named in a verdict`, `the review gate passes only an approval of the current head by someone other than the author`.

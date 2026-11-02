@@ -354,7 +354,15 @@ export const needsBundle = paths => paths.some(path => /^(scripts|hooks)\//.test
 // Author line: the words before its first comma, with a dispatching lane in brackets as part of the name.
 export const authorKey = body => {
   const author = stripComments(body).match(/^Author:[ \t]*(.*)$/m)?.[1] ?? ''
-  return author.split(',')[0].replace(/`/g, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
+  return author
+    .split(',')[0]
+    .normalize('NFKC')
+    .replace(/[\p{C}]/gu, '')
+    .replace(/`/g, '')
+    .replace(/[.,;:]+\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase() || null
 }
 
 const labelName = label => (typeof label === 'string' ? label : label.name)
@@ -577,6 +585,62 @@ export const binaryImages = paths => {
   return output
 }
 
+export const cleanReviewText = text => {
+  if (typeof text !== 'string') return ''
+  const withoutComments = text.replace(/<!--[\s\S]*?(?:-->|$)/g, '')
+  const lines = withoutComments.split(/\r?\n/)
+  const result = []
+  let fenceChar = null
+  let fenceLength = 0
+  for (const line of lines) {
+    if (fenceChar !== null) {
+      const closeMatch = line.match(/^[ ]{0,3}(`{3,}|~{3,})[ \t]*$/)
+      if (closeMatch && closeMatch[1][0] === fenceChar && closeMatch[1].length >= fenceLength) {
+        fenceChar = null
+        fenceLength = 0
+      }
+      continue
+    }
+    const openMatch = line.match(/^[ ]{0,3}(`{3,}|~{3,})/)
+    if (openMatch) {
+      fenceChar = openMatch[1][0]
+      fenceLength = openMatch[1].length
+      continue
+    }
+    if (/^\s*>/.test(line)) continue
+    result.push(line)
+  }
+  return result.join('\n')
+}
+
+export const cleanReviewer = text => {
+  if (typeof text !== 'string') return null
+  const cleaned = text
+    .normalize('NFKC')
+    .replace(/[\p{C}]/gu, '')
+    .replace(/`/g, '')
+    .replace(/[.,;:]+\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+  return cleaned || null
+}
+
+export const fullVerdictOf = body => {
+  const clean = cleanReviewText(body)
+  const lines = clean.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  if (lines.length === 0) return null
+  const first = lines[0]
+  const match = first.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})\b`?(?:[ \t]+by[ \t]+(.+))?$/)
+  if (!match) return null
+  if (lines.slice(1).some(line => /^Review:\s*(APPROVE|REQUEST CHANGES)\b/.test(line))) return null
+  return {
+    kind: match[1],
+    sha: match[2].toLowerCase(),
+    reviewer: match[3] ? cleanReviewer(match[3]) : null,
+  }
+}
+
 export const reviewOf = body => {
   const match = (body ?? '').match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})\b/m)
   return match ? { kind: match[1], sha: match[2].toLowerCase() } : null
@@ -587,6 +651,45 @@ export const verdict = (comments, head) => {
   const last = comments.map(comment => reviewOf(comment.body)).filter(Boolean).at(-1)
   if (!last) output.info.push('review: no review verdict yet.')
   else output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, ${head.startsWith(last.sha) ? 'the current head.' : 'an older head; the current head has no verdict yet.'}`)
+  return output
+}
+
+// Every agent may post from the owner's account, so GitHub cannot tell the author from the reviewer; the names
+// in the Author line and in the verdict do (docs/dev/REVIEWING.md). The name is the words after "by", read as
+// authorKey reads the Author line.
+export const reviewerOf = body => {
+  const verdict = fullVerdictOf(body)
+  return verdict ? verdict.reviewer : null
+}
+
+// A verdict counts only when it is posted by the owner, a member or a collaborator, and not by a bot: anyone can
+// comment on this public repository, and a contributor's review is advice (CONTRIBUTING.md rule 8).
+export const isTeamComment = comment => {
+  const association = String(comment?.author_association ?? comment?.authorAssociation ?? '').trim().toUpperCase()
+  const login = String(comment?.user?.login ?? comment?.author?.login ?? '')
+  return ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association) && comment?.user?.type !== 'Bot' && !login.endsWith('[bot]')
+}
+
+// --review-gate: passes only when the newest verdict from the team approves the current head, by its full sha, and
+// names a reviewer other than the author. The merging agent runs it before `gh pr merge` (docs/dev/REVIEWING.md, Merging).
+export const reviewGate = ({ body, comments, head }) => {
+  const output = result()
+  const fail = (message, fix) => output.problems.push(problem('review-gate', message, fix))
+  const all = (comments ?? []).map(comment => ({ ...comment, verdict: fullVerdictOf(comment.body) })).filter(c => c.verdict)
+  const ignored = all.filter(comment => !isTeamComment(comment)).length
+  if (ignored) output.info.push(`review gate: ${ignored} verdict${ignored === 1 ? '' : 's'} from outside the team or from a bot ignored.`)
+  const verdicts = all.filter(isTeamComment).map(comment => comment.verdict)
+  const last = verdicts.at(-1)
+  const author = authorKey(body)
+  const ask = 'ask an agent or person who did not write it to review it as docs/dev/REVIEWING.md says.'
+  if (!last) return fail('no review verdict yet.', ask), output
+  if (last.sha.length !== 40) return fail(`the newest verdict names ${last.sha}, a short sha.`, 'the reviewer posts the full 40-character head sha: `Review: APPROVE <full head sha> by <name>`.'), output
+  if (String(head).toLowerCase() !== last.sha) return fail(`the newest verdict is for ${last.sha.slice(0, 7)}, not the current head ${String(head).slice(0, 7)}.`, 'the current head needs a new verdict; ' + ask), output
+  if (last.kind !== 'APPROVE') return fail('the newest verdict for the current head requests changes.', 'fix the findings, push, and ask for a new verdict.'), output
+  if (!last.reviewer) return fail('the approval does not name its reviewer.', 'the reviewer posts `Review: APPROVE <full head sha> by <agent or login>`.'), output
+  if (!author) return fail('the body has no Author line, so the reviewer cannot be told from the author.', 'add `Author: <agent>, <branch>` to the body.'), output
+  if (last.reviewer === author) return fail(`the approval is by the author (${last.reviewer}).`, ask), output
+  output.info.push(`review gate: approved for the current head by ${last.reviewer}, not the author (${author}).`)
   return output
 }
 
@@ -654,6 +757,10 @@ export const checkPr = data => {
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
   else add(verdict(data.prComments, data.head))
+  if (data.isReviewGate) {
+    if (data.prComments === null) output.problems.push(problem('review-gate', 'the review gate needs the pull request\'s comments.', 'run it with --pr <N>, without --offline.'))
+    else add(reviewGate({ body: data.body, comments: data.prComments, head: data.head }))
+  }
   if (data.isDraft) output.info.push(`draft: the reviewer starts when you run \`gh pr ready ${data.number}\` and comment \`Ready for review ${data.head}\`.`)
   return output
 }
@@ -689,6 +796,7 @@ const usage = `Usage:
 Options:
   --offline       Skip issue, claim, open-PR cap and review network checks
   --no-bundle     Skip the Bun board bundle check
+  --review-gate   Also fail unless the newest verdict approves the current head and names someone other than the author
   --help          Print this usage
 
 Default repository: WenyuChiou/agent-board. Default base: origin/main.
@@ -697,7 +805,7 @@ Exit codes: 0 passed, 1 check problems, 2 usage or environment error.
 
 const parseArgs = argv => {
   const options = {}
-  const flags = new Set(['--offline', '--no-bundle', '--help'])
+  const flags = new Set(['--offline', '--no-bundle', '--review-gate', '--help'])
   const values = new Set(['--pr', '-R', '--repo-dir', '--body-file', '--title', '--base', '--event'])
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i]
@@ -903,6 +1011,7 @@ export const main = async (argv = process.argv.slice(2)) => {
       }
       data.prComments = data.number === null ? [] : await api(`issues/${data.number}/comments`, { isList: true })
     }
+    data.isReviewGate = Boolean(options['--review-gate'])
     const checked = checkPr(data)
     if (needsBundle(data.paths)) {
       if (options['--event']) checked.info.push('bundle: checked by test.yml ("Board bundle up to date").')

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr,
   isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
-  privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
+  privateData, report, reportMarkdown, reviewGate, reviewerOf, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -48,7 +48,7 @@ const fixture = (t, testTitle = coveringTitle) => {
     writeFileSync(target, text)
   }
   const git = (...args) => {
-    const execution = spawnSync('git', args, { cwd: directory, encoding: 'utf8' })
+    const execution = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: directory, encoding: 'utf8' })
     assert.equal(execution.status, 0, execution.stderr || execution.error?.message)
     return execution.stdout.trim()
   }
@@ -431,6 +431,59 @@ test('pr-check asks for the rules page when CONTRIBUTING.md, team-process.md or 
   assert.equal(checkPr({ ...syntheticPr(), paths: ['CONTRIBUTING.md'], changedPaths: ['CONTRIBUTING.md'] }).problems.some(item => item.check === 'rules-page'), true)
 })
 
+test('pr-check reads the reviewer named in a verdict', () => {
+  assert.equal(reviewerOf('Review: APPROVE abcdef1234567890abcdef1234567890abcdef12 by Codex (desktop).'), 'codex (desktop)')
+  assert.equal(reviewerOf('Review: REQUEST CHANGES `abcdef1` by `antigravity`'), 'antigravity')
+  assert.equal(reviewerOf('Review: APPROVE abcdef1234567890abcdef1234567890abcdef12'), null)
+  assert.equal(reviewerOf('Looks good, by dot'), null)
+})
+
+test('the review gate passes only an approval of the current head by someone other than the author', () => {
+  const head = 'abcdef1234567890abcdef1234567890abcdef12'
+  const body = 'Fixes #42\nAuthor: claude (cloud), docs/x\n'
+  const team = text => ({ body: text, author_association: 'OWNER', user: { login: 'owner', type: 'User' } })
+  const gate = (...texts) => reviewGate({ body, head, comments: texts.map(team) })
+  assert.deepEqual(gate(`Review: APPROVE ${head} by codex (desktop)`).problems, [])
+  assert.match(gate(`Review: APPROVE ${head} by codex (desktop)`).info[0], /by codex \(desktop\), not the author \(claude \(cloud\)\)/)
+  // Another session of the same agent is another reviewer; the same name is the author.
+  assert.deepEqual(gate(`Review: APPROVE ${head} by claude (desktop)`).problems, [])
+  assert.match(gate(`Review: APPROVE ${head} by Claude (cloud)`).problems[0].message, /by the author/)
+  assert.match(gate().problems[0].message, /no review verdict/)
+  assert.match(gate(`Review: APPROVE ${head}`).problems[0].message, /does not name its reviewer/)
+  assert.match(gate('Review: APPROVE 1234567890abcdef1234567890abcdef12345678 by dot').problems[0].message, /not the current head/)
+  // Only the full head sha counts, as REVIEWING.md asks; a short one fails even when it is the head's.
+  assert.match(gate(`Review: APPROVE ${head.slice(0, 7)} by dot`).problems[0].message, /short sha/)
+  // The newest verdict decides: an approval followed by a request for changes fails, and the reverse passes.
+  assert.match(gate(`Review: APPROVE ${head} by dot`, `Review: REQUEST CHANGES ${head} by antigravity`).problems[0].message, /requests changes/)
+  assert.deepEqual(gate(`Review: REQUEST CHANGES ${head} by antigravity`, `Review: APPROVE ${head} by antigravity`).problems, [])
+  assert.match(reviewGate({ body: 'Fixes #42\n', head, comments: [team(`Review: APPROVE ${head} by dot`)] }).problems[0].message, /no Author line/)
+  // Only the team's verdicts count: an outsider's or a bot's approval is ignored, and cannot override the team's.
+  const outsider = { body: `Review: APPROVE ${head} by outsider`, author_association: 'NONE', user: { login: 'someone', type: 'User' } }
+  const bot = { body: `Review: APPROVE ${head} by bot`, author_association: 'COLLABORATOR', user: { login: 'helper[bot]', type: 'Bot' } }
+  assert.match(reviewGate({ body, head, comments: [outsider] }).problems[0].message, /no review verdict/)
+  assert.match(reviewGate({ body, head, comments: [bot] }).problems[0].message, /no review verdict/)
+  assert.match(reviewGate({ body, head, comments: [{ body: `Review: APPROVE ${head} by dot` }] }).problems[0].message, /no review verdict/)
+  assert.match(reviewGate({ body, head, comments: [team(`Review: REQUEST CHANGES ${head} by dot`), outsider] }).problems[0].message, /requests changes/)
+  assert.match(reviewGate({ body, head, comments: [outsider, team(`Review: APPROVE ${head} by dot`)] }).info[0], /1 verdict from outside the team or from a bot ignored/)
+  // Mixed-line comments or multiple verdict lines do not count as a verdict
+  assert.match(gate(`Review: APPROVE ${head}\nReview: REQUEST CHANGES ${head} by dot`).problems[0].message, /no review verdict/)
+  assert.match(gate(`Review: APPROVE ${head} by dot\nReview: REQUEST CHANGES ${head} by antigravity`).problems[0].message, /no review verdict/)
+  assert.match(gate(`Notes before verdict (not an opening verdict)\nReview: APPROVE ${head} by dot`).problems[0].message, /no review verdict/)
+  // Fenced, hidden or quoted text does not count as a genuine verdict
+  assert.match(gate('```\nReview: APPROVE ' + head + ' by dot\n```').problems[0].message, /no review verdict/)
+  assert.match(gate(' ```\nReview: APPROVE ' + head + ' by dot\n ```').problems[0].message, /no review verdict/)
+  assert.match(gate('   ~~~\nReview: APPROVE ' + head + ' by dot\n   ~~~').problems[0].message, /no review verdict/)
+  assert.match(gate('````\n```\nReview: APPROVE ' + head + ' by dot\n```\n````').problems[0].message, /no review verdict/)
+  assert.match(gate('<!-- Review: APPROVE ' + head + ' by dot -->').problems[0].message, /no review verdict/)
+  assert.match(gate('> Review: APPROVE ' + head + ' by dot').problems[0].message, /no review verdict/)
+  // Format/control characters and zero-width spaces are canonicalized before author/reviewer comparison
+  assert.match(gate('Review: APPROVE ' + head + ' by claude\u200b (cloud)').problems[0].message, /by the author/)
+  assert.match(reviewGate({ body: `Fixes #42\nAuthor: claude\u200b (cloud)\n`, head, comments: [team(`Review: APPROVE ${head} by claude (cloud)`)] }).problems[0].message, /by the author/)
+  // checkPr runs the gate only when asked, and not offline.
+  assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true }).problems.some(item => item.check === 'review-gate'), true)
+  assert.equal(checkPr({ ...syntheticPr(), isReviewGate: true, prComments: null }).problems.some(item => item.check === 'review-gate'), true)
+  assert.equal(checkPr(syntheticPr()).problems.some(item => item.check === 'review-gate'), false)
+})
 test('pr-check requires synthetic alt text for images in the body', () => {
   for (const text of ['![Board](example.svg)', '<img src="example.svg">', '<img alt="Board" src="example.svg">', '<img data-alt="Synthetic board" src="example.svg">', '<img title=\' alt="Synthetic"\'>']) {
     assert.equal(privateData({ added: [], body: text }).problems.length, 1)
