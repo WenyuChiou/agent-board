@@ -568,7 +568,7 @@ export const LINES = [
 "    const key = JSON.stringify([project, owner.agent || \"claude\", owner.session]);",
 "    holders.set(key, (holders.get(key) ?? new Set).add(canonicalOf(owner)));",
 "  };",
-"  if (mine !== null)",
+"  if (mine !== null && mine.isRun !== true)",
 "    hold(mine.project, mirrorOwner(mine));",
 "  for (const project of projects) {",
 "    for (const task of project.tasks) {",

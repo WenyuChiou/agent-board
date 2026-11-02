@@ -229,6 +229,10 @@ test('a saved turn with no full session stays held while two same-prefix owners 
   const beside = observeQuestions(emptyQuestions(), parseProgress(`## demo\n${beta}`), mine, [], NOW, true, 'pending', undefined, [saved]).ledger
   expect(carrying(beside)).toEqual([])
   expect(isTurnRecorded(beside, saved)).toBe(false)
+  // A run asks nobody, so it owns no question under the alias.
+  const run = { ...mine, sessionId: 'a1b2c3d4-run-9', isRun: true }
+  const besideRun = observeQuestions(emptyQuestions(), parseProgress(`## demo\n${beta}`), run, [], NOW, true, 'pending', undefined, [saved]).ledger
+  expect(isTurnRecorded(besideRun, saved)).toBe(true)
 })
 
 test('a same-prefix peer neither answers an inbox ask nor takes its turn', () => {
