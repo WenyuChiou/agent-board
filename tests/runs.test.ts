@@ -485,6 +485,33 @@ test('removeAutoBlock and extractAutoBlock isolate colliding short session ids',
   const keptCodex = removeAutoBlock(cross, A, 'claude')
   expect(extractAutoBlock(keptCodex, B, 'codex')).toContain('### Codex one')
   expect(extractAutoBlock(keptCodex, A, 'claude')).toBe(null)
+
+  // Cross-agent isolation with identical full id and resume
+  const same = upsertAutoBlock(upsertAutoBlock('', mirror(A, 'Claude same', { agent: 'claude' }), en), mirror(A, 'Codex same', { agent: 'codex' }), en)
+  expect(extractAutoBlock(same, A, 'claude')).toContain('### Claude same')
+  expect(extractAutoBlock(same, A, 'codex')).toContain('### Codex same')
+  const keptClaude = removeAutoBlock(same, A, 'codex')
+  expect(extractAutoBlock(keptClaude, A, 'claude')).toContain('### Claude same')
+  expect(extractAutoBlock(keptClaude, A, 'codex')).toBe(null)
+
+  // Cross-agent isolation with short id and no resume
+  const shortIdOnly = [
+    '## Demo',
+    '<!-- auto session=aaaa1111 agent=claude state=working updated=2026-10-27T12:00:00.000Z -->',
+    '### Claude short',
+    '- [~] x',
+    '<!-- /auto session=aaaa1111 -->',
+    '<!-- auto session=aaaa1111 agent=codex state=working updated=2026-10-27T12:00:00.000Z -->',
+    '### Codex short',
+    '- [~] x',
+    '<!-- /auto session=aaaa1111 -->',
+    '',
+  ].join('\n')
+  expect(extractAutoBlock(shortIdOnly, 'aaaa1111', 'claude')).toContain('### Claude short')
+  expect(extractAutoBlock(shortIdOnly, 'aaaa1111', 'codex')).toContain('### Codex short')
+  const keptClaudeShort = removeAutoBlock(shortIdOnly, 'aaaa1111', 'codex')
+  expect(extractAutoBlock(keptClaudeShort, 'aaaa1111', 'claude')).toContain('### Claude short')
+  expect(extractAutoBlock(keptClaudeShort, 'aaaa1111', 'codex')).toBe(null)
 })
 
 test('cross-agent parent reaches the person instead of same-agent run with same session id', () => {
@@ -557,4 +584,52 @@ test('pickParent does not exclude person candidates with different full resume t
 
   const picked = pickParent(projects, 'Demo', NOW, ['subagent-9999'])
   expect(picked).toBe('aaaa1111-1111-4000-8000-000000000001')
+})
+
+test('writtenResume discards invalid resume values', () => {
+  const shortIdMirror = { ...emptyMirror('12345678', 'Demo', NOW, ''), resume: 'bad value with spaces' }
+  const block = renderAutoBlock(shortIdMirror, en)
+  expect(block[0]).not.toContain('resume=')
+})
+
+test('foldRuns composite lookup resolves parent run among same-agent runs sharing an id', () => {
+  const personCodex = [
+    '## Demo',
+    '<!-- auto session=p1111111 agent=codex state=working updated=2026-10-27T12:00:00.000Z -->',
+    '### Person Codex',
+    '- [~] x',
+    '<!-- /auto session=p1111111 -->',
+  ].join('\n')
+  const personGemini = [
+    '<!-- auto session=p2222222 agent=gemini state=working updated=2026-10-27T12:00:00.000Z -->',
+    '### Person Gemini',
+    '- [~] x',
+    '<!-- /auto session=p2222222 -->',
+  ].join('\n')
+  const codexRun = [
+    '<!-- auto session=r1111111 agent=codex state=working updated=2026-10-27T12:00:00.000Z origin=run parent=p1111111 -->',
+    '### Codex run shared id',
+    '- [~] x',
+    '<!-- /auto session=r1111111 -->',
+  ].join('\n')
+  const geminiRun = [
+    '<!-- auto session=r1111111 agent=gemini state=working updated=2026-10-27T12:00:00.000Z origin=run parent=p2222222 -->',
+    '### Gemini run shared id',
+    '- [~] x',
+    '<!-- /auto session=r1111111 -->',
+  ].join('\n')
+  const geminiChild = [
+    '<!-- auto session=c3333333 agent=gemini state=working updated=2026-10-27T12:00:00.000Z origin=run parent=r1111111 -->',
+    '### Gemini child',
+    '- [~] x',
+    '<!-- /auto session=c3333333 -->',
+  ].join('\n')
+  const text = [personCodex, personGemini, codexRun, geminiRun, geminiChild, ''].join('\n')
+  const projects = parseProgress(text)
+  const folded = foldRuns(projects)
+  const geminiPersonTask = projects[0]?.tasks.find(t => t.title === 'Person Gemini')
+  const codexPersonTask = projects[0]?.tasks.find(t => t.title === 'Person Codex')
+  expect(geminiPersonTask).toBeDefined()
+  expect(codexPersonTask).toBeDefined()
+  expect(folded.runs.has(geminiPersonTask!)).toBe(true)
 })

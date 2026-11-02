@@ -327,14 +327,14 @@ export type BlockIdentity = string | {
 }
 
 const toIdentity = (target: BlockIdentity, agent?: string, resume?: string | null): { sessionId: string; agent?: string; resume?: string | null } => {
-  if (typeof target === 'object' && target !== null) {
-    return {
-      sessionId: target.sessionId,
-      agent: target.agent ?? agent,
-      resume: target.resume ?? resume,
-    }
+  if (typeof target === 'string') {
+    return { sessionId: target, agent, resume }
   }
-  return { sessionId: target, agent, resume }
+  return {
+    sessionId: target.sessionId,
+    agent: target.agent ?? agent,
+    resume: target.resume ?? resume,
+  }
 }
 
 export const matchesSpan = (span: BlockSpan, target: BlockIdentity, agent?: string, resume?: string | null): boolean => {
