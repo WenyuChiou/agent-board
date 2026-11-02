@@ -743,7 +743,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
           ...newEntries,
         ]
         try {
-          writeFileSync(pendingFile, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: noteEntries }) + '\n')
+          writeFileSync(pendingFile, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: noteEntries }) + '\n', { mode: 0o600 })
         } catch (error) {
           throw fileError(part, error)
         }

@@ -962,12 +962,14 @@ test('the pane archive twice on the same day with one same-title same-steps done
 test('/progress tidy with archive saved and task not removed (simulated failure), then tidy again: one entry, not two', async ($, on) => {
   const block = `<!-- auto session=a1b2c397 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c397 -->\n`
   const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const boardText = `# Progress\n\n## Synthetic\n${block}`
+  const boardHash = sha256(boardText)
   const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
   const world: World = {
     files: new Map([
-      [FILE, `# Progress\n\n## Synthetic\n${block}`],
+      [FILE, boardText],
       [ARCHIVE, `# Archive\n\n${entry}\n`],
-      [pending, JSON.stringify({ version: 1, entries: [{ entry, held: 0 }] })],
+      [pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry, held: 0, boardHash }] })],
     ]),
     mtime: 1,
     hasTasks: true,
@@ -984,12 +986,14 @@ test('/progress tidy with archive saved and task not removed (simulated failure)
 test('the pane archive with archive saved and task not removed (simulated failure), then tidy again: one entry, not two', async ($, on) => {
   const block = `<!-- auto session=a1b2c397 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c397 -->\n`
   const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const boardText = `# Progress\n\n## Synthetic\n${block}`
+  const boardHash = sha256(boardText)
   const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
   const world: World = {
     files: new Map([
-      [FILE, `# Progress\n\n## Synthetic\n${block}`],
+      [FILE, boardText],
       [ARCHIVE, `# Archive\n\n${entry}\n`],
-      [pending, JSON.stringify({ version: 1, entries: [{ entry, held: 0 }] })],
+      [pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry, held: 0, boardHash }] })],
     ]),
     mtime: 1,
     hasTasks: true,
@@ -1028,6 +1032,7 @@ test('/progress tidy with archive holding X once, board holding new identical X,
   expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
 
   world.files.set(FILE, `# Progress\n\n## Synthetic\n${block2}`)
+  world.mtime += 1
   world.unremovable.clear()
   expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
   expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
