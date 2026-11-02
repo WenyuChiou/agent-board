@@ -1,2 +1,2 @@
-- **Tests / native hooks** · An Antigravity native-context check that fails now names fixed hook-error codes and its exit status, while keeping commands and log text private. The log is read only on failure; the missing-context flake remains under investigation. Part of #683.
+- **Tests / native hooks** · An Antigravity native-context check that fails now names fixed hook-error codes and its exit status, while keeping commands and log text private. The log is read only on failure; the missing-context flake remains under investigation (#683).
 Tests: `native report context failures keep hook codes without exposing command output`, `Antigravity reports its own waiting question with the command bound by native hooks`.
