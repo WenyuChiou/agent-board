@@ -1,12 +1,12 @@
 import { expect, test } from 'claude-code/testing'
 
 import { boardItems, boardScreen, boardText, chatText, emptyBoardState } from '../hooks/board'
-import { renderAutoBlock, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { extractAutoBlock, removeAutoBlock, renderAutoBlock, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { dashboardHtml } from '../hooks/dashboard'
 import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
 import { autoOf, parseProgress } from '../hooks/parse'
 import { emptyQuestions, observeQuestions, withCaptures } from '../hooks/questions'
-import { cleanSignal, codexSignal, foldRuns, isStrongRun, pickParent, withRunMark, withSignal } from '../hooks/runs'
+import { cleanSignal, codexSignal, foldRuns, isStrongRun, pickParent, startersOf, withRunMark, withSignal } from '../hooks/runs'
 import { serveModel } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
 import { buildView } from '../hooks/view'
@@ -388,4 +388,248 @@ test('a strong run is suppressed while a weak hint remains eligible for the lega
   expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { source: 'exec' })))).toBe(true)
   expect(isStrongRun(withSignal(null, codexSignal(true, null, null)))).toBe(false)
   expect(isStrongRun(withSignal(null, codexSignal(true, 'history', { originator: 'Codex Desktop' })))).toBe(false)
+})
+
+test('concurrent subagents sharing session id prefix remain distinct without overwriting or collision', () => {
+  const sub1 = delegate(1, {
+    session: 'subagent',
+    agent: 'antigravity',
+    resume: 'subagent-1111-0000-4000-8000-000000000001',
+    parent: PERSON,
+    title: 'subagent alpha task',
+  })
+  const sub2 = delegate(2, {
+    session: 'subagent',
+    agent: 'antigravity',
+    resume: 'subagent-2222-0000-4000-8000-000000000002',
+    parent: PERSON,
+    title: 'subagent beta task',
+  })
+  const view = viewOf(file(person, sub1, sub2))
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.title).toBe('Ship the export feature')
+  expect(rows[0]?.runs).toBe('+2 runs by Antigravity, last 21 min ago')
+  expect(view.background).toBe(undefined)
+
+  const projects = parseProgress(file(person, sub1, sub2))
+  const starter = startersOf(projects)
+  const auto1 = autoOf(block(sub1).split('\n')[0]!)!
+  const auto2 = autoOf(block(sub2).split('\n')[0]!)!
+  expect(starter(auto1)?.session).toBe('aaaa1111')
+  expect(starter(auto2)?.session).toBe('aaaa1111')
+})
+
+test('subagents across different agents sharing block session id do not collide', () => {
+  const subCodex = delegate(1, {
+    session: 'sub00001',
+    agent: 'codex',
+    resume: 'codex-uuid-0000-4000-8000-000000000001',
+    parent: PERSON,
+    title: 'codex subagent',
+  })
+  const subAntigravity = delegate(2, {
+    session: 'sub00001',
+    agent: 'antigravity',
+    resume: 'antigravity-uuid-0000-4000-8000-000000000002',
+    parent: PERSON,
+    title: 'antigravity subagent',
+  })
+  const view = viewOf(file(person, subCodex, subAntigravity))
+  const rows = rowsOf(view)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.runs).toContain('+2 runs by')
+  expect(rows[0]?.runs).toContain('Antigravity')
+  expect(rows[0]?.runs).toContain('Codex')
+  expect(view.background).toBe(undefined)
+})
+
+test('upsertAutoBlock preserves peer subagents when session id prefixes match', () => {
+  const subA = { ...emptyMirror('subagent-1111-0000-4000-8000-000000000001', 'Demo', NOW, ''), agent: 'antigravity', title: 'Subagent Alpha', isRun: true as const }
+  const subB = { ...emptyMirror('subagent-2222-0000-4000-8000-000000000002', 'Demo', NOW + 1000, ''), agent: 'antigravity', title: 'Subagent Beta', isRun: true as const }
+  const first = upsertAutoBlock(file(person), subA, en)
+  const second = upsertAutoBlock(first, subB, en)
+  const projects = parseProgress(second)
+  const tasks = projects.find(project => project.name === 'Demo')?.tasks ?? []
+  const subTasks = tasks.filter(task => task.auto?.isRun === true)
+  expect(subTasks).toHaveLength(2)
+  expect(subTasks.map(task => task.title).sort()).toEqual(['Subagent Alpha', 'Subagent Beta'])
+})
+
+test('removeAutoBlock and extractAutoBlock isolate colliding short session ids', () => {
+  const A = 'aaaa1111-1111-4000-8000-000000000001'
+  const B = 'aaaa1111-2222-4000-8000-000000000002'
+  const mirror = (id: string, title: string, extra = {}) => ({ ...emptyMirror(id, 'Demo', NOW, ''), title, isTitleFinal: true, ...extra })
+  const both = upsertAutoBlock(upsertAutoBlock('', mirror(A, 'Alpha'), en), mirror(B, 'Beta'), en)
+
+  expect(extractAutoBlock(both, A)).toContain('### Alpha')
+  expect(extractAutoBlock(both, B)).toContain('### Beta')
+
+  const removedA = removeAutoBlock(both, A)
+  expect(extractAutoBlock(removedA, A)).toBe(null)
+  expect(extractAutoBlock(removedA, B)).toContain('### Beta')
+
+  const removedB = removeAutoBlock(both, B)
+  expect(extractAutoBlock(removedB, B)).toBe(null)
+  expect(extractAutoBlock(removedB, A)).toContain('### Alpha')
+
+  const updatedB = upsertAutoBlock(both, mirror(B, 'Beta changed'), en)
+  expect(extractAutoBlock(both, B) === extractAutoBlock(updatedB, B)).toBe(false)
+  expect(extractAutoBlock(updatedB, B)).toContain('### Beta changed')
+  expect(extractAutoBlock(updatedB, A)).toContain('### Alpha')
+
+  // Cross-agent isolation
+  const cross = upsertAutoBlock(upsertAutoBlock('', mirror(A, 'Alpha', { agent: 'claude' }), en), mirror(B, 'Codex one', { agent: 'codex' }), en)
+  expect(extractAutoBlock(cross, A, 'claude')).toContain('### Alpha')
+  expect(extractAutoBlock(cross, B, 'codex')).toContain('### Codex one')
+  const keptCodex = removeAutoBlock(cross, A, 'claude')
+  expect(extractAutoBlock(keptCodex, B, 'codex')).toContain('### Codex one')
+  expect(extractAutoBlock(keptCodex, A, 'claude')).toBe(null)
+
+  // Cross-agent isolation with identical full id and resume
+  const same = upsertAutoBlock(upsertAutoBlock('', mirror(A, 'Claude same', { agent: 'claude' }), en), mirror(A, 'Codex same', { agent: 'codex' }), en)
+  expect(extractAutoBlock(same, A, 'claude')).toContain('### Claude same')
+  expect(extractAutoBlock(same, A, 'codex')).toContain('### Codex same')
+  const keptClaude = removeAutoBlock(same, A, 'codex')
+  expect(extractAutoBlock(keptClaude, A, 'claude')).toContain('### Claude same')
+  expect(extractAutoBlock(keptClaude, A, 'codex')).toBe(null)
+
+  // Cross-agent isolation with short id and no resume
+  const shortIdOnly = [
+    '## Demo',
+    '<!-- auto session=aaaa1111 agent=claude state=working updated=2026-10-27T12:00:00.000Z -->',
+    '### Claude short',
+    '- [~] x',
+    '<!-- /auto session=aaaa1111 -->',
+    '<!-- auto session=aaaa1111 agent=codex state=working updated=2026-10-27T12:00:00.000Z -->',
+    '### Codex short',
+    '- [~] x',
+    '<!-- /auto session=aaaa1111 -->',
+    '',
+  ].join('\n')
+  expect(extractAutoBlock(shortIdOnly, 'aaaa1111', 'claude')).toContain('### Claude short')
+  expect(extractAutoBlock(shortIdOnly, 'aaaa1111', 'codex')).toContain('### Codex short')
+  const keptClaudeShort = removeAutoBlock(shortIdOnly, 'aaaa1111', 'codex')
+  expect(extractAutoBlock(keptClaudeShort, 'aaaa1111', 'claude')).toContain('### Claude short')
+  expect(extractAutoBlock(keptClaudeShort, 'aaaa1111', 'codex')).toBe(null)
+})
+
+test('cross-agent parent reaches the person instead of same-agent run with same session id', () => {
+  const personBlock = [
+    '## Demo',
+    '<!-- auto session=aaaa1111 agent=claude state=working updated=2026-10-27T12:00:00.000Z -->',
+    '### Person',
+    '- [~] x',
+    '<!-- /auto session=aaaa1111 -->',
+  ].join('\n')
+  const codexRun = [
+    '<!-- auto session=aaaa1111 agent=codex state=working updated=2026-10-27T12:00:00.000Z origin=run -->',
+    '### Codex run same id',
+    '- [~] x',
+    '<!-- /auto session=aaaa1111 -->',
+  ].join('\n')
+  const codexChild = [
+    '<!-- auto session=cccc3333 agent=codex state=working updated=2026-10-27T12:00:00.000Z origin=run parent=aaaa1111 -->',
+    '### Codex child',
+    '- [~] x',
+    '<!-- /auto session=cccc3333 -->',
+  ].join('\n')
+  const text = [personBlock, codexRun, codexChild, ''].join('\n')
+  const projects = parseProgress(text)
+  const childAuto = autoOf('session=cccc3333 agent=codex state=working updated=2026-10-27T12:00:00.000Z origin=run parent=aaaa1111')!
+
+  expect(startersOf(projects)(childAuto)?.session).toBe('aaaa1111')
+  expect(startersOf(projects)(childAuto)?.agent).toBe('claude')
+
+  const folded = foldRuns(projects)
+  const personTask = projects[0]?.tasks.find(t => t.title === 'Person')
+  expect(personTask).toBeDefined()
+  expect(folded.runs.has(personTask!)).toBe(true)
+})
+
+test('upsertAutoBlock does not duplicate blocks on resume change or bad resume value', () => {
+  const A = 'aaaa1111-1111-4000-8000-000000000001'
+  const B = 'aaaa1111-2222-4000-8000-000000000002'
+  const mirror = (id: string, title: string, extra = {}) => ({ ...emptyMirror(id, 'Demo', NOW, ''), title, isTitleFinal: true, ...extra })
+
+  const initial = upsertAutoBlock('', mirror(A, 'Alpha'), en)
+  const updated = upsertAutoBlock(initial, mirror(A, 'Alpha2', { resume: B }), en)
+  const tasks = parseProgress(updated)[0]?.tasks ?? []
+  expect(tasks).toHaveLength(1)
+  expect(tasks[0]?.title).toBe('Alpha2')
+
+  const badInitial = upsertAutoBlock('', mirror(A, 'AlphaBad', { resume: 'bad value' }), en)
+  const badSecond = upsertAutoBlock(badInitial, mirror(A, 'AlphaBad2', { resume: 'bad value' }), en)
+  const badTasks = parseProgress(badSecond)[0]?.tasks ?? []
+  expect(badTasks).toHaveLength(1)
+  expect(badTasks[0]?.title).toBe('AlphaBad2')
+})
+
+test('pickParent does not exclude person candidates with different full resume than an unrelated run', () => {
+  const personAuto = {
+    ...emptyMirror('aaaa1111-1111-4000-8000-000000000001', 'Demo', NOW, ''),
+    agent: 'claude',
+    title: 'Working Person',
+    state: 'working' as const,
+  }
+  const runAuto = {
+    ...emptyMirror('aaaa1111-2222-4000-8000-000000000002', 'Demo', NOW, ''),
+    agent: 'codex',
+    title: 'Background Run',
+    state: 'working' as const,
+    isRun: true as const,
+  }
+  const text = upsertAutoBlock(upsertAutoBlock('', personAuto, en), runAuto, en)
+  const projects = parseProgress(text)
+
+  const picked = pickParent(projects, 'Demo', NOW, ['subagent-9999'])
+  expect(picked).toBe('aaaa1111-1111-4000-8000-000000000001')
+})
+
+test('writtenResume discards invalid resume values', () => {
+  const shortIdMirror = { ...emptyMirror('12345678', 'Demo', NOW, ''), resume: 'bad value with spaces' }
+  const block = renderAutoBlock(shortIdMirror, en)
+  expect(block[0]).not.toContain('resume=')
+})
+
+test('foldRuns composite lookup resolves parent run among same-agent runs sharing an id', () => {
+  const personCodex = [
+    '## Demo',
+    '<!-- auto session=p1111111 agent=codex state=working updated=2026-10-27T12:00:00.000Z -->',
+    '### Person Codex',
+    '- [~] x',
+    '<!-- /auto session=p1111111 -->',
+  ].join('\n')
+  const personGemini = [
+    '<!-- auto session=p2222222 agent=gemini state=working updated=2026-10-27T12:00:00.000Z -->',
+    '### Person Gemini',
+    '- [~] x',
+    '<!-- /auto session=p2222222 -->',
+  ].join('\n')
+  const codexRun = [
+    '<!-- auto session=r1111111 agent=codex state=working updated=2026-10-27T12:00:00.000Z origin=run parent=p1111111 -->',
+    '### Codex run shared id',
+    '- [~] x',
+    '<!-- /auto session=r1111111 -->',
+  ].join('\n')
+  const geminiRun = [
+    '<!-- auto session=r1111111 agent=gemini state=working updated=2026-10-27T12:00:00.000Z origin=run parent=p2222222 -->',
+    '### Gemini run shared id',
+    '- [~] x',
+    '<!-- /auto session=r1111111 -->',
+  ].join('\n')
+  const geminiChild = [
+    '<!-- auto session=c3333333 agent=gemini state=working updated=2026-10-27T12:00:00.000Z origin=run parent=r1111111 -->',
+    '### Gemini child',
+    '- [~] x',
+    '<!-- /auto session=c3333333 -->',
+  ].join('\n')
+  const text = [personCodex, personGemini, codexRun, geminiRun, geminiChild, ''].join('\n')
+  const projects = parseProgress(text)
+  const folded = foldRuns(projects)
+  const geminiPersonTask = projects[0]?.tasks.find(t => t.title === 'Person Gemini')
+  const codexPersonTask = projects[0]?.tasks.find(t => t.title === 'Person Codex')
+  expect(geminiPersonTask).toBeDefined()
+  expect(codexPersonTask).toBeDefined()
+  expect(folded.runs.has(geminiPersonTask!)).toBe(true)
 })

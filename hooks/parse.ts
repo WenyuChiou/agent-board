@@ -356,7 +356,7 @@ export const parseStaleMs = (value: unknown, fallback: number = DEFAULT_STALE_MS
 export const FUTURE_SKEW_MS = 5 * 60 * 1000
 
 export const futureTimeKey = (auto: ProgressAuto): string =>
-  `future:${sha256(JSON.stringify(['future-time', auto.agent, auto.session, auto.updated]))}`
+  `future:${sha256(JSON.stringify(['future-time', auto.agent, auto.resume ?? auto.session, auto.updated]))}`
 
 // Keep the writer's stamp intact. The local observation belongs to that exact update,
 // and remains authoritative when the local clock eventually catches up with it.
