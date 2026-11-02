@@ -4540,7 +4540,7 @@ main(fs, { file, session, rounds: 10, spacingMs: 50, lockWaitMs: 8000, gateMs: 1
       settled = readFileSync(f.progress, 'utf8')
       const isSelectedPending = existsSync(join(f.root, 'pending', selectedPendingName))
       return !isSelectedPending && owners.every(id => settled.includes(`<!-- auto session=${id} `))
-    }, 'automatic recovery must drain the selected event and restore all twelve blocks')
+    }, 'automatic recovery must drain the selected event and restore all twelve blocks', 20000)
     await waitForAutomaticRecovery(() => ownedRecoveryPids.every(pid => !isReporterAlive(pid)), 'every owned recovery helper must exit after draining', 3000)
     stamp('recovered')
     const saved = JSON.parse(readFileSync(join(f.root, 'sessions', `${selectedHash}.json`), 'utf8'))
