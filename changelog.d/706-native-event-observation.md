@@ -1,0 +1,2 @@
+- **Tests / native hooks** · Native Antigravity checks observe the recorded event after a hook safely queues it for automatic recovery. A real locked-file regression verifies that the event commits without another hook or user input, while preserving the existing state, session and privacy checks and time limits. (#706)
+  Tests: `native Antigravity event assertions await a queued record commit without replaying the hook`, `native Antigravity hook commands bind conversationId, record metadata only and keep Stop resumable`.

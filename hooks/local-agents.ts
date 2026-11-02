@@ -89,14 +89,32 @@ export const antigravityCommand = (argv: string[], isWindows: boolean, quote: (v
     const source = `process.argv=JSON.parse(${JSON.stringify(args)});process.argv.push('--hook-started',String(Math.floor(require('node:perf_hooks').performance.timeOrigin)));${argv[3]}`
     return `${windowsNode} --input-type=commonjs -e eval(Buffer.from('${base64(new TextEncoder().encode(source))}','base64').toString('utf8'))`
   }
-  return encodedLaunch(argv)
+  return encodedLaunch(argv, true)
 }
 
 // PowerShell reads U+2018 to U+201B as single quotes too, so each is doubled like ' (#625).
 // The start time is passed on because this launch costs a PowerShell start first (#533).
-const encodedLaunch = (argv: string[]): string => {
-  const launch = `& ${argv.map(value => `'${value.replace(/['‘’‚‛]/g, quote => quote + quote)}'`).join(' ')} --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE`
-  return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${base64(utf16le(launch))}`
+const encodedLaunch = (argv: string[], isCompact = false): string => {
+  const single = (value: string): string => "'" + value.replace(/['‘’‚‛]/g, quote => quote + quote) + "'"
+  const stamp = ' --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE'
+  const encode = (source: string): string => 'powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + base64(utf16le(source))
+  const command = encode('& ' + argv.map(single).join(' ') + stamp)
+  const worker = argv[4], progressAt = argv.indexOf('--progress-file')
+  if (!isCompact || command.length < 8191 || argv[1] !== '--input-type=commonjs' || argv[2] !== '-e' || !worker || progressAt < 0 || !argv[progressAt + 1]) return command
+  // Keep the full worker literal for ownership checks. Shared path prefixes can be
+  // reconstructed without repeating them through both encoding layers (#705).
+  const words = argv.map((value, index) => {
+    if (index === 4) return '$w'
+    if (index !== 0 && index !== progressAt + 1) return single(value)
+    let count = 0
+    while (count < worker.length && count < value.length && worker[count] === value[count]) count++
+    const common = worker.slice(0, count)
+    count = Math.max(common.lastIndexOf('\\'), common.lastIndexOf('/')) + 1
+    const shared = '($w.Substring(0,' + count + ')+' + single(value.slice(count)) + ')'
+    return count > 0 && shared.length < single(value).length ? shared : single(value)
+  })
+  const compact = encode('$w=' + single(worker) + '; & ' + words.join(' ') + stamp)
+  return compact.length < command.length ? compact : command
 }
 
 // A host's hook command on Windows, which cmd and PowerShell both run: Codex 0.164 runs hooks

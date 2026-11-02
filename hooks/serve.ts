@@ -1242,6 +1242,14 @@ const PAGE_SCRIPT = String.raw`
       return false;
     }).then(function (ok) { refresh(); return ok; });
   }
+  // Reconcile both a fresh render and an enqueue response that arrives after its receipt.
+  function clearEnqueueResult(key, receipt) {
+    var result = key && results[key];
+    if (!result || !receipt || result.messageId !== receipt.id) return;
+    delete results[key];
+    var slot = resultSlots[key];
+    if (slot) { slot.node.textContent = ''; slot.node.className = 'press-result'; }
+  }
   function nativeAct(key, text, delivery, session, asked, fp, go) {
     if (isUnreachable) return Promise.resolve(false);
     var slot = JSON.stringify([key, delivery.id, delivery.turn, session, asked, fp]);
@@ -1251,6 +1259,10 @@ const PAGE_SCRIPT = String.raw`
     say(w('serveSending', agentName(delivery.agent)), '', key);
     return call('/api/act', { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp }).then(function (data) {
       say(data.note || w(data.ok ? 'messagesQueued' : 'messagesFailed'), data.ok ? 'done' : 'alert', key, undefined, !data.ok);
+      if (data.ok && results[key]) {
+        results[key].messageId = attempt.id;
+        clearEnqueueResult(key, pg.sources[key] && pg.sources[key].receipt);
+      }
       busyOff(go, data.ok || isUnreachable);
       return data.ok;
     }, function () { say(w('messagesFailed'), 'alert', key, undefined, true); busyOff(go, false); unreachable(); return false; }).then(function (ok) { refresh(); return ok; });
@@ -1268,6 +1280,7 @@ const PAGE_SCRIPT = String.raw`
   function agentName(agent) { return brand(agent || 'claude'); }
   function receiptLine(receipt, key) {
     if (!receipt) return null;
+    clearEnqueueResult(key, receipt);
     var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     if (receipt.status === 'acknowledged' || receipt.status === 'rejected') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
     // The server already took a nonce ACK off; a receipt kept from a version 1 store was

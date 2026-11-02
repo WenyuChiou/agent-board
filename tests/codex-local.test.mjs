@@ -2642,6 +2642,116 @@ test('Codex lifecycle hooks never retain conversation and approval payloads, and
   assert.ok(!existsSync(transcript))
 }))
 
+// These synthetic full ids have distinct SHA-256 owners with the same eight-character prefix.
+const collisionSessions = ['collision-fixture-9342', 'collision-fixture-29381']
+const collisionOwner = id => createHash('sha256').update(`codex:${id}`).digest('hex')
+const collisionBlock = (text, owner) => text.match(new RegExp(`<!-- auto session=${owner.slice(0, 8)} [^\\n]*owner=${owner}[^\\n]*-->[\\s\\S]*?<!-- /auto session=${owner.slice(0, 8)} -->`))?.[0]
+
+test('Codex hook events and reports preserve both independent sessions with the same short id', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const [first, second] = collisionSessions
+  assert.equal(collisionOwner(first).slice(0, 8), collisionOwner(second).slice(0, 8))
+  assert.notEqual(collisionOwner(first), collisionOwner(second))
+  const report = (id, project) => f.command(['--codex-report', '--session', id], { title: `${project} task`, project, state: 'working', steps: ['- [~] Keep this work'] })
+  assert.equal(report(first, 'First project').status, 0)
+  const firstBytes = collisionBlock(readFileSync(f.progress, 'utf8'), collisionOwner(first))
+  assert.ok(firstBytes)
+  for (const name of ['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd']) {
+    const result = f.event(name, 'collision-turn', { session_id: second })
+    assert.equal(result.status, 0, result.stderr)
+    const text = readFileSync(f.progress, 'utf8')
+    assert.equal(collisionBlock(text, collisionOwner(first)), firstBytes)
+    assert.ok(collisionBlock(text, collisionOwner(second)))
+    assert.equal((text.match(/^<!-- auto /gm) ?? []).length, 2)
+  }
+  const secondBytes = collisionBlock(readFileSync(f.progress, 'utf8'), collisionOwner(second))
+  assert.equal(report(first, 'Moved first project').status, 0)
+  const moved = readFileSync(f.progress, 'utf8')
+  assert.equal(collisionBlock(moved, collisionOwner(second)), secondBytes)
+  assert.ok(moved.includes(`## Moved first project\n${collisionBlock(moved, collisionOwner(first))}`))
+  const savedFirst = collisionBlock(moved, collisionOwner(first))
+  assert.equal(report(second, 'Moved second project').status, 0)
+  assert.equal(collisionBlock(readFileSync(f.progress, 'utf8'), collisionOwner(first)), savedFirst)
+}))
+
+test('Codex same-prefix reporting still refuses duplicate ownership and contradictory or unproven peers', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const [id, peer] = collisionSessions
+  const owner = collisionOwner(id), peerOwner = collisionOwner(peer)
+  const report = () => f.command(['--codex-report', '--session', id], { title: 'Owned task', state: 'working', steps: ['- [~] Keep this work'] })
+  assert.equal(report().status, 0)
+  const owned = readFileSync(f.progress, 'utf8')
+  const recordPath = join(f.root, 'sessions', `${owner}.json`)
+  const record = readFileSync(recordPath)
+  const block = collisionBlock(owned, owner)
+  const foreign = block.replace(`owner=${owner}`, `owner=${peerOwner}`).replace(`resume=${id}`, `resume=${peer}`)
+  for (const text of [
+    owned + owned,
+    owned.replace(`resume=${id}`, `resume=${peer}`),
+    owned.replace('agent=codex', 'agent=cursor'),
+    foreign.replace(` owner=${peerOwner}`, ''),
+    foreign.replace(`resume=${peer}`, `resume=${id}`),
+    foreign.replace(`owner=${peerOwner}`, `owner=${peerOwner.slice(0, -1)}${peerOwner.endsWith('0') ? '1' : '0'}`),
+    foreign.replace(` resume=${peer}`, ''),
+    owned + foreign.replace(` owner=${peerOwner}`, ''),
+  ]) {
+    writeFileSync(f.progress, text)
+    const result = report()
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /BLOCK_CONFLICT/)
+    assert.equal(readFileSync(f.progress, 'utf8'), text)
+    assert.deepEqual(readFileSync(recordPath), record)
+  }
+}))
+
+test('native completion and run withdrawal select the full owner beside a same-prefix peer', async () => {
+  const { boardConfirmedReport, dropCodexBlock, putCodexBlock } = await importTs('../hooks/codex.ts')
+  const [id, peer] = collisionSessions
+  const owner = collisionOwner(id), peerOwner = collisionOwner(peer)
+  const report = { session: id, agent: 'codex', turn: null, state: 'waiting', title: 'Owned task', project: 'Owned project', steps: ['- [ ] Work'], updated: '2026-10-30T00:00:00Z' }
+  const peerText = putCodexBlock('', { ...report, session: peer, title: 'Peer task', project: 'Peer project' }, peerOwner)
+  const done = { ...report, state: 'done', steps: ['- [x] Work'], updated: '2026-10-30T00:01:00.000Z' }
+  const text = putCodexBlock(peerText, done, owner)
+  assert.deepEqual(boardConfirmedReport(text, report, owner), done)
+  assert.equal(dropCodexBlock(text, owner), peerText)
+  assert.equal(dropCodexBlock(text + text, owner), text + text)
+})
+
+test('run withdrawal refuses a block whose native resume contradicts its owner and keeps every byte', async () => {
+  const { dropCodexBlock, putCodexBlock } = await importTs('../hooks/codex.ts')
+  const [id, peer] = collisionSessions
+  const owner = collisionOwner(id), peerOwner = collisionOwner(peer)
+  const report = { session: id, agent: 'codex', turn: null, state: 'working', title: 'Owned task', project: 'Owned project', steps: ['- [~] Work'], updated: '2026-10-30T00:00:00Z' }
+  const own = putCodexBlock('', report, owner)
+  const both = putCodexBlock(putCodexBlock('', { ...report, session: peer, title: 'Peer task', project: 'Peer project' }, peerOwner), report, owner)
+  assert.ok(both.includes(`resume=${peer}`))
+  // A contradiction beside a valid peer, alone, with mixed line endings, and with a resume that could never be a session's.
+  for (const text of [
+    both.replace(`resume=${id}`, `resume=${peer}`),
+    own.replace(`resume=${id}`, `resume=${peer}`),
+    both.replace(`resume=${id}`, `resume=${peer}`).replaceAll('\n', '\r\n') + 'Keep this mixed ending.\n',
+    own.replace(`resume=${id}`, 'resume=x'),
+  ]) assert.equal(dropCodexBlock(text, owner), text)
+  // The peer's own valid binding is still withdrawn alone, and a block with no resume is still its owner's.
+  assert.equal(dropCodexBlock(both, peerOwner), putCodexBlock('', report, owner))
+  assert.equal(dropCodexBlock(own.replace(` resume=${id}`, ''), owner), '')
+})
+
+test('native reports preserve a different agent with the same hash prefix and mixed newline bytes', async () => {
+  const { putCodexBlock, dropCodexBlock } = await importTs('../hooks/codex.ts')
+  const id = 'cross-collision-fixture-22272', peer = 'cross-collision-fixture-63084'
+  const owner = collisionOwner(id)
+  const peerOwner = createHash('sha256').update(`cursor:${peer}`).digest('hex')
+  assert.equal(owner.slice(0, 8), peerOwner.slice(0, 8))
+  const report = { session: id, agent: 'codex', turn: null, state: 'working', title: 'Owned task', project: 'Own project', steps: ['- [~] Work'], updated: '2026-10-30T00:00:00Z' }
+  const peerText = putCodexBlock('', { ...report, session: peer, agent: 'cursor', title: 'Peer task', project: 'Peer project' }, peerOwner).replaceAll('\n', '\r\n') + 'Keep this mixed ending.\n'
+  const both = putCodexBlock(peerText, report, owner)
+  assert.ok(both.startsWith(peerText))
+  const rewritten = putCodexBlock(both, { ...report, steps: ['- [?] Keep my question'] }, owner)
+  assert.ok(rewritten.startsWith(peerText))
+  assert.equal(dropCodexBlock(rewritten, owner), peerText)
+})
+
 test('Codex reports refuse a colliding or unowned block and do not change it', () => fixture(f => {
   f.install('--apply')
   const id = createHash('sha256').update(`codex:${session}`).digest('hex').slice(0, 8)
@@ -2939,6 +3049,7 @@ const opencodeOneShot = (home, mode, scenario = 'default') => {
   const exits = join(home, `one-shot-exits-${mode}-${scenario}.jsonl`)
   writeFileSync(calls, '')
   writeFileSync(exits, '')
+  writeFileSync(calls + '.timing', '')
   const spawnStub = `import { spawnSync as realSpawnSync } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
 const spawnSync = (file, args, options) => {
@@ -2947,21 +3058,32 @@ const spawnSync = (file, args, options) => {
   if (globalThis.isExiting) appendFileSync(${JSON.stringify(exits)}, JSON.stringify(cwd ?? null) + '\\n')
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'fail') return { status: 1, stdout: '', stderr: '' }
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'hang') {
+    const t0 = performance.now()
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, options.timeout)
+    try { appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ wait: session_id, asked: options.timeout, t0, t1: performance.now() }) + '\\n') } catch {}
     return { error: { code: 'ETIMEDOUT' }, status: null, signal: 'SIGKILL' }
   }
   return realSpawnSync(file, args, options)
 }`
   const plugin = join(home, `one-shot-plugin-${mode}-${scenario}.mjs`), main = join(home, `one-shot-${mode}-${scenario}.mjs`)
   const copy = join(home, `one-shot-plugin-${mode}-${scenario}-copy.mjs`)
-  writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub).replace("import { spawnSync } from 'node:child_process'", spawnStub))
+  assert.ok(source.includes('const hookError = code => {'), 'the timing wrapper for #576 no longer matches the plugin')
+  writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub).replace("import { spawnSync } from 'node:child_process'", spawnStub)
+    // #576: each log write made while exiting is timed, with the log's size before it.
+    .replace('const hookError = code => {', `const hookError = code => {
+  const t0 = performance.now(), file = ${JSON.stringify(join(home, '.agent-board', 'hook-errors.log'))}
+  let size = 0
+  try { size = fs.statSync(file).size } catch {}
+  try { return timedHookError(code) } finally { if (globalThis.isExiting) try { fs.appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ log: code, size, t0, t1: performance.now() }) + '\\n') } catch {} }
+}
+const timedHookError = code => {`))
   writeFileSync(copy, readFileSync(plugin))
   // Exit listeners run in order, so the ones around the plugin's own time its exit work.
   writeFileSync(main, `import { writeFileSync } from 'node:fs'
 const marks = {}
-process.on('exit', () => { marks.start = Date.now(); globalThis.isExiting = true })
+process.on('exit', () => { marks.start = Date.now(); marks.monotonicStart = performance.now(); globalThis.isExiting = true })
 const { AgentBoardLocal } = await import(${JSON.stringify(pathToFileURL(plugin).href)})
-process.on('exit', () => { marks.end = Date.now(); writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks)) })
+process.on('exit', () => { marks.end = Date.now(); marks.monotonicEnd = performance.now(); writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks)) })
 let gets = 0, release = () => {}
 const isStalled = ${JSON.stringify(scenario)} === 'stalled'
 const holdAt = { 'late-chat': 0, 'second-chat': 2 }[${JSON.stringify(scenario)}] ?? -1
@@ -3016,7 +3138,7 @@ await hooks.event({ event: { type: 'session.deleted', properties: { info: { id: 
   assert.equal(result.status, 0, result.stderr)
   if (mode === 'real') settleQueue(home)
   const lines = file => readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
-  return { calls: lines(calls), exitFolders: lines(exits), marks: JSON.parse(readFileSync(marks, 'utf8')) }
+  return { calls: lines(calls), exitFolders: lines(exits), marks: JSON.parse(readFileSync(marks, 'utf8')), segments: lines(calls + '.timing') }
 }
 // A loaded machine can push a report past the worker's 2 s limit (#241). An event the worker queued
 // is applied by settleQueue before a real-mode check reads the board. A report given up on
@@ -3083,9 +3205,13 @@ test('opencode: two sessions in one process both end within one shared deadline'
       assertNothingLost(log)
     } else {
       assert.deepEqual(exiting, [{ session: 'synthetic-one-shot', state: 'ended', isExiting: true }])
-      assert.equal(readFileSync(log, 'utf8').match(/opencode REPORTER_TIMEOUT/g)?.length, 2)
       const spent = run.marks.end - run.marks.start
-      assert.ok(spent >= 2000 && spent < 3500, `exit took ${spent} ms`)
+      // Where the exit's time went (#576), shown on a pass too, so CI runs give the spread.
+      const ms = value => value.toFixed(1)
+      const segments = `exit took ${spent} ms, ${ms(run.marks.monotonicEnd - run.marks.monotonicStart)} ms monotonic: ${run.segments.map(({ t0, t1, ...what }) => `${JSON.stringify(what)} at ${ms(t0 - run.marks.monotonicStart)} took ${ms(t1 - t0)}`).join('; ')}`
+      t.diagnostic(segments)
+      assert.equal(readFileSync(log, 'utf8').match(/opencode REPORTER_TIMEOUT/g)?.length, 2)
+      assert.ok(spent >= 2000 && spent < 3500, segments)
       for (const session of ['synthetic-one-shot', 'synthetic-second']) assert.equal(oneShotState(text, session), 'waiting', text)
     }
   }, { retry: mode === 'real' && LOST })
@@ -3564,6 +3690,68 @@ test('Windows Antigravity binds its executable across PATH batch files and anoth
   }
 }))
 
+
+test('Windows Antigravity fallback commands stay within the command limit at long installation paths', async () => {
+  const { antigravityCommand, hookCommandArgs, windowsHookCommand } = await importTs('../hooks/local-agents.ts')
+  const { connectDataRoots } = await importTs('../hooks/connect-pure.ts')
+  const quote = value => "'" + value.replace(/['‘’‚‛]/g, mark => mark + mark) + "'"
+  for (const length of [150, 160, 180]) {
+    const home = 'C:\\synthetic ' + 'h'.repeat(length - 'C:\\synthetic '.length)
+    const folder = home + '\\.agent-board'
+    for (const name of ['agent-board-hook.mjs', 'progress-hook.mjs']) {
+      const argv = hookCommandArgs(home + '\\n s\\node.exe', home, 'antigravity', folder + '\\' + name, folder + '\\progress.md', 'Stop', 'waiting')
+      assert.ok(windowsHookCommand(argv, quote).length >= 8191, 'the fixture must reach the overlong fallback')
+      const command = antigravityCommand(argv, true, quote)
+      assert.ok(command.length < 8191, String(command.length) + ' characters at home length ' + length)
+      if (name === 'progress-hook.mjs') {
+        assert.ok(connectDataRoots(command).includes(folder))
+        assert.ok(connectDataRoots(JSON.stringify({ command })).includes(folder))
+      }
+    }
+  }
+})
+
+test('compact Antigravity fallback preserves hook arguments and Codex trust command bytes', async () => {
+  const { antigravityCommand, hookCommandArgs, windowsHookCommand } = await importTs('../hooks/local-agents.ts')
+  const quote = value => "'" + value.replace(/['‘’‚‛]/g, mark => mark + mark) + "'"
+  const goldenHome = "C:\\synthetic f'‘’‚‛雪"
+  const golden = hookCommandArgs('C:\\node space\\node.exe', goldenHome, 'codex', goldenHome + '\\.agent-board\\agent-board-hook.mjs', goldenHome + '\\.agent-board\\progress.md', 'Stop')
+  // These hashes are the main commands before #705; Codex trust binds their exact bytes.
+  assert.equal(createHash('sha256').update(windowsHookCommand(golden, quote)).digest('hex'), '456338c74f0b3302852162939307e11ad4dd1b8796e0acb34d5326f609f41cb6')
+  assert.equal(createHash('sha256').update(windowsHookCommand(golden, quote, 'C:\\NODE~1\\node.exe')).digest('hex'), '3a10d8477c5f6e44aba0025019403638c42a35aaa1145d083a867200182a1791')
+  if (process.platform !== 'win32') return
+  await fixture(async f => {
+    const prefix = "long f's 雪-"
+    const home = join(f.home, prefix + 'h'.repeat(Math.max(0, 160 - f.home.length - prefix.length - 1)))
+    const root = join(home, '.agent-board')
+    mkdirSync(root, { recursive: true })
+    const runtime = join(f.home, 'n s')
+    mkdirSync(runtime)
+    const node = join(runtime, 'node.exe')
+    copyFileSync(process.execPath, node)
+    const worker = join(root, 'agent-board-hook.mjs')
+    const capture = join(root, 'synthetic-long-fallback.json')
+    const stdout = 'synthetic compact stdout\n', stderr = 'synthetic compact stderr\n'
+    writeFileSync(worker, syntheticWindowsWrapperWorker(capture, stdout, stderr, 37))
+    const argv = hookCommandArgs(node, home, 'antigravity', worker, join(root, 'progress.md'), 'Stop', 'waiting')
+    assert.ok(windowsHookCommand(argv, quote).length >= 8191, 'exercise the compact branch')
+    const command = antigravityCommand(argv, true, quote)
+    assert.ok(command.length < 8191, String(command.length) + ' characters')
+    const input = JSON.stringify({ unicode: '雪', apostrophe: "O'Hara", quotes: '"‘’‚‛“”', newline: 'line one\nline two' }, null, 2)
+    assert.ok(input.includes('\n'), 'the command receives multiline JSON stdin')
+    const result = await fireCommand(f, command, input)
+    assert.equal(result.status, 37, hookFailure(result))
+    assert.equal(result.stdout, stdout)
+    assert.equal(result.stderr, stderr)
+    const saved = JSON.parse(readFileSync(capture, 'utf8'))
+    assert.equal(saved.worker, worker)
+    assert.equal(saved.input, input)
+    assert.deepEqual(saved.argv.slice(0, -2), argv.slice(5))
+    assert.equal(saved.argv.at(-2), '--hook-started')
+    assert.ok(Number.isSafeInteger(Number(saved.argv.at(-1))) && Number(saved.argv.at(-1)) > 0)
+  })
+})
+
 test('Windows Antigravity falls back to PowerShell when setup cannot verify a quote-free Node path', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   const home = join(f.home, "f's")
   mkdirSync(home)
@@ -3992,6 +4180,21 @@ test('failed native tree termination reports a bounded error and retains its fix
   }
 })
 
+const nativeEventRecord = async (record, event) => {
+  // A successful native hook may have queued the event for automatic recovery.
+  // Observe that event's commit without sending the hook a second time.
+  await waitForAutomaticRecovery(() => {
+    try { return JSON.parse(readFileSync(record, 'utf8')).activity.at(-1)?.event === event }
+    catch (error) {
+      if (error.code === 'ENOENT') return false
+      throw error
+    }
+  }, `the native hook must commit ${event} before its saved activity is asserted`)
+  const saved = JSON.parse(readFileSync(record, 'utf8'))
+  assert.equal(saved.activity.at(-1).event, event)
+  return saved
+}
+
 test('native Antigravity hook commands bind conversationId, record metadata only and keep Stop resumable', { timeout: 240000 }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
@@ -4006,9 +4209,8 @@ test('native Antigravity hook commands bind conversationId, record metadata only
     assert.equal(result.status, 0, hookFailure(result))
     if (event === 'SessionStart') assert.equal(typeof JSON.parse(result.stdout).injectSteps?.[0]?.systemMessage?.systemMessage, 'string')
     else assert.deepEqual(JSON.parse(result.stdout), {})
-    const saved = JSON.parse(readFileSync(record, 'utf8'))
+    const saved = await nativeEventRecord(record, event)
     assert.equal(saved.session, conversationId)
-    assert.equal(saved.activity.at(-1).event, event)
     assert.equal(saved.state, event === 'SessionStart' || event === 'Stop' ? 'waiting' : 'working')
     assert.ok(!JSON.stringify(saved).includes('PRIVATE_'))
   }
@@ -4023,8 +4225,45 @@ test('native Antigravity hook commands bind conversationId, record metadata only
   const resumed = await fire('PreInvocation')
   assert.equal(resumed.error, undefined, hookFailure(resumed))
   assert.equal(resumed.status, 0, hookFailure(resumed))
-  assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'working')
+  assert.equal((await nativeEventRecord(record, 'PreInvocation')).state, 'working')
   assert.notEqual(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'ended', '--event', 'Stop'], { conversationId }).status, 0)
+}))
+
+test('native Antigravity event assertions await a queued record commit without replaying the hook', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const payload = JSON.parse(recovery.payload)
+  const started = await nativeHook(recovery.hooks.PreInvocation[0].command, f.env, payload)
+  assert.equal(started.status, 0, hookFailure(started))
+  await waitForAutomaticRecovery(() => existsSync(recovery.record) && JSON.parse(readFileSync(recovery.record, 'utf8')).activity.at(-1).event === 'PreInvocation', 'the first native event must be committed before the controlled lock')
+  const locked = lockedProgress(f)
+  const env = { ...f.env, NODE_OPTIONS: `${locked.env.NODE_OPTIONS} --require ${JSON.stringify(recovery.preload)}` }
+  let recoveryPid, release
+  try {
+    const posted = await nativeHook(recovery.hooks.PostInvocation[0].command, env, payload)
+    assert.equal(posted.status, 0, hookFailure(posted))
+    assert.deepEqual(JSON.parse(posted.stdout), {})
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the native event must queue once and launch its own recovery helper')
+    recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    assert.ok(isReporterAlive(recoveryPid))
+    assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).activity.at(-1).event, 'PreInvocation')
+    // Let the observer start while the real record is still behind. Releasing the
+    // lock lets the already-running recovery apply it without another host event.
+    release = setImmediate(() => unlinkSync(locked.marker))
+    const saved = await nativeEventRecord(recovery.record, 'PostInvocation')
+    assert.equal(saved.session, recovery.conversationId)
+    assert.equal(saved.state, 'working')
+    assert.deepEqual(saved.activity.map(one => one.event), ['PreInvocation', 'PostInvocation'])
+    assert.doesNotMatch(JSON.stringify(saved), /PRIVATE_/)
+    await waitForAutomaticRecovery(() => pendingFiles(f).length === 0 && !existsSync(recovery.lease), 'the one queued event must drain without a second hook')
+    await waitForAutomaticRecovery(() => !isReporterAlive(recoveryPid), 'the owned recovery helper must exit', 3000)
+  } finally {
+    clearImmediate(release)
+    // The hook may start recovery before an earlier assertion fails.
+    if (recoveryPid === undefined && existsSync(recovery.pidFile)) recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    if (existsSync(locked.marker)) unlinkSync(locked.marker)
+    if (Number.isInteger(recoveryPid) && recoveryPid > 0 && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
+  }
 }))
 
 test('an edited Antigravity definition is a conflict rather than an automatic trust or overwrite', () => fixture(f => {

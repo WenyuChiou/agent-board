@@ -1,0 +1,2 @@
+- **Antigravity / Windows fallback** · Long Windows installation paths no longer repeat shared directories in an oversized PowerShell fallback command. Existing short hook commands and Codex trust strings keep their exact bytes (#705).
+  Tests: `Windows Antigravity fallback commands stay within the command limit at long installation paths`, `compact Antigravity fallback preserves hook arguments and Codex trust command bytes`.
