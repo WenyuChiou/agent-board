@@ -1,18 +1,24 @@
-import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressStep, ProgressStepStatus, ProgressTask } from '../types'
+import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressStep, ProgressStepStatus, ProgressTask, QuestionRecord } from '../types'
 import { askOf, askRank } from './ask'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
+import { agentLabel } from './strings'
 import type { AskKind } from './ask'
 import { confirmKey, shortId, stepWords, upsertAutoBlock } from './blocks'
 import type { ConfirmRef } from './blocks'
+import { isLifecycleStep } from './codex'
+import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
 import { sha256 } from './sha256'
 import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
+import { closedCopies, mergeCopies, recordFolder } from './question-merge'
+import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
+import type { RunGroup } from './runs'
 import type { PendingTurn } from './board'
 
 // What the pane shows, worked out from the file and this session's own list, so the
@@ -43,6 +49,8 @@ export type CurrentView = {
   done: number
   total: number
   steps: ViewStep[]
+  // The runs this session started for itself, as one line; absent when it started none (#399).
+  runs?: string
 }
 
 // A step of a hand-kept task, addressed so a press can tick exactly the line it showed.
@@ -50,7 +58,9 @@ export type StepRef = { project: string; title: string; step: string; line: numb
 
 // What a row's 封存 press takes out: a session's block by its id, or a hand-kept task by its
 // heading line, checked against the title so a task that moved is still found once.
-export type TaskRef = { project: string; title: string; line: number; session: string | null }
+// `isDuplicate` marks the older block of two for one session (#399): its archive is allowed
+// while it still looks live, once the file shows a newer block for the same agent and id.
+export type TaskRef = { project: string; title: string; line: number; session: string | null; isDuplicate?: true }
 
 // Another agent's session, as its block names it: its block id, the session id its hook gave
 // (`resume=`), the folder it ran in (`dir=`), and whether it has closed (`state=ended`). The
@@ -66,6 +76,8 @@ export type WaitingItem = {
   questionId?: string
   ageStage?: 'pending' | 'reminder' | 'older'
   nativeSession?: string
+  at?: number
+  dir?: string | null
   key: string
   project: string
   // The task it belongs to, its background, and what it needs from the person.
@@ -100,8 +112,11 @@ export type WaitingItem = {
   // What the person's Answered press keeps, to hide the question until the session asks
   // something else (`answeredKey`); '' for a hand-kept step, which is ticked instead.
   hideKey: string
-  // A retained source without a current producer is available for review, not a new hide.
+  // A retained source without a current producer is available for review, not a new hide. One kept
+  // from an archived block can be hidden (#400): hiding writes only the hidden list, never the source.
   canHide?: boolean
+  // Kept for review after its session's block was archived: nothing is running that could be archived.
+  isKept?: true
   // A hand-kept step can be ticked from the pane; another session's cannot.
   step: StepRef | null
   // Another agent's session the question came from; null for Claude's and hand-kept ones.
@@ -118,6 +133,8 @@ export type Focus =
 
 export type TaskRow = {
   nativeSession?: string
+  at?: number
+  dir?: string | null
   key: string
   project: string
   title: string
@@ -153,6 +170,9 @@ export type TaskRow = {
   confirm?: ConfirmRef | null
   // Another agent's session the row is; null for Claude's and hand-kept ones.
   target: AgentTarget | null
+  // The runs this session started for itself, as one line (`+3 runs by Codex, last 20 min ago`);
+  // absent when it started none (#399).
+  runs?: string
 }
 
 // This session's pull request, for the card.
@@ -170,6 +190,12 @@ export type Overview = { waiting: number; active: number; due: number; today: nu
 
 export type View = {
   warning?: string
+  // The size warning's numbers and finished hand-kept tasks Clean up can archive (#464).
+  details?: string
+  // The size warning is up.
+  isLarge?: true
+  // A size warning or due finished tasks make Clean up available on the page and pane.
+  isCleanable?: true
   // What the board cleared in the last 7 days (retention.ts); absent when it cleared nothing.
   pruned?: string
   current: CurrentView | null
@@ -181,13 +207,20 @@ export type View = {
   hidden: WaitingItem[]
   reminder?: WaitingItem[]
   older?: WaitingItem[]
+  // Unanswered questions of stopped sessions, each counted once; Waiting shows one line.
+  stoppedAsking?: number
   hasPendingQuestions?: boolean
+  // The runs agents started for themselves that no session is known for, as one folded line
+  // (`Background runs: 4, last 20 min ago`); absent when there are none (#399).
+  background?: string
   idle: TaskRow[]
   stopped: TaskRow[]
   due: TaskRow[]
   active: TaskRow[]
   groups: RowGroup[]
   recent: DoneItem[]
+  finished?: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null }>
+  unreadable?: string[]
   health?: string[]
 }
 
@@ -195,6 +228,15 @@ const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 export const IDLE_MS = 7 * DAY
+export const OLDER_SHOWN = 10
+
+// A session titled by its folder has its project's name for a title; a row then names it once.
+// Case and the path separator do not make two names (#612). The page's script keeps a copy.
+export const isSameName = (project: string, title: string): boolean => {
+  const key = (name: string): string => name.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+
+  return key(project) !== '' && key(project) === key(title)
+}
 
 export const relativeTime = (then: number, now: number, s: Strings = ZH_TW): string => {
   if (then <= 0) return ''
@@ -269,18 +311,29 @@ export const mirrorMatchesTask = (mirror: ProgressMirror, project: string, task:
   return source.title === task.title && steps(source) === steps(task) && contextOf(source) === contextOf(task) && handoffOf(source) === handoffOf(task)
 }
 
+// The words a step shows. A step an agent wrote as a whole JSON record has none of its own
+// (`recordStepWords`), so the person reads its text field or a plain line, never the braces,
+// ids and paths inside. A hand-kept task's steps are the person's own words and stay as written,
+// which also keeps a press on one matching the line the file holds.
+const shownStep = (task: ProgressTask, text: string, s: Strings): { text: string; note: string } => {
+  const words = task.auto === null ? null : recordStepWords(text, s)
+
+  return words === null ? splitNote(text) : { text: words, note: '' }
+}
+
 // `isAsked` leaves out a question the person marked answered.
 const stepPhrase = (task: ProgressTask, s: Strings, isAsked: (index: number) => boolean = () => true): { status: string; tone: Tone } => {
   const blocked = task.steps.find(step => step.status === 'blocked')
-  if (blocked !== undefined) return { status: s.stuck(splitNote(blocked.text).text), tone: 'alert' }
+  if (blocked !== undefined) return { status: s.stuck(shownStep(task, blocked.text, s).text), tone: 'alert' }
   const waiting = task.steps.find((step, index) => step.status === 'waiting' && isAsked(index))
-  if (waiting !== undefined) return { status: s.waitsOnYou(splitNote(waiting.text).text), tone: 'warn' }
+  if (waiting !== undefined) return { status: s.waitsOnYou(shownStep(task, waiting.text, s).text), tone: 'warn' }
   const running = task.steps.find(step => step.status === 'running')
-  if (running !== undefined) return { status: s.runningStep(splitNote(running.text).text), tone: 'running' }
+  if (running !== undefined) return { status: s.runningStep(shownStep(task, running.text, s).text), tone: 'running' }
   const current = task.steps[currentStepIndex(task)]
   if (current === undefined) return { status: s.noSteps, tone: 'quiet' }
+  const words = task.auto === null ? current.text : recordStepWords(current.text, s) ?? current.text
 
-  return { status: current.status === 'doing' ? s.doingStep(current.text) : s.nextStep(current.text), tone: 'quiet' }
+  return { status: current.status === 'doing' ? s.doingStep(words) : s.nextStep(words), tone: 'quiet' }
 }
 
 // Every status a glyph carries is also said in words.
@@ -392,14 +445,15 @@ const sessionName = (id: string): string => {
 export const agentName = (agent: string): string => (agent === '' || agent === 'claude' ? 'Claude Code' : agent)
 
 // User-facing hints name tasks and agents. Exact ids stay in internal bindings and in the
-// resume command copied on demand. `withCommand` false omits it on the LAN page.
+// resume command copied on demand. `withCommand` false omits it on the LAN page. `hasBrand`: the
+// agent is named by its brand name (the pane and the page), else by its slug (the terminal board).
 export type ReplyHint = { where: string; back: string; note: string; reopen: string | null }
-export const replyHint = (item: WaitingItem, s: Strings, withCommand = true): ReplyHint => {
+export const replyHint = (item: WaitingItem, s: Strings, withCommand = true, hasBrand = false): ReplyHint => {
   if (item.where !== 'other') return { where: '', back: '', note: '', reopen: null }
   const reopen = withCommand && item.sessionId !== null ? item.reopen : null
 
   return {
-    where: s.replyElsewhere(item.task, '', item.agent),
+    where: s.replyElsewhere(item.task, '', hasBrand ? agentLabel(item.agent, s) : item.agent),
     back: '',
     note: '',
     reopen,
@@ -471,7 +525,7 @@ const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
 
   return foldSteps(
     task.steps.map((step, index) => ({
-      ...splitNote(step.text),
+      ...shownStep(task, step.text, s),
       status: step.status,
       depth: step.depth,
       isCurrent: index === current,
@@ -587,12 +641,29 @@ export const answeredJson = (answered: readonly string[]): string => `${JSON.str
 export const seenPath = (path: string): string => `${path.replace(/\.md$/i, '')}-seen.json`
 
 const SEEN_MAX = 500
+// One reserved entry in progress-seen.json (#464): when a reader that records first ran with the 3-day
+// rule. A finished hand-kept task's 3 days count from the later of this and its own first observation,
+// so tasks an earlier release saw done long ago get their 3 days from the upgrade. Absent = unknown.
+export const SWEEP_ARMED_KEY = sha256('hand-kept-sweep-armed')
 const hasTime = (time: unknown): time is number => typeof time === 'number' && Number.isFinite(time) && time > 0
 const isFutureKey = (key: string): boolean => /^future:[0-9a-f]{64}$/.test(key)
 
 // Notes and indentation do not mean the task's work changed.
 export const taskFingerprint = (project: string, task: ProgressTask): string =>
   sha256(JSON.stringify([project, task.title, task.steps.map(step => [step.status, step.text.trim()])]))
+
+// Whether the text is a seen file this reader understands: empty, or JSON holding a `seen` object. A
+// sweep that must write nothing on a file it cannot read (the page's, #464) stops on anything else.
+export const isSeenText = (text: string): boolean => {
+  if (text.trim() === '') return true
+  try {
+    const data: unknown = JSON.parse(text)
+    const list = data !== null && typeof data === 'object' && 'seen' in data ? data.seen : null
+    return list !== null && typeof list === 'object' && !Array.isArray(list)
+  } catch {
+    return false
+  }
+}
 
 export const parseSeen = (text: string, age = 0): Record<string, number> | null => {
   if (text.trim() === '') return {}
@@ -604,8 +675,8 @@ export const parseSeen = (text: string, age = 0): Record<string, number> | null 
     // The writer bounds absent clock entries. A present update's baseline must survive
     // decoding even when the board has more rows than the manual observation cache.
     return Object.fromEntries([
-      ...entries.filter(([key]) => isFutureKey(key)),
-      ...entries.filter(([key]) => /^[0-9a-f]{64}$/.test(key)).slice(0, SEEN_MAX),
+      ...entries.filter(([key]) => key === SWEEP_ARMED_KEY || isFutureKey(key)),
+      ...entries.filter(([key]) => key !== SWEEP_ARMED_KEY && /^[0-9a-f]{64}$/.test(key)).slice(0, SEEN_MAX),
     ])
   } catch {
     return Math.abs(age) < HALF_WRITE_MS ? null : {}
@@ -623,6 +694,7 @@ export const withSeen = (
   now: number,
   other: Readonly<Record<string, number>> = {},
   isSettled = false,
+  isArming = false,
 ): Record<string, number> => {
   const entries = new Map<string, number>()
   const presentClocks = new Set<string>()
@@ -630,6 +702,9 @@ export const withSeen = (
     const times = [seen[key], other[key]].filter(hasTime)
     return times.length > 0 ? Math.min(...times) : undefined
   }
+  // A time on a clock that ran ahead would keep every task from ever being due: it counts as unknown.
+  const held = earliest(SWEEP_ARMED_KEY)
+  const armedBefore = held !== undefined && held - now <= FUTURE_SKEW_MS ? held : undefined
   for (const project of projects) {
     for (const task of project.tasks) {
       if (task.auto !== null && hasTime(task.auto.updated)) {
@@ -659,10 +734,23 @@ export const withSeen = (
     ...clocks.filter(([key]) => presentClocks.has(key)),
     ...clocks.filter(([key]) => !presentClocks.has(key)).slice(0, SEEN_MAX),
   ]
-  return Object.fromEntries([
+  const rest = [
     ...keptClocks,
-    ...[...entries].filter(([key]) => !isFutureKey(key)).slice(0, SEEN_MAX),
-  ])
+    ...[...entries].filter(([key]) => key !== SWEEP_ARMED_KEY && !isFutureKey(key)).slice(0, SEEN_MAX),
+  ]
+  // The reserved entry is first written with an observation it belongs to, so a board with
+  // nothing to observe leaves no file behind.
+  const armed = armedBefore ?? (isArming && rest.length > 0 ? now : undefined)
+  return Object.fromEntries([...(armed === undefined ? [] : [[SWEEP_ARMED_KEY, armed] as const]), ...rest])
+}
+
+// When a finished hand-kept task counts as seen done for the 3-day rule; undefined while either time
+// is unknown or in the future, so nothing is counted or moved on a guess.
+export const handKeptSeenAt = (seen: Readonly<Record<string, number>>, project: string, task: ProgressTask, now: number): number | undefined => {
+  const armed = seen[SWEEP_ARMED_KEY]
+  if (!hasTime(armed) || armed > now) return undefined
+  const observed = seen[taskFingerprint(project, task)]
+  return hasTime(observed) && observed <= now ? Math.max(observed, armed) : undefined
 }
 
 export const seenJson = (seen: Readonly<Record<string, number>>): string => `${JSON.stringify({ seen }, null, 2)}\n`
@@ -684,6 +772,10 @@ export const manualDoneSeen = (projects: readonly ProgressProject[], seen: Reado
 
 const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 
+// The agents of some runs as a person names them (`Codex / Claude Code`), the busiest first.
+const runAgents = (group: RunGroup, s: Strings): string => group.agents.map(agent => s.agentNames[agent] ?? agentName(agent)).join(' / ')
+const runsText = (group: RunGroup, now: number, s: Strings): string => s.runsLine(group.count, runAgents(group, s), relativeTime(group.last, now, s))
+
 export const buildView = (
   projects: readonly ProgressProject[],
   here: readonly string[],
@@ -703,21 +795,43 @@ export const buildView = (
   pending: readonly PendingTurn[] = [],
   frozen: ReadonlySet<string> = new Set(),
   observe: typeof observeQuestions = observeQuestions,
+  staleMs: number = STALE_MS,
 ): View => {
-  const observed = questions === undefined ? null : observe(questions, projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
+  // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
+  // pair is no second row. What is left is what the rows, the questions and the counts read.
+  const folded = foldRuns(projects)
+  const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
+  const recordsById = new Map((observed?.ledger.records ?? []).map(record => [record.id, record]))
   const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
   const inactiveHidden: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
   const active: Array<TaskRow & { rank: number; order: number }> = []
   const recent: Array<DoneItem & { at: number }> = []
+  const finished: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null }> = []
   const idle: TaskRow[] = []
   const stopped: Array<{ row: TaskRow; updated: number }> = []
   const completed: Array<{ row: TaskRow; updated: number; recent: DoneItem & { at: number } | null }> = []
   const inactiveScopes = new Map<string, number>()
   const liveScopes = new Set<string>()
+  const unreadable = new Set<string>()
+  for (const scope of frozen) {
+    try {
+      const parts: unknown = JSON.parse(scope)
+      if (!Array.isArray(parts) || parts.length !== 3 || !parts.every(part => typeof part === 'string')) continue
+      unreadable.add(parts[1] || 'claude')
+    } catch {}
+  }
   let order = 0
+  // The parents whose rows carry their runs line; the runs of any other go to the background line.
+  const placed = new Set<ProgressTask>()
+  // The runs of the session this view belongs to: its row is the current card, not a listed row.
+  let ownRuns: RunGroup | null = null
+  // A run's own question is no question for anyone: its saved records stay in the ledger but are not asked again.
+  const keptTasks = new Set(folded.projects.flatMap(project => project.tasks))
+  const keptScopes = new Set(folded.projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [questionScope(project.name, task.auto.agent, task.auto.session)])))
+  const foldedScopes = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto === null || keptTasks.has(task) ? [] : [questionScope(project.name, task.auto.agent, task.auto.session)])).filter(scope => !keptScopes.has(scope)))
   const repeats = new Map<string, number>()
   // How many tasks share each project and title, counted once rather than for every row (#371).
   const twins = new Map<string, number>()
@@ -728,11 +842,18 @@ export const buildView = (
     }
   }
 
-  for (const project of projects) {
+  for (const project of folded.projects) {
     const name = project.name || s.uncategorized
     const isHere = isHereProject(name, here)
     for (const task of project.tasks) {
-      if (task.auto !== null && task.auto.session === ownId) continue
+      if (task.auto !== null && task.auto.session === ownId) {
+        const own = folded.runs.get(task)
+        if (own !== undefined) {
+          ownRuns = own
+          placed.add(task)
+        }
+        continue
+      }
       order += 1
       const title = task.title || s.unnamed
       // A repeated title gets #2, #3, … so its row and buttons are its own.
@@ -753,7 +874,7 @@ export const buildView = (
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
-      const stale = isStale(task.auto, now, updated)
+      const stale = isStale(task.auto, now, updated, staleMs)
       const isInactive = !isManual && (isComplete || stale || task.auto?.state === 'ended')
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
@@ -806,6 +927,8 @@ export const buildView = (
           context,
           ...parts,
           when,
+          ...(lastActive === undefined ? {} : { at: lastActive }),
+          dir: task.auto?.dir ?? null,
           ...askOf(parts.text, parts.note),
           where: isManual ? 'manual' : 'other',
           agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
@@ -833,6 +956,19 @@ export const buildView = (
       if (isComplete) {
         const doneAt = doneSeen[doneKey(name, title)]
         const seen = isManual ? doneAt === null ? null : doneAt ?? now : updated
+        if (seen !== null && now - seen < 7 * DAY) {
+          finished.push({
+            key,
+            project: name,
+            title,
+            when: clock.isFuture ? when : relativeTime(seen, now, s),
+            at: seen,
+            agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+            ...(isManual ? { isOwn: true as const } : {}),
+            dir: task.auto?.dir ?? null,
+            questions: isInactive ? unresolved : [],
+          })
+        }
         if (seen !== null && now - seen < DAY) {
           completion = { key, project: name, title, when: clock.isFuture ? when : relativeTime(seen, now, s), at: seen, questions: isInactive ? unresolved : [] }
           recent.push(completion)
@@ -840,23 +976,26 @@ export const buildView = (
         if (!isInactive || (unresolved.length === 0 && !task.steps.some(step => step.status === 'waiting'))) continue
       }
 
-      const auto = task.auto === null ? null : isComplete || stale ? 'ended' : task.auto.state
+      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || stale ? 'ended' : task.auto.state
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
       // One whose questions were all marked answered is back with the work in progress.
       if (!isIdle && auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index))) continue
 
-      const { done, total } = countSteps(task)
+      // A hook's placeholder step says the session waits; while it works the row shows no step (#612).
+      const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
+      const { done, total } = countSteps(shown)
       const phrase =
         auto === 'working'
-          ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(task.auto?.agent ?? ''), tone: 'accent' as const }
+          ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
           : auto === 'ended'
             ? { status: stale ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
             : task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
               ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
               : stepPhrase(task, s, isPrompt)
       const open = task.steps[currentStepIndex(task)]
+      const group = folded.runs.get(task)
       const row: TaskRow = {
         key,
         project: name,
@@ -866,10 +1005,12 @@ export const buildView = (
         total,
         ...phrase,
         when: isIdle && !clock.isFuture ? relativeTime(lastActive ?? 0, now, s) : when,
+        ...(lastActive === undefined ? {} : { at: lastActive }),
+        dir: task.auto?.dir ?? null,
         ...(clock.isFuture ? { hasFutureTime: true } : {}),
         isHere,
         auto,
-        steps: rowSteps(task, s),
+        steps: rowSteps(shown, s),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
         questions: isInactive ? unresolved : [],
         question: isInactive ? unresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
@@ -885,7 +1026,9 @@ export const buildView = (
         // Only an agent whose resume by id is known gets a command.
         resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
         handoff: handoffOf(task),
-        confirm: (isManual && task.line >= 0 || auto === 'ended')
+        // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
+        // so the press could only say the line changed (#142).
+        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || auto === 'ended')
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
           : null,
         archive:
@@ -896,12 +1039,15 @@ export const buildView = (
               : null,
         target: targetOf(task.auto),
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
+        ...(group === undefined ? {} : { runs: runsText(group, now, s) }),
       }
 
       if (isComplete) {
         completed.push({ row, updated, recent: completion })
         continue
       }
+      // A finished session draws no row, so its runs are counted with the background runs instead.
+      if (group !== undefined) placed.add(task)
       if (auto === 'ended' && unresolved.length > 0) {
         stopped.push({ row, updated })
         continue
@@ -923,9 +1069,37 @@ export const buildView = (
     }
   }
 
+  // The older block of two for one session: no row of its own, but the person may take it out.
+  for (const { project, task } of folded.duplicates) {
+    const auto = task.auto
+    if (auto === null) continue
+    const name = project.name || s.uncategorized
+    const title = task.title || s.unnamed
+    const base = `${name}::${title}`
+    const repeat = (repeats.get(base) ?? 0) + 1
+    repeats.set(base, repeat)
+    const updated = observedTime(auto, now, seen).updated
+    const { done, total } = countSteps(task)
+    stopped.push({
+      updated,
+      row: {
+        key: repeat === 1 ? base : `${base}#${repeat}`,
+        project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
+        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], left: [], next: null, due: null, pr: '',
+        agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
+        archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
+      },
+    })
+  }
+  let background: RunGroup | null = folded.background
+  for (const [task, group] of folded.runs) {
+    if (!placed.has(task)) background = mergeGroups(background, group)
+  }
+
   due.sort((a, b) => a.days - b.days)
   active.sort((a, b) => a.rank - b.rank || a.order - b.order)
   recent.sort((a, b) => b.at - a.at)
+  finished.sort((a, b) => b.at - a.at)
   const shownRecent = recent.slice(0, 3)
   for (const item of completed) {
     if (item.recent === null || !shownRecent.includes(item.recent)) stopped.push({ row: item.row, updated: item.updated })
@@ -961,21 +1135,31 @@ export const buildView = (
     const id = observed?.keys[pendingQuestionSlot(scope, turn.text)] ?? observed?.ledger.records.find(record => record.scope === scope && record.isUnresolved && record.producerSources?.includes(JSON.stringify(turn)))?.id
     if (id === undefined || waiting.some(item => item.questionId === id)) return []
     const parts = splitNote(turn.text)
-    return [{ key: `inbox::${id}`, questionId: id, project: turn.project, task: '', context: '', ...parts, when: '', ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
+    return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
-  const own = mine === null ? [] : ownWaiting(mine, observed?.keys).map(item => ({ ...item, questionId: item.hideKey }))
-  const isResolved = (item: WaitingItem): boolean => observed?.ledger.records.find(record => record.id === item.questionId)?.isUnresolved === false
-  const all = [...own, ...waiting, ...inbox].filter(item => !isResolved(item)).map(item => {
-    const record = observed?.ledger.records.find(row => row.id === item.questionId)
-    const age = questionAge(record?.firstObserved ?? 0, now)
-    return { ...item, ageStage: age.stage, when: age.age === null ? s.questionAgeUnknown : relativeTime(record?.firstObserved ?? 0, now, s) }
-  }).sort(
+  const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys).map(item => ({ ...item, questionId: item.hideKey }))
+  // Each record by its id, once: a board holds hundreds of questions and thousands of records.
+  const recordOf = new Map<string, QuestionRecord>()
+  const rankOf = new Map<string, number>()
+  for (const [index, record] of (observed?.ledger.records ?? []).entries()) {
+    if (recordOf.has(record.id)) continue
+    recordOf.set(record.id, record)
+    rankOf.set(record.id, index)
+  }
+  const isResolved = (item: WaitingItem): boolean => recordOf.get(item.questionId ?? '')?.isUnresolved === false
+  const firstSeen = (item: WaitingItem): number => recordOf.get(item.questionId ?? '')?.firstObserved ?? 0
+  const scopeOf = (item: WaitingItem): string => recordOf.get(item.questionId ?? '')?.scope ?? ''
+  const seenAs = (item: WaitingItem) => ({ at: firstSeen(item), rank: rankOf.get(item.questionId ?? '') ?? -1, scope: scopeOf(item) })
+  const aged = (item: WaitingItem): WaitingItem => {
+    const record = recordOf.get(item.questionId ?? '')
+    const age = questionAge(firstSeen(item), now)
+    return { ...item, ageStage: age.stage, when: age.age === null ? s.questionAgeUnknown : relativeTime(firstSeen(item), now, s), ...(item.at === undefined && record !== undefined ? { at: record.firstObserved } : {}), dir: item.dir ?? recordFolder(record) ?? null }
+  }
+  const all = [...own, ...waiting, ...inbox].filter(item => !isResolved(item)).map(aged).sort(
     (a, b) => whereRank(a) - whereRank(b) || askRank(a.kind) - askRank(b.kind),
   )
-  const asks: WaitingItem[] = all.filter(item => item.ageStage === 'pending' && (item.hideKey === '' || !marked.has(item.hideKey)))
-  const reminder: WaitingItem[] = all.filter(item => item.ageStage === 'reminder' && (item.hideKey === '' || !marked.has(item.hideKey)))
-  const older: WaitingItem[] = all.filter(item => item.ageStage === 'older' && (item.hideKey === '' || !marked.has(item.hideKey)))
-  const hidden: WaitingItem[] = [...all.filter(item => item.hideKey !== '' && marked.has(item.hideKey)), ...inactiveHidden]
+  const isMarked = (item: WaitingItem): boolean => item.hideKey !== '' && marked.has(item.hideKey)
+  const hidden: WaitingItem[] = [...all.filter(isMarked), ...inactiveHidden]
   const liveQuestions = new Set(all.flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
   for (const { row } of stopped) {
     row.questions = row.questions?.filter(item => item.questionId === undefined || !liveQuestions.has(item.questionId))
@@ -984,9 +1168,27 @@ export const buildView = (
   for (const item of shownRecent) item.questions = item.questions?.filter(question => question.questionId === undefined || !liveQuestions.has(question.questionId))
   const onShelf = new Set([...stopped.flatMap(({ row }) => row.questions ?? []), ...shownRecent.flatMap(item => item.questions ?? [])].flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
   const shownQuestions = new Set([...all, ...hidden].flatMap(item => item.questionId === undefined ? [] : [item.questionId]))
+  const retained: WaitingItem[] = []
+  const stoppedQuestions = new Set<string>()
+  const keptSessions = new Set([...keptTasks].flatMap(task => task.auto === null ? [] : [sessionIdentity(task.auto)]).filter(identity => identity !== null))
+  const runSessions = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto?.isRun === true ? [sessionIdentity(task.auto)] : [])).filter(identity => identity !== null))
+  const starterOf = startersOf(projects)
   for (const record of observed?.ledger.records ?? []) {
-    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id)) continue
+    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id) || foldedScopes.has(record.scope)) continue
     const source = record.source
+    const saved = source.kind === 'block' ? sourceSnapshot(source.data) : null
+    let agent = source.agent
+    // A kept question whose block is gone is folded by its saved copy, as the live block was (#399): a
+    // copy of a session that is a row on the board today is that row's, which shows its own question;
+    // a copy of a run is listed under the agent of the session that started it, when that one is on
+    // the board.
+    if (saved !== null && saved.auto !== null && !liveScopes.has(record.scope) && !keptScopes.has(record.scope)) {
+      const identity = sessionIdentity(saved.auto)
+      if (identity !== null && keptSessions.has(identity)) continue
+      const isRun = saved.auto.isRun === true || identity !== null && runSessions.has(identity)
+      const starter = isRun ? starterOf(saved.auto) : null
+      if (starter !== null) agent = starter.agent
+    }
     const parts = splitNote(source.text)
     const age = questionAge(record.firstObserved, now)
     // A source copy still knows a stopped session after its block was removed or replaced.
@@ -994,16 +1196,49 @@ export const buildView = (
     let isInactiveSource = false
     if (source.kind === 'block' && !liveScopes.has(record.scope)) {
       // Unknown historical source shapes retain the existing review behavior.
-      const saved = sourceSnapshot(source.data)
-      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated) || isMarksComplete(saved.steps))
+      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated, staleMs) || isMarksComplete(saved.steps))
     }
-    const stage = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope) ? 'older' : age.stage
-    const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), ...askOf(parts.text, parts.note), where: 'other', agent: source.agent === 'claude' ? '' : source.agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: false, step: null, target: null }
+    const isStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
+    const stage = isStopped ? 'older' : age.stage
+    const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, dir: recordFolder(record) ?? saved?.auto?.dir ?? null, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), at: record.firstObserved, ...askOf(parts.text, parts.note), where: 'other', agent: agent === 'claude' ? '' : agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
     if (marked.has(record.id)) hidden.push(item)
-    else if (stage === 'pending') asks.push(item)
-    else if (stage === 'reminder') reminder.push(item)
-    else older.push(item)
+    else {
+      retained.push(item)
+      if (isStopped) stoppedQuestions.add(record.id)
+    }
   }
+  // A question that sits on a Stopped or recent row is also listed under Older, with the age it was
+  // first asked, so the stopped-sessions line in Waiting has one list to open (#400). The row keeps its
+  // own copy. A question the ledger loop already put there is not listed twice, and every stopped
+  // question is counted once by its id. A board that first looks at a long-quiet block cannot have
+  // seen the question before the block's last write, so the question is at least that old: the age
+  // is taken from the earlier of the two, and never reads "just now" for a month-old block.
+  const olderIds = new Set([...all.filter(item => !isMarked(item)), ...retained].flatMap(item => item.ageStage === 'older' && item.questionId !== undefined ? [item.questionId] : []))
+  const askedOn = [...stopped.map(({ row, updated }) => ({ questions: row.questions ?? [], updated })), ...shownRecent.map(item => ({ questions: item.questions ?? [], updated: 0 }))]
+  const onRows: WaitingItem[] = []
+  for (const { questions, updated } of askedOn) {
+    for (const question of questions) {
+      const id = question.questionId
+      if (id === undefined || marked.has(id)) continue
+      const record = recordsById.get(id)
+      if (record?.isUnresolved === false) continue
+      stoppedQuestions.add(id)
+      if (olderIds.has(id)) continue
+      const first = record?.firstObserved ?? 0
+      const askedAt = updated > 0 && updated < first ? updated : first
+      onRows.push({ ...question, dir: question.dir ?? recordFolder(record), key: `older::${question.key}`, ageStage: 'older', when: questionAge(first, now).age === null ? s.questionAgeUnknown : relativeTime(askedAt, now, s) })
+      olderIds.add(id)
+    }
+  }
+  // The same question asked in several blocks or captures is one card (#463): the newest copy that
+  // can be acted on, with the age of the oldest. The copies a stopped session's row lists under
+  // Older are in the mix, so a live card does not repeat them; the other copies stay in the
+  // question list, and the row keeps its own.
+  const merged = mergeCopies([...all.filter(item => !isMarked(item)), ...retained, ...onRows].map(item => ({ item, ...seenAs(item), isStopped: item.questionId !== undefined && stoppedQuestions.has(item.questionId) })), closedCopies(observed?.ledger.records ?? [], marked))
+  const asks: WaitingItem[] = merged.filter(item => item.ageStage === 'pending')
+  const reminder: WaitingItem[] = merged.filter(item => item.ageStage === 'reminder')
+  const older: WaitingItem[] = merged.filter(item => item.ageStage === 'older')
+  const stoppedAsking = older.filter(item => item.questionId !== undefined && stoppedQuestions.has(item.questionId)).length
   const dueRows = due.map(({ days: _days, ...row }) => row)
   const now1 = asks.find(item => askRank(item.kind) < 2)
   const today1 = due.find(row => row.days <= 1)
@@ -1021,6 +1256,10 @@ export const buildView = (
             : null
 
   const current = mine === null ? null : currentOf(mine, s)
+  if (ownRuns !== null) {
+    if (current === null) background = mergeGroups(background, ownRuns)
+    else current.runs = runsText(ownRuns, now, s)
+  }
   if (current !== null && !asks.some(item => item.where === 'here') && all.some(item => item.where === 'here' && item.ageStage !== 'pending')) {
     current.status = reminder.some(item => item.where === 'here') ? s.sectionQuestionReminders : s.sectionOlderQuestions
     current.tone = 'quiet'
@@ -1037,13 +1276,17 @@ export const buildView = (
     hidden,
     reminder,
     older,
+    ...(stoppedAsking > 0 ? { stoppedAsking } : {}),
     hasPendingQuestions: questions !== undefined,
+    ...(background === null ? {} : { background: s.backgroundRuns(background.count, relativeTime(background.last, now, s)) }),
     idle,
     stopped: stopped.map(item => item.row),
     due: dueRows,
     active: rows,
     groups,
     recent: shownRecent.map(({ at: _at, ...item }) => item),
+    finished,
+    ...(unreadable.size === 0 ? {} : { unreadable: [...unreadable] }),
   }
 }
 

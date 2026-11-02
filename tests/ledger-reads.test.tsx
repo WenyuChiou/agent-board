@@ -2097,8 +2097,8 @@ test('one sweep removes at most 200 files, fifty to a process, and the next swee
   expect(filesOf(world, RETIRED)).toHaveLength(16)
 })
 
-test('a working or waiting block that asks stays however old, while an ended one that asks is archived', async ($, on) => {
-  const board = `## demo\n${block('a1b2c301', 'ended', 96, '- [x] Draft\n- [?] Ended question, OK?')}${block('a1b2c302', 'waiting', 96, '- [?] Waiting question, OK?')}${block('a1b2c303', 'working', 24 * 40, '- [~] Work\n- [?] Working question, OK?')}`
+test('a waiting or working block that asks is archived after seven days without a report and stays inside them, while an ended one that asks goes after three', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'ended', 96, '- [x] Draft\n- [?] Ended question, OK?')}${block('a1b2c302', 'waiting', 144, '- [?] Waiting question, OK?')}${block('a1b2c303', 'waiting', 24 * 8, '- [?] Old waiting question, OK?')}${block('a1b2c304', 'working', 24 * 40, '- [~] Work\n- [?] Working question, OK?')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
   seedAsked(world, board)
@@ -2109,15 +2109,100 @@ test('a working or waiting block that asks stays however old, while an ended one
   const text = world.files.get(FILE) ?? ''
   expect(text).not.toContain('session=a1b2c301')
   expect(text).toContain('session=a1b2c302')
-  expect(text).toContain('session=a1b2c303')
+  expect(text).not.toContain('session=a1b2c303')
+  expect(text).not.toContain('session=a1b2c304')
   const archive = world.files.get(ARCHIVE) ?? ''
   expect(archive).toContain('Ended question, OK?')
   expect(archive).not.toContain('Waiting question')
-  expect(archive).not.toContain('Working question')
-  // Only the ended block's question has a copy made for the archive; the others are live questions with their blocks on the board.
-  expect(capturesOf(world).filter(copy => copy.disposition === 'archived').map(copy => copy.record.words)).toEqual(['Ended question, OK?'])
-  expect(ledgerRecords(world).filter(record => record.isArchived).map(record => record.words)).toEqual(['Ended question, OK?'])
-  expect(ledgerRecords(world).filter(record => record.isUnresolved)).toHaveLength(3)
+  expect(archive).toContain('Old waiting question, OK?')
+  expect(archive).toContain('Working question, OK?')
+  const archived = ['Ended question, OK?', 'Old waiting question, OK?', 'Working question, OK?']
+  expect(capturesOf(world).filter(copy => copy.disposition === 'archived').map(copy => copy.record.words).sort()).toEqual(archived)
+  expect(ledgerRecords(world).filter(record => record.isArchived).map(record => record.words).sort()).toEqual(archived)
+  expect(ledgerRecords(world).filter(record => record.isUnresolved)).toHaveLength(4)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::older' })
+    const pane = visiblePaneText(await ui.drawn())
+    for (const question of archived) expect(pane).toContain(question)
+    // The six-day waiting block stays, and it has been quiet for more than twelve hours, so its question sits
+    // on its Stopped row and is listed here too: four questions in stopped sessions in all.
+    expect(pane).toContain('Waiting question, OK?')
+    expect(pane).toContain('4 unanswered in stopped sessions')
+  } finally { await ui.unmount() }
+})
+
+test('an explicit archive and the automatic one keep a waiting block\'s question the same way', async ($, on) => {
+  const steps = '- [x] Draft the plan\n- [?] Publish the plan, OK?'
+  // The sweep takes the waiting block quiet for eight days; the waiting block quiet for thirteen
+  // hours is on its Stopped row and still inside its seven days, so the person archives it there.
+  const board = `## demo\n${block('a1b2c401', 'waiting', 24 * 8, steps)}${block('a1b2c402', 'waiting', 13, steps)}`.replaceAll(' agent=codex ', ' agent=codex dir=%2Fwork%2Fdemo ')
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  world.store = { ...world.store, opened: ['stopped'] }
+  seedAsked(world, board)
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(2000)
+  expect(world.files.get(FILE)).not.toContain('session=a1b2c401')
+  expect(world.files.get(FILE)).toContain('session=a1b2c402')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'demo::Synthetic plan a1b2c402' })
+    await ui.press({ key: 'demo::Synthetic plan a1b2c402::archive' })
+    await clock.advance(2000)
+    expect(world.files.get(FILE)).not.toContain('session=a1b2c402')
+    // Both blocks left the file the same way: each has a saved copy of its question, marked archived.
+    const copies = capturesOf(world).filter(copy => copy.disposition === 'archived')
+    expect(copies).toHaveLength(2)
+    const [automatic, explicit] = ['a1b2c401', 'a1b2c402'].map(session => copies.find(copy => copy.record.source?.session === session))
+    expect(automatic).toBeDefined()
+    expect(explicit).toBeDefined()
+    const kept = (copy: QuestionCapture | undefined) => ({ words: copy?.record.words, text: copy?.record.source?.text, kind: copy?.record.source?.kind, isUnresolved: copy?.record.isUnresolved })
+    expect(kept(explicit)).toEqual(kept(automatic))
+    expect(ledgerRecords(world).map(record => [record.words, record.isArchived, record.isUnresolved])).toEqual([['Publish the plan, OK?', true, true], ['Publish the plan, OK?', true, true]])
+    // The same question asked in two stopped sessions is one line under Older (#463); both copies stay in the list above.
+    await ui.press({ key: 'section::older' })
+    expect(visiblePaneText(await ui.drawn()).split('Publish the plan, OK?').length - 1).toBe(1)
+  } finally { await ui.unmount() }
+})
+
+test('a question kept from a block the seven-day sweep archived can be hidden from Older, then shows under hidden and no longer under Older, and can be shown again', async ($, on) => {
+  const board = `## demo\n${block('a1b2c501', 'waiting', 24 * 8, '- [x] Draft the plan\n- [?] Publish the plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  seedAsked(world, board)
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(PAST_START_SWEEP)
+  expect(world.files.get(FILE)).not.toContain('session=a1b2c501')
+  const kept = ledgerRecords(world).find(record => record.words === 'Publish the plan, OK?')!
+  expect(kept.isArchived).toBe(true)
+  // The sweep has retired the question's identity, which is what used to refuse a hide of it.
+  await clock.advance(2000)
+  expect(world.files.has(proofFile('retired', kept.id))).toBe(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::older' })
+    expect(visiblePaneText(await ui.drawn())).toContain('Publish the plan, OK?')
+    await ui.press({ key: `ask::retained::${kept.id}` })
+    await ui.press({ key: `retained::${kept.id}::hide` })
+    await clock.advance(2000)
+    expect(JSON.parse(world.files.get(ANSWERED) ?? '{"answered":[]}').answered).toEqual([kept.id])
+    // It left Older (and the stopped-sessions line), and the hidden shelf counts it.
+    const hidden = visiblePaneText(await ui.drawn())
+    expect(hidden).toContain('1 answered, hidden')
+    expect(hidden).not.toContain('Publish the plan, OK?')
+    expect(hidden).not.toContain('unanswered in stopped sessions')
+    await ui.press({ key: 'section::hidden' })
+    expect(visiblePaneText(await ui.drawn())).toContain('Publish the plan, OK?')
+    // Nothing else changed: it is still an unanswered archived question, and Show again brings it back.
+    expect(ledgerRecords(world).find(record => record.id === kept.id)?.isUnresolved).toBe(true)
+    await ui.press({ key: `retained::${kept.id}::unhide` })
+    await clock.advance(2000)
+    expect(JSON.parse(world.files.get(ANSWERED) ?? '{"answered":[]}').answered).toEqual([])
+    expect(visiblePaneText(await ui.drawn())).toContain('1 unanswered in stopped sessions')
+  } finally { await ui.unmount() }
 })
 
 test('a board that changes on every try still has its finished blocks archived, and the block that asks waits for the next sweep', async ($, on) => {

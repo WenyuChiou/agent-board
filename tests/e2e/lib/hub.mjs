@@ -13,6 +13,7 @@ import { pageDom, serve } from './surfaces.mjs'
 import { noMachineIds, noSilentPress, seenWithin } from './expect.mjs'
 import { knownFailure } from './known.mjs'
 import { PAGE_MS, RECEIPT_SLACK_MS } from './budget.mjs'
+import { EN } from '../../../hooks/strings-en.ts'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
 const ownedProxies = new Set()
@@ -22,6 +23,11 @@ const promptParts = prompt => {
   assert.ok(match, prompt)
   return { nonce: match[1], text: match[2], prompt }
 }
+
+// A reply that names how many messages this receiver has had, so its card's receipt line
+// differs from the one an earlier message left on the same card (the page strips "ACK <nonce>").
+const ackReply = (message, actor) => `ACK ${message.nonce} reply ${actor.received.length}`
+const receiptText = (receipt, s = 'Replied') => receipt.reply ? `${s} · ${receipt.reply}` : s
 
 // The owned transport shapes come from tests/messaging.test.mjs:584 and :735.
 // Only these adapters represent native receivers; generic client registration
@@ -44,7 +50,7 @@ const ownedCodex = async (hub, actor) => {
         await pause(80)
         throw new Error('ACK_TIMEOUT')
       }
-      listener({ method: 'item/completed', params: { threadId: actor.session, turnId: turn, item: { type: 'agentMessage', text: 'ACK ' + message.nonce } } })
+      listener({ method: 'item/completed', params: { threadId: actor.session, turnId: turn, item: { type: 'agentMessage', text: ackReply(message, actor) } } })
       current = { thread: actor.session, status: 'idle', turn: null }
       listener({ method: 'turn/completed', params: { threadId: actor.session, turn: { id: turn, status: 'completed' } } })
       return { turn: { id: turn } }
@@ -65,7 +71,7 @@ const ownedAntigravity = async (hub, actor) => {
       const turns = current.turns + 1, step = current.step + 1
       listener({ event: 'step_update', step_update: { conversation_id: actor.session, step_type: 'user_input', state: 'DONE', step_index: step } })
       current = { session: actor.session, status: 'idle', turns, step }
-      listener({ event: 'result', result: { conversation_id: actor.session, num_turns: turns, status: 'SUCCESS', response: 'ACK ' + message.nonce } })
+      listener({ event: 'result', result: { conversation_id: actor.session, num_turns: turns, status: 'SUCCESS', response: ackReply(message, actor) } })
     },
   }
   const connector = await attachAntigravitySession({ boardUrl: hub.server.url, transport, session: actor.session, state: () => current, verifyOwner: one => one === transport, surface: 'Synthetic Antigravity stream', onError: error => actor.errors.push(error.message) })
@@ -188,9 +194,12 @@ export const receiptBudget = async hub => {
   return { pagePollMs, measuredMs: combined + RECEIPT_SLACK_MS }
 }
 
+// A hub that stays open until close(): a world, its server and page, and one actor per spec,
+// each native one attached. withHub closes it after fn; a suite that shares one hub across
+// its tests opens it in before() and closes it in after().
 // prepare({ world, messages }) runs once the actors' blocks are written and before the server starts,
 // to put more on the board or in the message folder first; callers that pass none see no change.
-export const withHub = async (specs, fn, { prepare } = {}) => {
+export const openHub = async (specs, { prepare } = {}) => {
   const world = makeWorld()
   // Messaging leases and latency use real clocks in both parent and server; with no jump,
   // world.now is the real time too.
@@ -226,8 +235,10 @@ export const withHub = async (specs, fn, { prepare } = {}) => {
         const input = dom.inputs(card)[0]
         assert.ok(input, 'No message box on ' + card.textContent)
         input.value = text
-        const button = dom.buttons(card).find(one => /^(?:Send|Copy$)/.test(one.textContent))
+        const button = dom.buttons(card).find(one => one.getAttribute('data-nav') === null && (one.textContent.startsWith('Send') || one.textContent === EN.pgCopyAnswer))
         assert.ok(button, card.textContent)
+        // The message box sits in the open row (or the box a question opens): a person opens it first.
+        assert.ok(dom.reveal(button), 'The message box is not on screen: ' + card.textContent)
         return { card, button, before: card.textContent }
       },
       click: async draft => {
@@ -265,7 +276,7 @@ export const withHub = async (specs, fn, { prepare } = {}) => {
           received = actor.received.find(one => stored === 'ACK ' + one.nonce || stored.startsWith('ACK ' + one.nonce + ' '))
           card = (await hub.card(actor)).textContent
           return card
-        }, text => receipt?.status === 'acknowledged' && received && text.includes('Replied'), Math.max(1, budget.measuredMs + extraMs - budget.pagePollMs - (performance.now() - sent.started)))
+        }, text => receipt?.status === 'acknowledged' && received && text.includes(receiptText(receipt)), Math.max(1, budget.measuredMs + extraMs - budget.pagePollMs - (performance.now() - sent.started)))
         const elapsed = performance.now() - sent.started + budget.pagePollMs
         assert.ok(elapsed <= budget.measuredMs + extraMs, `${elapsed} ms including the page poll exceeds ${budget.measuredMs + extraMs} ms`)
         assert.ok(received, 'Native transport did not receive this message')
@@ -285,12 +296,15 @@ export const withHub = async (specs, fn, { prepare } = {}) => {
       },
       fallback: async (actor, text) => {
         const draft = await hub.draft(actor, text)
-        assert.equal(draft.button.textContent, 'Copy', draft.card.textContent)
+        assert.equal(draft.button.textContent, EN.pgCopyAnswer, draft.card.textContent)
         assert.match(draft.card.textContent, /Copy/)
         const before = dom.text()
+        // A shared page keeps every earlier copy, so this press must add exactly one.
+        const copies = dom.copied.length
         await hub.click(draft)
+        assert.equal(dom.copied.length, copies + 1, 'Copy did not reach the clipboard')
         assert.equal(dom.copied.at(-1), text)
-        noSilentPress({ surface: 'serve', card: actor.title, button: 'Copy', before, after: dom.text() })
+        noSilentPress({ surface: 'serve', card: actor.title, button: EN.pgCopyAnswer, before, after: dom.text() })
         noMachineIds((await hub.card(actor)).textContent, world)
       },
     }
@@ -301,8 +315,19 @@ export const withHub = async (specs, fn, { prepare } = {}) => {
         world.cleanups.push(() => actor.connector.close())
       }
     }
+    hub.close = () => world.close()
+    return hub
+  } catch (error) {
+    await world.close()
+    throw error
+  }
+}
+
+export const withHub = async (specs, fn, options) => {
+  const hub = await openHub(specs, options)
+  try {
     await fn(hub)
   } finally {
-    await world.close()
+    await hub.close()
   }
 }

@@ -2,7 +2,7 @@ import { emptyQuestions, observeQuestions } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror } from '../types'
-import { archivableAsking, confirmTask, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { archivableAsking, countManualDone, confirmTask, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { ZH_TW } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { answerAgentPrompt } from '../hooks/inbox'
@@ -19,7 +19,7 @@ import {
 } from '../hooks/mirror'
 import { futureTimeKey, parseProgress, STALE_MS } from '../hooks/parse'
 import { BIG_AT, bigBoard } from './fixtures/big-board'
-import { answeredJson, answeredPath, buildView, dueDays, foldSteps, IDLE_MS, keptAnswered, parseAnswered, parseSeen, relativeTime, seenJson, seenPath, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, dueDays, foldSteps, handKeptSeenAt, IDLE_MS, keptAnswered, parseAnswered, parseSeen, relativeTime, seenJson, seenPath, SWEEP_ARMED_KEY, taskFingerprint, withAnswered, withSeen } from '../hooks/view'
 
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const HOUR = 60 * 60 * 1000
@@ -116,7 +116,7 @@ test('a Codex block set to working says Codex is working, not Claude', () => {
   const after = upsertAutoBlock(before, next, s)
   expect(after).toContain('> Codex is working')
   expect(after).not.toContain('Claude is working')
-  expect(removeAutoBlock(after, mirror.sessionId)).toBe(removeAutoBlock(before, mirror.sessionId))
+  expect(removeAutoBlock(after, mirror)).toBe(removeAutoBlock(before, mirror))
   const task = parseProgress(after).find(project => project.name === mirror.project)?.tasks[0]
   expect(task?.auto?.agent).toBe('codex')
   expect(task?.auto?.state).toBe('working')
@@ -211,10 +211,10 @@ const askingBoard = (): string => [
   ...askingBlock('ffffffff', 'waiting', 100, ['- [?] Waiting for an answer, OK?']),
 ].join('\n')
 
-test('a block that asks is listed for the question check only once its three days are over', () => {
+test('a block that asks is listed for the question check only once its three or seven quiet days are over', () => {
   const asking = archivableAsking(askingBoard(), NOW)
   // The ended and the done block; not the one 50 hours old, nor the one that asks nothing, nor a
-  // working or waiting one, however long since its last write.
+  // working or waiting one inside their seven days.
   expect(asking.map(one => one.ref.session)).toEqual(['aaaaaaaa', 'bbbbbbbb'])
   expect(asking.map(one => [one.ref.project, one.ref.title])).toEqual([['alpha', 'Plan aaaaaaaa'], ['alpha', 'Plan bbbbbbbb']])
   // The session's own block is never listed.
@@ -233,7 +233,7 @@ test('a block that asks is taken only when the check says its questions are kept
   expect(one.text).not.toContain('session=aaaaaaaa')
   expect(one.text).toContain('session=bbbbbbbb')
   expect(one.text).toContain('session=eeeeeeee')
-  // Even a yes for every block does not take the one still inside its three days, or a working or waiting one.
+  // Even a yes for every block leaves the ended one inside its three days, and working or waiting ones inside their seven days.
   const all = takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true)
   expect(all.entries).toHaveLength(3)
   expect(all.text).toContain('session=cccccccc')
@@ -245,17 +245,22 @@ test('a block that asks is taken only when the check says its questions are kept
   expect(own.text).toContain('session=aaaaaaaa')
 })
 
-test('a working or waiting block that asks is never taken, however long since its last write', () => {
-  for (const state of ['working', 'waiting']) for (const hours of [100, 24 * 40]) {
+test('a working or waiting block that asks is taken after seven days without a report, and an ended or done one after three', () => {
+  for (const state of ['working', 'waiting']) for (const hours of [100, 144, 167, 168, 169, 24 * 40]) {
     const text = ['## alpha', ...askingBlock('jjjjjjjj', state, hours, ['- [?] Pick 24 hours or 7 days?'])].join('\n')
-    expect(archivableAsking(text, NOW)).toEqual([])
-    expect(takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true).entries).toEqual([])
+    const isDue = hours > 168
+    expect(archivableAsking(text, NOW).map(one => one.ref.session)).toEqual(isDue ? ['jjjjjjjj'] : [])
+    const taken = takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true)
+    expect(taken.entries).toHaveLength(isDue ? 1 : 0)
+    expect(taken.text.includes('session=jjjjjjjj')).toBe(!isDue)
+    expect(takeArchivable(text, NOW, undefined, STRINGS.en)).toEqual({ text, entries: [] })
   }
-  // The same block once it has ended or is done is taken.
-  for (const state of ['ended', 'done']) {
-    const text = ['## alpha', ...askingBlock('jjjjjjjj', state, 100, ['- [?] Pick 24 hours or 7 days?'])].join('\n')
-    expect(archivableAsking(text, NOW).map(one => one.ref.session)).toEqual(['jjjjjjjj'])
-    expect(takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true).entries).toHaveLength(1)
+  for (const state of ['ended', 'done']) for (const hours of [60, 100]) {
+    const text = ['## alpha', ...askingBlock('jjjjjjjj', state, hours, ['- [?] Pick 24 hours or 7 days?'])].join('\n')
+    const isDue = hours > 72
+    expect(archivableAsking(text, NOW).map(one => one.ref.session)).toEqual(isDue ? ['jjjjjjjj'] : [])
+    expect(takeArchivable(text, NOW, undefined, STRINGS.en, false, () => true).entries).toHaveLength(isDue ? 1 : 0)
+    expect(takeArchivable(text, NOW, undefined, STRINGS.en)).toEqual({ text, entries: [] })
   }
 })
 
@@ -807,6 +812,29 @@ test('a stopped task keeps its question on the Stopped shelf and is not counted 
   expect(hidden.stopped).toHaveLength(1)
 })
 
+test('a block that asks and has been silent for twelve hours is listed under Stopped with its question, not under Waiting', () => {
+  const at = (hours: number): string => ['## alpha', ...askingBlock('a1b2c400', 'waiting', hours, ['- [?] Publish the synthetic plan, OK?'])].join('\n')
+  const view = buildView(parseProgress(at(13)), [], null, NOW)
+  expect(view.waiting).toEqual([])
+  expect(view.overview.waiting).toBe(0)
+  expect(view.stopped).toHaveLength(1)
+  expect(view.stopped[0]?.questions?.map(question => question.text)).toEqual(['Publish the synthetic plan, OK?'])
+  expect(view.overview.stopped).toBe(1)
+  const recent = buildView(parseProgress(at(11)), [], null, NOW)
+  expect(recent.waiting).toHaveLength(1)
+  expect(recent.stopped).toEqual([])
+})
+
+test('an explicit done block keeps its unanswered question on the stopped shelf after its recent completion expires', () => {
+  const file = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=done updated=2026-10-15T11:00:00Z -->\n### Release\n- [?] Publish, OK?\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->'
+  const view = buildView(parseProgress(file), [], null, NOW)
+  expect(view.waiting).toEqual([])
+  expect(view.active).toEqual([])
+  expect(view.stopped).toHaveLength(1)
+  expect(view.stopped[0]).toMatchObject({ auto: 'ended', question: 'Publish, OK?' })
+  expect(view.stopped[0]?.questions).toHaveLength(1)
+})
+
 test('future-clock staleness preserves an unanswered question identity, age and original source', () => {
   const stamp = NOW + 24 * HOUR
   const projects = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(stamp).toISOString()} -->\n### Future question\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->`)
@@ -847,6 +875,37 @@ test('explicit actions on an observed future-dated stopped task recheck the same
   expect(takeArchivable(original, at, undefined, ZH_TW, true).text).toBe(original)
 })
 
+test('configurable staleness allows completion and archive on quiet sessions and forbids them when active', () => {
+  const customStale = 5 * 60 * 1000
+  const text = (stamp: number): string => `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=working updated=${new Date(stamp).toISOString()} -->\n### Quiet task\n- [~] Doing\n<!-- /auto session=a1b2c3d4 -->`
+  const original = text(NOW)
+  const projects = parseProgress(original)
+  const seen = withSeen({}, projects, NOW)
+
+  // Active within customStale
+  const activeAt = NOW + 4 * 60 * 1000
+  const activeView = buildView(projects, [], null, activeAt, 0, {}, ZH_TW, [], seen, undefined, undefined, [], undefined, undefined, customStale)
+  expect(activeView.stopped).toHaveLength(0)
+
+  // Stopped past customStale
+  const stoppedAt = NOW + 5 * 60 * 1000 + 1
+  const stoppedView = buildView(projects, [], null, stoppedAt, 0, {}, ZH_TW, [], seen, undefined, undefined, [], undefined, undefined, customStale)
+  expect(stoppedView.stopped).toHaveLength(1)
+  const row = stoppedView.stopped[0]
+  expect(row?.confirm).not.toBe(null)
+  expect(row?.archive).not.toBe(null)
+  if (!row?.confirm || !row.archive) throw new Error('stopped row actions missing')
+  expect(confirmTask(original, row.confirm, stoppedAt, ZH_TW, seen, customStale)?.text).toContain('state=done')
+  const archived = takeTask(original, row.archive, stoppedAt, ZH_TW, seen, customStale)
+  expect(archived).not.toBe(null)
+  expect(archived?.text).not.toContain('Quiet task')
+
+  // When resumed (newer update within customStale), archive and confirm are disallowed
+  const resumed = text(stoppedAt)
+  expect(confirmTask(resumed, row.confirm, stoppedAt, ZH_TW, seen, customStale)).toBe(null)
+  expect(takeTask(resumed, row.archive, stoppedAt, ZH_TW, seen, customStale)).toBe(null)
+})
+
 test('a task idle exactly seven days stays on the board and one idle a millisecond longer is hidden', () => {
   const file = (at: number): string => `## demo
 <!-- auto session=a1b2c3d4 state=ended updated=${new Date(at).toISOString()} -->
@@ -874,6 +933,88 @@ test('a hand-kept task is aged from when its content was first seen, and editing
   expect(view(file.replace('[ ]', '[~]')).active).toHaveLength(1)
   expect(withSeen(seen, projects, NOW)).toEqual(seen)
   expect(Object.keys(seen)[0]).toMatch(/^[0-9a-f]{64}$/)
+})
+
+test('tasks already seen done before the upgrade get their three days from the first run of the new rule', () => {
+  const day = 24 * HOUR
+  const text = '## demo\n### Finished before upgrade\n- [x] Finished\n'
+  const projects = parseProgress(text)
+  const task = projects[0]!.tasks[0]!
+  const key = taskFingerprint('demo', task)
+  const old = withSeen({}, projects, NOW - 10 * day)
+  expect(withSeen(old, projects, NOW)).toEqual(old)
+  expect(withSeen({}, [], NOW)).toEqual({})
+  // Nothing to observe, nothing to write: the reserved entry is written with the first observation.
+  expect(withSeen({}, [], NOW, {}, false, true)).toEqual({})
+  expect(handKeptSeenAt(old, 'demo', task, NOW)).toBeUndefined()
+  const armed = withSeen(old, projects, NOW, {}, false, true)
+  expect(Object.keys(armed)[0]).toBe(SWEEP_ARMED_KEY)
+  expect(armed[SWEEP_ARMED_KEY]).toBe(NOW)
+  expect(armed[key]).toBe(NOW - 10 * day)
+  expect(parseSeen(seenJson(armed))).toEqual(armed)
+  for (const isSettled of [false, true]) {
+    expect(withSeen(armed, [], NOW + day, {}, isSettled, true)[SWEEP_ARMED_KEY]).toBe(NOW)
+    expect(withSeen(armed, [], NOW + day, { [SWEEP_ARMED_KEY]: NOW - day }, isSettled)[SWEEP_ARMED_KEY]).toBe(NOW - day)
+    expect(withSeen({ [SWEEP_ARMED_KEY]: NOW - day }, [], NOW + day, armed, isSettled)[SWEEP_ARMED_KEY]).toBe(NOW - day)
+  }
+  // A clock that ran ahead must not hold every task from being due: a future armed time is unknown, and armed again.
+  const ahead = { ...armed, [SWEEP_ARMED_KEY]: NOW + day }
+  expect(withSeen(ahead, projects, NOW, {}, false, true)[SWEEP_ARMED_KEY]).toBe(NOW)
+  expect(SWEEP_ARMED_KEY in withSeen(ahead, projects, NOW)).toBe(false)
+  const crowded = parseProgress('## demo\n' + Array.from({ length: 510 }, (_, i) => `### Task ${i}\n- [x] Finished\n`).join(''))
+  const capped = parseSeen(seenJson(withSeen(armed, crowded, NOW + day, {}, true, true))) ?? {}
+  expect(capped[SWEEP_ARMED_KEY]).toBe(NOW)
+  expect(Object.keys(capped)).toHaveLength(501)
+  for (const seen of [{}, { [key]: NOW }, { [SWEEP_ARMED_KEY]: NOW }, { ...armed, [key]: NOW + 1 }, { ...armed, [SWEEP_ARMED_KEY]: NOW + 1 }]) {
+    expect(handKeptSeenAt(seen, 'demo', task, NOW)).toBeUndefined()
+  }
+  expect(handKeptSeenAt(armed, 'demo', task, NOW)).toBe(NOW)
+  for (const offset of [-1, 0]) {
+    const at = NOW + 3 * day + offset
+    const age = (_key: string, project: string, item: typeof task) => handKeptSeenAt(armed, project, item, at)
+    expect(countManualDone(projects, at, age)).toBe(offset < 0 ? 0 : 1)
+    expect(takeManualDone(text, at, age).entries).toHaveLength(offset < 0 ? 0 : 1)
+  }
+  const later = { ...armed, [key]: NOW + day }
+  expect(handKeptSeenAt(later, 'demo', task, NOW + day)).toBe(NOW + day)
+  for (const offset of [-1, 0]) {
+    const at = NOW + 4 * day + offset
+    expect(countManualDone(projects, at, (_key, project, item) => handKeptSeenAt(later, project, item, at))).toBe(offset < 0 ? 0 : 1)
+  }
+})
+
+test('a sweep over the synthetic big board counts in under a second and moves nothing open', () => {
+  const day = 24 * HOUR
+  const marks = [' ', '~', '?', '>', '!']
+  const appended = Array.from({ length: 40 }, (_, index) => `### Synthetic completion ${index}\n- [x] Finished\n- [${index < 30 ? '-' : marks[(index - 30) % marks.length]}] Last step\n`).join('')
+  const text = `${bigBoard().source}\n## Sweep sample\n${appended}`
+  const projects = parseProgress(text)
+  const seen = { ...withSeen({}, projects, BIG_AT - 30 * day), [SWEEP_ARMED_KEY]: BIG_AT - 4 * day }
+  const age = (_key: string, project: string, task: typeof projects[number]['tasks'][number]) => handKeptSeenAt(seen, project, task, BIG_AT)
+  const countStart = Date.now()
+  const count = countManualDone(projects, BIG_AT, age)
+  expect(Date.now() - countStart).toBeLessThan(1000)
+  const takeStart = Date.now()
+  const out = takeManualDone(text, BIG_AT, age)
+  expect(Date.now() - takeStart).toBeLessThan(1000)
+  expect(count).toBe(30)
+  expect(out.entries).toHaveLength(count)
+  for (const entry of out.entries) expect(entry).not.toMatch(/- \[[ ~?>!]\]/)
+  // One scan of each text, not one per block: a block's lines must come through the sweep unchanged.
+  const linesOf = (one: string): string[] => one.replace(/\r?\n$/, '').split(/\r?\n/)
+  const before = linesOf(text)
+  const after = linesOf(out.text)
+  const spansBefore = scanBlocks(before)
+  const spansAfter = scanBlocks(after)
+  expect(spansAfter.map(span => [span.session, span.state, span.updated])).toEqual(spansBefore.map(span => [span.session, span.state, span.updated]))
+  spansBefore.forEach((span, index) => {
+    const kept = spansAfter[index]!
+    expect(after.slice(kept.start, kept.end + 1)).toEqual(before.slice(span.start, span.end + 1))
+  })
+  const remaining = new Set(parseProgress(out.text).flatMap(project => project.tasks.map(task => taskFingerprint(project.name, task))))
+  for (const project of projects) for (const task of project.tasks) {
+    if (task.auto !== null || task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled')) expect(remaining.has(taskFingerprint(project.name, task))).toBe(true)
+  }
 })
 
 test('a hand-kept task the seen record does not know is never hidden', () => {
@@ -969,4 +1110,20 @@ test('the seen record keeps the earliest time per task, drops tasks no longer in
   expect(Object.keys(parseSeen(seenJson(Object.fromEntries(many[0]?.tasks.map(task => [taskFingerprint('demo', task), NOW]) ?? []))) ?? {})).toHaveLength(500)
   expect(seenPath('/tmp/progress.md')).toBe('/tmp/progress-seen.json')
   expect(seenPath('/tmp/BOARD.MD')).toBe('/tmp/BOARD-seen.json')
+})
+
+test('tidy takes a verified run of any age without keeping its question and respects keep and closed markers', () => {
+  const now = Date.parse('2026-10-27T12:00:00Z')
+  const block = (id: string, isClosed = true): string => `<!-- auto session=${id} agent=codex state=working updated=2026-10-27T12:00:00Z -->
+### Synthetic run
+- [?] Ship it, OK?
+${isClosed ? `<!-- /auto session=${id} -->` : ''}
+`
+  const text = '## demo\n' + block('aaaa1111') + block('bbbb2222') + block('cccc3333', false)
+  const taken = takeArchivable(text, now, 'bbbb2222', ZH_TW, false, () => false, () => true)
+  expect(taken.entries).toHaveLength(1)
+  expect(taken.entries[0]).toContain('Ship it, OK?')
+  expect(taken.text).not.toContain('session=aaaa1111')
+  expect(taken.text).toContain('session=bbbb2222')
+  expect(taken.text).toContain('session=cccc3333')
 })

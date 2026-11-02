@@ -13,6 +13,16 @@ const isBusy = (error: unknown): boolean => {
   return code === 'EEXIST' || process.platform === 'win32' && code === 'EPERM'
 }
 
+// On Windows a file whose delete is still in flight refuses a create, a stat and an open with EPERM until the
+// last handle closes, and it is gone a moment later (#241). To a caller that is a lock in its last moments, not a refusal.
+const isVanishing = (error: unknown): boolean => process.platform === 'win32' && (error as { code?: string }).code === 'EPERM'
+
+// EPERM with no lock file there, or with a lock file that cannot be stat-ed, can be that same race, so a few more tries
+// (each after a pause of at most 10 ms) must show the refusal repeating before it is reported as a refusal.
+const DENIED_RETRIES = 5
+
+const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+
 const claim = (file: string, busy?: (code: string) => void): Claim | null => {
   const text = JSON.stringify({ version: 1, pid: process.pid, token: randomBytes(16).toString('hex') })
   let fd: number
@@ -78,13 +88,13 @@ const recover = (file: string, staleMs: number): void => {
   try {
     let current
     try { current = lstatSync(file) } catch (error) {
-      if ((error as { code?: string }).code === 'ENOENT') return
+      if ((error as { code?: string }).code === 'ENOENT' || isVanishing(error)) return
       throw error
     }
     if (!current.isFile() || Date.now() - current.mtimeMs < staleMs) return
     let text: string
     try { text = readFileSync(file, 'utf8') } catch (error) {
-      if ((error as { code?: string }).code === 'ENOENT') return
+      if ((error as { code?: string }).code === 'ENOENT' || isVanishing(error)) return
       throw error
     }
     if (!isDeadOwner(text)) return
@@ -106,6 +116,7 @@ export const withLocalLock = <T>(file: string, action: () => T & Synchronous<T>,
   const started = performance.now()
   let owner: Claim | null = null
   let lastCode = ''
+  let absent = 0
   const busy = (code: string): void => { lastCode = code }
   for (;;) {
     owner = claim(file, busy)
@@ -118,13 +129,22 @@ export const withLocalLock = <T>(file: string, action: () => T & Synchronous<T>,
       // failed create, and do not infer absence from an unreadable directory entry.
       if (lastCode === 'EPERM') {
         try { lstatSync(file) } catch (error) {
-          if ((error as { code?: string }).code === 'ENOENT') throw new Error('LOCK_DENIED')
+          const isAbsent = (error as { code?: string }).code === 'ENOENT'
+          if (!isAbsent && !isVanishing(error)) throw error
+          // One such refusal is the owner's release racing this create: try again. A real refusal repeats, and
+          // only then is it reported: LOCK_DENIED when no file is there, the stat error when one cannot be read.
+          if (absent < DENIED_RETRIES) {
+            absent += 1
+            pause(10)
+            continue
+          }
+          if (isAbsent) throw new Error('LOCK_DENIED')
           throw error
         }
       }
       throw new Error('LOCK_BUSY')
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, Math.min(10, waitMs - (performance.now() - started))))
+    pause(Math.max(0, Math.min(10, waitMs - (performance.now() - started))))
   }
   try { return action() } finally { release(file, owner) }
 }

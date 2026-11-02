@@ -335,7 +335,15 @@ export const readMonthParts = async (base: string, sizeOf: (path: string) => Pro
 }
 
 // What the board says when a file passes its size limit: it keeps everything the person wrote.
-export const sizeWarnings = (sizes: { progress: number; store: number }, s: Strings = ZH_TW): string[] => [
+export const sizeWarnings = (sizes: { progress: number; store: number }, s: Strings = ZH_TW): string[] =>
+  sizes.progress > RETENTION.progressSoftBytes || sizes.store > RETENTION.storeWarnBytes ? [s.boardLarge] : []
+
+export const sizeDetails = (sizes: { progress: number; store: number }, s: Strings = ZH_TW): string[] => [
   ...(sizes.progress > RETENTION.progressSoftBytes ? [s.progressLarge(Math.round(sizes.progress / KB), RETENTION.progressSoftBytes / KB)] : []),
   ...(sizes.store > RETENTION.storeWarnBytes ? [s.storeLarge((sizes.store / MB).toFixed(1), (RETENTION.storeCapBytes / MB).toFixed(1))] : []),
 ]
+
+export const storageDetails = (sizes: { progress: number; store: number }, finished: number, s: Strings = ZH_TW): string | undefined => {
+  const details = [...sizeDetails(sizes, s), ...(finished > 0 ? [s.canArchive(finished)] : [])]
+  return details.length === 0 ? undefined : details.join(' · ')
+}

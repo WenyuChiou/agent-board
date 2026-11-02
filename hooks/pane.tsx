@@ -12,9 +12,10 @@ import type {
 import type { PressOutcome, ProgressAnswer, ProgressPressResult, ProgressStepStatus, ResolveResult } from '../types'
 import type { Strings } from './i18n'
 import { ZH_TW } from './i18n'
+import { agentLabel } from './strings'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { progressBar, replyHint } from './view'
+import { OLDER_SHOWN, progressBar, replyHint } from './view'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
 // The pane's drawing, from the view and a set of actions; it never touches the engine,
@@ -47,6 +48,8 @@ export type PaneActions = {
   toggleSection: (id: string) => PressOutcome | Promise<PressOutcome>
   continueHere: () => PressOutcome | Promise<PressOutcome>
   archive: () => PressOutcome | Promise<PressOutcome>
+  // Clean up: the scheduled sweep (the hourly one, `--tidy`), not the archive of every finished task (#464).
+  cleanUp: () => PressOutcome | Promise<PressOutcome>
   takeOver: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
   handOver: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
   tick: (ref: StepRef) => PressOutcome | Promise<PressOutcome>
@@ -106,9 +109,12 @@ export const pressTarget = (view: View, button: string, s: Strings = ZH_TW): { k
   if (button === 'section::health') return { key: button, revision: '', label: s.sectionHealth }
   if (button === 'section::reminder') return { key: button, revision: '', label: s.sectionQuestionReminders }
   if (button === 'section::older') return { key: button, revision: '', label: s.sectionOlderQuestions }
+  if (button === 'section::stoppedAsking') return { key: button, revision: '', label: s.stoppedAsking(view.stoppedAsking ?? 0) }
+  if (button === 'section::olderAll') return { key: button, revision: '', label: s.showAllQuestions(view.older?.length ?? 0) }
   if (button === 'section::others') return { key: button, revision: '', label: view.current === null ? s.sectionActive : s.sectionOther }
   if (button === 'focus::more') return { key: button, revision: '', label: s.moreWaiting(view.waiting.length - (view.focus?.type === 'ask' ? 1 : 0)) }
   if (button === 'continue' && view.current !== null) return { key: button, revision: JSON.stringify([view.current.title, view.current.steps]), label: view.current.title }
+  if (button === 'clean') return { key: button, revision: '', label: s.cleanUp }
   if (button === 'archive') return { key: button, revision: '', label: view.recent.map(item => item.title).join(', ') }
   const asks = [...view.waiting, ...view.hidden, ...(view.reminder ?? []), ...(view.older ?? [])]
   const ask = asks.sort((a, b) => b.key.length - a.key.length).find(item => button === `ask::${item.key}` || button.startsWith(`${item.key}::`))
@@ -280,7 +286,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     if (item.where === 'other') {
       const run = item.kind === 'do' ? item.command : null
       const open = item.kind === 'review' ? item.link : null
-      const hint = replyHint(item, s)
+      const hint = replyHint(item, s, true, true)
       return (
         <Box flexDirection="column">
           {run !== null && <Text color={palette.accent} wrap="wrap">{`$ ${run}`}</Text>}
@@ -404,12 +410,12 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const askDetail = (item: WaitingItem) => (
     <Box flexDirection="column">
       <Text color={palette.project} wrap="truncate-end">
-        {`${item.project} › ${item.task}${item.agent === '' ? '' : ` · ${item.agent}`}`}
+        {`${item.project} › ${item.task}${item.where === 'manual' ? '' : ` · ${agentLabel(item.agent || 'claude', s)}`}`}
       </Text>
       {item.note !== '' && <Text wrap="wrap">{item.note}</Text>}
       {item.note === '' && item.context !== '' && muted(s.contextLine(item.context))}
       {item.when !== '' && muted(item.when)}
-      {item.canHide === false ? muted(s.questionReviewOnly) : item.where !== 'manual' && muted(s.archiveLive)}
+      {item.canHide === false ? muted(s.questionReviewOnly) : item.where !== 'manual' && item.isKept !== true && muted(s.archiveLive)}
       {askActions(item)}
       {item.hideKey !== '' && item.canHide !== false && (
         <Box marginTop={1}>
@@ -549,7 +555,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const taskRow = (row: TaskRow, showProject: boolean) => {
     const isRowOpen = model.expanded === row.key
     const tail = row.due === null ? `${row.done}/${row.total}` : row.due.left
-    const meta = [row.due === null ? '' : row.due.date, showProject ? row.project : '', row.agent, row.status, row.pr, row.when].filter(
+    const meta = [row.due === null ? '' : row.due.date, showProject ? row.project : '', row.auto === null ? '' : agentLabel(row.agent || 'claude', s), row.status, row.pr, row.when].filter(
       part => part !== '',
     )
 
@@ -567,6 +573,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             {meta.join(' · ')}
           </Text>
         </Box>
+        {row.runs !== undefined && (
+          <Box paddingLeft={2}>
+            <Text color={palette.muted} wrap="truncate-end">{row.runs}</Text>
+          </Box>
+        )}
         {!isRowOpen && cardResult(row.key)}
         {isRowOpen && (
           <Box paddingLeft={2} flexDirection="column" marginTop={1}>
@@ -669,6 +680,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         <Text color={current.tone === 'quiet' ? palette.muted : color(current.tone)} wrap="wrap">
           {current.status}
         </Text>
+        {current.runs !== undefined && muted(current.runs, 'truncate-end')}
         {showAll ? (
           <Box flexDirection="column" marginTop={1}>
             {steps(current.steps)}
@@ -710,6 +722,15 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     <Box flexDirection="column">
       <Text bold>{s.paneTitle}</Text>
       {view.warning && <Text color={palette.alert}>{view.warning}</Text>}
+      {view.isCleanable && (
+        <Box flexDirection="column">
+          <Button key="clean" plain onPress={buttonPress('clean', actions.cleanUp)}>
+            {s.cleanUp}
+          </Button>
+        </Box>
+      )}
+      {cardResult('clean')}
+      {view.details && <Text color={palette.muted}>{view.details}</Text>}
       {view.pruned && <Text color={palette.muted}>{view.pruned}</Text>}
       {model.hasPendingQuestionsProblem && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
       {model.hasQuestionsProblem && <Text color={palette.alert}>{s.questionsUnreadable()}</Text>}
@@ -748,11 +769,20 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
 
       {view.waiting.length > 0 && fold('waiting', s.sectionWaiting, view.waiting.length, 'warn', '')}
       {isOpen('waiting') && view.waiting.map(waitingRow)}
+      {(view.stoppedAsking ?? 0) > 0 && <Box flexDirection="column">
+        <Button key="section::stoppedAsking" plain onPress={buttonPress('section::stoppedAsking', () => actions.toggleSection('older'), true)}>
+          {`${isOpen('older') ? '▾' : '▸'} ${s.stoppedAsking(view.stoppedAsking!)}`}
+        </Button>
+        {cardResult('section::stoppedAsking')}
+      </Box>}
       {(['reminder', 'older'] as const).map(id => {
         const items = view[id] ?? []
+        const shownItems = id === 'older' && !isOpen('olderAll') ? items.slice(0, OLDER_SHOWN) : items
         return items.length === 0 ? null : <Box flexDirection="column">
           {fold(id, id === 'reminder' ? s.sectionQuestionReminders : s.sectionOlderQuestions, items.length, 'quiet', s.questionAgingHint)}
-          {isOpen(id) && items.map(item => <Box flexDirection="column">{waitingRow(item)}{muted(item.when)}</Box>)}
+          {isOpen(id) && shownItems.map(item => <Box flexDirection="column">{waitingRow(item)}{muted(item.when)}</Box>)}
+          {isOpen(id) && shownItems.length < items.length && <Button key="section::olderAll" plain onPress={buttonPress('section::olderAll', () => actions.toggleSection('olderAll'), true)}>{s.showAllQuestions(items.length)}</Button>}
+          {cardResult('section::olderAll')}
         </Box>
       })}
       {view.hidden.length > 0 && (
@@ -792,6 +822,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           {shelfQuestions(row.questions ?? [], row.key)}
         </Box>
       ))}
+      {view.background !== undefined && (
+        <Box marginTop={1}>
+          <Text color={palette.muted} wrap="truncate-end">{view.background}</Text>
+        </Box>
+      )}
       {hasDetachedResult && (
         <Box key={`stopped::${resultTask}`} flexDirection="column" marginTop={1} paddingLeft={1}>
           {muted([model.resolveResult?.project, model.resolveResult?.title].filter(Boolean).join(' · '))}

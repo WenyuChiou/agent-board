@@ -1,12 +1,16 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { performance } from 'node:perf_hooks'
+import { basename } from 'node:path'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { inspectSurfaces, terminal, seenPageWithin, serve, run } from './lib/surfaces.mjs'
 import { noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
+
+// The page's empty board: the agents that report here and what to do next, in place of the sections.
+const EMPTY_PAGE = /Your board is ready[\s\S]*Start a new session in an agent you set up; its work shows here/
 
 describe('L1 first run', () => {
   test('L1 first run: an empty board says how to connect the first agent', async () => {
@@ -15,29 +19,30 @@ describe('L1 first run', () => {
       assert.equal(world.exists('progress.md'), false)
       const screens = await inspectSurfaces(world)
       for (const surface of ['terminal', 'chat', 'page', 'html']) {
-        assert.match(screens[surface], /Nothing needs you|No work in progress/, surface)
+        // The page has no Needs you section yet: its empty board is the "Your board is ready" card.
+        assert.match(screens[surface], surface === 'page' ? EMPTY_PAGE : /Nothing needs you|No work in progress/, surface)
         await knownFailure('hold:empty-board-connect', () => assert.match(screens[surface], /\b(?:connect|set up|install)\b.*(?:agent|setup-agent)|setup-agent.*--apply/i, surface))
       }
     } finally { await world.close() }
   })
 
-  test('L1 first Codex session: the row title comes from the first prompt, not "Local codex task"', async () => {
+  test('L1 first Codex session: the hook reports its project without reading the prompt', async () => {
     const world = makeWorld()
     try {
       const prompt = 'Prepare the synthetic gateway release'
+      const expectedTitle = basename(world.root)
       const result = await hook(world, 'codex', 'UserPromptSubmit', { prompt, cwd: world.root })
       assert.equal(result.status, 0, result.stderr || result.stdout)
       assert.match(world.read('progress.md'), /agent=codex .*state=working/)
       const server = await serve.start(world)
       const rows = (await server.get('/api/board')).json().model.groups.flatMap(group => group.rows)
       assert.equal(rows.length, 1)
-      await knownFailure('hold:codex-first-prompt-title', () => assert.equal(rows[0].title, prompt))
+      assert.equal(rows[0].title, expectedTitle)
       for (const [surface, text] of Object.entries({ terminal: await terminal.screen(world), page: await server.page() })) {
         noMachineIds(text, world)
-        await knownFailure('hold:codex-first-prompt-title', () => {
-          assert.ok(text.includes(prompt), `${surface}: ${text}`)
-          assert.ok(!text.includes('Local codex task'), surface)
-        })
+        assert.ok(text.includes(expectedTitle), `${surface}: ${text}`)
+        assert.ok(!text.includes('Local codex task'), surface)
+        assert.ok(!text.includes(prompt), surface)
       }
     } finally { await world.close() }
   })
@@ -90,7 +95,9 @@ describe('L1 first run', () => {
       await watch.next(text => text.includes('Prepare the gateway'), 10000)
       await server.page()
       // Measure an update after a steady-state poll, excluding startup and first ledger writes.
-      await watch.next(text => text.includes('Prepare the gateway'), 10000)
+      // The board writes nothing while its screen is unchanged (#545), so this waits one poll
+      // rather than for another frame.
+      await new Promise(done => setTimeout(done, 2500))
       block(world, { state: 'waiting', steps: ['- [?] Publish the gateway, OK?'] })
       const [frame, elapsed] = await Promise.all([
         watch.next(text => text.includes('Publish the gateway, OK?'), PANE_MS),
@@ -109,7 +116,7 @@ describe('L1 first run', () => {
     try {
       assert.equal(world.exists('progress.md'), false)
       const screens = await inspectSurfaces(world)
-      for (const [name, text] of Object.entries(screens)) assert.match(text, /Nothing needs you|No work in progress/, name)
+      for (const [name, text] of Object.entries(screens)) assert.match(text, name === 'page' ? EMPTY_PAGE : /Nothing needs you|No work in progress/, name)
     } finally { await world.close() }
   })
 
@@ -147,7 +154,7 @@ describe('L1 first run', () => {
     let server
     try {
       server = await serve.start(world)
-      assert.match(await server.page(), /No work in progress/)
+      assert.match(await server.page(), EMPTY_PAGE)
       block(world, { title: 'First gateway route' })
       const elapsed = await seenPageWithin(server, text => text.includes('First gateway route'), PAGE_MS)
       assert.ok(elapsed <= PAGE_MS)

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
 import { knownFailure } from './lib/known.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, hookLoadMarker, leftoverPlan, leftoverProcesses, levelOutcome, liveMemoryLevel, makeRedact, median, parseArguments, peakRss, percentile, queuedSessions, questionEvidenceProjection, questionRecoveryOf, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, queuedSessions, questionEvidenceProjection, questionRecoveryOf, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
@@ -510,30 +510,44 @@ describe('L6 soak arguments', () => {
     assert.equal(sessions.has('load-codex-4'), false)
     assert.equal(sessions.has('load-codex-5'), false)
   })
-  test('L6 soak arguments: a failed hook load check is known for #241 only on Windows, when no hook exited non-zero or ran past twice the 3 s budget, the poll interval fits its budget, every poll was answered, some report was shown and every late or missed report came back while that session\'s own event was queued', () => {
-    const marker = (key, outcome, platform = 'win32') => hookLoadMarker({ key, outcome, platform, budgetMs: 3000 })
+  test('L5 hook load results: every failed measurement fails after the closed issue is removed', async () => {
+    const module = await import('./lib/soak-report.mjs')
+    assert.equal(typeof module.classifyHookLoadChecks, 'function')
     const slowHooks = { ok: false, over: 1, failedRuns: 0, maxMs: 3126 }
     const latePage = { ok: false, shown: 2182, slow: 30, slowNotQueued: 0, failedAnswers: 0, pollWithinBudget: true }
-    assert.deepEqual(marker('hooks', slowHooks), { issue: 241, explains: true })
-    assert.deepEqual(marker('page', latePage), { issue: 241, explains: true })
-    // A lucky pass on Windows still carries the marker; other systems and other checks carry none.
-    assert.deepEqual(marker('hooks', { ok: true }), { issue: 241, explains: true })
-    assert.deepEqual(marker('page', { ok: true, pollWithinBudget: true }), { issue: 241, explains: true })
-    assert.equal(marker('hooks', slowHooks, 'linux'), undefined)
-    assert.equal(marker('page', latePage, 'darwin'), undefined)
-    assert.equal(marker('caps', { ok: false }), undefined)
-    // Outside the pattern: a hook that exited non-zero, one that ran past 6 s, a failure with no slow
-    // run, a late report without its own queued event, a bad poll interval, an unanswered poll, no report shown, or nothing slow.
-    assert.equal(marker('hooks', { ...slowHooks, failedRuns: 1 }).explains, false)
-    assert.equal(marker('hooks', { ...slowHooks, maxMs: 6001 }).explains, false)
-    assert.equal(marker('hooks', { ok: false, over: 0, failedRuns: 0, maxMs: 0 }).explains, false)
-    assert.equal(marker('page', { ...latePage, slowNotQueued: 1 }).explains, false)
-    assert.equal(marker('page', { ...latePage, pollWithinBudget: false }).explains, false)
-    assert.equal(marker('page', { ...latePage, pollWithinBudget: undefined }).explains, false)
-    assert.equal(marker('page', { ok: true, pollWithinBudget: false }).explains, false)
-    assert.equal(marker('page', { ...latePage, failedAnswers: 1 }).explains, false)
-    assert.equal(marker('page', { ...latePage, shown: 0 }).explains, false)
-    assert.equal(marker('page', { ...latePage, slow: 0 }).explains, false)
-    assert.equal(marker('page', {}).explains, false)
+    const outcomes = {
+      slowHooks,
+      latePage,
+      failedRun: { ...slowHooks, failedRuns: 1 },
+      overTwiceBudget: { ...slowHooks, maxMs: 6001 },
+      noSlowHook: { ok: false, over: 0, failedRuns: 0, maxMs: 0 },
+      lateNotQueued: { ...latePage, slowNotQueued: 1 },
+      badPollInterval: { ...latePage, pollWithinBudget: false },
+      unknownPollInterval: { ...latePage, pollWithinBudget: undefined },
+      failedAnswer: { ...latePage, failedAnswers: 1 },
+      noReportShown: { ...latePage, shown: 0 },
+      nothingSlow: { ...latePage, slow: 0 },
+      emptyFailure: {},
+    }
+    for (const [key, outcome] of Object.entries(outcomes)) outcome.line = `Failure profile: ${key}.`
+    const titles = Object.fromEntries(Object.keys(outcomes).map(key => [key, `Check ${key}`]))
+    const results = module.classifyHookLoadChecks({ outcomes, titles })
+    assert.deepEqual(results.map(result => result.status), Object.keys(outcomes).map(() => 'fail'))
+    assert.deepEqual(results.map(result => result.line), Object.values(outcomes).map(outcome => outcome.line))
+  })
+
+  test('L5 hook load results: missing measurements fail and complete successful measurements pass', async () => {
+    const module = await import('./lib/soak-report.mjs')
+    assert.equal(typeof module.classifyHookLoadChecks, 'function')
+    const titles = { hooks: 'Hook timing', page: 'Page timing', missing: 'Missing check' }
+    const outcomes = {
+      hooks: { ok: true, line: 'Every hook ended in time.' },
+      page: { ok: true, pollWithinBudget: false, line: 'Every report appeared.' },
+    }
+    assert.deepEqual(module.classifyHookLoadChecks({ outcomes, titles }), [
+      { title: titles.hooks, status: 'pass', line: outcomes.hooks.line },
+      { title: titles.page, status: 'pass', line: outcomes.page.line },
+      { title: titles.missing, status: 'fail', line: 'Not measured: the run ended before this check.' },
+    ])
   })
 })

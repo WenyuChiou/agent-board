@@ -14,6 +14,8 @@ import { knownFailure } from './lib/known.mjs'
 import { fileOpsPerPoll } from './lib/soak-report.mjs'
 import { BIG_FILE_HOOK_MS, BLOCKS, HOOK_TIMEOUT_MS, IDLE_POLL_FILE_OPS, LIVE_SESSIONS } from './lib/budget.mjs'
 
+// The page's words with their line breaks and runs of spaces folded to one space.
+const squash = text => text.replace(/\s+/g, ' ')
 const HOUR = 3600000
 const DAY = 24 * HOUR
 // The most asks the terminal should print under "Waiting on you" before it says how to see the
@@ -74,8 +76,9 @@ describe('L4 time and scale', () => {
         const start = text.indexOf(task)
         const end = text.indexOf(ask, start)
         assert.ok(start >= 0 && end > start, `${surface} must show the task and its ask:\n${text}`)
-        // Everything the surface says about this task, from its title down to the ask itself.
-        const entry = text.slice(start, end + ask.length)
+        // Everything the surface says about this task, from its title down to the ask itself. On the
+        // page the age sits at the right end of the row, after the ask, so the row is read whole.
+        const entry = surface === 'page' ? server.dom.cards().find(card => card.textContent.includes(task))?.textContent ?? '' : text.slice(start, end + ask.length)
         assert.ok(entry.includes(EN.daysAgo(30)), `${surface}: ${entry}`)
         assert.ok(!text.includes(EN.justNow), `${surface} calls something "just now" on a board that holds only a 30-day-old block:\n${text}`)
       }
@@ -144,7 +147,8 @@ describe('L4 time and scale', () => {
       const first = (await server.get('/api/board')).json().model
       assert.equal(first.groups.flatMap(group => group.rows).length, 501)
       const seen = world.read('progress-seen.json')
-      assert.equal(Object.keys(JSON.parse(seen).seen).length, 501)
+      // Every future clock keeps its own baseline, alongside the reserved sweep-arming entry.
+      assert.equal(Object.keys(JSON.parse(seen).seen).length, 502)
       await server.get('/api/board')
       assert.equal(world.read('progress-seen.json'), seen)
       await server.stop()
@@ -219,6 +223,7 @@ describe('L4 time and scale', () => {
         return text.slice(at, at + 250)
       }
       for (const [surface, text] of Object.entries(screens)) {
+        if (surface === 'page') continue
         // Both shelves are named on every surface. The plain terminal print only names them, and
         // --all opens them.
         assert.ok(text.includes(EN.idleCount(1)), `${surface} must count the idle task:\n${text}`)
@@ -234,6 +239,18 @@ describe('L4 time and scale', () => {
         assert.ok(idle.includes(EN.sessionStopped(EN.daysAgo(7))), `${surface}: the idle task must say when it was last active: ${idle}`)
         assert.ok(!idle.includes(EN.justNow), `${surface} calls the idle task "just now": ${idle}`)
       }
+      // The page has one shelf of Stopped work and one line of older questions under Needs you, where a
+      // reminder and an older question both stand; it counts the idle task, keeps the ask on a card
+      // with its age and puts the idle task's age on its row.
+      assert.ok(squash(screens.page).includes(`${EN.pgStopped} 1`), `page must count the idle task:\n${screens.page}`)
+      assert.ok(screens.page.includes(EN.pgOlderOne(1)), `page must show the waiting ask among its older questions:\n${screens.page}`)
+      const askCard = server.dom.cards().find(card => card.tag === 'article' && card.textContent.includes(ask))
+      assert.ok(askCard, `page must show the ask:\n${screens.page}`)
+      assert.match(askCard.textContent, ageOf(EN.daysAgo(5)), 'page: the ask must say it is 5 days old')
+      const quietRow = server.dom.cards().find(card => card.className.split(' ').includes('row') && card.textContent.includes(quiet))
+      assert.ok(quietRow, `page must show the idle task:\n${screens.page}`)
+      assert.match(quietRow.textContent, ageOf(EN.daysAgo(7)), 'page: the idle task must say when it was last active')
+      assert.ok(!quietRow.textContent.includes(EN.justNow), `page calls the idle task "just now": ${quietRow.textContent}`)
       assert.deepEqual(model.idle.map(row => [row.title, row.status, row.when]), [[quiet, EN.sessionStopped(EN.daysAgo(7)), EN.daysAgo(7)]])
       assert.deepEqual((model.reminder ?? []).map(item => [item.task, item.text, item.when]), [[task, ask, EN.daysAgo(5)]])
       assert.deepEqual(model.older ?? [], [])

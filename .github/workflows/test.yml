@@ -1,5 +1,4 @@
-# Checks every push to main and every pull request, so a PR reports real checks
-# (Wenyu's merge gate refuses a PR with zero checks).
+# Select affected checks on every PR push, Draft and Ready alike.
 # Runs offline: `claude plugin validate` and `claude plugin test` need no login or API key.
 name: test
 
@@ -7,6 +6,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run every check group
+        type: boolean
+        default: true
+  schedule:
+    - cron: '17 5 * * 0'
 
 permissions:
   contents: read
@@ -24,100 +31,209 @@ env:
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 
 jobs:
-  exchange:
-    name: local exchange (${{ matrix.os }}, Node ${{ matrix.node }})
+  impact:
+    name: affected checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      full: ${{ steps.plan.outputs.full }}
+      installers_os: ${{ steps.plan.outputs.installers_os }}
+      # A pull request runs each Node line once and each system once (Node 22 on Ubuntu, Node 24 on
+      # Windows). Its plugin check runs on Ubuntu, and also on Windows when the changed paths reach the
+      # plugin's runtime (the planner's plugin_os). main, the weekly run, a manual run and a release PR
+      # run every pair, so a failure only one pair shows is still caught before a release.
+      node_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22},{"os":"windows-latest","node":24}]' || '[{"os":"ubuntu-latest","node":22},{"os":"ubuntu-latest","node":24},{"os":"windows-latest","node":22},{"os":"windows-latest","node":24}]' }}
+      # An empty planner output (the base selector predates plugin_os) falls through to both systems.
+      plugin_os: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}
+      bundle: ${{ steps.plan.outputs.bundle }}
+      released: ${{ steps.plan.outputs.released }}
+      board: ${{ steps.plan.outputs.board }}
+      messaging: ${{ steps.plan.outputs.messaging }}
+      tooling: ${{ steps.plan.outputs.tooling }}
+      npm: ${{ steps.plan.outputs.npm }}
+      plugin: ${{ steps.plan.outputs.plugin }}
+      installers: ${{ steps.plan.outputs.installers }}
+      remote: ${{ steps.plan.outputs.remote }}
+      journeys: ${{ steps.plan.outputs.journeys }}
+      browser: ${{ steps.plan.outputs.browser }}
+      generated: ${{ steps.plan.outputs.generated }}
+      board_tests: ${{ steps.plan.outputs.board_tests }}
+      messaging_tests: ${{ steps.plan.outputs.messaging_tests }}
+      tooling_tests: ${{ steps.plan.outputs.tooling_tests }}
+      npm_tests: ${{ steps.plan.outputs.npm_tests }}
+      journeys_tests: ${{ steps.plan.outputs.journeys_tests }}
+      browser_tests: ${{ steps.plan.outputs.browser_tests }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: checker
+          ref: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: source
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+      - name: Plan from trusted base rules
+        id: plan
+        shell: bash
+        env:
+          CI_SOURCE_ROOTS: '["${{ github.workspace }}/checker","${{ github.workspace }}/source"]'
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_FORCE_FULL: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full) || startsWith(github.event.pull_request.title, 'chore(release):') || (github.event_name == 'push' && github.event.before == '0000000000000000000000000000000000000000') }}
+        run: |
+          if [ -f checker/scripts/ci-impact.mjs ]; then
+            node checker/scripts/ci-impact.mjs plan
+          else
+            # Bootstrap never lets a head selector decide to omit checks.
+            node --input-type=module <<'NODE'
+          import { appendFileSync, readdirSync } from 'node:fs'
+          const groups = ["board","messaging","tooling","npm","plugin","installers","remote","journeys","browser","generated"]
+          const tests = Object.fromEntries(groups.map(g => [g, []]))
+          const tools = ['pr-check','preflight','changelog-fold','team-stats'].map(n => n+'.test.mjs')
+          for (const name of readdirSync('source/tests').filter(n=>n.endsWith('.test.mjs') && n!=='ci-impact.test.mjs')) {
+            const group = tools.includes(name) ? 'tooling' : name==='npm-package.test.mjs' ? 'npm' : ['exchange.test.mjs','messaging.test.mjs'].includes(name) ? 'messaging' : 'board'
+            tests[group].push('tests/'+name)
+          }
+          for (const [g,f] of [['journeys','e2e'],['browser','browser']]) tests[g] = readdirSync('source/tests/'+f).filter(n=>n.endsWith('.test.mjs')).map(n=>'tests/'+f+'/'+n)
+          const plan = {version:1,full:true,checks:Object.fromEntries(groups.map(g=>[g,true])),files:[],reason:'base selector unavailable: full bootstrap'}
+          const values = {plan:JSON.stringify(plan),full:'true',installers_os:'["ubuntu-latest","windows-latest"]',plugin_os:'["ubuntu-latest","windows-latest"]',bundle:'true',released:'true',...Object.fromEntries(groups.map(g=>[g,'true']))}
+          for (const g of ["board","messaging","tooling","npm","journeys","browser"]) values[g+'_tests'] = JSON.stringify(tests[g])
+          appendFileSync(process.env.GITHUB_OUTPUT,Object.entries(values).map(([k,v])=>k+'='+v).join('\n')+'\n')
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,'Full bootstrap: base has no selector; every group selected.\n')
+          NODE
+          fi
+
+      - name: Selector contract tests
+        working-directory: source
+        run: node --test tests/ci-impact.test.mjs
+
+  board:
+    needs: impact
+    if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.board == 'true' }}
+    name: board (${{ matrix.os }}, Node ${{ matrix.node }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
         # The CLI loads .ts files through Node's type stripping: on by default from
         # 22.18 and in 24. Both lines run so an import Node cannot load fails here.
-        node: [22, 24]
+        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
-    # Windows runners take 4.5 to 5 minutes for checkout, setup and the two suites;
-    # 10 leaves room for the runner's cleanup (#304).
+    # Split board and messaging so Windows keeps its existing ten-minute budget.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # github.sha: on a pull request, GitHub's merge of it into main, so the tests run what merging gives (#339).
+          ref: ${{ github.sha }}
           persist-credentials: false
           # The whole history with its tags, for the released files table below.
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
-      - name: Synthetic file exchange and mock owner tests
-        run: node --test tests/exchange.test.mjs tests/messaging.test.mjs
-
-      # The board script other agents run, on plain Node.
       - name: Board script tests
-        run: node --test tests/board.test.mjs tests/board-storage.test.mjs tests/codex-local.test.mjs tests/local-lock.test.mjs tests/prompt-hooks.test.mjs tests/codex-host.test.mjs tests/codex-fallback.test.mjs tests/legacy-connect.test.mjs tests/connect-worker.test.mjs
+        env:
+          CI_TEST_FILES: ${{ needs.impact.outputs.board_tests }}
+        run: node scripts/ci-impact.mjs run
 
-      # hooks/board-script.ts is the bundle of scripts/board-cli.ts; it must match its sources.
-      # Bun is pinned so the bundle comes out the same.
-      - name: Board bundle up to date
-        if: runner.os != 'Windows' && matrix.node == 24
-        run: npx --yes bun@1.4.2 scripts/build-board.ts --check
+  messaging:
+    needs: impact
+    if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.messaging == 'true' }}
+    name: local exchange (${{ matrix.os }}, Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # The CLI loads .ts files through Node's type stripping: on by default from
+        # 22.18 and in 24. Both lines run so an import Node cannot load fails here.
+        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
+    runs-on: ${{ matrix.os }}
+    # Split board and messaging so Windows keeps its existing ten-minute budget.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          # The whole history with its tags, for the released files table below.
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Synthetic exchange and mock owner tests
+        env:
+          CI_TEST_FILES: ${{ needs.impact.outputs.messaging_tests }}
+        run: node scripts/ci-impact.mjs run
 
-      # hooks/released.ts holds the hash of every file each tagged release generated, so an
-      # installation from before the plugin kept a record of its output upgrades silently.
-      - name: Released files table up to date
-        if: runner.os != 'Windows' && matrix.node == 24
-        run: npx --yes bun@1.4.2 scripts/build-released.ts --check
-
-  # The tests of scripts/pr-check.mjs, scripts/preflight.mjs and scripts/changelog-fold.mjs, in a job of their own: the exchange job on Windows
-  # already uses most of its time limit (#304).
-  pr-check-tests:
+  tooling:
+    needs: impact
+    if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.tooling == 'true' }}
     name: pr-check tests (${{ matrix.os }}, Node ${{ matrix.node }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        node: [22, 24]
+        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
       - name: PR check tests
-        run: node --test tests/pr-check.test.mjs tests/preflight.test.mjs tests/changelog-fold.test.mjs tests/team-stats.test.mjs
+        env:
+          CI_TEST_FILES: ${{ needs.impact.outputs.tooling_tests }}
+        run: node scripts/ci-impact.mjs run
 
   # The npm package in a job of its own: what `npm pack` would publish, the version in step
   # with plugin.json, and the launcher (setup, help, the installed board script) in a scratch home.
-  npm-package:
+
+  npm:
+    needs: impact
+    if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.npm == 'true' }}
     name: npm package (${{ matrix.os }}, Node ${{ matrix.node }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        node: [22, 24]
+        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
       - name: npm package tests
-        run: node --test tests/npm-package.test.mjs
+        env:
+          CI_TEST_FILES: ${{ needs.impact.outputs.npm_tests }}
+        run: node scripts/ci-impact.mjs run
 
   plugin:
+    needs: impact
+    if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.plugin == 'true' }}
     name: plugin (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(needs.impact.outputs.plugin_os) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -137,42 +253,71 @@ jobs:
       - name: Pane and hook tests
         run: claude plugin test .
 
-      # A missing check script fails the step, so it cannot be skipped by deleting it.
-      - name: Installer checks (setup.sh)
+
+  installers:
+    name: legacy installers (${{ matrix.os }})
+    needs: impact
+    if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.installers == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.impact.outputs.installers_os) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+      - name: Unix installer
         if: runner.os != 'Windows'
         run: bash tests/setup.check.sh
-
-      - name: Installer checks (setup.ps1)
+      - name: Windows installer
         if: runner.os == 'Windows'
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1
 
-      # The remote reporter is stdlib Python; it runs in a temp folder and writes no bytecode.
-      - name: Remote reporter tests
-        if: runner.os != 'Windows'
-        run: python3 -B scripts/remote-reporter/test_pipeline.py
-
-      - name: Remote reporter tests (Windows)
-        if: runner.os == 'Windows'
-        run: python -B scripts/remote-reporter/test_pipeline.py
-
-  # The user-journey tests: the board script on plain Node, driven the way a person uses it
-  # (terminal board, --chat, the --serve page over HTTP, --html) in isolated temp homes.
-  journeys:
-    # Node 24 keeps the old check names, which branch protection on main requires, and the Node 22
-    # rows add their version.
-    name: journeys (${{ matrix.os }}${{ matrix.node == 22 && ', Node 22' || '' }})
+  remote:
+    name: remote reporter (${{ matrix.os }})
+    needs: impact
+    if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.remote == 'true' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Unix reporter
+        if: runner.os != 'Windows'
+        run: python3 -B scripts/remote-reporter/test_pipeline.py
+      - name: Windows reporter
+        if: runner.os == 'Windows'
+        run: python -B scripts/remote-reporter/test_pipeline.py
+
+  journeys:
+    needs: impact
+    if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.journeys == 'true' }}
+    # Node 22 rows add their version to the name.
+    name: journeys (${{ matrix.os }}${{ matrix.node == 22 && ', Node 22' || '' }})
+    strategy:
+      fail-fast: false
+      matrix:
         # Both lines run, as in the jobs above, so a journey that depends on one Node's behaviour
         # fails here.
-        node: [22, 24]
+        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -180,9 +325,100 @@ jobs:
 
       # `node --test` passes with zero tests when the pattern matches nothing, so a missing
       # journey folder fails here instead of passing silently.
-      - name: Journey tests present
-        shell: bash
-        run: ls tests/e2e/*.test.mjs
+      - name: Selected user journeys
+        env:
+          CI_TEST_FILES: ${{ needs.impact.outputs.journeys_tests }}
+        run: node scripts/ci-impact.mjs run
 
-      - name: User-journey tests
-        run: node --test "tests/e2e/*.test.mjs"
+  browser:
+    needs: impact
+    if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.browser == 'true' }}
+    name: browser journeys (${{ matrix.os }}, Node 24)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install isolated browser test tools
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/agent-board-playwright" --no-save --package-lock=false --ignore-scripts --no-audit --no-fund playwright@1.62.1
+          node "$RUNNER_TEMP/agent-board-playwright/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Browser tests present
+        shell: bash
+        run: ls tests/browser/*.test.mjs
+      - name: Confirmed product journeys in Chromium
+        env:
+          CI_TEST_FILES: ${{ needs.impact.outputs.browser_tests }}
+          CI_TEST_SERIAL: "1"
+          AGENT_BOARD_PLAYWRIGHT_MODULE: ${{ runner.temp }}/agent-board-playwright/node_modules/playwright/index.mjs
+          AGENT_BOARD_BROWSER_ARTIFACTS_DIR: ${{ runner.temp }}/agent-board-browser-artifacts
+        run: node scripts/ci-impact.mjs run
+      - name: Keep synthetic browser evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-journeys-${{ matrix.os }}
+          path: ${{ runner.temp }}/agent-board-browser-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  generated:
+    name: generated files
+    needs: impact
+    if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.generated == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+      - name: Board bundle up to date
+        if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.bundle == 'true' }}
+        run: npx --yes bun@1.4.2 scripts/build-board.ts --check
+      - name: Released files table up to date
+        if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.released == 'true' }}
+        run: npx --yes bun@1.4.2 scripts/build-released.ts --check
+
+  ci-validation:
+    name: CI validation
+    if: always()
+    needs: [impact, board, messaging, tooling, npm, plugin, installers, remote, journeys, browser, generated]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+      - name: Every selected group actually succeeded
+        env:
+          CI_PLAN: ${{ needs.impact.outputs.plan }}
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: |
+          node --input-type=module <<'NODE'
+          const needs = JSON.parse(process.env.CI_NEEDS)
+          if (needs.impact.result !== 'success') throw new Error('impact failed or skipped')
+          const plan = JSON.parse(process.env.CI_PLAN)
+          if (plan.version !== 1 || typeof plan.full !== 'boolean' || !plan.checks) throw new Error('invalid plan')
+          for (const g of ["board","messaging","tooling","npm","plugin","installers","remote","journeys","browser","generated"]) {
+            if (typeof plan.checks[g] !== 'boolean') throw new Error(g+': missing selection metadata')
+            const status = needs[g]?.result
+            const selected = plan.full || plan.checks[g]
+            if (selected ? status !== 'success' : !['success','skipped'].includes(status)) throw new Error(g+': '+status)
+            console.log(g+': '+(selected ? 'executed successfully' : 'not run (unaffected)'))
+          }
+          NODE

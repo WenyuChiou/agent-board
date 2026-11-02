@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { ProgressMirror } from '../types'
 import { emptyMirror } from '../hooks/mirror'
 import { keepRecent, liveToldKeys, remindersOf, toldKey } from '../hooks/remind'
-import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, isExpiredRecord, isSameWrite, monthPart, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, recordBytes, sizeWarnings, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, unseenFailedInbox } from '../hooks/retention'
+import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, isExpiredRecord, isSameWrite, monthPart, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, recordBytes, sizeDetails, sizeWarnings, storageDetails, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, unseenFailedInbox } from '../hooks/retention'
 import { completionPrefix } from '../hooks/mirror'
 import { STRINGS } from '../hooks/strings'
 import { buildView, viewCache } from '../hooks/view'
@@ -60,9 +60,29 @@ test('warnings start above 524288 and 1258291.2 bytes', () => {
     expect(sizeWarnings({ progress: progress ?? 0, store: store ?? 0 }, STRINGS.en)).toEqual([])
   }
   expect(sizeWarnings({ progress: 524289, store: 1258292 }, STRINGS.en)).toEqual([
-    STRINGS.en.progressLarge(512, 512),
-    STRINGS.en.storeLarge('1.2', '1.5'),
+    STRINGS.en.boardLarge,
   ])
+})
+
+test('the size warning is one sentence and its numbers move to the details line in every language', () => {
+  for (const s of Object.values(STRINGS)) {
+    const sizes = { progress: 600 * 1024, store: 1.3 * 1024 * 1024 }
+    expect(sizeWarnings(sizes, s)).toEqual([s.boardLarge])
+    expect(sizeWarnings({ progress: sizes.progress, store: 0 }, s)).toEqual([s.boardLarge])
+    expect(sizeWarnings({ progress: 0, store: sizes.store }, s)).toEqual([s.boardLarge])
+    expect(sizeWarnings({ progress: 524288, store: 1258291.2 }, s)).toEqual([])
+    expect(s.boardLarge).not.toMatch(/\d/)
+    expect(sizeDetails(sizes, s)).toEqual([s.progressLarge(600, 512), s.storeLarge('1.3', '1.5')])
+    for (const count of [1, 2]) {
+      expect(storageDetails(sizes, count, s)).toBe([s.progressLarge(600, 512), s.storeLarge('1.3', '1.5'), s.canArchive(count)].join(' · '))
+      expect(storageDetails({ progress: 0, store: 0 }, count, s)).toBe(s.canArchive(count))
+    }
+    expect(s.canArchive(1)).not.toBe(s.canArchive(2))
+    expect(storageDetails(sizes, 0, s)).toBe(sizeDetails(sizes, s).join(' · '))
+    expect(storageDetails({ progress: 0, store: 0 }, 0, s)).toBeUndefined()
+  }
+  expect(STRINGS.en.canArchive(1)).toBe('1 finished task can be archived')
+  expect(STRINGS.en.canArchive(2)).toBe('2 finished tasks can be archived')
 })
 
 test('an ended agent record goes just over 3 days after its last write, and one still at work is kept for 30 days', () => {
@@ -213,7 +233,7 @@ test("a month's journal goes on in a second part once the first reaches 1 MB, an
 test('a size warning shows only past its limit and says what is kept', () => {
   const s = STRINGS.en
   expect(sizeWarnings({ progress: 524288, store: 1258291.2 }, s)).toEqual([])
-  const [progress, store] = sizeWarnings({ progress: 600 * 1024, store: 1.3 * 1024 * 1024 }, s)
+  const [progress, store] = sizeDetails({ progress: 600 * 1024, store: 1.3 * 1024 * 1024 }, s)
   expect(progress).toBe(s.progressLarge(600, 512))
   expect(progress).toContain('hand-kept tasks and steps waiting on you are never removed')
   expect(store).toBe(s.storeLarge('1.3', '1.5'))
@@ -450,7 +470,7 @@ test('a reporter temporary copy in the inbox goes once it is over a day old, and
 })
 
 test('the saved-records warning says that only records of sessions whose block has left the board are cleared, in every language', () => {
-  const warn = (lang: 'en' | 'zh-TW' | 'zh-CN'): string => sizeWarnings({ progress: 0, store: 1.3 * 1024 * 1024 }, STRINGS[lang])[0] ?? ''
+  const warn = (lang: 'en' | 'zh-TW' | 'zh-CN'): string => sizeDetails({ progress: 0, store: 1.3 * 1024 * 1024 }, STRINGS[lang])[0] ?? ''
   expect(warn('en')).toContain('only records of sessions whose block has left the board are cleared')
   expect(warn('en')).not.toContain('old records are being cleared')
   expect(warn('zh-TW')).toContain('只有區塊已離開看板的 session 紀錄會被清掉')

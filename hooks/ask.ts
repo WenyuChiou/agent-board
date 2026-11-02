@@ -32,6 +32,31 @@ const INPUT = /(提供|給我|给我|告訴我|告诉我|哪個|哪个|哪裡|�
 const URL = /https?:\/\/\S+/
 const CODE = /`([^`]+)`/
 
+// Whole-question wrappers do not change any inferred reading, including confirmation.
+// A wrapper closed inside an option, or a word's own apostrophe, belongs to the text.
+const questionWords = (text: string): string => {
+  let question = text.trim()
+  const pairs: Record<string, string> = { '"': '"', "'": "'", '“': '”', '「': '」', '『': '』', '(': ')' }
+  while (question.length >= 2 && pairs[question[0]!] === question[question.length - 1]) {
+    const open = question[0]!
+    const close = pairs[open]!
+    let depth = 1
+    let end = -1
+    for (let i = 1; i < question.length; i += 1) {
+      const char = question[i]
+      if (char === '\\') { i += 1; continue }
+      // A possessive apostrophe inside a word is not the end of a quoted question.
+      if (open === "'" && char === "'" && /[\p{L}\p{N}]/u.test(question[i - 1] ?? '') && /[\p{L}\p{N}]/u.test(question[i + 1] ?? '')) continue
+      if (open !== close && char === open) depth += 1
+      else if (char === close && --depth === 0) { end = i; break }
+    }
+    // The first wrapper must enclose the whole question, not just its first option.
+    if (end !== question.length - 1) break
+    question = question.slice(1, -1).trim()
+  }
+  return question
+}
+
 // Splits `0.6.0 還是 1.0.0？` or a list Claude gave into options. The first option is the
 // clause right before 還是 / or, so `先開旗標，還是全部開？` and `A first, or B?` read too.
 const optionsOf = (text: string): string[] => {
@@ -46,6 +71,27 @@ const optionsOf = (text: string): string[] => {
   return [lead.replace(/^(要|用|選|是)/, '').trim(), rest].filter(one => one !== '' && [...one].length <= 24)
 }
 
+// A note that opens by asking for a look or an action. These are stricter than REVIEW and DO, which
+// find their word anywhere (`按照`, `runs`, `reviewers`) and would take a choice away from its question.
+const NOTE_LOOK = /^(請|请|please\s+)?\s*(看一下|看看|檢查|检查|確認一下|确认一下|過目|过目|review(?![\w-])|take a look|look at|check(?![\w-]))/i
+const NOTE_ACT = /^(請|请|please\s+)?\s*(在|到|去|幫我|帮我)?\s*(跑|執行|执行|按(?!照)|點|点|run(?![\w-])|install(?![\w-])|click(?![\w-])|open(?![\w-])|paste(?![\w-])|set up(?![\w-])|log ?in(?![\w-])|sign in(?![\w-]))/i
+// A note with its own reading decides the kind unless it holds a choice.
+const noteDecides = (note: string): boolean =>
+  note !== '' && optionsOf(note).length < 2 &&
+  (CONFIRM.test(note) || YES_NO.test(note) || URL.test(note) || CODE.test(note) || NOTE_LOOK.test(note) || NOTE_ACT.test(note))
+
+// The question is read before the note, and the first of them with two options is used; a lone
+// option reads as before, from the note when there is one, else from the question.
+// A note that asks, points to or tells something of its own decides the kind, so the question's
+// options are not used then.
+const optionsRead = (subject: string, note: string): string[] => {
+  const fromQuestion = optionsOf(subject)
+  if (fromQuestion.length >= 2 && !noteDecides(note)) return fromQuestion
+  const fromNote = optionsOf(note)
+
+  return fromNote.length >= 2 || note !== '' ? fromNote : fromQuestion
+}
+
 const kindOf = (value: unknown): AskKind | null => ASK_KINDS.find(one => one === value) ?? null
 
 // What Claude said (`metadata.ask`, `options`, `command`, `link`), else what the words imply.
@@ -54,18 +100,21 @@ export const askOf = (
   note: string,
   given: { ask?: unknown; options?: unknown; command?: unknown; link?: unknown } = {},
 ): Ask => {
-  const text = `${note} ${subject}`.trim()
+  const subjectWords = questionWords(subject)
+  const noteWords = questionWords(note)
+  const text = `${noteWords} ${subjectWords}`.trim()
+  // What the agent gave wins whole.
   const options = Array.isArray(given.options)
     ? given.options.filter((one): one is string => typeof one === 'string' && one.trim() !== '').map(one => one.trim())
-    : optionsOf(note || subject)
+    : optionsRead(subjectWords, noteWords)
   const command = typeof given.command === 'string' && given.command.trim() !== '' ? given.command.trim() : (CODE.exec(text)?.[1] ?? null)
   const link = typeof given.link === 'string' && given.link.trim() !== '' ? given.link.trim() : (URL.exec(text)?.[0] ?? null)
   const said = kindOf(given.ask)
   if (said !== null) return { kind: said, options, command, link }
 
-  const words = note || subject
+  const words = noteWords || subjectWords
   let kind: AskKind = 'reply'
-  if (WAIT.test(note) || (note === '' && WAIT.test(subject))) kind = 'wait'
+  if (WAIT.test(noteWords) || (noteWords === '' && WAIT.test(subjectWords))) kind = 'wait'
   else if (options.length >= 2) kind = 'choose'
   else if (CONFIRM.test(words) || YES_NO.test(words)) kind = 'confirm'
   else if (link !== null || REVIEW.test(words)) kind = 'review'

@@ -10,6 +10,8 @@ import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
 
+// The page's words with their line breaks and runs of spaces folded to one space.
+const squash = text => text.replace(/\s+/g, ' ')
 const ask = (world, agent = 'codex') => block(world, { agent, state: 'waiting', title: 'Release the gateway', steps: ['- [x] Check routes', '- [?] Ship the gateway, OK?'] })
 const seed = world => {
   const sessions = []
@@ -81,7 +83,8 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const finishedAt = world.now - agents.length
       for (const [index, agent] of agents.entries()) block(world, { agent, session: (0xb2000000 + index).toString(16), title: `Journal ${agent} report`, updated: new Date(finishedAt + index).toISOString(), state: 'done', steps: ['- [x] Check routes'] })
       const first = await inspectSurfaces(world, server)
-      assert.match(first.page, /Done recently/)
+      // The Done shelf replaced the Done recently heading; its count is the week's finished work.
+      assert.ok(squash(first.page).includes(`${EN.pgDone} ${EN.pgDoneWeek(agents.length)}`), first.page)
       assert.match(first.page, /Journal deepseek report/)
       assert.equal((world.read('progress.md').match(/state=done /g) ?? []).length, agents.length)
       const lines = () => world.files().filter(name => /progress-journal-.*\.md$/.test(name)).flatMap(name => world.read(name).split('\n').filter(Boolean))
@@ -143,52 +146,54 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         return { ok: result.status < 400, json: async () => result.json() }
       })
       const initial = await createPage()
-      const labels = initial.cards().flatMap(card => initial.buttons(card).map(button => ({ card: card.textContent.includes('Publish page report') ? 'Publish page report' : 'Publish docs', label: button.textContent })))
+      // The question is a card under Needs you and the docs task is a row; each is found by its own words.
+      const ownerOf = card => card.textContent.includes('Publish routes, OK?') ? 'Publish routes, OK?' : 'Publish docs'
+      // A button that only opens or reveals something (a row, More, Write your own) is no action; the rest are pressed.
+      const isNav = button => button.getAttribute('data-nav') !== null
+      const labels = []
+      for (const card of initial.cards()) for (const button of initial.buttons(card)) {
+        if (!isNav(button) && initial.reveal(button)) labels.push({ card: ownerOf(card), label: button.textContent })
+      }
       assert.ok(labels.length > 0)
+      // Each button is pressed on a fresh page, after the shelf, row or More panel around it is open.
       for (const { card: title, label } of labels) {
         const page = await createPage()
-        const card = page.cards().find(one => one.textContent.includes(title) && page.buttons(one).some(button => button.textContent === label))
+        const card = page.cards().find(one => one.textContent.includes(title) && page.buttons(one).some(button => button.textContent === label && button.getAttribute('data-nav') === null))
         assert.ok(card, `${title}: ${label}`)
-        const button = page.buttons(card).find(one => one.textContent === label)
-        const before = page.text()
+        const button = page.buttons(card).find(one => one.textContent === label && one.getAttribute('data-nav') === null)
+        assert.ok(page.reveal(button), `${title}: ${label} is not on screen`)
+        const before = page.visible()
         button.click()
         await page.flush()
-        const after = page.text()
+        const after = page.visible()
         const check = () => noSilentPress({ surface: 'page', card: title, button: label, before, after })
         check()
-        noMachineIds(after, world)
+        noMachineIds(page.text(), world)
       }
-      const page = await createPage()
-      const card = page.cards().find(one => page.buttons(one).some(button => button.textContent === 'Copy'))
-      assert.ok(card, 'The fallback must expose a Copy action')
-      page.inputs(card)[0].value = 'Publish the synthetic routes'
-      const before = page.text()
-      page.buttons(card).find(button => button.textContent === 'Copy').click()
-      await page.flush()
-      assert.equal(page.copied.at(-1), 'Publish the synthetic routes')
-      noSilentPress({ surface: 'page', card: 'nonempty reply', button: 'Copy', before, after: page.text() })
-      for (const id of ['relay', 'paste-go']) {
-        const controls = await createPage()
-        const before = controls.node('.paste').textContent
-        controls.node(id).click()
-        await controls.flush()
-        assert.ok(!controls.node('.paste').textContent.includes(EN.pressPending), `${id} is still pending after flush()`)
-        const check = () => noSilentPress({ surface: 'page', card: 'board controls', button: id, before, after: controls.node('.paste').textContent })
-        check()
-        noMachineIds(controls.text() + controls.node('.paste').textContent, world)
-      }
-      const paste = await createPage()
-      paste.node('paste').value = 'Synthetic invalid paste'
-      const beforePaste = paste.node('.paste').textContent
-      paste.node('paste-go').click()
-      await paste.flush()
-      assert.ok(!paste.node('.paste').textContent.includes(EN.pressPending), 'paste-go with invalid paste is still pending after flush()')
-      noSilentPress({ surface: 'page', card: 'board controls', button: 'paste-go', before: beforePaste, after: paste.node('.paste').textContent })
+      // Write your own opens a box with Copy answer: empty, it says so; with text, it copies it.
+      const writing = await createPage()
+      const asked = writing.cards().find(one => one.textContent.includes('Publish routes, OK?'))
+      assert.ok(asked, 'The question must be a card')
+      writing.buttons(asked).find(button => button.textContent === EN.pgWriteOwn).click()
+      const copy = writing.buttons(asked).find(button => button.textContent === EN.pgCopyAnswer)
+      assert.ok(copy && writing.reveal(copy), 'Write your own must expose a Copy answer action')
+      const beforeEmpty = writing.visible()
+      copy.click()
+      await writing.flush()
+      noSilentPress({ surface: 'page', card: 'empty reply', button: EN.pgCopyAnswer, before: beforeEmpty, after: writing.visible() })
+      assert.equal(writing.copied.length, 0, 'An empty box copies nothing')
+      writing.inputs(asked)[0].value = 'Publish the synthetic routes'
+      const before = writing.visible()
+      copy.click()
+      await writing.flush()
+      assert.equal(writing.copied.at(-1), 'Publish the synthetic routes')
+      noSilentPress({ surface: 'page', card: 'nonempty reply', button: EN.pgCopyAnswer, before, after: writing.visible() })
+      // The paste box and its relay button left the page with the redesign; Close board is the control that remains.
       const closing = await createPage()
-      const beforeClose = closing.text()
+      const beforeClose = closing.visible()
       closing.node('close').click()
       await closing.flush()
-      noSilentPress({ surface: 'page', card: 'board controls', button: 'close', before: beforeClose, after: closing.text() })
+      noSilentPress({ surface: 'page', card: 'board controls', button: 'close', before: beforeClose, after: closing.visible() })
       assert.match(closing.text(), /closed/i)
     } finally { await world.close() }
   })
@@ -222,13 +227,15 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const card = page.cards().find(one => one.className?.split(' ').includes('row') && one.textContent.includes('Resume route review'))
       const button = page.buttons(card).find(one => /Copy resume/.test(one.textContent))
       assert.ok(button)
-      const before = page.text()
+      // The stopped task sits on the closed Other work shelf; a person opens it and the row first.
+      assert.ok(page.reveal(button), 'Copy resume must be reachable')
+      const before = page.visible()
       button.click()
       await page.flush()
       noMachineIds(page.text(), world)
       assert.ok(page.copied.at(-1).includes('codex resume synthetic-status-owner'))
-      noSilentPress({ surface: 'page', card: 'Resume route review', button: button.textContent, before, after: page.text() })
-      const result = card.childNodes.flatMap(node => [node, ...node.childNodes]).find(node => node.className?.split(' ').includes('press-result'))
+      noSilentPress({ surface: 'page', card: 'Resume route review', button: button.textContent, before, after: page.visible() })
+      const result = page.slot(card)
       assert.ok(result)
       const status = result.textContent
       assert.ok(status.length > 0)
@@ -271,9 +278,17 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       }
       const screens = await inspectSurfaces(world, server)
       for (const [surface, text] of Object.entries(screens)) for (const one of sessions) {
+        // The page draws a waiting session as a card of its own question, naming the agent and the
+        // project but not the task; those are checked below, card by card.
+        if (surface === 'page' && one.state === 'waiting') continue
         assert.match(text, new RegExp(one.title), surface)
-        assert.match(text, new RegExp(one.agent), surface)
+        assert.match(text, new RegExp(one.agent, surface === 'page' ? 'i' : ''), surface)
         assert.match(text, new RegExp(one.project), surface)
+      }
+      const cards = server.dom.cards().filter(card => card.tag === 'article')
+      for (const one of sessions.filter(session => session.state === 'waiting')) {
+        const found = cards.filter(card => new RegExp(one.agent, 'i').test(card.textContent) && card.textContent.includes(one.project) && card.textContent.includes('Publish the synthetic report, OK?'))
+        assert.equal(found.length, 1, one.title)
       }
       assert.equal(model.counts.waiting, 4)
       assert.equal(model.counts.active, 4)
@@ -295,18 +310,21 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       assert.match(await watch.press('\r'), /Measure routes/)
       // Finish startup and the first idle poll before measuring a producer's
       // steady-state update. Opening a card is a separate user interaction.
-      await watch.next(text => text.includes('0/2') && text.includes('Measure routes'), 10000)
+      // The board writes nothing while its screen is unchanged (#545), so this waits one poll
+      // rather than for another frame.
+      await new Promise(done => setTimeout(done, 2500))
       block(world, { ...original, steps: ['- [x] Measure routes', '- [~] Publish gateway'] })
       assert.match(world.read('progress.md'), /\[x\] Measure routes/)
       const [observed] = await Promise.all([
         watch.next(text => text.includes('1/2') && text.includes('Publish gateway'), PANE_MS),
-        seenPageWithin(server, text => text.includes('1/2') && text.includes('Publish gateway'), PAGE_MS),
+        // The page counts finished steps in words on the row ("1 step done"), not as a fraction.
+        seenPageWithin(server, text => text.includes(EN.pgDoneStepsOne(1)) && text.includes('Publish gateway'), PAGE_MS),
       ])
       assert.ok(observed.elapsed <= PANE_MS)
       const screens = await inspectSurfaces(world, server)
       for (const [surface, text] of Object.entries(screens)) {
         // Chat's compact row reports the new next step rather than a fraction.
-        if (surface !== 'chat') assert.match(text, /1\/2/, surface)
+        if (surface !== 'chat') assert.match(text, surface === 'page' ? new RegExp(EN.pgDoneStepsOne(1)) : /1\/2/, surface)
         if (surface !== 'watch') assert.match(text, /Publish gateway/, surface)
       }
     } finally {
@@ -379,7 +397,8 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const screens = await inspectSurfaces(world)
       for (const surface of ['page', 'html']) {
         assert.match(screens[surface], /Prepare research summary/, surface)
-        assert.match(screens[surface], /Done recently/, surface)
+        // The Done section replaced Done recently: the page counts the week's finished work, progress.html counts the shelf.
+        assert.ok(squash(screens[surface]).includes(surface === 'page' ? `${EN.pgDone} ${EN.pgDoneWeek(1)}` : `${EN.pgDone} 1`), screens[surface])
       }
       assert.match(screens.chat, /\b1 done today\b/)
       assert.match(screens.chat, /Prepare research summary/)

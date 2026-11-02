@@ -1,24 +1,24 @@
-import { emptyQuestions, observeQuestions } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, resolveQuestion, withCaptures } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
-import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact } from '../hooks/board'
-import { addManualTask, isArchivable, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor } from '../hooks/board'
+import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { connectDataRoots, connectRecordPath, recoveryUnreadableCode } from '../hooks/connect-pure'
 import { boardRun } from '../hooks/board-commands'
 import { dashboardHtml } from '../hooks/dashboard'
 import { codexReport, putCodexBlock } from '../hooks/codex'
-import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
-import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
+import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
+import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
-import { appendJournal, countDay, journalLine, parseJournal, progressReport } from '../hooks/journal'
+import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, progressReport, unwrittenEntries } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
-import { LANGS, RELAY, ZH_TW } from '../hooks/i18n'
-import { resolveLang, STRINGS } from '../hooks/strings'
+import { LANGS, ZH_TW } from '../hooks/i18n'
+import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
@@ -29,9 +29,176 @@ import { applyCompletionOverlay, completionKey, completionOfBlock, completionOve
 import { RELEASED } from '../hooks/released'
 import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
-import { agentName, buildView, contextOf, handoffOf, manualDoneSeen, mirrorMatchesTask, replyHint, resumeCommand, resumeVia, statusLine, taskFingerprint, wayBackText, withSeen, IDLE_MS } from '../hooks/view'
+import { agentName, buildView, contextOf, handoffOf, manualDoneSeen, mirrorMatchesTask, OLDER_SHOWN, relativeTime, replyHint, resumeCommand, resumeVia, statusLine, taskFingerprint, wayBackText, withSeen, IDLE_MS } from '../hooks/view'
+import { localDay } from '../hooks/journal'
 
 const ARCHIVE_AGENTS = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek', 'custom-agent']
+
+const STOPPED_NOW = Date.parse('2026-10-16T12:00:00Z')
+const STOPPED_FIRST = STOPPED_NOW - 4 * 86400000
+const stoppedQuestionBoard = (sessions: number, questions = sessions, states: readonly string[] = ['ended']): string =>
+  '## Synthetic\n' + Array.from({ length: sessions }, (_, index) => {
+    const session = (0x40000000 + index).toString(16)
+    const count = Math.floor(questions / sessions) + (index < questions % sessions ? 1 : 0)
+    return `<!-- auto session=${session} agent=codex state=${states[index % states.length]} updated=${new Date(STOPPED_NOW - 13 * 3600000).toISOString()} -->\n### Plan ${index}\n${Array.from({ length: count }, (_, step) => `- [?] Synthetic question ${index}.${step}, OK?`).join('\n')}\n<!-- /auto session=${session} -->\n`
+  }).join('\n')
+
+test('an unanswered question in an ended session adds to one stopped-sessions line in Waiting', () => {
+  const projects = parseProgress(stoppedQuestionBoard(3, 3, ['ended', 'done', 'waiting']))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  for (const s of Object.values(STRINGS)) {
+    const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, s, [], {}, ledger)
+    expect(view.stoppedAsking).toBe(3)
+    expect(view.waiting).toEqual([])
+    expect(view.overview.waiting).toBe(0)
+    expect(view.focus).toBe(null)
+    expect(boardText(view, [], s)).toContain(s.stoppedAsking(3))
+    expect(chatText(view, [], [], s, '/synthetic')).toContain(s.stoppedAsking(3))
+    expect(boardScreen(view, [], emptyBoardState, s)).toContain(s.stoppedAsking(3))
+    expect(dashboardHtml(view, s, '/synthetic/progress.md', '')).toContain(s.stoppedAsking(3))
+    expect(serveModel(view, [], s).stoppedAsking).toBe(3)
+    // The page words the line as the count of its Older questions, from the same model number.
+    expect(servePage(s, 'n')).toContain("plural('pgOlder', count.older)")
+    for (const quiet of [[], parseProgress('## Synthetic\n### Quiet work\n- [ ] Finish\n')]) {
+      const empty = buildView(quiet, [], null, STOPPED_NOW, 0, {}, s, [], {}, emptyQuestions())
+      expect(Object.hasOwn(empty, 'stoppedAsking')).toBe(false)
+      expect(Object.hasOwn(serveModel(empty, [], s), 'stoppedAsking')).toBe(false)
+      for (const text of [boardText(empty, [], s), chatText(empty, [], [], s, '/synthetic'), boardScreen(empty, [], emptyBoardState, s), dashboardHtml(empty, s, '/synthetic/progress.md', '')]) expect(text).not.toContain(s.stoppedAsking(3))
+    }
+  }
+})
+
+test('a question in a stopped session is listed under Older once, with the age it was first asked', () => {
+  const projects = parseProgress(stoppedQuestionBoard(1))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+  expect(view.older).toHaveLength(1)
+  const question = view.older![0]!
+  expect(question.key.startsWith('older::')).toBe(true)
+  expect(question.ageStage).toBe('older')
+  expect(question.when).toBe(relativeTime(STOPPED_FIRST, STOPPED_NOW, STRINGS.en))
+  expect(question.when).not.toBe(relativeTime(STOPPED_NOW - 13 * 3600000, STOPPED_NOW, STRINGS.en))
+  expect(question.hideKey).toBe(view.stopped[0]!.questions![0]!.hideKey)
+  expect(view.waiting).toEqual([])
+  expect(view.reminder).toEqual([])
+  expect(serveModel(view, [], STRINGS.en).older.map(item => item.questionId)).toEqual([question.questionId])
+  const unknown = { ...ledger, records: ledger.records.map(record => ({ ...record, firstObserved: 0 })) }
+  expect(buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, unknown).older?.[0]?.when).toBe(STRINGS.en.questionAgeUnknown)
+})
+
+test('a question first seen today in a block quiet for thirty days is listed under Older as thirty days old, not just now', () => {
+  const board = stoppedQuestionBoard(1).replace(/updated=\S+/, `updated=${new Date(STOPPED_NOW - 30 * 86400000).toISOString()}`)
+  const projects = parseProgress(board)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_NOW, true, 'fixture:stopped').ledger
+  const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+  expect(view.older).toHaveLength(1)
+  expect(view.older![0]!.when).toBe(STRINGS.en.daysAgo(30))
+  expect(view.older![0]!.when).not.toBe(STRINGS.en.justNow)
+})
+
+test('a question on a Stopped row and in the Older list is counted once', () => {
+  const projects = parseProgress(stoppedQuestionBoard(1))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const archived = withCaptures(ledger, [{ version: 1, disposition: 'archived', record: ledger.records[0]! }])
+  const repeated = observeQuestions(ledger, projects, null, [], STOPPED_NOW, true, 'fixture:again').ledger
+  for (const kept of [ledger, archived, repeated]) {
+    const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, kept)
+    expect(view.stopped[0]?.questions).toHaveLength(1)
+    expect(view.older?.map(item => item.questionId)).toEqual([view.stopped[0]!.questions![0]!.questionId])
+    expect(view.stoppedAsking).toBe(1)
+  }
+  const retained = buildView([], [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, archived)
+  expect(retained.stoppedAsking).toBe(1)
+  expect(retained.older).toHaveLength(1)
+})
+
+test('hiding or answering a question in Older lowers the stopped-sessions count', () => {
+  const projects = parseProgress(stoppedQuestionBoard(2))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const initial = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+  expect(initial.stoppedAsking).toBe(2)
+  const first = initial.older![0]!
+  const second = initial.older![1]!
+  const hidden = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [first.hideKey], {}, ledger)
+  expect(hidden.stoppedAsking).toBe(1)
+  expect(hidden.hidden.map(item => item.questionId)).toEqual([first.questionId])
+  expect(hidden.older?.map(item => item.questionId)).toEqual([second.questionId])
+  const resolved = resolveQuestion(ledger, second.questionId!, STOPPED_NOW)
+  const answered = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [first.hideKey], {}, resolved)
+  expect(answered.stoppedAsking ?? 0).toBe(0)
+  expect(answered.older).toEqual([])
+})
+
+test('a question of a stopped session that was hidden before stays hidden and is not counted', () => {
+  const projects = parseProgress(stoppedQuestionBoard(1))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const legacy = buildView(projects, [], null, STOPPED_NOW).stopped[0]!.questions![0]!.hideKey
+  const hidden = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [legacy], {}, ledger)
+  expect(hidden.older).toEqual([])
+  expect(Object.hasOwn(hidden, 'stoppedAsking')).toBe(false)
+  expect(hidden.hidden.map(item => item.questionId)).toEqual([ledger.records[0]!.id])
+})
+
+test('Older lists ten questions and a Show all control for the rest on the page and the dashboard', () => {
+  for (const count of [12, 10]) {
+    const projects = parseProgress(stoppedQuestionBoard(count))
+    const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+    const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+    expect(view.older).toHaveLength(count)
+    expect(view.stoppedAsking).toBe(count)
+    const html = dashboardHtml(view, STRINGS.en, '/synthetic/progress.md', '')
+    const older = html.split('data-key="section:older"')[1]!.split('data-key="section:stopped"')[0]!
+    const [shown = '', rest = ''] = older.split('<details class="more" data-key="older:more">')
+    expect((shown.match(/class="ask"/g) ?? []).length).toBe(OLDER_SHOWN)
+    expect((rest.match(/class="ask"/g) ?? []).length).toBe(count - OLDER_SHOWN)
+    for (const item of view.older!.slice(0, OLDER_SHOWN)) expect(shown).toContain(item.text)
+    for (const item of view.older!.slice(OLDER_SHOWN)) expect(rest).toContain(item.text)
+    if (count > OLDER_SHOWN) expect(rest).toContain(`<summary>${STRINGS.en.showAllQuestions(count)}</summary>`)
+    else expect(html).not.toContain(STRINGS.en.showAllQuestions(count))
+  }
+  const page = servePage(STRINGS.en, 'n')
+  expect(page).toContain("w('showAllQuestions', older.length)")
+  // Ten are drawn until Show all; pressing it appends the rest.
+  expect(page).toContain(`var shownOlder = opened['older:all'] ? older.length : ${OLDER_SHOWN};`)
+  expect(page).toContain('older.slice(shownOlder).forEach(drawOlder);')
+})
+
+test('the chat text tells the question of a stopped session once, under its row, and counts it in the stopped-sessions line', () => {
+  const projects = parseProgress(stoppedQuestionBoard(2))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+  const text = chatText(view, [], [], STRINGS.en, '/synthetic')
+  const asked = view.stopped.flatMap(row => row.questions ?? [])
+  expect(asked).toHaveLength(2)
+  for (const question of asked) expect(text.split(question.text).length - 1).toBe(1)
+  expect(text).toContain(STRINGS.en.stoppedAsking(2))
+  expect(text).not.toContain(STRINGS.en.sectionOlderQuestions)
+})
+
+test('a board with two hundred stopped sessions and five hundred old questions gives one line, and draws only ten rows until Show all', () => {
+  const projects = parseProgress(stoppedQuestionBoard(200, 500))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], STOPPED_FIRST, true, 'fixture:stopped').ledger
+  const view = buildView(projects, [], null, STOPPED_NOW, 0, {}, STRINGS.en, [], {}, ledger)
+  expect(view.stopped).toHaveLength(200)
+  expect(view.stoppedAsking).toBe(500)
+  expect(view.older).toHaveLength(500)
+  const html = dashboardHtml(view, STRINGS.en, '/synthetic/progress.md', '')
+  expect(html.split(`>${STRINGS.en.stoppedAsking(500)}</button>`)).toHaveLength(2)
+  const older = html.split('data-key="section:older"')[1]!
+  expect((older.split('<details class="more" data-key="older:more">')[0]!.match(/class="ask"/g) ?? []).length).toBe(OLDER_SHOWN)
+  expect(serveModel(view, [], STRINGS.en).stoppedAsking).toBe(500)
+})
+
+test('every language has the stopped-sessions line and the Show all words', () => {
+  for (const s of Object.values(STRINGS)) {
+    expect(s.stoppedAsking(3)).toContain('3')
+    expect(s.showAllQuestions(12)).toContain('12')
+    // The page words the stopped-sessions line as its Older count, in the singular and the plural, each with the number blank.
+    expect(pageWords(s).pgOlder).toContain('\u0001')
+    expect(pageWords(s).pgOlderOne).toContain('\u0001')
+    expect(pageWords(s).showAllQuestions).toContain('\u0001')
+  }
+})
 
 test('immutable completion overlays project exact or older mirrors and leave fresh genuine work unchanged', () => {
   const now = Date.parse('2026-10-19T12:00:00Z')
@@ -128,6 +295,60 @@ test('Confirm done distinguishes manual twins across repeated project headings a
   expect(confirmTask(unrelated, first.row.confirm, now, STRINGS.en)?.text).toContain('### Keep this\n- [ ] Different work')
 })
 
+test('Confirm done on a marker with no space before --> keeps its end and reads back as done', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  // FORMAT.md also accepts `<!--auto` with no space after `<!--`; its start stays as written.
+  const markers = [
+    ['<!-- auto session=a1b2c3d4 agent=codex updated=2026-10-19T11:00:00Z state=ended-->', '<!-- auto session=a1b2c3d4 agent=codex updated=2026-10-19T12:00:00.000Z state=done -->'],
+    ['<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-19T11:00:00Z-->', '<!-- auto session=a1b2c3d4 agent=codex state=done updated=2026-10-19T12:00:00.000Z -->'],
+    ['<!--auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-19T11:00:00Z-->', '<!--auto session=a1b2c3d4 agent=codex state=done updated=2026-10-19T12:00:00.000Z -->'],
+  ]
+  for (const [marker, expected] of markers) {
+    const file = `## demo\n${marker}\n### Ship\n- [ ] finish\n<!-- /auto session=a1b2c3d4 -->\n`
+    const row = boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), []).find(item => item.type === 'row' && item.row.title === 'Ship')
+    if (row?.type !== 'row' || row.row.confirm == null) throw new Error('Missing synthetic row')
+    const result = confirmTask(file, row.row.confirm, now, STRINGS.en)
+    expect(result?.text.split('\n')[1]).toBe(expected)
+    expect(parseProgress(result?.text ?? '')[0]?.tasks[0]?.auto?.state).toBe('done')
+  }
+})
+
+test('Confirm done adds state=done to a stale marker with spaces after -->', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  const updated = new Date(now - 26 * 60 * 60 * 1000).toISOString()
+  const file = `## demo\n<!-- auto session=a1b2c3d4 agent=codex updated=${updated} -->   \n### Ship\n- [ ] finish\n<!-- /auto session=a1b2c3d4 -->\n`
+  const row = boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), []).find(item => item.type === 'row' && item.row.title === 'Ship')
+  if (row?.type !== 'row' || row.row.confirm == null) throw new Error('Missing synthetic row')
+  const result = confirmTask(file, row.row.confirm, now, STRINGS.en)
+  const auto = parseProgress(result?.text ?? '')[0]?.tasks[0]?.auto
+  expect(auto?.state).toBe('done')
+  expect(auto?.updated).toBe(now)
+})
+
+test('Confirm done edits state= and updated= themselves, not an attribute whose name ends in them', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  const marker = '<!-- auto session=a1b2c3d4 agent=codex backup-state=working old-updated=2026-10-18T11:00:00Z state=ended updated=2026-10-19T11:00:00Z-->'
+  const file = `## demo\n${marker}\n### Ship\n- [ ] finish\n<!-- /auto session=a1b2c3d4 -->\n`
+  const row = boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), []).find(item => item.type === 'row' && item.row.title === 'Ship')
+  if (row?.type !== 'row' || row.row.confirm == null) throw new Error('Missing synthetic row')
+  const result = confirmTask(file, row.row.confirm, now, STRINGS.en)
+  expect(result?.text.split('\n')[1]).toBe('<!-- auto session=a1b2c3d4 agent=codex backup-state=working old-updated=2026-10-18T11:00:00Z state=done updated=2026-10-19T12:00:00.000Z -->')
+  expect(parseProgress(result?.text ?? '')[0]?.tasks[0]?.auto?.state).toBe('done')
+})
+
+test('a hand-kept task with no open step is not offered Confirm done on any surface', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  const file = '## demo\n### Ship\n\n## demo\n### Open\n- [ ] finish\n'
+  const items = boardItems(buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en), [])
+  const rowOf = (title: string) => items.find(item => item.type === 'row' && item.row.title === title)
+  const empty = rowOf('Ship')
+  const open = rowOf('Open')
+  if (empty?.type !== 'row' || open?.type !== 'row') throw new Error('Missing synthetic rows')
+  // The pane, the terminal's d key and the page all offer Confirm done from row.confirm.
+  expect(empty.row.confirm ?? null).toBe(null)
+  expect(open.row.confirm).not.toBe(null)
+})
+
 test('Confirm done changes only visible checkbox marks through comments and preserves CRLF', () => {
   const now = Date.parse('2026-10-19T12:00:00Z')
   const file = ['## Demo', '### Commented steps', '<!-- [ ] Hidden -->- [ ] Visible', '<!-- Multiline', '[ ] Hidden multiline', '-->- [~] Closing', '- <!-- Keep this note -->[>] Inline', '- [-] Canceled', ''].join('\r\n')
@@ -192,8 +413,11 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
       if (item?.type !== 'row') throw new Error('Missing synthetic row')
       expect(item.row.archive === null).toBe(live)
       const drawn = pinned({ ...emptyBoardState, isIdleOpen: true }, items)
-      expect(boardKey(drawn, 'a', items, s).action?.type ?? null).toBe(live ? null : 'archive')
-      expect(boardScreen(view, [], drawn, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(live)
+      const pressed = boardKey(drawn, 'a', items, s)
+      expect(pressed.action?.type ?? null).toBe(live ? null : 'archive')
+      // The terminal says why only once a is pressed (#545).
+      expect(boardScreen(view, [], drawn, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(false)
+      expect(boardScreen(view, [], pressed.state, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(live)
       const model = serveModel(view, [], s)
       const page = [...model.groups.flatMap(group => group.rows), ...model.stopped][0]
       expect(page?.canArchive).toBe(!live)
@@ -207,7 +431,8 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
     }
     const asked = `## Demo\n<!-- auto session=11223344 agent=${agent} state=waiting updated=${new Date(now).toISOString()} -->\n### Question\n- [?] Choose a limit?\n<!-- /auto session=11223344 -->\n`
     const view = buildView(parseProgress(asked), [], null, now, 0, {}, s)
-    expect(boardScreen(view, [], emptyBoardState, s, { width: 160, isColor: false })).toContain(s.archiveLive)
+    expect(boardScreen(view, [], emptyBoardState, s, { width: 160, isColor: false })).not.toContain(s.archiveLive)
+    expect(boardKey(pinned(emptyBoardState, boardItems(view, [])), 'a', boardItems(view, []), s).state.note).toBe(s.archiveLive)
     expect(serveModel(view, [], s).asks[0]?.archiveNote).toBe(s.archiveLive)
     // A selected stopped block that resumes before the queued write stays owned.
     expect(takeTask(asked, { project: 'Demo', title: 'Question', line: 2, session: '11223344' }, now, s)).toBe(null)
@@ -483,6 +708,184 @@ test('what a waiting step asks decides its buttons: confirm, choose, do, review,
   })
 })
 
+test('a choice question with a note keeps its two options as buttons', () => {
+  for (const question of ['Which metric, win rate or Elo?', '用 win rate 還是 Elo？', '用 win rate 还是 Elo？']) {
+    const note = 'the reports will follow it'
+    const expected = { kind: 'choose', options: ['win rate', 'Elo'] }
+    expect(askOf(question, note)).toMatchObject(expected)
+    const projects = parseProgress('## Demo\n' + ['codex', 'claude'].map((agent, index) => {
+      const id = String(index + 1).repeat(8)
+      return `<!-- auto session=${id} agent=${agent} state=waiting updated=${new Date(NOW).toISOString()} -->\n### Metric ${agent}\n- [?] ${question} — ${note}\n<!-- /auto session=${id} -->\n`
+    }).join('\n'))
+    const view = buildView(projects, [], null, NOW, 0, {}, STRINGS.en)
+    expect(view.waiting).toHaveLength(2)
+    for (const item of view.waiting) expect(item).toMatchObject({ ...expected, text: question, note })
+    expect(serveModel(view, [], STRINGS.en).asks.map(item => item.answers)).toEqual([expected.options, expected.options])
+    const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW - 9 * 86400000, true, 'fixture:choice').ledger
+    const retained = buildView(projects, [], null, NOW, 0, {}, STRINGS.en, [], {}, ledger)
+    expect(retained.older).toHaveLength(2)
+    for (const item of retained.older ?? []) expect(item).toMatchObject({ ...expected, text: question, note })
+    expect(serveModel(retained, [], STRINGS.en).older.map(item => [item.text, item.note])).toEqual([[question, note], [question, note]])
+  }
+})
+
+test('a note that holds a choice does not replace the options in the question', () => {
+  expect(askOf('Which metric, win rate or Elo?', 'later we may use A or B?')).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
+  expect(askOf('用 win rate 還是 Elo？', '之後用 A 還是 B？')).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
+})
+
+test('a choice wrapped in quote marks gives options without the quotes in every language', () => {
+  const choices = [
+    ['Top shelf or bottom shelf?', ['Top shelf', 'bottom shelf']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['先开旗标，还是全部开？', ['先开旗标', '全部开']],
+    ['A first, or B?', ['A first', 'B']],
+  ] as const
+  for (const [open, close] of [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]) {
+    for (const [question, options] of choices) {
+      expect(askOf(`${open}${question}${close}`, '').options).toEqual([...options])
+      expect(askOf('Pick', `${open}${question}${close}`).options).toEqual([...options])
+    }
+  }
+  expect(askOf(' (「Top shelf or bottom shelf?」) ', '').options).toEqual(['Top shelf', 'bottom shelf'])
+  expect(askOf('“the "red" shelf or the blue shelf?”', '').options).toEqual(['the "red" shelf', 'the blue shelf'])
+  expect(askOf("'Alice's shelf or Bob's shelf?'", '').options).toEqual(["Alice's shelf", "Bob's shelf"])
+  expect(askOf('Pick', '', { ask: 'choose', options: ['"quoted"', '(literal)'] }).options).toEqual(['"quoted"', '(literal)'])
+  expect(askOf('"red" shelf or "blue shelf?"', '').options).toEqual(['"red" shelf', '"blue shelf'])
+  expect(askOf('「先開旗標」還是「全部開？」', '').options).toEqual(['「先開旗標」', '「全部開'])
+  expect(askOf('(Top shelf) or (bottom shelf?)', '').options).toEqual(['(Top shelf)', '(bottom shelf'])
+  expect(askOf('(Top (high) shelf or bottom?)', '').options).toEqual(['Top (high) shelf', 'bottom'])
+  expect(askOf(String.raw`"a \"red\" shelf or blue?"`, '').options).toEqual([String.raw`a \"red\" shelf`, 'blue'])
+  expect(askOf('Please review "the shelf"', '').options).toEqual([])
+})
+
+test('a quoted choice extracted from prose keeps clean answer options and inner quotes', () => {
+  const choices = [
+    ['Top shelf or bottom shelf?', ['Top shelf', 'bottom shelf']],
+    ['Left row or right row?', ['Left row', 'right row']],
+    ['A first, or B?', ['A first', 'B']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['先开旗标，还是全部开？', ['先开旗标', '全部开']],
+  ] as const
+  for (const [open, close] of [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]) {
+    for (const [question, options] of choices) {
+      const extracted = lastQuestionInProse(`The labels are ready.\n\n${open}${question}${close}`, true)
+      expect(extracted).toBe(`${open}${question}${close}`)
+      expect(askOf(extracted ?? '', '')).toMatchObject({ kind: 'choose', options: [...options] })
+      expect(askOf('Shelf placement', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+    }
+  }
+  for (const [reply, options] of [
+    ['(「Top shelf or bottom shelf?」)', ['Top shelf', 'bottom shelf']],
+    ['“the "red" row or the blue row?”', ['the "red" row', 'the blue row']],
+    ["'Alice's row or Bob's row?'", ["Alice's row", "Bob's row"]],
+    ['(Top (high) shelf or bottom?)', ['Top (high) shelf', 'bottom']],
+    ['(Top shelf) or (bottom shelf?)', ['(Top shelf)', '(bottom shelf']],
+    [String.raw`"a \"red\" row or blue?"`, [String.raw`a \"red\" row`, 'blue']],
+    ['"red" row or "blue row?"', ['"red" row', '"blue row']],
+    ['「先開旗標」還是「全部開？」', ['「先開旗標」', '「全部開']],
+  ] as const) {
+    const extracted = lastQuestionInProse(reply, true)
+    expect(extracted).not.toBeNull()
+    expect(askOf('Shelf placement', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+  }
+  expect(askOf('"Top shelf or bottom shelf? Explain your choice', '').options).toEqual(['"Top shelf', 'bottom shelf'])
+})
+
+test('lexical apostrophes stay in choice options from questions and extracted replies', () => {
+  for (const [question, options] of [
+    ["'90s or modern?", ["'90s", 'modern']],
+    ["'80s or retro?", ["'80s", 'retro']],
+    ["'em or them?", ["'em", 'them']],
+  ] as const) {
+    expect(askOf(question, '')).toMatchObject({ kind: 'choose', options: [...options] })
+    expect(askOf('Pick', question)).toMatchObject({ kind: 'choose', options: [...options] })
+    const extracted = lastQuestionInProse(question, true)
+    expect(extracted).toBe(question)
+    expect(askOf('Pick', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+  }
+})
+
+test('paired question wrappers preserve inferred kinds and confirmation notes', () => {
+  const pairs = [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]
+  for (const question of ['可以推到 main 嗎？', '合併可以嗎？', 'Ready, OK?']) {
+    for (const [open, close] of pairs) {
+      const wrapped = `${open}${question}${close}`
+      const extracted = lastQuestionInProse(wrapped, true)
+      expect(extracted).toBe(wrapped)
+      expect(askOf(wrapped, '')).toMatchObject({ kind: 'confirm', options: [] })
+      expect(askOf(extracted ?? '', '')).toMatchObject({ kind: 'confirm', options: [] })
+      expect(askOf('Top shelf or bottom shelf?', extracted ?? '')).toMatchObject({ kind: 'confirm', options: [] })
+    }
+  }
+  for (const [question, kind] of [
+    ['waiting for the report?', 'wait'],
+    ['Which folder?', 'input'],
+    ['Please review the diff?', 'review'],
+    ['Run `npm test`?', 'do'],
+    ['Review https://example.com/report?', 'review'],
+  ] as const) {
+    const direct = askOf(question, '')
+    const extracted = askOf('Task', lastQuestionInProse(question, true) ?? '')
+    expect(direct.kind).toBe(kind)
+    for (const [open, close] of pairs) {
+      const wrapped = `${open}${question}${close}`
+      expect(askOf(wrapped, '')).toEqual(direct)
+      expect(askOf('Task', lastQuestionInProse(wrapped, true) ?? '')).toEqual(extracted)
+    }
+  }
+})
+
+test('options the agent gave win over options found in the question or the note', () => {
+  expect(askOf('win rate or Elo?', 'A or B?', { options: [' X ', 'Y', '', null] })).toMatchObject({ kind: 'choose', options: ['X', 'Y'] })
+  expect(askOf('win rate or Elo?', 'A or B?', { ask: 'choose', options: ['X'] }).options).toEqual(['X'])
+  expect(askOf('Which one?', 'A or B?', { options: 'X or Y?' })).toMatchObject({ kind: 'choose', options: ['A', 'B'] })
+  expect(askOf('Pick', `A or ${'B'.repeat(25)}?`, { ask: 'choose' }).options).toEqual(['A'])
+})
+
+test('a question with no choice still takes its options from the note', () => {
+  for (const note of ['win rate or Elo?', 'win rate 還是 Elo？', 'win rate 还是 Elo？']) {
+    expect(askOf('Pick', note)).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
+  }
+  expect(askOf('Ready, OK?', 'a note with no choice')).toMatchObject({ kind: 'reply', options: [] })
+})
+
+test('a note that asks or points to something of its own decides the kind, whatever the question holds', () => {
+  const rows = [
+    { question: '測試還是紅的，要重跑嗎？', note: '要我直接重跑 CI 嗎？', kind: 'confirm' },
+    { question: '問題還是在嗎？', note: '可以關掉這個 issue 嗎？', kind: 'confirm' },
+    { question: 'build 還是壞的？', note: '請在本機跑 `npm ci`', kind: 'do', command: 'npm ci' },
+    { question: '預覽頁還是跑版？', note: '看一下 https://example.test/preview', kind: 'review', link: 'https://example.test/preview' },
+    { question: '預覽頁還是跑版？', note: '看一下預覽頁', kind: 'review' },
+    { question: 'Which build, old or new?', note: 'Please run the installer', kind: 'do' },
+    { question: 'Which build, old or new?', note: 'Run the installer', kind: 'do' },
+    { question: 'Should I merge #12 or not?', note: 'Shall I merge it now?', kind: 'confirm' },
+  ]
+  for (const { question, note, kind, command, link } of rows) {
+    expect(askOf(question, note)).toMatchObject({ kind, options: [], ...(command && { command }), ...(link && { link }) })
+  }
+  for (const [question, note] of [
+    ['用 win rate 還是 Elo？', '之後的報表會按照這個算'],
+    ['用 win rate 還是 Elo？', '我建議 Elo'],
+    ['Which metric, win rate or Elo?', 'the runs will follow it'],
+    ['Which metric, win rate or Elo?', 'the reviewers asked for one'],
+    ['Which metric, win rate or Elo?', 'click-through rate is the same'],
+    ['Which metric, win rate or Elo?', 'run-to-run variance is small'],
+    ['Which metric, win rate or Elo?', ''],
+    ['Which metric, win rate or Elo?', 'the reports will follow it'],
+  ]) {
+    expect(askOf(question, note)).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
+  }
+})
+
+test('agent labels read only brand names owned by the table and preserve an empty agent', () => {
+  for (const s of Object.values(STRINGS)) {
+    expect(agentLabel('claude', s)).toBe('Claude Code')
+    expect(agentLabel('CODEX', s)).toBe('Codex')
+    for (const agent of ['', 'custom-agent', 'constructor', 'toString']) expect(agentLabel(agent, s)).toBe(agent)
+  }
+})
+
 test('the focus is the most pressing thing: an answer here, then elsewhere, then today, then stuck, then waiting on others', () => {
   const day = 24 * 60 * 60 * 1000
   const iso = (ms: number): string => new Date(ms).toISOString()
@@ -550,7 +953,7 @@ test('a stopped session retains unresolved questions independently of its connec
   expect(stopped.groups).toEqual([])
 })
 
-test('finished hand-kept tasks leave a day after they were first seen done, whole, and nothing else moves', () => {
+test('a hand-kept task with every step done is archived three days after it was first seen done', () => {
   const day = 24 * 60 * 60 * 1000
   const text = `# 專案進度
 
@@ -558,7 +961,7 @@ test('finished hand-kept tasks leave a day after they were first seen done, whol
 ### Google 暑期實習
 > 截止 10-31
 - [x] 改履歷
-- [x] 投遞
+- [-] 投遞
 
 ### Meta 實習
 - [x] 改履歷
@@ -566,21 +969,58 @@ test('finished hand-kept tasks leave a day after they were first seen done, whol
 
 ## 研究
 ### 讀論文
-- [x] 讀完
+- [-] 讀完
 `
-  const seen: Record<string, number> = { 'done:求職::Google 暑期實習': NOW - 2 * day, 'done:研究::讀論文': NOW - day / 2 }
-  const out = takeManualDone(text, NOW, key => seen[key])
-  expect(out.keys).toEqual(['done:求職::Google 暑期實習'])
-  expect(out.entries).toEqual(['## 求職 · 2026-10-14\n### Google 暑期實習\n> 截止 10-31\n- [x] 改履歷\n- [x] 投遞'])
-  expect(out.text).toBe('# 專案進度\n\n## 求職\n### Meta 實習\n- [x] 改履歷\n- [ ] 投遞\n\n## 研究\n### 讀論文\n- [x] 讀完\n')
+  expect(HAND_KEPT_DONE_MS).toBe(3 * day)
+  const observed = NOW - 3 * day
+  const seen: Record<string, number> = { 'done:求職::Google 暑期實習': observed, 'done:研究::讀論文': observed }
+  for (const at of [NOW - 1, NOW, NOW + 1]) {
+    const out = takeManualDone(text, at, key => seen[key])
+    expect(countManualDone(parseProgress(text), at, key => seen[key])).toBe(out.entries.length)
+    if (at < NOW) {
+      expect(out.entries).toEqual([])
+      expect(out.text).toBe(text)
+    } else {
+      expect(out.keys).toEqual(['done:求職::Google 暑期實習', 'done:研究::讀論文'])
+      expect(out.entries).toEqual([
+        `## 求職 · ${localDay(observed)}\n### Google 暑期實習\n> 截止 10-31\n- [x] 改履歷\n- [-] 投遞`,
+        `## 研究 · ${localDay(observed)}\n### 讀論文\n- [-] 讀完`,
+      ])
+      expect(out.text).toBe('# 專案進度\n\n## 求職\n### Meta 實習\n- [x] 改履歷\n- [ ] 投遞\n')
+      const crlf = takeManualDone(text.replace(/\n/g, '\r\n'), at, key => seen[key])
+      expect(crlf.text).toBe(out.text.replace(/\n/g, '\r\n'))
+      expect(crlf.text).not.toMatch(/(?<!\r)\n/)
+    }
+  }
+  const immediate = takeManualDone(text, observed, () => undefined, ZH_TW, true)
+  expect(immediate.entries).toHaveLength(2)
+  expect(immediate.entries.every(entry => entry.includes(localDay(observed)))).toBe(true)
   // Never seen done: stays until the pane has seen it.
   expect(takeManualDone(text, NOW, () => undefined).entries).toEqual([])
+  expect(countManualDone(parseProgress(text), NOW, () => undefined)).toBe(0)
+})
+
+test('a hand-kept task with a waiting or open step is never archived', () => {
+  for (const mark of [' ', '~', '?', '>', '!']) {
+    const text = `## Synthetic\n### Still open\n- [x] Finished\n- [${mark}] Next step\n`
+    for (const isNow of [false, true]) {
+      const out = takeManualDone(text, NOW, () => NOW - 30 * 24 * 60 * 60 * 1000, ZH_TW, isNow)
+      expect(out.entries).toEqual([])
+      expect(out.keys).toEqual([])
+      expect(out.text).toBe(text)
+      expect(countManualDone(parseProgress(text), NOW, () => NOW - 30 * 24 * 60 * 60 * 1000)).toBe(0)
+    }
+  }
+})
+
+test('the scheduled hand-kept move is off in the first release', () => {
+  expect(isHandKeptMoveOn).toBe(false)
 })
 
 test("archived at the person's word, a finished hand-kept task carries the day it was seen done, or today when it never was", () => {
   const text = '# 專案進度\n\n## 研究\n### 讀論文\n- [x] 讀完\n\n### 寫摘要\n- [x] 寫完\n\n### 投稿\n- [ ] 送出\n'
   const seen: Record<string, number> = { 'done:研究::讀論文': NOW }
-  // Not asked: neither has been done a day yet.
+  // Not asked: neither has been observed done for three days yet.
   expect(takeManualDone(text, NOW, key => seen[key]).entries).toEqual([])
   const out = takeManualDone(text, NOW, key => seen[key], ZH_TW, true)
   expect(out.keys).toEqual(['done:研究::讀論文', 'done:研究::寫摘要'])
@@ -704,13 +1144,19 @@ test('progress.html shows the whole file: counts, the focus, folded sections, st
   expect(html.startsWith('<!doctype html>')).toBe(true)
   expect(html).toContain('<html lang="zh-Hant">')
   expect(html).toContain('@media (prefers-color-scheme:dark)')
-  expect(html).toContain('● 2</span> 等你')
-  expect(html).toContain('✓ 3</span> 今天完成')
-  expect(html).toContain('<div class="label">現在最需要你</div>')
+  // The counts line and the focus box are gone: the Needs you sheet heads its own count, and the question an agent asked comes first in it.
+  expect(html).toContain('<h2 class="flag">需要你<b id="needs-n">2</b></h2>')
+  expect(html).toContain('<p class="empty" id="needs-empty" hidden>')
+  expect(html.indexOf('用 win rate 還是 Elo？')).toBeLessThan(html.indexOf('等王教授回覆'))
+  expect(html).toContain('<h2 class="sec-title">正在做<span class="count">0</span></h2>')
+  // The agent row counts what each agent waits on.
+  expect(html).toContain('<span class="c-name">Codex</span><span class="badge">1</span>')
   // Drawn as a pill, the chip shows the word without the terminal's brackets.
   expect(html).toContain('>選一個</span>')
   expect(html).toContain('AutoResearchAgent › Stage 2 · codex')
-  expect(html).toContain('data-key="section:waiting" open')
+  // A task with a due date sits in a folded section and shows its steps.
+  expect(html).toContain('<details class="section" data-key="section:due">')
+  expect(html).toContain('<ol class="steps">')
   expect(html).toContain('Google &lt;script&gt;alert(1)&lt;/script&gt;')
   expect(html).not.toContain('<script>alert(1)')
   expect(html).toContain('location.reload()')
@@ -949,6 +1395,151 @@ test('the question a reply ends on: its last paragraph only, without code or mar
   // An underscore inside a word belongs to it (a name, a token); at the edge of one it is markdown.
   expect(lastQuestion('Should I rename `snake_case` to ghp_16C7e42F in CI?')).toBe('Should I rename snake_case to ghp_16C7e42F in CI?')
   expect(lastQuestion('Use _this_ or __that__, not my__name?')).toBe('Use this or that, not my__name?')
+})
+
+test('a reply that is JSON is not cut at its question mark and shown as a question', () => {
+  const answer = '{"text":"Done.","ask":"Ship it?"}'
+  const file = { name: 'codex-turn-1-1.json', body: JSON.stringify({ session_id: 's', cwd: '/w/app', last_assistant_message: answer }), at: 1 }
+  const pending = peekInbox([file], undefined, undefined, STRINGS.en)
+  expect(pending[0]?.text).toBe('Ship it?')
+  expect(pending[0]?.isQuestion).toBe(true)
+  expect(pending[0]?.text).not.toContain('"')
+  // Redaction of an unrelated JSON value must not make valid JSON into prose.
+  const withSecret = { ...file, body: JSON.stringify({ session_id: 's', cwd: '/w/app', last_assistant_message: '{"question":"Ship it?","token":"hunter2"}' }) }
+  const redacted = peekInbox([withSecret], undefined, text => redact(text, '/h'), STRINGS.en)[0]
+  expect(redacted?.text).toBe('Ship it?')
+  expect(redacted?.fullText).not.toContain('hunter2')
+  const ledger = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'fixture:json', undefined, redacted ? [redacted] : []).ledger
+  expect(JSON.stringify(ledger)).not.toContain('hunter2')
+  const escaped = { ...file, body: JSON.stringify({ session_id: 'escaped', cwd: '/w/app', last_assistant_message: '{"question":"Ship it\\u003f","\\u0074oken":"synthetic-secret"}' }) }
+  const safe = peekInbox([escaped], undefined, text => redact(text, '/h'), STRINGS.en)[0]
+  expect(safe?.text).toBe('Ship it?')
+  expect(safe?.fullText).toBe('Ship it?')
+  expect(safe?.fullText).not.toContain('synthetic-secret')
+  const captured = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'fixture:escaped-json', undefined, safe ? [safe] : []).ledger
+  expect(captured.records.length).toBe(1)
+  expect(JSON.stringify(captured)).not.toContain('synthetic-secret')
+  const selected = { ...file, body: JSON.stringify({ session_id: 'selected', cwd: '/w/app', last_assistant_message: '{"question":"Is token=synthetic-secret ready?"}' }) }
+  expect(peekInbox([selected], undefined, text => redact(text, '/h'), STRINGS.en)[0]?.fullText).not.toContain('synthetic-secret')
+})
+
+test("a JSON reply with a question field gives that field's question", () => {
+  expect(lastQuestion('\uFEFF  {\r\n  "question": " Which one, A or B? ",\r\n  "options": ["A", "B"]\r\n}  ')).toBe('Which one, A or B?')
+  expect(lastQuestion('{"question":" ","ask":4,"text":" Ship it? ","message":"Wrong?"}')).toBe('Ship it?')
+  expect(lastQuestion('{"question":{"text":"Nested?"},"ask":"Next?","text":"Wrong?"}')).toBe('Next?')
+  const keys = ['question', 'ask', 'text', 'message', 'reply', 'answer']
+  for (const key of keys) expect(lastQuestion(JSON.stringify({ [key]: 'Selected?' }))).toBe('Selected?')
+  expect(lastQuestion('{"question":"Done.","ask":"Wrong?"}')).toBeNull()
+})
+
+test('a JSON reply with no string field gives no question and the could-not-read line', () => {
+  const answers = ['{}', '{"question":null,"ask":3,"text":"  ","message":{"text":"Nested?"}}', '[{"question":"Nested?"}]']
+  for (const [i, answer] of answers.entries()) {
+    expect(lastQuestion(answer)).toBeNull()
+    const file = { name: `codex-turn-${i + 1}-1.json`, body: JSON.stringify({ session_id: `s${i}`, cwd: '/w/app', last_assistant_message: answer }), at: i + 1 }
+    for (const lang of LANGS) {
+      const pending = peekInbox([file], undefined, undefined, STRINGS[lang])
+      expect(pending[0]?.text).toBe(STRINGS[lang].turnUnreadable)
+      expect(pending[0]?.isQuestion).toBe(false)
+      expect(pending[0]?.hasSummary).toBe(true)
+      const view = buildView([], [], null, NOW, 0, {}, STRINGS[lang])
+      expect(boardText(view, pending, STRINGS[lang], { width: 120, isColor: false })).toContain(STRINGS[lang].turnUnreadable)
+    }
+  }
+  expect(STRINGS.en.turnUnreadable).toBe('Could not read this turn')
+})
+
+test('JSON scalars remain prose as written while objects and arrays without text are unreadable', () => {
+  const answers = ['42', 'true', 'false', 'null', '"Keep the quotes."', '"Ship it?"']
+  for (const [i, answer] of answers.entries()) {
+    const file = { name: `codex-turn-${i + 10}-1.json`, body: JSON.stringify({ session_id: `scalar${i}`, cwd: '/w/app', last_assistant_message: answer }), at: i + 10 }
+    const pending = peekInbox([file], undefined, undefined, STRINGS.en)[0]
+    if (!answer.includes('?')) expect(pending?.text).toBe(answer)
+    expect(pending?.fullText).toBe(answer)
+    expect(pending?.text).not.toBe(STRINGS.en.turnUnreadable)
+  }
+  expect(lastQuestion('"Ship it?"')).toBe('"Ship it?"')
+  expect(parseDigest('TITLE: work\nASK: "Ship it?"')?.ask).toBe('"Ship it?"')
+  for (const answer of ['{}', '[]']) {
+    const file = { name: 'codex-turn-30-1.json', body: JSON.stringify({ session_id: 'structured', cwd: '/w/app', last_assistant_message: answer }), at: 30 }
+    const unreadable = peekInbox([file], undefined, undefined, STRINGS.en)[0]
+    expect(unreadable?.text).toBe(STRINGS.en.turnUnreadable)
+    expect(unreadable?.fullText).toBe(undefined)
+  }
+})
+
+test('an ASK line that holds JSON never becomes a question step', () => {
+  const noText = parseDigest('TITLE: work\nASK: {"options":["A?"]}')
+  expect(noText?.ask).toBe('')
+  expect(applyDigest(emptyMirror('a1b2c3d4', 'app', NOW), noText!, NOW).tasks.filter(one => one.waiting === 'you')).toEqual([])
+  const selected = parseDigest('TITLE: work\nASK: {"question":"Ship it?","ask":"Wrong?"}')
+  expect(selected?.ask).toBe('Ship it?')
+  expect(selected?.ask).not.toContain('{')
+  expect(applyDigest(emptyMirror('a1b2c3d4', 'app', NOW), selected!, NOW).tasks.find(one => one.waiting === 'you')?.subject).toBe('Ship it?')
+  expect(parseDigest('TITLE: work\nASK: {"question":"Use \\\"A\\\"?"}')?.ask).toBe('Use \"A\"?')
+  expect(parseDigest('TITLE: work\nASK: []')?.ask).toBe('')
+})
+
+test('a JSON object ASK uses the ordinary question rules for its selected text', () => {
+  for (const answer of ['{"text":"Done."}', '["Ship it?"]']) {
+    const digest = parseDigest(`TITLE: work\nASK: ${answer}`)!
+    expect(digest.ask).toBe('')
+    expect(applyDigest(emptyMirror('a1b2c3d4', 'app', NOW), digest, NOW).tasks.filter(one => one.waiting === 'you')).toEqual([])
+  }
+  const question = parseDigest('TITLE: work\nASK: {"text":"Checked. Ship it?"}')!
+  expect(question.ask).toBe('Ship it?')
+  expect(applyDigest(emptyMirror('a1b2c3d4', 'app', NOW), question, NOW).tasks.find(one => one.waiting === 'you')?.subject).toBe('Ship it?')
+  expect(parseDigest('TITLE: work\nASK: {"text":"Ready? It is done."}')?.ask).toBe(lastQuestion('Ready? It is done.'))
+  expect(parseDigest('TITLE: work\nASK: Confirm the plan')?.ask).toBe('Confirm the plan')
+  expect(parseDigest('TITLE: work\nASK: "Done."')?.ask).toBe('"Done."')
+})
+
+test('an unchanged inbox uses the current language and remains cached within one language', async () => {
+  const file = { name: 'codex-turn-1760600000-1.json', body: JSON.stringify({ session_id: 'synthetic-lang', cwd: '/work/demo', last_assistant_message: '{}' }), at: 1 }
+  const listing = ['/work/demo/progress.md', [[file.name, 1, file.body.length]], {}]
+  let reads = 0
+  const fresh = async () => { reads++; return { files: [file], scrub: (text: string) => text, isComplete: true } }
+  const en = await turnsFor(null, listing, STRINGS.en, fresh)
+  expect(en.turns[0]?.text).toBe(STRINGS.en.turnUnreadable)
+  expect(reads).toBe(1)
+  const tw = await turnsFor(en.cache, listing, STRINGS['zh-TW'], fresh)
+  expect(tw.turns[0]?.text).toBe(STRINGS['zh-TW'].turnUnreadable)
+  expect(reads).toBe(2)
+  const cn = await turnsFor(tw.cache, listing, STRINGS['zh-CN'], fresh)
+  expect(cn.turns[0]?.text).toBe(STRINGS['zh-CN'].turnUnreadable)
+  expect(reads).toBe(3)
+  const hit = await turnsFor(cn.cache, listing, STRINGS['zh-CN'], fresh)
+  expect(hit.turns).toBe(cn.turns)
+  expect(reads).toBe(3)
+  const partial = await turnsFor(cn.cache, [...listing, 'changed'], STRINGS['zh-CN'], async () => ({ files: [file], scrub: (text: string) => text, isComplete: false }))
+  expect(partial.cache).toBe(cn.cache)
+  const retried = await turnsFor(partial.cache, [...listing, 'changed'], STRINGS['zh-CN'], fresh)
+  expect(retried.turns[0]?.text).toBe(STRINGS['zh-CN'].turnUnreadable)
+  expect(reads).toBe(4)
+})
+
+test('a plain reply that ends in a question is read as before', () => {
+  expect(lastQuestion('Done.\r\n\r\n**Ship it?**')).toBe('Ship it?')
+  expect(lastQuestion('Done.\n```json\n{"question":"Ignore?"}\n```')).toBeNull()
+  const make = (session: string, answer: string) => JSON.stringify({ session_id: session, cwd: '/w/app', last_assistant_message: answer })
+  const pending = peekInbox([
+    { name: 'codex-turn-1-1.json', body: make('s', 'Ship it?'), at: 1 },
+    { name: 'codex-end-2-1.json', body: JSON.stringify({ session_id: 's' }), at: 2 },
+  ])
+  expect(pending[0]?.text).toBe('Ship it?')
+  expect(pending[0]?.isClosed).toBe(true)
+  // An already-stored half-JSON question remains untouched, even on an ended/stale record.
+  const old = '## app\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-01-01T00:00:00Z -->\n### Work\n- [?] {"question":"Old?\n<!-- /auto session=a1b2c3d4 -->\n'
+  expect(isQuestionStale('codex-turn-1767225600000-1.json', NOW)).toBe(true)
+  expect(parseProgress(old)[0]?.tasks[0]?.steps[0]?.text).toBe('{"question":"Old?')
+  for (const stored of [old, old.replace('state=ended', 'state=working')]) {
+    const projects = parseProgress(stored)
+    const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'fixture:stored').ledger
+    expect(ledger.records[0]?.source?.text).toBe('{"question":"Old?')
+    const view = buildView(projects, [], null, NOW, 0, {}, STRINGS.en, [], {}, ledger)
+    expect(view.stopped[0]?.questions?.[0]?.text).toBe('{"question":"Old?')
+    expect(boardText(view, [], STRINGS.en, { width: 120, isColor: false, isIdleOpen: true })).toContain('{"question":"Old?')
+  }
 })
 
 test('the model’s summary of a turn: five keyed lines, - for nothing, the question split from its label', () => {
@@ -1660,12 +2251,12 @@ test('the board for other agents puts what waits on you first, then each project
   const text = boardText(buildView(parseProgress(BOARD_FILE), [], null, now, 0, {}, STRINGS.en), pending, STRINGS.en, { width: 80, isColor: false })
   const at = (part: string): number => text.indexOf(part)
   expect(text.startsWith('Progress  ● 2 waiting')).toBe(true)
-  expect(at('api-gateway · codex › Rate-limit the public endpoints')).toBeGreaterThan(at('Waiting on you'))
+  expect(at('api-gateway · Codex › Rate-limit the public endpoints')).toBeGreaterThan(at('Waiting on you'))
   expect(text).toContain('[Choose] Per-key limit — 100 or 300 a minute?')
-  expect(text).toContain('OpenClaw · openclaw\n    Ship it to staging now?')
+  expect(text).toContain('OpenClaw · OpenClaw\n    Ship it to staging now?')
   expect(at('▸ acme-web')).toBeGreaterThan(at('Ship it to staging'))
   expect(text).toContain('▸ 2 Settings page')
-  expect(at('docs-site · gemini: Fixed 12 broken links.')).toBeGreaterThan(at('▸ acme-web'))
+  expect(at('docs-site · Gemini CLI: Fixed 12 broken links.')).toBeGreaterThan(at('▸ acme-web'))
   expect(text).not.toContain('\u001b[')
 })
 
@@ -1710,7 +2301,7 @@ test('a turn that only showed the board is not work, in any language or agent', 
 
 test('a reply that is the printed board and a sentence is a look at the board, asked in plain words, while work that shows it too is not', () => {
   const said = (prompt: string, answer: string) => readTurn('grok-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt, last_assistant_message: answer }))
-  const board = 'Progress  ● 2 waiting  ▸ 5 in progress  ⚑ 0 due soon  ✓ 1 done today\n\n● Waiting on you\n  api-gateway › Rate limits\n    [Choose] 100 or 300 a minute?\n\n▸ api-gateway  1 item · 1 working\n  Rate limits\n    1/3 grok is working\n'
+  const board = 'Progress  ● 2 waiting  ▸ 5 in progress  ⚑ 0 due soon  ✓ 1 done today\n\n● Waiting on you\n  api-gateway › Rate limits\n    [Choose] 100 or 300 a minute?\n\n▸ api-gateway  1 item · 1 working\n  Rate limits\n    1/3 Grok Build is working\n'
   const zh = '進度  ● 2 等你  ▸ 5 進行中  ⚑ 0 快到期  ✓ 1 今天完成\n\n● 現在最需要你\n  api-gateway › 限流\n'
   // Grok Build took "我想看一下進度" for the board skill: the request alone does not say so.
   expect(isBoardTurn(said('我想看一下目前所有專案的進度', `\`\`\`\n${zh}\`\`\`\n\n先回 persona_framework 的 T10：三個重判決定還等你拍板。`)!)).toBe(true)
@@ -2640,7 +3231,8 @@ test('the terminal key contract covers every card kind from every agent and sour
     }
   }
   expect(cells.size).toBe(192)
-  expect(offered).toBe(376)
+  // 376 before the retained cells, whose questions kept from an archived block now offer h too (#400).
+  expect(offered).toBe(392)
 })
 
 test('with explicit legacy opt-in the page offers a send only into a Grok or Codex session that has closed; an open one, Claude and a hand-kept task each get their own way', () => {
@@ -2648,7 +3240,7 @@ test('with explicit legacy opt-in the page offers a send only into a Grok or Cod
   const row = (title: string) => [...model.groups.flatMap(group => group.rows), ...model.stopped].find(one => one.title === title)
   expect(row('Pick the cache')).toMatchObject({ send: 'send', where: '/w/api-gateway', info: '', isSending: false })
   const codex = model.asks.find(ask => ask.agent === 'codex')
-  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('codex'), where: '' })
+  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('Codex'), where: '' })
   expect(codex?.answers.length).toBeGreaterThan(0)
   // A hand-kept question is the person's own: ticking it is the answer, with nothing to copy.
   expect(model.asks.find(ask => ask.project === 'docs-site')).toMatchObject({ send: 'none', answers: [], canTick: true, info: '' })
@@ -2715,7 +3307,7 @@ test('a press on the page is worked out from the file as it is now: a line that 
   expect(resumeAction(items, { key: 'row:gone', type: 'tick', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   // An open Codex session is answered in its own window.
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
-  expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('codex') })
+  expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('Codex') })
   const manual = keyOf(item => item.type === 'ask' && item.ask.project === 'docs-site')
   expect(resumeAction(items, { key: manual, type: 'tick', text: '', session: '', fp: fpIn(items, manual) }, STRINGS.en).type).toBe('tick')
   expect(resumeAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveManualReply })
@@ -2870,15 +3462,24 @@ test('on the local network the page answers only its own address, with its own t
   expect(requestProblem({ ...post, origin: 'http://127.0.0.1:5000' }, lan, 'phone')).toBe(403)
   // And it says when it closes, which is sooner than the computer's page.
   expect(servePage(STRINGS.en, 'n', true)).toContain('after 10 minutes unused')
-  expect(servePage(STRINGS.en, 'n')).toContain('The local board stays running')
   expect(servePage(STRINGS.en, 'n', false, 30 * 60000)).toContain('after 30 minutes unused')
+  // With no limit the footer says nothing about closing; the sentence that the board stays running is gone from the page.
+  expect(servePage(STRINGS.en, 'n')).not.toContain(STRINGS.en.serveIdle)
+  for (const s of Object.values(STRINGS)) {
+    expect(servePage(s, 'n', true)).toContain(s.serveLanIdle)
+    expect(servePage(s, 'n', false, 30 * 60000)).toContain(s.serveIdleTimed(30))
+    // The network's limit is the one it shows, even when the computer's page has a longer one.
+    expect(servePage(s, 'n', true, 30 * 60000)).not.toContain(s.serveIdleTimed(30))
+    expect(servePage(s, 'n')).not.toContain(s.serveLanIdle)
+    expect(servePage(s, 'n')).not.toContain(s.serveIdleTimed(30))
+  }
 })
 
 test('from the local network a reply to an agent is offered as a copy, and refused if sent, since it would run a program on the computer', () => {
   const model = resumeModel(serveView(), [], STRINGS.en, new Set(), true)
   const rows = [...model.groups.flatMap(group => group.rows), ...model.stopped]
   // The row keeps a box to write the answer in and copy it, as the note says.
-  expect(rows.find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'open', where: '', info: STRINGS.en.serveLanSend('grok'), hasCopyBox: true })
+  expect(rows.find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'open', where: '', info: STRINGS.en.serveLanSend('Grok Build'), hasCopyBox: true })
   expect(resumeModel(serveView(), [], STRINGS.en).stopped.find(one => one.title === 'Pick the cache')).toMatchObject({ send: 'send', hasCopyBox: false })
   // Nor is a command to resume a session shown there: it names the session's folder.
   const ended = buildView(
@@ -2899,13 +3500,13 @@ test('from the local network a reply to an agent is offered as a copy, and refus
   expect(resumeOf(false)).toContain('claude --resume dddddddd-1111')
   expect(resumeOf(true)).toBe(null)
   // What was not a send stays as it was.
-  expect(model.asks.find(ask => ask.agent === 'codex')).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('codex') })
+  expect(model.asks.find(ask => ask.agent === 'codex')).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('Codex') })
   expect(rows.find(one => one.title === 'Dark mode for the settings page')?.send).toBe('claude')
   const items = boardItems(serveView(), [])
   const key = items.find(item => item.type === 'row' && item.row.title === 'Pick the cache')?.key ?? ''
   const press = { key, type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: fpIn(items, key) }
   expect(resumeAction(items, press, STRINGS.en).type).toBe('send')
-  expect(resumeAction(items, press, STRINGS.en, true)).toEqual({ type: 'refuse', note: STRINGS.en.serveLanSend('grok') })
+  expect(resumeAction(items, press, STRINGS.en, true)).toEqual({ type: 'refuse', note: STRINGS.en.serveLanSend('Grok Build') })
   expect(resumeAction(items, { ...press, type: 'archive' }, STRINGS.en, true)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
 })
 
@@ -2936,7 +3537,7 @@ test("on the local network every agent's task shows as on the computer, except t
     const here = computer.find(row => who(row) === agent)
     const there = lan.find(row => who(row) === agent)
     if (here === undefined || there === undefined) throw new Error(`no row for ${agent}`)
-    if (here.send === 'send') expect(there).toEqual({ ...here, send: 'open', where: '', info: STRINGS.en.serveLanSend(agent), hasCopyBox: true, resume: null })
+    if (here.send === 'send') expect(there).toEqual({ ...here, send: 'open', where: '', info: STRINGS.en.serveLanSend(agentLabel(agent, STRINGS.en)), hasCopyBox: true, resume: null })
     else expect(there).toEqual({ ...here, resume: null })
   }
   // Claude's row has a command to resume it on the computer, which stays there.
@@ -2959,18 +3560,29 @@ test("the page runs only its own script, and the chat prompt in it cannot close 
   // Words from the file are set as text by the page's script, never as HTML.
   expect(page).not.toContain('innerHTML')
   expect(page).not.toContain('insertAdjacentHTML')
-  // The relay prompt has a comment marker in it; inside the words it is escaped.
+  // No comment marker reaches the page. The paste box and its chat prompt (which had one) are gone from it, and the words sit in a JSON block with no raw '<' to close the script with.
   expect(page).not.toContain('<!-- auto')
-  expect(pageWords(STRINGS.en).relayPrompt).toBe(RELAY)
+  expect(Object.hasOwn(pageWords(STRINGS.en), 'relayPrompt')).toBe(false)
+  const block = page.split('<script type="application/json" id="words">')[1]!.split('</script>')[0]!
+  expect(block).not.toContain('<')
+  expect(JSON.parse(block)).toEqual(pageWords(STRINGS.en))
   expect(Object.values(pageWords(STRINGS['zh-CN'])).every(word => typeof word === 'string' && word !== '')).toBe(true)
 })
 
 // A word the page script asks for but is not given would show as the text "undefined".
 test('every word the page script asks for is one the page is given', () => {
+  // The words go only to the live page, so its pg words are all in.
   const words = pageWords(STRINGS.en)
-  const named = [...servePage(STRINGS.en, 'n').matchAll(/\bw\(([^)]*)\)/g)].flatMap(found => [...found[1].matchAll(/(?<!=== )'([A-Za-z]+)'/g)].map(key => key[1]))
+  const page = servePage(STRINGS.en, 'n')
+  // The plural helper joins 'One' to a key itself; that literal is not a word.
+  const named = [...page.matchAll(/\bw\(([^)]*)\)/g)].flatMap(found => [...found[1].matchAll(/(?<!=== |\+ )'([A-Za-z]+)'/g)].map(key => key[1]))
   expect(named.length).toBeGreaterThan(20)
   expect(named.filter(key => !(key in words))).toEqual([])
+  // Every word passed to plural() has both forms, so a count of one never shows "undefined".
+  const plurals = [...page.matchAll(/\bplural\('([A-Za-z]+)'/g)].map(key => key[1])
+  expect(plurals.length).toBeGreaterThan(0)
+  expect(plurals.flatMap(key => [key, `${key}One`]).filter(key => !(key in words))).toEqual([])
+  expect(Object.keys(words).filter(key => key.startsWith('pg')).length).toBeGreaterThan(20)
 })
 
 const oldClockFragment = (at: number, state = 'working'): string =>
@@ -3243,11 +3855,11 @@ test('the board you work in marks the chosen line and lists only the keys that d
   const onAsk = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
   expect(onAsk).toContain('› [Choose] Per-key limit')
   expect(onAsk).toContain('    2 300 a minute')
-  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · ↑↓ select')
+  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · ↑↓/jk select')
   const onJob = boardScreen(view, [], { selected: job, key: null, open: items[job]?.key ?? null, note: 'Copied: 300' }, STRINGS.en, { width: 100, isColor: false })
   expect(onJob).toContain('› Fabrikam fellowship')
   expect(onJob).toContain('    ✓ 1 Draft the statement')
-  expect(onJob).toContain('x done · d confirm done · a archive · ↑↓ select')
+  expect(onJob).toContain('x done · d confirm done · a archive · ↑↓/jk select')
   expect(onJob.trimEnd().endsWith('Copied: 300')).toBe(true)
 })
 
@@ -3273,16 +3885,18 @@ test('the terminal board, progress.html and the board page name the session that
   // A command longer than the terminal is cut short on its line, so c copies it whole.
   const whole = `cd '/home/someone/projects/data-pipeline-with-a-long-name/services/events' && claude --resume a1b2c3d4-1111-2222-3333`
   expect(boardKey({ ...emptyBoardState, selected: claude }, 'c', items, STRINGS.en).action).toEqual({ type: 'copy', text: whole })
+  // The way back is shown whole, wrapped at 80 columns, with the command c copies (#545).
   const narrow = boardScreen(view, [], { ...emptyBoardState, selected: claude }, STRINGS.en, { width: 80, isColor: false })
-  expect(narrow).not.toContain(whole)
-  expect(narrow).toContain('c copy resume command')
+  expect(narrow.split('\n').map(line => line.trim()).join(' ')).toContain(STRINGS.en.boardAnswerInCopy('Claude Code', 'claude --resume …'))
+  // The footer's line keys give way at 80 columns; the keys that move and quit stay.
+  expect(narrow).toContain(STRINGS.en.boardKeysMove)
   // A block written by hand under the AGENTS.md rule leaves no id: there is nothing to copy.
   expect(boardKey({ ...emptyBoardState, selected: codex }, 'c', items, STRINGS.en).action).toBeNull()
   const screen = boardScreen(view, [], { ...emptyBoardState, selected: claude }, STRINGS.en, { width: 120, isColor: false })
-  expect(screen).toContain(`Reply in the "Backfill the events" session. Can't reply from here.`)
+  expect(screen).toContain('Answer in Claude Code — c copies: claude --resume …')
   expect(screen).toContain('c copy resume command')
   const onCodex = boardScreen(view, [], { ...emptyBoardState, selected: codex }, STRINGS.en, { width: 120, isColor: false })
-  expect(onCodex).toContain(`Reply in the "Rename the export job" session (codex). Can't reply from here.`)
+  expect(onCodex).toContain('Answer in Codex for a longer reply.')
   expect(onCodex).not.toContain('c copy session ID')
   expect(onCodex).not.toContain('c9d8e7f6')
 
@@ -3411,7 +4025,7 @@ test('every agent keeps exact resume bindings without showing session identifier
   expect(html).not.toContain('對話 ID')
   // The web card keeps the actionable resume command without another id-only button.
   expect(servePage(STRINGS.en, 'n')).not.toContain("copy(ask.sessionId)")
-  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen, ask.key)")
+  expect(servePage(STRINGS.en, 'n')).toContain("copy(ask.reopen, key)")
 
   // Ended, a session whose agent reopens one by id offers that command, in its own folder.
   const ended = buildView(parseProgress(file.replaceAll('state=waiting', 'state=ended')), [], null, now, 0, {}, STRINGS.en).stopped
@@ -3573,7 +4187,7 @@ test('two hand-kept tasks with the same title and next step are told apart by ho
   expect(fpIn(itemsOf(`${twins}\n### Weekly review\n- [ ] Write notes\n`), one ?? '')).not.toBe(fpIn(before, one ?? ''))
   expect(fpIn(itemsOf(`${twins}\n## Work\n### Weekly review\n- [ ] Write notes\n`), one ?? '')).toBe(fpIn(before, one ?? ''))
   // A block has an id of its own, and a same-titled block of another session does not change it.
-  const block = (session: string): string => `## api\n<!-- auto session=${session} agent=codex state=ended updated=2026-10-17T08:30:00Z resume=0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b dir=%2Fw%2Fapi -->\n### Wire the cache\n- [ ] Pick a size\n<!-- /auto session=${session} -->\n`
+  const block = (session: string): string => `## api\n<!-- auto session=${session} agent=codex state=ended updated=2026-10-17T08:30:00Z resume=0199a2b3-c4d5-7e6f-8a9b-${session.padEnd(12, '0')} dir=%2Fw%2Fapi -->\n### Wire the cache\n- [ ] Pick a size\n<!-- /auto session=${session} -->\n`
   const alone = itemsOf(block('a1000000'))
   expect(fpIn(itemsOf(`${block('a1000000')}\n${block('a2000000')}`), alone[0]?.key ?? '')).toBe(fpIn(alone, alone[0]?.key ?? ''))
 })
@@ -3698,7 +4312,8 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(press('unhide', codexKey)).toEqual({ type: 'refuse', note: STRINGS.en.pressNothing })
   // The page's script and words carry the buttons.
   const page = servePage(STRINGS.en, 'n')
-  expect(page).toContain("act(ask.key, 'hide')")
+  expect(page).toContain("button(w('answeredHide'), function () { act(key, 'hide'); })")
+  expect(page).toContain("button(w('pgAnswered'), function () { act(key, 'hide'); }, 'primary')")
   expect(page).toContain("act(one.key, 'unhide')")
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
 })
@@ -3731,7 +4346,8 @@ test('a reply on the line of a task whose question was marked answered goes as i
   expect(row(resumeModel(view, [], STRINGS.en))?.question).toBe('')
   const stale = { key: grok, type: 'send', text: 'Use Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?' }
   expect(resumeAction(items, stale, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
-  expect(servePage(STRINGS.en, 'n')).toContain('var asked = row.question;')
+  // A row's message box is drawn with the question the row names, which the reply carries back.
+  expect(servePage(STRINGS.en, 'n')).toContain("replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery)")
   // Still asked, it opens by itself and a reply goes as its answer.
   expect([row(resumeModel(serveView(), [], STRINGS.en))?.isAsking, row(resumeModel(serveView(), [], STRINGS.en))?.question]).toEqual([true, 'Redis or Memcached?'])
   const asking = boardItems(serveView(), [])
@@ -3821,10 +4437,13 @@ test('progress.html and the serve page show stopped tasks in a closed shelf', ()
   expect(boardScreen(view, [], toggled, STRINGS.en)).toContain('Stopped <plan>')
   expect(boardScreen(view, [], emptyBoardState, STRINGS.en)).not.toContain('Stopped <plan>')
   expect(boardScreen(view, [], emptyBoardState, STRINGS.en)).not.toContain(STRINGS.en.empty)
+  // The page keeps them on a shelf that stays closed until it is opened, one row each, under the Stopped word.
   const page = servePage(STRINGS.en, 'nonce')
-  expect(page).toContain("opened['stopped:'] === true")
-  expect(page).toContain("w('stoppedCount', model.stopped.length)")
-  expect(page).toContain('rowCard(row)')
+  expect(page).toContain("shelf('stopped', w('pgStopped')")
+  expect(page).toContain("fold.inert = opened['shelf:' + name] !== true;")
+  expect(page).toContain('var one = rowItem(ref, name, section, true);')
+  const grouped = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] }).view
+  expect(grouped?.all.stopped.map(one => one.key)).toEqual([row?.key])
 })
 
 test('every language has the stopped count words', () => {
@@ -3894,7 +4513,9 @@ test('every language has the idle count words', () => {
   for (const words of Object.values(STRINGS)) {
     expect(words.boardKeyIdle).toMatch(/^i /)
     expect(words.boardUsage).toContain('--all')
-    expect(pageWords(words).idleCount).toBe(words.idleCount(1).replace('1', '\u0001'))
+    // The page has no idle shelf: an idle task joins the Stopped shelf, so the page asks for that word, not the idle count.
+    expect(Object.hasOwn(pageWords(words), 'idleCount')).toBe(false)
+    expect(pageWords(words).pgStopped).toBe(words.pgStopped)
   }
 })
 
@@ -3926,7 +4547,14 @@ test('the idle shelf keeps terminal and page row actions without putting its que
   expect(row?.canArchive).toBe(true)
   expect(serveAction(boardItems(view, []), { key: row?.key ?? '', type: 'tick', text: row?.next ?? '', session: '', fp: row?.fp }, STRINGS.en).type).toBe('tick')
   expect(serveAction(boardItems(view, []), { key: row?.key ?? '', type: 'archive', text: '', session: '', fp: row?.fp }, STRINGS.en).type).toBe('archive')
-  expect(servePage(STRINGS.en, 'nonce')).toContain("opened['idle:'] === true")
+  // The page lists an idle task on its closed Stopped shelf, not among the questions, and draws it with the same row buttons.
+  const grouped = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] }).view
+  expect([...(grouped?.all.stopped ?? []), ...(grouped?.own.stopped ?? [])].map(one => one.key)).toEqual([row?.key])
+  expect(grouped?.needs.cards).toEqual([])
+  const page = servePage(STRINGS.en, 'nonce')
+  expect(page).toContain("shelf('stopped', w('pgStopped')")
+  expect(page).toContain("act(key, 'tick', row.next")
+  expect(page).toContain("act(key, 'archive'")
 })
 
 test('an ordinary board never resumes a closed session even without messaging enabled', () => {
@@ -3974,23 +4602,24 @@ test('quoted connection paths after equals and opening parentheses decode their 
 
 
 test("the redesigned pages speak the page's language in every new word", () => {
-  const keys = ['viewAll', 'viewStopped', 'viewCount', 'sideViews', 'sideProjects', 'sideAgents', 'sideOwnTasks', 'viewEmptyDue', 'viewEmptyStopped', 'viewEmptyRecent', 'viewEmptyFiltered', 'clearFilters', 'removeFilter', 'sectionActive', 'sectionDue'] as const
+  // The words the page script fills in; the words the server writes into the page itself are checked below.
+  const keys = ['pgNeeds', 'pgWorking', 'pgOthers', 'pgStopped', 'pgDone', 'pgAgents', 'pgOlder', 'pgOlderOne', 'pgSideFold', 'pgSideOpen', 'showAllQuestions'] as const
   for (const s of Object.values(STRINGS)) {
     const view = buildView(parseProgress('## Synthetic\n### Plan\n- [ ] Continue\n'), [], null, NOW, 0, {}, s)
     const live = servePage(s, 'synthetic')
     const snapshot = dashboardHtml(view, s, 'synthetic', 'synthetic')
     for (const page of [live, snapshot]) {
-      for (const label of [s.themeLabel, s.themeSystem, s.themeLight, s.themeDark]) expect(page).toContain(label)
-      expect(page).toContain('data-theme-pick="system"')
-      expect(page).toContain('data-theme-pick="light"')
-      expect(page).toContain('data-theme-pick="dark"')
+      // One icon button switches between light and dark; it names the theme it switches to, in the page's language.
+      for (const label of [s.themeToDark, s.themeToLight]) expect(page).toContain(label)
+      expect(page).toContain('data-theme-toggle')
+      expect(page).not.toContain('data-theme-pick')
     }
-    expect(live).toContain(s.sideTitle)
+    for (const label of [s.pgViews, s.pgOverview, s.pgNeeds, s.pgWorking, s.pgOthers, s.pgDone, s.pgProjects, s.pgAgents, s.pgSideFold]) expect(live).toContain(label)
     expect(live).toContain(s.serveLive)
     expect(live).toContain(s.serveLiveHint)
     expect(live).toContain(s.sideClose)
-    expect(snapshot).toContain(s.dashSections)
-    expect(snapshot).toContain('data-section="dash-others"')
+    for (const label of [s.pgNeeds, s.pgWorking, s.pgAgents]) expect(snapshot).toContain(label)
+    expect(snapshot).toContain('data-key="section:others"')
     expect(snapshot).not.toContain('href="#')
     const words = pageWords(s)
     for (const key of keys) {
@@ -4015,4 +4644,16 @@ test('the redesigned pages carry no run of digits or letters that reads as a mac
       expect(context).toBe(null)
     }
   }
+})
+
+test('archive entries are counted with their number: a new twin of an archived entry is added, a saved pair is not added again', () => {
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const archive = (n: number): string => `# Archive\n\n${Array.from({ length: n }, () => entry).join('\n\n')}\n`
+  expect(archiveEntryCount(archive(2), entry)).toBe(2)
+  expect(unwrittenEntries([entry, entry], new Map([[entry, 1]]))).toEqual([entry])
+  expect(missingEntries([archive(1)], [entry, entry])).toEqual([entry, entry])
+  expect(missingEntries([archive(2)], [entry, entry])).toEqual([])
+  expect(missingEntries(['', archive(3)], [entry, entry])).toEqual([])
+  expect(missingEntries([archive(3)], [entry], new Map([[entry, 2]]))).toEqual([])
+  expect(missingEntries([archive(2)], [entry], new Map([[entry, 2]]))).toEqual([entry])
 })

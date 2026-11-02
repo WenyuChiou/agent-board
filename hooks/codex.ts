@@ -1,10 +1,17 @@
+import { LANGS } from './i18n'
 import type { Strings } from './i18n'
+import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
 import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
 import { scanBlocks } from './blocks'
+import type { Origin } from './runs'
 
-export type CodexReport = {
+// `origin`, `parent` and `isWeak` say who started the session (#399): a run an agent started for
+// itself keeps only a session record; weak hints retain the legacy block mark and parent.
+export type CodexReport = Origin & {
   session: string
+  folder?: string
+  folderDigest?: string
   turn: string | null
   state: 'working' | 'waiting' | 'done' | 'ended'
   title: string
@@ -26,6 +33,9 @@ const line = (value: unknown): string => {
   return clean
 }
 
+// The same heading the board reads for a project (hooks/parse.ts).
+const PROJECT_HEADING = /^##\s+(.+?)\s*#*\s*$/
+
 const OPENCLAW_WORKSPACE = /[\\/]\.openclaw[\\/]workspace(?:-[^\\/]*)?[\\/]*$/
 
 // A local session's project from its working folder (#246). `readTurn` in inbox.ts and
@@ -40,6 +50,23 @@ export const folderProject = (cwd: unknown): string => {
 
 // This is the one place a new local session title comes from (#246).
 export const sessionTitle = (folder: string, fallback: string): string => line(folder || fallback)
+
+// The step a hook writes for a session that has reported none of its own (`codexLifecycle` here,
+// `localAgentLifecycle` in codex-local.ts). The view tells it from an agent's step by these words:
+// every language's, and those earlier releases wrote, which stay in old blocks (#612).
+const EARLIER_LIFECYCLE_STEPS = [
+  'Local session activity; Codex explicitly reports task steps',
+  '本機 session 活動狀態；任務步驟由 Codex 明確回報',
+  '本地 session 活动状态；任务步骤由 Codex 明确报告',
+  'Native session activity; the current agent explicitly reports task steps',
+  '原生 session 活動狀態；任務步驟由目前 agent 明確回報',
+  '原生 session 活动状态；任务步骤由当前 agent 明确报告',
+]
+export const LIFECYCLE_STEPS: ReadonlySet<string> = new Set([
+  ...LANGS.flatMap(lang => [STRINGS[lang].codexLifecycle, STRINGS[lang].localAgentLifecycle]),
+  ...EARLIER_LIFECYCLE_STEPS,
+])
+export const isLifecycleStep = (text: string): boolean => LIFECYCLE_STEPS.has(text.trim())
 
 // Hooks describe lifecycle, not task completion. Only an explicit report can say done.
 export const codexEvent = (previous: CodexReport | null, input: Record<string, unknown>, now: string, s: Strings): CodexReport => {
@@ -114,7 +141,9 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const agent = report.agent ?? 'codex'
   // The block id is a hash prefix; only the host's full id can match a live receiver.
   const resume = RESUME.test(report.session) ? ` resume=${report.session}` : ''
-  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${resume} -->`
+  // Only a run is marked: a person's session is the default, so its block stays as it was.
+  const run = report.origin === 'run' ? ` origin=run${report.parent !== undefined && RESUME.test(report.parent) ? ` parent=${report.parent}` : ''}` : ''
+  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${resume}${run} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const block = [marker, `### ${report.title}`, ...report.steps, `<!-- /auto session=${id} -->`].join(eol)
   // Use the board's scanner: Markdown examples are not task ownership, and a
@@ -146,4 +175,27 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const visible = parseProgress(next).flatMap(project => project.tasks).filter(task => task.auto?.session === id && task.auto.agent === agent)
   if (visible.length !== 1) throw new Error('BLOCK_NOT_VISIBLE')
   return next
+}
+
+export const dropCodexBlock = (text: string, owner: string): string => {
+  if (!/^[a-f0-9]{64}$/.test(owner)) return text
+  const lines = text.split('\n')
+  const spans = scanBlocks(lines).filter(span => span.session === owner.slice(0, 8))
+  const span = spans[0]
+  if (spans.length !== 1 || span === undefined) return text
+  const attrs = parseAttrs(lines[span.start] ?? '')
+  if (attrs.owner !== owner || attrs.agent !== 'codex') return text
+  // Like removeAutoBlock, an unfinished block loses only its marker. Slice the
+  // raw span so mixed line endings and every other writer's bytes stay intact.
+  const last = span.isClosed ? span.end : span.start
+  const offset = (index: number): number => lines.slice(0, index).reduce((total, line) => total + line.length + 1, 0)
+  // putCodexBlock opens a section of its own for a new block: when this block is all that section
+  // holds, its heading and the blank line before it go too, so nothing of the withdrawn run is left.
+  let first = span.start
+  const next = lines.slice(last + 1).find(line => line.trim() !== '')
+  if (first > 0 && PROJECT_HEADING.test(lines[first - 1] ?? '') && (next === undefined || PROJECT_HEADING.test(next))) {
+    first -= 1
+    if (first > 0 && (lines[first - 1] ?? '').trim() === '') first -= 1
+  }
+  return text.slice(0, offset(first)) + text.slice(offset(last + 1))
 }

@@ -1,6 +1,7 @@
 # Checks the pull request itself against CONTRIBUTING.md, Pull requests: the Fixes/Part of and
-# Author lines, the template sections, the claim, the CHANGELOG entry and its test titles, the
-# open pull request cap, and private data in added docs and pictures. The bundle is test.yml's job.
+# Author lines, the template sections, the CHANGELOG entry and its test titles, private data in
+# added docs and pictures and, for a contributor from outside the team, the claim and the open pull
+# request caps. The bundle is test.yml's job.
 # The checker script comes from the base branch, so a pull request cannot loosen the script that
 # judges it. This workflow file itself is read from the pull request, so a pull request that edits
 # it is a governance change (CONTRIBUTING.md rule 12) and is reviewed as one.

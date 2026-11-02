@@ -5,7 +5,7 @@
 // (board-cli.ts passes them in), so the page changes progress.md the way the pane does.
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
@@ -15,10 +15,13 @@ import { basename, delimiter, isAbsolute, join } from 'node:path'
 import { boardItems } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
-import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
+import { agentLabel } from '../hooks/strings'
+import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
+import { RELEASED } from '../hooks/released'
 import { createMessaging } from './board-messaging'
+import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
 
 export type ServeOptions = {
@@ -36,6 +39,11 @@ export type ServeOptions = {
   act: (action: BoardAction) => string
   // Every finished task to the archive now: the line to show.
   tidy: () => string
+  // The Clean up button: the sweep `--tidy` runs (agent blocks by age; hand-kept tasks only once the
+  // move is on, #464), the line to show.
+  clean: () => string
+  sweep: () => void
+  sweepMs: number
   paste: (text: string, reviewToken?: string) => { isAdded: boolean; note: string; review?: { token: string; current: string; incoming: string } }
   // Why the board or a press could not be made when it met a file the board could not read or
   // write (the note the terminal board shows), or null for an error of any other kind. A phone
@@ -59,6 +67,21 @@ const MAX_WAIT = 10 * 60 * 1000
 const KILL_WAIT = 15 * 1000
 
 const HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' }
+
+const versionParts = (version: string): number[] => version.split('.').map(Number)
+const isNewerVersion = (candidate: string, current: string): boolean => {
+  const next = versionParts(candidate)
+  const held = versionParts(current)
+  for (let index = 0; index < 3; index += 1) {
+    if ((next[index] ?? 0) !== (held[index] ?? 0)) return (next[index] ?? 0) > (held[index] ?? 0)
+  }
+  return false
+}
+const boardVersion = RELEASED.reduce((highest, release) => {
+  return isNewerVersion(release.version, highest) ? release.version : highest
+}, '0.0.0')
+const packageVersionValue = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
+const packageVersion = /^\d+\.\d+\.\d+$/.test(packageVersionValue) ? packageVersionValue : null
 
 const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { ...HEADERS, 'content-type': 'application/json; charset=utf-8' })
@@ -232,6 +255,7 @@ export const startServer = (o: ServeOptions): void => {
   })()
   const token = randomBytes(24).toString('base64url')
   const sending = new Set<string>()
+  const repoOf = repoLookup(worktreeRepoName)
   // The last answer of each session the page sent to, until the next send to that session. One
   // entry per session at most; the page shows those that came after it loaded.
   const replies = new Map<string, Result & { at: number; key: string }>()
@@ -309,11 +333,11 @@ export const startServer = (o: ServeOptions): void => {
   // seconds and the answer comes with it, however long the agent takes.
   const send = (target: AgentTarget, reply: string, title: string, cardKey: string): { status: number; note: string } => {
     const plan = sendPlan(target, reply, isWindows)
-    if (plan === null) return { status: 409, note: o.s.serveSendNone(target.agent) }
-    const label = `${target.agent} · ${title}`
+    if (plan === null) return { status: 409, note: o.s.serveSendNone(agentLabel(target.agent, o.s)) }
+    const label = `${agentLabel(target.agent, o.s)} · ${title}`
     if (plan.cwd !== null && !isFolder(plan.cwd)) return { status: 409, note: o.s.serveSendFailed(label, o.s.serveFolderGone(basename(plan.cwd))) }
     const key = sendKey(target)
-    if (sending.has(key)) return { status: 409, note: o.s.serveSendBusy(target.agent) }
+    if (sending.has(key)) return { status: 409, note: o.s.serveSendBusy(agentLabel(target.agent, o.s)) }
     sending.add(key)
     replies.delete(key)
     run(plan, o.s, label)
@@ -353,11 +377,27 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (req.method === 'GET') {
       if (url.pathname === '/api/board') {
-        // A file the board cannot read is named on the page, which would otherwise say it is offline.
+        // A file the board cannot read is named on the page, which would otherwise say it is offline. The page
+        // is always the grouped one; the old ?group=agent address asks for what every address gets now.
         try {
-          const shown = o.view()
-          const state = isLan ? undefined : messaging.snapshot(Date.now(), o.reports?.(false))
-          return json(res, 200, { model: serveModel(shown, o.pending(false), o.s, sending, isLan, state, o.allowResume), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now: Date.now() })
+          const now = Date.now()
+          const view = o.view()
+          const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
+          const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
+          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now }
+          // The page already compares its clock at minute precision. Keep that refresh boundary
+          // without treating each millisecond as changed content; replies and receipts stay exact.
+          const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
+          const etag = `W/"${createHash('sha256').update(fingerprint).digest('hex')}"`
+          const matches = req.headers['if-none-match']?.split(',').some(value => value.trim() === '*' || value.trim().replace(/^W\//, '') === etag.slice(2))
+          if (matches) {
+            res.writeHead(304, { ...HEADERS, etag })
+            res.end()
+            return
+          }
+          res.writeHead(200, { ...HEADERS, etag, 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify(payload))
+          return
         } catch (error) {
           const note = o.failure(error, isLan)
           if (note === null) {
@@ -392,7 +432,8 @@ export const startServer = (o: ServeOptions): void => {
     try {
       if (url.pathname === '/api/act') {
         const state = isLan ? undefined : messaging.snapshot(Date.now())
-        const action = serveAction(boardItems(o.view(), o.pending()), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, state?.connections, true, o.allowResume)
+        // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
+        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, state?.connections, true, o.allowResume)
         if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})
@@ -416,6 +457,10 @@ export const startServer = (o: ServeOptions): void => {
       }
       if (url.pathname === '/api/tidy') {
         const note = o.tidy()
+        return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
+      }
+      if (url.pathname === '/api/clean') {
+        const note = o.clean()
         return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
       }
       if (url.pathname === '/api/paste') {
@@ -467,14 +512,17 @@ export const startServer = (o: ServeOptions): void => {
   server.listen(o.port, '127.0.0.1', () => {
     port = (server.address() as AddressInfo).port
     const url = `http://127.0.0.1:${port}/?t=${token}`
-    if (!o.onReady(url, port)) stop()
-    else {
-      // Preparing the protected address may block; inactivity starts after publication.
-      lastSeen = Date.now()
-      if (o.isDefaultMessagesDirectory) {
-        // A later --serve asks this address before moving a lock this hub left behind.
-        try { messaging.recordOwner(port, url) } catch {}
-      }
+    if (!o.onReady(url, port)) {
+      stop()
+      return
     }
+    // Preparing a private address can block; inactivity starts once that address is ready.
+    lastSeen = Date.now()
+    if (o.isDefaultMessagesDirectory) {
+      // A later --serve asks this address before moving a lock this hub left behind.
+      try { messaging.recordOwner(port, url) } catch {}
+    }
+    const sweeper = setInterval(() => { try { o.sweep() } catch {} }, o.sweepMs)
+    server.on('close', () => clearInterval(sweeper))
   })
 }

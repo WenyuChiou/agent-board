@@ -1,0 +1,2 @@
+- **Reporters / Matching cut-tail detection** · Native reporters detect cut tails with the same UTF-8 rules as the board, including headings with non-breaking spaces. Repair keeps the exact earlier bytes, including malformed UTF-8 (#298).
+  Tests: `the reporter and the board agree on a cut tail when a heading uses a non-breaking space`, `repairing a cut tail preserves multibyte and malformed UTF-8 before its byte boundary`.

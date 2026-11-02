@@ -2,41 +2,39 @@
 
 This page sets how much work is open at once, when a finding becomes an issue, and how a pull request goes from claim to merge. It applies to every agent and person working in this repository: Claude Code sessions, Codex, dot and Muse, and agents on other computers. [CONTRIBUTING.md, Pull requests](../../CONTRIBUTING.md#pull-requests) has the rules each pull request must meet; where the two disagree, CONTRIBUTING.md wins.
 
+If you work from outside the team, [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md) gives every step you need. The parts of this page about lanes, Codex runs, dot and Muse, the roadmap line and the weekly table are about the owner's own agents.
+
 ## Mode and settings
 
 This repository follows the multi-agent workflow standard that its maintainer keeps on the owner's computer. [Part B](#part-b--contributors-copied-into-each-repos-workflow-file), at the end of this page, is a copy of the steps that standard asks of every contributor. Where this page or CONTRIBUTING.md says something different, they win.
 
-- **Mode:** supervised. The coordinator is the maintainer: the Claude Code session on the owner's computer that the owner has named maintainer of this repository (CONTRIBUTING rule 8). Only the owner or the maintainer merges (rule 8); the maintainer tags releases and makes the GitHub release ([RELEASING.md](../RELEASING.md)). Supervised concerns the owner's computer only: sessions there push only when the owner says so. It is not a rule for other contributors, who push their own branches as [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md) says. This mode changes only after the owner turns on automatic pushes for this repository.
-- **Lanes and files:** lanes own no files. A `for-dot` issue names the files allowed ([Who takes which issue](#who-takes-which-issue)); any other issue says what to change. `hooks/board-script.ts` and `hooks/released.ts` are generated: never edit or merge them by hand; rebuild them with Bun 1.4.2, or write "maintainer rebuilds at merge" under Checks ([brief-rules.md](brief-rules.md) item 7). Everyone shares the string tables (`hooks/i18n.ts`, `hooks/strings-en.ts`, `hooks/strings-zh-cn.ts`). Host hooks, tests that start processes, `hooks/pane.tsx`, `hooks/register.tsx` and connect stay with agents that can run the plugin tests locally.
-- **Caps:** at most five lanes plus the maintainer, and at most two Codex runs at once on one computer. Pull requests: [One thing at a time](#one-thing-at-a-time).
-- **Releases:** the maintainer prepares, reviews and merges the release pull request under the owner's authorization; only the owner publishes to npm ([CONTRIBUTING.md, Releases](../../CONTRIBUTING.md#releases), [RELEASING.md](../RELEASING.md)).
+- **Mode:** supervised. The coordinator is the maintainer: the Claude Code session on the owner's computer that the owner has named maintainer of this repository (CONTRIBUTING rule 8). A collaborator with write access, the maintainer or the owner merges once someone other than the author has approved (rule 8); the maintainer tags releases and makes the GitHub release ([RELEASING.md](../RELEASING.md)). Supervised concerns the owner's computer only: sessions there push only when the owner says so. It is not a rule for other contributors, who push their own branches as [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md) says. This mode changes only after the owner turns on automatic pushes for this repository.
+- **Lanes and files:** lanes own no files. A `for-dot` issue names the files allowed ([Who takes which issue](#who-takes-which-issue)); any other issue says what to change. `hooks/board-script.ts` and its parts (`hooks/board-script-*.ts`) and `hooks/released.ts` are generated: never edit or merge them by hand; rebuild them with Bun 1.4.2, or write "maintainer rebuilds at merge" under Checks ([brief-rules.md](brief-rules.md) item 7). Everyone shares the string tables (`hooks/i18n.ts`, `hooks/strings-en.ts`, `hooks/strings-zh-cn.ts`). Host hooks, tests that start processes, `hooks/pane.tsx`, `hooks/register.tsx` and connect stay with agents that can run the plugin tests locally.
+- **Caps:** at most five lanes plus the maintainer, and at most two Codex runs at once on one computer. The team has no limit on open pull requests or issues ([How much is open at once](#how-much-is-open-at-once)).
+- **Releases:** the maintainer prepares the release pull request, and it merges and is tagged, with no one's go-ahead, once the release gate passes ([RULES.md, R7](RULES.md#r7-releases-go-out-by-themselves)); only the owner publishes to npm, until npm trusted publishing is set up ([CONTRIBUTING.md, Releases](../../CONTRIBUTING.md#releases), [RELEASING.md](../RELEASING.md)).
 - **Agents on other computers** take issues labelled `for-agent` and `ready`; `for-dot` is for dot or Muse (CONTRIBUTING rule 3). No label names a computer.
-- **Hold list:** there is none in this repository. A finding that is not an issue goes in a comment on one of the issues you are working on (CONTRIBUTING rule 2), and the maintainer files the ones that qualify ([When a finding becomes an issue](#when-a-finding-becomes-an-issue)).
+- **Hold list:** there is none in this repository. A finding goes in an issue of its own, or in a comment on the issue that already has it ([When a finding becomes an issue](#when-a-finding-becomes-an-issue)).
 - **Where Part B differs here, and why.** CONTRIBUTING.md is the rule here, so where Part B asks for something else, do this:
-  - Which issue (B1 step 1, B7): one labelled `ready` and `for-agent` (`for-dot` for dot or Muse), not `blocked`, and not `claimed` unless the claim has run out (rule 3). No issue is assigned or labelled by computer.
-  - Claim, Ready, review and Handover (B1 steps 1, 7 and 8, B6): [From claim to merge](#from-claim-to-merge) and rules 3, 7 and 14 ask for more: the claim's end time and the `claimed` label; `gh pr ready` and the preflight output with Ready; an answer to each finding in a comment and a merge of `main` before the new Ready; a push before a Handover, the checks run in it, and removing `claimed`.
+  - Which issue (B1 step 1, B7): one labelled `ready` and `for-agent` (`for-dot` for dot or Muse) and not `blocked`. The team needs no claim (rule 3), so a `claimed` label or a `Claim:` comment is not required; if someone says on the issue that they work on it, comment on theirs instead of starting a competing pull request. A contributor from outside the team claims the issue first. No issue is assigned or labelled by computer.
+  - Ready, review and Handover (B1 steps 1, 7 and 8, B6): the team needs no claim, so B1 step 1 does not apply to it. [From claim to merge](#from-claim-to-merge) and rules 7 and 14 ask for more: `gh pr ready` and the preflight output with Ready; an answer to each finding in a comment, and a merge of `main` before the new Ready only if GitHub reports a conflict; a push before a Handover, and the checks run in it. A contributor from outside the team also claims (rule 3) and removes `claimed` when it hands over.
+  - Findings (B2): anyone may open an issue for a finding, including audit or test findings, with no limit (B2's "open an issue only where the repo's rules tell you to" does not apply), and there is no hold list ([When a finding becomes an issue](#when-a-finding-becomes-an-issue)); a finding outside the issues on the pull request stays out, even when it concerns the same files (CONTRIBUTING rules 2 and 9).
+  - Merge (B1 step 9): the instruction "you never do" does not apply here. A collaborator with write access, the maintainer or the owner may review and merge as CONTRIBUTING rules 8, 9 and 12 permit; the maintainer handles release tags and the GitHub release.
   - Files (B1 step 3, B4): lanes own no files, and the string tables have no lane sections, so a new key goes in the same place in all three tables (AGENTS.md, Conventions in the code).
   - Tests (B1 step 4): only the test files your change touches, one run at a time; no full suite runs on your own computer, except `claude plugin test .` (AGENTS.md, Checks).
-  - Findings (B2): nothing outside the issues on your pull request goes into it, not even a fix in the same files (rules 2 and 9); put it in a comment on one of your issues.
-  - Stacked pull requests (B5): none. Branch from current `main` (rule 4) and claim the next issue only after your pull request merges ([One thing at a time](#one-thing-at-a-time)).
+  - Stacked pull requests (B5): none. Branch each pull request from current `main` (rule 4). The team may have as many open as it needs ([How much is open at once](#how-much-is-open-at-once)), so B3's "at most one PR of yours waiting for review or CI" does not apply.
+  - Keeping current (B4): merge `main` into your branch, and never rebase a pushed branch, but only when GitHub reports a conflict. A pull request that is only behind `main` merges as it is once its checks pass (rule 4, [Merge order](#merge-order)). The coordinator may merge `main` into your branch to clear a conflict, or to rebuild the bundle when the merged result needs it ([Merge order](#merge-order)): run `git pull --ff-only` before your next commit.
   - Blocked (B6): ask in a comment starting `Question:` and add the `question` label; while you wait, keep working on what the question does not touch, or hand over (CONTRIBUTING.md, Questions; rule 14). You need not end your session. Wenyu, named in B6, is the owner.
-  - The `Agent:` trailer (B1 step 6, B7) is not required yet. Until CONTRIBUTING.md asks for it, the `Author:` line (rule 10) is what tells agents apart.
+  - The `Agent:` trailer (B1 step 6, B7) is not required yet. Until CONTRIBUTING.md asks for it, the `Author:` line (rule 7) is what tells agents apart.
 
-## One thing at a time
+## How much is open at once
 
-- Each author (an agent and its lane, CONTRIBUTING rule 10) works on one pull request at a time: one feature (it may span several issues), or two or three bug fixes, never more than three (CONTRIBUTING rule 2). It has at most one pull request waiting for review or CI. Claim the next issues after that pull request merges.
-- An author has at most two open pull requests (CONTRIBUTING rule 10). Open pull requests stay at six or fewer; eight is the hard cap.
-- Work in the next milestone only. Milestones after the next one are parked: no claims there until the release before them ships. Each new milestone opens with at most 15 issues, each with an owner, and the rest wait in Later.
+- A pull request is one feature (it may span several issues), or two or three bug fixes, never more than three (CONTRIBUTING rule 2). The team has no limit on how many pull requests it has open, how many issues it works on or how many it opens, and needs no claim on an issue; a comment saying who works on one is welcome and nothing checks it (CONTRIBUTING rules 3 and 10).
+- A contributor from outside the team claims an issue first (rule 3) and has at most two open pull requests per GitHub login and four from outside the team in all (rule 10); [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md) has the steps.
+- Work in the next milestone only. Milestones after the next one are parked: no work starts there until the release before them ships. An issue labelled `for-agent` is the exception: the maintainer labels it so an agent outside the team can take it whatever its milestone. A milestone has no limit on its number of issues.
 
 ## When a finding becomes an issue
 
-A finding becomes a new issue only if it:
-
-- loses the person's work or data,
-- tells the person something untrue, or
-- blocks an open pull request.
-
-Anything else you find goes in a comment on one of your own issues (CONTRIBUTING rule 2), and the maintainer files it if it qualifies. The same problem on another surface is a comment on the issue that already has it. An audit or a test run that finds many problems hands in one list in a comment, not a batch of issues. Until fewer than 60 issues are open, at most three new issues a day. An issue that CONTRIBUTING.md requires (a merge without an approving review, rule 9; undoing a merged pull request, rule 11) is always allowed and does not count toward that limit.
+Anyone may open an issue through the issue forms: a bug, something the board says that is untrue, or an idea. Search the open issues first: the same problem on another surface is a comment on the issue that already has it. Keep to one problem per issue, including findings from an audit or a test run. There is no limit on how many issues are open or opened in a day. A finding outside the pull request you are working on goes in an issue of its own or a comment on the issue that already has it, never into that pull request (CONTRIBUTING rule 2).
 
 ## Closing more than we open
 
@@ -48,26 +46,54 @@ Each step is one comment on GitHub, so an agent on another computer can see whos
 
 | Step | Who | Comment |
 |---|---|---|
-| Claim | author | `Claim: <agent>, <branch>, until <YYYY-MM-DD HH:MM> UTC` on each issue the pull request names, and the `claimed` label (CONTRIBUTING rule 3) |
+| Claim | author from outside the team | `Claim: <agent>, <branch>, until <YYYY-MM-DD HH:MM> UTC` on each issue the pull request names, and the `claimed` label (CONTRIBUTING rule 3); the team needs none |
 | Draft | author | the pull request, opened as a draft |
 | Ready | author | once the PR check and CI pass: `gh pr ready`, then a comment that starts `Ready for review <full head sha>`, with the preflight output under Checks |
-| Review | reviewer | `Review: APPROVE <full head sha>` or `Review: REQUEST CHANGES <full head sha>`, naming the reviewer (`by owner`, `by maintainer` or `by code-review subagent`), with all findings at once (CONTRIBUTING rule 9) |
-| Changes | author | an answer to each finding in a comment, the fixes, a merge of `main`, then a comment that starts `Ready for review <new head sha>` |
-| Merge | maintainer | a squash merge of the exact head named in `Review: APPROVE`, then the evidence on each issue; a pull request that changes `.github/workflows/` merges as CONTRIBUTING rule 12 says |
+| Take a review | anyone who may review except the author (CONTRIBUTING rule 8) | a comment `Reviewing: <GitHub login or agent>` on a pull request marked Ready (rule 9) |
+| Review | reviewer | `Review: APPROVE <full head sha>` or `Review: REQUEST CHANGES <full head sha>`, naming the reviewer (`by <GitHub login or agent>`), with all findings at once (CONTRIBUTING rule 9); the reviewer is not the author (rule 8) |
+| Changes | author | an answer to each finding in a comment, the fixes, a merge of `main` only if GitHub reports a conflict, then a comment that starts `Ready for review <new head sha>` |
+| Merge | a collaborator with write access, the maintainer or the owner | a squash merge of the current head once the approval and checks required by CONTRIBUTING rule 9 hold, then the evidence on each issue; a pull request that changes `.github/workflows/` merges as CONTRIBUTING rule 12 says |
 
-- The maintainer gives a verdict within four hours of Ready during the maintainer's day, and by the next morning at the latest. There is no review without the preflight output.
-- A review asks for what the issue, [brief-rules.md](brief-rules.md), CONTRIBUTING.md and AGENTS.md require, and for anything in the diff that breaks behaviour. Anything else becomes a note for later, not another review round.
-- After a second REQUEST CHANGES, the maintainer's next comment gives each change by file and line. The third round is the last: after it, the maintainer takes the branch over and finishes it, as in a handover (CONTRIBUTING rule 14). From then on the maintainer has written part of the pull request, so its verdict comes from a code-review subagent or the owner (CONTRIBUTING rule 8).
+- Any collaborator with write access, the maintainer or the owner may take a Ready pull request it did not write; the maintainer and every collaborator may also have their own pull requests approved by a code-review subagent they run, under rule 8's conditions. The maintainer offers its own pull requests to the collaborators first: it requests their review on the pull request and says so in a comment, and a code-review subagent or Codex reviews one only when no collaborator has commented `Reviewing:` within four hours of Ready (owner, 2026-10-30). The maintainer makes sure each one gets a verdict within four hours of Ready during the maintainer's day, and by the next morning at the latest, and reviews it itself when nobody else has. There is no review without the preflight output. Every reviewer starts from `node scripts/review-queue.mjs` at the start of each work block and after each merge, so no Ready pull request waits unseen. The same output ends with the lanes whose worktree is more than 2 hours old and whose branch has no open or draft pull request (the rule is a draft within 1 hour and a report at 2); a failed lookup prints a note and never hides a lane.
+- An agent standing in for the maintainer, such as a Codex run while the maintainer session is away, offers its own pull requests to the collaborators, and counts as an author of every pull request it opened, wrote part of or wrote the brief for: neither its own approval nor that of a code-review subagent it runs counts for one of those, so a collaborator or the owner approves them (owner, 2026-11-01).
+- A collaborator who will be away for more than a day comments `Away: until <YYYY-MM-DD>` on the roadmap issue #209, at most 14 days ahead, and `Back` on return; the owner may end a notice with one comment. While every collaborator other than the pull request's author has a notice standing, or when no collaborator has commented `Reviewing:` within 24 hours of Ready, a pull request that the line above sends to a collaborator or the owner may merge after notice instead: its author comments `Merging after <UTC time> unless someone objects` with the full head sha, naming a time at least 48 hours after this comment and after that head's `Ready for review`, and at that time the author, the maintainer, a collaborator or the owner merges it if every check rule 9 requires has passed on that head, a code-review subagent its author runs has posted `Review: APPROVE <full head sha>` for it as CONTRIBUTING rule 8 says (on this path it counts even for the stand-in), no P0 or P1 from a review bot or the subagent stands unresolved, and nobody has posted `Review: REQUEST CHANGES` or objected. A push, a `Reviewing:` comment from a collaborator or the owner, a collaborator's `Back`, or an objection before the merge cancels the notice and sends the pull request back to the line above. A governance, workflow or release pull request never merges this way. Within 7 days, a collaborator, the maintainer or the owner who did not write it reviews each pull request merged this way; a finding becomes an issue (owner, 2026-11-01).
+- A bot's review (Codex Code Review, Greptile) with no findings is input for the reviewer, not an approval: only a `Review: APPROVE <full head sha>` comment counts (owner, 2026-11-01).
+- A pull request that changes the board page's messages, the setup output or the one-line row summaries also runs the journeys it touches in [USER-SIM.md](../validation/USER-SIM.md) on its head, and puts their PASS, FRICTION or FAIL rows under Checks. An AI simulated user runs them, the author's own agent included: the rows are evidence for the reviewer, not an approval. A FAIL, or a FRICTION with no issue, keeps it from merging. This replaces the walk through #572 by a person (owner, 2026-11-01).
+- A review asks for what the issue, [brief-rules.md](brief-rules.md), CONTRIBUTING.md and AGENTS.md require, and for anything in the diff that breaks behaviour. A change that none of the pull request's issues needs is a must-fix in the first review: take it out, and open an issue for it if it is worth keeping (owner, 2026-11-01). Anything else becomes a note for later, not another review round.
+- After a second REQUEST CHANGES, the reviewer's next comment gives each change by file and line. The third round is the last: after it, the reviewer or the maintainer takes the branch over and finishes it, as in a handover (CONTRIBUTING rule 14). From then on whoever took it over has written part of the pull request, so the verdict comes from someone else (CONTRIBUTING rule 8).
+- A team author (CONTRIBUTING rule 3: the owner, members and collaborators, and their agents) who neither pushes nor replies within 6 hours of a REQUEST CHANGES has handed the pull request over; the 6 hours count only within the author's working day, as the four-hour review rule counts the maintainer's. The maintainer may then take the branch over and finish it as in CONTRIBUTING rule 14, and as above the verdict then comes from someone else, or close it with a note on its issues (owner, 2026-11-01).
+- When the cause of a failure is still unknown after two fix attempts, the author stops, writes on the issue what was tried with a `Question:`, and takes other work. A raised timeout, a lowered bar or an added retry is never the fix for an unknown cause (owner, 2026-11-01).
 
 ## Merge order
 
-When several pull requests are green, pull requests that change neither `hooks/board-script.ts` nor the string tables merge first, smallest first. Then pull requests that change either merge one at a time, the oldest Ready first. For each, the maintainer merges `main` into the branch, rebuilds the bundle with Bun 1.4.2, reviews the new head and comments `Review: APPROVE <new head sha>` (CONTRIBUTING rules 4 and 9), waits for CI and merges. Afterwards the maintainer comments "main moved, merge it" on the other open pull requests.
+When several pull requests are green, pull requests that change neither `hooks/board-script.ts` and its parts (`hooks/board-script-*.ts`) nor the string tables merge first, smallest first. Then pull requests that change either merge one at a time, the oldest Ready first. A pull request that is behind `main` merges as it is once its checks pass. Only a conflict needs the author to merge `main` into the branch; the author or the maintainer then rebuilds the bundle with Bun 1.4.2 if the branch changes it. A check that fails without a conflict because the merged result needs a rebuilt bundle is the maintainer's: the maintainer merges `main` and rebuilds the bundle. A new verdict is required unless that merge of `main` has no conflicts and nothing else in the merge commit (CONTRIBUTING rules 4 and 9). Once the current head has passed the checks and has the approval rule 9 requires, a collaborator with write access, the maintainer or the owner may merge. Afterwards the maintainer comments "conflict with main, merge it" on an open pull request that `main` now conflicts with, and on no other.
+
+Nobody waits idle on CI. After an approval, start a background wait that merges with `--match-head-commit <sha>` once every check passes, and take the next pull request in the queue. Do not update a branch that is only behind `main` (`gh pr update-branch`): that gives it a new head, so the old wait cannot merge it and a new wait must be pinned to the new head, and the approval carries over only when the update merged `main` without conflicts (CONTRIBUTING rule 9).
+
+## Flaky and slow tests
+
+A test that fails in CI and passes on a rerun of the same head is flaky; a test that takes more than half its timeout in CI is slow. Either one gets a `bug` issue the same day, with the run links, the job, the system, and the time against the timeout; a later failure adds its run to that issue. Before a rerun, the run link and the test's title go in a comment on the pull request, and only the failed job is rerun, once. The fix is at the cause: what the test waits for, what it races with, what it reads before it is written. Raising a timeout, checking less, skipping the test, marking it todo or calling the machine slow is not a fix (owner, 2026-10-26). When such a test fails a required job, every pull request pays for it, so the issue goes in the current milestone and the maintainer starts on it the same day, through a Codex run or a lane, unless a claim already stands (owner, 2026-11-01).
+
+## Pull requests from forks
+
+Checks on a pull request from a fork wait for approval from a collaborator with write access, the maintainer or the owner, for every outside contributor and every push (the repository's Actions setting).
+
+- **Approving a run.** A collaborator with write access, the maintainer or the owner may approve a held run; the maintainer looks for held runs at least once a day. Before approving, read the whole diff under Files changed, `.github/`, `scripts/` and `tests/` first: a pull request's own workflow files decide what its run does, and CI runs its own test files. Approve the run for the newest head only.
+- **If many arrive at once.** The owner can limit issues, comments and pull requests to people who have contributed before, for one week: `gh api -X PUT repos/WenyuChiou/agent-board/interaction-limits -f limit=contributors_only -f expiry=one_week`. `gh api -X DELETE repos/WenyuChiou/agent-board/interaction-limits` lifts it. It is a brake for a flood, not a standing rule.
+- **A pull request that skips the rules** gets one comment pointing to [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md) and what is missing. It is closed only if nothing changes in a week.
+
+## Standing approvals
+
+Kinds of governance change the owner approves in advance (CONTRIBUTING rule 12). A pull request whose every change is of one kind below quotes that line and its date in its body in place of a new approval; anything else asks the owner as rule 12 says.
+
+- Outside `.github/workflows/`: wording, spelling, links and formatting, and bringing another copy (AGENTS.md, CONTRIBUTOR-PATH.md, the issue forms, the pull request template) in line with a rule already merged, when nothing changes who may do what or what a check enforces (owner, 2026-11-01).
+- Raising the pinned Claude Code, Bun or Node version in a workflow, with nothing else in that file changed, once CI passes on it (owner, 2026-11-01).
 
 ## Who takes which issue
 
 - Issues labelled `for-dot` and `ready` suit an agent working only through GitHub: pure modules with plain Node tests, documentation in all three languages, and the Python reporter. The issue names the files allowed, the exact test titles and the fragment text.
 - Host hooks, tests that start processes, `hooks/pane.tsx`, `hooks/register.tsx` and connect stay with agents that can run the plugin tests locally.
-- The maintainer sets `for-dot` and `ready`, the claim adds `claimed`, and `blocked` means wait.
+- The maintainer sets `for-dot` and `ready`, a claim from outside the team adds `claimed`, and `blocked` means wait.
 
 ## How each agent is doing
 
@@ -79,11 +105,11 @@ Every week the maintainer posts, for each agent (`node scripts/team-stats.mjs --
 - review rounds per pull request (aim: 1.5 or fewer);
 - regressions (aim: none). A regression is an issue with a line that starts `Regression of #N` or `Caused by #N`, naming the merged pull request that caused it (CONTRIBUTING rule 11).
 
-The agent is the words before the first comma of the pull request's `Author:` line (CONTRIBUTING rule 10), so write them the same way every time; a pull request without the line counts as `unknown`.
+The agent is the words before the first comma of the pull request's `Author:` line (CONTRIBUTING rule 7), so write them the same way every time; a pull request without the line counts as `unknown`.
 
 An agent below these aims two weeks running takes smaller issues for a while: one at a time, a single module with Node tests, and briefs whose Checks the maintainer writes. It goes back to normal after two first-review approvals in a row.
 
-<!-- part-b:start source=~/.claude/docs/PROJECT_WORKFLOW.md sha256=a7fa8b2842a77a1726abc845d8ced9dc2806d1d06b878bf76d7e00943c3d4d2c -->
+<!-- part-b:start source=PROJECT_WORKFLOW.md sha256=f6a68dab110a00e3d81c3f9c3105148ed54791da521a49aabc85c38600b46712 -->
 ## Part B — contributors (copied into each repo's workflow file)
 
 ### B1. The steps
@@ -107,8 +133,6 @@ Open an issue only where the repo's rules tell you to (agent-board: when no issu
 - In the PR body, give each issue its own `Fixes #N` or `Part of #N` line and its evidence (B1 step 6).
 - If review finds a problem in one issue, take that issue out of the PR (its changes, its changelog fragment and its `Fixes #N` or `Part of #N` line) and say so on the issue; fix it later in another PR, and do not hold up the rest.
 - One branch per PR, and at most one PR of yours waiting for review or CI.
-
-(Wenyu 2026-10-21: one issue per PR was too slow; 「新增功能(可以主要大功能發一個PR) bug 可以其中2-3個一起發」.)
 
 ### B4. Shared files
 - The repo file lists which files each lane owns. A PR that changes another lane's files needs one of its issues to name that lane.

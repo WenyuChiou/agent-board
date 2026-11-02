@@ -52,8 +52,13 @@ node ~/.agent-board/agent-board.mjs --codex-report
 {"title":"Check the installer","project":"Agent-Board","state":"working","steps":["- [x] Read setup","- [~] Run tests"]}
 ```
 
-`CODEX_THREAD_ID` binds to the current thread, never a name or a conversation file.
-`--session` is for explicit offline fixtures, not for a skill to select another chat.
+`--session` or `CODEX_THREAD_ID`, when supplied, binds to that exact thread. Otherwise the
+command binds only when one recent working or waiting Codex hook record has the same cleaned
+working-folder name. Older records without a folder and runs, weak or strong, are excluded; zero or
+multiple candidates bind nothing. This lets a Codex App session report without the variable.
+If no session binds, the command exits non-zero with one board sentence; the agent continues
+its work without repeating that notice. `--session` is for explicit offline fixtures, not for
+a skill to select another chat.
 The block id is derived from the full thread id; its full ownership digest prevents a
 short-id collision from overwriting another block. Only that block changes. Explicit
 reports work in an existing desktop conversation. Skill discovery may need a new turn
@@ -78,8 +83,28 @@ block `ended` merely to avoid duplicate cards. Finish a completed task as `done`
 unfinished work waiting. `ended` is reserved for observed session termination or an explicit
 decision to stop that work permanently.
 
-Hooks keep only selected metadata. They ignore `transcript_path`, prompts, tool inputs,
-assistant messages and permission decisions, never read transcripts, and call no model.
+Hooks keep only selected metadata. They ignore prompts, tool inputs, assistant messages and
+permission decisions, and call no model. The one thing they open from `transcript_path` is the
+first record of the session's own Codex history file (the `rollout-<time>-<session id>.jsonl` file named for the
+session; another session's file is never opened), at a session's start and at each prompt. The
+file is read in pieces of 4 KiB until the one that holds the first line break, so up to 4 KiB
+after the break is read into memory; only the bytes before the break are decoded, and of that
+record they keep four short fields (`originator`, `source`, `thread_source`,
+`parent_thread_id`) and nothing else. Those fields say whether a person started the session:
+a `codex exec` run, a helper thread, a subagent, a non-user `thread_source`, a
+`parent_thread_id`, or a `codex_exec` / `codex_sdk` / `codex_mcp` originator proves a run.
+It keeps its local session record but writes no block, row, run count or question
+([FORMAT.md](FORMAT.md#runs-an-agent-started)). A weak hint, such as no history path,
+keeps the earlier marked-block behavior; a later strong signal replaces it.
+
+A first explicit report without a hook record and the board script's tidy can also find
+the session's own history under `CODEX_HOME/sessions/YYYY/MM/DD/` (or `--codex-dir`,
+else the home's `.codex`). Lookup reads at most 60 directories, newest first, and uses the
+same exact filename rule and first-record reader. Tidy checks at most 50 sessions, newest
+block first, caching each result for that pass. An old run block, marked or unmarked,
+moves through the normal archive path as soon as its record proves it is a run, including
+a block with a question. Missing, unreadable or unrecognized history provides no run proof.
+The optional Claude plugin sweep does not open history files and keeps its current age rules.
 A permission event marks waiting; no output approves a tool or merge. `Stop` marks activity waiting, never conversation termination or task completion. Detailed steps and completion still come from explicit reports.
 Disconnected or untrusted hooks cannot update activity; existing stale-time rules apply.
 
@@ -109,7 +134,7 @@ node ~/.agent-board/agent-board.mjs --codex-remove
 node ~/.agent-board/agent-board.mjs --codex-remove --apply
 ```
 
-Doctor checks generated file hashes and hook definitions, reporting hook trust as unknown.
+Doctor checks generated file hashes and hook definitions, querying Codex trust when a binary is supplied or discovered on PATH/LOCALAPPDATA, or inspecting config.toml when Codex is not available.
 Reinstall repairs missing generated files; edited files or hooks require review. Removal
 takes only unchanged owned files and exact owned hook groups. It preserves progress,
 session records, archives, journals and foreign hooks. Close a test board with its Close
@@ -141,10 +166,12 @@ Installation and hook trust are separate. Agent-assisted trust needs one explici
 confirmation for six exact definitions, instead of asking the person to navigate a CLI:
 
 ```sh
-node /path/to/installed/agent-board.mjs --codex-trust --codex-bin /absolute/path/to/codex
+node /path/to/installed/agent-board.mjs --codex-trust --codex-bin /absolute/path/to/codex --json
 # After the person approves the displayed config.toml scope and six hashes:
-node /path/to/installed/agent-board.mjs --codex-trust --codex-bin /absolute/path/to/codex --apply
+node /path/to/installed/agent-board.mjs --codex-trust --codex-bin /absolute/path/to/codex --json --apply
 ```
+
+Without `--json`, both commands print one plain line for the person: what would be or was trusted, and the next step.
 
 Resolve the actual executable; do not guess a desktop binary location. Preview does not
 write. Apply requires an intact owned installation, rediscovers the same definitions,

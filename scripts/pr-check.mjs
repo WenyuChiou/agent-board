@@ -4,10 +4,18 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
+import { bundleFiles, isBundleFile } from './bundle-text.mjs'
 
-// The open pull request cap the owner approved for CONTRIBUTING.md rule 10 (#229): per author, and in all.
-export const AUTHOR_CAP = 2
-export const TOTAL_CAP = 8
+// Pull requests from outside the team (CONTRIBUTING.md, Outside contributors; #482): two open per GitHub login and
+// four in all. The team has no limit on open pull requests (#607).
+export const OUTSIDE_LOGIN_CAP = 2
+export const OUTSIDE_TOTAL_CAP = 4
+// A small docs fix from outside the team (CONTRIBUTING.md rule 2) needs no issue line, claim or changelog fragment.
+export const SMALL_DOCS_FILES = 3
+export const SMALL_DOCS_LINES = 50
+// Larger than either of these, an outside pull request gets a note (never a failure).
+export const OUTSIDE_NOTE_LINES = 500
+export const OUTSIDE_NOTE_FILES = 15
 // The most issues a fix pull request may name (CONTRIBUTING.md rule 2); a feature pull request has no limit.
 export const FIX_ISSUE_CAP = 3
 
@@ -18,6 +26,20 @@ const isReleaseTitle = title => /^chore\(release\):/.test(title)
 // The type is read as rule 6 reads it for the CHANGELOG: the word before "(", "!" or ":".
 const isFixTitle = title => /^fix[(!:]/.test(title)
 const linesOf = text => text.split(/\r?\n/)
+
+// The owner's agents all post as the OWNER, so only another association is outside; an association that is not
+// known (a local --body-file run) reads as the team and changes nothing.
+export const isOutsideAssociation = association => typeof association === 'string' && association.trim() !== '' && !['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association.trim().toUpperCase())
+const isKnownAssociation = association => typeof association === 'string' && association.trim() !== ''
+
+// A docs: pull request that changes only README*.md or docs/**/*.md (not docs/FORMAT.md or docs/dev/), in at most
+// three files and 50 added lines.
+const isSmallDocsPath = path => {
+  const lower = path.toLowerCase()
+  return /^README[^/]*\.md$/.test(path) || (/^docs\/.+\.md$/.test(lower) && lower !== 'docs/format.md' && !lower.startsWith('docs/dev/'))
+}
+export const isSmallDocsFix = ({ title, paths, added }) => /^docs(?::|\()/.test(title)
+  && paths.length > 0 && paths.length <= SMALL_DOCS_FILES && paths.every(isSmallDocsPath) && added.length <= SMALL_DOCS_LINES
 
 export const stripComments = body => body.replace(/<!--[\s\S]*?(?:-->|$)/g, '')
 
@@ -71,7 +93,7 @@ export const addedLines = unifiedDiff => {
   return added
 }
 
-export const issueLine = (body, title) => {
+export const issueLine = (body, title, { isOptional = false } = {}) => {
   const output = { issue: null, kind: null, issues: [], ...result() }
   if (isReleaseTitle(title)) {
     output.info.push('issue: release pull requests need no issue line.')
@@ -86,7 +108,8 @@ export const issueLine = (body, title) => {
     listed.push({ number: Number(match[2]), kind: match[1].toLowerCase() })
   }
   if (!listed.length) {
-    output.problems.push(problem('issue', 'the first non-empty body line must name one issue.', 'add "Fixes #N" or "Part of #N" as the first line.'))
+    if (isOptional) output.info.push('issue: a small docs fix needs no issue line.')
+    else output.problems.push(problem('issue', 'the first non-empty body line must name one issue.', 'add "Fixes #N" or "Part of #N" as the first line.'))
     return output
   }
   output.issue = listed[0].number
@@ -106,19 +129,23 @@ export const issueLine = (body, title) => {
   return output
 }
 
+// The branch as a whole word: "fix/a" is not named by "fix/ab", and it may sit in backticks or before punctuation.
+const namesBranch = (text, branch, boundary = '[\\s`,();.]') => {
+  return new RegExp(`(?:^|${boundary})${escapeRegex(branch)}(?=$|${boundary})`).test(text)
+}
+
 export const authorLine = (body, branch) => {
   const output = { agent: null, ...result() }
   const author = stripComments(body).match(/^Author:[ \t]*(.*)$/m)?.[1]?.trim() ?? ''
   const comma = author.indexOf(',')
   const name = comma === -1 ? '' : author.slice(0, comma).replace(/`/g, '').trim()
-  // The cap counts the words before the comma, so a line without one would count as a new author each time.
+  // The weekly table and the review queue name the agent by the words before the comma, so a line without one would count as a new author each time.
   if (!name || name.toLowerCase() === '<agent>') {
     output.problems.push(problem('author', 'the Author line needs "<agent>, <branch>", with the comma.', 'write "Author: <your agent name>, <this branch>".'))
   } else {
     output.agent = name.split(/\s+/)[0].toLowerCase()
   }
-  const boundary = '[\\s`,();.]'
-  if (!new RegExp(`(?:^|${boundary})${escapeRegex(branch)}(?=$|${boundary})`).test(comma === -1 ? author : author.slice(comma + 1))) {
+  if (!namesBranch(comma === -1 ? author : author.slice(comma + 1), branch)) {
     output.problems.push(problem('author', 'the Author line does not name this pull request branch.', 'put the exact current branch on the Author line, optionally in backticks.'))
   }
   return output
@@ -152,18 +179,6 @@ export const sections = (body, template) => {
     if (items.has(match[2].trim())) {
       output.problems.push(problem('sections', 'a template checkbox has no result or reason.', match[1] === ' ' ? 'tick it and add the result, or add "not run:" and why, or "n/a:" and why.' : 'add the result after a dash on the checked item.'))
     }
-  }
-  return output
-}
-
-// A pull request that names several issues passes each number, so the message names the issue that lacks the claim.
-export const claimed = (comments, agent, branch, issue = null) => {
-  const output = result()
-  const agentPattern = agent ? new RegExp(`\\b${escapeRegex(agent)}\\b`, 'i') : null
-  if (!comments.some(comment => comment.body.includes(branch) && agentPattern?.test(comment.body))) {
-    output.problems.push(issue === null
-      ? problem('claim', 'no issue comment claims this branch for this agent.', 'comment on the issue with "Claim: <agent>, <branch>" before starting work.')
-      : problem('claim', `no comment on #${issue} claims this branch for this agent.`, `comment on #${issue} with "Claim: <agent>, <branch>" before starting work; each issue of the pull request needs its own claim.`))
   }
   return output
 }
@@ -335,37 +350,132 @@ export const changelog = ({ text, added, issue, issues, titles, isRelease, isDoc
 
 export const needsBundle = paths => paths.some(path => /^(scripts|hooks)\//.test(path))
 
-// Rule 12 governance files; a pull request that changes one is not counted for the cap.
-export const isGovernancePath = path => path === 'AGENTS.md' || path === 'CONTRIBUTING.md' || path.startsWith('.github/')
-
-// Every agent posts from one GitHub account, so the cap counts the agent on the Author line:
-// the words before its first comma, with a dispatching lane in brackets as part of the name.
+// Every agent posts from one GitHub account, so the weekly table and the review queue tell agents apart by the
+// Author line: the words before its first comma, with a dispatching lane in brackets as part of the name.
 export const authorKey = body => {
   const author = stripComments(body).match(/^Author:[ \t]*(.*)$/m)?.[1] ?? ''
   return author.split(',')[0].replace(/`/g, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
 }
 
 const labelName = label => (typeof label === 'string' ? label : label.name)
-// A reopened pull request keeps its creation time and would take a slot ahead of newer ones, so it is opened anew.
-const capFix = 'close it and open a new pull request from the same branch when one merges, or keep the claim "waiting for a slot"; the owner may label it "cap-exempt".'
 
-export const cap = ({ open, number, body, perAuthor = AUTHOR_CAP, total = TOTAL_CAP }) => {
+// A reopened pull request keeps its creation time and would take a slot ahead of newer ones, so it is opened anew.
+const outsideCapFix = 'wait until one of the open outside pull requests merges or closes, or close this one and open a new pull request from the same branch later; do not reopen the closed one, since GitHub keeps its first creation time and it would take a slot ahead of newer ones.'
+
+// Only a pull request from outside the team (the author is not the owner, a member or a collaborator) is limited: two
+// open per GitHub login and four in all, drafts included. The team has no limit (#607), so checkPr never calls this
+// for a team pull request and a team pull request is not counted here. No exemption applies: a release, governance or
+// cap-exempt pull request from outside takes a slot too.
+export const cap = ({ open, number, login = null, perLogin = OUTSIDE_LOGIN_CAP, outsideTotal = OUTSIDE_TOTAL_CAP }) => {
   const output = result()
-  const isExempt = pr => isReleaseTitle(pr.title) || pr.isGovernance || pr.labels.some(label => labelName(label) === 'cap-exempt')
-  if (open.some(pr => pr.number === number && isExempt(pr))) return output
   // Older pull requests keep their slots: sort by creation and judge only this one's place.
-  const counted = open.filter(pr => !isExempt(pr)).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.number - b.number)
-  const keyOf = pr => authorKey(pr.body ?? '') ?? `unnamed #${pr.number}`
-  const self = counted.find(pr => pr.number === number) ?? { number, body }
+  const counted = open.filter(pr => Boolean(pr.isOutside)).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.number - b.number)
+  const self = counted.find(pr => pr.number === number) ?? { number, login }
   const queue = counted.includes(self) ? counted : [...counted, self]
   const ahead = queue.slice(0, queue.indexOf(self) + 1)
-  if (ahead.length > total) {
-    output.problems.push(problem('cap', `${ahead.length} pull requests would be open, over the ${total} in all; counted: ${counted.map(pr => `#${pr.number}`).join(', ')}.`, capFix))
+  if (ahead.length > outsideTotal) {
+    output.problems.push(problem('cap', `${ahead.length} outside pull requests would be open, over the ${outsideTotal} in all; counted: ${counted.map(pr => `#${pr.number}`).join(', ')}.`, outsideCapFix))
   }
-  const author = keyOf(self)
-  const own = ahead.filter(pr => keyOf(pr) === author)
-  if (own.length > perAuthor) {
-    output.problems.push(problem('cap', `"${author}" would have ${own.length} open pull requests, over ${perAuthor} per author: ${own.map(pr => pr.number === null ? 'this one' : `#${pr.number}`).join(', ')}.`, `${capFix} A dispatched agent names its lane in brackets on the Author line, as in "codex (phase1)".`))
+  const mine = typeof (self.login ?? login) === 'string' ? (self.login ?? login).toLowerCase() : null
+  const own = mine ? ahead.filter(pr => typeof pr.login === 'string' ? pr.login.toLowerCase() === mine : pr === self) : []
+  if (own.length > perLogin) {
+    output.problems.push(problem('cap', `"${self.login ?? login}" would have ${own.length} open pull requests, over ${perLogin} per login: ${own.map(pr => pr.number === null ? 'this one' : `#${pr.number}`).join(', ')}.`, outsideCapFix))
+  }
+  return output
+}
+
+const dayMs = 24 * 60 * 60 * 1000
+// "Claim taken over:" is a claim too (CONTRIBUTING.md rule 3).
+const isClaimComment = comment => /^\s*Claim(?: taken over)?:/i.test(comment.body ?? '')
+const loginOf = comment => (typeof comment.user?.login === 'string' ? comment.user.login : null)
+const writtenAt = comment => Date.parse(comment.created_at ?? '')
+// Whether comment a came before comment b: by creation time, else by place in the list (GitHub lists oldest first).
+const isBefore = (comments, a, b) => {
+  const [first, second] = [writtenAt(a), writtenAt(b)]
+  return Number.isFinite(first) && Number.isFinite(second) && first !== second ? first < second : comments.indexOf(a) < comments.indexOf(b)
+}
+
+// A person may follow the branch name with more punctuation than the Author line does.
+const claimBoundary = '[\\s`\'",:;()!?*<>\\[\\].]'
+
+// When a claim runs out: its "until" time, "2026-10-28 21:04 UTC" or "2026-10-28T21:04Z" (always read as UTC).
+// "waiting for a slot" runs out 7 days after its comment and a claim with no readable time after 2, the longest rule 3
+// allows; a comment with no date counts as still live.
+const claimEnd = comment => {
+  const until = String(comment.body).match(/\buntil\s+(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/i)
+  if (until) return Date.UTC(Number(until[1]), Number(until[2]) - 1, Number(until[3]), Number(until[4]), Number(until[5]))
+  const written = writtenAt(comment)
+  return Number.isFinite(written) ? written + (/waiting for a slot/i.test(comment.body) ? 7 : 2) * dayMs : Infinity
+}
+
+// The claim an outside pull request needs: a comment starting "Claim:" that the author wrote from their own login and
+// that names the branch, and no other login that claimed the issue earlier and still holds a live claim (rule 3: the
+// earlier claim wins, so a claim another login posts after the author's own does not block). The author's own claim
+// running out while the pull request is open is not a failure. A Handover: comment ends its writer's claim.
+export const outsideClaim = ({ comments, login, branch, issue = null, now = Date.now() }) => {
+  const output = result()
+  const on = issue === null ? '' : ` on #${issue}`
+  if (typeof login !== 'string' || !login) {
+    output.problems.push(problem('claim', "the pull request author's GitHub login is unknown, so the claim cannot be checked.", 're-run the check; it reads the login from the pull request.'))
+    return output
+  }
+  const own = login.toLowerCase()
+  const ownClaim = comments.find(comment => isClaimComment(comment) && loginOf(comment)?.toLowerCase() === own && namesBranch(comment.body, branch, claimBoundary))
+  if (!ownClaim) {
+    output.problems.push(problem('claim', `no comment${on} starting "Claim:" from ${login} names this branch.`, `comment${on} from your own GitHub account "Claim: <agent>, <branch>, until <YYYY-MM-DD HH:MM> UTC" before starting work; a claim another login wrote does not count.`))
+  }
+  // Each other login's latest claim sets when it runs out; isEarlier says it claimed the issue before the author did.
+  const held = new Map()
+  for (const comment of comments) {
+    const who = loginOf(comment)?.toLowerCase()
+    if (!who || who === own) continue
+    // An earlier claim carries over to a renewal only if it had not run out by then; one that had is over and the new claim is a new one.
+    if (isClaimComment(comment)) {
+      const prev = held.get(who)
+      held.set(who, { comment, isEarlier: (prev?.isEarlier && !(claimEnd(prev.comment) <= writtenAt(comment))) || !ownClaim || isBefore(comments, comment, ownClaim) })
+    } else if (/^\s*Handover:/i.test(comment.body ?? '')) held.delete(who)
+  }
+  const holders = [...held.values()].filter(item => item.isEarlier && claimEnd(item.comment) > now).map(item => loginOf(item.comment))
+  if (holders.length) {
+    output.problems.push(problem('claim', `${holders.join(', ')} ${holders.length === 1 ? 'holds' : 'hold'} a live claim${on}.`, 'take an issue nobody holds, or wait until that claim runs out; do not start a competing pull request, comment on theirs (CONTRIBUTING.md rule 3).'))
+  }
+  return output
+}
+
+// An outside author takes an issue labelled ready and for-agent, and not blocked.
+export const outsideIssue = (issueData, number) => {
+  const output = result()
+  const labels = (Array.isArray(issueData.labels) ? issueData.labels : []).map(label => String(labelName(label)).toLowerCase())
+  const missing = ['ready', 'for-agent'].filter(name => !labels.includes(name))
+  if (missing.length) {
+    output.problems.push(problem('issue', `#${number} is not labelled ${missing.map(name => `"${name}"`).join(' and ')}.`, 'take an open issue labelled "ready" and "for-agent", or open an issue and say you would like to take it (CONTRIBUTING.md, Outside contributors).'))
+  }
+  if (labels.includes('blocked')) {
+    output.problems.push(problem('issue', `#${number} is labelled "blocked".`, 'take an issue that is not blocked (CONTRIBUTING.md rule 3).'))
+  }
+  return output
+}
+
+// Changelog fragments and the generated files (the board bundle and its parts, the release table) are not the author's lines to review.
+const isGeneratedPath = path => path.startsWith('changelog.d/') || isBundleFile(path) || path === 'hooks/released.ts'
+// team-process.md holds the sections CONTRIBUTING rule 12 calls governance (From claim to merge, Standing approvals).
+const isOutsideGovernance = path => path === 'AGENTS.md' || path === 'CONTRIBUTING.md' || path === 'docs/dev/team-process.md' || path === 'package.json' || path.startsWith('.github/') || path.startsWith('.claude-plugin/')
+
+// Notes for the reviewer, never a failure: a large change, and a change to a file the maintainer looks at first.
+// numstat: { path, added, deleted } for each changed file; without it the size is not judged.
+export const outsideNotes = ({ paths = [], numstat }) => {
+  const output = result()
+  const ask = 'ask on the issue first (CONTRIBUTING.md, Outside contributors)'
+  if (Array.isArray(numstat)) {
+    const counted = numstat.filter(item => !isGeneratedPath(item.path))
+    const lines = counted.reduce((sum, item) => sum + item.added + item.deleted, 0)
+    if (lines > OUTSIDE_NOTE_LINES || counted.length > OUTSIDE_NOTE_FILES) {
+      output.info.push(`outside note: ${lines} changed lines in ${counted.length} ${counted.length === 1 ? 'file' : 'files'} (changelog fragments and generated files not counted) is more than about ${OUTSIDE_NOTE_LINES} lines or ${OUTSIDE_NOTE_FILES} files; ${ask}.`)
+    }
+  }
+  const governed = paths.filter(isOutsideGovernance)
+  if (governed.length) {
+    output.info.push(`outside note: this pull request changes ${governed.slice(0, 5).join(', ')}${governed.length > 5 ? ` and ${governed.length - 5} more` : ''}; ${ask}.`)
   }
   return output
 }
@@ -379,6 +489,10 @@ const tokenPatterns = [
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
 ]
+// An email address names a person (docs/dev/RULES.md, R8); git@, noreply addresses and the reserved example domains do not.
+const emailPattern = /\b([A-Za-z0-9._%+-]+)@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b/g
+const isPlaceholderEmail = ([, local, domain]) => /^(?:git|no-?reply)$/i.test(local) || /^no-?reply\b/i.test(local) ||
+  /(?:^|\.)(?:example\.(?:com|org|net)|example|invalid|test|localhost)$/i.test(domain) || /(?:^|\.)users\.noreply\.github\.com$/i.test(domain)
 const uuidPattern = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
 const homePattern = /(?:[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}|\/(?:Users|home)\/)([^\\/\s"'`]+)/gi
 // A web address, such as https://github.com/users/<name>, is not a home folder; file:///home/…,
@@ -410,6 +524,10 @@ export const privateData = ({ added, body }) => {
     if (tokenPatterns.some(pattern => [...text.matchAll(pattern)].length > 0)) {
       add('token or token link', 'remove it, and revoke the token if it was real.')
     }
+    // Addresses inside a link count too: a link can carry one in its path or query.
+    if ([...text.matchAll(emailPattern)].some(match => !isPlaceholderEmail(match))) {
+      add('email address', 'use a GitHub login or a placeholder such as name@example.com; this repository is public (docs/dev/RULES.md, R8).')
+    }
     if (path && /\.svg$/i.test(path) && /data:image\/(png|jpe?g|gif|webp)/i.test(text)) {
       add('embedded bitmap image', 'draw the SVG from synthetic data with docs/preview/render.ts instead.')
     }
@@ -423,6 +541,28 @@ export const privateData = ({ added, body }) => {
       output.problems.push(problem('private-data', `image without synthetic alt text in body line ${line}.`, imageFix))
     }
   }
+  return output
+}
+
+// docs/dev/RULES.md is the one-page summary of these three files (its R5): a change to one of them changes it too,
+// or the body says why not.
+const rulesSources = ['CONTRIBUTING.md', 'docs/dev/team-process.md', 'docs/RELEASING.md']
+export const rulesPage = ({ paths = [], body = '', headPaths }) => {
+  const output = result()
+  const changed = paths.filter(path => rulesSources.includes(path))
+  if (!changed.length) return output
+  // A deleted or renamed-away page is not a changed one; headPaths is unknown only where the tree cannot be listed.
+  const isPresent = headPaths === undefined || headPaths === null || [...headPaths].includes('docs/dev/RULES.md')
+  if (!isPresent) {
+    output.problems.push(problem('rules-page', `${changed.join(', ')} changed, and docs/dev/RULES.md is not in the head.`, 'keep docs/dev/RULES.md, changed to match (docs/dev/RULES.md, R5).'))
+    return output
+  }
+  if (paths.includes('docs/dev/RULES.md')) return output
+  if (linesOf(stripComments(body)).some(line => /^\s*Rules page: unchanged, \S/.test(line))) {
+    output.info.push('rules page: unchanged, with a reason in the body.')
+    return output
+  }
+  output.problems.push(problem('rules-page', `${changed.join(', ')} changed, but docs/dev/RULES.md did not.`, 'change docs/dev/RULES.md to match, or add a body line "Rules page: unchanged, <reason>" (docs/dev/RULES.md, R5).'))
   return output
 }
 
@@ -456,15 +596,23 @@ export const checkPr = data => {
     output.problems.push(...checked.problems)
     output.info.push(...(checked.info ?? []))
   }
-  const issue = issueLine(data.body, data.title)
+  // Only the pull request's own association is read here; an unknown one is the team (a local --body-file run).
+  const isOutside = isOutsideAssociation(data.association)
+  // The small docs lane is for outside pull requests; the team's rules do not change.
+  const isSmallDocs = isOutside && isSmallDocsFix(data)
+  const issue = issueLine(data.body, data.title, { isOptional: isSmallDocs })
   const author = authorLine(data.body, data.branch)
   const isRelease = isReleaseTitle(data.title)
   add(issue)
   add(author)
+  if (isOutside && isRelease) {
+    output.problems.push(problem('outside', 'a release pull request comes from the maintainer, not from outside the team.', 'open a fix or feature pull request; only the maintainer raises the version (CONTRIBUTING.md, Releases).'))
+  }
   add(naming(data.title, data.branch))
   add(sections(data.body, data.template))
   add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, issues: issue.issues, titles: testTitles(data.testFiles), isRelease, isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) }))
   add(privateData({ added: data.added, body: data.body }))
+  add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
   if (issue.issue !== null) {
     // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
@@ -481,14 +629,29 @@ export const checkPr = data => {
         output.problems.push(problem('issue', `#${number} must be an open issue, not a pull request or a closed issue.`, 'use the number of an open issue covering this change.'))
       }
     }
-    if (lookups.some(item => (item.issueComments ?? null) === null)) output.info.push('claim: skipped (offline).')
-    for (const { number, issueData, issueComments } of lookups) {
-      if (issueComments && issueData !== false) add(claimed(issueComments, author.agent, data.branch, lookups.length > 1 ? number : null))
+    // The team needs no claim (#607), so only an outside author's issue is read for one.
+    if (isSmallDocs) output.info.push('claim: a small docs fix needs none.')
+    else if (isOutside) {
+      if (lookups.some(item => (item.issueComments ?? null) === null)) output.info.push('claim: skipped (offline).')
+      // An outside author's claim is judged by the login that wrote it, so the Author line's name does not enter.
+      for (const { number, issueData, issueComments } of lookups) {
+        if (!issueComments || issueData === false) continue
+        add(outsideClaim({ comments: issueComments, login: data.login, branch: data.branch, issue: lookups.length > 1 ? number : null, now: data.now }))
+      }
+      for (const { number, issueData } of lookups) if (issueData) add(outsideIssue(issueData, number))
     }
   }
-  if (data.open === null) output.info.push('cap: skipped (offline).')
-  else if (isRelease || data.paths.some(isGovernancePath) || data.labels?.some(label => labelName(label) === 'cap-exempt')) output.info.push('cap: this pull request is exempt.')
-  else add(cap({ open: data.open, number: data.number, body: data.body }))
+  // An unknown author (a local --body-file run) is judged as the team, so say what was not checked: CI knows the
+  // author and holds an outside contributor to the claim and the cap.
+  if (!isOutside && !isSmallDocs && !isKnownAssociation(data.association)) {
+    output.info.push('claim and cap: not checked, the author is unknown here. The team needs neither; a contributor from outside the team needs both (CONTRIBUTING rules 3 and 10), and CI checks them.')
+  }
+  // The team has no limit on open pull requests (#607); only an outside author's are counted.
+  if (isOutside) {
+    if (data.open === null) output.info.push('cap: skipped (offline).')
+    else add(cap({ open: data.open, number: data.number, login: data.login }))
+    add(outsideNotes({ paths: data.paths, numstat: data.numstat }))
+  }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
   else add(verdict(data.prComments, data.head))
   if (data.isDraft) output.info.push(`draft: the reviewer starts when you run \`gh pr ready ${data.number}\` and comment \`Ready for review ${data.head}\`.`)
@@ -655,17 +818,29 @@ export const main = async (argv = process.argv.slice(2)) => {
       const event = readJson(readText(resolve(options['--event'])))
       const pr = event.pull_request
       if (!pr || !event.repository) throw new Error('event must contain pull_request and repository metadata.')
+      // Merged metadata cannot enter the merge queue again, but its public body still needs privacy checks.
+      if (pr.state === 'closed' && pr.merged === true) {
+        const checked = privateData({ added: [], body: pr.body ?? '' })
+        if (checked.problems.length) {
+          console.log(report(checked, 'merged pull request metadata'))
+          return 1
+        }
+        console.log('pr-check: contribution checks not run: the pull request is already merged; metadata privacy check passed.')
+        return 0
+      }
       repo = event.repository.full_name
-      data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.head?.ref, head: pr.head?.sha, isDraft: pr.draft, labels: pr.labels }
+      // author_association and user.login are in the event's pull_request; both stay undefined when it has none.
+      data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.head?.ref, head: pr.head?.sha, isDraft: pr.draft, labels: pr.labels, association: pr.author_association, login: pr.user?.login }
       base = pr.base?.sha
     } else if (options['--pr']) {
       let pr
       try {
-        pr = readJson(command('gh', ['pr', 'view', options['--pr'], '-R', repo, '--json', 'number,title,body,headRefName,headRefOid,baseRefName,baseRefOid,isDraft,labels'], cwd))
+        pr = readJson(command('gh', ['pr', 'view', options['--pr'], '-R', repo, '--json', 'number,title,body,headRefName,headRefOid,baseRefName,baseRefOid,isDraft,labels,author'], cwd))
       } catch {
         throw new Error('network check failed for gh pr view; use --body-file with --offline to check without GitHub.')
       }
-      data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.headRefName, head: pr.headRefOid, isDraft: pr.isDraft, labels: pr.labels }
+      // gh pr view has no author_association field; it is read from the open pull request list below.
+      data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.headRefName, head: pr.headRefOid, isDraft: pr.isDraft, labels: pr.labels, login: pr.author?.login }
       base = pr.baseRefOid
       baseRef = pr.baseRefName
     } else {
@@ -694,6 +869,11 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.paths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', range)).filter(Boolean).map(diffPath)
     data.changedPaths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', '--diff-filter=ACMRT', range)).filter(Boolean).map(diffPath)
     data.addedPaths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', '--diff-filter=A', range)).filter(Boolean).map(diffPath)
+    // Lines added and removed in each file, for the size note on an outside pull request; a binary file shows "-".
+    data.numstat = linesOf(git(cwd, 'diff', '--numstat', '--no-ext-diff', '--no-renames', range)).filter(Boolean).map(line => {
+      const [added, deleted, ...name] = line.split('\t')
+      return { path: diffPath(name.join('\t')), added: Number(added) || 0, deleted: Number(deleted) || 0 }
+    }).filter(item => item.path)
     data.template = git(cwd, 'show', `${base}:.github/pull_request_template.md`)
     const headPaths = new Set(linesOf(git(cwd, 'ls-tree', '-r', '--name-only', data.head)).filter(Boolean).map(diffPath))
     data.headPaths = headPaths
@@ -705,22 +885,32 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.prComments = null
     if (!options['--offline']) {
       const api = apiReader(options, repo, cwd)
+      // The team needs no claim and has no cap (#607), so a team author's check reads neither the open pull requests
+      // nor the issue comments: a failed lookup it does not need must not stop it. The open list also gives the
+      // author's association when the event did not.
+      const isTeam = () => isKnownAssociation(data.association) && !isOutsideAssociation(data.association)
+      if (!isTeam()) {
+        const open = []
+        for (const pr of await api('pulls?state=open', { isList: true })) {
+          open.push({ number: pr.number, title: pr.title, body: pr.body ?? '', createdAt: pr.created_at, labels: pr.labels, isOutside: isOutsideAssociation(pr.author_association), association: pr.author_association, login: pr.user?.login ?? null })
+        }
+        data.open = open
+        const own = open.find(pr => pr.number === data.number)
+        if (own) {
+          data.association ??= own.association
+          data.login ??= own.login ?? undefined
+        }
+      }
       const [first, ...more] = [...new Set(issueLine(data.body, data.title).issues)]
       const lookup = async number => {
         const issueData = await api(`issues/${number}`, { isMissingAllowed: true })
-        return { issueData, issueComments: issueData === false ? [] : await api(`issues/${number}/comments`, { isList: true }) }
+        return { issueData, issueComments: issueData === false || isTeam() ? [] : await api(`issues/${number}/comments`, { isList: true }) }
       }
       if (first !== undefined) {
         Object.assign(data, await lookup(first))
         data.moreIssues = {}
         for (const number of more) data.moreIssues[number] = await lookup(number)
       }
-      const open = []
-      for (const pr of await api('pulls?state=open', { isList: true })) {
-        const files = await api(`pulls/${pr.number}/files`, { isList: true })
-        open.push({ number: pr.number, title: pr.title, body: pr.body ?? '', createdAt: pr.created_at, labels: pr.labels, isGovernance: files.some(file => isGovernancePath(file.filename)) })
-      }
-      data.open = open
       data.prComments = data.number === null ? [] : await api(`issues/${data.number}/comments`, { isList: true })
     }
     const checked = checkPr(data)
@@ -730,9 +920,9 @@ export const main = async (argv = process.argv.slice(2)) => {
       else if (git(cwd, 'rev-parse', 'HEAD').trim() !== data.head) checked.info.push('bundle not checked: check out the pull request\'s head.')
       // A checkout that converts line endings (core.autocrlf, eol=crlf) writes the bundle with CRLF,
       // and the bundle check would fail on a current bundle; so the file itself is looked at.
-      else if (existsSync(join(cwd, 'hooks', 'board-script.ts')) && readFileSync(join(cwd, 'hooks', 'board-script.ts'), 'utf8').includes('\r\n')) checked.info.push('bundle not checked: hooks/board-script.ts has CRLF line endings in this checkout; CI checks the bundle, or clone with -c core.autocrlf=false.')
+      else if (bundleFiles(cwd).some(path => existsSync(join(cwd, path)) && readFileSync(join(cwd, path), 'utf8').includes('\r\n'))) checked.info.push('bundle not checked: hooks/board-script*.ts have CRLF line endings in this checkout; CI checks the bundle, or clone with -c core.autocrlf=false.')
       else if (bundleIsCurrent(cwd)) checked.info.push('bundle: board bundle is current.')
-      else checked.problems.push(problem('bundle', 'hooks/board-script.ts is out of date.', 'run "npx --yes bun@1.4.2 scripts/build-board.ts" and commit hooks/board-script.ts with the source change.'))
+      else checked.problems.push(problem('bundle', 'the board bundle (hooks/board-script.ts and its parts) is out of date.', 'run "npx --yes bun@1.4.2 scripts/build-board.ts" and commit hooks/board-script*.ts with the source change.'))
     }
     const header = `${data.number === null ? 'new pull request' : `#${data.number}`} ${data.branch} at ${data.head.slice(0, 7)}`
     if (process.env.GITHUB_STEP_SUMMARY) {

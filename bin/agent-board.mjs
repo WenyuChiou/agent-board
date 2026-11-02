@@ -5,6 +5,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { bundleFromDir } from '../scripts/bundle-text.mjs'
 
 const pkg = fileURLToPath(new URL('..', import.meta.url))
 const { name, version: v } = JSON.parse(readFileSync(join(pkg, 'package.json'), 'utf8'))
@@ -32,11 +33,11 @@ Set up, once per computer:
   setup options: --agent <name>[,<name>] or all, --home <folder>, --data-dir <folder>
 
 The board:
-  agent-board                  print the board
-  agent-board --watch          the board in this terminal, with keys
-  agent-board --serve          the board's page in your browser
+  agent-board                  open the board where you are (desktop window, live board in terminal over SSH, text for agents)
+  agent-board stop             stop the board's page
   agent-board --chat           the board as plain text, for a chat app
-  agent-board --html           write the board as a page and open it
+
+All options: agent-board --help all (--watch, --serve, --html, --print, --tidy, ...)
 
 The board runs the board script that setup installed (~/.agent-board/agent-board.mjs, or the
 Claude Code plugin's, beside its progress.md). Other options are passed to it unchanged.
@@ -50,11 +51,11 @@ Without installing: npx ${name} <the same options>`,
   setup 選項：--agent <名稱>[,<名稱>] 或 all、--home <資料夾>、--data-dir <資料夾>
 
 看板：
-  agent-board                  印出看板
-  agent-board --watch          在這個終端機開看板，可用按鍵操作
-  agent-board --serve          在瀏覽器開看板網頁
+  agent-board                  在所在位置打開看板（桌面開視窗、SSH 在終端機開看板、agent 印純文字）
+  agent-board stop             停止看板網頁
   agent-board --chat           純文字看板，給聊天 app 用
-  agent-board --html           把看板寫成網頁並打開
+
+所有選項：agent-board --help all（--watch、--serve、--html、--print、--tidy...）
 
 看板執行的是 setup 安裝的看板程式（~/.agent-board/agent-board.mjs，或 Claude Code
 外掛放在 progress.md 旁的那份）。其他選項原樣交給它。
@@ -68,11 +69,94 @@ Without installing: npx ${name} <the same options>`,
   setup 选项：--agent <名称>[,<名称>] 或 all、--home <文件夹>、--data-dir <文件夹>
 
 看板：
-  agent-board                  打印看板
+  agent-board                  在所在位置打开看板（桌面开窗口、SSH 在终端打开看板、agent 印纯文本）
+  agent-board stop             停止看板网页
+  agent-board --chat           纯文本看板，给聊天 app 用
+
+所有选项：agent-board --help all（--watch、--serve、--html、--print、--tidy...）
+
+看板运行的是 setup 安装的看板程序（~/.agent-board/agent-board.mjs，或 Claude Code
+插件放在 progress.md 旁的那份）。其他选项原样交给它。
+说明：https://github.com/WenyuChiou/agent-board/blob/main/docs/SETUP.md
+不安装也能用：npx ${name} <同样的选项>`,
+][at]
+const usageAll = [
+  `agent-board ${v}: a local board for coding agents.
+
+Set up, once per computer:
+  agent-board setup            preview what setup would change; writes nothing
+  agent-board setup --apply    make those changes
+  setup options: --agent <name>[,<name>] or all, --home <folder>, --data-dir <folder>
+
+The board:
+  agent-board                  open the board where you are
+  agent-board stop             stop the board's page
+  agent-board --print          print the board as text
+  agent-board --watch          the board in this terminal, with keys
+  agent-board --serve          the board's page in your browser
+  agent-board --chat           the board as plain text, for a chat app
+  agent-board --html           write the board as a page and open it
+  agent-board --tidy           archive eligible completed tasks
+  agent-board --no-open        start the server without opening a browser
+  agent-board --lan            open the board to devices on your local network
+  agent-board --port <port>    use this port for the page
+  agent-board --lang <lang>    interface language (en, zh-TW, zh-CN)
+  agent-board --idle-minutes <n> close the page after idle minutes
+  agent-board --all            list idle and stopped tasks
+
+The board runs the board script that setup installed (~/.agent-board/agent-board.mjs, or the
+Claude Code plugin's, beside its progress.md). Other options are passed to it unchanged.
+Guide: https://github.com/WenyuChiou/agent-board/blob/main/docs/SETUP.md
+Without installing: npx ${name} <the same options>`,
+  `agent-board ${v}：給程式 agent 用的本機看板。
+
+設定（每台電腦一次）：
+  agent-board setup            先看設定會改什麼，不寫入任何東西
+  agent-board setup --apply    套用這些變更
+  setup 選項：--agent <名稱>[,<名稱>] 或 all、--home <資料夾>、--data-dir <資料夾>
+
+看板：
+  agent-board                  在所在位置打開看板
+  agent-board stop             停止看板網頁
+  agent-board --print          印出純文字看板
+  agent-board --watch          在這個終端機開看板，可用按鍵操作
+  agent-board --serve          在瀏覽器開看板網頁
+  agent-board --chat           純文字看板，給聊天 app 用
+  agent-board --html           把看板寫成網頁並打開
+  agent-board --tidy           封存符合條件的已完成工作
+  agent-board --no-open        啟動伺服器但不打開瀏覽器
+  agent-board --lan            開放區域網路連線
+  agent-board --port <埠號>    指定看板網頁的連接埠
+  agent-board --lang <語言>    介面語言（en、zh-TW、zh-CN）
+  agent-board --idle-minutes <分> 閒置指定分鐘後自動關閉
+  agent-board --all            列出閒置和已停止項目
+
+看板執行的是 setup 安裝的看板程式（~/.agent-board/agent-board.mjs，或 Claude Code
+外掛放在 progress.md 旁的那份）。其他選項原樣交給它。
+說明：https://github.com/WenyuChiou/agent-board/blob/main/docs/SETUP.md
+不安裝也能用：npx ${name} <同樣的選項>`,
+  `agent-board ${v}：给编程 agent 用的本机看板。
+
+设置（每台电脑一次）：
+  agent-board setup            先看设置会改什么，不写入任何东西
+  agent-board setup --apply    应用这些更改
+  setup 选项：--agent <名称>[,<名称>] 或 all、--home <文件夹>、--data-dir <文件夹>
+
+看板：
+  agent-board                  在所在位置打开看板
+  agent-board stop             停止看板网页
+  agent-board --print          打印纯文本看板
   agent-board --watch          在这个终端打开看板，可用按键操作
   agent-board --serve          在浏览器打开看板网页
   agent-board --chat           纯文本看板，给聊天 app 用
   agent-board --html           把看板写成网页并打开
+  agent-board --tidy           归档符合条件的已完成工作
+  agent-board --no-open        启动服务器但不打开浏览器
+  agent-board --lan            开放局域网连接
+  agent-board --port <端口>    指定看板网页的端口
+  agent-board --lang <语言>    界面语言（en、zh-TW、zh-CN）
+  agent-board --idle-minutes <分> 闲置指定分钟后自动关闭
+  agent-board --all            列出闲置和已停止项目
 
 看板运行的是 setup 安装的看板程序（~/.agent-board/agent-board.mjs，或 Claude Code
 插件放在 progress.md 旁的那份）。其他选项原样交给它。
@@ -87,20 +171,12 @@ const isWin = process.platform === 'win32'
 const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(home.toLowerCase()) : path.startsWith(home)) ? `~${path.slice(home.length)}` : path
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
 const run = (path, passed, { isSetup = false, env = process.env } = {}) => {
-  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : 'inherit', encoding: 'utf8', env, windowsHide: true })
+  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : 'inherit', encoding: 'utf8', env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: `npx ${name} setup` } : env, windowsHide: true })
   if (result.error) {
     console.error(message(`agent-board: could not start ${shown(path)} (${code(result.error)}).`, `agent-board：無法啟動 ${shown(path)}（${code(result.error)}）。`, `agent-board：无法启动 ${shown(path)}（${code(result.error)}）。`))
     process.exit(1)
   }
   if (isSetup && result.stderr) {
-    if (result.status !== 0 && /MISSING_ARGUMENT/.test(result.stderr)) {
-      console.error(message('agent-board: a setup option is missing its value. Options such as --agent, --home and --data-dir each take one; see agent-board setup --help.', 'agent-board：setup 有個選項後面沒有接值。--agent、--home、--data-dir 這類選項都要接一個值；請看 agent-board setup --help。', 'agent-board：setup 有个选项后面没有接值。--agent、--home、--data-dir 这类选项都要接一个值；请看 agent-board setup --help。'))
-      process.exit(1)
-    }
-    if (result.status !== 0 && /INVALID_TARGETS/.test(result.stderr)) {
-      console.error(message(`agent-board: setup found no agent to set up on this computer, or --agent named one it does not know. Name one: npx ${name} setup --agent codex (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).`, `agent-board：setup 在這台電腦找不到要設定的 agent，或 --agent 寫了它不認得的名稱。指定一個：npx ${name} setup --agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`, `agent-board：setup 在这台电脑找不到要设置的 agent，或 --agent 写了它不认识的名称。指定一个：npx ${name} setup --agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`))
-      process.exit(1)
-    }
     process.stderr.write(result.status === 0 ? result.stderr : result.stderr.replaceAll(resolve(pkg), '<agent-board package>').replaceAll(resolve(pkg).replaceAll('\\', '/'), '<agent-board package>'))
   }
   if (result.signal) {
@@ -114,13 +190,18 @@ const unknown = word => {
   process.exit(2)
 }
 const isHelp = args.includes('--help') || args.includes('-h')
+const showHelp = () => {
+  const isAll = args.includes('all')
+  console.log(isAll ? usageAll : usage)
+  process.exit(0)
+}
 if (args[0] === 'setup') {
-  if (isHelp) { console.log(usage); process.exit(0) }
+  if (isHelp) showHelp()
   run(join(pkg, 'scripts/setup-agent.mjs'), args.slice(1), { isSetup: true })
 }
 if (args.includes('--version') || args.includes('-v')) { console.log(`agent-board ${v}`); process.exit(0) }
-if (args[0] === 'help' || isHelp) { console.log(usage); process.exit(0) }
-if (args[0] && !args[0].startsWith('-')) unknown(args[0])
+if (args[0] === 'help' || isHelp) showHelp()
+if (args[0] && !args[0].startsWith('-') && args[0] !== 'stop') unknown(args[0])
 
 const passArgs = []
 let dataDir
@@ -155,9 +236,8 @@ language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? langOf(process.env.
 const hash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
 if (!isChat) {
   try {
-    const source = readFileSync(join(pkg, 'hooks/board-script.ts'), 'utf8')
-    const marker = 'export const BOARD_SCRIPT = '
-    const bundled = JSON.parse(source.slice(source.indexOf(marker) + marker.length))
+    // The bundle is kept in hooks/board-script.ts and its parts; the shared reader joins them.
+    const bundled = bundleFromDir(pkg)
     const digest = hash(readFileSync(installed, 'utf8'))
     // Setup prepends account settings to the raw bundle; align that header here.
     if (digest !== hash(`\n${bundled}`)) {
@@ -193,4 +273,4 @@ if (!isChat) {
 // A separate process preserves argv[1], which the installed page server identifies.
 const env = dataDir ? { ...process.env } : process.env
 if (dataDir) delete env.CLAUDE_PROGRESS_FILE
-run(installed, passArgs, { env })
+run(installed, passArgs, { env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v } })

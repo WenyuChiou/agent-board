@@ -1,6 +1,6 @@
 # Releasing Agent Board
 
-The maintainer session prepares, reviews and merges a release and creates its GitHub release. Only the owner publishes to npm, because publishing needs the npm account's one-time code. Agents never run `npm login` or `npm publish`. The short version of these steps is in [CONTRIBUTING.md, Releases](../CONTRIBUTING.md#releases).
+The maintainer session prepares and merges a release and creates its GitHub release. The release pull request needs the approval required by [CONTRIBUTING.md, Pull requests](../CONTRIBUTING.md#pull-requests) rule 8, including its exception for a code-review subagent on a pull request the maintainer wrote. Only the owner publishes to npm, because publishing needs the npm account's one-time code. Agents never run `npm login` or `npm publish`. The short version of these steps is in [CONTRIBUTING.md, Releases](../CONTRIBUTING.md#releases).
 
 ## Stable and pre-release
 
@@ -18,6 +18,9 @@ The release gate, checked on the exact tagged commit:
 2. **Parity.** `docs/validation/<date>-parity-<version>.md` exists, run as [PARITY-CHECKLIST.md](validation/PARITY-CHECKLIST.md) says. Every FAIL in it names an open issue outside this release's must-ship set.
 3. **Journeys.** The L1–L3 user-journey tests (`tests/e2e/`, #222) pass on that commit. While #222 is open, no release can be stable.
 4. **Must-ship.** No issue in the release's must-ship set is open. The set is the issues the milestone description names as must-ship.
+5. **Simulated user.** `docs/validation/<date>-usersim-<version>.md` exists, run as [USER-SIM.md](validation/USER-SIM.md) says on the release pull request's head, with no FAIL and an issue for every FRICTION. Unlike gates 1–4, this one holds for every release: without it there is no release, not even a pre-release.
+
+Nobody gives a go-ahead: a release that has its simulated-user record goes out, as stable when gates 1–4 also pass and as a pre-release otherwise ([RULES.md, R7](dev/RULES.md#r7-releases-go-out-by-themselves)).
 
 A pre-release that passes the gate later is promoted in place, never re-tagged or published again:
 
@@ -29,16 +32,18 @@ npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
 ## Checklist
 
 1. **Version.** Put the same `X.Y.Z` in `.claude-plugin/plugin.json` and `package.json`, the three README badges and the marketplace descriptions. `node --test tests/npm-package.test.mjs` fails when `package.json` and `plugin.json` disagree.
-2. **CHANGELOG.** Run `node scripts/changelog-fold.mjs X.Y.Z` to preview, then add `--write`. It folds every `changelog.d/` fragment, and any entry left under `## Unreleased`, into `## X.Y.Z — YYYY-MM-DD`.
+2. **CHANGELOG.** Run `node scripts/changelog-fold.mjs X.Y.Z` to preview, then add `--write`. It folds every `changelog.d/` fragment, and any entry left under `## Unreleased`, into `## X.Y.Z — YYYY-MM-DD`. With `--write` its output ends with three questions for the next version's plan (the goal above this version's, one hard number it should move, which other field has solved a problem like ours); it only prints them.
 3. **Generated files.** Rebuild as in [CONTRIBUTING.md, Releases](../CONTRIBUTING.md#releases) step 3: the board bundle and the released-files table, and both `--check` commands pass.
 4. **Checks.** Run everything in [CONTRIBUTING.md, Run the checks](../CONTRIBUTING.md#run-the-checks). The npm test also checks that `npm pack` would publish only the files `package.json` lists.
-5. **Pull request.** Title it `chore(release): Agent Board X.Y.Z`, review it, then squash-merge the exact tested head.
+5. **Pull request.** Title it `chore(release): Agent Board X.Y.Z`. Add the simulated-user record (gate 5) for its head. Obtain the approval required by CONTRIBUTING rule 8 and squash-merge with `--match-head-commit` only once every CI job and all other checks required by rule 9 have succeeded on that exact head. The squash merge keeps the same files, so the record holds for the merged commit.
 6. **Tag.** On the merged commit, run `claude plugin tag . --dry-run`, then `claude plugin tag .`. Push only the new tag.
-7. **Gate.** Check the release gate above, and decide stable or pre-release.
-8. **GitHub release.** Write it from the version's CHANGELOG section. A pre-release's notes open with: "Pre-release: this version did not pass the release gate (docs/RELEASING.md)."
+7. **Gate.** Check the release gate above: it decides stable or pre-release.
+8. **GitHub release.** Write it from the version's CHANGELOG section, then a link comparing the previous tag with the new one. A pre-release's notes open with: "Pre-release: this version did not pass the release gate (docs/RELEASING.md)."
 
    ```bash
    awk '/^## X\.Y\.Z /{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
+   # PREV is the previous release, for example 0.24.0
+   printf '\n**Full changes:** https://github.com/WenyuChiou/agent-board/compare/agent-board--vPREV...agent-board--vX.Y.Z\n' >> notes.md
    # stable
    gh release create agent-board--vX.Y.Z --verify-tag --title "Agent Board X.Y.Z" --notes-file notes.md --latest
    # pre-release

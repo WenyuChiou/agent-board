@@ -1,6 +1,6 @@
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
 import { cleanContext, cleanTitle, clip, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
-import { answeredStep } from './step-words'
+import { answeredStep, oneLine } from './step-words'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 
@@ -32,7 +32,8 @@ export const parseDigest = (answer: string): Digest | null => {
   const context = field(lines, 'CONTEXT')
   const done = field(lines, 'DONE')
   const next = field(lines, 'NEXT')
-  const ask = field(lines, 'ASK')
+  const normalized = normalizeReplyValue(field(lines, 'ASK'))
+  const ask = normalized.text === null ? '' : normalized.isStructured ? lastQuestionInProse(normalized.text, true) ?? '' : normalized.text
   const handoffTo = field(lines, 'HANDOFF').replace(/\s+/g, ' ').trim()
   if ([title, context, done, next, ask].every(value => value === '')) return null
   const split = ask.search(/\s[—–-]{1,2}\s/)
@@ -70,10 +71,51 @@ const withoutEmphasis = (line: string): string =>
     .replace(/[*#>]+/g, '')
     .replace(/_+/g, (run, at: number, whole: string) => (/[A-Za-z0-9]/.test(whole[at - 1] ?? '') && /[A-Za-z0-9]/.test(whole[at + run.length] ?? '') ? run : ''))
 
+// JSON objects and arrays are data, not prose. Only a top-level, nonempty string can
+// say what an object means; arrays have no usable field. Scalars stay as written.
+const normalizeReplyValue = (answer: string): { text: string | null; isStructured: boolean } => {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(answer.trim().replace(/^\uFEFF/, '').trim()) as unknown
+  } catch {
+    return { text: answer, isStructured: false }
+  }
+  if (parsed === null || typeof parsed !== 'object') return { text: answer, isStructured: false }
+  if (Array.isArray(parsed)) return { text: null, isStructured: true }
+  const fields = parsed as Record<string, unknown>
+  for (const key of ['question', 'ask', 'text', 'message', 'reply', 'answer']) {
+    const value = Object.prototype.hasOwnProperty.call(fields, key) ? fields[key] : undefined
+    if (typeof value === 'string' && value.trim() !== '') return { text: value.trim(), isStructured: true }
+  }
+  return { text: null, isStructured: true }
+}
+
+export const normalizeReply = (answer: string): string | null => normalizeReplyValue(answer).text
+
+// An agent can write a whole JSON record into a step (a hook's payload, a turn log). It starts
+// with a brace and a quoted key, or a bracket and an object or string, so `{choose one}` and
+// `[WIP] fix` stay as written. Such a step has no words of its own: the record's own text field
+// stands in when it has one, else a line that says so, and the braces, ids and paths inside are
+// never drawn. A record cut off before its closing brace reads the same way. Null for any other
+// step. The same text fields are read as in a reply.
+const RECORD_STEP = /^\s*(?:\{\s*"|\[\s*[{"])/
+export const recordStepWords = (text: string, s: Strings): string | null => {
+  if (!RECORD_STEP.test(text)) return null
+  const { text: words, isStructured } = normalizeReplyValue(text)
+
+  return oneLine(isStructured && words !== null ? words : s.stepIsRecord) || s.stepIsRecord
+}
+
 // The question a reply ends on, if its last paragraph asks one: the last sentence there
 // with a question mark, without code or markdown. A reply that ends on a statement asks
 // nothing, even if it asked something earlier.
 export const lastQuestion = (answer: string, isFull = false): string | null => {
+  const prose = normalizeReply(answer)
+  return prose === null ? null : lastQuestionInProse(prose, isFull)
+}
+
+// For callers that already normalized the reply: do not parse it a second time.
+export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
   const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, '$1')
   const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '')
   const last = paragraphs.at(-1)
@@ -84,7 +126,9 @@ export const lastQuestion = (answer: string, isFull = false): string | null => {
     .filter(line => line !== '')
   const tail = lines.at(-1) ?? ''
   if (!/[?？]/.test(tail)) return null
-  const sentences = tail.match(/[^.。!！?？]*[?？]/g) ?? []
+  // Keep closing wrappers after the question mark so choice parsing can distinguish
+  // a wrapped question from a word's own leading apostrophe, such as '90s.
+  const sentences = tail.match(/[^.。!！?？]*[?？]["'”」』)]*/g) ?? []
   const question = (sentences.at(-1) ?? '').trim()
 
   return question === '' ? null : isFull ? question : clip(question, 120)

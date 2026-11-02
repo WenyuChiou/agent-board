@@ -9,6 +9,7 @@ import type {
   ProgressTail,
 } from '../types'
 import { sha256 } from './sha256.ts'
+import { splitLines } from './lines.ts'
 
 // `## project` / `### task` / `> note` / `- [x] step`, plus the auto markers a session's
 // mod writes around its own block. Everything else is ignored, so free text never breaks
@@ -86,6 +87,8 @@ export const autoOf = (raw: string): ProgressAuto | null => {
   const state = SESSION_STATES.find(one => one === attrs.state) ?? 'waiting'
   const updated = Date.parse(attrs.updated ?? '')
   const pr = Number(attrs.pr)
+  // `origin=run` is the one value that means anything (#399); `parent` only matters beside it.
+  const isRun = attrs.origin === 'run'
 
   return {
     session,
@@ -96,6 +99,8 @@ export const autoOf = (raw: string): ProgressAuto | null => {
     dir: folderOf(attrs.dir),
     pr: Number.isInteger(pr) && pr > 0 ? pr : null,
     ci: CI_STATES.find(one => one === attrs.ci) ?? null,
+    ...(isRun ? { isRun: true as const } : {}),
+    ...(isRun && attrs.parent !== undefined && RESUME.test(attrs.parent) ? { parent: attrs.parent } : {}),
   }
 }
 
@@ -118,7 +123,7 @@ const dueOf = (task: ProgressTask): string | null => {
 // block or heading the other skips: null inside a code fence (the fence lines too) or a
 // multi-line HTML comment; else the line with its comments taken out, an auto marker kept
 // whole.
-export const readable = (lines: readonly string[]): Array<string | null> => {
+export const readable = (lines: readonly string[], isDiagnostic = false): Array<string | null> => {
   let isFenced = false
   let isComment = false
 
@@ -141,8 +146,10 @@ export const readable = (lines: readonly string[]): Array<string | null> => {
       // A later board boundary before the comment close belongs to the next writer.
       let hasBoundary = false
       let hasClose = false
+      let hasTask = false
       for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex++) {
         const next = lines[nextIndex] ?? ''
+        if (TASK.test(next)) hasTask = true
         if (AUTO_START.test(next) || AUTO_END.test(next) || PROJECT.test(next)) hasBoundary = true
         if (next.includes('-->')) {
           hasClose = true
@@ -150,6 +157,11 @@ export const readable = (lines: readonly string[]): Array<string | null> => {
         }
       }
       if (hasBoundary || !hasClose) return raw
+      // Diagnostics keep the cut line without making its commented-out tasks visible.
+      if (isDiagnostic && hasTask) {
+        isComment = true
+        return raw
+      }
     }
     line = line.replace(/<!--.*?-->/g, '')
     const open = line.indexOf('<!--')
@@ -166,7 +178,7 @@ export const readable = (lines: readonly string[]): Array<string | null> => {
 // Keep its boundary in the original string; writers must preserve the prefix exactly.
 export const progressTail = (markdown: string): ProgressTail | null => {
   const raws = markdown.split('\n')
-  const lines = readable(raws)
+  const lines = readable(raws, true)
   let offset = 0
   let open: { session: string; tasks: number } | null = null
   let torn: ProgressTail | null = null
@@ -216,7 +228,7 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
     return task
   }
 
-  const raws = markdown.split(/\r?\n/)
+  const raws = splitLines(markdown)
   readable(raws).forEach((line, lineIndex) => {
     if (line === null) return
     const raw = raws[lineIndex] ?? ''
@@ -320,11 +332,31 @@ export const currentStepIndex = (task: ProgressTask): number => {
 
 // A block whose session stopped writing to it (the terminal closed without the session
 // ending, a crash) still says working or waiting; after half a day it is treated as ended.
-export const STALE_MS = 12 * 60 * 60 * 1000
+export const DEFAULT_STALE_MS = 12 * 60 * 60 * 1000
+export const STALE_MS = DEFAULT_STALE_MS
+
+// Parse a custom stale duration (milliseconds), enforcing a minimum 1 minute (60,000 ms) lower bound.
+export const parseStaleMs = (value: unknown, fallback: number = DEFAULT_STALE_MS): number => {
+  if (value === undefined || value === null) return fallback
+  if (typeof value === 'string' && value.trim() === '') return fallback
+  if (typeof value === 'number') {
+    if (Number.isFinite(value) && value > 0) return Math.max(60 * 1000, value)
+    throw new Error('INVALID_STALE_MS')
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed)
+      if (Number.isFinite(parsed) && parsed > 0) return Math.max(60 * 1000, parsed)
+    }
+    throw new Error('INVALID_STALE_MS')
+  }
+  throw new Error('INVALID_STALE_MS')
+}
 export const FUTURE_SKEW_MS = 5 * 60 * 1000
 
 export const futureTimeKey = (auto: ProgressAuto): string =>
-  `future:${sha256(JSON.stringify(['future-time', auto.agent, auto.session, auto.updated]))}`
+  `future:${sha256(JSON.stringify(['future-time', auto.agent, auto.resume ?? auto.session, auto.updated]))}`
 
 // Keep the writer's stamp intact. The local observation belongs to that exact update,
 // and remains authoritative when the local clock eventually catches up with it.
@@ -337,8 +369,8 @@ export const observedTime = (auto: ProgressAuto | null, now: number, seen: Reado
   return { updated: isObserved ? first : updated, isFuture }
 }
 
-export const isStale = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0): boolean =>
-  auto !== null && (auto.state === 'working' || auto.state === 'waiting') && updated > 0 && now - updated > STALE_MS
+export const isStale = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0, staleMs: number = STALE_MS): boolean =>
+  auto !== null && (auto.state === 'working' || auto.state === 'waiting') && updated > 0 && now - updated > staleMs
 
 // The key a finished hand-kept task is remembered by, to archive it a day later.
 export const doneKey = (project: string, title: string): string => `done:${project}::${title}`
@@ -348,8 +380,10 @@ export const baseName = (path: string): string => path.replace(/[\\/]+$/, '').sp
 // `## persona_framework (PFC)` belongs to the session whose repo is persona_framework.
 export const projectHead = (name: string): string => (name.trim().split(/[\s(（·—]/)[0] ?? '').toLowerCase()
 
+// The whole heading first, so `## my project` is the folder `my project`, not only `my`.
 export const isHereProject = (name: string, here: readonly string[]): boolean => {
   const head = projectHead(name)
+  const whole = name.trim().toLowerCase()
 
-  return head !== '' && here.some(one => one.toLowerCase() === head)
+  return head !== '' && here.some(one => one.toLowerCase() === whole || one.toLowerCase() === head)
 }

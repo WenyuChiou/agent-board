@@ -1,9 +1,13 @@
-<h1 align="center">Agent Board</h1>
+<h1 align="center"><img alt="Agent Board" src="docs/images/brand/agent-board-logo.svg" width="360"></h1>
 
 <p align="center"><b>See what every AI coding agent is doing, and answer the one that needs you, from one board.</b></p>
 
+<p align="center"><a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a> <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a> <a href="https://www.npmjs.com/package/@wenyuchiou/agent-board"><img alt="npm" src="https://img.shields.io/npm/v/@wenyuchiou/agent-board"></a></p>
+
+<p align="center">English · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
+
 <p align="center">
-<img alt="An animated board in six scenes: Claude Code, Codex, Antigravity and OpenCode report to one terminal board; their steps tick off live; Codex's question jumps to the top; one key copies the answer; a message written on the board's page reaches Codex and its reply shows, a preview coming in 0.24.2; and one npx command connects every agent, on npm from 0.24.0. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
+<img alt="An animated board: agents report progress, questions and replies, and one setup command connects them. With messaging on and the Codex session connected, Send queues a reply. &quot;Accepted&quot; does not mean delivered; a confirmation from that session means it was received, not that the work is done. The LAN page has no messaging. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
 </p>
 
 <p align="center"><b>Integrations</b><br>
@@ -19,11 +23,7 @@
 <a href="#supported-agents"><img src="docs/images/agents/chip-deepseek-harness.svg" height="28" alt="DeepSeek Harness"></a>
 </p>
 
-<p align="center"><sub>dot and other web chats report by hand: you paste their block into <a href="#the-boards-page">the board's page</a>.</sub></p>
-
-<p align="center"><a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a></p>
-
-<p align="center">English · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
+<p align="center"><sub>dot and other web chats report by hand: you merge their block into the progress file (<a href="docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste">how</a>).</sub></p>
 
 You have Claude Code on one project, Codex on another and Antigravity on a third, and when one of them stops to ask you something, you only find out when you happen to switch back. **Agent Board** puts that question in front of you the moment it's asked, with a button for each answer. It runs on your computer and keeps everything in one Markdown file.
 
@@ -34,10 +34,12 @@ With Node.js 22+, in any terminal:
 ```sh
 npx @wenyuchiou/agent-board setup
 npx @wenyuchiou/agent-board setup --apply
-npx @wenyuchiou/agent-board --serve
+npx @wenyuchiou/agent-board
 ```
 
-The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board's page. To set up one agent only, add `--agent` and its name, such as `--agent codex`. More in the [setup guide](docs/SETUP.md#install-with-npm).
+The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board where you are: in its own window on a desktop, the live terminal board over SSH, or text for agents. In an agent's chat, `/agent-board` opens the same board. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. More in the [setup guide](docs/SETUP.md#install-with-npm).
+
+Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
 
 Then:
 
@@ -45,7 +47,14 @@ Then:
 - **Claude Code** connects through its plugin instead: `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
 - **Codex:** trust its hooks in `/hooks` ([how](docs/CODEX.md)).
 - **OpenCode, OpenClaw:** reload their plugins.
-- **dot and other web chats:** paste [the last section of AGENTS.md](AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then paste the block it writes into [the board's page](#the-boards-page).
+- **dot and other web chats:** paste [the last section of AGENTS.md](AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then save each block it writes and merge it into the progress file as [Remote reporters](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) shows.
+
+In the new session, open the board with its entry:
+
+- **I use Claude Code:** `/agent-board`
+- **I use Codex:** `$agent-board`
+- **I use Antigravity:** `/agent-board` (checked in a synthetic home, not run live yet)
+- **I use OpenCode:** `/board`
 
 <details>
 <summary><b>Without npm: install from a checkout</b></summary>
@@ -87,16 +96,16 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 |:-:|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI and App | `$agent-board` |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board` (not verified yet) |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board` (checked in a synthetic home, not run live yet) |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
-| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board` (not verified yet) |
-| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board` (not verified yet) |
-| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board` (not verified yet) |
+| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board` (checked in a synthetic home, not run live yet) |
+| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board` (checked in a synthetic home, not run live yet) |
+| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board` (checked in a synthetic home, not run live yet) |
 | <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
-| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board` (not verified yet) |
+| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board` (checked in a synthetic home, not run live yet) |
 
-**In the Claude desktop app,** which cannot show the pane, the footer shows the board's status and `/progress` gives you a link to [the board's page](#the-boards-page), where you can answer questions and archive work; if that page cannot start, it opens the read-only page. The board page needs the board script that `/progress connect` installs, or the next session start updates.
+**In the Claude desktop app,** when its Code tab shows no pane, the footer shows the waiting count and `/agent-board opens the board`. `/agent-board` starts the live [board page](#the-boards-page) and replies with its link, where you can answer questions and archive work; it works in every Claude Code session and leaves the pane as it is. When the pane cannot be placed, `/progress` does the same. If the live page cannot start, both open the read-only page. The board page needs the board script that `/progress connect` installs, or the next session start updates.
 
 ### Open the board anywhere
 
@@ -144,7 +153,7 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 | <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | Chat | The board and its skill; its own hooks are still to come | Copy |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | Chat | Its plugin's session events | Copy |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | CLI | Its plugin's session events | Copy |
-| | dot, other web chats | Web | A block you paste | Answer in its chat |
+| | dot, other web chats | Web | A block you merge | Answer in its chat |
 
 Hooks say whether a session is working or waiting; its steps and when it is done come from the agent's own reports. Gemini CLI is still a target (`--agent gemini`) for paid and enterprise use: see [setup](docs/SETUP.md#legacy-gemini-cli-compatibility).
 
@@ -157,9 +166,9 @@ Hooks say whether a session is working or waiting; its steps and when it is done
 | Codex | 0.163.0-alpha.10.2 app-server ([record](docs/validation/2026-10-19-native-hooks.md)); CLI in the 0.23.5 live run; App untested |
 | Antigravity | CLI on Windows ([record](docs/validation/2026-10-19-native-hooks.md)); the App opens the board but does not report a question yet (#285); IDE untested |
 | OpenCode | Plugin SDK 1.19.3 ([record](docs/validation/2026-10-19-portable-hosts.md)) |
-| Cursor | Untested |
+| Cursor | checked in a synthetic home, not run live yet |
 | Grok Build | 1.0.62 with a mock model |
-| Muse Code | Untested |
+| Muse Code | checked in a synthetic home, not run live yet |
 | Hermes Agent | 0.19.0 with a mock model |
 | OpenClaw | Source contract and synthetic callbacks ([record](docs/validation/2026-10-19-portable-hosts.md)); app untested |
 | DeepSeek Harness | Plugin loader ([record](docs/validation/2026-10-19-portable-hosts.md)); app untested |
@@ -171,10 +180,10 @@ Hooks say whether a session is working or waiting; its steps and when it is done
 
 ## What you see
 
-- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. Once you turn messaging on ([`--messages-dir`](docs/MESSAGING.md#enable-locally)), **Send** reaches a session that has a live connection; otherwise **Copy** gives you the reply to paste into its chat.
+- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. With messaging on ([`--messages-dir`](docs/MESSAGING.md#enable-locally)) and that session connected, **Send** queues your answer, and a confirmation from that session means it was received; otherwise press **Copy** and paste it into that chat.
 - **Check the others are still moving.** Each agent's task shows its current step and when it last reported. Work nobody has touched for a week folds into one **N idle 7+ days** line.
 - **Clear what is finished or dead.** Finished work moves to a monthly archive by itself. A session that stopped halfway can be archived, confirmed done or taken over.
-- **Tell an agent something without going there.** Type a reply on the board: with messaging on, it goes straight to that session if it is connected; otherwise the board copies it for you to paste.
+- **Tell an agent something without going there.** With messaging on and the session connected, type in the reply box and send it; otherwise press **Copy** and paste it there.
 
 **The terminal board** (`--watch`), with Codex's question open: `y` or `n` copies the answer.
 
@@ -190,10 +199,9 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 
 The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node ~/.agent-board/agent-board.mjs --serve` does the same; run it again to reopen the page. On the page you can:
 
-- **Answer** a question: **Send** to a session that is online (with messaging on), or **Copy** the reply.
+- **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
 - **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent.
-- **Paste a block** from a web chat such as Muse or dot.
 
 The page listens on 127.0.0.1 only, and its address carries a random key: anything on this computer that has the link can use it. It keeps running after you close the tab; **Close the board** stops it. Add `--lan` to open it on a phone on the same Wi-Fi: that link is plain HTTP and anyone who has it can use the page, so use it only on a network you trust. Details and limits are in [the guide](docs/GUIDE.md#the-boards-page).
 
@@ -202,6 +210,14 @@ The page listens on 127.0.0.1 only, and its address carries a random key: anythi
 <img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, progress.html, the archive and the status line read it. Synthetic data." src="docs/images/flow-en.svg" width="100%">
 
 Each agent's hooks write what its session is doing into its own block of one local `progress.md` (a fresh install uses `~/.agent-board/progress.md`). Task steps come only from the agent's own reports, and no private conversation is read. The board reads the file without calling a model; the optional Claude plugin can sum up turns with Claude's model, as [the guide says](docs/GUIDE.md#does-anything-leave-my-machine-what-does-it-cost). You can read and edit the file too: [the file format](docs/FORMAT.md). In English, 繁體中文 and 简体中文.
+
+### Three Core Pillars
+
+- **One Markdown file**: every agent's progress goes into one plain progress.md that you can read and edit; no database.
+- **Every agent on one board**: Claude Code, Codex, Antigravity, Cursor, OpenCode and the other connected agents, side by side.
+- **Questions first**: the questions your agents are waiting on come first, and you answer them from the board; a connected session receives the answer.
+
+For architectural positioning and coexistence with memory tools, see the [Architecture Positioning Guide](docs/dev/architecture-positioning.md).
 
 ## Troubleshooting
 
@@ -216,7 +232,7 @@ Use the agent's own name after `--agent` (the doctor keeps its old name for ever
 | You see | Try |
 |---|---|
 | An agent is not on the board | Start a new session of it; one that was already open is not connected. Codex also needs its hooks trusted in `/hooks`. |
-| Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs`) and read its conflicts and `adapter-pending` lines; edited files are left alone and listed there. |
+| Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup --json` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs --json`) and read its conflicts and `adapter-pending` lines; edited files are left alone and listed there. |
 | An old version is still running | A running session keeps the version it loaded: start a new one. To update, see [the guide](docs/GUIDE.md#update-and-uninstall). |
 | An agent shows up twice | It may be connected both ways: by the Claude plugin's `/progress connect` and by setup. `/progress connect status` lists what the plugin connected; remove one with `/progress connect remove` or `--codex-remove --agent <name>`. |
 | A question will not go away | Answer it in its own chat, then press **Already answered, hide** (`h`). After 3 days it moves into **Earlier unanswered questions**, and after 7 days into **Older unanswered questions**. |

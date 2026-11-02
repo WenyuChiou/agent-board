@@ -1,10 +1,13 @@
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
-import { lastQuestion } from './digest'
+import { lastQuestionInProse, normalizeReply } from './digest'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
+import { DARK, LIGHT } from './palette'
+import type { Tone } from './palette'
 import { sha256 } from './sha256'
-import { relativeTime, replyHint } from './view'
+import { agentLabel } from './strings'
+import { isSameName, relativeTime, replyHint } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
 
@@ -14,7 +17,7 @@ import type { ConfirmRef } from './blocks'
 
 // A turn another agent's hook left that no Claude Code session has summed up yet. The
 // board only peeks at it: taking it is a Claude Code session's job, so the two never race.
-export type PendingTurn = { id?: string; fullText?: string; sources?: string[]; sourceRevisions?: string[]; isClosed?: boolean; agent: string; project: string; text: string; isQuestion: boolean; at: number; sourceAt?: number; hasSummary?: boolean }
+export type PendingTurn = { id?: string; dir?: string; fullText?: string; sources?: string[]; sourceRevisions?: string[]; isClosed?: boolean; agent: string; project: string; text: string; isQuestion: boolean; at: number; sourceAt?: number; hasSummary?: boolean }
 
 // A reply's last line of prose, its code blocks left out: where a reply usually says what
 // came of the turn.
@@ -33,6 +36,7 @@ export const peekInbox = (
   files: ReadonlyArray<{ name: string; body: string; at: number }>,
   readLog: (path: string) => string = () => '',
   scrub: (text: string) => string = text => text,
+  s: Strings = ZH_TW,
 ): PendingTurn[] => {
   const latest = new Map<string, PendingTurn>()
   const questions = new Map<string, PendingTurn>()
@@ -44,19 +48,20 @@ export const peekInbox = (
     if (read.event === 'prompt') continue
     const turn = read.prompt === '' && isTranscriptPath(read.transcript) ? { ...read, prompt: transcriptTail(readLog(read.transcript)).prompt } : read
     if (isBoardTurn(turn)) continue
-    const answer = scrub(turn.answer)
-    const question = lastQuestion(answer, true)
-    const summary = question ?? closing(answer)
+    const normalized = normalizeReply(turn.answer)
+    const prose = normalized === null ? null : scrub(normalized)
+    const question = prose === null ? null : lastQuestionInProse(prose, true)
+    const summary = prose === null ? s.turnUnreadable : question ?? closing(prose)
     const text = (summary ?? turn.prompt).trim()
     if (question !== null) {
       // Words deduplicate retries, not independent ledger identities. An end or later
       // statement cannot prove a previous question answered before anyone captured it.
       const key = JSON.stringify([turn.id, turn.project, question.replace(/\s+/g, ' ').trim()])
       const previous = questions.get(key)
-      questions.set(key, { id: turn.id, fullText: answer, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
+      questions.set(key, { id: turn.id, fullText: prose!, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
       latest.delete(turn.id)
     } else if (turn.event !== 'end' && text !== '') {
-      latest.set(turn.id, { id: turn.id, fullText: answer, agent: turn.agent, project: turn.project, text, isQuestion: false, at: file.at, sourceAt: turn.at ?? file.at, hasSummary: summary !== undefined && summary !== null })
+      latest.set(turn.id, { id: turn.id, ...(prose === null ? {} : { fullText: prose }), agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: false, at: file.at, sourceAt: turn.at ?? file.at, hasSummary: summary !== undefined && summary !== null })
     }
     if (turn.event === 'end') {
       latest.delete(turn.id)
@@ -67,18 +72,101 @@ export const peekInbox = (
   return [...questions.values(), ...latest.values()].sort((a, b) => Number(b.isQuestion) - Number(a.isQuestion) || b.at - a.at)
 }
 
-export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean }
+// A cache hit returns the same turns without asking the caller to read the inbox again.
+export type TurnCache = { key: string; turns: PendingTurn[] } | null
+export const turnsFor = async (
+  cache: TurnCache,
+  listing: unknown,
+  s: Strings,
+  fresh: () => Promise<{ files: Array<{ name: string; body: string; at: number }>; scrub: (text: string) => string; isComplete: boolean }>,
+): Promise<{ turns: PendingTurn[]; cache: TurnCache }> => {
+  const key = JSON.stringify([listing, s.lang])
+  if (cache?.key === key) return { turns: cache.turns, cache }
+  const { files, scrub, isComplete } = await fresh()
+  const turns = peekInbox(files, () => '', scrub, s)
+  return { turns, cache: isComplete ? { key, turns } : cache }
+}
+
+export type ColorDepth = 'truecolor' | '256'
+export type Theme = 'dark' | 'light'
+
+// How a reply to a question reaches its session through the running page (`--serve`): the page
+// sends it into a connected session, or into a closed one it may resume. The fields are the ones
+// the page's own buttons send back, so the page checks the press as it checks its own.
+export type AnswerRoute = { mode: 'connected' | 'send'; agent: string; session: string; asked: string; fp: string; delivery?: { id: string; turn: string; agent: string } }
+
+// `depth` and `theme` pick the page's colours for a terminal; `routes` are the questions the
+// running page can answer into their session, by line key; `agents` the agents that reported to
+// this board, which an empty board names.
+export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; depth?: ColorDepth; theme?: Theme; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
 
 export const remainingInbox = (view: View, pending: readonly PendingTurn[]): readonly PendingTurn[] => view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
 
-const CODES = { waiting: '33', accent: '36', done: '32', alert: '31', quiet: '2', bold: '1', project: '35' } as const
+// How the board is painted, from what the terminal says of itself. NO_COLOR and --no-color win;
+// FORCE_COLOR paints into a pipe (`| less -R`); otherwise only a terminal is painted. 24-bit only
+// where COLORTERM says the terminal has it, else the nearest of 256, which terminals draw as
+// given, whatever their theme does to the 16 basic colours. A light terminal is told by --theme,
+// or by the background COLORFGBG names (7, or 9 to 15).
+export const terminalLook = (env: Readonly<Record<string, string | undefined>>, args: readonly string[], isTty: boolean): { isColor: boolean; depth: ColorDepth; theme: Theme } => {
+  const force = env.FORCE_COLOR
+  const isForced = force !== undefined && force !== '' && force !== '0' && force !== 'false'
+  const isColor = (env.NO_COLOR ?? '') === '' && !args.includes('--no-color') && (isForced || isTty)
+  const depth = /^(truecolor|24bit)$/i.test(env.COLORTERM ?? '') || force === '3' ? 'truecolor' : '256'
+  const at = args.indexOf('--theme')
+  const asked = at >= 0 ? args[at + 1] : undefined
+  const ground = Number((env.COLORFGBG ?? '').split(';').at(-1))
+  const isLightGround = (env.COLORFGBG ?? '') !== '' && Number.isInteger(ground) && (ground === 7 || (ground >= 9 && ground <= 15))
 
-const paint = (isColor: boolean) => (code: keyof typeof CODES, text: string): string => (isColor && text !== '' ? `\u001b[${CODES[code]}m${text}\u001b[0m` : text)
+  return { isColor, depth, theme: asked === 'light' || asked === 'dark' ? asked : isLightGround ? 'light' : 'dark' }
+}
+
+const rgbOf = (hex: string): number[] => [1, 3, 5].map(at => parseInt(hex.slice(at, at + 2), 16))
+const LEVELS = [0, 95, 135, 175, 215, 255]
+
+// The xterm colour nearest a page colour: one of the 6×6×6 cube or of the 24 greys.
+export const nearest256 = (hex: string): number => {
+  const [r = 0, g = 0, b = 0] = rgbOf(hex)
+  const distance = (x: number, y: number, z: number): number => (r - x) ** 2 + (g - y) ** 2 + (b - z) ** 2
+  const level = (value: number): number => LEVELS.reduce((best, one, index) => (Math.abs(one - value) < Math.abs((LEVELS[best] ?? 0) - value) ? index : best), 0)
+  const [i, j, k] = [level(r), level(g), level(b)]
+  const grey = Math.max(0, Math.min(23, Math.round(((r + g + b) / 3 - 8) / 10)))
+  const shade = 8 + 10 * grey
+
+  return distance(shade, shade, shade) < distance(LEVELS[i] ?? 0, LEVELS[j] ?? 0, LEVELS[k] ?? 0) ? 232 + grey : 16 + 36 * i + 6 * j + k
+}
+
+// Each ink is a role of the page's palette. Secondary text is `muted`, never the terminal's own
+// dim, which turns faint grey on a light background.
+const ROLE = { waiting: 'waiting', accent: 'accent', done: 'done', alert: 'alert', quiet: 'muted', project: 'project', running: 'running', soon: 'soon' } as const
+type Ink = keyof typeof ROLE | 'bold'
+
+const paint = (o: { isColor: boolean; depth?: ColorDepth; theme?: Theme }) => (ink: Ink, text: string, isBold = false): string => {
+  if (!o.isColor || text === '') return text
+  const hex = ink === 'bold' ? null : (o.theme === 'light' ? LIGHT : DARK)[ROLE[ink]]
+  const [r = 0, g = 0, b = 0] = hex === null ? [] : rgbOf(hex)
+  const codes = [...(ink === 'bold' || isBold ? ['1'] : []), ...(hex === null ? [] : [o.depth === 'truecolor' ? `38;2;${r};${g};${b}` : `38;5;${nearest256(hex)}`])]
+
+  return `\u001b[${codes.join(';')}m${text}\u001b[0m`
+}
+
+// Secondary text in the board's muted colour, for a line the script adds below the board.
+export const mutedLine = (text: string, o: { isColor: boolean; depth?: ColorDepth; theme?: Theme }): string => paint(o)('quiet', text)
+
+// The ink of a row's status: what it waits on, or its current step in the accent colour.
+const toneInk = (tone: Tone, hasStep: boolean): Ink =>
+  tone === 'warn' ? 'waiting' : tone === 'alert' ? 'alert' : tone === 'running' ? 'running' : tone === 'soon' ? 'soon' : tone === 'done' ? 'done' : hasStep || tone === 'accent' ? 'accent' : 'quiet'
 
 // Chat keeps its existing budget; terminals also draw emoji and supplementary CJK wide.
-const chatColumns = (char: string): number => (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(char) ? 2 : 1)
+const chatColumns = (char: string): number => (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(char) ? 2 : 1)
 const columns = (char: string): number => (chatColumns(char) === 2 || /[\u{20000}-\u{3fffd}\p{Emoji_Presentation}]/u.test(char) ? 2 : 1)
-const displayColumns = (text: string): number => [...text].reduce((sum, char) => sum + columns(char), 0)
+// Symbols of East Asian ambiguous width the board draws (● ◐ ✓ ⚑ ○ … — · ↑↓): one column in most
+// terminals, two in many set up for Chinese. The Chinese board counts them as two, so its lines
+// never run over; where they are drawn narrow a line only ends a little short.
+const AMBIGUOUS = /[§¨°±·×÷–-‖‘’“”†-•‥-‧‰※←-⇿①-⓿─-◿☀-➿]/
+const wideColumns = (char: string): number => (columns(char) === 2 || AMBIGUOUS.test(char) ? 2 : 1)
+const columnsOf = (isWide: boolean): ((char: string) => number) => (isWide ? wideColumns : columns)
+const isWideLang = (s: Strings): boolean => s.lang !== 'en'
+export const displayColumns = (text: string, isWide = false): number => [...text].reduce((sum, char) => sum + columnsOf(isWide)(char), 0)
 
 // Control characters out: the text comes from other agents' blocks and turns, and an escape
 // sequence in it would move the cursor or clear the screen of the terminal it is printed in.
@@ -92,7 +180,7 @@ const fitted = (raw: string, width: number, columnOf: (char: string) => number):
   let used = 0
   let out = ''
   for (const char of chars) {
-    if (used + columnOf(char) > width - 1) break
+    if (used + columnOf(char) > width - columnOf('…')) break
     used += columnOf(char)
     out += char
   }
@@ -100,12 +188,13 @@ const fitted = (raw: string, width: number, columnOf: (char: string) => number):
   return `${out}…`
 }
 
-export const fit = (raw: string, width: number): string => fitted(raw, width, columns)
+export const fit = (raw: string, width: number, isWide = false): string => fitted(raw, width, columnsOf(isWide))
 
 const MARK: Record<string, string> = { done: '✓', doing: '▸', todo: '○', waiting: '●', running: '◐', blocked: '!', cancelled: '–' }
 
 // Recovery advice must stay readable even when it is longer than one terminal row.
-const wrapNote = (raw: string, width: number): string[] => {
+const wrapNote = (raw: string, width: number, isWide = false): string[] => {
+  const columns = columnsOf(isWide)
   const lines: string[] = []
   const limit = Math.max(2, width)
   let line = ''
@@ -127,15 +216,23 @@ const wrapNote = (raw: string, width: number): string[] => {
 
 const stepLine = (step: ViewStep): string => `${MARK[step.status] ?? '○'} ${step.number === null ? '' : `${step.number} `}${step.text}${step.note ? ` — ${step.note}` : ''}`
 
+// The agent a line belongs to, by the name it goes by: a hand-kept task has none, and a block
+// with no agent is Claude Code's.
+const agentOf = (agent: string, isAgent: boolean, s: Strings): string => (agent !== '' ? agentLabel(agent, s) : isAgent ? agentLabel('claude', s) : '')
+
 const rowLines = (row: TaskRow, s: Strings, o: BoardOptions): string[] => {
-  const c = paint(o.isColor)
-  const who = row.agent === '' ? '' : ` · ${row.agent}`
+  const c = paint(o)
+  const isWide = isWideLang(s)
+  const cut = (raw: string, width: number): string => fit(raw, width, isWide)
+  const name = agentOf(row.agent, row.auto !== null, s)
+  const who = name === '' ? '' : ` · ${name}`
   const count = row.total > 0 ? `${row.done}/${row.total} ` : ''
-  const lines = [`  ${c('bold', fit(row.title, o.width - 4))}`, `    ${c('quiet', fit(`${count}${row.status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6))}`]
-  if (row.context) lines.push(`    ${c('quiet', fit(row.context, o.width - 6))}`)
+  const lines = [`  ${c('bold', cut(row.title, o.width - 4))}`, `    ${c('quiet', cut(`${count}${row.status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6))}`]
+  if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
+  if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
   for (const step of row.steps) {
     const tone = step.status === 'waiting' ? 'waiting' : step.status === 'blocked' ? 'alert' : step.isCurrent ? 'accent' : step.status === 'done' ? 'quiet' : null
-    const line = fit(stepLine(step), o.width - 6)
+    const line = cut(stepLine(step), o.width - 6)
     lines.push(`    ${tone === null ? line : c(tone, line)}`)
   }
 
@@ -143,59 +240,65 @@ const rowLines = (row: TaskRow, s: Strings, o: BoardOptions): string[] => {
 }
 
 // The line of counts at the top of the board.
+// It is bold throughout, as the page's is.
 const countLine = (view: View, pending: readonly PendingTurn[], s: Strings, c: ReturnType<typeof paint>): string => {
   const { active, due, today } = view.overview
   const waiting = view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length
 
-  return `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`
+  return `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`, true)}  ${c('accent', `▸ ${active} ${s.countActive}`, true)}  ${c('alert', `⚑ ${due} ${s.countDue}`, true)}  ${c('done', `✓ ${today} ${s.countToday}`, true)}`
 }
 
 // What waits on the person: the questions of the work on the board, then those in turns no
 // session has taken in yet. Questions marked answered are not in `view.waiting`. `named` says
 // how a project is told (the chat shows the home folder's name as `~`).
-const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: (project: string) => string = project => project): Array<{ where: string; text: string; task: string }> => [
+const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: (project: string) => string = project => project, label: (agent: string) => string = agent => agent): Array<{ where: string; text: string; task: string }> => [
   ...view.waiting.map(item => ({
-    where: [named(item.project), item.agent].filter(part => part !== '').join(' · '),
+    where: [named(item.project), label(item.agent)].filter(part => part !== '').join(' · '),
     text: `${s.chip(s.ask[item.kind])}${item.text}${item.note ? ` — ${item.note}` : ''}`,
     task: item.task,
   })),
-  ...remainingInbox(view, pending).filter(turn => turn.isQuestion).map(turn => ({ where: [named(turn.project), turn.agent].filter(part => part !== '').join(' · '), text: turn.text, task: '' })),
+  ...remainingInbox(view, pending).filter(turn => turn.isQuestion).map(turn => ({ where: [named(turn.project), label(turn.agent)].filter(part => part !== '').join(' · '), text: turn.text, task: '' })),
 ]
 
 export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
-  const c = paint(o.isColor)
+  const c = paint(o)
+  const isWide = isWideLang(s)
+  const cut = (raw: string, width: number): string => fit(raw, width, isWide)
   const lines: string[] = [countLine(view, pending, s, c), '']
   if (view.warning) lines.push(c('alert', view.warning), '')
+  if (view.details) lines.push(c('quiet', view.details), '')
 
-  const asks = asksOf(view, pending, s)
+  const asks = asksOf(view, pending, s, project => project, agent => agentLabel(agent, s))
   const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
   for (const [title, items] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
     if (items.length === 0) continue
     lines.push(`${title} (${items.length}) · --all`)
-    if (o.isIdleOpen) for (const item of items) lines.push(`  ${fit(`${item.project} › ${item.task} · ${item.when}`, o.width - 4)}`, `    ${fit(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
+    if (o.isIdleOpen) for (const item of items) lines.push(`  ${cut(`${item.project} › ${item.task} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
   }
   // Questions marked answered in a pane are left out, and counted so they are not lost.
   const hidden = view.hidden.length === 0 ? [] : [c('quiet', s.hiddenCount(view.hidden.length))]
   if (asks.length === 0) {
     lines.push(c('done', s.nothingForYou), ...hidden, '')
   } else {
-    lines.push(c('waiting', `● ${s.sectionWaiting}`))
+    lines.push(c('waiting', `● ${s.sectionWaiting}`, true))
     for (const ask of asks) {
-      lines.push(`  ${c('project', fit(ask.where + (ask.task ? ` › ${ask.task}` : ''), o.width - 4))}`, `    ${fit(ask.text, o.width - 6)}`)
+      lines.push(`  ${c('project', cut(ask.where + (ask.task ? ` › ${ask.task}` : ''), o.width - 4))}`, `    ${cut(ask.text, o.width - 6)}`)
     }
     lines.push(...hidden.map(line => `  ${line}`), '')
   }
 
+  if ((view.stoppedAsking ?? 0) > 0) lines.push(c('quiet', s.stoppedAsking(view.stoppedAsking!)), '')
+
   if (view.due.length > 0) {
     lines.push(c('alert', `⚑ ${s.sectionDue}`))
-    for (const row of view.due) lines.push(`  ${fit(`${row.project} › ${row.title}${row.due ? ` · ${row.due.left}` : ''}`, o.width - 4)}`)
+    for (const row of view.due) lines.push(`  ${cut(`${row.project} › ${row.title}${row.due ? ` · ${row.due.left}` : ''}`, o.width - 4)}`)
     lines.push('')
   }
 
   for (const group of view.groups) {
     if (group.rows.length === 0) continue
-    const summary = fit(`  ${group.summary}`, Math.max(0, o.width - 3))
-    lines.push(c('project', fit(`▸ ${group.project}`, o.width - displayColumns(summary))) + c('quiet', summary))
+    const summary = cut(`  ${group.summary}`, Math.max(0, o.width - 3))
+    lines.push(c('project', cut(`▸ ${group.project}`, o.width - displayColumns(summary, isWide)), true) + c('quiet', summary))
     for (const row of group.rows) lines.push(...rowLines(row, s, o))
     lines.push('')
   }
@@ -205,7 +308,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push(c('quiet', o.isIdleOpen ? count(rows.length) : `${count(rows.length)} · --all`))
     if (o.isIdleOpen) {
       for (const row of rows) {
-        lines.push(`  ${c('project', fit(row.project, o.width - 4))}`, ...rowLines(row, s, o))
+        lines.push(`  ${c('project', cut(row.project, o.width - 4), true)}`, ...rowLines(row, s, o))
       }
     }
     lines.push('')
@@ -214,20 +317,22 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   if (recentQuestions.length > 0) {
     lines.push(c('done', s.sectionRecent))
     for (const item of recentQuestions) {
-      lines.push(`  ${fit(`${item.project} › ${item.title} · ${item.when}`, o.width - 4)}`)
-      for (const question of item.questions ?? []) lines.push(`    ${fit(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
+      lines.push(`  ${cut(`${item.project} › ${item.title} · ${item.when}`, o.width - 4)}`)
+      for (const question of item.questions ?? []) lines.push(`    ${cut(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
     }
     lines.push('')
   }
   const news = pending.filter(turn => !turn.isQuestion)
   if (news.length > 0) {
     lines.push(c('accent', `◐ ${s.boardInbox}`))
-    for (const turn of news) lines.push(`  ${fit(`${[turn.project, turn.agent].filter(part => part !== '').join(' · ')}: ${turn.text}`, o.width - 4)}`)
+    for (const turn of news) lines.push(`  ${cut(`${[turn.project, agentLabel(turn.agent, s)].filter(part => part !== '').join(' · ')}: ${turn.text}`, o.width - 4)}`)
     lines.push('')
   }
 
   if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty), '')
-  for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2).map(part => c('quiet', part)))
+  // Runs agents started for themselves, with no session known: one folded line, never in the counts (#399).
+  if (view.background) lines.push(c('quiet', cut(view.background, o.width)), '')
+  for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2, isWide).map(part => c('quiet', part)))
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
 }
@@ -376,8 +481,9 @@ export const chatText = (
   const asks = asksOf(view, pending, s, named)
   const rows = [...view.due.map(row => ({ row, mark: '⚑' })), ...view.groups.flatMap(group => group.rows.map(row => ({ row, mark: '▸' })))]
   // Each item is cut whole, never in the middle. A heading belongs to its first item.
-  const items: string[] = [chatLine(countLine(view, pending, s, paint(false)), 0, home, isWindows)]
+  const items: string[] = [chatLine(countLine(view, pending, s, paint({ isColor: false })), 0, home, isWindows)]
   if (view.warning) items[0] += `\n${view.warning}`
+  if (view.details) items[0] += `\n${view.details}`
   // Questions marked answered are left out and counted, as on the terminal board.
   const hidden = view.hidden.length === 0 ? null : s.hiddenCount(view.hidden.length)
   if (asks.length === 0) items.push(`\n${s.nothingForYou}${hidden === null ? '' : `\n${hidden}`}`)
@@ -385,19 +491,22 @@ export const chatText = (
     items.push([...(index === 0 ? ['', `● ${s.sectionWaiting}`] : []), line(ask.where + (ask.task ? ` › ${ask.task}` : ''), 2), line(ask.text, 4)].join('\n'))
   })
   if (asks.length > 0 && hidden !== null) items.push(`  ${hidden}`)
+  if ((view.stoppedAsking ?? 0) > 0) items.push(line(s.stoppedAsking(view.stoppedAsking!)))
   const news = pending.filter(turn => !turn.isQuestion)
   news.forEach((turn, index) => {
     const at = turn.sourceAt ?? turn.at
     const when = now !== undefined && Number.isFinite(at) && at > 0 && at <= now ? relativeTime(at, now, s) : ''
     items.push([...(index === 0 ? ['', `◐ ${s.chatPendingReports}`] : []), line(`${[named(turn.project), turn.agent].filter(part => part !== '').join(' · ')} · ${s.chatReportTime(when)}`, 2), line(turn.hasSummary === false ? s.chatNoSummary : turn.text, 4)].join('\n'))
   })
-  for (const [title, shelf] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
+  // The copies of a stopped row's questions (`older::`) are told once below, under their row.
+  for (const [title, shelf] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, (view.older ?? []).filter(item => !item.key.startsWith('older::'))]] as const) {
     if (shelf.length === 0) continue
     items.push(`\n${title} (${shelf.length})`)
     for (const item of shelf) items.push(line(`${named(item.project)} › ${item.task} · ${item.when}`, 2), line(`${item.text}${item.note ? ` — ${item.note}` : ''}`, 4))
   }
   if (view.idle.length > 0) items.push(line(s.idleCount(view.idle.length)))
   if (view.stopped.length > 0) items.push(line(s.stoppedCount(view.stopped.length)))
+  if (view.background) items.push(line(view.background))
   for (const row of view.stopped.filter(row => (row.questions?.length ?? 0) > 0)) {
     items.push(line(`${named(row.project)} › ${row.title} · ${row.when}`, 2))
     for (const question of row.questions ?? []) items.push(line(`${question.text}${question.note ? ` — ${question.note}` : ''}`, 4))
@@ -414,7 +523,7 @@ export const chatText = (
   const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
     const next = (row.steps.find(step => step.isCurrent && isNext(step)) ?? row.steps.find(isNext))?.text
-    const words = `${mark} ${named(row.project)} › ${row.title}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}`
+    const words = `${mark} ${isSameName(row.project, row.title) ? named(row.project) : `${named(row.project)} › ${row.title}`}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}${row.runs ? ` · ${row.runs}` : ''}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
   if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) items.push(s.empty)
@@ -464,6 +573,10 @@ export type BoardAction =
   | { type: 'unhide'; key: string | null }
   | { type: 'html' }
   | { type: 'quit' }
+  // An answer the running page sends into the question's session, as its own button would.
+  | { type: 'send'; key: string; text: string; route: AnswerRoute }
+  // Archive now: every finished task, as the page's button under Done recently.
+  | { type: 'tidy' }
 
 export const emptyBoardState: BoardState = { selected: 0, key: null, open: null, note: '', seen: null }
 
@@ -476,17 +589,27 @@ const chosen = (state: BoardState, items: readonly BoardItem[]): number => {
 
 // In the order the screen shows them: what waits on you, each project's work, then turns
 // no Claude Code session has taken in.
+// The key of a question on the reminder or Older shelf: the page names the line it drew by it. It
+// holds the key a Hide would write (`hideKey`), which changes when another copy of the question
+// arrives, so a press made before that is refused rather than taken for the new copy.
+export const olderKey = (ask: WaitingItem): string => `older:${ask.key}@${ask.questionId}@${ask.hideKey}`
+
 // The full action catalog includes idle rows for the page server. Terminal callers pass
 // their shelf state so only rows the person can see are selectable.
 export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOpen = true, isOlderOpen = false): BoardItem[] => {
-  // Work due soon first, then each project's; a row is listed once.
-  const rows = [...view.due, ...view.groups.flatMap(group => group.rows), ...(isIdleOpen ? [...view.idle, ...view.stopped] : [])].filter((row, index, all) => all.findIndex(one => one.key === row.key) === index)
+  // The page's order: what is working now, then the rest by project, work due soon first; a row
+  // is listed once.
+  const shelved = new Set([...view.idle, ...view.stopped].map(row => row.key))
+  const listed = [...view.due, ...view.groups.flatMap(group => group.rows), ...(isIdleOpen ? [...view.idle, ...view.stopped] : [])].filter((row, index, all) => all.findIndex(one => one.key === row.key) === index)
+  const isWorking = (row: TaskRow): boolean => row.auto === 'working' && !shelved.has(row.key)
+  const rest = listed.filter(row => !isWorking(row))
+  const rows = [...listed.filter(isWorking), ...[...new Set(rest.map(row => row.project))].flatMap(project => rest.filter(row => row.project === project))]
 
   return [
     // A question's key holds its words, so a press made while it showed one question is refused
     // once the same step asks another, rather than taken as the answer to the new one.
     ...view.waiting.map(ask => ({ type: 'ask' as const, key: ask.hideKey === '' ? `ask:${ask.key}` : `ask:${ask.key}@${ask.hideKey}`, ask })),
-    ...(isOlderOpen ? [...(view.reminder ?? []), ...(view.older ?? [])].map(ask => ({ type: 'ask' as const, key: `older:${ask.key}@${ask.questionId}`, ask })) : []),
+    ...(isOlderOpen ? [...(view.reminder ?? []), ...(view.older ?? [])].map(ask => ({ type: 'ask' as const, key: olderKey(ask), ask })) : []),
     ...rows.map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
     ...remainingInbox(view, pending).map((turn, index) => ({ type: 'turn' as const, key: `turn:${turn.agent}:${turn.project}:${index}`, turn })),
   ]
@@ -548,7 +671,7 @@ export const pinned = (state: BoardState, items: readonly BoardItem[]): BoardSta
   return { ...state, selected: at, key: items[at]?.key ?? null, seen: Object.fromEntries(items.map(item => [item.key, fingerprint(item, items)])) }
 }
 
-export const boardKey = (state: BoardState, key: string, items: readonly BoardItem[], s: Strings = ZH_TW): { state: BoardState; action: BoardAction | null } => {
+export const boardKey = (state: BoardState, key: string, items: readonly BoardItem[], s: Strings = ZH_TW, routes: Readonly<Record<string, AnswerRoute>> = {}): { state: BoardState; action: BoardAction | null } => {
   if (key === 'q' || key === '\u0003') return { state, action: { type: 'quit' } }
   state = { ...state, note: '', tone: 'alert', copyText: undefined, result: undefined }
   const last = Math.max(0, items.length - 1)
@@ -562,6 +685,8 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: state.isIdleOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
   if (key === 'l') return { state: { ...state, isOlderOpen: !state.isOlderOpen, selected: 0, key: null, open: null, note: state.isOlderOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
   if (key === 'u') return { state, action: { type: 'unhide', key: null } }
+  // Archive now, as the page's button under Done recently does: every finished task goes at once.
+  if (key === 't') return { state, action: { type: 'tidy' } }
   if (item === undefined) return { state: { ...state, note: s.pressNothing }, action: null }
   state = { ...state, result: { key: item.key, revision: fingerprint(item, items), label: item.type === 'ask' ? item.ask.task : item.type === 'row' ? item.row.title : item.turn.project } }
   // The line under the cursor changed since the screen was drawn: choose what is there now and
@@ -570,7 +695,8 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (isGone) return changed
   // A tick, an archive or a copy of what to say acts on the line as the last draw showed it: the
   // same key can now be another session's block, or the same step reworded.
-  if ((key === 'x' || key === 'a' || key === 'd' || key === 'c' || key === 'h') && state.seen !== null && state.seen[item.key] !== fingerprint(item, items)) return changed
+  const isSeen = state.seen === null || state.seen[item.key] === fingerprint(item, items)
+  if ((key === 'x' || key === 'a' || key === 'd' || key === 'c' || key === 'h') && !isSeen) return changed
   if (key === 'enter' || key === ' ') return { state: { ...state, selected: at, key: item.key, open: state.open === item.key ? null : item.key, note: state.open === item.key ? s.pressClosed : s.pressOpened, tone: 'done' }, action: null }
   if (item.type === 'ask') {
     const { ask } = item
@@ -583,12 +709,19 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
     const answers = answersOf(ask, s)
     const pick = ask.kind === 'confirm' ? ['y', 'n'].indexOf(key) : /^[1-9]$/.test(key) ? Number(key) - 1 : -1
     const answer = pick >= 0 ? answers[pick] : undefined
+    // Where the running page can answer into the session, the key sends the answer, as the
+    // page's button does; elsewhere it copies it to paste into the agent.
+    const route = routes[item.key]
+    if (answer !== undefined && route !== undefined) return isSeen ? { state, action: { type: 'send', key: item.key, text: plain(answer), route } } : changed
     if (answer !== undefined) return { state, action: { type: 'copy', text: plain(answer) } }
+    // Said only when asked: a live session's question is that session's to take off the board.
+    if (key === 'a' && ask.where !== 'manual' && ask.isKept !== true && ask.canHide !== false) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
   }
   if (item.type === 'row') {
     const { row } = item
     if (key === 'x' && row.next !== null) return { state, action: { type: 'tick', ref: row.next } }
     if (key === 'a' && row.archive !== null) return { state, action: { type: 'archive', ref: row.archive, title: row.title } }
+    if (key === 'a' && (row.auto === 'working' || row.auto === 'waiting')) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
     if (key === 'd' && row.confirm != null) return { state, action: { type: 'done', ref: row.confirm, title: row.title } }
     if (key === 'c' && row.resume !== null) return { state, action: { type: 'copy', text: plain(row.resume) } }
   }
@@ -596,14 +729,15 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   return { state: { ...state, note: s.pressNothing }, action: null }
 }
 
-const keysFor = (item: BoardItem | undefined, s: Strings): string[] => {
+const keysFor = (item: BoardItem | undefined, s: Strings, routes: Readonly<Record<string, AnswerRoute>>): string[] => {
   if (item === undefined) return []
   if (item.type === 'ask') {
     const { ask } = item
     const answers = answersOf(ask, s)
+    const isSent = routes[item.key] !== undefined
     return [
       ...(ask.step !== null ? [s.boardKeyTick] : []),
-      ...(ask.kind === 'confirm' ? [s.boardKeyConfirm] : answers.length > 0 ? [s.boardKeyOptions(answers.length)] : []),
+      ...(ask.kind === 'confirm' ? [isSent ? s.boardKeyConfirmSend : s.boardKeyConfirm] : answers.length > 0 ? [isSent ? s.boardKeyOptionsSend(answers.length) : s.boardKeyOptions(answers.length)] : []),
       ...((ask.command ?? ask.link) !== null
         ? [s.boardKeyCopyCommand]
         : replyHint(ask, s).reopen !== null
@@ -620,15 +754,83 @@ const keysFor = (item: BoardItem | undefined, s: Strings): string[] => {
   return []
 }
 
-export const boardScreen = (view: View, pending: readonly PendingTurn[], state: BoardState, s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
-  const c = paint(o.isColor)
+// Nothing on the board at all, not even something finished: the screen says how work comes.
+export const isEmptyBoard = (view: View, pending: readonly PendingTurn[]): boolean =>
+  boardItems(view, pending, true, true).length === 0 && view.recent.length === 0
+
+// The agents that reported to this board: from the names of their turns in progress-inbox
+// (`codex-turn-…`), and from the blocks it shows. A block with no agent is Claude Code's.
+const INBOX_AGENT = /^([a-z0-9]+)-(?:prompt|turn|end)-/
+export const boardAgents = (inbox: readonly string[], view: View, pending: readonly PendingTurn[]): string[] => [
+  ...new Set([
+    ...inbox.map(name => INBOX_AGENT.exec(name)?.[1] ?? ''),
+    ...[...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped].map(row => row.agent || (row.auto === null ? '' : 'claude')),
+    ...(view.finished ?? []).map(item => item.agent || 'claude'),
+    ...pending.map(turn => turn.agent),
+  ].filter(agent => agent !== '')),
+]
+
+// The questions the running page answers into their session, from the board it serves
+// (`/api/board`): the same fields its buttons send back.
+export const routesOf = (model: unknown): Record<string, AnswerRoute> => {
+  const asks = (model as { asks?: unknown } | null)?.asks
+  const routes: Record<string, AnswerRoute> = {}
+  if (!Array.isArray(asks)) return routes
+  const text = (value: unknown): string => (typeof value === 'string' ? value : '')
+  for (const one of asks as unknown[]) {
+    if (one === null || typeof one !== 'object') continue
+    const ask = one as Record<string, unknown>
+    const key = text(ask.key)
+    if (key === '') continue
+    const fields = { agent: text(ask.agent), session: text(ask.session), asked: text(ask.text), fp: text(ask.fp) }
+    const delivery = ask.delivery as Record<string, unknown> | null | undefined
+    if (ask.send === 'connected' && delivery != null && typeof delivery === 'object' && text(delivery.id) !== '' && text(delivery.turn) !== '') routes[key] = { mode: 'connected', ...fields, delivery: { id: text(delivery.id), turn: text(delivery.turn), agent: text(delivery.agent) } }
+    else if (ask.send === 'send') routes[key] = { mode: 'send', ...fields }
+  }
+
+  return routes
+}
+
+// The terminal board is drawn on the terminal's second screen, which leaving gives back as it was.
+export const SCREEN_ENTER = '\u001b[?1049h\u001b[?25l'
+export const SCREEN_LEAVE = '\u001b[?25h\u001b[?1049l'
+
+// One write per change, with no clearing of the whole screen, so nothing flickers: the cursor
+// home, each line cleared to its end, and everything below the last cleared. Null when the screen
+// is what was drawn last, so nothing is written. With the terminal's height known, a board longer
+// than the screen keeps its last line and drops what does not fit, so the terminal never scrolls.
+// `focus` is the selected line's first and last screen line: the window moves to show it, since
+// the keys act on that line and the second screen has no scrollback to find it in.
+export const frame = (previous: string | null, screen: string, rows = 0, focus: readonly [number, number] | null = null): string | null => {
+  if (screen === previous) return null
+  const all = screen.replace(/\n+$/, '').split('\n')
+  const room = rows - 1
+  const body = all.slice(0, -1)
+  const from = focus === null ? 0 : Math.max(0, Math.min(focus[0], focus[1] - room + 1, body.length - room))
+  const shown = rows > 1 && all.length > rows ? [...body.slice(from, from + room), all.at(-1) ?? ''] : all
+
+  return `\u001b[H${shown.map(line => `${line}\u001b[K`).join('\n')}\u001b[J`
+}
+
+export const boardScreen = (view: View, pending: readonly PendingTurn[], state: BoardState, s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string =>
+  boardLayout(view, pending, state, s, o).screen
+
+// The screen and where on it the selected line is (its heading, row and open lines), for `frame`.
+export const boardLayout = (view: View, pending: readonly PendingTurn[], state: BoardState, s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): { screen: string, focus: readonly [number, number] | null } => {
+  const c = paint(o)
+  const isWide = isWideLang(s)
+  const cut = (raw: string, width: number): string => fit(raw, width, isWide)
+  const cols = (text: string): number => displayColumns(text, isWide)
+  const wrap = (text: string, width: number): string[] => wrapNote(text, width, isWide)
+  const routes = o.routes ?? {}
   const items = boardItems(view, pending, state.isIdleOpen ?? false, state.isOlderOpen ?? false)
+  const shelved = new Set([...view.idle, ...view.stopped].map(row => row.key))
   const at = chosen(state, items)
-  const { active, due, today } = view.overview
-  const waiting = view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length
   const lines: string[] = [
-    `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`)}  ${c('accent', `▸ ${active} ${s.countActive}`)}  ${c('alert', `⚑ ${due} ${s.countDue}`)}  ${c('done', `✓ ${today} ${s.countToday}`)}`,
+    countLine(view, pending, s, c),
     ...(view.warning ? [c('alert', view.warning)] : []),
+    ...(view.details ? [c('quiet', view.details)] : []),
+    ...((view.stoppedAsking ?? 0) > 0 ? [c('quiet', `${s.stoppedAsking(view.stoppedAsking!)} · ${s.boardKeyOlder}`)] : []),
     ...(view.hidden.length === 0 ? [] : [c('quiet', `${s.hiddenCount(view.hidden.length)} · ${s.boardKeyShowHidden}`)]),
     ...((view.reminder?.length ?? 0) + (view.older?.length ?? 0) === 0 ? [] : [c('quiet', `${s.sectionQuestionReminders}: ${view.reminder?.length ?? 0} · ${s.sectionOlderQuestions}: ${view.older?.length ?? 0} · ${s.boardKeyOlder}`)]),
     ...(view.idle.length + view.stopped.length === 0 ? [] : [c('quiet', [
@@ -636,89 +838,138 @@ export const boardScreen = (view: View, pending: readonly PendingTurn[], state: 
       view.stopped.length === 0 ? '' : s.stoppedCount(view.stopped.length),
       s.boardKeyIdle,
     ].filter(part => part !== '').join(' · '))]),
+    ...(view.background ? [c('quiet', cut(view.background, o.width))] : []),
     '',
   ]
+  // A title on the left and its agent and age on the right, so the ages end in one column.
+  const titled = (indent: number, title: string, meta: string, isHere: boolean, ink?: Ink): string => {
+    const room = o.width - indent - 2
+    const right = meta === '' ? '' : cut(meta, Math.max(0, Math.min(30, room - 14)))
+    const left = cut(title, room - (right === '' ? 0 : cols(right) + 2))
+    const gap = right === '' ? '' : ' '.repeat(Math.max(2, room - cols(left) - cols(right)))
+    return `${isHere ? c(ink ?? 'bold', left, true) : ink === undefined ? left : c(ink, left)}${gap}${c('quiet', right)}`
+  }
+  const muted = (text: string, indent: string): string[] => wrap(text, o.width - indent.length - 2).map(part => `${indent}${c('quiet', part)}`)
   const result = state.result
   const resultItem = result === undefined ? undefined : items.find(item => item.key === result.key)
   const hasResult = result === undefined || result.revision === null || result.revision === (resultItem === undefined ? '' : fingerprint(resultItem, items))
   const resultLines = (indent: string): void => {
     if (!hasResult) return
-    if (state.copyText !== undefined) lines.push(`${indent}${c('alert', fit(s.boardCopyFailed(''), o.width - indent.length))}`, plain(state.copyText))
+    if (state.copyText !== undefined) lines.push(`${indent}${c('alert', cut(s.boardCopyFailed(''), o.width - indent.length))}`, plain(state.copyText))
     else if (state.note !== '') {
-      const notes = wrapNote(state.note, o.width - indent.length)
+      const notes = wrap(state.note, o.width - indent.length)
       lines.push(...notes.map(line => `${indent}${c(state.tone ?? 'done', line)}`))
     }
   }
+  // A line that went with the press (a question hidden with h) leaves its note under its task's
+  // row when that still shows, so the task's title is not told twice.
+  const isOrphan = result !== undefined && resultItem === undefined && hasResult && state.note !== ''
+  const host = isOrphan ? items.find(item => item.type === 'row' && item.row.title === result.label)?.key ?? null : null
   let section = ''
-  items.forEach((item, index) => {
+  let focus: readonly [number, number] | null = null
+  const drawItem = (item: BoardItem, index: number): void => {
     const isHere = index === at
     const isOpen = state.open === item.key
-    const mark = isHere ? c('accent', '›') : ' '
+    const mark = isHere ? c('accent', '›', true) : ' '
+    const isWorking = item.type === 'row' && item.row.auto === 'working' && !shelved.has(item.row.key)
     const head =
-      item.type === 'ask' ? `● ${item.ask.ageStage === 'older' ? s.sectionOlderQuestions : item.ask.ageStage === 'reminder' ? s.sectionQuestionReminders : s.sectionWaiting}` : item.type === 'row' ? `▸ ${item.row.project}` : `◐ ${s.boardInbox}`
-    if (head !== section) {
+      item.type === 'ask' ? `● ${item.ask.ageStage === 'older' ? s.sectionOlderQuestions : item.ask.ageStage === 'reminder' ? s.sectionQuestionReminders : s.sectionWaiting}` : item.type === 'row' ? (isWorking ? `▸ ${s.sectionActive}` : item.row.project) : `◐ ${s.boardInbox}`
+    const headKey = item.type === 'row' && !isWorking ? `project:${head}` : head
+    if (headKey !== section) {
       if (section !== '') lines.push('')
-      lines.push(item.type === 'ask' ? c('waiting', fit(head, o.width)) : item.type === 'row' ? c('project', fit(head, o.width)) : c('accent', fit(head, o.width)))
-      section = head
+      lines.push(c(item.type === 'ask' ? 'waiting' : item.type === 'row' && !isWorking ? 'project' : 'accent', cut(head, o.width), true))
+      section = headKey
     }
-    const line = (text: string): string => (isHere ? c('bold', text) : text)
     if (item.type === 'ask') {
       const { ask } = item
-      const where = [ask.project, ask.agent].filter(part => part !== '').join(' · ')
-      lines.push(`${mark} ${line(fit(`${s.chip(s.ask[ask.kind])}${ask.text}`, o.width - 4))}`)
+      const name = ask.where === 'manual' ? '' : agentOf(ask.agent, true, s)
+      // An age the board does not know is left out of the column rather than said there.
+      lines.push(`${mark} ${titled(2, `${s.chip(s.ask[ask.kind])}${ask.text}`, [name, ask.when === s.questionAgeUnknown ? '' : ask.when].filter(part => part !== '').join(' · '), isHere)}`)
       if (result?.key === item.key) resultLines('    ')
-      lines.push(`    ${c('project', fit(where + (ask.task ? ` › ${ask.task}` : ''), o.width - 6))}`)
+      lines.push(`    ${c('project', cut(ask.project + (ask.task ? ` › ${ask.task}` : ''), o.width - 6))}`)
       if (isOpen || isHere) {
-        if (ask.canHide === false) lines.push(`    ${c('quiet', fit(s.questionReviewOnly, o.width - 6))}`)
-        else if (ask.where !== 'manual') lines.push(`    ${c('quiet', fit(s.archiveLive, o.width - 6))}`)
-        if (ask.note) lines.push(`    ${fit(ask.note, o.width - 6)}`)
-        answersOf(ask, s).forEach((answer, n) => lines.push(`    ${c('accent', ask.kind === 'confirm' ? (n === 0 ? 'y' : 'n') : String(n + 1))} ${fit(answer, o.width - 8)}`))
-        if (ask.command !== null) lines.push(`    ${c('accent', fit(`$ ${ask.command}`, o.width - 6))}`)
+        if (ask.canHide === false) lines.push(`    ${c('quiet', cut(s.questionReviewOnly, o.width - 6))}`)
+        if (ask.note) lines.push(`    ${cut(ask.note, o.width - 6)}`)
+        const answers = answersOf(ask, s)
+        answers.forEach((answer, n) => lines.push(`    ${c('accent', ask.kind === 'confirm' ? (n === 0 ? 'y' : 'n') : String(n + 1), true)} ${cut(answer, o.width - 8)}`))
+        // Whether the key answers or only copies, said on the line: without a session that takes
+        // it, the question stays until the person answers in the agent and hides it here.
+        if (answers.length > 0) {
+          const keys = ask.kind === 'confirm' ? 'y/n' : `1–${answers.length}`
+          const route = routes[item.key]
+          lines.push(...muted(route !== undefined ? s.boardAnswerSends(keys, agentOf(route.agent, true, s)) : name === '' ? s.boardAnswerCopies(keys) : s.boardAnswerCopiesTo(keys, name), '    '))
+        }
+        if (ask.command !== null) lines.push(`    ${c('accent', cut(`$ ${ask.command}`, o.width - 6))}`)
+        // The way back to the session, never cut, with which command c copies.
         if (ask.where === 'other') {
-          const hint = replyHint(ask, s)
-          lines.push(`    ${c('quiet', fit(hint.where, o.width - 6))}`)
+          // Its folder and session id stay off the screen, as everywhere on the board; c copies
+          // the whole command.
+          const back = (ask.command ?? ask.link) === null ? replyHint(ask, s).reopen : null
+          lines.push(...muted(back === null || ask.resumeVia === null ? s.boardAnswerIn(name) : s.boardAnswerInCopy(name, `${plain(ask.resumeVia)} …`), '    '))
         }
       }
       return
     }
     if (item.type === 'row') {
       const { row } = item
-      const who = row.agent === '' ? '' : ` · ${row.agent}`
-      const count = row.total > 0 ? `${row.done}/${row.total} ` : ''
-      lines.push(`${mark} ${line(fit(row.title, o.width - 4))}`)
-      if (result?.key === item.key) resultLines('    ')
+      const name = agentOf(row.agent, row.auto !== null, s)
+      lines.push(`${mark} ${titled(2, row.title, [name, row.when].filter(part => part !== '').join(' · '), isHere)}`)
+      if (result?.key === item.key || host === item.key) resultLines('    ')
       const badge = row.due ? `⚑ ${row.due.left}` : ''
-      const reserve = badge === '' ? 0 : displayColumns(badge) + 2
-      lines.push(`    ${c('quiet', fit(`${count}${row.status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6 - reserve))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
-      if ((isOpen || isHere) && (row.auto === 'working' || row.auto === 'waiting')) lines.push(`    ${c('quiet', fit(s.archiveLive, o.width - 6))}`)
+      const reserve = badge === '' ? 0 : cols(badge) + 2
+      // Under In progress a row also names its project, which has no heading there.
+      const lead = [isWorking && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
+      // The step it is on, in the accent colour, where its status only says that it works.
+      const step = row.tone === 'quiet' || row.tone === 'accent' ? row.steps.find(one => one.isCurrent && (one.status === 'doing' || one.status === 'todo')) : undefined
+      const status = cut(`${lead}${step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve)
+      const quiet = status.startsWith(lead) ? lead : ''
+      lines.push(`    ${c('quiet', quiet)}${c(toneInk(row.tone, step !== undefined), status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
+      if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
       if (isOpen) {
-        if (row.question) lines.push(`    ${fit(row.question, o.width - 6)}`)
-        if (row.context) lines.push(`    ${c('quiet', fit(row.context, o.width - 6))}`)
-        for (const step of row.steps) lines.push(`    ${fit(stepLine(step), o.width - 6)}`)
-        if (row.handoff) lines.push(`    ${c('quiet', fit(row.handoff, o.width - 6))}`)
+        if (row.question) lines.push(`    ${cut(row.question, o.width - 6)}`)
+        if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
+        for (const step of row.steps) {
+          const tone = step.status === 'waiting' ? 'waiting' : step.status === 'blocked' ? 'alert' : step.isCurrent ? 'accent' : step.status === 'done' ? 'quiet' : null
+          const line = cut(stepLine(step), o.width - 6)
+          lines.push(`    ${tone === null ? line : c(tone, line)}`)
+        }
+        if (row.handoff) lines.push(`    ${c('quiet', cut(row.handoff, o.width - 6))}`)
       }
       return
     }
     const { turn } = item
-    lines.push(`${mark} ${line(fit(`${[turn.project, turn.agent].filter(part => part !== '').join(' · ')}: ${turn.text}`, o.width - 4))}`)
+    lines.push(`${mark} ${titled(2, `${[turn.project, agentLabel(turn.agent, s)].filter(part => part !== '').join(' · ')}: ${turn.text}`, '', isHere)}`)
     if (result?.key === item.key) resultLines('    ')
+  }
+  items.forEach((item, index) => {
+    const from = lines.length
+    drawItem(item, index)
+    if (index === at) focus = [from, lines.length - 1]
   })
-  if (result !== undefined && resultItem === undefined && hasResult && state.note !== '') {
-    lines.push('', `  ${fit(result.label, o.width - 4)}`)
+  if (isOrphan && host === null) {
+    lines.push('', `  ${cut(result.label, o.width - 4)}`)
     resultLines('    ')
   }
-  const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
-  if (recentQuestions.length > 0) {
-    lines.push('', c('done', s.sectionRecent))
-    for (const item of recentQuestions) {
-      lines.push(`  ${fit(`${item.project} › ${item.title} · ${item.when}`, o.width - 4)}`)
-      for (const question of item.questions ?? []) lines.push(`    ${fit(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
+  // What finished, as on the page, with its Archive now: t moves all of it at once.
+  if (view.recent.length > 0) {
+    const heading = `✓ ${s.sectionRecent}`
+    if (lines.at(-1) !== '') lines.push('')
+    lines.push(`${c('done', cut(heading, o.width), true)}${c('quiet', cut(`  ${s.boardKeyArchiveDone}`, o.width - cols(heading)))}`)
+    for (const item of view.recent) {
+      lines.push(`  ${c('done', '✓')} ${titled(4, `${item.project} › ${item.title}`, item.when, false, 'quiet')}`)
+      for (const question of item.questions ?? []) lines.push(`    ${cut(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
     }
   }
-  if (items.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty))
-  lines.push('', c('quiet', fit([...keysFor(items[at], s), s.boardKeysMove].join(' · '), o.width)))
+  if (isEmptyBoard(view, pending)) {
+    // As the page's first screen: which agents report here, and how their work comes.
+    const agents = [...new Set((o.agents ?? []).map(agent => agentLabel(agent, s)))]
+    lines.push(c('quiet', s.empty), ...muted(agents.length === 0 ? s.boardNoAgents : s.boardAgentsHere(agents.join(', ')), ''), ...muted(s.boardEmptyHow, ''))
+  }
+  // The line's own keys give way first, so the keys that move and quit always show.
+  const own = keysFor(items[at], s, routes).join(' · ')
+  lines.push('', c('quiet', own === '' ? cut(s.boardKeysMove, o.width) : `${cut(own, o.width - cols(s.boardKeysMove) - cols(' · ') - 1)} · ${s.boardKeysMove}`))
   if (result === undefined) resultLines('')
-  for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2).map(part => c('quiet', part)))
+  for (const line of view.health ?? []) lines.push(...wrap(line, o.width - 2).map(part => c('quiet', part)))
 
-  return `${lines.join('\n')}\n`
+  return { screen: `${lines.join('\n')}\n`, focus }
 }

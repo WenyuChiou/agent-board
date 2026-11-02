@@ -15,16 +15,18 @@ import type { BoardState } from '../../hooks/board'
 import { dashboardHtml } from '../../hooks/dashboard'
 import { countDay, journalLine } from '../../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../../hooks/mirror'
-import { DARK, LIGHT } from '../../hooks/palette'
+import { MARK_PATH } from '../../hooks/page-look'
+import { DARK, LIGHT, PAGE_DARK, PAGE_LIGHT } from '../../hooks/palette'
 import type { Palette } from '../../hooks/palette'
 import { parseProgress } from '../../hooks/parse'
 import { emptyQuestions } from '../../hooks/questions'
-import { STRINGS } from '../../hooks/strings'
-import { buildView, replyHint } from '../../hooks/view'
+import { STRINGS, agentLabel } from '../../hooks/strings'
+import { buildView } from '../../hooks/view'
 import { CLI_FILES, COVER, COVER_AGENTS, COVER_MARKS, COVER_MOMENTS, NOW, SAMPLES, SESSION, MIN, coverFile } from './samples'
 import type { CoverAgent, CoverSample } from './samples'
 import { AGENT_ICONS, TESTED_ICONS } from './icons'
 import type { AgentIcon } from './icons'
+import { LOCKUP, lockupBody } from './brand'
 import { CELL, LINE, gridSvg, keyBox, layout, rowOf, toNode, widthCells } from './terminal'
 import type { Theme } from './terminal'
 
@@ -220,12 +222,25 @@ const brandDefs = (w: number, h: number, glow: [number, number] = [0.78, 0.35]):
 const brandGround = (w: number, h: number): string =>
   `<rect width="${w}" height="${h}" fill="url(#sky)"/><rect width="${w}" height="${h}" fill="url(#glow)"/><rect width="${w}" height="${h}" fill="url(#dots)"/>`
 
-// The board mark and the name beside it.
+// The board mark, `size` square at x, y, and beside it the wordmark, both on the dark ground.
 const brandMark = (x: number, y: number, size = 34, hasName = true): string => {
-  const k = size / 34
-  const name = `<text x="${x + size + 12}" y="${y + size * 0.74}" font-size="${Math.round(size * 0.72)}" font-weight="700" fill="${BRAND.ink}">Agent Board</text>`
-  return `<g transform="translate(${x} ${y}) scale(${k})"><rect width="34" height="34" rx="9" fill="${BRAND.accent}"/><rect x="8" y="9" width="18" height="3.5" rx="1.75" fill="#0c1116"/><rect x="8" y="15.5" width="12" height="3.5" rx="1.75" fill="#0c1116"/><circle cx="23" cy="22" r="3.6" fill="${DARK.waiting}"/></g>${hasName ? name : ''}`
+  const k = size / LOCKUP.grid.size
+  if (!hasName) return `<path transform="translate(${x} ${y}) scale(${num(size / 64)})" fill="${PAGE_DARK.brand}" d="${MARK_PATH}"/>`
+  return `<g transform="translate(${num(x - LOCKUP.grid.x * k)} ${num(y - LOCKUP.grid.y * k)}) scale(${num(k)})">${lockupBody(BRAND.ink, PAGE_DARK.brand)}</g>`
 }
+
+// docs/images/brand/: the lockup for a light and for a dark ground; the lockup and the mark alone that
+// follow the reader's theme through their own style (the README's title is that lockup: GitHub gives
+// an SVG picture its page's theme). Paths only, on a transparent ground.
+const lockupOpen = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(LOCKUP.width)}" height="${Math.ceil(LOCKUP.height)}" viewBox="${LOCKUP.left} ${LOCKUP.top} ${LOCKUP.width} ${LOCKUP.height}" role="img" aria-label="agent-board"><title>agent-board</title>`
+const brandLockup = (mode: 'light' | 'dark'): string => {
+  const page = mode === 'light' ? PAGE_LIGHT : PAGE_DARK
+  return `${lockupOpen}${lockupBody(page.ink, page.brand)}</svg>\n`
+}
+const brandLogo = (): string =>
+  `${lockupOpen}<style>.ink{fill:${PAGE_LIGHT.ink}}.brand{fill:${PAGE_LIGHT.brand}}@media (prefers-color-scheme:dark){.ink{fill:${PAGE_DARK.ink}}.brand{fill:${PAGE_DARK.brand}}}</style>${lockupBody('.ink', '.brand')}</svg>\n`
+const brandMarkFile = (): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="agent-board"><title>agent-board</title><style>path{fill:${PAGE_LIGHT.brand}}@media (prefers-color-scheme:dark){path{fill:${PAGE_DARK.brand}}}</style><path d="${MARK_PATH}"/></svg>\n`
 
 // The logo takes seven tenths of its tile: smaller, a logo with thin lines (OpenAI's) or fine
 // detail (Nous Research's) blurs at the table's 24 px.
@@ -724,7 +739,7 @@ const dashboard = (lang: Lang): string => {
   const sample = SAMPLES[lang] as (typeof SAMPLES)[string]
   const file = upsertAutoBlock(sample.file, mineOf(lang, false), s)
   const view = buildView(parseProgress(file), [], null, NOW, today(lang), {}, s)
-  return dashboardHtml(view, s, sample.path, s.dashStamp('2026-10-16 09:40'))
+  return dashboardHtml(view, s, sample.path, s.dashStamp('2026-10-16 09:40'), [], NOW)
 }
 
 // The promotional card, for GitHub's social preview and for sharing: a headline, the agents
@@ -759,10 +774,13 @@ const promo = (lang: Lang): string => {
   const pal = DARK
   const { grid: whole, theme } = paneGrid(lang, 'dark', { opened: [], isAnswered: false })
   // The card has no room for the Already answered line under the reply box (nor the blank line
-  // above it): the notification under the pane would run off the card.
+  // above it), nor for the question's age and archive notes: the notification under the pane
+  // would run off the card.
   const hide = whole.findIndex(row => row.map(cell => cell.ch).join('').includes(STRINGS[lang].answeredHide))
   const isBlankAbove = hide > 0 && (whole[hide - 1] ?? []).every(cell => cell.ch === ' ')
-  const grid = isBlankAbove ? [...whole.slice(0, hide - 1), ...whole.slice(hide + 1)] : whole
+  const notes = [STRINGS[lang].questionAgeUnknown, STRINGS[lang].archiveLive]
+  const grid = (isBlankAbove ? [...whole.slice(0, hide - 1), ...whole.slice(hide + 1)] : whole)
+    .filter(row => !notes.some(note => row.map(cell => cell.ch).join('').includes(note)))
   // The pane whole, down to the line before its second box (the first is the reply box), so
   // no line is cut off.
   const boxes = grid.flatMap((row, i) => ((row[0]?.ch ?? '') === '╭' ? [i] : []))
@@ -825,20 +843,26 @@ ${glyph(icon, 0, 0, 48)}
 // is the board the person gets, not a drawing of it. One per CLI, language and theme.
 const CLI_AGENTS = ['codex', 'antigravity'] as const
 type CliAgent = (typeof CLI_AGENTS)[number]
-// boardScreen's colour codes (CODES in hooks/board.ts) and the palette colour each one takes;
-// 0 ends a run and 1 is bold. A code missing here stops the render rather than drawing it plain.
-const ANSI: Record<string, keyof Palette> = { '31': 'alert', '32': 'done', '33': 'waiting', '35': 'project', '36': 'accent', '2': 'muted' }
+// boardScreen paints with the palette's own colours, 24-bit here (hooks/palette.ts), bold or not;
+// each is drawn in the picture's palette by its role. A colour that is no role stops the render
+// rather than drawing it plain.
 type Grid = Parameters<typeof gridSvg>[0]
-const ansiGrid = (text: string, palette: Palette): Grid =>
+// A board's lines with the gap before each right-aligned age closed, to tell whether a narrower
+// board cuts anything.
+const shapeOf = (text: string): string => text.split('\n').map(line => line.replace(/ {3,}/g, '  ').trimEnd()).join('\n')
+const ansiGrid =(text: string, palette: Palette, mode: Mode): Grid =>
   text.replace(/\n$/, '').split('\n').map(line => {
+    const source = mode === 'light' ? LIGHT : DARK
     const cells: Grid[number] = []
     let style: Grid[number][number]['style'] = {}
-    for (const part of line.split(/(\u001b\[\d+m)/)) {
-      const code = /^\u001b\[(\d+)m$/.exec(part)?.[1]
-      if (code !== undefined) {
-        const tone = ANSI[code]
-        if (tone === undefined && code !== '0' && code !== '1') throw new Error(`boardScreen paints with ANSI code ${code}, which render.ts has no colour for`)
-        style = code === '1' ? { bold: true } : tone === undefined ? {} : { fg: palette[tone] }
+    for (const part of line.split(/(\u001b\[[\d;]*m)/)) {
+      const codes = /^\u001b\[([\d;]*)m$/.exec(part)?.[1]?.split(';')
+      if (codes !== undefined) {
+        const at = codes.indexOf('38')
+        const hex = at < 0 ? null : `#${codes.slice(at + 2, at + 5).map(n => Number(n).toString(16).padStart(2, '0')).join('')}`.toUpperCase()
+        const role = hex === null ? undefined : (Object.keys(source) as Array<keyof Palette>).find(one => source[one].toUpperCase() === hex)
+        if (hex !== null && (codes[at + 1] !== '2' || role === undefined)) throw new Error(`boardScreen paints with ${codes.join(';')}, which render.ts has no colour for`)
+        style = { ...(codes[0] === '1' ? { bold: true } : {}), ...(role === undefined ? {} : { fg: palette[role] }) }
         continue
       }
       for (const ch of [...part]) cells.push(...(widthCells(ch) === 2 ? [{ ch, style }, { ch: '', style }] : [{ ch, style }]))
@@ -861,10 +885,11 @@ const cliBoard = (lang: Lang, mode: Mode, agent: CliAgent): string => {
   const state = { ...emptyBoardState, selected: at, key, open: key }
   // The window is as narrow as it can be while every line still shows whole: the board cuts an
   // indented line a little before the window's edge, so the widest line alone is not enough.
-  const whole = boardScreen(view, [], state, s, { width: 400, isColor: false })
+  // The ages sit at the right edge, so lines are compared with the gap before them closed.
+  const whole = shapeOf(boardScreen(view, [], state, s, { width: 400, isColor: false }))
   let cols = Math.max(...whole.split('\n').map(widthCells))
-  while (boardScreen(view, [], state, s, { width: cols, isColor: false }) !== whole) cols++
-  const grid = ansiGrid(boardScreen(view, [], state, s, { width: cols, isColor: true }), t.palette)
+  while (shapeOf(boardScreen(view, [], state, s, { width: cols, isColor: false })) !== whole) cols++
+  const grid = ansiGrid(boardScreen(view, [], state, s, { width: cols, isColor: true, depth: 'truecolor', theme: mode }), t.palette, mode)
   const theme: Theme = { ground: t.ground, ink: t.ink, edge: t.edge, muted: t.palette.muted, accent: t.palette.accent, frame: t.palette.frame }
   const title = 'agent-board --watch'
   // Half a unit in from the edge, so the window's outline is not cut by the picture's own edge.
@@ -1021,7 +1046,7 @@ const rowKey = (row: Grid[number] | undefined): string =>
 // stranger cannot place: the one under an open question to reply in the agent's own session
 // (scene 4's words say the answer is copied for Codex, and "can't reply from here" would read as
 // the opposite at a glance), and the one under a live session's line to archive it once it stops.
-// And it names each agent once, as its tile does: the board today says "codex is working · codex".
+// And it names each agent once, as its tile does: the board today says "Codex is working · codex".
 const coverBoard = (lang: Lang, mode: Mode, m: number, cols: number): Grid => {
   const s = STRINGS[lang]
   const c = COVER[lang] as CoverSample
@@ -1037,15 +1062,15 @@ const coverBoard = (lang: Lang, mode: Mode, m: number, cols: number): Grid => {
   const label = item.type === 'ask' ? item.ask.task : item.type === 'row' ? item.row.title : ''
   const copied = cursor.isCopied === true ? { note: s.copied, tone: 'done' as const, result: { key: item.key, revision: null, label } } : {}
   const state: BoardState = { ...emptyBoardState, selected: at, key: item.key, open: cursor.isOpen === true ? item.key : null, ...copied }
-  const lines = boardScreen(view, [], state, s, { width: cols, isColor: true }).replace(/\n$/, '').split('\n')
+  const lines = boardScreen(view, [], state, s, { width: cols, isColor: true, depth: 'truecolor', theme: mode }).replace(/\n$/, '').split('\n')
   if (lines.length < 3 || lines[lines.length - 2] !== '') throw new Error(`The cover's moment ${m} does not end with the board's key line, language ${lang}`)
   const plain = boardScreen(view, [], state, s, { width: cols, isColor: false }).replace(/\n$/, '').split('\n')
   // The hints as boardScreen prints them, so only those exact lines go.
-  const hints = new Set([s.archiveLive, ...items.flatMap(one => (one.type === 'ask' ? [replyHint(one.ask, s).where] : []))].filter(hint => hint !== '').map(hint => `    ${fit(hint, cols - 6)}`.trimEnd()))
+  const hints = new Set(items.flatMap(one => (one.type === 'ask' && one.ask.where === 'other' ? [s.boardAnswerIn(agentLabel(one.ask.agent || 'claude', s))] : [])).map(hint => `    ${fit(hint, cols - 6)}`.trimEnd()))
   const isHint = (i: number): boolean => hints.has((plain[i] ?? '').trimEnd())
   const withNames = (line: string): string =>
-    COVER_AGENTS.reduce((text, agent) => text.replace(`${s.agentWorking(agent)} · ${agent}`, s.agentWorking(COVER_NAMES[agent])).replace(` · ${agent} › `, ` · ${COVER_NAMES[agent]} › `), line)
-  return ansiGrid(`${lines.slice(0, -2).filter((_, i) => !isHint(i)).map(withNames).join('\n')}\n`, coverPalette(mode))
+    COVER_AGENTS.reduce((text, agent) => text.replace(`${s.agentWorking(agentLabel(agent, s))} · ${agent}`, s.agentWorking(COVER_NAMES[agent])).replace(` · ${agent} › `, ` · ${COVER_NAMES[agent]} › `), line)
+  return ansiGrid(`${lines.slice(0, -2).filter((_, i) => !isHint(i)).map(withNames).join('\n')}\n`, coverPalette(mode), mode)
 }
 
 // The board's width on the cover for a theme: as wide as its widest line in any language, so the
@@ -1055,8 +1080,8 @@ const coverColsByMode = new Map<Mode, number>()
 const coverCols = (mode: Mode): number => {
   const known = coverColsByMode.get(mode)
   if (known !== undefined) return known
-  const whole = LANGS.flatMap(one => Array.from({ length: COVER_MOMENTS }, (_, m) => coverBoard(one, mode, m, 400).map(row => lineText(row).trimEnd())))
-  const isWhole = (n: number): boolean => LANGS.every((one, l) => Array.from({ length: COVER_MOMENTS }, (_, m) => m).every(m => coverBoard(one, mode, m, n).map(row => lineText(row).trimEnd()).join('\n') === (whole[l * COVER_MOMENTS + m] ?? []).join('\n')))
+  const whole = LANGS.flatMap(one => Array.from({ length: COVER_MOMENTS }, (_, m) => coverBoard(one, mode, m, 400).map(row => shapeOf(lineText(row)))))
+  const isWhole = (n: number): boolean => LANGS.every((one, l) => Array.from({ length: COVER_MOMENTS }, (_, m) => m).every(m => coverBoard(one, mode, m, n).map(row => shapeOf(lineText(row))).join('\n') === (whole[l * COVER_MOMENTS + m] ?? []).join('\n')))
   let cols = Math.max(...whole.flatMap(rows => rows.map(widthCells)))
   while (!isWhole(cols)) {
     cols++
@@ -1167,7 +1192,8 @@ const cover = (lang: Lang, mode: Mode): string => {
     return runs.map(([a, b]) => `<rect class="a ${glow(COVER_AT[m] ?? 0, 0.8, isAsking ? (mode === 'dark' ? 0.12 : 0.2) : 0.15)}" x="1" y="${rowY(a) - 1}" width="${num(winW - 2)}" height="${(b - a + 1) * LINE + 2}" fill="${isAsking ? pal.waiting : pal.accent}"/>`).join('')
   }).join('')
   // Scene 5: Codex's line lights up when the person's message reaches it, and again when it replies.
-  const codexAt = boards[MOMENT.opened]?.findIndex(row => lineText(row).replace(/^[›\s]+/, '').trimEnd() === c.tasks.codex.title) ?? -1
+  // A title line ends where the gap before its agent and age starts.
+  const codexAt = boards[MOMENT.opened]?.findIndex(row => lineText(row).replace(/^[›\s]+/, '').replace(/ {2,}.*$/, '').trimEnd() === c.tasks.codex.title) ?? -1
   if (codexAt < 0) throw new Error(`Codex has no line on the board when the message is sent, language ${lang}`)
   const reached = [[T.arrive, pal.accent], [T.replied, pal.done]].map(([at, colour]) => `<rect class="a ${glow(at as number, 1, 0.22)}" x="1" y="${rowY(codexAt) - 1}" width="${num(winW - 2)}" height="${2 * LINE + 2}" fill="${colour}"/>`).join('')
   // The shadow is cast by a still rect the window's size under it, not by the window, so a change
@@ -1483,6 +1509,11 @@ mkdirSync(join(OUT, 'agents'), { recursive: true })
 for (const icon of AGENT_ICONS) write(join(OUT, 'agents', `${icon.file}.svg`), () => agentIcon(icon))
 for (const icon of AGENT_ICONS) write(join(OUT, 'agents', `chip-${icon.file}.svg`), () => chip(icon))
 for (const lang of LANGS) write(join(OUT, `promo-${lang}.svg`), () => promo(lang))
+
+mkdirSync(join(OUT, 'brand'), { recursive: true })
+for (const mode of ['light', 'dark'] as const) write(join(OUT, 'brand', `agent-board-lockup-${mode}.svg`), () => brandLockup(mode))
+write(join(OUT, 'brand', 'agent-board-logo.svg'), brandLogo)
+write(join(OUT, 'brand', 'agent-board-mark.svg'), brandMarkFile)
 
 mkdirSync(join(OUT, 'board'), { recursive: true })
 for (const lang of LANGS) {

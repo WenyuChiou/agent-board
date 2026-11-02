@@ -131,20 +131,11 @@ export const leftoverPlan = ({ list, self, since, roots, exclude = [] }) => {
   return { kill, keep }
 }
 
-// The open issue marked on a hook load check, and whether it explains this outcome (#395). #241: on
-// a busy Windows machine a hook can run longer than the 3 s budget, and an event whose reporter runs
-// out of time is queued until a later hook applies it, so the page shows it late or never. Only that
-// pattern counts: no hook exited non-zero or ran past twice the budget, every poll was answered, some
-// report was shown, the page's poll interval fits its budget, and every late or missed report came
-// back while that session's own event was queued. Anything else stays a failure.
-export const hookLoadMarker = ({ key, outcome, platform, budgetMs }) => {
-  if (platform !== 'win32' || (key !== 'hooks' && key !== 'page')) return undefined
-  if (outcome.ok && (key === 'hooks' || outcome.pollWithinBudget === true)) return { issue: 241, explains: true }
-  const explains = key === 'hooks'
-    ? outcome.over > 0 && outcome.failedRuns === 0 && outcome.maxMs <= 2 * budgetMs
-    : outcome.pollWithinBudget === true && outcome.shown > 0 && outcome.slow > 0 && outcome.slowNotQueued === 0 && outcome.failedAnswers === 0
-  return { issue: 241, explains }
-}
+export const classifyHookLoadChecks = ({ outcomes, titles }) => Object.entries(titles).map(([key, title]) => {
+  const outcome = outcomes[key]
+  if (outcome === undefined) return { title, status: 'fail', line: 'Not measured: the run ended before this check.' }
+  return { title, status: outcome.ok ? 'pass' : 'fail', line: outcome.line }
+})
 
 export const redactDeep = (value, redact) => {
   if (typeof value === 'string') return redact(value)

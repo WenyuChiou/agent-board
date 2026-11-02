@@ -166,7 +166,8 @@ const run = async () => {
   catch { return fail('INCOMPLETE_INPUT') }
   const internal = ['--hook-version', '--hook-event', '--hook-deadline', '--hook-started', '--home']
   const reporterArgs = args.filter((arg, index) => !internal.includes(arg) && !internal.includes(args[index - 1]))
-  const queue = () => {
+  // A reporter run that failed passes its own log code as 'failure'; a saved copy is logged after it as REPORTER_QUEUED.
+  const queue = failure => {
     let temporary
     try {
       // A late copy is still written: it holds the worker's start time, and replay drops it once a
@@ -175,7 +176,7 @@ const run = async () => {
       const pending = path.join(${dataRoot === undefined ? `path.dirname(${JSON.stringify(script)})` : JSON.stringify(dataRoot)}, 'pending')
       fs.mkdirSync(pending, { recursive: true, mode: 0o700 })
       // Concurrent workers can pass 64 by a few because the count and write are separate.
-      if (fs.readdirSync(pending).filter(name => name.endsWith('.json')).length >= 64) return fail('REPORTER_TIMEOUT')
+      if (fs.readdirSync(pending).filter(name => name.endsWith('.json')).length >= 64) return fail(failure ?? 'REPORTER_TIMEOUT')
       const env = Object.fromEntries((${JSON.stringify(HOOK_SESSION_ENV)}[agent] ?? []).filter(name => typeof process.env[name] === 'string').map(name => [name, process.env[name]]))
       // Replay reads only session_id, sessionId, sessionID, conversationId,
       // conversation_id, generation_id, turn_id, hook_event_name, hookEventName,
@@ -189,12 +190,15 @@ const run = async () => {
       if (Array.isArray(roots) && typeof roots[0] === 'string' && roots[0].length <= 4096) kept.workspace_roots = [roots[0]]
       const file = path.join(pending, String(started).padStart(15, '0') + '-' + randomUUID() + '.raw.json')
       temporary = file + '.tmp'
-      fs.writeFileSync(temporary, JSON.stringify({ version: 1, kind: 'raw', at: started, argv: reporterArgs, env, payload: kept }), { flag: 'wx', mode: 0o600 })
+      // Match normalized entries' UTC text; replay still orders by the precise source milliseconds.
+      const now = new Date(started).toISOString().replace(/\\.\\d{3}Z$/, 'Z')
+      fs.writeFileSync(temporary, JSON.stringify({ version: 1, kind: 'raw', at: started, now, argv: reporterArgs, env, payload: kept }), { flag: 'wx', mode: 0o600 })
       fs.renameSync(temporary, file)
       temporary = undefined
       requestRecovery()
+      if (failure) hookError(failure)
       return fail('REPORTER_QUEUED')
-    } catch { return fail('REPORTER_FAILED') }
+    } catch { return fail(failure ?? 'REPORTER_FAILED') }
     finally { if (temporary) { try { fs.unlinkSync(temporary) } catch {} } }
   }
   const remaining = deadline - Date.now()
@@ -211,7 +215,13 @@ const run = async () => {
     // line of its own, for the agent to correct (#217).
     const reason = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
     if (reason && isReport) process.stderr.write('AGENT_BOARD_REASON ' + reason + '\\n')
-    return fail(reason ? 'REPORTER_FAILED ' + reason : 'REPORTER_FAILED')
+    const failure = reason ? 'REPORTER_FAILED ' + reason : 'REPORTER_FAILED'
+    // A report is answered to its agent, never queued. Any other event that failed is saved, so a failure nobody
+    // foresaw (#241) costs a retry, not the event. A refusal of the event itself (INVALID_SESSION, say) would refuse
+    // its replay too, and replay drops such an entry, so it is only logged. A refusal missing here is saved and dropped
+    // at replay, which wastes a replay; a retryable code listed here would lose its event.
+    if (isReport || /^(?:INVALID_|BLOCK_|SESSION_CONFLICT$|UNSUPPORTED_AGENT$|MISSING_ARGUMENT$|MISSING_TURN$|STALE_TURN$|SHARED_BOARD_PATH_CONFLICT$|UNSAFE_COMMAND_PATH$)/.test(reason ?? '')) return fail(failure)
+    return queue(failure)
   }
   if (!isReport && result.stderr?.split(/\\r?\\n/).includes('AGENT_BOARD_HOOK_PENDING')) requestRecovery()
   process.stdout.write(result.stdout)

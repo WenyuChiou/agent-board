@@ -387,6 +387,7 @@ export const questionFilesKey = (
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
 const ownObservations = (mine: ProgressMirror): Observation[] => {
+  if (mine.isRun === true) return []
   const own = shortId(mine.sessionId)
   const scope = questionScope(mine.project, 'claude', own)
   return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: 'claude', session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
@@ -587,6 +588,32 @@ export const observeQuestions = (
       if (row.isWaiting) keys[questionSlot(row.scope, row.index)] = record.id
     })
   }
+  const blockKey = (auto: ProgressAuto): string => JSON.stringify([auto.agent.toLowerCase(), auto.session, auto.resume])
+  const locations = new Map<string, { project: string; scope: string }[]>()
+  const scopeCounts = new Map<string, number>()
+  for (const project of projects) for (const task of project.tasks) {
+    if (task.auto === null) continue
+    const key = blockKey(task.auto)
+    const places = locations.get(key) ?? []
+    const scope = questionScope(project.name, task.auto.agent, task.auto.session)
+    places.push({ project: project.name, scope })
+    locations.set(key, places)
+    scopeCounts.set(scope, (scopeCounts.get(scope) ?? 0) + 1)
+  }
+  for (const record of records) {
+    const source = record.source
+    if (!record.isUnresolved || assigned.has(record.id) || frozen.has(record.scope) || source?.kind !== 'block') continue
+    const auto = sourceSnapshot(source.data)?.auto
+    if (auto === undefined || auto === null || auto.agent.toLowerCase() !== source.agent.toLowerCase() || auto.session !== source.session) continue
+    const places = locations.get(blockKey(auto))
+    const destination = places?.length === 1 ? places[0] : undefined
+    if (destination === undefined || destination.project === source.project || frozen.has(destination.scope) || scopeCounts.get(destination.scope) !== 1) continue
+    // A unique live block with the saved full identity proves a project move. Keep the
+    // former question's evidence, without treating a missing or colliding block as an answer.
+    record.isUnresolved = false
+    record.isPresent = false
+    record.isWaiting = false
+  }
   if (isSettled) {
     for (const record of records) {
       if (!assigned.has(record.id) && !frozen.has(record.scope)) {
@@ -618,6 +645,11 @@ export const observeQuestions = (
     marked: answered.map(key => answered.includes(migrationKey(key)) || proofs.consumed.includes(sha256(key)) ? '' : legacy[key] ?? key).filter(key => key !== ''),
   }
 }
+
+// A question kept for review after its block was archived (#400). Its identity is retired and it no
+// longer waits on the board, yet it can be hidden: that writes only the hidden list.
+export const isKeptQuestion = (ledger: QuestionLedger, id: string): boolean =>
+  ledger.records.some(record => record.id === id && record.isUnresolved && record.isArchived === true && record.source !== undefined)
 
 export const acknowledgementKeys = (ledger: QuestionLedger, id: string): string[] =>
   [id, ...Object.entries(ledger.legacy).filter(([, target]) => target === id).flatMap(([key]) => [key, migrationKey(key)])]

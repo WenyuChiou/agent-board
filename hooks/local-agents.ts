@@ -89,8 +89,28 @@ export const antigravityCommand = (argv: string[], isWindows: boolean, quote: (v
     const source = `process.argv=JSON.parse(${JSON.stringify(args)});process.argv.push('--hook-started',String(Math.floor(require('node:perf_hooks').performance.timeOrigin)));${argv[3]}`
     return `${windowsNode} --input-type=commonjs -e eval(Buffer.from('${base64(new TextEncoder().encode(source))}','base64').toString('utf8'))`
   }
-  const launch = `& ${argv.map(value => `'${value.replaceAll("'", "''")}'`).join(' ')} --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE`
+  return encodedLaunch(argv)
+}
+
+// PowerShell reads U+2018 to U+201B as single quotes too, so each is doubled like ' (#625).
+// The start time is passed on because this launch costs a PowerShell start first (#533).
+const encodedLaunch = (argv: string[]): string => {
+  const launch = `& ${argv.map(value => `'${value.replace(/['‘’‚‛]/g, quote => quote + quote)}'`).join(' ')} --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE`
   return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${base64(utf16le(launch))}`
+}
+
+// A host's hook command on Windows, which cmd and PowerShell both run: Codex 0.164 runs hooks
+// through PowerShell, which reads a line that starts with a quoted word as a string, so the program
+// goes first unquoted (`windowsNode`, a path of safe characters or its verified 8.3 name) and the
+// other words stay quoted. A spaced path with no 8.3 name goes inside an encoded PowerShell launch,
+// which also runs from cmd but costs a PowerShell start (#533, #623). PowerShell reads U+201C to
+// U+201F as double quotes, so a word holding one goes inside the launch's single quotes (#625).
+export const windowsHookCommand = (argv: string[], quote: (value: string) => string, windowsNode?: string): string => {
+  if (windowsNode !== undefined) {
+    if (!/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i.test(windowsNode)) throw new Error('UNSAFE_HOOK_EXECUTABLE')
+    if (!argv.some(value => /[“-‟]/.test(value))) return [windowsNode, ...argv.slice(1).map(quote)].join(' ')
+  }
+  return encodedLaunch(argv)
 }
 
 export const cursorEvents: Record<string, string> = {

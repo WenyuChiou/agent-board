@@ -262,7 +262,8 @@ describe('L3 across agents and sessions', () => {
     }
     expect(surfaces.terminal).toContain('✓ 1 Retry limit')
     expect(surfaces.terminal).not.toContain('● 1 Retry limit')
-    expect(surfaces.html).toContain('● 0</span> waiting')
+    // progress.html counts what needs you in its Needs you flag, as the page does.
+    expect(surfaces.html).toContain('<b id="needs-n">0</b>')
     expect(surfaces.html).toContain('Nothing needs you right now')
     for (const visible of Object.values(surfaces)) {
       noMachineIds(visible, world)

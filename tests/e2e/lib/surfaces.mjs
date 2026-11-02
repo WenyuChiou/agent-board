@@ -52,7 +52,7 @@ export const terminal = {
   screen: async (world, args = []) => successful(await run(world, args)),
   keys: async (world, keys, args = []) => successful(await run(world, ['--keys', keys, ...args])),
   watch: world => {
-    const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
+    const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
     const child = spawnIsolated(process.execPath, ['--import', pathToFileURL(preload).href, world.script, '--watch'], { env: world.env, cwd: world.root, stdio: ['pipe', 'pipe', 'pipe'] })
     ownedChildren.add(child)
     let output = '', errors = '', failure
@@ -61,8 +61,8 @@ export const terminal = {
     child.on('error', error => { failure = error })
     child.stdout.setEncoding('utf8').on('data', chunk => {
       output += chunk
-      if (!output.includes('\x1b[2J\x1b[H')) return
-      const current = output.split('\x1b[2J\x1b[H').at(-1)
+      if (!output.includes('\x1b[H')) return
+      const current = output.split('\x1b[H').at(-1)
       const heading = world.lang === 'zh-TW' ? '進度' : world.lang === 'zh-CN' ? '进度' : 'Progress'
       if (!current.includes(heading)) return
       frames.push({ sequence: ++sequence, text: plain(current), at: performance.now() })
@@ -119,6 +119,10 @@ export const html = async world => {
 
 // The small DOM is copied from tests/board.test.mjs pageDom. The actual shipped
 // page script builds every card and performs every press; tests do not emulate actions.
+// The state-first page draws a question as an article.card under Needs you and every task as a
+// li.row; cards() returns both, and a row's steps and buttons live inside its own node.
+// The page's own parts a person reads: the sidebar, the sections, the notes, the notices and the footer.
+const PAGE_PARTS = ['side', 'needs-n', 'board', 'note', 'offline', 'main', '.pfoot']
 export const pageDom = async (source, first, post, { clipboard = true, legacyCopy = false } = {}) => {
   const nodes = new Map()
   class Element {
@@ -130,12 +134,29 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
       this.value = ''
       this.text = ''
       this.style = {}
+      this.className = ''
     }
+    set id(value) {
+      this.attributes.id = value
+      nodes.set(value, this)
+    }
+    get id() { return this.attributes.id ?? '' }
     set textContent(value) {
       this.text = value
       this.childNodes = []
     }
     get textContent() { return this.text + this.childNodes.map(child => child.textContent).join(' ') }
+    // readText: the words the page holds for the person, leaving out the blocks it keeps only for
+    // another state (the empty-board text beside a card, the box for writing an answer). A folded
+    // row still counts: its words are one press away, and the privacy checks read them.
+    get readText() { return String(this.className).split(' ').includes('gone') ? '' : this.text + this.childNodes.map(child => child.readText).join(' ') }
+    // visibleText: only what is on screen now; a closed row and a hidden composer are inert, and a
+    // closed details shows its summary only.
+    get visibleText() {
+      if (this.inert === true) return ''
+      const shown = this.tag === 'details' && this.open !== true ? this.childNodes.filter(child => child.tag === 'summary') : this.childNodes
+      return this.text + shown.map(child => child.visibleText).join(' ')
+    }
     appendChild(child) {
       child.parentNode = this
       this.childNodes.push(child)
@@ -154,12 +175,26 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
       return child
     }
     remove() { this.parentNode?.removeChild(this) }
-    setAttribute(name, value) { this.attributes[name] = value }
+    setAttribute(name, value) {
+      this.attributes[name] = value
+      if (name === 'id') nodes.set(value, this)
+    }
     getAttribute(name) { return this.attributes[name] ?? null }
     addEventListener(name, callback) { this.events[name] = callback }
-    querySelectorAll() { return this.childNodes.flatMap(child => [...(child.tag === 'textarea' && child.getAttribute('data-key') !== null ? [child] : []), ...child.querySelectorAll()]) }
-    click() { if (!this.disabled) this.events.click?.() }
+    querySelectorAll(selector = 'textarea[data-key]') {
+      return this.childNodes.flatMap(child => [...(matches(child, selector) ? [child] : []), ...child.querySelectorAll(selector)])
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null }
+    click() {
+      if (this.disabled) return
+      this.events.click?.()
+      if (this.tag === 'summary' && this.parentNode?.tag === 'details') {
+        this.parentNode.open = !this.parentNode.open
+        this.parentNode.events.toggle?.()
+      }
+    }
     focus(options) { this.focusOptions = options; document.activeElement = this }
+    blur() { if (document.activeElement === this) document.activeElement = null }
     scrollIntoView(options) { (this.scrollCalls ??= []).push(options) }
     select() { this.setSelectionRange(0, this.value.length) }
     setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end }
@@ -168,7 +203,25 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
     if (!nodes.has(id)) nodes.set(id, new Element(id))
     return nodes.get(id)
   }
+  const matches = (node, selector) => {
+    if (selector === 'button') return node.tag === 'button'
+    if (selector === 'button:not([data-local])') return node.tag === 'button' && node.getAttribute('data-local') === null
+    if (selector === 'button[data-static]') return node.tag === 'button' && node.getAttribute('data-static') !== null
+    const tag = selector.match(/^[a-z]+/)?.[0]
+    const attrs = [...selector.matchAll(/\[([^=\]]+)(?:=["']?([^\]"']+)["']?)?\]/g)]
+    if (tag && node.tag !== tag) return false
+    if (attrs.length) return attrs.every(([, name, value]) => node.getAttribute(name) !== null && (value === undefined || node.getAttribute(name) === value))
+    if (tag) return true
+    return selector === 'textarea[data-key]' && node.tag === 'textarea' && node.getAttribute('data-key') !== null
+  }
   get('words').textContent = source.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
+  get('.pfoot').appendChild(get('close'))
+  get('close').tag = 'button'
+  for (const found of source.matchAll(/<button\b([^>]*)>/g)) {
+    const id = found[1].match(/id="([^"]+)"/)?.[1]
+    if (!id) continue
+    for (const attr of ['data-local', 'data-static']) if (found[1].includes(attr)) get(id).setAttribute(attr, '')
+  }
   let model = first, scheduled, pollMs
   const requests = [], copied = []
   const pending = []
@@ -186,7 +239,11 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
       node.textContent = text
       return node
     },
-    querySelector: get,
+    querySelector: selector => selector.startsWith('#') ? get(selector.slice(1)) : [...nodes.values()].flatMap(node => [...(matches(node, selector) ? [node] : []), ...node.querySelectorAll(selector)])[0] ?? get(selector),
+    querySelectorAll: selector => [...nodes.values()].flatMap(node => [...(matches(node, selector) ? [node] : []), ...node.querySelectorAll(selector)]),
+    addEventListener(name, run) { this.events[name] = run },
+    events: {},
+    title: '',
     activeElement: null,
   }
   runInNewContext(script, {
@@ -194,14 +251,17 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
     navigator,
     crypto: { randomUUID }, window: { confirm: () => true, isSecureContext: true },
     setTimeout: (callback, ms) => {
-      assert.ok(Number.isFinite(ms) && ms > 0, 'The shipped page must schedule a poll interval')
-      pollMs = ms
-      scheduled = callback
+      assert.ok(ms === undefined || Number.isFinite(ms) && ms > 0, 'The shipped page must schedule a poll interval')
+      // Only the board's own poll is the next redraw; a short wait of a moving page is not.
+      if (ms === 3000 || ms === undefined) {
+        pollMs = ms ?? 3000
+        scheduled = callback
+      }
       return 1
     },
     clearTimeout: () => {},
     fetch: async (target, options) => {
-      if (target === '/api/board') return { ok: true, json: async () => ({ model, now: 1 }) }
+      if (target.startsWith('/api/board')) return { ok: true, json: async () => ({ model, now: 1 }) }
       const request = { path: target, body: JSON.parse(options.body) }
       requests.push(request)
       const promise = post(request)
@@ -216,19 +276,50 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
   }
   await flush()
   const descendants = node => [node, ...node.childNodes.flatMap(descendants)]
+  // A question card, a task row, and the line a press leaves where its card has gone (lost).
+  const isCard = node => { const names = String(node.className ?? '').split(' '); return names.includes('card') || names.includes('row') || names.includes('lost') }
   return {
     node: get, requests, copied, flush, setClipboard,
     get activeElement() { return document.activeElement },
     get pollMs() { return pollMs },
     inputs: node => descendants(node).filter(one => one.tag === 'textarea'),
-    cards: () => descendants(get('board')).filter(node => node.className?.split(' ').includes('card')),
+    cards: () => descendants(get('board')).filter(isCard),
     buttons: node => descendants(node).filter(one => one.tag === 'button'),
+    // The words of one section of the board: needs, working, others or done.
+    section: name => get('board').childNodes.filter(one => one.getAttribute('data-sec') === name).map(one => one.readText).join('\n'),
+    // The line a press writes next to its card or row.
+    slot: node => descendants(node).find(one => String(one.className).split(' ').includes('press-result')),
     redraw: async next => {
       model = next
       scheduled()
       await flush()
     },
-    text: () => ['summary', 'counts', 'status', 'board', 'note', 'main'].map(id => get(id).textContent).join('\n'),
+    // Puts a button on screen the way a person would: opens the closed shelf, the row and the More
+    // panel around it, one press each. False when the page keeps it for another state (a box that
+    // shows only after Write your own) or when nothing opens it.
+    reveal: button => {
+      const toggles = node => descendants(node).filter(one => one.tag === 'button' && one.getAttribute('aria-expanded') === 'false')
+      for (let step = 0; step < 8; step++) {
+        for (let one = button; one; one = one.parentNode) if (String(one.className).split(' ').includes('gone')) return false
+        let folded = null
+        for (let one = button; one.parentNode; one = one.parentNode) if (one.parentNode.tag === 'details' && one.parentNode.open !== true && one.tag !== 'summary') folded = one.parentNode
+        if (folded) { folded.childNodes.find(one => one.tag === 'summary')?.click(); continue }
+        let blocked = null
+        for (let one = button; one; one = one.parentNode) if (one.inert === true) blocked = one
+        if (!blocked) return true
+        let node = blocked, isOpened = false
+        for (let level = 0; level < 3 && !isOpened && node.parentNode; level++) {
+          const toggle = node.parentNode.childNodes.filter(one => one !== node).flatMap(toggles)[0]
+          if (toggle) { toggle.click(); isOpened = true } else node = node.parentNode
+        }
+        if (!isOpened) return false
+      }
+      return false
+    },
+    // text(): the words the page holds for the state it shows, folded away or not (the privacy
+    // checks read it); visible(): only what is on screen now (a press must change this).
+    text: () => PAGE_PARTS.map(id => get(id).readText).join('\n'),
+    visible: () => PAGE_PARTS.map(id => get(id).visibleText).join('\n'),
   }
 }
 
@@ -317,24 +408,41 @@ export const serve = {
         else await dom.redraw(model)
         return dom.text()
       }
-      const press = async (cardMatch, buttonMatch) => {
+      const matches = (value, pattern) => pattern instanceof RegExp ? pattern.test(value) : value.includes(pattern)
+      // A button that only opens or reveals (a row's head, More) is no action and is not pressed here.
+      const isAction = one => one.getAttribute('data-nav') === null
+      // A button of the page itself, in no card or row (the Done shelf's Archive now).
+      const pressPage = async buttonMatch => {
         await page()
-        const matches = (value, pattern) => pattern instanceof RegExp ? pattern.test(value) : value.includes(pattern)
-        const card = dom.cards().find(one => matches(one.textContent, cardMatch) && dom.buttons(one).some(button => matches(button.textContent, buttonMatch)))
-        assert.ok(card, `Card missing: ${cardMatch}\n${dom.text()}`)
-        const button = dom.buttons(card).find(one => matches(one.textContent, buttonMatch))
-        assert.ok(button, `Button missing: ${buttonMatch}\n${card.textContent}`)
-        const before = card.textContent
+        const button = dom.buttons(dom.node('board')).find(one => isAction(one) && matches(one.textContent, buttonMatch))
+        assert.ok(button, `Button missing: ${buttonMatch}\n${dom.text()}`)
+        assert.ok(dom.reveal(button), `Button not on screen: ${buttonMatch}\n${dom.text()}`)
+        const before = dom.visible()
         button.click()
         await dom.flush()
         await page()
-        const after = dom.cards().find(one => matches(one.textContent, cardMatch) && dom.buttons(one).some(button => matches(button.textContent, buttonMatch)))?.textContent ?? ''
+        return { before, after: dom.visible(), card: 'page', button: button.textContent, surface: 'serve', requests: dom.requests }
+      }
+      const press = async (cardMatch, buttonMatch) => {
+        await page()
+        const card = dom.cards().find(one => matches(one.textContent, cardMatch) && dom.buttons(one).some(button => isAction(button) && matches(button.textContent, buttonMatch)))
+        assert.ok(card, `Card missing: ${cardMatch}\n${dom.text()}`)
+        const button = dom.buttons(card).find(one => isAction(one) && matches(one.textContent, buttonMatch))
+        assert.ok(button, `Button missing: ${buttonMatch}\n${card.textContent}`)
+        // A person opens the shelf and the row first, and a press must change what is on screen.
+        assert.ok(dom.reveal(button), `Button not on screen: ${buttonMatch}\n${card.textContent}`)
+        const before = card.visibleText
+        button.click()
+        await dom.flush()
+        await page()
+        const after = dom.cards().find(one => matches(one.textContent, cardMatch) && dom.buttons(one).some(button => isAction(button) && matches(button.textContent, buttonMatch)))?.visibleText ?? ''
         return { before, after, card: String(cardMatch), button: button.textContent, surface: 'serve', requests: dom.requests }
       }
       // isOwned: the pid is alive and the world's address file still names it and this address. It
       // does not ask the server, so after a hard crash a leftover file and a reused pid would pass:
       // a caller that ends the server itself first asks it (as killRecorded and the soak do).
-      return { url: url.href, get, post, page, press, stop, pid, isOwned: () => isRecorded() && alive(), get dom() { return dom }, get pollMs() { return dom?.pollMs } }
+      const visible = async () => { await page(); return dom.visible() }
+      return { url: url.href, get, post, page, visible, press, pressPage, stop, pid, isOwned: () => isRecorded() && alive(), get dom() { return dom }, get pollMs() { return dom?.pollMs } }
     } catch (error) {
       await stop()
       throw error
@@ -363,10 +471,12 @@ export const inspectSurfaces = async (world, server, { allow = [] } = {}) => {
   }
 }
 
-export const seenPageWithin = async (server, predicate, ms) => {
+// visible: read only what is on screen (a folded row and a hidden box do not count).
+// read: a function that returns the text to test, in place of the whole page.
+export const seenPageWithin = async (server, predicate, ms, { visible = false, read } = {}) => {
   // pageDom advances the shipped poll callback without sleeping; charge its actual delay.
   if (server.pollMs === undefined) await server.page()
   const pollMs = server.pollMs
   assert.ok(Number.isFinite(pollMs) && pollMs < ms, `Page poll ${pollMs} exceeds budget ${ms}`)
-  return pollMs + await seenWithin(server.page, predicate, ms - pollMs)
+  return pollMs + await seenWithin(read ?? (visible ? server.visible : server.page), predicate, ms - pollMs)
 }

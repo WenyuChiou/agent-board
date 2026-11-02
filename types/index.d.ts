@@ -78,6 +78,11 @@ export type ProgressAuto = {
   dir: string | null
   pr: number | null
   ci: ProgressCi | null
+  // `origin=run`: an agent started this session for itself (a delegate's one-shot, a helper
+  // thread), not a person (#399). `parent` is the full session id or block id of the session that
+  // started it, when the writer knew it. Absent on every block a person's conversation writes.
+  isRun?: true
+  parent?: string
 }
 
 export type ProgressTask = {
@@ -195,6 +200,9 @@ export type ProgressMirror = {
   // A short tag of the path of the board this record was saved for (boardTag, retention.ts), so a
   // second board sharing the store does not remove it. A record from before 0.24 has none.
   board?: string
+  // The session was started by an agent for itself, not by a person (`origin=run` in its marker)
+  // (#399).
+  isRun?: true
 }
 
 // What the pane shows under its input box: a side question's answer, what a quick add

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { createServer, request } from 'node:http'
 import { createHash } from 'node:crypto'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging.ts'
@@ -16,6 +16,7 @@ import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
 import { claimMessageStore } from '../scripts/message-store-claim.ts'
 import { classifyMessageStoreFiles, isMessageStoreClean, readMessageStoreFiles } from './e2e/lib/message-store-files.mjs'
+import { privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
 
 // The server store and page modules use the host's extensionless imports; resolve only those
 // local paths, as tests/prompt-hooks.test.mjs does.
@@ -254,23 +255,91 @@ test('transport acceptance is distinct from an actual reply and cannot grant too
 // Windows keeps the address and its default message sibling in the protected child.
 const runtimeFolder = runtime => process.platform === 'win32' ? join(runtime, 'agent-board') : runtime
 
+// Before it prints its address, the page on Windows checks its folder's and file's access in
+// child processes. The owned child logs each phase, so a slow or failed start says where it was.
+const START_TRACE = String.raw`const fs = require('node:fs'), cp = require('node:child_process'), http = require('node:http')
+const file = process.env.AGENT_BOARD_TEST_START_TRACE
+const log = one => { try { fs.appendFileSync(file, JSON.stringify({ at: Math.round(performance.now()), ...one }) + '\n') } catch {} }
+log({ phase: 'preload' })
+for (const name of ['execFileSync', 'spawnSync']) {
+  const original = cp[name]
+  cp[name] = function (...args) {
+    // A begin line too, so a call still running when the test gives up shows in the trace.
+    const phase = String(args[0]).split(/[\\/]/).pop(), started = performance.now()
+    log({ phase: 'begin ' + phase })
+    try { return original.apply(this, args) } finally { log({ phase, ms: Math.round(performance.now() - started) }) }
+  }
+}
+const listen = http.Server.prototype.listen
+http.Server.prototype.listen = function (...args) { log({ phase: 'listen' }); this.once('listening', () => log({ phase: 'listening' })); return listen.apply(this, args) }
+const write = process.stdout.write
+process.stdout.write = function (...args) { log({ phase: 'address' }); return write.apply(this, args) }
+require('node:module').syncBuiltinESMExports()
+`
+// Every start's time from spawn to the printed address, or that it failed. One summary line at
+// the end of the file says when a start was slow or failed; there is no budget on it.
+const startTimes = []
+const SLOW_START_MS = 5000
+after(() => {
+  const slow = startTimes.filter(one => one.ms > SLOW_START_MS), failed = startTimes.filter(one => !one.ok)
+  if (slow.length === 0 && failed.length === 0) return
+  const worst = startTimes.reduce((most, one) => (one.ms > most.ms ? one : most), startTimes[0])
+  console.log(`# board starts: ${startTimes.length}, slowest ${worst.ms} ms (${worst.phases}), ${slow.length} over ${SLOW_START_MS / 1000} s, ${failed.length} failed`)
+})
+const startTrace = file => {
+  let text = ''
+  try { text = readFileSync(file, 'utf8').trim() } catch { return 'no trace' }
+  if (!text) return 'no trace'
+  // A line cut off by the kill reads as such, and the lines before it still show.
+  const read = line => { try { return JSON.parse(line) } catch { return { phase: 'unreadable line' } } }
+  return text.split('\n').map(read).map(one => one.ms === undefined ? `${one.phase}@${one.at}` : `${one.phase} ${one.ms}ms@${one.at}`).join(', ')
+}
 const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messages')]) => {
   // The board uses XDG_RUNTIME_DIR only when no other account can open it.
   const runtime = join(dir, 'runtime'); mkdirSync(runtime, { recursive: true, mode: 0o700 })
+  // `--serve` makes this folder private before it starts the page (runningPage reads its address
+  // file there first), so the page's 10 s window starts with PowerShell already loaded. The first
+  // PowerShell start on a fresh Windows machine takes seconds (2–3 s on CI) and belongs to `--serve`.
+  const isWindows = process.platform === 'win32', preparedAt = performance.now()
+  let handoff
+  if (isWindows) {
+    try { privateRuntimeFolder(join(runtime, 'agent-board')); handoff = runtimeFolderHandoff() }
+    catch (error) { throw new Error(`runtime folder not private after ${Math.round(performance.now() - preparedAt)} ms: ${error.message}`) }
+  }
+  const prepared = isWindows ? ` (folder made private in ${Math.round(performance.now() - preparedAt)} ms before)` : ''
   const script = join(dir, 'board.mjs'), progress = join(dir, 'progress.md')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${BOARD_SCRIPT}`)
   if (!readFileSyncSafe(progress)) writeFileSync(progress, '# Synthetic board\n')
   const preload = join(dir, 'message-fault.cjs')
   if (fault) writeFileSync(preload, `const fs = require('node:fs')\nconst path = require('node:path')\nconst directory = ${JSON.stringify(dir)}\n${fault}\nrequire('node:module').syncBuiltinESMExports()\n`)
-  const child = spawn(process.execPath, [...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const trace = join(dir, 'start-trace.jsonl'), tracer = join(dir, 'start-trace.cjs')
+  // A restart in the same folder starts a new trace, so a report names only its own child.
+  writeFileSync(tracer, START_TRACE); writeFileSync(trace, '')
+  const startedAt = performance.now()
+  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }) }, stdio: ['ignore', 'pipe', 'pipe'] })
   const exited = new Promise(done => child.once('exit', done))
   let address
   try { address = await new Promise((done, fail) => {
     let out = '', err = ''
-    const timer = setTimeout(() => { child.kill(); fail(new Error('start timeout ' + err)) }, 10000)
+    const report = () => `after ${Math.round(performance.now() - startedAt)} ms${prepared}; stdout ${out.length} bytes; stderr ${JSON.stringify(err.slice(-2000))}; child: ${startTrace(trace)}`
+    // The start's time and the phases the child logged, kept for the summary line at the end. Only
+    // the first outcome counts: the child exits normally when its test closes the page.
+    let isNoted = false
+    const note = ok => {
+      if (isNoted) return
+      isNoted = true
+      startTimes.push({ ms: Math.round(performance.now() - startedAt), ok, phases: startTrace(trace) })
+    }
+    const timer = setTimeout(() => { note(false); fail(new Error('start timeout ' + report())); child.kill() }, 10000)
     child.stderr.on('data', b => { err += b })
-    child.stdout.on('data', b => { out += b; if (out.includes('\n')) { clearTimeout(timer); done(out.split('\n')[0].trim()) } })
-    child.once('exit', code => { clearTimeout(timer); fail(new Error('start failed ' + code + ' ' + err)) })
+    child.stdout.on('data', b => {
+      out += b
+      if (!out.includes('\n')) return
+      clearTimeout(timer)
+      note(true)
+      done(out.split('\n')[0].trim())
+    })
+    child.once('exit', (code, signal) => { clearTimeout(timer); note(false); fail(new Error('start failed ' + code + ' ' + signal + ' ' + err + ' ' + report())) })
   })
   } catch (error) { child.kill(); await exited; throw error }
   const url = new URL(address)

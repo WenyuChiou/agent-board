@@ -9,9 +9,9 @@ import { pathToFileURL } from 'node:url'
 import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback.ts'
 import { boardRun, geminiBoardCommand } from '../hooks/board-commands.ts'
 import { codexApproval } from '../scripts/codex-approval.ts'
+import { bundleFromDir } from '../scripts/bundle-text.mjs'
 
-const source = readFileSync(new URL('../hooks/board-script.ts', import.meta.url), 'utf8')
-const bundle = JSON.parse(source.slice(source.indexOf('export const BOARD_SCRIPT = ') + 'export const BOARD_SCRIPT = '.length))
+const bundle = bundleFromDir(new URL('..', import.meta.url))
 const approvedConnect = f => {
   f.run('connect')
   writeFileSync(f.options, JSON.stringify({ trust: 'trusted' }))

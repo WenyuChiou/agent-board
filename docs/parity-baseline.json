@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "release": "agent-board--v0.23.5",
+  "releaseCommit": "1b05ee12159a793b7786ac97b717384f5f9f03fe",
+  "provenance": "Initial retrospective baseline: these exact test titles were inspected at the tagged release. No parity matrix shipped in that release. This file is a committed snapshot, never rewritten by tests. The release maintainer advances it only after reviewing evidence.",
+  "cells": [
+    {
+      "host": "codex-cli",
+      "surface": "--chat",
+      "capability": "open-board",
+      "level": "paste or cooperative",
+      "evidence": [
+        {
+          "file": "tests/board.test.mjs",
+          "title": "--chat prints the board as plain text and starts nothing: no page, no browser, no link, no file written",
+          "kind": "synthetic-contract"
+        }
+      ]
+    },
+    {
+      "host": "grok-build",
+      "surface": "--serve",
+      "capability": "answer-question",
+      "level": "opt-in resume",
+      "evidence": [
+        {
+          "file": "tests/board.test.mjs",
+          "title": "with explicit legacy opt-in a reply goes into a closed Grok session once, in its own folder, and the page waits for its answer before it closes",
+          "kind": "synthetic-contract"
+        }
+      ]
+    }
+  ]
+}

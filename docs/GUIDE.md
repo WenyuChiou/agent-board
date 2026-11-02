@@ -19,6 +19,7 @@ Fresh independent installs use `~/.agent-board/progress.md`. Existing installs r
 
 Read back the generated definitions and complete the host's trust/enablement requirements. Codex supports a previewed, scoped trust operation after user approval; see [Codex](CODEX.md). Existing sessions may need reload. CLI, desktop App and IDE must each execute their own acceptance test.
 
+
 ## Other agents
 
 The common installer writes the shared board, skills and available native adapters. It needs neither Claude Code nor another model. [Adapter coverage](SETUP.md#native-status-adapters) distinguishes installed adapters from pending ones.
@@ -35,21 +36,25 @@ An old progress card is not proof that a process is running. Equally, an open ap
 
 ## The board in every agent
 
-Use the installed skill, or the exact program path printed by setup:
+After `npm install -g @wenyuchiou/agent-board`, the `agent-board` command works in any terminal; without it, write `npx @wenyuchiou/agent-board` in its place:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --serve
-node ~/.agent-board/agent-board.mjs --watch
-node ~/.agent-board/agent-board.mjs --chat
-node ~/.agent-board/agent-board.mjs --html
+agent-board
+agent-board stop
+agent-board --chat
+agent-board --help all
 ```
 
 | Mode | Result |
 | --- | --- |
+| `agent-board` | Open the board where you are: desktop window, live board over SSH, text for agents |
+| `agent-board stop` | Stop the board page server for this progress file |
 | `--serve` | Interactive local web board; reusable background service |
-| `--watch` | Terminal board; arrows/Enter to select, `x` tick, `d` confirm done, `a` archive, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` HTML, `q` quit |
+| `--watch` | Terminal board; arrows or `j`/`k` and Enter to select, `x` tick, `d` confirm done, `a` archive, `t` archive the done list now, `y`/`n` or `1`–`9` answer, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` HTML, `q` quit. Into a pipe it prints the board once as plain text |
 | `--chat` | Compact plain text; no page, link, browser or writes |
 | `--html` | Writes/opens a read-only page; no message delivery |
+
+The terminal board uses the page's colours: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the nearest of 256. It takes the light set with `--theme light` or when `COLORFGBG` names a light background; `NO_COLOR` or `--no-color` turns colour off and `FORCE_COLOR` turns it on for `| less -R`. An answer key sends the answer when the running page (`--serve`) can send it into the question's session; otherwise it copies it, and the line says so. The Chinese boards count symbols such as ● and ✓ as two columns.
 
 Add `--lang en`, `zh-TW` or `zh-CN` to select the board language. Windows/custom installations use the printed absolute paths. `$agent-board` is the Codex skill entry; OpenCode installs `/board`. Other hosts must load their installed skill/command first.
 
@@ -57,7 +62,7 @@ Chat shows questions first, then unprocessed progress reports with their source 
 
 ### The board's page
 
-Questions appear first. Expand a task for its steps. You can tick manual steps, archive, paste a valid progress block, copy a reply or resume command, mark a question read and show it again. Mark read only changes the local hidden list; it sends nothing. A substantively new question appears again. There is no general task-editing form.
+Questions appear first. Expand a task for its steps. You can tick manual steps, archive, copy a reply or resume command, mark a question read and show it again. Mark read only changes the local hidden list; it sends nothing. A substantively new question appears again. There is no general task-editing form.
 
 An unchanged hidden question stays hidden when unrelated steps move or its whitespace changes. Questions with identical words have separate identities. Changing their number is ambiguous, so they reappear rather than inherit another question's hide. A question observed as resolved or absent gets a fresh identity if asked again; a new ask with identical words and no observed transition cannot be inferred from a report alone. **Show again** remains available. Hiding never answers, approves, completes or delivers anything.
 
@@ -87,7 +92,7 @@ The page on your network comes with these limits:
 
 - It opens only when you add `--lan`, only at a private address of the computer (one starting with 192.168, 10, or 172.16 to 172.31, never a public one), and it answers only requests sent to that address.
 - Its address carries a key of its own, not the key of the computer's page. Anyone who has that address, or photographs the QR code, can use the page until it closes, so use it on a network you trust, such as your home Wi-Fi, not a café's.
-- On the network the page uses plain HTTP, which is not encrypted, so another device on the same Wi-Fi could read what passes, agents' answers included. That is why a phone can tick, archive, mark a question answered (and show it again), copy, paste a block and close the board, but not answer an agent: a reply runs a program on the computer, so the phone shows the answer for you to copy, and you send it from the computer's page.
+- On the network the page uses plain HTTP, which is not encrypted, so another device on the same Wi-Fi could read what passes, agents' answers included. That is why a phone can tick, archive, mark a question answered (and show it again), copy and close the board, but not answer an agent: a reply runs a program on the computer, so the phone shows the answer for you to copy, and you send it from the computer's page.
 - It closes after 10 minutes in which no phone looks at it, and whenever the computer's page closes. A second `--serve --lan` while it is open gives the same address.
 
 See [Security](../SECURITY.md) before sharing access.
@@ -109,12 +114,13 @@ claude plugin install agent-board@agent-board
 
 Open a new Claude Code session; `/progress` opens the pane. It mirrors Task tools and can summarize turns through its model. Questions and decisions appear above the task cards. The pane follows Claude's theme; the page follows the system theme until you pick Light or Dark on it.
 
-The Claude desktop app shows the footer status; `/progress` offers the board page, where you can answer questions and archive work, and opens a read-only page if the live page cannot start. Starting the page can take up to half a minute; the footer says it is starting meanwhile. The live page needs the board script installed by `/progress connect`, or updated at the next session start. Sessions and agents using the same installed board script reuse the running page. A page `/progress` starts closes 30 minutes after its last tab is closed, and `/progress` again gives a new link; a page you started yourself with `--serve` keeps its own setting. `/progress` replaces a page started with `--allow-resume`, unless a reply there is still on its way; run `--serve --allow-resume` again afterwards when you need resumed replies. The Claude Code CLI shows the pane.
+`/agent-board` starts or reuses the live board page and replies with its link, where you can answer questions and archive work. It leaves the pane as it is and works in every session. When the Claude desktop app's Code tab shows no pane, the footer shows the waiting count and `/agent-board opens the board`; `/progress` there does the same as `/agent-board`. If the live page cannot start, both open a read-only page. Starting the page can take up to half a minute; the footer says it is starting meanwhile. The live page needs the board script installed by `/progress connect`, or updated at the next session start. Sessions and agents using the same installed board script reuse the running page. A page `/progress` or `/agent-board` starts closes 30 minutes after its last tab is closed, and running the command again gives a new link; a page you started yourself with `--serve` keeps its own setting. `/progress` and `/agent-board` replace a page started with `--allow-resume`, unless a reply there is still on its way; run `--serve --allow-resume` again afterwards when you need resumed replies. The Claude Code CLI shows the pane.
 
 | Command / input | Action |
 | --- | --- |
 | `/progress connect`, `connect status`, `connect remove` | Optional plugin connector setup, last status, removal |
 | `+ Job search: Fellowship due 11-20; draft; submit` | Quick-add in the pane (`/progress add …` also works) |
+| `/agent-board` | Start or reuse the live board page and show its link; the pane is left as it is |
 | `/progress open` | Write/open the read-only `progress.html` |
 | `/progress tidy`, `/progress sync` | Archive eligible work; reread Tasks/PR |
 | `/progress report`, `/progress today` | Copy a weekly/daily report |
@@ -127,13 +133,30 @@ The optional `scripts/setup.sh` / `scripts/setup.ps1` manages Claude-specific Ta
 
 ## How it keeps itself tidy
 
-The optional pane sweeps on session start and hourly: done blocks after 12 hours, other stopped/stale blocks after three days, completed manual tasks after 24 hours observed done. Explicit interactive tidy skips the wait for finished work. A working or waiting agent block stays live for 12 hours after its last write: the pane, terminal and page explain why Archive is unavailable, and tidy keeps it. Once stopped or ended, open the row to archive it immediately. Automatic sweeps take a block with an unresolved `[?]` step only when it has ended or is done, three days after its last write, and only when the same complete question snapshot the explicit archive requires is saved and read back; a block still working or waiting stays however old, and so does one whose snapshot cannot be saved. Explicit archive requires that snapshot at any age, preserving recovery after the source moves; storage failure leaves the source in place.
+Strong Codex runs and Claude print-mode sessions write no new board block. The board script’s tidy moves old Codex run blocks to the archive when their own session history proves they are runs, even if they contain a question. Missing or unreadable history supplies no run proof; ordinary age rules still apply. The optional pane’s sweep does not open history files. Weak hints keep the earlier behavior.
 
-Run `node ~/.agent-board/agent-board.mjs --tidy` for one normal age-based sweep without a Claude session or page. It installs no scheduler and does not write `progress-seen.json`: the pane, `--watch` or `--serve` must first observe a completed hand-kept task. A machine running only scheduled `--tidy` leaves unobserved manual tasks indefinitely; a recorded completed fingerprint must be at least 24 hours old. Unknown, future or unreadable observations retain manual tasks, while eligible dated agent blocks can still archive.
+The optional pane sweeps on session start and hourly: done blocks after 12 hours, other stopped/stale blocks after three days. A running `--serve` page also sweeps every hour. A hand-kept task with every step `[x]` or `[-]` counts toward the archive after three days observed done; in 0.24.1 scheduled sweeps only count these tasks and move none. The details line says "N finished tasks can be archived"; a zero count is omitted. A working or waiting agent block stays live for 12 hours after its last write: the pane, terminal and page explain why Archive is unavailable, and tidy keeps it. Once stopped or ended, open the row to archive it immediately. Automatic sweeps take a block with an unresolved `[?]` step only when the same complete question snapshot the explicit archive requires is saved and read back, and only when it has been quiet long enough: three days after its last write if it has ended or is done, seven days with no report if it is still working or waiting. A block whose snapshot cannot be saved stays. The question is kept and shows under Older unanswered questions, where it can be hidden and shown again. Explicit archive requires that snapshot at any age, preserving recovery after the source moves; storage failure leaves the source in place.
+
+Run `node ~/.agent-board/agent-board.mjs --tidy` for one normal age-based sweep without a Claude session or page. It installs no scheduler and does not write `progress-seen.json`: the pane, `--watch` or `--serve` must first observe a completed hand-kept task and record when the three-day rule first ran. The three days count from the later of those two observations, giving work seen done under 0.24.0 three days from the upgrade. A machine running only `--tidy` never arms that rule and counts nothing without the reserved entry. Unknown, future or unreadable observations retain manual tasks; `--tidy` can still archive eligible dated agent blocks. The page's hourly sweep skips its pass and writes nothing if the seen file cannot be read.
+
+Clean up on the pane or page archives the finished hand-kept tasks whose three days are up, exactly the ones the count line counts, plus what the normal sweep moves. It writes to the same monthly archive before removing work from the board; tasks inside their three days, open tasks and `[?]` tasks stay. If the seen file cannot be read, Clean up archives nothing and says so. In 0.24.1 unattended sweeps (pane start and hourly, `--tidy`, and page hourly) only count hand-kept tasks and move none. The pane's Archive now and `/progress tidy`, the page's Archive now, and a row's Archive still move finished work at once; nothing is deleted. The pane and page offer one Clean up button with the size warning and whenever the count is above zero, even on a small board. Numbers and the count sit in the details line. The terminal board, chat and `--html` show the details without a button.
 
 After 12 hours without a report, a card can look stopped; that is record staleness, not a native process check. A real new hook/report refreshes it. Work idle more than seven days folds away without changing its block; `--all` or the idle toggle shows it. Near-due work stays visible. Ended or stale sessions move to a separate Stopped shelf and leave the In progress count. Their unanswered questions leave Waiting on you and stay with the task, even when due or idle. Done sessions keep questions in their Done recently entry, then under Stopped when that entry leaves Done recently. Resolve on the pane closes one question; `--all` or `i` shows both idle and stopped tasks.
 
 The pane's saved records (the plugin's store file, in Claude's config folder under `plugins/store`) are kept to a fixed size too. An ended agent's record goes three days after its last write, and a session's saved task list after seven days, or thirty while it has open steps; none goes while its block is still on the board. Each record carries a short tag of the path of the board it was saved for, so a board uses the short times only for its own records: the records of another board on the same computer go only after thirty days (a record saved before 0.24 has no tag and also goes only after thirty days), and a board's own record dated more than a day ahead, written while the clock was wrong, goes unless its block is on the board. Inbox files the pane set aside as `.failed` are kept seven days from when it set them aside, whatever the file's own date. A temporary `.tmp` file a reporter left in the inbox, cut off before it was whole, is removed once it is a day old; it is a partial write, not a turn, so it is not counted as cleared. If the store still passes 1.5 MB after that, the oldest records of ended sessions that are not on the board go until it is under; hand-kept tasks and steps waiting on you are never removed by a size rule. The inbox of other agents' turns holds at most 1,000 files or 1.5 MB: the writers drop the oldest and note how many in `progress-inbox/dropped.log`. The pane and `progress.html` say in one line what was cleared in the last 7 days, for example "Cleared 12 old agent records and 340 unread inbox turns in the last 7 days", and only when something was cleared. They also warn when the store passes 1.2 MB (saying that only records of sessions whose block has left the board are cleared) or `progress.md` passes 512 KB.
+
+### How the board tidies up, at a glance
+
+- A session with no report for 12 hours counts as stopped and moves to the Stopped shelf.
+- An unanswered question stays on Needs you for 3 days, joins one grouped reminder until day 7, and after 7 days waits under Older unanswered questions.
+- A block that still asks is archived automatically only after 3 days (ended or done) or 7 days with no report (working or waiting). Its complete question is saved first and stays on the Older list; an explicit Archive saves it first too.
+- A hand-kept task with every step done or canceled counts toward the archive after 3 days. Archive now and Clean up move finished work at once. Other cleanup periods are as described above.
+
+### Marks and tags
+
+Step marks: ✓ done · ▸ doing · • to do · ● waiting on you · ◐ running · ! stuck · – canceled · ⚑ due within two weeks.
+
+Question tags: [Confirm] yes or no · [Choose] pick an option · [Input] type a reply · [Do] press "Did it" when finished · [Review] reply once you have looked · [Waiting] press once it arrives. A tag shows in the language of the board and is never written into the file; see [FORMAT.md](FORMAT.md).
 
 ## Update and uninstall
 
@@ -172,7 +195,7 @@ To share one board between two computers, set `CLAUDE_PROGRESS_FILE` on both to 
 
 ### An agent doesn't show up.
 
-1. Run `node scripts/setup-agent.mjs` to preview the current host and read any conflict or `adapter-pending` result.
+1. Run `node scripts/setup-agent.mjs --json` to preview the current host and read any conflict or `adapter-pending` result.
 2. Reload the host as required, complete only its scoped native hook trust/enablement, and read that state back.
 3. Have that session report its own proven native id; check its exact block and timestamp. Never invent a task for another session.
 4. Observe a new native lifecycle event separately from the explicit report. A progress record does not imply direct messaging; see [connection checks](MESSAGING.md#connecting-a-session-that-was-already-open).
@@ -225,6 +248,8 @@ The first line disconnects the other agents; finish any reported cleanup before 
 
 ## Troubleshooting
 
+A cut report marker that hides task headings inside a comment still produces the cut-marker warning; the hidden tasks and original bytes remain intact.
+
 - **No card:** check the selected progress path, installed adapter, trust and reload status. Observe a real event and read back that exact session's block. Do not fabricate success with a manual event.
 - **No Send:** the exact native session needs a supported live adapter. Hooks alone do not establish receiving. Desktop and CLI results are not interchangeable.
 - **A setup relay was ignored:** the recipient must surface missing authorization/blockers. An RPC success or ACK cannot replace observing its new progress report.
@@ -241,6 +266,7 @@ Until current Codex hooks are approved in /hooks, the optional connector keeps m
 Full source captures also live beside the board in content-addressed progress-questions-source-*.json files. Keep the whole questions file family in backups and moves. The pane's archive (session start, hourly, and the pane's tidy; not the board script's `--tidy`) keeps the newest 16 of each kind (captures, retired proofs, consumed proofs) and removes an older file only when the questions file or a newer copy already holds everything in it; a file that may be the only record stays, nothing is removed while any of them cannot be read, and one sweep removes at most 200 files, the rest waiting for the next. The same archive also keeps only the newest three torn questions files (the `.torn-*` copies set aside when the questions file was cut off or garbled), removes one over a week old even among those three, and removes a temporary copy left by an interrupted write once it is a day old and the questions file itself reads. Readers merge all captures into every read, so a stale mutable index cannot delete the retained original. Cleanup and explicit archive require successful full-copy readback. An end event closes a connection without answering its pending questions, including multiple asks and an end-only question. Corrupt or unreadable capture storage refuses destructive cleanup and new hides.
 Exact producer revisions remain attached after processing and resolution, so retrying an old raw file does not renew an answered question; a new producer revision remains observable.
 Explicit archive keeps its complete unresolved copy in the older shelf. Unexpected source disappearance keeps the normal age policy, with unknown clocks prominent.
+A question from a session that ended, finished or has not reported for 12 hours stays on that session's Stopped row, and it is also listed once under Older unanswered questions with how long ago it was first asked (never less than how long the session has been quiet) and its project, agent and task. Waiting on you shows one line, "N unanswered in stopped sessions", that opens Older; the question never moves into Waiting on you and no waiting count changes, and it counts once even when it sits on a Stopped row too. Older shows ten questions and a "Show all (N)" control for the rest on the pane, the page and progress.html; the terminal board lists them all. In Older, "Already answered, hide" works on a question that still has its source in the file and on one kept from an archived session; a retained copy whose source has gone from a session that was not archived is labeled review only and cannot be hidden. A hidden question is listed under "N answered, hidden" with "Show again" on the pane and the page; the terminal board shows that count, and its u key brings them all back. Answering a question kept from an archived session from the board, and bringing its session back, are not offered yet. A question hidden before this release stays hidden and is not counted.
 A stale report cannot revive an already resolved question with the same known producer revision and words. An explicit renewed revision or a substantively changed question can appear again.
-Live questions on the terminal and native pane reminder/older shelves support Already answered, hide and Show again without changing the source or its age. Retained copies whose producer source has gone are labeled review only; the served page's reminder/older sections are also review only and expose no hide control.
+Live questions on the terminal, native pane and served-page reminder/older shelves support Already answered, hide, and a hidden question comes back with Show again on the pane and the page (the terminal board's u key brings all of them back), without changing the source or its age; so does a question kept from an archived session. Retained copies whose producer source has gone, from a session that was not archived, are labeled review only on every surface and offer no hide control.
 A failed or dropped native-pane reply leaves its question unread. Successful submission resolves only the exact question still present afterward; a question renewed during delivery remains waiting. Moving an existing question into retained storage does not generate a new notification.

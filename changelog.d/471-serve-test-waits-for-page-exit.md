@@ -1,0 +1,2 @@
+- **The background `--serve` test waits for the page to exit before removing its folder (#471).** On Windows the page's process holds the test folder for a moment after its address file is gone, so cleanup failed with `EBUSY` on `main`. The test now uses the shared fixture that waits for that process and gives the page its own home.
+  Tests: `--serve starts the page in the background once, and the next --serve brings back the same page`.

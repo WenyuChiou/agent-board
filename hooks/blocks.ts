@@ -1,13 +1,15 @@
-import type { CutBlock, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressTask } from '../types'
+import type { CutBlock, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressProject, ProgressTask } from '../types'
 import { prWords } from './github'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { localDay } from './journal'
+import { splitLines } from './lines'
 import { fallbackTitle, isAnswered, questionToken, retainedCancelledOf } from './mirror'
 import { AUTO_END, AUTO_START, autoOf, doneKey, isCutMarker, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
+import { isOutranked, pickParent } from './runs'
 import { oneLine, plain } from './step-words'
 import { isStale, observedTime } from './parse'
 import type { JournalEntry } from './journal'
@@ -19,7 +21,14 @@ const PROJECT = /^##\s+(.+?)\s*#*\s*$/
 const TASK = /^###\s+(.+?)\s*#*\s*$/
 const STEP = /^([ \t]*[-*+]\s+\[)([ xX~?>!-])(\]\s+)(.*)$/
 const DAY = 24 * 60 * 60 * 1000
+export const HAND_KEPT_DONE_MS = 3 * DAY
+// In the first release (#464), pane start/hourly, --tidy and page hourly sweeps
+// only count finished hand-kept tasks and move none.
+// A person's Clean up moves the due tasks regardless; explicit tidies and row archives
+// keep moving finished work at once. The next release enables unattended moves.
+export const isHandKeptMoveOn: boolean = false
 const STOPPED_ARCHIVE_MS = 3 * DAY
+const SILENT_ASKING_ARCHIVE_MS = 7 * DAY
 
 export const shortId = (sessionId: string): string => sessionId.slice(0, 8)
 
@@ -60,20 +69,30 @@ const markOf = (task: ProgressMirrorTask): string => {
   return task.status === 'in_progress' ? '~' : ' '
 }
 
+const writtenResume = (mirror: { sessionId: string; resume?: string | null }): string | null => {
+  if (mirror.resume !== undefined && mirror.resume !== null && RESUME.test(mirror.resume)) return mirror.resume
+  if (mirror.sessionId.length > 8 && RESUME.test(mirror.sessionId)) return mirror.sessionId
+  return null
+}
+
 // The marker carries what another session's pane needs: the full id and folder for a
 // resume command, and how the pull request stands.
-const markerOf = (mirror: ProgressMirror): string => {
+const markerOf = (mirror: ProgressMirror, parent?: string): string => {
   const pr = mirror.pr ?? null
+  const resumeAttr = writtenResume(mirror)
   const attrs = [
     `session=${shortId(mirror.sessionId)}`,
     `agent=${mirror.agent || 'claude'}`,
     `state=${mirror.state}`,
     `updated=${new Date(mirror.updated).toISOString()}`,
     // Another agent's block carries that agent's own session id, for a reply from the board's page.
-    mirror.resume !== undefined && RESUME.test(mirror.resume) ? `resume=${mirror.resume}` : mirror.sessionId.length > 8 ? `resume=${mirror.sessionId}` : '',
+    resumeAttr === null ? '' : `resume=${resumeAttr}`,
     mirror.cwd ? `dir=${encodeURIComponent(mirror.cwd)}` : '',
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
+    // A session an agent started for itself (#399); a person's has no such mark.
+    mirror.isRun === true ? 'origin=run' : '',
+    mirror.isRun === true && parent !== undefined && RESUME.test(parent) ? `parent=${parent}` : '',
   ]
 
   return `<!-- auto ${attrs.filter(attr => attr !== '').join(' ')} -->`
@@ -90,13 +109,13 @@ export const stepWords = (task: ProgressMirrorTask, s: Strings = ZH_TW): string 
   return `${oneLine(task.subject)}${reason}`
 }
 
-export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): string[] => {
+export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, parent?: string): string[] => {
   const id = shortId(mirror.sessionId)
   const pr = mirror.pr ?? null
   const meta = [stateWords(mirror.state, mirror.agent, s), mirror.branch, pr === null ? '' : prWords(pr, s)].filter(part => part !== '').join(' · ')
 
   return [
-    markerOf(mirror),
+    markerOf(mirror, parent),
     `### ${oneLine(mirror.title) || oneLine(fallbackTitle(mirror)) || s.unnamed}`,
     `> ${oneLine(meta)}`,
     ...(mirror.context ? [s.contextNote(oneLine(mirror.context))] : []),
@@ -115,6 +134,8 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW): str
 
 export type BlockSpan = {
   session: string
+  agent?: string
+  resume?: string | null
   state: ProgressSessionState
   updated: number
   project: string
@@ -128,7 +149,7 @@ export type BlockSpan = {
 
 const eolOf = (text: string): string => (text.includes('\r\n') ? '\r\n' : '\n')
 
-const linesOf = (text: string): string[] => (text === '' ? [] : text.replace(/\r?\n$/, '').split(/\r?\n/))
+const linesOf = (text: string): string[] => (text === '' ? [] : splitLines(text.replace(/\r?\n$/, '')))
 
 // The lines as the parser reads them: what sits in a code fence or a comment is never taken
 // for a marker or a heading, so a block pasted there as an example is left alone.
@@ -265,7 +286,10 @@ const sectionRange = (raws: readonly string[], project: string): { heading: numb
   const heading = lines.findIndex(line => {
     const match = PROJECT.exec(line)
     if (match?.[1] === undefined) return false
-    return head === '' ? match[1].trim() === project.trim() : projectHead(match[1]) === head
+    const cand = match[1].trim()
+    const target = project.trim()
+    if (cand.toLowerCase() === target.toLowerCase()) return true
+    return head === '' ? cand === target : projectHead(cand) === head
   })
   if (heading < 0) return null
   const next = lines.findIndex((line, index) => index > heading && PROJECT.test(line))
@@ -296,12 +320,56 @@ const placeUnder = (lines: string[], project: string, added: readonly string[], 
   return lines.join(eol) + eol
 }
 
+export type BlockIdentity = string | {
+  sessionId: string
+  agent?: string
+  resume?: string | null
+}
+
+const toIdentity = (target: BlockIdentity, agent?: string, resume?: string | null): { sessionId: string; agent?: string; resume?: string | null } => {
+  if (typeof target === 'string') {
+    return { sessionId: target, agent, resume }
+  }
+  return {
+    sessionId: target.sessionId,
+    agent: target.agent ?? agent,
+    resume: target.resume ?? resume,
+  }
+}
+
+export const matchesSpan = (span: BlockSpan, target: BlockIdentity, agent?: string, resume?: string | null): boolean => {
+  const id = toIdentity(target, agent, resume)
+  if (id.agent !== undefined && id.agent !== '') {
+    const targetAgent = id.agent.toLowerCase()
+    const spanAgent = (span.agent || 'claude').toLowerCase()
+    if (spanAgent !== targetAgent) return false
+  }
+  const targetShort = shortId(id.sessionId)
+  if (span.session !== targetShort && span.session !== id.sessionId) return false
+
+  const spanFull = span.resume ?? (span.session.length > 8 ? span.session : null)
+  const targetFull = writtenResume(id) ?? (id.sessionId.length > 8 ? id.sessionId : null)
+
+  if (spanFull !== null && targetFull !== null) {
+    if (spanFull === targetFull) return true
+    if (span.resume !== null && span.resume === id.sessionId) return true
+    if (span.session.length > 8 && span.session === id.sessionId) return true
+    return false
+  }
+  return true
+}
+
 export const upsertAutoBlock = (text: string, mirror: ProgressMirror, s: Strings = ZH_TW): string => {
   const eol = eolOf(text)
   const lines = linesOf(text)
-  const block = renderAutoBlock(mirror, s)
   const id = shortId(mirror.sessionId)
-  const existing = scanBlocks(lines).find(span => span.session === id)
+  const fullId = writtenResume(mirror) ?? (mirror.sessionId.length > 8 ? mirror.sessionId : null)
+  const existing = scanBlocks(lines).find(span => matchesSpan(span, mirror))
+  // A run keeps the parent its block already names; until one is named, it takes the person's
+  // session working in the same project right now when exactly one is (#399), else none, and
+  // counts as a background run.
+  const parent = mirror.isRun !== true ? undefined : (existing === undefined ? undefined : parseAttrs(lines[existing.start] ?? '').parent) ?? pickParent(parseProgress(text), mirror.project, mirror.updated, [id, mirror.sessionId, ...(fullId ? [fullId] : [])]) ?? undefined
+  const block = renderAutoBlock(mirror, s, parent)
 
   if (existing !== undefined) {
     const end = existing.isClosed ? existing.end : existing.start
@@ -346,16 +414,15 @@ const removeSpans = (text: string, spans: readonly BlockSpan[]): string => {
   return lines.length === 0 ? '' : lines.join(eol) + eol
 }
 
-export const removeAutoBlock = (text: string, sessionId: string): string => {
-  const id = shortId(sessionId)
-  const spans = scanBlocks(linesOf(text)).filter(span => span.session === id)
+export const removeAutoBlock = (text: string, target: BlockIdentity, agent?: string, resume?: string | null): string => {
+  const spans = scanBlocks(linesOf(text)).filter(span => matchesSpan(span, target, agent, resume))
 
   return spans.length === 0 ? text : removeSpans(text, spans)
 }
 
-export const extractAutoBlock = (text: string, sessionId: string): string | null => {
+export const extractAutoBlock = (text: string, target: BlockIdentity, agent?: string, resume?: string | null): string | null => {
   const lines = linesOf(text)
-  const span = scanBlocks(lines).find(one => one.session === shortId(sessionId))
+  const span = scanBlocks(lines).find(span => matchesSpan(span, target, agent, resume))
 
   return span === undefined ? null : lines.slice(span.start, span.end + 1).join('\n')
 }
@@ -395,9 +462,9 @@ export type ConfirmedTask = { text: string; ref: ConfirmRef; entries: Array<Omit
 
 // A person's completion changes only the exact task drawn, and only after its agent
 // stopped. Recheck here, inside each caller's read/change/write retry.
-export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}): ConfirmedTask | null => {
+export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS): ConfirmedTask | null => {
   const task = confirmedTarget(text, ref, s)
-  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now, observedTime(task.auto, now, seen).updated)) return null
+  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now, observedTime(task.auto, now, seen).updated, staleMs)) return null
   const lines = linesOf(text)
   const spans = scanBlocks(lines)
   const span = ref.session === null ? undefined : spans.find(one => one.session === ref.session)
@@ -420,12 +487,18 @@ export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strin
     lines[step.line] = raw.slice(0, index) + 'x' + raw.slice(index + 1)
   }
   if (span !== undefined) {
-    let marker = lines[span.start] ?? ''
+    // Only the attributes are edited: FORMAT.md accepts a marker with no space before `-->`
+    // and spaces after it, so a bare `[^\s]+` value would take the `-->` with it (#142).
+    // A name counts only at the start or after whitespace: `-` is not a word character, so
+    // `\b` would also find `state=` inside `backup-state=`.
+    const marker = lines[span.start] ?? ''
+    const end = marker.lastIndexOf('-->')
+    let attrs = end < 0 ? marker : marker.slice(0, end).trimEnd()
     for (const [name, value] of [['state', 'done'], ['updated', new Date(now).toISOString()]]) {
-      const attr = new RegExp(`\\b${name}=(?:"[^"]*"|'[^']*'|[^\\s]+)`)
-      marker = attr.test(marker) ? marker.replace(attr, `${name}=${value}`) : marker.replace(/\s*-->$/, ` ${name}=${value} -->`)
+      const attr = new RegExp(`(^|\\s)${name}=(?:"[^"]*"|'[^']*'|[^\\s]+)`)
+      attrs = attr.test(attrs) ? attrs.replace(attr, `$1${name}=${value}`) : `${attrs} ${name}=${value}`
     }
-    lines[span.start] = marker
+    lines[span.start] = end < 0 ? attrs : `${attrs} ${marker.slice(end)}`
   }
   const after = lines.join(eolOf(text)) + (text.endsWith('\n') ? eolOf(text) : '')
   const changed = parseProgress(after).flatMap(project => project.tasks).find(one => one.line === task.line)
@@ -435,24 +508,27 @@ export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strin
 }
 
 // The block still asks something of the person: a visible `[?]` step.
-const isAsking = (visible: readonly string[], span: BlockSpan): boolean =>
+const isAsking = (visible: readonly (string | null)[], span: BlockSpan): boolean =>
   visible.slice(span.start, span.end + 1).some(line => STEP.exec(line ?? '')?.[2] === '?')
 
-// An automatic sweep takes a block that asks only when it has stopped (`ended` or `done`) and has
-// been quiet for the three days a stopped block is given. A `waiting` or `working` block may still
-// get its answer, and its question is a live one that a later poll would have to make again (#174).
-const isStoppedAsking = (span: BlockSpan, now: number): boolean =>
-  (span.state === 'ended' || span.state === 'done') && now - span.updated > STOPPED_ARCHIVE_MS
+// A working or waiting block's question stays live for seven days without a report. After that
+// it is treated as left behind, so its question can go to Older unanswered. Ended and done
+// blocks still get three days before the sweep may take them (#400).
+const isAskingArchiveDue = (span: BlockSpan, now: number): boolean =>
+  (span.state === 'working' || span.state === 'waiting')
+    ? now - span.updated > SILENT_ASKING_ARCHIVE_MS
+    : (span.state === 'ended' || span.state === 'done') && now - span.updated > STOPPED_ARCHIVE_MS
 
 // The blocks that ask which a sweep may take once the caller has checked that their questions are
-// kept outside the block (#174), each with its lines as they read now (`text`), so a later try can
-// tell the block it checked from one changed since.
+// kept outside the block (#174): working or waiting after seven quiet days, ended or done after
+// three. Each comes with its lines as they read now (`text`), so a later try can tell the block it
+// checked from one changed since.
 export type AskingBlock = { span: BlockSpan; ref: TaskRef; text: string }
 export const archivableAsking = (text: string, now: number, keep?: string): AskingBlock[] => {
   if (!text.includes('[?]')) return []
   const lines = linesOf(text)
   const visible = readable(lines)
-  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && span.updated > 0 && isStoppedAsking(span, now) && isAsking(visible, span))
+  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && span.updated > 0 && isAskingArchiveDue(span, now) && isAsking(visible, span))
   if (spans.length === 0) return []
   const projects = parseProgress(text)
 
@@ -467,12 +543,13 @@ export const archivableAsking = (text: string, now: number, keep?: string): Aski
 
 // Moves old blocks out; each entry is the block without its markers, under a dated heading,
 // ready to append to progress-archive.md. A block with a visible `[?]` step stays unless it has
-// stopped (`ended` or `done`, three days quiet) and `mayTake` says its questions are kept
-// (`archivableAsking` lists the ones to ask about).
-export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean): Archived => {
+// been quiet long enough (`isAskingArchiveDue`) and `mayTake` says its questions are kept outside
+// it, so the question goes on under Older unanswered (`archivableAsking` lists the ones to ask about).
+// A verified agent run needs neither an age wait nor a retained question.
+export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean, isAgentRun?: (span: BlockSpan) => boolean): Archived => {
   const lines = linesOf(text)
   const visible = readable(lines)
-  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isStoppedAsking(span, now) && mayTake?.(span) === true)))
+  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && (isAgentRun?.(span) === true || isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isAskingArchiveDue(span, now) && mayTake?.(span) === true))))
   if (spans.length === 0) return { text, entries: [] }
   const entries = spans.map(span => {
     const body = lines.slice(span.start + 1, span.end)
@@ -484,12 +561,37 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
   return { text: removeSpans(text, spans), entries }
 }
 
-// Hand-kept tasks whose every step is done, a day after the pane first saw them done
+const manualDoneTasks = (
+  projects: readonly ProgressProject[],
+  now: number,
+  seenAt: (key: string, project: string, task: ProgressTask) => number | undefined,
+  isNow = false,
+): Array<{ project: string; task: ProgressTask; key: string; at: number }> => {
+  const selected: Array<{ project: string; task: ProgressTask; key: string; at: number }> = []
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
+      const key = doneKey(project.name, task.title)
+      const at = seenAt(key, project.name, task) ?? (isNow ? now : undefined)
+      if (at === undefined || (!isNow && !(at <= now && now - at >= HAND_KEPT_DONE_MS))) continue
+      selected.push({ project: project.name, task, key, at })
+    }
+  }
+  return selected
+}
+
+export const countManualDone = (
+  projects: readonly ProgressProject[],
+  now: number,
+  seenAt: (key: string, project: string, task: ProgressTask) => number | undefined,
+): number => manualDoneTasks(projects, now, seenAt).length
+
+// Hand-kept tasks whose every step is done, three days after first observed done
 // (`seen`, by doneKey): moved out whole, heading to last step, like a session's block.
 // `isNow`: the person asked, so every finished one goes at once, under the day it was seen
 // done, or today when it never was.
-// The task context lets a standalone writer use fingerprint observations while the plugin
-// keeps its existing title-key observations.
+// Scheduled sweeps use fingerprint observations; an explicit pane tidy keeps its
+// existing title-key observations.
 export const takeManualDone = (
   text: string,
   now: number,
@@ -502,26 +604,20 @@ export const takeManualDone = (
   const spans: BlockSpan[] = []
   const entries: string[] = []
   const keys: string[] = []
-  for (const project of parseProgress(text)) {
-    for (const task of project.tasks) {
-      if (task.auto !== null || task.line < 0 || !isTaskComplete(task)) continue
-      const key = doneKey(project.name, task.title)
-      const at = seenAt(key, project.name, task) ?? (isNow ? now : undefined)
-      if (at === undefined || (!isNow && now - at < DAY)) continue
-      let end = task.line
-      for (let index = task.line + 1; index < lines.length; index += 1) {
-        const line = seen[index] ?? ''
-        if (PROJECT.test(line) || TASK.test(line) || AUTO_START.test(line)) break
-        if ((lines[index] ?? '').trim() !== '') end = index
-      }
-      const last = end
-      // The blank lines after it go too, so the next task moves up into its place.
-      while (end + 1 < lines.length && lines[end + 1]?.trim() === '') end += 1
-      spans.push({ session: '', state: 'done', updated: at, project: project.name, start: task.line, end, isClosed: true })
-      const day = localDay(at)
-      entries.push([`## ${project.name || s.uncategorized} · ${day}`, ...lines.slice(task.line, last + 1)].join('\n'))
-      keys.push(key)
+  for (const { project, task, key, at } of manualDoneTasks(parseProgress(text), now, seenAt, isNow)) {
+    let end = task.line
+    for (let index = task.line + 1; index < lines.length; index += 1) {
+      const line = seen[index] ?? ''
+      if (PROJECT.test(line) || TASK.test(line) || AUTO_START.test(line)) break
+      if ((lines[index] ?? '').trim() !== '') end = index
     }
+    const last = end
+    // The blank lines after it go too, so the next task moves up into its place.
+    while (end + 1 < lines.length && lines[end + 1]?.trim() === '') end += 1
+    spans.push({ session: '', state: 'done', updated: at, project, start: task.line, end, isClosed: true })
+    const day = localDay(at)
+    entries.push([`## ${project || s.uncategorized} · ${day}`, ...lines.slice(task.line, last + 1)].join('\n'))
+    keys.push(key)
   }
   if (spans.length === 0) return { text, entries: [], keys: [] }
 
@@ -533,7 +629,7 @@ export const takeManualDone = (
 // null when it cannot be found for sure: a block without its end marker, a heading that is
 // gone or has a twin, a heading inside some session's block, or a session id two blocks
 // share when the row's project and each block's first heading cannot tell them apart.
-export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}): Archived | null => {
+export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
@@ -562,8 +658,13 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
     // Recheck ownership at the write boundary: a stopped row may have resumed since it
     // was drawn. Unknown clocks cannot prove that a working/waiting session stopped.
     if (span.state === 'working' || span.state === 'waiting') {
-      const auto = parseProgress(text).flatMap(project => project.tasks).find(task => task.line === span.heading)?.auto ?? null
-      if (auto === null || !isStale(auto, now, observedTime(auto, now, observations).updated)) return null
+      const tasks = parseProgress(text).flatMap(project => project.tasks)
+      const task = tasks.find(one => one.line === span.heading)
+      const auto = task?.auto ?? null
+      // The older block of a twin pair is offered for archive while it still looks live (#399):
+      // a newer block with the same agent and full id is the one that runs.
+      const isTwin = ref.isDuplicate === true && task !== undefined && isOutranked(tasks, task)
+      if (auto === null || !isTwin && !isStale(auto, now, observedTime(auto, now, observations).updated, staleMs)) return null
     }
 
     return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }
