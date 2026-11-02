@@ -62,9 +62,9 @@ test('ambiguous live block destinations do not supersede a prior project questio
 })
 
 test('a colliding destination question scope keeps the former project question unresolved', () => {
-  const before = initial()
+  const before = initial(A)
   const original = before.records[0]!
-  const after = observe(before, block({ project: 'NewProject' }) + block({ project: 'NewProject' }))
+  const after = observe(before, block({ project: 'NewProject', resume: A }) + block({ project: 'NewProject' }))
   const retained = after.records.find(record => record.id === original.id)!
   expect(retained.isUnresolved).toBe(true)
   expect(retained.firstObserved).toBe(original.firstObserved)
