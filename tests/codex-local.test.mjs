@@ -4118,6 +4118,21 @@ test('failed native tree termination reports a bounded error and retains its fix
   }
 })
 
+const nativeEventRecord = async (record, event) => {
+  // A successful native hook may have queued the event for automatic recovery.
+  // Observe that event's commit without sending the hook a second time.
+  await waitForAutomaticRecovery(() => {
+    try { return JSON.parse(readFileSync(record, 'utf8')).activity.at(-1)?.event === event }
+    catch (error) {
+      if (error.code === 'ENOENT') return false
+      throw error
+    }
+  }, `the native hook must commit ${event} before its saved activity is asserted`)
+  const saved = JSON.parse(readFileSync(record, 'utf8'))
+  assert.equal(saved.activity.at(-1).event, event)
+  return saved
+}
+
 test('native Antigravity hook commands bind conversationId, record metadata only and keep Stop resumable', { timeout: 240000 }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
@@ -4132,9 +4147,8 @@ test('native Antigravity hook commands bind conversationId, record metadata only
     assert.equal(result.status, 0, hookFailure(result))
     if (event === 'SessionStart') assert.equal(typeof JSON.parse(result.stdout).injectSteps?.[0]?.systemMessage?.systemMessage, 'string')
     else assert.deepEqual(JSON.parse(result.stdout), {})
-    const saved = JSON.parse(readFileSync(record, 'utf8'))
+    const saved = await nativeEventRecord(record, event)
     assert.equal(saved.session, conversationId)
-    assert.equal(saved.activity.at(-1).event, event)
     assert.equal(saved.state, event === 'SessionStart' || event === 'Stop' ? 'waiting' : 'working')
     assert.ok(!JSON.stringify(saved).includes('PRIVATE_'))
   }
@@ -4149,8 +4163,45 @@ test('native Antigravity hook commands bind conversationId, record metadata only
   const resumed = await fire('PreInvocation')
   assert.equal(resumed.error, undefined, hookFailure(resumed))
   assert.equal(resumed.status, 0, hookFailure(resumed))
-  assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'working')
+  assert.equal((await nativeEventRecord(record, 'PreInvocation')).state, 'working')
   assert.notEqual(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'ended', '--event', 'Stop'], { conversationId }).status, 0)
+}))
+
+test('native Antigravity event assertions await a queued record commit without replaying the hook', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const payload = JSON.parse(recovery.payload)
+  const started = await nativeHook(recovery.hooks.PreInvocation[0].command, f.env, payload)
+  assert.equal(started.status, 0, hookFailure(started))
+  await waitForAutomaticRecovery(() => existsSync(recovery.record) && JSON.parse(readFileSync(recovery.record, 'utf8')).activity.at(-1).event === 'PreInvocation', 'the first native event must be committed before the controlled lock')
+  const locked = lockedProgress(f)
+  const env = { ...f.env, NODE_OPTIONS: `${locked.env.NODE_OPTIONS} --require ${JSON.stringify(recovery.preload)}` }
+  let recoveryPid, release
+  try {
+    const posted = await nativeHook(recovery.hooks.PostInvocation[0].command, env, payload)
+    assert.equal(posted.status, 0, hookFailure(posted))
+    assert.deepEqual(JSON.parse(posted.stdout), {})
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the native event must queue once and launch its own recovery helper')
+    recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    assert.ok(isReporterAlive(recoveryPid))
+    assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).activity.at(-1).event, 'PreInvocation')
+    // Let the observer start while the real record is still behind. Releasing the
+    // lock lets the already-running recovery apply it without another host event.
+    release = setImmediate(() => unlinkSync(locked.marker))
+    const saved = await nativeEventRecord(recovery.record, 'PostInvocation')
+    assert.equal(saved.session, recovery.conversationId)
+    assert.equal(saved.state, 'working')
+    assert.deepEqual(saved.activity.map(one => one.event), ['PreInvocation', 'PostInvocation'])
+    assert.doesNotMatch(JSON.stringify(saved), /PRIVATE_/)
+    await waitForAutomaticRecovery(() => pendingFiles(f).length === 0 && !existsSync(recovery.lease), 'the one queued event must drain without a second hook')
+    await waitForAutomaticRecovery(() => !isReporterAlive(recoveryPid), 'the owned recovery helper must exit', 3000)
+  } finally {
+    clearImmediate(release)
+    // The hook may start recovery before an earlier assertion fails.
+    if (recoveryPid === undefined && existsSync(recovery.pidFile)) recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    if (existsSync(locked.marker)) unlinkSync(locked.marker)
+    if (Number.isInteger(recoveryPid) && recoveryPid > 0 && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
+  }
 }))
 
 test('an edited Antigravity definition is a conflict rather than an automatic trust or overwrite', () => fixture(f => {
