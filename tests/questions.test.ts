@@ -188,12 +188,6 @@ test('a pending question pairs with the same-prefix peer block that asked it', (
   expect(ledger.records.map(record => record.words).sort()).toEqual(['Other ask?', 'Same ask?'])
   expect(isTurnRecorded(ledger, turn)).toBe(true)
   expect(isTurnRecorded(emptyQuestions(), turn)).toBe(false)
-  const { session: _turnSession, ...savedTurn } = turn
-  const savedLedger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'pending', undefined, [savedTurn as PendingTurn]).ledger
-  expect(savedLedger.records.map(record => record.source?.kind)).toEqual(['block', 'block'])
-  expect(savedLedger.records.find(record => record.words === 'Same ask?')?.scope).toBe(questionScope('demo', 'codex', 'a1b2c3d4-person-a'))
-  expect(isTurnRecorded(savedLedger, savedTurn as PendingTurn)).toBe(true)
-  expect(isTurnRecorded(emptyQuestions(), savedTurn as PendingTurn)).toBe(false)
 
   const both = parseProgress(`## demo\n${block('a1b2c3d4-person-a', 'Alpha work', 'Same ask?')}${block('a1b2c3d4-person-b', 'Beta work', 'Same ask?')}`)
   const shared = observeQuestions(emptyQuestions(), both, null, [], NOW, true, 'pending', undefined, [{ ...turn, sourceRevisions: ['a'.repeat(64)] }]).ledger
@@ -203,6 +197,38 @@ test('a pending question pairs with the same-prefix peer block that asked it', (
 
   const twice = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} -->\n### Alpha work\n- [?] Same ask?\n- [?] Same ask?\n<!-- /auto session=a1b2c3d4 -->\n`)
   expect(observeQuestions(emptyQuestions(), twice, null, [], NOW, true, 'pending', undefined, [turn]).ledger.records.filter(record => record.source?.kind === 'inbox')).toHaveLength(1)
+})
+
+test('a saved turn with no full session stays held while two same-prefix owners could have asked it', () => {
+  const block = (id: string, title: string, step: string): string => `<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} resume=${id} -->\n### ${title}\n- [?] ${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const alpha = block('a1b2c3d4-person-a', 'Alpha work', 'Alpha ask?'), beta = block('a1b2c3d4-person-b', 'Beta work', 'Beta ask?')
+  const saved = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', text: 'Beta ask?', isQuestion: true, at: NOW } as PendingTurn
+  const pass = (ledger: QuestionLedger, text: string, turn: PendingTurn) => observeQuestions(ledger, parseProgress(`## demo\n${text}`), null, [], NOW, true, 'pending', undefined, [turn]).ledger
+  const carrying = (ledger: QuestionLedger) => ledger.records.filter(record => (record.producerSources ?? []).length > 0)
+
+  for (const turn of [saved, { ...saved, text: 'Neither ask?' }]) {
+    const held = parseQuestions(questionsJson(pass(emptyQuestions(), alpha + beta, turn)))
+    expect(held.records.map(record => record.source?.kind)).toEqual(['block', 'block'])
+    expect(carrying(held)).toEqual([])
+    expect(isTurnRecorded(held, turn)).toBe(false)
+  }
+  // Once one owner holds the alias the turn pairs with it, and later peers leave that capture alone.
+  const alone = parseQuestions(questionsJson(pass(emptyQuestions(), beta, saved)))
+  expect(carrying(alone).map(record => record.source?.task)).toEqual(['Beta work'])
+  expect(isTurnRecorded(alone, saved)).toBe(true)
+  const established = parseQuestions(questionsJson(pass(alone, alpha + beta, saved)))
+  expect(isTurnRecorded(established, saved)).toBe(true)
+  // A turn that names its full session is still paired beside a peer.
+  const named = { ...saved, session: 'a1b2c3d4-person-b' }
+  expect(isTurnRecorded(pass(emptyQuestions(), alpha + beta, named), named)).toBe(true)
+  // A peer that has no question left still names a second owner.
+  const finished = block('a1b2c3d4-person-a', 'Alpha work', 'Alpha ask?').replace('- [?]', '- [x]')
+  expect(isTurnRecorded(pass(emptyQuestions(), finished + beta, saved), saved)).toBe(false)
+  // So does the current session, whose own block the pass leaves out.
+  const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW, '/demo', 'codex'), { subject: 'Own ask?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Own work' }
+  const beside = observeQuestions(emptyQuestions(), parseProgress(`## demo\n${beta}`), mine, [], NOW, true, 'pending', undefined, [saved]).ledger
+  expect(carrying(beside)).toEqual([])
+  expect(isTurnRecorded(beside, saved)).toBe(false)
 })
 
 test('a same-prefix peer neither answers an inbox ask nor takes its turn', () => {

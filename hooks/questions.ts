@@ -516,10 +516,17 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
   const rows: Observation[] = []
   const scopes = new Set<string>()
   const ambiguous = new Set<string>()
+  const holders = new Map<string, Set<string | null>>()
+  const hold = (project: string, owner: QuestionOwner): void => {
+    const key = JSON.stringify([project, owner.agent || 'claude', owner.session])
+    holders.set(key, (holders.get(key) ?? new Set()).add(canonicalOf(owner)))
+  }
+  if (mine !== null) hold(mine.project, mirrorOwner(mine))
   for (const project of projects) {
     for (const task of project.tasks) {
       // A run under the current session's alias asks nobody here, whichever session it belongs to.
       if (mine !== null && task.auto !== null && (task.auto.isRun === true ? task.auto.session === shortId(mine.sessionId) : matchesSpan(task.auto, { ...mine, agent: mine.agent || 'claude' }))) continue
+      if (task.auto !== null) hold(project.name, task.auto)
       const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
       if (frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))) continue
       if (scopes.has(scope)) ambiguous.add(scope)
@@ -536,6 +543,9 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
     if (!turn.isQuestion || turn.id === undefined) continue
     const scope = questionScope(turn.project, turn.agent, turn.id)
     if (frozen.has(scope)) continue
+    // A turn saved with no full session could be any holder's. While its alias has two, it stays
+    // held: matching words on one of them do not show that one asked it.
+    if (turn.session === undefined && (holders.get(JSON.stringify([turn.project, turn.agent || 'claude', turn.id]))?.size ?? 0) > 1) continue
     const matching = rows.filter(row => row.isWaiting && row.session === turn.id && row.source.project === turn.project && (row.source.agent || 'claude') === (turn.agent || 'claude') && questionWords(row.text) === questionWords(turn.text) && isOwnerOf(row.source, turn.session))
     if (matching.length === 1 && matching[0] !== undefined) {
       const row = matching[0]
