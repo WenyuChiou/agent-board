@@ -179,6 +179,47 @@ const hookLog = f => existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(
 
 const hookFailure = result => JSON.stringify({ status: result.status, signal: result.signal, error: result.error && { code: result.error.code, message: result.error.message }, termination: result.termination, stdout: result.stdout, stderr: result.stderr })
 
+const nativeReportContext = (result, label, readLog = () => '') => {
+  const context = JSON.parse(result.stdout).injectSteps?.[0]?.systemMessage?.systemMessage
+  if (typeof context !== 'string') {
+    // Read only on failure, and keep fixed codes instead of commands or log text.
+    const known = new Set(['UNSUPPORTED_AGENT', 'REPORTER_UPGRADE_REQUIRED', 'REPORTER_TIMEOUT', 'INPUT_TOO_LARGE', 'INPUT_TIMEOUT', 'INCOMPLETE_INPUT', 'REPORTER_FAILED', 'REPORTER_QUEUED'])
+    let log = '', hasLog = true
+    try { log = readLog() } catch { hasLog = false }
+    const codes = log.split(/\r?\n/).flatMap(line => {
+      const code = /^\S+ antigravity ([A-Z][A-Z0-9_]*)(?: |$)/.exec(line)?.[1]
+      return known.has(code) ? [code] : []
+    }).slice(-4)
+    const status = Number.isInteger(result.status) ? result.status : 'unknown'
+    assert.equal(typeof context, 'string', `${label}: missing native report context; status=${status}; hook codes=${hasLog ? codes.join(',') || 'none' : 'unavailable'}`)
+  }
+  return context
+}
+
+test('native report context failures keep hook codes without exposing command output', () => {
+  const log = [
+    '2026-11-02T00:00:00Z antigravity REPORTER_TIMEOUT',
+    '2026-11-02T00:00:01Z antigravity REPORTER_QUEUED',
+    '2026-11-02T00:00:02Z antigravity PRIVATE_LOG',
+  ].join('\n')
+  const result = { status: 0, stdout: '{"unrelated":"PRIVATE_COMMAND"}', stderr: 'PRIVATE_STDERR', signal: 'PRIVATE_SIGNAL' }
+  assert.throws(() => nativeReportContext(result, 'setup zh-CN', () => log), error => {
+    assert.match(error.message, /REPORTER_TIMEOUT,REPORTER_QUEUED/)
+    assert.match(error.message, /status=0/)
+    assert.ok(!error.message.includes('PRIVATE_'))
+    return true
+  })
+  assert.throws(() => nativeReportContext(result, 'setup zh-CN', () => { throw Error('PRIVATE_READ') }), error => {
+    assert.match(error.message, /missing native report context.*hook codes=unavailable/)
+    assert.ok(!error.message.includes('PRIVATE_'))
+    return true
+  })
+  let isLogRead = false
+  const started = { stdout: JSON.stringify({ injectSteps: [{ systemMessage: { systemMessage: 'Bound command' } }] }) }
+  assert.equal(nativeReportContext(started, 'setup en', () => { isLogRead = true; return log }), 'Bound command')
+  assert.equal(isLogRead, false)
+})
+
 // Windows soon hands a freed pid to another process, so a pid this test has seen
 // exit is never stopped by number afterwards. Tests in this file run one at a time.
 const exitedPids = new Set()
@@ -5572,8 +5613,7 @@ test('Antigravity reports its own waiting question with the command bound by nat
     const fire = event => fireCommand(f, hooks[event][0].command, JSON.stringify(payload))
     const started = await fire('SessionStart')
     assert.equal(started.status, 0, hookFailure(started))
-    const context = JSON.parse(started.stdout).injectSteps?.[0]?.systemMessage?.systemMessage
-    assert.equal(typeof context, 'string', `${connector} ${lang}: missing native report context`)
+    const context = nativeReportContext(started, `${connector} ${lang}`, () => hookLog(f))
     assert.ok(!context.includes('PRIVATE_'))
     const command = context.match(/`(node [^`\r\n]+)`/)?.[1]
     assert.ok(command, context)
