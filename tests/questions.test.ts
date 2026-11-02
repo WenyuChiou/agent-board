@@ -69,7 +69,19 @@ test('a question keeps its id, hide and resolution after a same-prefix peer with
   const id = first.records[0]!.id
   const left = observeQuestions(observeQuestions(first, both, mine, [id], NOW + 1, true).ledger, alone, mine, [id], NOW + 2, true).ledger
   expect(left.records.map(record => [record.id, record.isPresent, record.firstObserved])).toEqual([[id, true, first.records[0]!.firstObserved]])
+  const met = observeQuestions(first, both, mine, [id], NOW + 1, true).ledger
+  for (const ledger of [met, left]) {
+    expect(parseQuestions(questionsJson(ledger))).toEqual(ledger)
+    expect(parseQuestions(compactQuestionsJson(ledger))).toEqual(ledger)
+    const capture = captureJson(ledger.records[0]!, 'unresolved')
+    expect(parseCapture(capture, sha256(capture))?.record.id).toBe(id)
+  }
   expect(buildView(alone, [], mine, NOW + 2, 0, {}, STRINGS.en, [id], {}, left).hidden.map(item => item.text)).toEqual(['Alpha question?'])
+
+  const fresh = observeQuestions(emptyQuestions(), both, null, [], NOW, true).ledger
+  const freshId = fresh.records[0]!.id
+  const freshLeft = observeQuestions(fresh, alone, null, [freshId], NOW + 1, true).ledger
+  expect(freshLeft.records.map(record => [record.id, record.isPresent])).toEqual([[freshId, true]])
 
   const resolved = resolveQuestion(observeQuestions(emptyQuestions(), alone, null, [], NOW, true).ledger, observeQuestions(emptyQuestions(), alone, null, [], NOW, true).ledger.records[0]!.id, NOW + 1)
   const after = observeQuestions(observeQuestions(resolved, both, null, [], NOW + 2, true).ledger, alone, null, [], NOW + 3, true).ledger
@@ -124,15 +136,21 @@ test('archiving a same-prefix peer checks that peer alone', () => {
 
 test('an own question saved before same-prefix identity keeps its record when a peer appears', () => {
   const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW), { subject: 'Alpha question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha work' }
-  const peer = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Quiet step' }, '1', NOW), title: 'Beta work' }
+  const peer = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Beta question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Beta work' }
   const ownFile = `## demo\n${renderAutoBlock(mine).join('\n')}\n`
   const saved = observeQuestions(emptyQuestions(), parseProgress(ownFile), mine, [], NOW, true).ledger
   const old = { ...saved, records: saved.records.map(record => {
-    const { sessionId: _sessionId, resume: _resume, ...data } = JSON.parse(record.source!.data) as Record<string, unknown>
-    return { ...record, source: { ...record.source!, data: JSON.stringify(data) } }
+    const { task, title, context } = JSON.parse(record.source!.data) as Record<string, unknown>
+    return { ...record, source: { ...record.source!, data: JSON.stringify({ task, title, context }) } }
   }) }
-  const next = observeQuestions(old, parseProgress(`${ownFile}${renderAutoBlock(peer).join('\n')}\n`), mine, [], NOW + 1, true).ledger
-  expect(next.records.filter(record => record.isPresent).map(record => record.id)).toEqual([saved.records[0]!.id])
+  const projects = parseProgress(`${ownFile}${renderAutoBlock(peer).join('\n')}\n`)
+  for (const current of [mine, null]) {
+    const next = observeQuestions(old, projects, current, [], NOW + 60000, true).ledger
+    const alpha = next.records.filter(record => record.words === 'Alpha question?')
+    expect(alpha.map(record => [record.id, record.firstObserved, record.isPresent])).toEqual([[saved.records[0]!.id, NOW, true]])
+    expect(parseQuestions(questionsJson(next))).toEqual(next)
+    expect(buildView(projects, [], current, NOW + 60000, 0, {}, STRINGS.en, [], {}, next).waiting.map(item => item.text).sort()).toEqual(['Alpha question?', 'Beta question?'])
+  }
 })
 
 test('a pending question pairs with the same-prefix peer block that asked it', () => {

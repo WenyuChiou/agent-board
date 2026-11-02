@@ -28,31 +28,55 @@ const sourceOwner = (source: QuestionSource): QuestionOwner | null => {
   return { session: source.session, agent: source.agent, resume: 'resume' in data && typeof data.resume === 'string' ? data.resume : data.sessionId.length > 8 ? data.sessionId : null }
 }
 
-// Keep existing scopes until two canonical owners share an alias. A record already saved under a
-// canonical scope keeps that alias split after a peer leaves, even one that left no record, so a
-// record never moves back and loses its id. Project-heading migration is unchanged (#602).
+// A record's id binds its scope, so a saved record never changes scope. The alias stays with the
+// owners that already saved records under it; another owner sharing it uses its canonical id, and
+// so does each owner when two meet with nothing saved. An owner with a record under its canonical
+// id stays there after a peer leaves. Project-heading migration is unchanged (#602).
 export const questionScopes = (projects: readonly ProgressProject[], mine: ProgressMirror | null, ledger?: QuestionLedger): QuestionScopeOf => {
   const owners = new Map<string, Set<string>>()
-  const split = new Set<string>()
-  const add = (project: string, auto: QuestionOwner): void => {
-    const canonical = auto.resume ?? (auto.session.length > 8 ? auto.session : null)
+  const holders = new Map<string, Set<string>>()
+  const titled = new Map<string, Set<string>>()
+  const saved = new Set<string>()
+  const note = (map: Map<string, Set<string>>, key: string, id: string): void => {
+    const ids = map.get(key) ?? new Set<string>()
+    ids.add(id)
+    map.set(key, ids)
+  }
+  const canonicalOf = (auto: QuestionOwner): string | null => auto.resume ?? (auto.session.length > 8 ? auto.session : null)
+  const add = (project: string, auto: QuestionOwner, title?: string): void => {
+    const canonical = canonicalOf(auto)
     if (canonical === null) return
     const scope = questionScope(project, auto.agent, auto.session)
-    const ids = owners.get(scope) ?? new Set<string>()
-    ids.add(canonical)
-    owners.set(scope, ids)
+    note(owners, scope, canonical)
+    if (title !== undefined) note(titled, JSON.stringify([scope, title]), canonical)
   }
-  for (const project of projects) for (const task of project.tasks) if (task.auto !== null && task.auto.isRun !== true) add(project.name, task.auto)
-  if (mine !== null && mine.isRun !== true) add(mine.project, mirrorOwner(mine))
+  for (const project of projects) for (const task of project.tasks) if (task.auto !== null && task.auto.isRun !== true) add(project.name, task.auto, task.title)
+  if (mine !== null && mine.isRun !== true) add(mine.project, mirrorOwner(mine), mine.title)
   for (const record of ledger?.records ?? []) {
-    const auto = record.source === undefined ? null : sourceOwner(record.source)
-    if (auto === null || record.source === undefined) continue
-    add(record.source.project, auto)
-    if (auto.resume !== null && auto.resume !== auto.session && record.scope === questionScope(record.source.project, auto.agent, auto.resume)) split.add(questionScope(record.source.project, auto.agent, auto.session))
+    const source = record.source
+    if (source === undefined) continue
+    const auto = sourceOwner(source)
+    if (auto === null) {
+      // An own copy saved before it held the session id is known only by its alias and title.
+      const ids = source.kind === 'own' ? titled.get(JSON.stringify([record.scope, source.task])) : undefined
+      const only = ids?.size === 1 ? [...ids][0] : undefined
+      if (only !== undefined) note(holders, record.scope, only)
+      continue
+    }
+    add(source.project, auto)
+    const canonical = canonicalOf(auto)
+    if (canonical === null) continue
+    if (record.scope === questionScope(source.project, auto.agent, auto.session)) note(holders, record.scope, canonical)
+    else if (record.scope === questionScope(source.project, auto.agent, canonical)) saved.add(record.scope)
   }
   return (project: string, agent: string, session: string, resume?: string | null): string => {
     const scope = questionScope(project, agent, session)
-    return ((owners.get(scope)?.size ?? 0) > 1 || split.has(scope)) && resume != null ? questionScope(project, agent, resume) : scope
+    if (resume == null) return scope
+    const own = questionScope(project, agent, resume)
+    if (saved.has(own)) return own
+    const held = holders.get(scope)
+    if (held !== undefined) return held.has(resume) ? scope : own
+    return (owners.get(scope)?.size ?? 0) > 1 ? own : scope
   }
 }
 const isFrozenQuestion = (record: QuestionRecord, frozen: ReadonlySet<string>): boolean =>
@@ -525,13 +549,7 @@ export const observeQuestions = (
   frozen: ReadonlySet<string> = new Set(),
 ): { ledger: QuestionLedger; keys: Record<string, string>; marked: string[] } => {
   const scopeOf = questionScopes(projects, mine, ledger)
-  const records = ledger.records.map(row => {
-    // A copy of this session's own list saved before it held the session id is this session's.
-    const isOldOwn = row.source?.kind === 'own' && mine !== null && mine.isRun !== true && row.source.project === mine.project && row.source.session === shortId(mine.sessionId) && row.source.agent === mirrorOwner(mine).agent
-    const auto = row.source === undefined ? null : sourceOwner(row.source) ?? (isOldOwn && mine !== null ? mirrorOwner(mine) : null)
-    const scope = auto === null || row.source === undefined || row.scope !== questionScope(row.source.project, auto.agent, auto.session) ? row.scope : scopeOf(row.source.project, auto.agent, auto.session, auto.resume)
-    return { ...row, scope }
-  })
+  const records = ledger.records.map(row => ({ ...row }))
   for (const record of records) {
     if (record.source?.kind !== 'inbox' || !record.isUnresolved) continue
     let source: PendingTurn
