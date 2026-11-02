@@ -169,6 +169,8 @@ gh issue list --repo WenyuChiou/agent-board --state open --label for-agent --jso
 ### Step 3 — Automatic Label Unlocks After Each Merge
 Immediately after squash-merging an upstream PR (`gh pr merge <PR> --squash --match-head-commit <sha>`) and posting closing verification evidence on its issue:
 
+Before each `--add-label ready` below, post the issue's `Ready check:` comment ([RULES.md, R4](RULES.md#r4-one-issue-one-owner)); the merge settles only what the issue waits on, not the other three points.
+
 - **When `#388` (`#315`) merges**, unlock Phase 1B, Phase 1C, Phase 3B-1, and Phase 3B-2:
   ```sh
   gh issue edit 603 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
