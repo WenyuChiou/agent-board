@@ -28,10 +28,12 @@ const sourceOwner = (source: QuestionSource): QuestionOwner | null => {
   return { session: source.session, agent: source.agent, resume: 'resume' in data && typeof data.resume === 'string' ? data.resume : data.sessionId.length > 8 ? data.sessionId : null }
 }
 
-// Keep existing scopes until two canonical owners share an alias. Saved sources keep that
-// distinction after a peer leaves, without changing project-heading migration (#602).
+// Keep existing scopes until two canonical owners share an alias. A record already saved under a
+// canonical scope keeps that alias split after a peer leaves, even one that left no record, so a
+// record never moves back and loses its id. Project-heading migration is unchanged (#602).
 export const questionScopes = (projects: readonly ProgressProject[], mine: ProgressMirror | null, ledger?: QuestionLedger): QuestionScopeOf => {
   const owners = new Map<string, Set<string>>()
+  const split = new Set<string>()
   const add = (project: string, auto: QuestionOwner): void => {
     const canonical = auto.resume ?? (auto.session.length > 8 ? auto.session : null)
     if (canonical === null) return
@@ -44,11 +46,13 @@ export const questionScopes = (projects: readonly ProgressProject[], mine: Progr
   if (mine !== null && mine.isRun !== true) add(mine.project, mirrorOwner(mine))
   for (const record of ledger?.records ?? []) {
     const auto = record.source === undefined ? null : sourceOwner(record.source)
-    if (auto !== null && record.source !== undefined) add(record.source.project, auto)
+    if (auto === null || record.source === undefined) continue
+    add(record.source.project, auto)
+    if (auto.resume !== null && auto.resume !== auto.session && record.scope === questionScope(record.source.project, auto.agent, auto.resume)) split.add(questionScope(record.source.project, auto.agent, auto.session))
   }
   return (project: string, agent: string, session: string, resume?: string | null): string => {
     const scope = questionScope(project, agent, session)
-    return (owners.get(scope)?.size ?? 0) > 1 && resume != null ? questionScope(project, agent, resume) : scope
+    return ((owners.get(scope)?.size ?? 0) > 1 || split.has(scope)) && resume != null ? questionScope(project, agent, resume) : scope
   }
 }
 const isFrozenQuestion = (record: QuestionRecord, frozen: ReadonlySet<string>): boolean =>
@@ -120,8 +124,18 @@ const normalizeSource = (source: QuestionSource): QuestionSource => {
   return isWholeTask(parsed) && snapshotOf(parsed) !== null ? { ...source, data: sourceData(parsed as unknown as ProgressTask) } : source
 }
 
+// The tasks a row's reference names. Peers that share a short id are told apart as `takeTask` tells
+// them apart, by title and then line; a twin of the same session stays beside it, so it names neither.
+export const refTasks = (projects: readonly ProgressProject[], ref: TaskRef): ProgressTask[] => {
+  const same = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : task.auto?.session === ref.session)
+  if (ref.session === null || same.length < 2) return same
+  const titled = same.filter(task => task.title === ref.title)
+  const named = titled.find(task => task.line === ref.line) ?? (titled.length === 1 ? titled[0] : undefined)
+  return named === undefined ? same : same.filter(task => task.auto?.agent === named.auto?.agent && task.auto?.resume === named.auto?.resume)
+}
+
 export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: TaskRef, ledger: QuestionLedger): boolean => {
-  const tasks = projects.filter(project => project.name === ref.project).flatMap(project => project.tasks).filter(task => ref.session === null ? task.title === ref.title : task.auto?.session === ref.session)
+  const tasks = refTasks(projects, ref)
   if (tasks.length !== 1) return false
   const task = tasks[0]
   if (task === undefined) return false
@@ -444,7 +458,8 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
   const ambiguous = new Set<string>()
   for (const project of projects) {
     for (const task of project.tasks) {
-      if (mine !== null && task.auto !== null && matchesSpan(task.auto, { ...mine, agent: mine.agent || 'claude' })) continue
+      // A run under the current session's alias asks nobody here, whichever session it belongs to.
+      if (mine !== null && task.auto !== null && (task.auto.isRun === true ? task.auto.session === shortId(mine.sessionId) : matchesSpan(task.auto, { ...mine, agent: mine.agent || 'claude' }))) continue
       const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
       if (frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))) continue
       if (scopes.has(scope)) ambiguous.add(scope)
@@ -461,7 +476,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
     if (!turn.isQuestion || turn.id === undefined) continue
     const scope = questionScope(turn.project, turn.agent, turn.id)
     if (frozen.has(scope)) continue
-    const matching = rows.filter(row => row.isWaiting && row.scope === scope && questionWords(row.text) === questionWords(turn.text))
+    const matching = rows.filter(row => row.isWaiting && row.session === turn.id && row.source.project === turn.project && (row.source.agent || 'claude') === (turn.agent || 'claude') && questionWords(row.text) === questionWords(turn.text))
     if (matching.length === 1 && matching[0] !== undefined) {
       const row = matching[0]
       row.producerRevisions = [...new Set([...(row.producerRevisions ?? []), ...(turn.sourceRevisions ?? [])])]
@@ -511,7 +526,9 @@ export const observeQuestions = (
 ): { ledger: QuestionLedger; keys: Record<string, string>; marked: string[] } => {
   const scopeOf = questionScopes(projects, mine, ledger)
   const records = ledger.records.map(row => {
-    const auto = row.source === undefined ? null : sourceOwner(row.source)
+    // A copy of this session's own list saved before it held the session id is this session's.
+    const isOldOwn = row.source?.kind === 'own' && mine !== null && mine.isRun !== true && row.source.project === mine.project && row.source.session === shortId(mine.sessionId) && row.source.agent === mirrorOwner(mine).agent
+    const auto = row.source === undefined ? null : sourceOwner(row.source) ?? (isOldOwn && mine !== null ? mirrorOwner(mine) : null)
     const scope = auto === null || row.source === undefined || row.scope !== questionScope(row.source.project, auto.agent, auto.session) ? row.scope : scopeOf(row.source.project, auto.agent, auto.session, auto.resume)
     return { ...row, scope }
   })
