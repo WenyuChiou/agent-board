@@ -23,6 +23,7 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
    - **Wait cancellation (empty wait)**: When a caller aborts or times out a parked wait (`board_wait` / `--wait-message`) without a message having arrived, the wait is cleanly unregistered and aborted; any queued messages in the store remain untouched (`queued`) and unconsumed (matching #685).
    - **Pre-claim message withdrawal**: When the sender explicitly cancels or dismisses a message while still `queued` (before atomic claim wins), the message transitions to `rejected` with `error: 'DISMISSED'` / `'CANCELLED'`. Text is dropped, hash is preserved, and target blocking is released immediately. It is never claimed by or delivered to any host.
    - **Post-claim cancellation / disconnect**: Once `queued` -> `uncertain` is committed to disk, a cancellation or disconnect **cannot** roll back the message to `queued` (violates strict no-replay). In accordance with the core `#388` contract (`hooks/messaging.ts:158–164`), the message remains in or transitions to `uncertain` with `error: 'DISMISSED'` / `'CANCELLED'`; target blocking is preserved until the message settles, is acknowledged, or reaches `OPEN_LIMIT_MS` (30 minutes). The message is **never** automatically re-injected on later turns. A message whose completed transport write already persisted `accepted` keeps `accepted` (it never moves back to `uncertain` or `queued`); target blocking is preserved until it is acknowledged, settled, or reaches `OPEN_LIMIT_MS`.
+   - *Code today:* `dismissMessage` in #388 (`hooks/messaging.ts`) moves an `accepted` message to `uncertain`. Keeping it `accepted` is a #388 pre-merge fix (section 6, wave 0).
 
 | Scenario | Durable State | Waiter Cleanup | Target-Blocking Effect | No-Replay Outcome |
 | :--- | :--- | :--- | :--- | :--- |
@@ -32,12 +33,14 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
 
 4. **Target Blocking, Transport Evidence & Semantic Acknowledgement**:
    - Retain `#388`'s target blocking: `claimMessages` blocks a target while an open message is `accepted` or `uncertain` (`hooks/messaging.ts:158–164`). This prevents out-of-order execution, split delivery, and race conditions.
+   - **A hook-only target is not held.** A target that has no ACK channel (a next-turn hook with no `board_ack`, Tier 3) can never answer `ACK <nonce>`, so the rule above would let it take one message per `OPEN_LIMIT_MS` (30 minutes). For such a target the hook's completed write is the delivery: the message is recorded `accepted` and does not block the target. Order still holds, because one claim hands over every message queued for that target. A target with an ACK channel keeps the blocking rule. Owner: #603.
    - **Receipt stages**:
      1. *Prepared envelope*: In-memory claim formed, nonce issued, prompt framed.
      2. *Completed transport write / `accepted`*: External transport write verified complete (stdout pipe flushed, SDK turn submitted, or MCP tool call returned; process spawn alone is insufficient). Persists status as `accepted`; **target remains blocked**. This is strictly transport receipt evidence, **never** proof of model reading or semantic comprehension.
      3. *Semantic ACK / `acknowledged`*: Host agent issues `ACK <nonce>` or `board_ack` within the turn. Persists status as `acknowledged`; target unblocks.
      4. *Settled / queue release*: Message text dropped, hash preserved, pruned after retention period (`FINISHED_KEEP_MS`).
    - Retain current `HOP_LIMIT=2` across all roadmaps and briefs (#603, #319, #685, #686) and six-hex ACK token (`ACK <nonce>`). The 128-bit random framing boundary used to isolate delivered peer prompts is stored and verified as a distinct field (`framingNonce`), preventing truncation or collision with the 6-character ACK token.
+   - *Code today:* #388 has no `framingNonce`; its fence `<<<AB-<nonce>` reuses the six-hex ACK nonce. Adding the field before the store format ships is a #388 pre-merge fix (section 6, wave 0).
 5. **Trusted Session/Turn Enrollment & Capability Lease Lifecycle**:
    - A capability token is enrolled and bound by a trusted local launcher or host adapter to:
      - Message store path
@@ -47,7 +50,7 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
      - Canonical workspace path (`canonical(cwd)` matching `canonical(workspace)`)
      - Owner generation and trusted turn boundary
    - **Permitted rights**: `board_wait`, `board_ack`, `board_post` strictly within own assigned session and turn. Cannot impersonate other sessions, cannot grant tool permissions or bypass trust.
-   - **Expiry / renewal**: Leases expire at the turn boundary or after 60 s inactivity. A parked `board_wait` (including its 15 s `notifications/progress`) counts as activity, so the second consecutive wait in the same turn stays valid.
+   - **Expiry / renewal**: Leases expire at the turn boundary or after 60 s inactivity. A parked `board_wait` (including its 15 s `notifications/progress`) counts as activity, so the second consecutive wait in the same turn stays valid. This 60 s lease is the MCP capability lease that #721 adds, under its own name. It is not #388's 15 s `LEASE_MS` in `scripts/board-messaging.ts`, which is the receiver connection lease renewed on every poll.
    - **Revocation / reconnect**: Contested registration marks both sessions `contested`; capability lease is immediately revoked, falling back to honest `Copy` mode.
    - Model-supplied text, prompt arguments, and client JSON-RPC request IDs are **not** identity proof.
    - Callers without authenticated host binding fall back to restricted unprivileged mailbox/polling mode, and never receive the privileged two-waits-per-turn lease.
@@ -76,7 +79,7 @@ Keep visible state and latency distinct so an enqueue or delivery failure cannot
 | **1. Delivery Goal & Two-Host Proof** | Primary target: user-led communication from one board. First two targeted live-push paths: **Claude Code** (`[P1]`, #316) and **Codex** (`[P1]` daemon `turn/start`, #318); #603 provides Tier 3 next-turn delivery and #319 provides Tier 2 step-end continuation. All other surfaces keep honest `Copy` / next-turn mailbox fallback until separate native evidence is checked in. | Distinguishes UI feedback (1–2s), board refresh (~2s), and model latency; prevents fabricated delivery claims. | `#687` Roadmap, `#316` Claude receiver, `#318` Codex daemon, `#603` Hook mailbox, `#319` Codex step-end |
 | **2. Cancellation, Claim & Uncertainty** | Atomic claim commit (`queued -> uncertain`) is the single ordering boundary. Pre-claim cancel removes from queue; post-claim cancel keeps an already-`accepted` message `accepted`, otherwise retains `uncertain`, preserving **no-replay**. | Arrival races, disconnect after claim, timeout after claim, stale-waiter cleanup. | `#603` Mailbox state machine, `#685` MCP cancellation semantics |
 | **3. Trusted Session/Turn Enrollment** | Local launcher/host binds capability to store path, native agent, PID/start time, canonical workspace path, owner generation, and turn boundary. Unbound callers fall back to restricted mailbox polling. | Forged identity claims, stale leases, cross-workspace leakage, restart/reconnect. | `#603` Contract, `#685` Lease manager |
-| **4. Acceptance, Ordering & Compatibility** | Retains `#388` target blocking while messages are `accepted` or `uncertain`. `accepted` is transport evidence only. Keeps `HOP_LIMIT=2` and six-hex ACK token; 128-bit framing boundary is separate `framingNonce`. **DAG: `#365` unlocks only after `#388` + `#603` + `#319` merge.** | Out-of-order delivery, late/duplicate ACK, shared-file conflicts across `#319` and `#365`. | `#603` Core, `#319` Codex, `#365` Antigravity/Gemini, `#687` DAG |
+| **4. Acceptance, Ordering & Compatibility** | Retains `#388` target blocking while messages are `accepted` or `uncertain`, except for a hook-only target with no ACK channel (invariant 4). `accepted` is transport evidence only. Keeps `HOP_LIMIT=2` and six-hex ACK token; 128-bit framing boundary is separate `framingNonce`. **DAG: `#365` unlocks only after `#388` + `#603` + `#319` merge.** | Out-of-order delivery, late/duplicate ACK, shared-file conflicts across `#319` and `#365`. | `#603` Core, `#319` Codex, `#365` Antigravity/Gemini, `#687` DAG |
 | **5. Capability Evidence & Visible Latency** | Surfaces explicitly tiered as `Proposed`, `Implemented`, or `Verified`. Target 1–2s visible send status, ~2s board update, separate from host ACK and model reply. Empty wait 45s max; prompt wake on event. | Prevents stacked 2s polling loops; surfaces real failure states. | `#687` Matrix, `#685` Waiter, `#365` Card gating |
 
 ---
@@ -117,80 +120,107 @@ Keep visible state and latency distinct so an enqueue or delivery failure cannot
 | 11 | **Legacy Gemini CLI** | CLI (`gemini`) | **Proposed** | `[P3]` `board_wait` (45 s, blocked by #685) | `AfterAgent` `{"decision":"deny"}` (gated by #365) | `SessionStart` + `BeforeAgent` | `~/.gemini/settings.json` MCP + `AfterAgent` first-line `ACK` |
 | 12 | **`dot` & Web Chats** | Claude.ai, ChatGPT, Gemini Web, DeepSeek Web, Grok Web | **Proposed** | Honest Tier 4 (no unsolicited wake) | Parsed on block import | One-click `<<<board-message <nonce>>>>` copy | Scoped `#import=` link + zero-paste-box clipboard import (`#561`) |
 
+Once #720 merges, the status of each surface comes from its receiver's record and the table in `docs/MESSAGING.md` is generated from them (section 8); this matrix then links there instead of carrying its own status.
+
 ---
 
 ## 6. Phased PR Execution Table & File Boundaries
 
-Every slice stays focused (`<= 500` changed lines excluding generated bundles and changelog fragments) and owns disjoint primary files within each parallel wave:
+The work runs in four waves. A wave starts when the merges it names are in, not when the whole wave before it ends. Within a wave, slices own disjoint primary files so they can run at the same time. Every slice stays focused (`<= 500` changed lines, generated bundles excluded).
 
-Exception: `#686` and `#233` both touch `hooks/local-agents.ts`. To prevent concurrent edits, `#686` is an explicit prerequisite for `#233`: `#233` stays `blocked` until both `#603` and `#686` merge, then starts from current `main` (or merges `main` into an existing draft branch without rebasing). Neither may change installed Codex hook command strings (invariant 7).
+The lane is the suggested executor. It is not a claim: whoever takes a `ready` issue assigns themselves ([RULES.md R4](RULES.md#r4-one-issue-one-owner)), and an issue idle for 24 hours goes back to `ready`. `dot` and `muse` work on GitHub only, so slices that need an app installed (the spikes, live runs) go to a local agent.
 
-| Phase / Slice | Issue / PR | Assigned Executor | Label State | Primary Files (Non-Colliding Within Wave) | Unlocks When Merged |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Phase 1A** | `#315` (PR `#388`) | `claude` / `codex` / `antigravity` | In CI / Ready | `hooks/messaging.ts`, `scripts/board-messaging.ts`, `scripts/message-store-claim.ts`, `scripts/board-serve.ts`, `scripts/board-cli.ts` | `#603`, `#317`, `#316`, `#318` |
-| **Phase 1B** | `#603` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/hook-safety.ts`, `hooks/hook-messages.ts`, `scripts/codex-local.ts` | `#319`, `#685`, `#686` |
-| **Phase 1C** | `#317` | **`muse`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/cli-send.ts`, `hooks/board.ts`, `scripts/board-cli.ts`, `tests/cli-send.test.mjs` | `#232` |
-| **Phase 2A** | `#319` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#603` | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Codex/Grok/Muse `Stop` `block` + Cursor `stop`) | `#365` (Phase 2B) |
-| **Phase 2B** | `#365` | **`muse`** (`for-dot`) | `blocked` -> `ready` after **`#388`, `#603`, and `#319`** | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Antigravity `Stop`/`PreInvocation` + Gemini `AfterAgent`) | Full Tier 2 Antigravity/Gemini |
-| **Phase 3A** | `#685` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/mcp-tools.ts`, `scripts/board-mcp.ts`, `scripts/board-cli.ts` (`--mcp`, `--wait-message`), `hooks/connect-pure.ts` | Universal Desktop/IDE Tier 1 |
-| **Phase 3B-1** | `#316` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#388` | `hooks/receiver.ts`, `hooks/register.tsx`, `hooks/serve.ts`, string tables | Claude Code Tier 1 |
-| **Phase 3B-2** | `#318` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#388` | `scripts/codex-receiver.mjs`, `hooks/codex.ts` | Codex Daemon Tier 1 |
-| **Phase 3C-1** | `#686` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/local-agents.ts` (`opencodePlugin`), `hooks/portable-agents.ts` (DeepSeek, OpenClaw) | `#233` (Phase 3C-2) + OpenCode/DeepSeek/OpenClaw Tier 1 |
-| **Phase 3C-2** | `#233` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` and `#686` | `hooks/local-agents.ts` / `scripts/hermes-session-connector.mjs`, `tests/e2e/l3b-messaging.test.mjs` | Hermes L3b parity |
-| **Phase 3D** | `#232` (Bug PR) | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#317` | `hooks/pane.tsx`, `hooks/board.ts`, `scripts/board-cli.ts`, `tests/e2e/l3b-messaging.test.mjs` | Cross-surface receipt parity |
-| **Phase 4A** | `#561` | **`claude`** (`for-agent`) | `ready` (`for-agent`) | `docs/validation/*-web-chat-relay.md`, `hooks/serve.ts`, `scripts/board-serve.ts` | `dot` & Web-Chat zero-paste-box |
+### Wave 0: now
+
+| Slice | Issue / PR | Lane | Primary files | Unlocks |
+| :--- | :--- | :--- | :--- | :--- |
+| Message store | `#315` (PR `#388`) | its current authors; `dot` pushes its pending patch first | `hooks/messaging.ts`, `scripts/board-messaging.ts`, `scripts/message-store-claim.ts`, `scripts/board-serve.ts`, `scripts/board-cli.ts` | wave 1 |
+| Web-chat relay | `#561` | `claude` (assigned) | `docs/validation/*-web-chat-relay.md`, `hooks/serve.ts`, `scripts/board-serve.ts` | `dot` and web chats, Tier 4 |
+| Vendor API spikes | step 1 of `#316`, `#722`, `#724`, `#725`, `#726` | a local agent with that app installed | `docs/validation/<date>-<host>-spike.md` | the slice that uses that API |
+
+`#388` pre-merge fixes, both small: `dismissMessage` keeps an `accepted` message `accepted` (invariant 3), and the store gains `framingNonce` (invariant 4). It is approved by someone who wrote neither it nor its brief, such as the owner or `RyanGosling0508`.
+
+A spike is half a day: on a machine with the app, call the one API the slice depends on (Claude Code `$.prompt.submit`; Antigravity's wakeup on a background command exiting 0; OpenCode `client.session.promptAsync`; DeepSeek `agent.followup`; OpenClaw `chat.send`) and record the version, OS, call and result. A spike that fails stops its slice with a `Question:` before any code is written.
+
+### Wave 1: after `#388` merges
+
+| Slice | Issue | Lane | Primary files | Unlocks |
+| :--- | :--- | :--- | :--- | :--- |
+| Hook mailbox | `#603` | `codex` | `hooks/hook-safety.ts`, `hooks/hook-messages.ts`, `scripts/codex-local.ts` | wave 2 |
+| Receiver records | `#720` | `claude` | `scripts/message-client.mjs` (record type), `scripts/messaging-matrix.mjs`, `docs/MESSAGING.md` (generated table) | `#724`, `#725`, `#726`; `#316` and `#318` add a record |
+| Claude Code receiver | `#316` | `claude` | `hooks/receiver.ts`, `hooks/register.tsx`, `hooks/serve.ts`, string tables | Claude Code Tier 1 |
+| Codex daemon receiver | `#318` | `antigravity` | `scripts/codex-receiver.mjs`, `hooks/codex.ts` | Codex daemon Tier 1 |
+| Agent `--send` | `#317` | `dot` | `hooks/cli-send.ts`, `hooks/board.ts`, `scripts/board-cli.ts`, `tests/cli-send.test.mjs` | `#232` |
+
+`#720` merges before `#316` and `#318` go Ready; they start at the same time and merge `main` once it is in.
+
+### Wave 2: after `#603` merges
+
+| Slice | Issue | Lane | Primary files | Unlocks |
+| :--- | :--- | :--- | :--- | :--- |
+| Codex step end | `#319` | `muse` | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Codex, Grok, Muse `Stop` and Cursor `stop`) | `#365` |
+| Antigravity and Gemini step end | `#365` | `muse`, after `#319` and the Antigravity spike | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Antigravity `Stop`/`PreInvocation`, Gemini `AfterAgent`) | Tier 2 for Antigravity and Gemini |
+| MCP server (`#685` part 1 of 3) | `#721` | `claude` | `hooks/mcp-tools.ts`, `scripts/board-mcp.ts`, `scripts/board-cli.ts` (`--mcp`), peer guardrails in `hooks/messaging.ts` | `#722` |
+| Parked waiters (`#685` part 2 of 3) | `#722` | `codex`, after `#721` | `scripts/board-mcp.ts` (waiter), `scripts/board-cli.ts` (`--wait-message`) | Desktop and IDE Tier 1 |
+| MCP config entries (`#685` part 3 of 3) | `#723` | `antigravity` | `hooks/connect-pure.ts`, `scripts/setup.ts` | MCP for six hosts |
+| OpenCode receiver (`#686`) | `#724` | the agent that ran its spike | `hooks/receivers/opencode.ts`, one import line in `hooks/local-agents.ts` | `#233`, OpenCode Tier 1 |
+| DeepSeek receiver (`#686`) | `#725` | the agent that ran its spike | `hooks/receivers/deepseek.ts`, one import line in `hooks/portable-agents.ts` | DeepSeek Tier 1 |
+| OpenClaw receiver (`#686`) | `#726` | the agent that ran its spike | `hooks/receivers/openclaw.ts`, one import line in `hooks/portable-agents.ts` | OpenClaw Tier 1 |
+
+`#685` and `#686` stay open as parent issues and close when their last part merges. Each `#686` receiver lives in its own file, so the three touch only one import line of a shared file; that one-line conflict is fixed by merging `main`.
+
+### Wave 3: last
+
+| Slice | Issue | Lane | Primary files | Starts after |
+| :--- | :--- | :--- | :--- | :--- |
+| Hermes receiver | `#233` | `claude` | `hooks/local-agents.ts`, `scripts/hermes-session-connector.mjs`, `tests/e2e/l3b-messaging.test.mjs` | `#603` and `#724` |
+| Receipts on every surface | `#232` (bug) | `claude` | `hooks/pane.tsx`, `hooks/board.ts`, `scripts/board-cli.ts`, `tests/e2e/l3b-messaging.test.mjs` | `#317` |
+
+`#724` and `#233` both touch `hooks/local-agents.ts`, so `#233` starts from `main` after `#724` merges (or merges `main` into an existing draft branch, without rebasing). Neither changes installed Codex hook command strings (invariant 7).
 
 ---
 
 ## 7. QA Acceptance & Coordinator Handover Playbook
 
-If the active QA/coordinator agent (`antigravity`) reaches its session or rate limit, **any maintainer, collaborator, or `claude` / `codex` session** can resume seamlessly with the following steps:
+Any agent or person who is not an author of a slice may run its QA; `antigravity` did it first. If one stops, the next takes over with these steps.
 
 ### Step 1 — Inspect Live Queue & CI State
 ```sh
 node scripts/review-queue.mjs
 gh pr list --repo WenyuChiou/agent-board --state open --json number,title,isDraft,headRefName,headRefOid
-gh issue list --repo WenyuChiou/agent-board --state open --label for-dot --json number,title,labels
-gh issue list --repo WenyuChiou/agent-board --state open --label for-agent --json number,title,labels
+gh issue list --repo WenyuChiou/agent-board --state open --milestone "0.25.0 Send to Claude, hand-off, versions and doctor" --json number,title,labels,assignees
 ```
 
-### Step 2 — Technical QA Checklist on Incoming PRs (`dot`, `muse`, `claude`)
-1. **Scope & B3 rule**: Verify the diff touches only files needed by its listed issues, includes `changelog.d/<issue>-<slug>.md` with exact covering test titles, and never mixes a bug fix (`#232`) into a feature PR.
-2. **Bundle rebuilds (`brief-rules.md` #7, `AGENTS.md` Checks)**: If a `for-dot` PR touched files compiled into `hooks/board-script.ts` and wrote `"maintainer rebuilds at merge"` under Checks instead of running Bun 1.4.2, check out the PR branch in a clean worktree, merge `origin/main` only if conflicting, and run `npx --yes bun@1.4.2 scripts/build-board.ts` (released-file generation via `scripts/build-released.ts` applies only to release tags).
-3. **Sequential local verification (`brief-rules.md` #10, `AGENTS.md` Checks)**: Run **one test command at a time** in an isolated temporary home:
-   - Run touched Node test files (`node --test <touched-test-file>`).
-   - If TS/TSX test files changed, run `claude plugin validate --strict .` and `claude plugin test .` once, alone.
-   - Run `node scripts/pr-check.mjs --pr <PR>` and verify `preflight.mjs` output is pasted under `## Checks`.
-4. **Governance Rule R2 (`docs/dev/RULES.md` #R2 — Nobody approves their own work)**:
-   - Remember: any agent that wrote part of a PR **or wrote its brief** counts as an author of that PR (`team-process.md` line 58, `RULES.md` line 17).
-   - Because `antigravity` authored the briefs on `#603`, `#317`, `#319`, `#365`, `#685`, `#316`, `#318`, `#686`, `#233`, `#232`, and `#561`, `antigravity` performs technical QA, bundle rebuilds, and `Review: REQUEST CHANGES <full sha>` when fixes are needed, while the formal `Review: APPROVE <full sha> by <reviewer>` must come from an independent collaborator (`SUPERD6`, `RyanGosling0508`), the owner (`WenyuChiou`), or an independent reviewer session that did not author the PR or its brief.
-   - Every `claude` executor slice is taken by `SUPERD6` (Claude Code). `SUPERD6` is then an author of that slice and cannot approve it; its `Review: APPROVE <full sha>` must come from the owner (`WenyuChiou`), `RyanGosling0508`, or another reviewer that did not write the PR or its brief.
+### Step 2 — Technical QA Checklist on Incoming PRs
+1. **Scope**: the diff touches only the files its issue lists, carries the CHANGELOG entry that [CONTRIBUTING rule 6](../../CONTRIBUTING.md#pull-requests) asks for, and never mixes a bug fix (`#232`) into a feature PR.
+2. **Bundle rebuilds**: if a PR from `dot` or `muse` touched files compiled into `hooks/board-script.ts` and wrote `"maintainer rebuilds at merge"` under Checks, check out the branch in a clean worktree and run `npx --yes bun@1.4.2 scripts/build-board.ts`.
+3. **Local verification, one command at a time** in an isolated temporary home: the touched Node test files (`node --test <file>`); `claude plugin validate --strict .` and `claude plugin test .` once, alone, if TS/TSX test files changed; and `node scripts/pr-check.mjs --pr <PR>`.
+4. **Who approves** ([RULES.md R2](RULES.md#r2-nobody-approves-their-own-work)): the authors of a slice are its executor and whoever wrote its brief. `antigravity` wrote the briefs of `#603`, `#316`, `#317`, `#318`, `#319`, `#365`, `#685`, `#686`, `#233`, `#232` and `#561`; `claude (cloud)` wrote `#720` to `#726`. The `Review: APPROVE <full sha> by <name>` comes from anyone else: another agent or session, a collaborator, or the owner. An author may still run QA and write `Review: REQUEST CHANGES`.
 
-### Step 3 — Automatic Label Unlocks After Each Merge
-Immediately after squash-merging an upstream PR (`gh pr merge <PR> --squash --match-head-commit <sha>`) and posting closing verification evidence on its issue:
+### Step 3 — Label Unlocks After Each Merge
+After a merge, remove `blocked` and add `ready` on each issue the merge unlocks, once everything in its row has merged:
 
-- **When `#388` (`#315`) merges**, unlock Phase 1B, Phase 1C, Phase 3B-1, and Phase 3B-2:
-  ```sh
-  gh issue edit 603 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  gh issue edit 317 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  gh issue edit 316 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  gh issue edit 318 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  ```
-- **When `#603` (Phase 1B) merges**, unlock Phase 2A, Phase 3A, and Phase 3C-1:
-  ```sh
-  gh issue edit 319 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  gh issue edit 685 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  gh issue edit 686 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  ```
-- **When `#686` (Phase 3C-1) merges**, unlock Phase 3C-2 (`#233`):
-  ```sh
-  gh issue edit 233 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  ```
-- **When `#319` (Phase 2A) merges**, unlock Phase 2B (`#365`):
-  ```sh
-  gh issue edit 365 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  ```
-- **When `#317` (Phase 1C) merges**, unlock Phase 3D (`#232`):
-  ```sh
-  gh issue edit 232 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  ```
+| When this merges | Unlock |
+| :--- | :--- |
+| `#388` (`#315`) | `#603`, `#720`, `#316`, `#318`, `#317` |
+| `#603` | `#319`, `#721`, `#723`; and `#724`, `#725`, `#726` once `#720` is in and the vendor's spike passed |
+| `#319` | `#365`, once the Antigravity spike passed |
+| `#721` | `#722` |
+| `#724` | `#233` |
+| `#317` | `#232` |
+
+```sh
+gh issue edit <N> --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
+```
+
+---
+
+## 8. When a Surface Counts as Done
+
+A surface's status in the matrix moves only on evidence:
+
+- **Proposed**: no merged receiver.
+- **Implemented**: the receiver is merged with synthetic tests, named by their test titles in the PR.
+- **Verified**: a dated live run is recorded in `docs/validation/<date>-<host>-live.md` with the host version, OS, the command, the message id, and the time of each receipt stage seen (`queued`, `accepted`, `acknowledged`, reply). A synthetic test never makes a surface Verified.
+
+Once `#720` merges, each receiver's record names this file, and the generated table shows Verified only when the file exists.
