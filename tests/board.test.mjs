@@ -3,7 +3,7 @@
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -6186,6 +6186,55 @@ fs.writeFileSync = function(file, data, ...args) {
     assert.ok(readFileSync(f.path, 'utf8').includes('Local synthetic task'))
     assert.equal(copies(), 0)
     assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy with corrupted held count (held: -1) in pending note archives 1 copy before removing task', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    const one = `## Synthetic\n${f.block('a1b2c323', 'Local synthetic task', 'done', 13)}`
+    const pending = join(f.dir, 'progress-archive.pending')
+    writeFileSync(f.path, one)
+    const boardHash = createHash('sha256').update(one).digest('hex')
+    const savedEntry = `## Synthetic · ${new Date().toISOString().slice(0, 10)}\n### Local synthetic task\n- [x] Finished`
+    writeFileSync(pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry: savedEntry, held: -1, boardHash }] }) + '\n')
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, 'Archived 1 task.\n')
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 1)
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy refuses pre-planted symlink pending note without truncating victim file', () => {
+  tidyFixture(f => {
+    const one = `## Synthetic\n${f.block('a1b2c324', 'Local synthetic task', 'done', 13)}`
+    writeFileSync(f.path, one)
+    const victim = join(f.dir, 'victim-file.txt')
+    writeFileSync(victim, 'important sensitive content')
+    const pending = join(f.dir, 'progress-archive.pending')
+    try {
+      symlinkSync(victim, pending)
+    } catch {
+      return
+    }
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.notEqual(result.status, 0)
+    assert.equal(readFileSync(victim, 'utf8'), 'important sensitive content')
+    assert.ok(readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+  })
+})
+
+test('--tidy refuses directory pending note without corrupting board', () => {
+  tidyFixture(f => {
+    const one = `## Synthetic\n${f.block('a1b2c325', 'Local synthetic task', 'done', 13)}`
+    writeFileSync(f.path, one)
+    const pending = join(f.dir, 'progress-archive.pending')
+    mkdirSync(pending)
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.notEqual(result.status, 0)
+    assert.ok(readFileSync(f.path, 'utf8').includes('Local synthetic task'))
   })
 })
 

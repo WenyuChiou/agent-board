@@ -707,6 +707,25 @@ const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
   openInBrowser(html, isOpen => done(isOpen ? s.windowOpened() : s.windowFailed(basename(html), basename(path)), isOpen))
 }
 
+const isRegularFile = (file: string): boolean => {
+  try {
+    const stat = lstatSync(file)
+    return stat.isFile() && !stat.isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+const isSymlinkOrNonRegular = (file: string): boolean => {
+  try {
+    const stat = lstatSync(file)
+    return stat.isSymbolicLink() || !stat.isFile()
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code === 'ENOENT') return false
+    return true
+  }
+}
+
 // Into the archive first, then out of the file, as the pane does: a crash between the two
 // leaves the work in both, never in neither. An entry already archived by an earlier try
 // (another session wrote meanwhile) is not archived twice. How many entries went, or null
@@ -716,7 +735,12 @@ const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
 const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[] } | null | typeof AGAIN, now: number): number | null => {
   const archived = new Map<string, number>()
   const pendingFile = pendingArchivePath(path)
-  let pending = existsSync(pendingFile) ? parsePendingArchive(read(pendingFile)) : []
+  let pending: PendingArchiveRecord[] = []
+  if (isRegularFile(pendingFile)) {
+    try {
+      pending = parsePendingArchive(read(pendingFile))
+    } catch {}
+  }
   let didRemove = false
   const wrote = rewrite(path, (text, isLast) => {
     didRemove = false
@@ -735,9 +759,17 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
         // A previous process may have saved the archive but failed to remove the task.
         const planned = nextPendingArchive([past, ...earlier], fresh, archived, pending, currentBoardHash)
         if (planned.missing.length === 0) return past
+        if (isSymlinkOrNonRegular(pendingFile)) {
+          throw fileError(pendingFile, Object.assign(new Error('EEXIST: refusing to write symlinked or non-regular pending note'), { code: 'EEXIST' }))
+        }
+        const temp = `${pendingFile}.${process.pid}.${Date.now().toString(36)}.board-tmp`
         try {
-          writeFileSync(pendingFile, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n', { mode: 0o600 })
+          const fd = openSync(temp, 'wx', 0o600)
+          closeSync(fd)
+          writeFileSync(temp, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n')
+          renameSync(temp, pendingFile)
         } catch (error) {
+          try { unlinkSync(temp) } catch {}
           throw fileError(part, error)
         }
         pending = planned.records
@@ -749,7 +781,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
     return taken.text
   })
 
-  if (wrote !== null && didRemove && existsSync(pendingFile)) {
+  if (wrote !== null && didRemove && isRegularFile(pendingFile)) {
     try {
       unlinkSync(pendingFile)
     } catch (error) {

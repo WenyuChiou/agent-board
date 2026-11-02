@@ -3036,8 +3036,12 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
 const removePendingArchiveNote = async ($: EngineInterface, path: string, s: Strings): Promise<void> => {
   const pendingFile = pendingArchivePath(path)
   if (!(await $.fs.exists(pendingFile))) return
-  const isWin = await isWindows($, path)
+  const parentDir = pendingFile.replace(/[\\/][^\\/]*$/, '')
   const name = baseName(pendingFile)
+  const list = await $.fs.list(parentDir).catch(() => [])
+  const found = list.find(entry => entry.name === name)
+  if (found && found.kind !== 'file') return
+  const isWin = await isWindows($, path)
   if (await removeFiles($, [pendingFile], isWin)) {
     await update($, answer, current =>
       current !== null && Object.values(STRINGS).some(words => current.text === words.pendingNoteRemoveFailed(name))
@@ -3080,8 +3084,16 @@ const appendArchive = async (
 ): Promise<void> => {
   if (entries.length === 0) return
   const pendingFile = pendingArchivePath(progressFile)
+  const parentDir = pendingFile.replace(/[\\/][^\\/]*$/, '')
+  const pendingBase = baseName(pendingFile)
   let pendingText = ''
-  try { pendingText = await readText($, pendingFile) } catch {}
+  try {
+    const list = await $.fs.list(parentDir).catch(() => [])
+    const found = list.find(entry => entry.name === pendingBase)
+    if (found?.kind === 'file') {
+      pendingText = await readText($, pendingFile)
+    }
+  } catch {}
   const pending = parsePendingArchive(pendingText)
   const sizes = await readMonthParts(month, async path => (await $.fs.stat(path).catch(() => undefined))?.size ?? null)
   const archive = currentPart(month, path => sizes.get(path) ?? null)
@@ -3090,7 +3102,18 @@ const appendArchive = async (
   const earlier = earlierPaths.length === 0 ? [] : await Promise.all(earlierPaths.map(one => readText($, one).catch(() => '')))
   const planned = nextPendingArchive([past, ...earlier], entries, written, pending, currentBoardHash)
   if (planned.missing.length === 0) return
-  await $.fs.write(pendingFile, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n')
+  const list = await $.fs.list(parentDir).catch(() => [])
+  const existing = list.find(entry => entry.name === pendingBase)
+  if (existing && existing.kind !== 'file') {
+    throw new Error('PENDING_NOTE_NOT_REGULAR_FILE')
+  }
+  const isWin = await isWindows($, progressFile)
+  const tempPending = `${pendingFile}.${Date.now().toString(36)}.board-tmp`
+  await $.fs.write(tempPending, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n')
+  const replaced = await replaceFile($, tempPending, pendingFile, isWin)
+  if (!replaced && !(await $.fs.exists(pendingFile))) {
+    await removeFiles($, [tempPending], isWin).catch(() => {})
+  }
   const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
   await $.fs.write(archive, head + planned.missing.join('\n\n') + '\n')
 }

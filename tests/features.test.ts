@@ -4669,6 +4669,10 @@ test('a pending archive note distinguishes crash-recovery retries from distinct 
   expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1 }])
   expect(parsePendingArchive(JSON.stringify({ version: 1, boardHash: 'hash1', entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1, boardHash: 'hash1' }])
   expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1, boardHash: 'hash2' }] }))).toEqual([{ entry, held: 1, boardHash: 'hash2' }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: -1 }] }))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: -0 }] }))).toEqual([{ entry, held: 0 }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1.5 }] }))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: Infinity }] }))).toEqual([{ entry, held: NaN }])
 
   // When pending recorded held = 0 and archive now holds 1: crash recovery skips re-adding.
   expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0 }])).toEqual([])
@@ -4678,6 +4682,8 @@ test('a pending archive note distinguishes crash-recovery retries from distinct 
   expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0, boardHash: 'hash1' }], 'hash2')).toEqual([entry])
   // When pending recorded held = 1 and archive holds only 1: archive write failed, so missing.
   expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 1 }])).toEqual([entry])
+  // When pending has an invalid or negative held count: treated as unproven so an unsaved entry is never dropped.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: -1 }])).toEqual([entry])
   // When pending has a legacy note without held: treated as not saved so twins are never dropped.
   expect(missingEntries([archive], [entry], new Map(), [entry])).toEqual([entry])
   // When pending does not hold the entry: a same-day twin is added even if archive already has one.

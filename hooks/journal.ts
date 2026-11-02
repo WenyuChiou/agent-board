@@ -54,7 +54,7 @@ export const parsePendingArchive = (text: string): PendingArchiveRecord[] => {
       } else if (item !== null && typeof item === 'object') {
         const obj = item as Record<string, unknown>
         const entry = typeof obj.entry === 'string' ? obj.entry : typeof obj.text === 'string' ? obj.text : undefined
-        const held = typeof obj.held === 'number' && Number.isFinite(obj.held) ? obj.held : NaN
+        const held = typeof obj.held === 'number' && Number.isSafeInteger(obj.held) && obj.held >= 0 ? obj.held : NaN
         const itemHash = typeof obj.boardHash === 'string' ? obj.boardHash : topBoardHash
         if (entry !== undefined) result.push({ entry: norm(entry), held, boardHash: itemHash })
       }
@@ -111,7 +111,7 @@ export const nextPendingArchive = (
   const pendingByEntry = new Map<string, Array<{ held: number; boardHash?: string }>>()
   for (const item of pending) {
     const entry = typeof item === 'string' ? norm(item) : norm(item.entry)
-    const held = typeof item === 'string' ? NaN : item.held
+    const held = typeof item === 'string' || !Number.isSafeInteger(item.held) || item.held < 0 ? NaN : item.held
     const itemHash = typeof item === 'string' ? undefined : item.boardHash
     const list = pendingByEntry.get(entry) ?? []
     list.push({ held, boardHash: itemHash })
@@ -134,7 +134,7 @@ export const nextPendingArchive = (
     const record = heldList !== undefined && heldList.length >= needed ? heldList[needed - 1] : undefined
     const isHashMatch = boardHash === undefined && record?.boardHash === undefined ? true : record?.boardHash === boardHash
     const nowHeld = inPastCount.get(key) ?? 0
-    if (record !== undefined && Number.isFinite(record.held) && isHashMatch && nowHeld >= record.held + needed) {
+    if (record !== undefined && Number.isSafeInteger(record.held) && record.held >= 0 && isHashMatch && nowHeld >= record.held + needed) {
       kept.push({ entry: key, held: record.held, ...(record.boardHash === undefined ? {} : { boardHash: record.boardHash }) })
       keptCount.set(key, (keptCount.get(key) ?? 0) + 1)
     } else {
