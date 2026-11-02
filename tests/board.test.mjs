@@ -1352,7 +1352,8 @@ test('CLI ticks rotate a full journal, chat reads the last part, and archive ret
   const earlier = `${'x'.repeat(1048576 - Buffer.byteLength(entry) - 1)}\n${entry}`
   assert.equal(Buffer.byteLength(earlier), 1048576)
   const savedEntry = entry.split('\n\n').find(part => part.includes('### Synthetic work'))
-  const retried = chatRun(['--keys', 'a'], { file: () => file, beside: { [archive]: earlier, 'progress-archive.pending': JSON.stringify({ version: 1, entries: [{ entry: savedEntry, held: 0 }] }) + '\n' }, change, inspect })
+  const boardHash = createHash('sha256').update(file).digest('hex')
+  const retried = chatRun(['--keys', 'a'], { file: () => file, beside: { [archive]: earlier, 'progress-archive.pending': JSON.stringify({ version: 1, boardHash, entries: [{ entry: savedEntry, held: 0, boardHash }] }) + '\n' }, change, inspect })
   assert.equal(retried.status, 0, retried.stdout + retried.stderr)
   assert.equal(retried.files[archive], earlier)
   assert.ok(!retried.files['progress.md'].includes('### Synthetic work'))
