@@ -124,7 +124,8 @@ const localBlockSpans = (lines: readonly string[], owner: string, agent: string,
   const owned: BlockSpan[] = []
   for (const span of scanBlocks(lines).filter(span => span.session === id)) {
     const attrs = parseAttrs(lines[span.start] ?? '')
-    if (attrs.owner === owner && attrs.agent === agent && (session === undefined || attrs.resume === undefined || attrs.resume === session)) {
+    // A withdrawal has no session to compare, so the owner digest itself must prove the marker's resume.
+    if (attrs.owner === owner && attrs.agent === agent && (attrs.resume === undefined || (session === undefined ? sha256(`${agent}:${attrs.resume}`) === owner : attrs.resume === session))) {
       owned.push(span)
       continue
     }

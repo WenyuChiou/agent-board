@@ -3882,7 +3882,7 @@ export const LINES = [
 "  const owned = [];",
 "  for (const span of scanBlocks(lines).filter((span) => span.session === id)) {",
 "    const attrs = parseAttrs(lines[span.start] ?? \"\");",
-"    if (attrs.owner === owner && attrs.agent === agent && (session === undefined || attrs.resume === undefined || attrs.resume === session)) {",
+"    if (attrs.owner === owner && attrs.agent === agent && (attrs.resume === undefined || (session === undefined ? sha256(`${agent}:${attrs.resume}`) === owner : attrs.resume === session))) {",
 "      owned.push(span);",
 "      continue;",
 "    }",
