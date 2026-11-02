@@ -4,27 +4,68 @@ This document is the repository-tracked architecture, execution map, and coordin
 
 ---
 
-## 1. Non-Negotiable Safety & Architecture Rules
+## 1. Product Focus & Core Architecture Invariants
 
+### Primary Delivery Target: User-Led Cross-Agent Communication
+The primary product goal is **a person communicating with different agents from one board** (`WenyuChiou` / `dot`). Broad autonomous agent-to-agent networking and unconstrained peer control are outside this immediate release.
+
+Two evidence-backed host paths are verified first:
+1. **Claude Code**: In-process plugin hook/register (`[P1]`, `$.prompt.submit` / `$.clock.every`).
+2. **Codex CLI & daemon**: In-process turn-start hook (`[P1]`, `scripts/codex-receiver.mjs` / `codex-local.ts`).
+
+All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallback until separate, versioned host evidence is recorded and checked in.
+
+### Non-Negotiable Safety & Protocol Invariants
 1. **Zero external runtime dependencies**: `package.json` stays dependency-free. All HTTP, WebSocket, `fs.watch`, and `stdio` JSON-RPC 2.0 MCP framing use the Node standard library.
 2. **Zero conversation scraping (`SECURITY.md`)**: Adapters never read `transcript_path` or saved chat history. Semantic acknowledgements come only from explicit tool/CLI calls (`board_ack`, `--message-ack`), owned in-memory SDK turn events, or single-turn hook response fields inspected in memory for a first-line `ACK <nonce>` and discarded immediately.
-3. **Two-layer receipt state machine (no auto-replay)**:
-   - `queued` -> `uncertain` (atomic claim written before external I/O) -> `accepted` (transport delivered: hook `stdout` flushed and exited `0`, MCP tool returned, or SDK turn accepted) -> `acknowledged` (verified `ACK <nonce>` or `board_ack`).
-   - A message in `uncertain` or `accepted` that receives no semantic `ACK` **never** reverts to `queued` and is **never** automatically re-injected on later turns (`SECURITY.md`). Interrupted deliveries that the host explicitly reports as dropped before starting a turn (for example Claude `Esc` `{ drop: ... }`) transition to `rejected`.
-4. **Fail-open lifecycle hooks (`<= 120 ms` lock budget)**: Message store errors or lock contention inside a host lifecycle hook must be caught and ignored so progress reporting and user prompts never fail or time out.
-5. **Preserve Codex `/hooks` command strings byte-for-byte**: Installed hook command strings in `hooks/local-agents.ts` must remain byte-identical so existing Codex `/hooks` trust hashes stay valid across upgrades.
-6. **Peer-to-peer (Agent-to-Agent) guardrails**:
-   - Sender identity is stamped by the hub/bus (`agent:<name>#<hash8>` or `unverified`), never trusted from caller text.
-   - Delivered peer prompts sit inside a 128-bit random nonce boundary explicitly stating that peer agent messages cannot approve tool execution, alter permissions/hooks, or merge pull requests.
-   - Same-workspace isolation (`folderDigest` match) applies by default to peer sends; human board sends are unrestricted.
-   - Hop ceiling (`hop <= 4`), pairwise consecutive auto-turn budget (`<= 6` exchanges without human intervention -> `PAIR_BUDGET_EXHAUSTED`), and a board-level `Pause Peer Messages` toggle prevent runaway loops.
+3. **Cancellation vs. Claim Ordering Boundary**:
+   - The atomic lock acquisition and disk commit in `claimMessages` (`queued` -> `uncertain`) is the single immutable point of no return.
+   - **Pre-claim cancellation**: If cancelled or timed out while still `queued` (before atomic claim wins), the message is removed from the queue or marked `cancelled`; it never reaches the host.
+   - **Post-claim cancellation**: Once `queued` -> `uncertain` is persisted, cancellation or disconnect **cannot** promise reversion to `queued` (violates no-replay invariant). The message transitions to `cancelled` with an uncertain delivery receipt, and is **never** automatically re-injected on later turns.
+4. **Target Blocking & Queue Advancement**:
+   - Retain `#388`'s target blocking: `claimMessages` blocks a target while an open message is `accepted` or `uncertain` (`hooks/messaging.ts:158–164`). This prevents out-of-order execution, split delivery, and race conditions.
+   - `accepted` is strictly transport receipt evidence (hook process spawned/exited 0, MCP tool returned, or SDK prompt accepted); it is **never** proof of model reading or semantic comprehension.
+5. **Protocol Compatibility & Distinct Tokens**:
+   - Retain current `HOP_LIMIT=2` and six-hex ACK token (`ACK <nonce>`).
+   - The 128-bit random framing boundary used to isolate delivered peer prompts is stored and verified as a distinct field (`framingNonce`), preventing truncation or collision with the 6-character ACK token.
+6. **Trusted Session/Turn Enrollment & Capability Lease**:
+   - A capability token is enrolled and bound by a trusted local launcher or host adapter to: message store path, native agent name, OS PID / process creation time, canonical workspace path (`folderDigest`), owner generation, and trusted turn boundary.
+   - Model-supplied text, prompt arguments, and client JSON-RPC request IDs are **not** identity proof.
+   - Callers without authenticated host binding fall back to a restricted unprivileged mailbox/polling mode, and never receive the privileged two-waits-per-turn lease.
+7. **Fail-open lifecycle hooks (`<= 120 ms` lock budget)**: Message store errors or lock contention inside a host lifecycle hook must be caught and ignored so progress reporting and user prompts never fail or time out.
+8. **Preserve Codex `/hooks` command strings byte-for-byte**: Installed hook command strings in `hooks/local-agents.ts` must remain byte-identical so existing Codex `/hooks` trust hashes stay valid across upgrades.
 
 ---
 
-## 2. Five Delivery Primitives & Four Honest UI Tiers
+## 2. Observable States & Latency Budgets
+
+Keep visible state and latency distinct so an enqueue or delivery failure cannot hide behind model delay:
+- **Sending**: Immediate local UI feedback (`< 500 ms`); no durable delivery claim.
+- **Queued**: Mailbox transaction committed to disk; visible send status within **1–2 seconds**.
+- **Board update**: Overall board state refreshes in **~2 seconds**.
+- **Host accepted**: Bound host/adapter has supplied transport delivery proof (child process spawned/hook returned 0, SDK turn accepted). **Not proof that the model read or answered**.
+- **Semantic ACK**: Correlated acknowledgement (`ACK <nonce>` or `board_ack`) from the intended session/turn.
+- **Full reply**: Separately observed completion with its own independent model latency.
+- **Bounded wait**: A parked `board_wait` call's 45 s limit is the **maximum empty wait**; an arriving event wakes it immediately rather than waiting for the timeout.
+
+---
+
+## 3. Adopted Architecture Decision Table
+
+| Dimension | Adopted Decision & Technical Contract | Covered Boundaries & Failure Modes | Owning Slice & Artifact |
+| :--- | :--- | :--- | :--- |
+| **1. Delivery Goal & Two-Host Proof** | Primary target: user-led communication from one board. First two verified paths: **Claude Code** (`[P1]`) and **Codex** (`[P1]` turn-start). All other surfaces keep honest `Copy` / next-turn mailbox fallback until separate native evidence is checked in. | Distinguishes UI feedback (1–2s), board refresh (~2s), and model latency; prevents fabricated delivery claims. | `#687` Roadmap, `#603` Mailbox, `#319` Codex adapter |
+| **2. Cancellation, Claim & Uncertainty** | Atomic claim commit (`queued -> uncertain`) is the single ordering boundary. Pre-claim cancel removes from queue; post-claim cancel records uncertain receipt, preserving **no-replay**. | Arrival races, disconnect after claim, timeout after claim, stale-waiter cleanup. | `#603` Mailbox state machine, `#685` MCP cancellation semantics |
+| **3. Trusted Session/Turn Enrollment** | Local launcher/host binds capability to store path, native agent, PID/start time, canonical workspace path, owner generation, and turn boundary. Unbound callers fall back to restricted mailbox polling. | Forged identity claims, stale leases, cross-workspace leakage, restart/reconnect. | `#603` Contract, `#685` Lease manager |
+| **4. Acceptance, Ordering & Compatibility** | Retains `#388` target blocking while messages are `accepted` or `uncertain`. `accepted` is transport evidence only. Keeps `HOP_LIMIT=2` and six-hex ACK token; 128-bit framing boundary is separate `framingNonce`. **DAG: `#365` unlocks only after `#388` + `#603` + `#319` merge.** | Out-of-order delivery, late/duplicate ACK, shared-file conflicts across `#319` and `#365`. | `#603` Core, `#319` Codex, `#365` Antigravity/Gemini, `#687` DAG |
+| **5. Capability Evidence & Visible Latency** | Surfaces explicitly tiered as `Proposed`, `Implemented`, or `Verified`. Target 1–2s visible send status, ~2s board update, separate from host ACK and model reply. Empty wait 45s max; prompt wake on event. | Prevents stacked 2s polling loops; surfaces real failure states. | `#687` Matrix, `#685` Waiter, `#365` Card gating |
+
+---
+
+## 4. Five Delivery Primitives & Four Honest UI Tiers
 
 ### Five Host Primitives (`[P1]`–`[P5]`)
-- **`[P1]` In-Process SDK Live Push**: Plugins already loaded inside the host runtime wake idle sessions directly (`Claude Code` `$.clock.every` + `$.prompt.submit` without `asUser`; `OpenCode` `client.session.promptAsync`; `DeepSeek Harness` Cordis `agent.followup` on root agents; `OpenClaw` Gateway RPC `chat.send` with `idempotencyKey` and `allowConversationAccess: false`).
+- **`[P1]` In-Process SDK Live Push**: Plugins already loaded inside the host runtime wake idle sessions directly (`Claude Code` `$.clock.every` + `$.prompt.submit` without `asUser`; `Codex` daemon `turn/start`; `OpenCode` `client.session.promptAsync`; `DeepSeek Harness` Cordis `agent.followup` on root agents; `OpenClaw` Gateway RPC `chat.send` with `idempotencyKey` and `allowConversationAccess: false`).
 - **`[P2]` Reactive Background Task Wakeup (`--wait-message`)**: For `Antigravity` 2.0 Desktop App, Antigravity IDE, and `agy` TUI (`WaitMsBeforeAsync: 500, IsDaemon: false`). Parks on `fs.watch` at 0% CPU and 0 token cost; claims an arriving message, prints the nonce-fenced envelope, and exits `0` to trigger Antigravity's native reactive turn wakeup.
 - **`[P3]` Zero-Dependency `stdio` MCP Parked Waiter (`--mcp` / `board_wait`)**: Exposes `board_status`, `board_inbox`, `board_ack`, `board_send`, and `board_wait`. `board_wait` enforces a **45 s single-call ceiling** (safe under 60 s Cursor IDE / Claude Desktop MCP timeouts), emits `notifications/progress` every 15 s, caps consecutive waits at **2 per turn** (90 s max), and **never pre-claims** while waiting so `Esc` cancellation or timeout leaves messages `queued`.
 - **`[P4]` Turn-Boundary Continuation**: Active turns pick up queued messages before stopping via host continuation hooks (`Codex` / `Grok Build` / `Muse Code` `Stop` `{"decision":"block"}`; `Antigravity` `Stop` `{"decision":"continue"}` and `PreInvocation`; `Cursor` `stop` `{"followup_message":...}`; `Gemini CLI` `AfterAgent` `{"decision":"deny"}`).
@@ -40,36 +81,36 @@ This document is the repository-tracked architecture, execution map, and coordin
 
 ---
 
-## 3. All 12 Ecosystems × Surface Coverage Matrix
+## 5. All 12 Ecosystems × Surface Coverage Matrix
 
-| # | Ecosystem | Surfaces Covered | Tier 1 (Idle Wake) | Tier 2 (Busy Continuation) | Tier 3 (Next-Turn) | Outbound & Receipt |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | **Claude Code & Desktop** | CLI, Desktop `Code`, VS Code; Desktop `Chat` | `Code`: `[P1]` `$.prompt.submit`; `Chat`: `[P3]` `board_wait` | `Code`: `receive: false` until `turn.complete` | Plugin / `board_inbox` | Native pane + MCP `board_send` / `turn.complete` first-line `ACK` or `board_ack` |
-| 2 | **Codex** | CLI (daemon / `--no-daemon`), Desktop App, IDE | Daemon: `codex-receiver.mjs` `turn/start`; App: `[P3]` `board_wait` | `Stop` `{"decision":"block"}` | `SessionStart` + `UserPromptSubmit` | MCP `board_send` or `--send` / `Stop` first-line `ACK` or `board_ack` |
-| 3 | **Antigravity** | 2.0 Desktop App, IDE, `agy` TUI / Stream CLI, SDK | App/IDE/TUI: `[P2]` `--wait-message`; Stream: `stdin` | `PreInvocation` + `Stop` `{"decision":"continue"}` | `SessionStart` + `PreInvocation` | `mcp_config.json` MCP + `--send` + optional Sidecar link |
-| 4 | **OpenCode** | CLI TUI, Desktop App, Web UI | `[P1]` `client.session.promptAsync` + `[P3]` | `session.idle` plugin dispatch | Plugin / `board_inbox` | Plugin `agent_board_send` & `agent_board_ack` (`context.sessionID`) |
-| 5 | **Cursor** | Cursor IDE (Composer), `cursor-agent` CLI | `[P3]` `board_wait` (45 s) | `stop` `{"followup_message":...}` | `sessionStart` + `board_inbox` (never `beforeSubmitPrompt`) | `~/.cursor/mcp.json` MCP + `afterAgentResponse` first-line `ACK` |
-| 6 | **Grok Build** | CLI (`grok`) | `[P3]` `board_wait` (45 s); ended opt-in `--allow-resume` | `Stop` `{"decision":"block"}` | MCP `board_inbox` | `~/.grok/config.toml` MCP + `Stop` `lastAssistantMessage` first-line `ACK` |
-| 7 | **Muse Code** | CLI (`muse`) | `[P3]` `board_wait` (45 s) | `Stop` `{"decision":"block"}` | `SessionStart` + `UserPromptSubmit` (`schema_version: 1`) | `~/.config/muse/settings.json` MCP |
-| 8 | **Hermes Agent** | CLI, Chat Gateway (Telegram / Discord / Slack) | Gateway hook queue receiver + `[P3]` `board_wait` | `pre_llm_call` + `post_llm_call` | `pre_llm_call` + MCP | MCP `board_send` / `board_ack` + `post_llm_call` |
-| 9 | **OpenClaw** | Gateway, WebChat, Desktop Control UI | `[P1]` Gateway RPC `chat.send` (`idempotencyKey`, local/WebChat only) | `registerAgentEventSubscription` | `agent_board_inbox` | `api.registerTool` (`allowConversationAccess: false`) |
-| 10 | **DeepSeek Harness** | Cordis CLI, TUI, Desktop, Web | `[P1]` `agent.followup` (`!agent.parentAgent`) | `ctx.on('agent/status')` -> `idle` | `ctx.tools` / MCP | `ctx.tools` `send` & `ack` (`ToolExecutionInput.agent`) |
-| 11 | **Legacy Gemini CLI** | CLI (`gemini`) | `[P3]` `board_wait` (45 s) | `AfterAgent` `{"decision":"deny"}` | `SessionStart` + `BeforeAgent` | `~/.gemini/settings.json` MCP + `AfterAgent` first-line `ACK` |
-| 12 | **`dot` & Web Chats** | Claude.ai, ChatGPT, Gemini Web, DeepSeek Web, Grok Web | Honest Tier 4 (no unsolicited wake) | Parsed on block import | One-click `<<<board-message <nonce>>>>` copy | Scoped `#import=` link + zero-paste-box clipboard import (`#561`) |
+| # | Ecosystem | Surfaces Covered | Status | Tier 1 (Idle Wake) | Tier 2 (Busy Continuation) | Tier 3 (Next-Turn) | Outbound & Receipt |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | **Claude Code & Desktop** | CLI, Desktop `Code`, VS Code; Desktop `Chat` | **Verified** | `Code`: `[P1]` `$.prompt.submit`; `Chat`: `[P3]` `board_wait` | `Code`: `receive: false` until `turn.complete` | Plugin / `board_inbox` | Native pane + MCP `board_send` / `turn.complete` first-line `ACK` or `board_ack` |
+| 2 | **Codex** | CLI (daemon / `--no-daemon`), Desktop App, IDE | **Verified** | Daemon: `codex-receiver.mjs` `turn/start`; App: `[P3]` `board_wait` | `Stop` `{"decision":"block"}` | `SessionStart` + `UserPromptSubmit` | MCP `board_send` or `--send` / `Stop` first-line `ACK` or `board_ack` |
+| 3 | **Antigravity** | 2.0 Desktop App, IDE, `agy` TUI / Stream CLI, SDK | Proposed | App/IDE/TUI: `[P2]` `--wait-message`; Stream: `stdin` | `PreInvocation` + `Stop` `{"decision":"continue"}` | `SessionStart` + `PreInvocation` (Gated: `HAS_ANTIGRAVITY_STEP_END_RECORD=false`) | `mcp_config.json` MCP + `--send` + optional Sidecar link |
+| 4 | **OpenCode** | CLI TUI, Desktop App, Web UI | Proposed | `[P1]` `client.session.promptAsync` + `[P3]` | `session.idle` plugin dispatch | Plugin / `board_inbox` | Plugin `agent_board_send` & `agent_board_ack` (`context.sessionID`) |
+| 5 | **Cursor** | Cursor IDE (Composer), `cursor-agent` CLI | Proposed | `[P3]` `board_wait` (45 s) | `stop` `{"followup_message":...}` | `sessionStart` + `board_inbox` (never `beforeSubmitPrompt`) | `~/.cursor/mcp.json` MCP + `afterAgentResponse` first-line `ACK` |
+| 6 | **Grok Build** | CLI (`grok`) | Proposed | `[P3]` `board_wait` (45 s); ended opt-in `--allow-resume` | `Stop` `{"decision":"block"}` | MCP `board_inbox` | `~/.grok/config.toml` MCP + `Stop` `lastAssistantMessage` first-line `ACK` |
+| 7 | **Muse Code** | CLI (`muse`) | Proposed | `[P3]` `board_wait` (45 s) | `Stop` `{"decision":"block"}` | `SessionStart` + `UserPromptSubmit` (`schema_version: 1`) | `~/.config/muse/settings.json` MCP |
+| 8 | **Hermes Agent** | CLI, Chat Gateway (Telegram / Discord / Slack) | Proposed | Gateway hook queue receiver + `[P3]` `board_wait` | `pre_llm_call` + `post_llm_call` | `pre_llm_call` + MCP | MCP `board_send` / `board_ack` + `post_llm_call` |
+| 9 | **OpenClaw** | Gateway, WebChat, Desktop Control UI | Proposed | `[P1]` Gateway RPC `chat.send` (`idempotencyKey`, local/WebChat only) | `registerAgentEventSubscription` | `agent_board_inbox` | `api.registerTool` (`allowConversationAccess: false`) |
+| 10 | **DeepSeek Harness** | Cordis CLI, TUI, Desktop, Web | Proposed | `[P1]` `agent.followup` (`!agent.parentAgent`) | `ctx.on('agent/status')` -> `idle` | `ctx.tools` / MCP | `ctx.tools` `send` & `ack` (`ToolExecutionInput.agent`) |
+| 11 | **Legacy Gemini CLI** | CLI (`gemini`) | Proposed | `[P3]` `board_wait` (45 s) | `AfterAgent` `{"decision":"deny"}` | `SessionStart` + `BeforeAgent` | `~/.gemini/settings.json` MCP + `AfterAgent` first-line `ACK` |
+| 12 | **`dot` & Web Chats** | Claude.ai, ChatGPT, Gemini Web, DeepSeek Web, Grok Web | Proposed | Honest Tier 4 (no unsolicited wake) | Parsed on block import | One-click `<<<board-message <nonce>>>>` copy | Scoped `#import=` link + zero-paste-box clipboard import (`#561`) |
 
 ---
 
-## 4. Phased PR Execution Table & File Boundaries
+## 6. Phased PR Execution Table & File Boundaries
 
 Every slice stays focused (`<= 500` changed lines excluding generated bundles and changelog fragments) and owns disjoint primary files within each parallel wave:
 
 | Phase / Slice | Issue / PR | Assigned Executor | Label State | Primary Files (Non-Colliding Within Wave) | Unlocks When Merged |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Phase 1A** | `#315` (PR `#388`) | `claude` / `codex` / `antigravity` | In CI / Ready | `hooks/messaging.ts`, `scripts/board-messaging.ts`, `scripts/message-store-claim.ts`, `scripts/board-serve.ts`, `scripts/board-cli.ts` | `#603`, `#317`, `#316`, `#318` |
-| **Phase 1B** | `#603` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/hook-safety.ts`, `hooks/hook-messages.ts`, `scripts/codex-local.ts` | `#319`, `#365`, `#685`, `#686`, `#233` |
+| **Phase 1B** | `#603` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/hook-safety.ts`, `hooks/hook-messages.ts`, `scripts/codex-local.ts` | `#319`, `#685`, `#686`, `#233` |
 | **Phase 1C** | `#317` | **`muse`** (`for-dot`) | `blocked` -> `ready` after `#388` | `hooks/cli-send.ts`, `hooks/board.ts`, `scripts/board-cli.ts`, `tests/cli-send.test.mjs` | `#232` |
-| **Phase 2A** | `#319` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#603` | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Codex/Grok/Muse `Stop` `block` + Cursor `stop`) | Full Tier 2 CLI/IDE |
-| **Phase 2B** | `#365` | **`muse`** (`for-dot`) | `blocked` -> `ready` after `#603` | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Antigravity `Stop`/`PreInvocation` + Gemini `AfterAgent`) | Full Tier 2 Antigravity/Gemini |
+| **Phase 2A** | `#319` | **`dot`** (`for-dot`) | `blocked` -> `ready` after `#603` | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Codex/Grok/Muse `Stop` `block` + Cursor `stop`) | `#365` (Phase 2B) |
+| **Phase 2B** | `#365` | **`muse`** (`for-dot`) | `blocked` -> `ready` after **`#388`, `#603`, and `#319`** | `hooks/hook-messages.ts`, `scripts/codex-local.ts` (Antigravity `Stop`/`PreInvocation` + Gemini `AfterAgent`) | Full Tier 2 Antigravity/Gemini |
 | **Phase 3A** | `#685` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#603` | `hooks/mcp-tools.ts`, `scripts/board-mcp.ts`, `scripts/board-cli.ts` (`--mcp`, `--wait-message`), `hooks/connect-pure.ts` | Universal Desktop/IDE Tier 1 |
 | **Phase 3B-1** | `#316` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#388` | `hooks/receiver.ts`, `hooks/register.tsx`, `hooks/serve.ts`, string tables | Claude Code Tier 1 |
 | **Phase 3B-2** | `#318` | **`claude`** (`for-agent`) | `blocked` -> `ready` after `#388` | `scripts/codex-receiver.mjs`, `hooks/codex.ts` | Codex Daemon Tier 1 |
@@ -80,7 +121,7 @@ Every slice stays focused (`<= 500` changed lines excluding generated bundles an
 
 ---
 
-## 5. QA Acceptance & Coordinator Handover Playbook
+## 7. QA Acceptance & Coordinator Handover Playbook
 
 If the active QA/coordinator agent (`antigravity`) reaches its session or rate limit, **any maintainer, collaborator, or `claude` / `codex` session** can resume seamlessly with the following steps:
 
@@ -117,13 +158,16 @@ Immediately after squash-merging an upstream PR (`gh pr merge <PR> --squash --ma
   gh issue edit 316 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   gh issue edit 318 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   ```
-- **When `#603` (Phase 1B) merges**, unlock Phase 2A, Phase 2B, Phase 3A, Phase 3C-1, and Phase 3C-2:
+- **When `#603` (Phase 1B) merges**, unlock Phase 2A, Phase 3A, Phase 3C-1, and Phase 3C-2:
   ```sh
   gh issue edit 319 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
-  gh issue edit 365 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   gh issue edit 685 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   gh issue edit 686 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   gh issue edit 233 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
+  ```
+- **When `#319` (Phase 2A) merges**, unlock Phase 2B (`#365`):
+  ```sh
+  gh issue edit 365 --repo WenyuChiou/agent-board --remove-label blocked --add-label ready
   ```
 - **When `#317` (Phase 1C) merges**, unlock Phase 3D (`#232`):
   ```sh
