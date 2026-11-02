@@ -818,6 +818,16 @@ export const main = async (argv = process.argv.slice(2)) => {
       const event = readJson(readText(resolve(options['--event'])))
       const pr = event.pull_request
       if (!pr || !event.repository) throw new Error('event must contain pull_request and repository metadata.')
+      // Merged metadata cannot enter the merge queue again, but its public body still needs privacy checks.
+      if (pr.state === 'closed' && pr.merged === true) {
+        const checked = privateData({ added: [], body: pr.body ?? '' })
+        if (checked.problems.length) {
+          console.log(report(checked, 'merged pull request metadata'))
+          return 1
+        }
+        console.log('pr-check: contribution checks not run: the pull request is already merged; metadata privacy check passed.')
+        return 0
+      }
       repo = event.repository.full_name
       // author_association and user.login are in the event's pull_request; both stay undefined when it has none.
       data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.head?.ref, head: pr.head?.sha, isDraft: pr.draft, labels: pr.labels, association: pr.author_association, login: pr.user?.login }

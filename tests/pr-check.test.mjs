@@ -656,6 +656,73 @@ test('pr-check checks CI event commits even when another branch is checked out a
   assert.match(execution.stdout, /^::stop-commands::([0-9a-f]{32})\r?\n[\s\S]*\r?\n::\1::\r?\n$/)
 })
 
+test('pr-check treats an edited merged pull request as archived metadata instead of rejecting its closed issue', async t => {
+  const setup = fixture(t)
+  const args = eventArgs(setup, 'COLLABORATOR')
+  const path = join(setup.directory, 'event.json')
+  const event = JSON.parse(readFileSync(path, 'utf8'))
+  event.action = 'edited'
+  event.pull_request.state = 'closed'
+  event.pull_request.merged = true
+  setup.put('event.json', JSON.stringify(event))
+  const calls = []
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async url => {
+    calls.push(url.pathname)
+    const payload = url.pathname.endsWith('/issues/42') ? { state: 'closed' } : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  const checked = await runMain(args, apiEnv)
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr)
+  assert.match(checked.stdout, /not run: the pull request is already merged/)
+  assert.equal(checked.stdout.includes('all checks passed'), false)
+  assert.deepEqual(calls, [])
+})
+
+test('pr-check still rejects private data in an edited merged pull request body', async t => {
+  const setup = fixture(t)
+  const args = eventArgs(setup, 'COLLABORATOR')
+  const event = JSON.parse(readFileSync(join(setup.directory, 'event.json'), 'utf8'))
+  event.action = 'edited'
+  event.pull_request = { ...event.pull_request, state: 'closed', merged: true, body: body + '\nPrivate path: /home/synthetic/private/progress.md\n' }
+  setup.put('event.json', JSON.stringify(event))
+  const checked = await runMain(args, apiEnv)
+  assert.equal(checked.status, 1, checked.stdout + checked.stderr)
+  assert.match(checked.stdout, /FAIL private-data/)
+  assert.equal(checked.stdout.includes('/home/synthetic/private'), false)
+})
+
+test('pr-check still rejects closed or missing issues unless the event is both closed and merged', async t => {
+  const setup = fixture(t)
+  const args = eventArgs(setup, 'COLLABORATOR')
+  const originalEvent = JSON.parse(readFileSync(join(setup.directory, 'event.json'), 'utf8'))
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  for (const lifecycle of [
+    { state: 'open', merged: false },
+    { state: 'closed', merged: false },
+    { state: 'open', merged: true },
+    { state: 'closed', merged: 'true' },
+    { state: 'closed' },
+  ]) {
+    for (const isMissing of [false, true]) {
+      setup.put('event.json', JSON.stringify({ ...originalEvent, action: 'edited', pull_request: { ...originalEvent.pull_request, ...lifecycle } }))
+      const calls = []
+      globalThis.fetch = async url => {
+        calls.push(url.pathname)
+        const isIssue = url.pathname.endsWith('/issues/42')
+        return { ok: !(isIssue && isMissing), status: isIssue && isMissing ? 404 : 200, json: async () => isIssue ? { state: 'closed' } : [], headers: new Headers() }
+      }
+      const checked = await runMain(args, apiEnv)
+      assert.equal(checked.status, 1, JSON.stringify(lifecycle) + checked.stdout + checked.stderr)
+      assert.match(checked.stdout, isMissing ? /#42 does not exist/ : /#42 must be an open issue/)
+      assert.ok(calls.some(path => path.endsWith('/issues/42')))
+      assert.equal(checked.stdout.includes('not run: the pull request is already merged'), false)
+    }
+  }
+})
+
 test('pr-check leaves the bundle to CI in a checkout that converts line endings', async t => {
   const setup = fixture(t)
   setup.put('scripts/synthetic.mjs', 'export const synthetic = true\n')
