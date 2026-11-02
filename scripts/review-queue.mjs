@@ -91,26 +91,49 @@ export const parseNotice = body => {
 const governedPaths = new Set(['AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/team-process.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json'])
 const isGovernedPath = path => governedPaths.has(path) || path.startsWith('.github/')
 
+// Checks whether an unresolved REQUEST CHANGES verdict exists for the current head.
+const unresolvedRequestChanges = (comments, head) => {
+  const headVerdicts = comments
+    .map(entry => ({ verdict: reviewOf(entry.comment.body), comment: entry.comment }))
+    .filter(entry => entry.verdict && matchesHead(head, entry.verdict.sha))
+  if (!headVerdicts.length) return false
+  const latestVerdict = headVerdicts.at(-1)?.verdict
+  if (latestVerdict?.kind === 'REQUEST CHANGES') return true
+  const reviewerVerdicts = new Map()
+  for (const entry of headVerdicts) {
+    const reviewer = verdictName(entry.comment.body) ?? (entry.comment.user?.login ? nameOf(entry.comment.user.login) : null)
+    if (reviewer) reviewerVerdicts.set(reviewer, entry.verdict.kind)
+  }
+  return [...reviewerVerdicts.values()].some(kind => kind === 'REQUEST CHANGES')
+}
+
 // Where the merge-after-notice stands for a pull request (team-process, From claim to merge). Only the pull request's own author can
 // give a notice, and the latest one that names the current head is the one that counts: a push leaves the old notice behind, so the
 // check for a first notice starts over for the new head.
 const noticeFor = ({ comments, head, ready, readyHours, takenBy, nowMs, isInQueue, isAllAway, hasBackSince, isGoverned, author }) => {
   const isByAuthor = comment => author !== '' && (comment.user?.login ?? '').toLowerCase() === author
   const authorNotice = entry => isByAuthor(entry.comment) ? parseNotice(entry.comment.body) : null
-  const isAllowed = isInQueue && !takenBy && ((readyHours ?? 0) > noticeWaitHours || isAllAway)
+  const hasUnresolvedChanges = unresolvedRequestChanges(comments, head)
+  const isAllowed = isInQueue && !takenBy && !hasUnresolvedChanges && ((readyHours ?? 0) > noticeWaitHours || isAllAway)
   if (isGoverned) return comments.some(authorNotice) || isAllowed ? { state: 'not-allowed', at: null } : null
   const last = comments.findLastIndex(entry => authorNotice(entry)?.shas.some(word => head.startsWith(word)))
   if (last < 0) return isAllowed ? { state: 'allowed', at: null } : null
   const notice = authorNotice(comments[last])
   const at = new Date(notice.at).toISOString()
+  if (hasUnresolvedChanges) return { state: 'cancelled', at }
   // A notice must be posted while the notice path is open.
   if (!ready || comments[last].time < ready.time) return { state: 'too-early', at }
   const isTakenBeforeNotice = comments.slice(ready.order + 1, last).some(({ comment }) => /^Reviewing:[ \t]*\S/m.test(comment.body ?? '') && !isByAuthor(comment))
   if (isTakenBeforeNotice) return { state: 'cancelled', at }
   if (!(comments[last].time - ready.time > noticeWaitHours * hour || isAllAway)) return { state: 'too-early', at }
   // The author's own Reviewing comment does not take the review, so it does not end the notice.
-  const isCancelled = comments.slice(last + 1).some(({ comment }) => (/^Reviewing:[ \t]*\S/m.test(comment.body ?? '') && !isByAuthor(comment))
-    || reviewOf(comment.body)?.kind === 'REQUEST CHANGES' || /^\s*Objection\b/i.test(comment.body ?? ''))
+  const isCancelled = comments.slice(last + 1).some(({ comment }) => {
+    const isOtherReviewing = /^Reviewing:[ \t]*\S/m.test(comment.body ?? '') && !isByAuthor(comment)
+    const isObjection = /^\s*Objection\b/i.test(comment.body ?? '')
+    const rev = reviewOf(comment.body)
+    const isHeadRequestChanges = rev?.kind === 'REQUEST CHANGES' && matchesHead(head, rev.sha)
+    return isOtherReviewing || isObjection || isHeadRequestChanges
+  })
   // A collaborator's Back on the roadmap issue after the notice ends it too (team-process, From claim to merge).
   if (isCancelled || hasBackSince(comments[last].time)) return { state: 'cancelled', at }
   const isTooEarly = notice.at - comments[last].time < noticeGapHours * hour || Boolean(ready && notice.at - ready.time < noticeGapHours * hour)

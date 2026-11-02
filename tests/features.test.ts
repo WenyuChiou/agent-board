@@ -11,7 +11,7 @@ import { boardRun } from '../hooks/board-commands'
 import { dashboardHtml } from '../hooks/dashboard'
 import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
-import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
+import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, progressReport, unwrittenEntries } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
@@ -734,6 +734,108 @@ test('a note that holds a choice does not replace the options in the question', 
   expect(askOf('用 win rate 還是 Elo？', '之後用 A 還是 B？')).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
 })
 
+test('a choice wrapped in quote marks gives options without the quotes in every language', () => {
+  const choices = [
+    ['Top shelf or bottom shelf?', ['Top shelf', 'bottom shelf']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['先开旗标，还是全部开？', ['先开旗标', '全部开']],
+    ['A first, or B?', ['A first', 'B']],
+  ] as const
+  for (const [open, close] of [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]) {
+    for (const [question, options] of choices) {
+      expect(askOf(`${open}${question}${close}`, '').options).toEqual([...options])
+      expect(askOf('Pick', `${open}${question}${close}`).options).toEqual([...options])
+    }
+  }
+  expect(askOf(' (「Top shelf or bottom shelf?」) ', '').options).toEqual(['Top shelf', 'bottom shelf'])
+  expect(askOf('“the "red" shelf or the blue shelf?”', '').options).toEqual(['the "red" shelf', 'the blue shelf'])
+  expect(askOf("'Alice's shelf or Bob's shelf?'", '').options).toEqual(["Alice's shelf", "Bob's shelf"])
+  expect(askOf('Pick', '', { ask: 'choose', options: ['"quoted"', '(literal)'] }).options).toEqual(['"quoted"', '(literal)'])
+  expect(askOf('"red" shelf or "blue shelf?"', '').options).toEqual(['"red" shelf', '"blue shelf'])
+  expect(askOf('「先開旗標」還是「全部開？」', '').options).toEqual(['「先開旗標」', '「全部開'])
+  expect(askOf('(Top shelf) or (bottom shelf?)', '').options).toEqual(['(Top shelf)', '(bottom shelf'])
+  expect(askOf('(Top (high) shelf or bottom?)', '').options).toEqual(['Top (high) shelf', 'bottom'])
+  expect(askOf(String.raw`"a \"red\" shelf or blue?"`, '').options).toEqual([String.raw`a \"red\" shelf`, 'blue'])
+  expect(askOf('Please review "the shelf"', '').options).toEqual([])
+})
+
+test('a quoted choice extracted from prose keeps clean answer options and inner quotes', () => {
+  const choices = [
+    ['Top shelf or bottom shelf?', ['Top shelf', 'bottom shelf']],
+    ['Left row or right row?', ['Left row', 'right row']],
+    ['A first, or B?', ['A first', 'B']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['先开旗标，还是全部开？', ['先开旗标', '全部开']],
+  ] as const
+  for (const [open, close] of [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]) {
+    for (const [question, options] of choices) {
+      const extracted = lastQuestionInProse(`The labels are ready.\n\n${open}${question}${close}`, true)
+      expect(extracted).toBe(`${open}${question}${close}`)
+      expect(askOf(extracted ?? '', '')).toMatchObject({ kind: 'choose', options: [...options] })
+      expect(askOf('Shelf placement', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+    }
+  }
+  for (const [reply, options] of [
+    ['(「Top shelf or bottom shelf?」)', ['Top shelf', 'bottom shelf']],
+    ['“the "red" row or the blue row?”', ['the "red" row', 'the blue row']],
+    ["'Alice's row or Bob's row?'", ["Alice's row", "Bob's row"]],
+    ['(Top (high) shelf or bottom?)', ['Top (high) shelf', 'bottom']],
+    ['(Top shelf) or (bottom shelf?)', ['(Top shelf)', '(bottom shelf']],
+    [String.raw`"a \"red\" row or blue?"`, [String.raw`a \"red\" row`, 'blue']],
+    ['"red" row or "blue row?"', ['"red" row', '"blue row']],
+    ['「先開旗標」還是「全部開？」', ['「先開旗標」', '「全部開']],
+  ] as const) {
+    const extracted = lastQuestionInProse(reply, true)
+    expect(extracted).not.toBeNull()
+    expect(askOf('Shelf placement', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+  }
+  expect(askOf('"Top shelf or bottom shelf? Explain your choice', '').options).toEqual(['"Top shelf', 'bottom shelf'])
+})
+
+test('lexical apostrophes stay in choice options from questions and extracted replies', () => {
+  for (const [question, options] of [
+    ["'90s or modern?", ["'90s", 'modern']],
+    ["'80s or retro?", ["'80s", 'retro']],
+    ["'em or them?", ["'em", 'them']],
+  ] as const) {
+    expect(askOf(question, '')).toMatchObject({ kind: 'choose', options: [...options] })
+    expect(askOf('Pick', question)).toMatchObject({ kind: 'choose', options: [...options] })
+    const extracted = lastQuestionInProse(question, true)
+    expect(extracted).toBe(question)
+    expect(askOf('Pick', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+  }
+})
+
+test('paired question wrappers preserve inferred kinds and confirmation notes', () => {
+  const pairs = [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]
+  for (const question of ['可以推到 main 嗎？', '合併可以嗎？', 'Ready, OK?']) {
+    for (const [open, close] of pairs) {
+      const wrapped = `${open}${question}${close}`
+      const extracted = lastQuestionInProse(wrapped, true)
+      expect(extracted).toBe(wrapped)
+      expect(askOf(wrapped, '')).toMatchObject({ kind: 'confirm', options: [] })
+      expect(askOf(extracted ?? '', '')).toMatchObject({ kind: 'confirm', options: [] })
+      expect(askOf('Top shelf or bottom shelf?', extracted ?? '')).toMatchObject({ kind: 'confirm', options: [] })
+    }
+  }
+  for (const [question, kind] of [
+    ['waiting for the report?', 'wait'],
+    ['Which folder?', 'input'],
+    ['Please review the diff?', 'review'],
+    ['Run `npm test`?', 'do'],
+    ['Review https://example.com/report?', 'review'],
+  ] as const) {
+    const direct = askOf(question, '')
+    const extracted = askOf('Task', lastQuestionInProse(question, true) ?? '')
+    expect(direct.kind).toBe(kind)
+    for (const [open, close] of pairs) {
+      const wrapped = `${open}${question}${close}`
+      expect(askOf(wrapped, '')).toEqual(direct)
+      expect(askOf('Task', lastQuestionInProse(wrapped, true) ?? '')).toEqual(extracted)
+    }
+  }
+})
+
 test('options the agent gave win over options found in the question or the note', () => {
   expect(askOf('win rate or Elo?', 'A or B?', { options: [' X ', 'Y', '', null] })).toMatchObject({ kind: 'choose', options: ['X', 'Y'] })
   expect(askOf('win rate or Elo?', 'A or B?', { ask: 'choose', options: ['X'] }).options).toEqual(['X'])
@@ -1356,7 +1458,7 @@ test('JSON scalars remain prose as written while objects and arrays without text
     expect(pending?.fullText).toBe(answer)
     expect(pending?.text).not.toBe(STRINGS.en.turnUnreadable)
   }
-  expect(lastQuestion('"Ship it?"')).toBe('"Ship it?')
+  expect(lastQuestion('"Ship it?"')).toBe('"Ship it?"')
   expect(parseDigest('TITLE: work\nASK: "Ship it?"')?.ask).toBe('"Ship it?"')
   for (const answer of ['{}', '[]']) {
     const file = { name: 'codex-turn-30-1.json', body: JSON.stringify({ session_id: 'structured', cwd: '/w/app', last_assistant_message: answer }), at: 30 }

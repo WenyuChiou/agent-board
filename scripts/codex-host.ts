@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
@@ -80,6 +80,53 @@ export const findCodexExecutable = (pathValue: string, platform: string, arch: s
     } catch {}
   }
   return undefined
+}
+
+// Auto-discovers the installed Codex binary: checks PATH, and on Windows
+// %LOCALAPPDATA%\OpenAI\Codex\bin (picking the newest version subdirectory by mtime).
+export const discoverCodexBinary = (env: Record<string, string | undefined> = process.env, platform = process.platform, arch = process.arch): string | undefined => {
+  const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path')
+  const pathValue = (pathKey ? env[pathKey] : undefined) ?? env.PATH ?? env.Path ?? ''
+  const fromPath = findCodexExecutable(pathValue, platform, arch)
+  if (fromPath) return fromPath
+  if (platform === 'win32' && env.LOCALAPPDATA) {
+    const base = join(env.LOCALAPPDATA, 'OpenAI', 'Codex', 'bin')
+    try {
+      let newest: { file: string; mtime: number } | undefined
+      const direct = join(base, 'codex.exe')
+      try {
+        const s = statSync(direct)
+        if (s.isFile()) newest = { file: realpathSync(direct), mtime: s.mtimeMs }
+      } catch {}
+      const entries = readdirSync(base, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          const candidate = join(base, entry.name, 'codex.exe')
+          try {
+            const s = statSync(candidate)
+            if (s.isFile() && (newest === undefined || s.mtimeMs > newest.mtime)) {
+              newest = { file: realpathSync(candidate), mtime: s.mtimeMs }
+            }
+          } catch {}
+        }
+      }
+      if (newest) return newest.file
+    } catch {}
+  }
+  return undefined
+}
+
+// Inspects config.toml when Codex cannot be queried directly.
+// Returns false when config.toml is missing or has no trusted_hash entries;
+// otherwise returns 'unknown' because exact hook approval requires verification through Codex.
+export const inspectCodexConfigToml = (configToml: string): boolean | 'unknown' => {
+  try {
+    const tomlText = readFileSync(configToml, 'utf8')
+    const hasTrustedHash = /^\s*trusted_hash\s*=\s*['"][^'"]+['"]/m.test(tomlText)
+    return hasTrustedHash ? 'unknown' : false
+  } catch {
+    return false
+  }
 }
 
 // Our hooks as Codex lists them. Not listed, or turned off in /hooks, is a no.
