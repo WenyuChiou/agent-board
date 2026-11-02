@@ -13,6 +13,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 
 - Claude Code, Codex, Antigravity, Cursor, cloud agents such as dot and Muse, and people by hand all follow this page. Each one reviews and merges others' pull requests on its own, from the review queue ([REVIEWING.md](REVIEWING.md)). No rule here depends on which agent you are.
 - **Where an agent starts.** [AGENTS.md](../../AGENTS.md) is the entry point; it sends you here first. Codex, Antigravity and Cursor read `AGENTS.md` by themselves. Claude Code does not: the repository is also a Claude Code plugin, whose root `CLAUDE.md` is not loaded, so a Claude Code session is given this page's link in its first prompt, or its user adds `@AGENTS.md` to their own `CLAUDE.md`. The same goes for any other agent that reads neither.
+- **Your own computer.** [AGENT-SETUP.md](AGENT-SETUP.md) lists the settings that keep your agents from stalling or piling up: a timeout on every hook, and how many runs to keep going at once.
 - **An agent works in the role of the person who runs it** (CONTRIBUTING, [Roles](../../CONTRIBUTING.md#roles)). An agent of the owner or of a collaborator may review and merge other authors' pull requests, as that person may.
 - **Who counts as the author.** The agent named in the `Author:` line, every agent it dispatched, and every agent that wrote part of the pull request or its brief. Another agent, of the same person or not, may review and approve it (R2).
 
@@ -43,10 +44,14 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 
 - A rule that can be checked lives in `scripts/pr-check.mjs` or `scripts/review-queue.mjs`, not only in prose.
 - A pull request that changes CONTRIBUTING.md, docs/dev/team-process.md or docs/RELEASING.md also changes this page, or says why not in a body line `Rules page: unchanged, <reason>`.
+- **What a finished CI run is.** Three checks are required on the current head: `pr-check` (the body and the rules in this section), `affected checks` (which test groups the change touches) and `CI validation` (every selected group passed). They are what GitHub requires, not all a merge needs: the reviewer also waits for every CI job the plan selected, every other workflow that applies and the `Greptile Review` check, or the reviewer's own code review where Greptile did not review the head (CONTRIBUTING rule 9). A documentation change usually finishes in about 2 minutes and a change that runs the full suite in about 8. Every job has a timeout of at most 15 minutes, so a run still going after that has stopped by itself: read which job timed out and treat it as R6 says.
 
 ## R6. When something fails
 
 - When the cause is still unknown after two fix attempts, stop and write a `Question:` on the issue.
+- **A red `main` comes first.** When a required check fails on `main`, whoever sees it first opens a fix, or a revert that names the pull request that broke it (CONTRIBUTING rule 11). Nothing else merges until `main` is green again ([team-process.md, Merge order](team-process.md#merge-order)).
+- **Waiting has limits.** A Ready pull request with green checks gets a verdict within four hours during the maintainer's day, and by the next morning at the latest; past four hours `node scripts/review-queue.mjs` marks it and names the next reviewer, and any agent R2 allows may take it. An assignee with no activity for 24 hours may be unassigned (R4). A lane has a draft pull request within an hour of starting ([team-process.md](team-process.md#from-claim-to-merge)).
+- **A flaky test.** A test that fails in CI and passes on a rerun of the same head is flaky. Comment the run link and the test's title on the pull request, rerun only the failed job, once, and open a `bug` issue the same day in the current milestone; the maintainer starts fixing it at its cause the same day ([team-process.md, Flaky and slow tests](team-process.md#flaky-and-slow-tests)).
 - A raised timeout, a skipped test or an added retry is never the fix for a flaky test.
 
 ## R7. Releases go out by themselves
