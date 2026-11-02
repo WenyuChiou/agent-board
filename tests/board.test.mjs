@@ -5046,12 +5046,15 @@ require('node:module').syncBuiltinESMExports()
     assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
     const saves = readFileSync(log, 'utf8').split('\n').filter(Boolean)
     assert.ok(saves.length >= 2, `${saves.length} saves`)
+    const messages = basename(board.served).replace(/\.json$/, '-messages')
+    const prefixes = [folder, join(folder, messages)].map(dir => `${dir.toLowerCase()}${sep}.acl-`)
     for (const saved of saves) {
-      // %TEMP% grants modify to other accounts on this computer; the private folder does not.
-      assert.ok(saved.toLowerCase().startsWith(`${folder.toLowerCase()}${sep}.acl-`), saved)
+      // %TEMP% grants modify to other accounts on this computer; the private folders do not.
+      assert.ok(prefixes.some(prefix => saved.toLowerCase().startsWith(prefix)), saved)
       assert.ok(!saved.toLowerCase().startsWith(resolve(board.env.TEMP).toLowerCase()), saved)
     }
-    assert.deepEqual(readdirSync(folder), [basename(board.served)], 'no scratch folder is left behind')
+    assert.deepEqual(readdirSync(folder).sort(), [messages, basename(board.served)].sort(), 'no scratch folder is left behind')
+    assert.ok(!readdirSync(join(folder, messages)).some(name => name.startsWith('.acl-')), 'no message scratch file is left behind')
   } finally { await board.end([url]) }
 })
 

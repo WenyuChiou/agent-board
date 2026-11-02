@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isFinished, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, shownMessage, textHash } from '../hooks/messaging'
 import type { Connection, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
@@ -54,21 +54,28 @@ export const moveLockAside = (lock: string, recorded: string, claim: MessageStor
 const openMessaging = (directory: string, isDefault = false) => {
   const root = resolve(directory)
   const isCreated = mkdirSync(root, { recursive: true, mode: 0o700 }) !== undefined
-  if (lstatSync(root).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_DIRECTORY')
-  if (process.platform === 'win32' && (isCreated || isDefault)) {
-    try {
-      privateFolder(root)
-    } catch { throw new Error('MESSAGE_STORE_ACL') }
-  }
-  const claim = claimMessageStore(root)
-  try { return openClaimedMessaging(root, claim) } catch (error) {
-    try { claim.release() } catch (cleanup) { throw new AggregateError([error, cleanup], 'MESSAGE_STORE_CLAIM_BLOCKED') }
+  const isFreshDefault = isDefault && isCreated
+  try {
+    if (lstatSync(root).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_DIRECTORY')
+    if (process.platform === 'win32' && (isCreated || isDefault)) {
+      try {
+        privateFolder(root)
+      } catch { throw new Error('MESSAGE_STORE_ACL') }
+    }
+    const claim = claimMessageStore(root)
+    try { return openClaimedMessaging(root, claim, isFreshDefault) } catch (error) {
+      try { claim.release() } catch (cleanup) { throw new AggregateError([error, cleanup], 'MESSAGE_STORE_CLAIM_BLOCKED') }
+      throw error
+    }
+  } catch (error) {
+    if (isFreshDefault) try { rmdirSync(root) } catch {}
     throw error
   }
 }
 
-const openClaimedMessaging = (root: string, claim: MessageStoreClaim) => {
+const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDefault = false) => {
   let isClosed = false
+  let isPublished = false
   const requireOpen = (): void => { if (isClosed) throw new Error('MESSAGE_STORE_CLOSED') }
   const file = join(root, 'messages.json')
   const lock = join(root, 'server.lock')
@@ -188,6 +195,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim) => {
     recordOwner: (port: number, url: string): void => {
       requireOpen()
       writeFileSync(owner, JSON.stringify({ pid: process.pid, port, url }), { mode: 0o600 })
+      isPublished = true
     },
     close: (): void => {
       if (isClosed) return
@@ -197,7 +205,12 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim) => {
         // A lock left behind keeps its owner record for explicit recovery.
         release()
         try { if (JSON.parse(readFileSync(owner, 'utf8')).pid === process.pid) unlinkSync(owner) } catch {}
-      } finally { claim.release() }
+      } finally {
+        try { claim.release() } finally {
+          // A default folder made by a start that never published its page leaves nothing behind.
+          if (isFreshDefault && !isPublished) try { rmdirSync(root) } catch {}
+        }
+      }
     },
     snapshot: (now: number, reports: readonly ProgressBinding[] = []) => {
       expire(now)

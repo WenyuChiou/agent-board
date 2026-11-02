@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
 import { knownFailure } from './lib/known.mjs'
-import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, leftoverPlan, leftoverProcesses, levelOutcome, makeRedact, median, parseArguments, peakRss, percentile, queuedSessions, questionEvidenceProjection, questionRecoveryOf, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
+import { OUT_DEFAULT, archiveIntegrity, archiveProblems, archiveQuestionIntegrity, archiveQuestionProblems, archiveRefusal, classifySoakChecks, fileOpsPerPoll, leftoverPlan, leftoverProcesses, levelOutcome, liveMemoryLevel, makeRedact, median, parseArguments, peakRss, percentile, queuedSessions, questionEvidenceProjection, questionRecoveryOf, redactDeep, tallyOf, writeReport } from './lib/soak-report.mjs'
 
 const soak = fileURLToPath(new URL('./soak.mjs', import.meta.url))
 
