@@ -28,7 +28,7 @@ import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, c
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
-import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, missingEntries, parseJournal, unwrittenEntries } from '../hooks/journal'
+import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
@@ -715,26 +715,49 @@ const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
 // the same entry text, and both leave (#231).
 const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[] } | null | typeof AGAIN, now: number): number | null => {
   const archived = new Map<string, number>()
+  const pendingFile = pendingArchivePath(path)
+  let pending = existsSync(pendingFile) ? parsePendingArchive(read(pendingFile)) : []
+  let didRemove = false
   const wrote = rewrite(path, (text, isLast) => {
+    didRemove = false
+    const currentBoardHash = createHash('sha256').update(text).digest('hex')
     const taken = take(text, isLast)
     if (taken === AGAIN) return AGAIN
-    if (taken === null) return text
+    if (taken === null || taken.entries.length === 0) return text
+    didRemove = true
     const fresh = unwrittenEntries(taken.entries, archived)
     if (fresh.length > 0) {
-      const part = partOf(archivePath(path, now))
-      // A previous try may have saved to the part before, the one that then reached 1 MB.
-      const earlier = monthParts(archivePath(path, now), existsSync).filter(one => one !== part).at(-1)
-      const before = earlier === undefined ? '' : read(earlier)
+      const month = archivePath(path, now)
+      const part = partOf(month)
+      // Earlier parts of this month keep the copy-count baseline stable across part rotations.
+      const earlier = monthParts(month, existsSync).filter(one => one !== part).map(read)
       const kept = rewrite(part, past => {
         // A previous process may have saved the archive but failed to remove the task.
-        const missing = missingEntries([past, before], fresh, archived)
-        return missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${missing.join('\n\n')}\n`
+        const planned = nextPendingArchive([past, ...earlier], fresh, archived, pending, currentBoardHash)
+        if (planned.missing.length === 0) return past
+        try {
+          writeFileSync(pendingFile, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n', { mode: 0o600 })
+        } catch (error) {
+          throw fileError(part, error)
+        }
+        pending = planned.records
+        return `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${planned.missing.join('\n\n')}\n`
       })
       if (kept === null) return null
       for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     }
     return taken.text
   })
+
+  if (wrote !== null && didRemove && existsSync(pendingFile)) {
+    try {
+      unlinkSync(pendingFile)
+    } catch (error) {
+      const rawCode = error !== null && typeof error === 'object' && 'code' in error ? (error as { code?: unknown }).code : undefined
+      const code = typeof rawCode === 'string' && /^[A-Z0-9_]+$/.test(rawCode) ? rawCode : undefined
+      process.stderr.write(`${s.pendingNoteRemoveFailed(basename(pendingFile), code)}\n`)
+    }
+  }
 
   return wrote === null ? null : [...archived.values()].reduce((sum, one) => sum + one, 0)
 }

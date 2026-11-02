@@ -918,6 +918,255 @@ test('/progress tidy still says two archived tasks when a stale write puts the t
   expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
 })
 
+test('/progress tidy twice on the same day with one same-title same-steps done block each time: the archive ends with two entries', async ($, on) => {
+  const block = (session: string): string => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+  const world: World = { files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block('a1b2c395')}`]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  world.files.set(FILE, `# Progress\n\n## Synthetic\n${block('a1b2c396')}`)
+  world.mtime += 1
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+})
+
+test('the pane archive twice on the same day with one same-title same-steps done block each time: the archive ends with two entries', async ($, on) => {
+  const block = (session: string): string => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+  const world: World = { files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block('a1b2c395')}`]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui1 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui1.press({ key: 'section::recent' })
+    await ui1.press({ key: 'archive' })
+    expect(await ui1.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
+  } finally { await ui1.unmount() }
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  world.files.set(FILE, `# Progress\n\n## Synthetic\n${block('a1b2c396')}`)
+  world.mtime += 1
+  await clock.advance(5000)
+  const ui2 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    if (await ui2.find({ type: 'Button', key: 'archive' }) === undefined) {
+      await ui2.press({ key: 'section::recent' })
+    }
+    await ui2.press({ key: 'archive' })
+    expect(await ui2.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
+  } finally { await ui2.unmount() }
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+})
+
+test('/progress tidy with archive saved and task not removed (simulated failure), then tidy again: one entry, not two', async ($, on) => {
+  const block = `<!-- auto session=a1b2c397 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c397 -->\n`
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const boardText = `# Progress\n\n## Synthetic\n${block}`
+  const boardHash = sha256(boardText)
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, boardText],
+      [ARCHIVE, `# Archive\n\n${entry}\n`],
+      [pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry, held: 0, boardHash }] })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.has(pending)).toBe(false)
+})
+
+test('the pane archive with archive saved and task not removed (simulated failure), then tidy again: one entry, not two', async ($, on) => {
+  const block = `<!-- auto session=a1b2c397 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c397 -->\n`
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const boardText = `# Progress\n\n## Synthetic\n${block}`
+  const boardHash = sha256(boardText)
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, boardText],
+      [ARCHIVE, `# Archive\n\n${entry}\n`],
+      [pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry, held: 0, boardHash }] })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::recent' })
+    await ui.press({ key: 'archive' })
+    expect(await ui.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
+  } finally { await ui.unmount() }
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.has(pending)).toBe(false)
+})
+
+test('/progress tidy with archive holding X once, board holding new identical X, and note left over from failed removal: archive ends with two entries', async ($, on) => {
+  const block1 = `<!-- auto session=a1b2c398 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c398 -->\n`
+  const block2 = `<!-- auto session=a1b2c399 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c399 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, `# Progress\n\n## Synthetic\n${block1}`],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unremovable: new Set([pending]),
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+    expect(world.files.has(pending)).toBe(true)
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+    expect(await ui.find({ type: 'Text', text: STRINGS.en.pendingNoteRemoveFailed('progress-archive.pending') })).toBeDefined()
+
+    world.files.set(FILE, `# Progress\n\n## Synthetic\n${block2}`)
+    world.mtime += 1
+    world.unremovable.clear()
+    expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+    expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+    expect(world.files.has(pending)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: STRINGS.en.pendingNoteRemoveFailed('progress-archive.pending') })).toBeUndefined()
+  } finally { await ui.unmount() }
+})
+
+test('/progress tidy does not restamp a leftover pending record onto a later twin when another task fails to clear', async ($, on) => {
+  const blockX1 = `<!-- auto session=a1b2c410 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c410 -->\n`
+  const blockY = '### Task Y\n- [x] Done step\n- [ ] Open step\n'
+  const blockX2 = `<!-- auto session=a1b2c412 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c412 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, `# Progress\n\n## Synthetic\n${blockX1}`],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unremovable: new Set([pending]),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.has(pending)).toBe(true)
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+
+  const secondBoard = `# Progress\n\n## Synthetic\n${blockY}\n${blockX2}`
+  world.files.set(FILE, secondBoard)
+  world.mtime += 1
+  world.unremovable.clear()
+  await clock.advance(60_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::others' })
+    world.unwritable = new Set([FILE])
+    await ui.press({ key: 'Synthetic::Task Y' })
+    await ui.press({ key: 'Synthetic::Task Y::archive' })
+    expect(world.files.get(FILE)).toBe(secondBoard)
+    expect(world.files.get(ARCHIVE)?.split('### Task Y').length).toBe(2)
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+
+    world.unwritable.clear()
+    expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+    expect(world.files.get(ARCHIVE)?.split('### Task Y').length).toBe(2)
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+    expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+    expect(world.files.has(pending)).toBe(false)
+  } finally { await ui.unmount() }
+})
+
+test('/progress tidy when archive write fails after note is written: task stays in progress.md, and next tidy archives it once', async ($, on) => {
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const block = `<!-- auto session=a1b2c399 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c399 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, `# Progress\n\n## Synthetic\n${block}`],
+      [ARCHIVE, `# Archive\n\n${entry}\n`],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unwritable: new Set([ARCHIVE]),
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
+  expect(world.files.get(FILE)).toContain('Synthetic twin')
+  expect(world.files.has(pending)).toBe(true)
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+
+  world.unwritable.clear()
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+  expect(world.files.has(pending)).toBe(false)
+})
+
+test('/progress tidy when note write fails: nothing is archived and board is unchanged', async ($, on) => {
+  const block = `<!-- auto session=a1b2c400 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c400 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block}`]]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unwritable: new Set([pending]),
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
+  expect(world.files.get(FILE)).toContain('Synthetic twin')
+  expect(world.files.has(pending)).toBe(false)
+  expect(world.files.has(ARCHIVE)).toBe(false)
+})
+
+test('archiveOne when archive write fails after note is written: task stays on board, and next archive archives it once', async ($, on) => {
+  const task = '### Manual task\n- [x] Done step\n- [ ] Open step\n'
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([[FILE, `# Progress\n\n## Synthetic\n${task}`]]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unwritable: new Set([ARCHIVE]),
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::others' })
+    await ui.press({ key: 'Synthetic::Manual task' })
+    await ui.press({ key: 'Synthetic::Manual task::archive' })
+    expect(world.files.get(FILE)).toContain('Manual task')
+    expect(world.files.has(pending)).toBe(true)
+    expect(world.files.has(ARCHIVE)).toBe(false)
+
+    world.unwritable.clear()
+    await ui.press({ key: 'Synthetic::Manual task::archive' })
+    expect(world.files.get(FILE)).not.toContain('Manual task')
+    expect(world.files.get(ARCHIVE)?.split('### Manual task').length).toBe(2)
+    expect(world.files.has(pending)).toBe(false)
+  } finally {
+    await ui.unmount()
+  }
+})
+
 test('on a light terminal no text falls back to the terminal dim', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { opened: ['others', 'waiting', 'recent', 'steps'] } }
   engineBeneath(on, world)

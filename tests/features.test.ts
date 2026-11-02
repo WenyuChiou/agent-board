@@ -13,7 +13,7 @@ import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
-import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, progressReport, unwrittenEntries } from '../hooks/journal'
+import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, parsePendingArchive, pendingArchivePath, progressReport, unwrittenEntries } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
@@ -4656,4 +4656,30 @@ test('archive entries are counted with their number: a new twin of an archived e
   expect(missingEntries(['', archive(3)], [entry, entry])).toEqual([])
   expect(missingEntries([archive(3)], [entry], new Map([[entry, 2]]))).toEqual([])
   expect(missingEntries([archive(2)], [entry], new Map([[entry, 2]]))).toEqual([entry])
+})
+
+test('a pending archive note distinguishes crash-recovery retries from distinct same-day twins', () => {
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const archive = `# Archive\n\n${entry}\n`
+  expect(pendingArchivePath('/work/progress.md')).toBe('/work/progress-archive.pending')
+  expect(parsePendingArchive('')).toEqual([])
+  expect(parsePendingArchive('broken')).toEqual([])
+  expect(parsePendingArchive(JSON.stringify({ entries: [entry] }))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify([entry]))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1 }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, boardHash: 'hash1', entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1, boardHash: 'hash1' }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1, boardHash: 'hash2' }] }))).toEqual([{ entry, held: 1, boardHash: 'hash2' }])
+
+  // When pending recorded held = 0 and archive now holds 1: crash recovery skips re-adding.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0 }])).toEqual([])
+  // When boardHash matches: crash recovery skips re-adding.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0, boardHash: 'hash1' }], 'hash1')).toEqual([])
+  // When boardHash does not match: treated as not saved so a twin is kept.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0, boardHash: 'hash1' }], 'hash2')).toEqual([entry])
+  // When pending recorded held = 1 and archive holds only 1: archive write failed, so missing.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 1 }])).toEqual([entry])
+  // When pending has a legacy note without held: treated as not saved so twins are never dropped.
+  expect(missingEntries([archive], [entry], new Map(), [entry])).toEqual([entry])
+  // When pending does not hold the entry: a same-day twin is added even if archive already has one.
+  expect(missingEntries([archive], [entry], new Map(), [])).toEqual([entry])
 })
