@@ -341,9 +341,10 @@ const keepAskedQuestions = (projects: ReturnType<typeof parseProgress>, ref: Tas
   const proofs = readQuestionProofs()
   if (latest === null || proofs === null || !archiveQuestionsKept(projects, ref, latest)) return false
   const settled = observeQuestions(latest, projects, null, parseAnswered(read(answeredPath(path))) ?? [], now, true, 'preview', proofs, pending(), [], frozen).ledger
-  if (settled.records.some(record => record.isUnresolved && isAskedBy(record, ref) && !latest.records.some(old => old.id === record.id && old.isUnresolved))) return false
+  const task = refTasks(projects, ref)[0]
+  if (settled.records.some(record => record.isUnresolved && isAskedBy(record, ref, task) && !latest.records.some(old => old.id === record.id && old.isUnresolved))) return false
   for (const record of latest.records) {
-    if (record.isUnresolved && isAskedBy(record, ref)) keepQuestionCapture(record, 'archived')
+    if (record.isUnresolved && isAskedBy(record, ref, task)) keepQuestionCapture(record, 'archived')
   }
 
   return true

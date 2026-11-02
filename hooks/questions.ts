@@ -17,6 +17,7 @@ export const questionWords = (text: string): string => text.trim().replace(/\s+/
 export const questionScope = (project: string, agent: string, session: string): string => JSON.stringify([project, agent || 'claude', session])
 type QuestionOwner = Pick<ProgressAuto, 'session' | 'agent' | 'resume'>
 type QuestionScopeOf = (project: string, agent: string, session: string, resume?: string | null) => string
+const canonicalOf = (auto: QuestionOwner): string | null => auto.resume ?? (auto.session.length > 8 ? auto.session : null)
 const mirrorOwner = (mine: ProgressMirror): QuestionOwner => ({ session: shortId(mine.sessionId), agent: mine.agent || 'claude', resume: mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null) })
 const sourceOwner = (source: QuestionSource): QuestionOwner | null => {
   if (source.kind === 'block') {
@@ -42,7 +43,6 @@ export const questionScopes = (projects: readonly ProgressProject[], mine: Progr
     ids.add(id)
     map.set(key, ids)
   }
-  const canonicalOf = (auto: QuestionOwner): string | null => auto.resume ?? (auto.session.length > 8 ? auto.session : null)
   const add = (project: string, auto: QuestionOwner, title?: string): void => {
     const canonical = canonicalOf(auto)
     if (canonical === null) return
@@ -171,14 +171,21 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
   // The copy no longer holds the title, so the record is tied to this task by its title and
   // session; two hand-kept tasks that ask the same have the same marks.
   return task.steps.filter(step => step.status === 'waiting').every(step => ledger.records.some(record => record.isUnresolved
-    ? isAskedBy(record, ref) && record.source?.text === step.text && record.source.data === sourceData(task) && (record.producer ?? '') === (step.questionToken ?? '')
+    ? isAskedBy(record, ref, task) && record.source?.text === step.text && record.source.data === sourceData(task) && (record.producer ?? '') === (step.questionToken ?? '')
     : record.resolvedAt !== undefined && record.source !== undefined && record.scope === scope && record.words === questionWords(step.text) && (record.producer ?? '') === (step.questionToken ?? '') && !ledger.records.some(other => other.isUnresolved && other.scope === scope && other.words === questionWords(step.text))))
 }
 // The questions of one block in the ledger: its project and title and, for an agent's block, its
 // session, so a block of another session with the same title is not taken for it. A hand-kept
 // task has no session, so only a hand-kept task's questions match it, not an agent block's (#174).
-export const isAskedBy = (record: QuestionRecord, ref: TaskRef): boolean =>
-  record.source?.project === ref.project && record.source.task === ref.title && (ref.session === null ? record.source.kind === 'manual' : record.source.session === ref.session)
+// `task`, the block the reference picked, keeps out a peer with the same alias and title. A copy
+// that holds no full id is judged by its alias alone.
+export const isAskedBy = (record: QuestionRecord, ref: TaskRef, task?: ProgressTask): boolean => {
+  if (record.source?.project !== ref.project || record.source.task !== ref.title || (ref.session === null ? record.source.kind !== 'manual' : record.source.session !== ref.session)) return false
+  const owner = sourceOwner(record.source)
+  const asker = owner === null ? null : canonicalOf(owner)
+  const picked = task?.auto === null || task?.auto === undefined ? null : canonicalOf(task.auto)
+  return asker === null || picked === null || asker === picked
+}
 export const questionProofPath = (path: string, kind: keyof QuestionProofs, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-${kind}-${hash}.json`
 export const questionProofOf = (path: string, name: string): { kind: keyof QuestionProofs; hash: string } | null => {
   const prefix = `${path.replace(/\\/g, '/').split('/').at(-1)?.replace(/\.md$/i, '')}-questions-`
@@ -668,25 +675,25 @@ export const observeQuestions = (
     })
   }
   const blockKey = (auto: ProgressAuto): string => JSON.stringify([auto.agent.toLowerCase(), auto.session, auto.resume])
-  const locations = new Map<string, { project: string; scope: string }[]>()
+  const locations = new Map<string, { project: string; scope: string; alias: string }[]>()
   const scopeCounts = new Map<string, number>()
   for (const project of projects) for (const task of project.tasks) {
     if (task.auto === null) continue
     const key = blockKey(task.auto)
     const places = locations.get(key) ?? []
-    const scope = questionScope(project.name, task.auto.agent, task.auto.session)
-    places.push({ project: project.name, scope })
+    const scope = scopeOf(project.name, task.auto.agent, task.auto.session, task.auto.resume)
+    places.push({ project: project.name, scope, alias: questionScope(project.name, task.auto.agent, task.auto.session) })
     locations.set(key, places)
     scopeCounts.set(scope, (scopeCounts.get(scope) ?? 0) + 1)
   }
   for (const record of records) {
     const source = record.source
-    if (!record.isUnresolved || assigned.has(record.id) || frozen.has(record.scope) || source?.kind !== 'block') continue
+    if (!record.isUnresolved || assigned.has(record.id) || isFrozenQuestion(record, frozen) || source?.kind !== 'block') continue
     const auto = sourceSnapshot(source.data)?.auto
     if (auto === undefined || auto === null || auto.agent.toLowerCase() !== source.agent.toLowerCase() || auto.session !== source.session) continue
     const places = locations.get(blockKey(auto))
     const destination = places?.length === 1 ? places[0] : undefined
-    if (destination === undefined || destination.project === source.project || frozen.has(destination.scope) || scopeCounts.get(destination.scope) !== 1) continue
+    if (destination === undefined || destination.project === source.project || frozen.has(destination.scope) || frozen.has(destination.alias) || scopeCounts.get(destination.scope) !== 1) continue
     // A unique live block with the saved full identity proves a project move. Keep the
     // former question's evidence, without treating a missing or colliding block as an answer.
     record.isUnresolved = false

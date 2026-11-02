@@ -3035,8 +3035,9 @@ const keepAskedQuestions = async ($: EngineInterface, path: string, projects: re
   if (!isSettled && !(await pollQuestions($, path, projects, true))) return false
   const ledger = await read($, questionLedger)
   if (!archiveQuestionsKept(projects, ref, ledger)) return false
+  const task = refTasks(projects, ref)[0]
   for (const record of ledger.records) {
-    if (record.isUnresolved && isAskedBy(record, ref)) await keepQuestionCapture($, path, record, 'archived')
+    if (record.isUnresolved && isAskedBy(record, ref, task)) await keepQuestionCapture($, path, record, 'archived')
   }
 
   return true

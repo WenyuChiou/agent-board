@@ -128,7 +128,11 @@ test('archiving a same-prefix peer checks that peer alone', () => {
 
   const sameTitle = parseProgress(`## demo\n${ended('a1b2c3d4-person-a', 'Same work', '- [?] Alpha question?')}${ended('a1b2c3d4-person-b', 'Same work', '- [?] Beta question?')}`)
   const second = sameTitle[0]!.tasks[1]!
-  expect(refTasks(sameTitle, { project: 'demo', title: 'Same work', line: second.line, session: 'a1b2c3d4' })).toEqual([second])
+  const secondRef = { project: 'demo', title: 'Same work', line: second.line, session: 'a1b2c3d4' }
+  expect(refTasks(sameTitle, secondRef)).toEqual([second])
+  const sameTitleLedger = observeQuestions(emptyQuestions(), sameTitle, null, [], NOW, true).ledger
+  expect(sameTitleLedger.records.filter(record => isAskedBy(record, secondRef, second)).map(record => record.words)).toEqual(['Beta question?'])
+  expect(archiveQuestionsKept(sameTitle, secondRef, sameTitleLedger)).toBe(true)
 
   const twins = parseProgress(`## demo\n${ended('a1b2c3d4-person-a', 'Twin work', '- [?] Twin question?')}${ended('a1b2c3d4-person-a', 'Twin work', '- [?] Twin question?')}`)
   expect(refTasks(twins, { project: 'demo', title: 'Twin work', line: twins[0]!.tasks[1]!.line, session: 'a1b2c3d4' })).toHaveLength(2)
@@ -151,6 +155,13 @@ test('an own question saved before same-prefix identity keeps its record when a 
     expect(parseQuestions(questionsJson(next))).toEqual(next)
     expect(buildView(projects, [], current, NOW + 60000, 0, {}, STRINGS.en, [], {}, next).waiting.map(item => item.text).sort()).toEqual(['Alpha question?', 'Beta question?'])
   }
+  const quiet = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Quiet step' }, '1', NOW), title: 'Beta work' }
+  const withQuiet = parseProgress(`${ownFile}${renderAutoBlock(quiet).join('\n')}\n`)
+  const resolved = resolveQuestion(old, saved.records[0]!.id, NOW + 1)
+  const gone = observeQuestions(observeQuestions(resolved, withQuiet, mine, [], NOW + 2, true).ledger, parseProgress(ownFile), mine, [], NOW + 3, true).ledger
+  expect(gone.records.filter(record => record.isUnresolved)).toEqual([])
+  expect(gone.records.map(record => record.id)).toEqual([saved.records[0]!.id])
+  expect(parseQuestions(compactQuestionsJson(gone))).toEqual(gone)
 })
 
 test('a pending question pairs with the same-prefix peer block that asked it', () => {
