@@ -9,7 +9,7 @@ import type { TaskRef } from './view'
 export type { QuestionLedger, QuestionProofs, QuestionRecord } from '../types'
 
 // Accepted continuation evidence retains its binding and clock without conversation text.
-export type QuestionAnswerEvidence = Pick<AgentTurn, 'agent' | 'id'> & { event: 'prompt' | 'turn'; at: number }
+export type QuestionAnswerEvidence = Pick<AgentTurn, 'agent' | 'id'> & { session?: string; event: 'prompt' | 'turn'; at: number }
 
 export const emptyQuestions = (): QuestionLedger => ({ version: 1, next: 1, records: [], legacy: {} })
 export const questionsPath = (path: string): string => `${path.replace(/\.md$/i, '')}-questions.json`
@@ -184,9 +184,27 @@ export const isAskedBy = (record: QuestionRecord, ref: TaskRef, task?: ProgressT
   const owner = sourceOwner(record.source)
   const picked = task?.auto ?? null
   if (owner === null || picked === null) return true
+  if ((owner.agent || 'claude').toLowerCase() !== (picked.agent || 'claude').toLowerCase()) return false
   const asker = canonicalOf(owner)
   const named = canonicalOf(picked)
-  return asker === null || named === null || (asker === named && (owner.agent || 'claude').toLowerCase() === (picked.agent || 'claude').toLowerCase())
+  return asker === null || named === null || asker === named
+}
+// A turn or an answer names its full session, and a source copy with no full id, or a turn saved
+// before it held one, is judged by its alias alone.
+const isOwnerOf = (source: QuestionSource, session: string | undefined): boolean => {
+  const owner = session === undefined ? null : sourceOwner(source)
+  const canonical = owner === null ? null : canonicalOf(owner)
+  return canonical === null || canonical === session
+}
+const inboxSession = (source: QuestionSource): string | undefined => {
+  const data = parsedJson(source.data)
+  return data !== null && typeof data === 'object' && 'session' in data && typeof data.session === 'string' ? data.session : undefined
+}
+// An answer closes only the inbox ask of the session that gave it, not a same-prefix peer's.
+export const isAnsweredBy = (record: QuestionRecord, turn: QuestionAnswerEvidence): boolean => {
+  if (record.source?.kind !== 'inbox' || record.source.agent !== turn.agent || record.source.session !== turn.id) return false
+  const asker = inboxSession(record.source)
+  return asker === undefined || turn.session === undefined || asker === turn.session
 }
 // Whether the ledger holds this turn's own ask, which a same-prefix peer's block may have paired
 // under its full id. An earlier ask of the same words by the same session is not a record of it.
@@ -195,7 +213,7 @@ export const isTurnRecorded = (ledger: QuestionLedger, turn: PendingTurn): boole
   const scope = questionScope(turn.project, turn.agent, turn.id)
   const json = JSON.stringify(turn)
   const revisions = turn.sourceRevisions ?? []
-  return ledger.records.some(record => (record.scope === scope || (record.source?.project === turn.project && record.source.session === turn.id && (record.source.agent || 'claude') === (turn.agent || 'claude'))) && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
+  return ledger.records.some(record => (record.scope === scope || (turn.session !== undefined && record.source?.project === turn.project && record.source.session === turn.id && (record.source.agent || 'claude') === (turn.agent || 'claude') && isOwnerOf(record.source, turn.session))) && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
 }
 export const questionProofPath = (path: string, kind: keyof QuestionProofs, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-${kind}-${hash}.json`
 export const questionProofOf = (path: string, name: string): { kind: keyof QuestionProofs; hash: string } | null => {
@@ -518,13 +536,11 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
     if (!turn.isQuestion || turn.id === undefined) continue
     const scope = questionScope(turn.project, turn.agent, turn.id)
     if (frozen.has(scope)) continue
-    const matching = rows.filter(row => row.isWaiting && row.session === turn.id && row.source.project === turn.project && (row.source.agent || 'claude') === (turn.agent || 'claude') && questionWords(row.text) === questionWords(turn.text))
-    // A turn holds only the short id, so same-prefix peers asking the same words both carry it.
-    if (matching.length === 1 || (matching.length > 1 && new Set(matching.map(row => row.scope)).size === matching.length)) {
-      for (const row of matching) {
-        row.producerRevisions = [...new Set([...(row.producerRevisions ?? []), ...(turn.sourceRevisions ?? [])])]
-        row.producerSources = [...(row.producerSources ?? []), JSON.stringify(turn)]
-      }
+    const matching = rows.filter(row => row.isWaiting && row.session === turn.id && row.source.project === turn.project && (row.source.agent || 'claude') === (turn.agent || 'claude') && questionWords(row.text) === questionWords(turn.text) && isOwnerOf(row.source, turn.session))
+    if (matching.length === 1 && matching[0] !== undefined) {
+      const row = matching[0]
+      row.producerRevisions = [...new Set([...(row.producerRevisions ?? []), ...(turn.sourceRevisions ?? [])])]
+      row.producerSources = [...(row.producerSources ?? []), JSON.stringify(turn)]
       continue
     }
     rows.push({ scope, session: turn.id, index: `inbox:${questionWords(turn.text)}`, text: turn.text, isWaiting: true, producer: '', producerRevisions: turn.sourceRevisions, producerSources: [JSON.stringify(turn)], source: { kind: 'inbox', project: turn.project, task: '', context: '', text: turn.text, agent: turn.agent, session: turn.id, data: JSON.stringify(turn) } })
@@ -577,7 +593,7 @@ export const observeQuestions = (
     const at = source?.sourceAt ?? source?.at
     // Cursor and Grok emit an empty stop for the asking turn. Only a later text-bearing
     // response or an accepted prompt proves continuation, even if the session moved folders.
-    if (!Number.isFinite(at) || !answeredTurns.some(turn => (turn.event === 'prompt' || (turn.event === 'turn' && (!('answer' in turn) || turn.answer.trim() !== ''))) && turn.at !== undefined && Number.isFinite(turn.at) && turn.at > at && turn.agent === record.source?.agent && turn.id === record.source?.session)) continue
+    if (!Number.isFinite(at) || !answeredTurns.some(turn => (turn.event === 'prompt' || (turn.event === 'turn' && (!('answer' in turn) || turn.answer.trim() !== ''))) && turn.at !== undefined && Number.isFinite(turn.at) && turn.at > at && isAnsweredBy(record, turn))) continue
     record.isUnresolved = false
     record.isWaiting = false
     record.isPresent = false

@@ -17,7 +17,7 @@ import type { ConfirmRef } from './blocks'
 
 // A turn another agent's hook left that no Claude Code session has summed up yet. The
 // board only peeks at it: taking it is a Claude Code session's job, so the two never race.
-export type PendingTurn = { id?: string; dir?: string; fullText?: string; sources?: string[]; sourceRevisions?: string[]; isClosed?: boolean; agent: string; project: string; text: string; isQuestion: boolean; at: number; sourceAt?: number; hasSummary?: boolean }
+export type PendingTurn = { id?: string; session?: string; dir?: string; fullText?: string; sources?: string[]; sourceRevisions?: string[]; isClosed?: boolean; agent: string; project: string; text: string; isQuestion: boolean; at: number; sourceAt?: number; hasSummary?: boolean }
 
 // A reply's last line of prose, its code blocks left out: where a reply usually says what
 // came of the turn.
@@ -56,16 +56,16 @@ export const peekInbox = (
     if (question !== null) {
       // Words deduplicate retries, not independent ledger identities. An end or later
       // statement cannot prove a previous question answered before anyone captured it.
-      const key = JSON.stringify([turn.id, turn.project, question.replace(/\s+/g, ' ').trim()])
+      const key = JSON.stringify([turn.id, turn.session, turn.project, question.replace(/\s+/g, ' ').trim()])
       const previous = questions.get(key)
-      questions.set(key, { id: turn.id, fullText: prose!, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
+      questions.set(key, { id: turn.id, session: turn.session, fullText: prose!, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
       latest.delete(turn.id)
     } else if (turn.event !== 'end' && text !== '') {
       latest.set(turn.id, { id: turn.id, ...(prose === null ? {} : { fullText: prose }), agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: false, at: file.at, sourceAt: turn.at ?? file.at, hasSummary: summary !== undefined && summary !== null })
     }
     if (turn.event === 'end') {
       latest.delete(turn.id)
-      for (const [key, pending] of questions) if (pending.id === turn.id) questions.set(key, { ...pending, isClosed: true })
+      for (const [key, pending] of questions) if (pending.id === turn.id && pending.session === turn.session) questions.set(key, { ...pending, isClosed: true })
     }
   }
 

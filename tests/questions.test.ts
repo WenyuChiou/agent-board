@@ -141,6 +141,14 @@ test('archiving a same-prefix peer checks that peer alone', () => {
   const crossLedger = observeQuestions(emptyQuestions(), cross, null, [], NOW, true).ledger
   expect(refTasks(cross, crossRef)).toEqual([picked])
   expect(crossLedger.records.filter(record => isAskedBy(record, crossRef, picked)).map(record => record.words)).toEqual(['Beta question?'])
+  const noResume = (text: string): string => text.replace(/ resume=\S+/, '')
+  for (const [codex, claude] of [[noResume, (text: string) => text], [noResume, noResume]] as const) {
+    const old = parseProgress(`## demo\n${codex(crossText('codex', '- [?] Alpha question?'))}${claude(crossText('claude', '- [?] Beta question?'))}`)
+    const oldPick = old[0]!.tasks[1]!
+    const oldRef = { ...crossRef, line: oldPick.line }
+    const oldLedger = observeQuestions(emptyQuestions(), old, null, [], NOW, true).ledger
+    expect(oldLedger.records.filter(record => isAskedBy(record, oldRef, oldPick)).map(record => record.words)).toEqual(['Beta question?'])
+  }
 
   const twins = parseProgress(`## demo\n${ended('a1b2c3d4-person-a', 'Twin work', '- [?] Twin question?')}${ended('a1b2c3d4-person-a', 'Twin work', '- [?] Twin question?')}`)
   expect(refTasks(twins, { project: 'demo', title: 'Twin work', line: twins[0]!.tasks[1]!.line, session: 'a1b2c3d4' })).toHaveLength(2)
@@ -175,17 +183,58 @@ test('an own question saved before same-prefix identity keeps its record when a 
 test('a pending question pairs with the same-prefix peer block that asked it', () => {
   const block = (id: string, title: string, step: string): string => `<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} resume=${id} -->\n### ${title}\n- [?] ${step}\n<!-- /auto session=a1b2c3d4 -->\n`
   const projects = parseProgress(`## demo\n${block('a1b2c3d4-person-a', 'Alpha work', 'Same ask?')}${block('a1b2c3d4-person-b', 'Beta work', 'Other ask?')}`)
-  const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', text: 'Same ask?', isQuestion: true, at: NOW } as PendingTurn
+  const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', session: 'a1b2c3d4-person-a', text: 'Same ask?', isQuestion: true, at: NOW } as PendingTurn
   const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'pending', undefined, [turn]).ledger
   expect(ledger.records.map(record => record.words).sort()).toEqual(['Other ask?', 'Same ask?'])
   expect(isTurnRecorded(ledger, turn)).toBe(true)
   expect(isTurnRecorded(emptyQuestions(), turn)).toBe(false)
+
   const both = parseProgress(`## demo\n${block('a1b2c3d4-person-a', 'Alpha work', 'Same ask?')}${block('a1b2c3d4-person-b', 'Beta work', 'Same ask?')}`)
-  const shared = observeQuestions(emptyQuestions(), both, null, [], NOW, true, 'pending', undefined, [turn]).ledger
+  const shared = observeQuestions(emptyQuestions(), both, null, [], NOW, true, 'pending', undefined, [{ ...turn, sourceRevisions: ['a'.repeat(64)] }]).ledger
   expect(shared.records.map(record => record.source?.kind)).toEqual(['block', 'block'])
-  expect(isTurnRecorded(shared, turn)).toBe(true)
+  const carrying = shared.records.filter(record => (record.producerSources ?? []).length > 0)
+  expect(carrying.map(record => record.source!.task)).toEqual(['Alpha work'])
+
   const twice = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} -->\n### Alpha work\n- [?] Same ask?\n- [?] Same ask?\n<!-- /auto session=a1b2c3d4 -->\n`)
   expect(observeQuestions(emptyQuestions(), twice, null, [], NOW, true, 'pending', undefined, [turn]).ledger.records.filter(record => record.source?.kind === 'inbox')).toHaveLength(1)
+})
+
+test('a same-prefix peer neither answers an inbox ask nor takes its turn', () => {
+  const session = 'a1b2c3d4-person-a'
+  const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', session, text: 'Inbox ask?', isQuestion: true, at: NOW, sourceAt: NOW } as PendingTurn
+  const inbox = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'pending', undefined, [turn]).ledger
+  const later = NOW + 1000
+  const peer = { agent: 'codex', id: 'a1b2c3d4', session: 'a1b2c3d4-person-b', event: 'prompt' as const, at: later }
+  const open = observeQuestions(inbox, [], null, [], later, true, 'pending', undefined, [turn], [peer]).ledger
+  expect(open.records.map(record => record.isUnresolved)).toEqual([true])
+  expect(buildView([], [], null, later, 0, {}, STRINGS.en, [], {}, open, undefined, [turn]).waiting.map(item => item.text)).toEqual(['Inbox ask?'])
+  const own = observeQuestions(inbox, [], null, [], later, true, 'pending', undefined, [], [{ ...peer, session }]).ledger
+  expect(own.records.map(record => record.isUnresolved)).toEqual([false])
+  const { session: _session, ...oldTurn } = turn
+  const old = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'pending', undefined, [oldTurn as PendingTurn]).ledger
+  expect(observeQuestions(old, [], null, [], later, true, 'pending', undefined, [], [peer]).ledger.records.map(record => record.isUnresolved)).toEqual([false])
+
+  const block = `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} resume=a1b2c3d4-person-b -->\n### Beta work\n- [?] Coincidence?\n<!-- /auto session=a1b2c3d4 -->\n`
+  const coincidence = { ...turn, text: 'Coincidence?' }
+  const apart = observeQuestions(emptyQuestions(), parseProgress(block), null, [], NOW, true, 'pending', undefined, [coincidence]).ledger
+  expect(apart.records.map(record => record.source?.kind).sort()).toEqual(['block', 'inbox'])
+  expect(apart.records.find(record => record.source?.kind === 'block')?.producerSources ?? []).toEqual([])
+  expect(isTurnRecorded(apart, coincidence)).toBe(true)
+  const blockOnly = { ...apart, records: apart.records.filter(record => record.source?.kind === 'block') }
+  expect(isTurnRecorded(blockOnly, coincidence)).toBe(false)
+  const pairOfBlocks = block + block.replace('resume=a1b2c3d4-person-b', 'resume=a1b2c3d4-person-a').replace('### Beta work', '### Alpha work').replace('- [?] Coincidence?', '- [?] Alpha ask?')
+  const split = observeQuestions(emptyQuestions(), parseProgress(pairOfBlocks.replace(/\n## demo\n/, '\n')), null, [], NOW, true).ledger
+  const peerRecord = split.records.find(record => record.words === 'Coincidence?')!
+  expect(peerRecord.scope).toBe(questionScope('demo', 'codex', 'a1b2c3d4-person-b'))
+  const peerCarrying = { ...split, records: [{ ...peerRecord, producerSources: [JSON.stringify(coincidence)] }] }
+  expect(isTurnRecorded(peerCarrying, coincidence)).toBe(false)
+  const [first, second] = ['peer-fixture-1122789', 'peer-fixture-1339192']
+  const file = (session: string, order: number, event = 'turn') => ({ name: `codex-${event}-${NOW + order}-${order}.json`, body: JSON.stringify({ session_id: session, cwd: '/demo', last_assistant_message: 'Use staging?' }), at: NOW + order })
+  const peers = peekInbox([file(first, 1), file(second, 2)])
+  expect(peers.map(one => one.id)).toEqual(['fad2ee8b', 'fad2ee8b'])
+  expect(peers.map(one => one.session).sort()).toEqual([first, second])
+  const ended = peekInbox([file(first, 1), file(second, 2), file(second, 3, 'end')])
+  expect(ended.filter(one => one.isClosed === true).map(one => one.session)).toEqual([second])
 })
 
 test('compact question indexes preserve every value and parse like existing formatted indexes', () => {

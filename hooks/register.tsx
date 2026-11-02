@@ -133,7 +133,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -415,9 +415,9 @@ let answersAdded = 0
 const rememberAnswered = (turns: readonly AgentTurn[]): void => {
   for (const turn of turns) {
     if ((turn.event !== 'prompt' && (turn.event !== 'turn' || turn.answer.trim() === '')) || turn.at === undefined || !Number.isFinite(turn.at)) continue
-    const key = JSON.stringify([turn.agent, turn.id])
+    const key = JSON.stringify([turn.agent, turn.id, turn.session])
     if ((answeredPending.get(key)?.at ?? -Infinity) >= turn.at) continue
-    answeredPending.set(key, { agent: turn.agent, id: turn.id, event: turn.event, at: turn.at })
+    answeredPending.set(key, { agent: turn.agent, id: turn.id, session: turn.session, event: turn.event, at: turn.at })
     answeredKeptSince.delete(key)
     answersAdded += 1
   }
@@ -831,7 +831,7 @@ const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects:
   rememberAnswered(evidence)
   if (evidence.length > 0 && questionsRunning !== null) return
   try {
-    const matches = (record: QuestionRecord, turn: QuestionAnswerEvidence): boolean => record.source?.kind === 'inbox' && record.source.agent === turn.agent && record.source.session === turn.id
+    const matches = isAnsweredBy
     const batch = [...answeredPending.entries()]
     // Counted with the batch, so an answer remembered while the key is read is not taken as carried.
     const added = answersAdded
@@ -2859,7 +2859,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
         if (unkept.length > 0) await holdBack(unkept, new Error('PENDING_QUESTION_NOT_KEPT'))
         // A question and its answer can arrive in one look: the answer was remembered before
         // the question was kept, so it settles now instead of at the next poll.
-        const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id])))
+        const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id, one.session])))
         // Its failure is made good at the next poll, so it sends back no run.
         if ([...answeredPending.keys()].some(key => asked.has(key))) await progressPath($).then(path => pollAnsweredQuestions($, path, undefined)).catch(() => undefined)
       } catch (error) {
