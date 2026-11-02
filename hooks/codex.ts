@@ -4,6 +4,8 @@ import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
 import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
 import { scanBlocks } from './blocks'
+import type { BlockSpan } from './blocks'
+import { sha256 } from './sha256'
 import type { Origin } from './runs'
 
 // `origin`, `parent` and `isWeak` say who started the session (#399): a run an agent started for
@@ -115,14 +117,34 @@ export const codexReport = (previous: CodexReport | null, session: string, input
   }
 }
 
+// A short alias is not ownership. Leave a peer alone only when its full native
+// binding and digest agree; an unowned or contradictory alias still blocks writes.
+const localBlockSpans = (lines: readonly string[], owner: string, agent: string, session?: string): BlockSpan[] | null => {
+  const id = owner.slice(0, 8)
+  const owned: BlockSpan[] = []
+  for (const span of scanBlocks(lines).filter(span => span.session === id)) {
+    const attrs = parseAttrs(lines[span.start] ?? '')
+    if (attrs.owner === owner && attrs.agent === agent && (session === undefined || attrs.resume === undefined || attrs.resume === session)) {
+      owned.push(span)
+      continue
+    }
+    const isPeer = attrs.agent !== undefined && attrs.resume !== undefined && RESUME.test(attrs.resume)
+      && attrs.owner !== owner && attrs.owner?.startsWith(id) === true
+      && attrs.owner === sha256(`${attrs.agent}:${attrs.resume}`)
+      && (session === undefined || attrs.agent !== agent || attrs.resume !== session)
+    if (!isPeer) return null
+  }
+  return owned
+}
+
 // A board completion is authoritative only for this exact owned task. Lifecycle
 // metadata reads it under the existing board lock before reusing its session cache.
 // Explicit task reports carry fresh intent and deliberately supersede this projection.
 export const boardConfirmedReport = (text: string, previous: CodexReport, owner: string): CodexReport => {
   const lines = text.split(/\r?\n/)
-  const spans = scanBlocks(lines).filter(span => span.session === owner.slice(0, 8))
-  const span = spans[0]
-  if (spans.length !== 1 || span === undefined || !span.isClosed || span.state !== 'done') return previous
+  const spans = localBlockSpans(lines, owner, previous.agent ?? 'codex', previous.session)
+  const span = spans?.[0]
+  if (spans?.length !== 1 || span === undefined || !span.isClosed || span.state !== 'done') return previous
   const attrs = parseAttrs(lines[span.start] ?? '')
   if (attrs.owner !== owner || attrs.agent !== (previous.agent ?? 'codex')) return previous
   const at = Date.parse(attrs.updated ?? '')
@@ -150,8 +172,8 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   // missing close must never reach past the next project or another agent's block.
   // Keep raw CR bytes in these lines so offsets preserve even mixed line endings.
   const lines = text.split('\n')
-  const found = scanBlocks(lines).filter(span => span.session === id)
-  if (found.length > 1) throw new Error('BLOCK_CONFLICT')
+  const found = localBlockSpans(lines, owner, agent, report.session)
+  if (found === null || found.length > 1) throw new Error('BLOCK_CONFLICT')
   const existing = found[0]
   // Append a section rather than reformat another writer's bytes.
   const append = (text: string): string => `${text}${text && !text.endsWith('\n') ? eol : ''}${eol}## ${report.project}${eol}${block}${eol}`
@@ -164,7 +186,7 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
     const end = offset(last) + (lines[last] ?? '').replace(/\r$/, '').length
     // Only a report that changes the project moves the block (#246). Any other write keeps
     // its place, so a block someone moved, or a heading the parser reads differently, stays.
-    const project = isProjectChanged ? parseProgress(text).find(project => project.tasks.some(task => task.auto?.session === id)) : undefined
+    const project = isProjectChanged ? parseProgress(`## ${existing.project}`)[0] : undefined
     // Compare names as the parser reads them: it drops a heading's trailing `#`.
     next = isProjectChanged && project?.name !== (parseProgress(`## ${report.project}`)[0]?.name ?? report.project)
       ? append(text.slice(0, offset(existing.start)) + text.slice(offset(last + 1)))
@@ -172,7 +194,7 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   } else {
     next = append(text)
   }
-  const visible = parseProgress(next).flatMap(project => project.tasks).filter(task => task.auto?.session === id && task.auto.agent === agent)
+  const visible = parseProgress(next).flatMap(project => project.tasks).filter(task => task.auto?.session === id && task.auto.agent === agent && (task.auto.resume ?? null) === (resume === '' ? null : report.session))
   if (visible.length !== 1) throw new Error('BLOCK_NOT_VISIBLE')
   return next
 }
@@ -180,9 +202,9 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
 export const dropCodexBlock = (text: string, owner: string): string => {
   if (!/^[a-f0-9]{64}$/.test(owner)) return text
   const lines = text.split('\n')
-  const spans = scanBlocks(lines).filter(span => span.session === owner.slice(0, 8))
-  const span = spans[0]
-  if (spans.length !== 1 || span === undefined) return text
+  const spans = localBlockSpans(lines, owner, 'codex')
+  const span = spans?.[0]
+  if (spans?.length !== 1 || span === undefined) return text
   const attrs = parseAttrs(lines[span.start] ?? '')
   if (attrs.owner !== owner || attrs.agent !== 'codex') return text
   // Like removeAutoBlock, an unfinished block loses only its marker. Slice the

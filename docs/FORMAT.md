@@ -164,7 +164,7 @@ An attribute is `name=value`, where the name is letters, digits, `_` or `-`, and
 
 | Attribute | Writers must give it | Value and effect |
 |---|---|---|
-| `session` | Yes. The parser needs only this one. | Identifies the block. Any text without whitespace; use 8 characters, `[0-9a-f]`, and use the same id for the end marker and for every rewrite. Two blocks must not share an id. The pane names it when it tells the person where to answer a `[?]` step, and for `agent=claude` offers it to copy (when there is no `resume`) only if it is a plain id: 6 to 64 letters, digits, dashes and underscores, starting with a letter or a digit. |
+| `session` | Yes. The parser needs only this one. | Identifies the block. Any text without whitespace; use 8 characters, `[0-9a-f]`, and use the same id for the end marker and for every rewrite. Hand-written blocks must not share an id. Independent local reports may share a hash prefix only with distinct full native bindings and matching full owner digests; the prefix alone never selects a block for a rewrite. The pane names it when it tells the person where to answer a `[?]` step, and for `agent=claude` offers it to copy (when there is no `resume`) only if it is a plain id: 6 to 64 letters, digits, dashes and underscores, starting with a letter or a digit. |
 | `agent` | Yes | Name of the agent in lower case: `claude`, `codex`, `gemini`, `cursor`, `aider`, `continue`, or your own. If missing: `claude`. For every agent but `claude` the pane shows the name beside the block's project and questions, words a working block as `<agent> is working` (zh-TW: `<agent> 正在做`) instead of `Claude is working`, and tells the person to answer a `[?]` step in that agent's session (`Reply in the "<task>" session (<session>, <agent>)`). |
 | `state` | Yes | `working`, `waiting`, `done` or `ended`; see [States](#states). If missing or not one of these: `waiting`. |
 | `updated` | Yes | When the block was last written, ISO 8601, read with `Date.parse`. Write UTC with a trailing `Z`, for example `2026-10-16T14:32:05Z`. A time with no zone is read as the local time of the machine running the pane; a date alone (`2026-10-16`) as midnight UTC. If missing or unreadable the block's age is unknown: ordinary age rules never show it as stopped or archive it, whatever its end marker and state (a `done` block with no readable time is not listed as recently finished either), so it stays in the file until someone removes it. Always write it. A closed Codex run can still be archived when its exact session history proves its origin. |
@@ -182,7 +182,7 @@ validated full native id in `resume`. Live receivers match that full id and agen
 not the hash prefix or a task title. This identifies the report; it does not register
 a receiving connection or prove that lifecycle hooks ran. The reporter adds no `dir`
 or permission to start another process. Ordinary hand-written agent blocks still
-leave these local bindings to the host integration.
+leave these local bindings to the host integration. The local writer checks each same-prefix block: a peer with a different full owner must have a valid native `resume`, an `agent`, and an `owner` equal to SHA-256 of that binding, with the same prefix. It preserves that peer unchanged. Missing or contradictory ownership and multiple copies of the current owner are refused without saving the report. Completion adoption and run withdrawal select the same exact owner; this is collision protection, not authentication.
 
 ### Body
 
