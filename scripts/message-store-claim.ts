@@ -95,3 +95,21 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
     throw error
   }
 }
+
+export const hasLiveClaims = (directory: string): boolean => {
+  try {
+    const root = resolve(directory)
+    const names = readdirSync(root).filter(one => one.startsWith(PREFIX))
+    for (const other of names) {
+      const match = /^\.message-claim-([1-9][0-9]*)-[a-f0-9]{32}\.json$/.exec(other)
+      if (!match) continue
+      try {
+        process.kill(Number(match[1]), 0)
+        return true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return true
+      }
+    }
+  } catch {}
+  return false
+}

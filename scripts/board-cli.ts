@@ -18,7 +18,7 @@ import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, co
 import type { ConfirmedTask } from '../hooks/blocks'
 import { startServer } from './board-serve'
 import { moveLockAside } from './board-messaging'
-import { claimMessageStore } from './message-store-claim'
+import { claimMessageStore, hasLiveClaims } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -1488,6 +1488,9 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
       if (storeCode !== 'MESSAGE_STORE_IN_USE' && (process.platform !== 'win32' || !existsSync(file))) break
       await new Promise(done => setTimeout(done, storeCode === 'MESSAGE_STORE_IN_USE' ? 200 : 50))
     }
+    if (held === '' && attempt === 0 && storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
+      try { held = readFileSync(lock, 'utf8') } catch { held = '' }
+    }
     // A hub killed without stopping leaves its pid, and after a restart that number can belong to
     // another program. The hub of the default folder leaves its address beside the lock, so the
     // lock is moved only when that address no longer answers. A hub still starting has no address
@@ -1513,6 +1516,11 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
       // It may be gone because its hub stopped meanwhile; another --serve's page may still be starting.
       // The next try waits for that page; the same pid (put back, or never moved) is not tried again.
       if (isMoved || isTaken(lock, held)) continue
+    } else if (attempt === 0 && storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
+      if (!existsSync(lock) && !hasLiveClaims(messagesDirectory())) {
+        await new Promise(done => setTimeout(done, Math.floor(Math.random() * 150) + 50))
+        continue
+      }
     }
     if (failure !== undefined && storeCode !== undefined) failure.storeCode = storeCode
     return null

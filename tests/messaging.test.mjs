@@ -2174,6 +2174,9 @@ test('an existing card sends only to its exact live receiver and preserves mark 
   assert.equal(ask.send, 'connected'); assert.equal(ask.canHide, offline.canHide)
   assert.equal(ask.session, thread); assert.equal(ask.delivery.id, connected.id)
   assert.equal(ask.info, '') // Internal binding metadata is not user-facing copy.
+  const staleSend = await board.call('/api/act', { key: ask.key, type: 'send', text: input.text, session: ask.session, asked: ask.text, fp: ask.fp })
+  assert.equal(staleSend.status, 409)
+  assert.equal(staleSend.body.note, EN.boardLineChanged)
   const request = { key: ask.key, type: 'message', id: 'AB-TEST-001', text: input.text, session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn }
   for (const wrong of [{ connection: 'wrong-session' }, { turn: 'stale-turn' }, { session: 'another-session' }, { fp: 'changed-line' }]) assert.equal((await board.call('/api/act', { ...request, ...wrong })).status, 409)
   assert.equal((await board.call('/api/act', request)).status, 200)

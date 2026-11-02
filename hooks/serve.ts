@@ -585,6 +585,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
     if (isLan || !connected || connected.id !== request.connection || connected.turn !== request.turn || connected.session !== request.session || (request.asked ?? '') !== question || !text) return { type: 'refuse', note: s.messagesFailed }
     return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title }
   }
+  if (connected) return { type: 'refuse', note: s.boardLineChanged }
   if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }
   if (isLan) return { type: 'refuse', note: s.serveLanSend(agentLabel(agent || 'claude', s)) }
   // A closed progress record is not a live receiver. Resuming a saved session is a

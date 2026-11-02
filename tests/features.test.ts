@@ -3305,6 +3305,9 @@ test('a press on the page is worked out from the file as it is now: a line that 
   expect(resumeAction(items, { key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Which port?' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   expect(resumeAction(items, { key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   expect(resumeAction(items, { key: 'row:gone', type: 'tick', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  // A stale send on a row where a receiver has connected is refused rather than launching a native process.
+  const grokConnected = [{ id: 'c1', agent: 'grok', session: GROK.resume, surface: 'Grok CLI', turn: 't1', expires: Date.now() + 60000 }]
+  expect(serveAction(items, { key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked, fp: fpIn(items, grok) }, STRINGS.en, false, grokConnected, true, true)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   // An open Codex session is answered in its own window.
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
   expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('Codex') })
