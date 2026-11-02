@@ -72,7 +72,7 @@ export const ZH_TW = {
   codexTrustApplied: (n: number): string => `Codex：已信任看板的 ${n} 個 hooks。開始新的 Codex 工作階段。`,
   codexTrustNone: 'Codex：看板的 hooks 已受信任。開始新的 Codex 工作階段。',
   codexPrivacy: '只保留 session、turn、狀態及明確回報的任務摘要；不讀對話紀錄，不保存 hook 的 prompt、工具輸入或回覆，不傳送給其他模型。',
-  codexDoctor: '檢查檔案與 hook 定義，不能證明 hooks 已獲信任或實際觸發；仍須在 CLI 和桌面版分別驗收。',
+  codexDoctor: '檢查檔案、hook 定義與 hook 信任狀態，不能證明實際觸發；仍須在 CLI 和桌面版分別驗收。',
   setupSummary: {
     "preview": "將更新 {count} 個設定檔案",
     "applied": "已更新 {count} 個設定檔案",

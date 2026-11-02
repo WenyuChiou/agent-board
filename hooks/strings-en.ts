@@ -34,7 +34,7 @@ export const EN: Strings = {
   codexTrustApplied: (n: number): string => `Codex: trusted the board's ${n} hooks. Start a new Codex session.`,
   codexTrustNone: "Codex: the board's hooks are already trusted. Start a new Codex session.",
   codexPrivacy: 'Keeps only session, turn, state and explicit task summaries. Never reads transcripts, stores hook prompts, tool inputs or replies, or sends content to another model.',
-  codexDoctor: 'Checks files and hook definitions, not hook trust or execution. Verify CLI and desktop separately.',
+  codexDoctor: 'Checks files, hook definitions and hook trust, not hook execution. Verify CLI and desktop separately.',
   setupSummary: {
     "preview": "would update {count} setup files",
     "applied": "updated {count} setup files",

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr,
   isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
-  privateData, report, reportMarkdown, reviewOf, sections, stripComments, testTitles, titleKnown, verdict,
+  privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -396,6 +396,41 @@ test('pr-check finds a session id, a home-folder path and a token link in added 
   }
 })
 
+test('pr-check finds an email address in added docs and the body, but not git, noreply or example addresses', () => {
+  // An address inside a link counts as much as one on its own, in the body or in added docs.
+  for (const value of ['Contact private.synthetic@gmail.com', 'mailto:synthetic.person@university.edu', 'https://forms.example.org/x?to=private.synthetic@gmail.com', 'https://host.example.org/people/synthetic.person@university.edu/']) {
+    const checked = privateData({ added: [{ path: 'docs/validation/synthetic-usersim.md', line: 3, text: value }], body: '' })
+    assert.equal(checked.problems.length, 1, value)
+    assert.match(checked.problems[0].message, /email address in docs\/validation\/synthetic-usersim\.md line 3/)
+    assert.equal(report(checked, 'synthetic').includes('private.synthetic'), false)
+  }
+  assert.equal(privateData({ added: [], body: 'See https://forms.example.org/x?to=private.synthetic@gmail.com' }).problems.length, 1)
+  for (const value of ['git@github.com:WenyuChiou/agent-board.git', 'Co-Authored-By: Synthetic <noreply@anthropic.com>', '12345+octocat@users.noreply.github.com', 'name@example.com', 'synthetic@example.invalid', 'npx @wenyuchiou/agent-board@next', 'claude plugin install agent-board@agent-board', 'react@18.3.1', 'https://synthetic@host.invalid/x']) {
+    assert.equal(privateData({ added: [], body: value }).problems.length, 0, value)
+  }
+})
+
+test('pr-check asks for the rules page when CONTRIBUTING.md, team-process.md or RELEASING.md changes', () => {
+  for (const path of ['CONTRIBUTING.md', 'docs/dev/team-process.md', 'docs/RELEASING.md']) {
+    const checked = rulesPage({ paths: [path, 'tests/x.test.mjs'], body: '' })
+    assert.equal(checked.problems.length, 1, path)
+    assert.equal(checked.problems[0].check, 'rules-page')
+    assert.equal(rulesPage({ paths: [path, 'docs/dev/RULES.md'], body: '' }).problems.length, 0)
+    assert.equal(rulesPage({ paths: [path], body: 'Rules page: unchanged, only a typo in an example.' }).problems.length, 0)
+    // A reason inside a template comment, or with no words after the comma, does not count.
+    assert.equal(rulesPage({ paths: [path], body: '<!-- Rules page: unchanged, reason -->' }).problems.length, 1)
+    assert.equal(rulesPage({ paths: [path], body: 'Rules page: unchanged, ' }).problems.length, 1)
+  }
+  assert.equal(rulesPage({ paths: ['README.md', 'docs/GUIDE.md'], body: '' }).problems.length, 0)
+  // Deleting or renaming the rules page away does not count as changing it.
+  const without = ['CONTRIBUTING.md', 'README.md']
+  assert.match(rulesPage({ paths: ['CONTRIBUTING.md', 'docs/dev/RULES.md'], body: '', headPaths: new Set(without) }).problems[0].message, /not in the head/)
+  assert.match(rulesPage({ paths: ['CONTRIBUTING.md', 'docs/dev/RULES.md', 'docs/dev/OLD-RULES.md'], body: '', headPaths: new Set([...without, 'docs/dev/OLD-RULES.md']) }).problems[0].message, /not in the head/)
+  assert.equal(rulesPage({ paths: ['CONTRIBUTING.md'], body: 'Rules page: unchanged, a typo.', headPaths: new Set(without) }).problems.length, 1)
+  assert.equal(rulesPage({ paths: ['CONTRIBUTING.md', 'docs/dev/RULES.md'], body: '', headPaths: new Set([...without, 'docs/dev/RULES.md']) }).problems.length, 0)
+  assert.equal(checkPr({ ...syntheticPr(), paths: ['CONTRIBUTING.md'], changedPaths: ['CONTRIBUTING.md'] }).problems.some(item => item.check === 'rules-page'), true)
+})
+
 test('pr-check requires synthetic alt text for images in the body', () => {
   for (const text of ['![Board](example.svg)', '<img src="example.svg">', '<img alt="Board" src="example.svg">', '<img data-alt="Synthetic board" src="example.svg">', '<img title=\' alt="Synthetic"\'>']) {
     assert.equal(privateData({ added: [], body: text }).problems.length, 1)
@@ -619,6 +654,73 @@ test('pr-check checks CI event commits even when another branch is checked out a
   assert.match(execution.stdout, /info draft:/)
   assert.match(execution.stdout, /info bundle: checked by test\.yml/)
   assert.match(execution.stdout, /^::stop-commands::([0-9a-f]{32})\r?\n[\s\S]*\r?\n::\1::\r?\n$/)
+})
+
+test('pr-check treats an edited merged pull request as archived metadata instead of rejecting its closed issue', async t => {
+  const setup = fixture(t)
+  const args = eventArgs(setup, 'COLLABORATOR')
+  const path = join(setup.directory, 'event.json')
+  const event = JSON.parse(readFileSync(path, 'utf8'))
+  event.action = 'edited'
+  event.pull_request.state = 'closed'
+  event.pull_request.merged = true
+  setup.put('event.json', JSON.stringify(event))
+  const calls = []
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async url => {
+    calls.push(url.pathname)
+    const payload = url.pathname.endsWith('/issues/42') ? { state: 'closed' } : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  const checked = await runMain(args, apiEnv)
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr)
+  assert.match(checked.stdout, /not run: the pull request is already merged/)
+  assert.equal(checked.stdout.includes('all checks passed'), false)
+  assert.deepEqual(calls, [])
+})
+
+test('pr-check still rejects private data in an edited merged pull request body', async t => {
+  const setup = fixture(t)
+  const args = eventArgs(setup, 'COLLABORATOR')
+  const event = JSON.parse(readFileSync(join(setup.directory, 'event.json'), 'utf8'))
+  event.action = 'edited'
+  event.pull_request = { ...event.pull_request, state: 'closed', merged: true, body: body + '\nPrivate path: /home/synthetic/private/progress.md\n' }
+  setup.put('event.json', JSON.stringify(event))
+  const checked = await runMain(args, apiEnv)
+  assert.equal(checked.status, 1, checked.stdout + checked.stderr)
+  assert.match(checked.stdout, /FAIL private-data/)
+  assert.equal(checked.stdout.includes('/home/synthetic/private'), false)
+})
+
+test('pr-check still rejects closed or missing issues unless the event is both closed and merged', async t => {
+  const setup = fixture(t)
+  const args = eventArgs(setup, 'COLLABORATOR')
+  const originalEvent = JSON.parse(readFileSync(join(setup.directory, 'event.json'), 'utf8'))
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  for (const lifecycle of [
+    { state: 'open', merged: false },
+    { state: 'closed', merged: false },
+    { state: 'open', merged: true },
+    { state: 'closed', merged: 'true' },
+    { state: 'closed' },
+  ]) {
+    for (const isMissing of [false, true]) {
+      setup.put('event.json', JSON.stringify({ ...originalEvent, action: 'edited', pull_request: { ...originalEvent.pull_request, ...lifecycle } }))
+      const calls = []
+      globalThis.fetch = async url => {
+        calls.push(url.pathname)
+        const isIssue = url.pathname.endsWith('/issues/42')
+        return { ok: !(isIssue && isMissing), status: isIssue && isMissing ? 404 : 200, json: async () => isIssue ? { state: 'closed' } : [], headers: new Headers() }
+      }
+      const checked = await runMain(args, apiEnv)
+      assert.equal(checked.status, 1, JSON.stringify(lifecycle) + checked.stdout + checked.stderr)
+      assert.match(checked.stdout, isMissing ? /#42 does not exist/ : /#42 must be an open issue/)
+      assert.ok(calls.some(path => path.endsWith('/issues/42')))
+      assert.equal(checked.stdout.includes('not run: the pull request is already merged'), false)
+    }
+  }
 })
 
 test('pr-check leaves the bundle to CI in a checkout that converts line endings', async t => {
@@ -1004,7 +1106,8 @@ test('pr-check only notes, and does not fail, a large or governance-touching out
   // A change to a file the maintainer looks at first is noted by name and still passes.
   for (const path of ['AGENTS.md', 'CONTRIBUTING.md', '.github/workflows/test.yml', 'package.json', '.claude-plugin/plugin.json']) {
     const checked = checkPr(outsidePr({ paths: [...syntheticPr().paths, path] }))
-    assert.deepEqual(checked.problems, [], path)
+    // CONTRIBUTING.md also asks for the rules page (docs/dev/RULES.md, R5), which is a check of its own.
+    assert.deepEqual(checked.problems.filter(item => item.check !== 'rules-page'), [], path)
     assert.ok(checked.info.some(line => line.startsWith('outside note:') && line.includes(path) && /ask on the issue first/.test(line)), path)
   }
   assert.deepEqual(notes(outsidePr({ paths: [...syntheticPr().paths, 'docs/CONTRIBUTOR-PATH.md', 'scripts/pr-check.mjs', 'hooks/pane.tsx'] })), [])
@@ -1026,6 +1129,15 @@ test('pr-check only notes, and does not fail, a large or governance-touching out
   assert.equal(execution.status, 0, execution.stdout + execution.stderr)
   // 501 lines of the new page and 2 of the fixture's CHANGELOG entry, in three files; the generated bundle and its parts are left out.
   assert.match(execution.stdout, /info outside note: 503 changed lines in 3 files/)
+})
+
+test('pr-check notes an outside change to the team process page like any other governance file', () => {
+  const checked = checkPr(outsidePr({ paths: [...syntheticPr().paths, 'docs/dev/team-process.md'] }))
+  // The page also asks for the rules page (docs/dev/RULES.md, R5), which is a check of its own.
+  assert.deepEqual(checked.problems.filter(item => item.check !== 'rules-page'), [])
+  assert.ok(checked.info.some(line => line.startsWith('outside note:') && line.includes('docs/dev/team-process.md') && /ask on the issue first/.test(line)))
+  // The team's own change to the page is not noted.
+  assert.deepEqual(checkPr({ ...outsidePr({ paths: [...syntheticPr().paths, 'docs/dev/team-process.md'] }), association: 'OWNER' }).info.filter(line => line.startsWith('outside note:')), [])
 })
 
 // A local run that does not know the author says the claim and the cap were not checked, rather than pass them silently.

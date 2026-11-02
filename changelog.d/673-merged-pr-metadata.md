@@ -1,0 +1,2 @@
+- **CI / Merged pull request updates** · Updating evidence on an already merged pull request no longer rejects issues closed by that merge. Active contributions still require open, valid issues, and public-body privacy checks remain enforced after merge (#673).
+  Tests: `pr-check treats an edited merged pull request as archived metadata instead of rejecting its closed issue`, `pr-check still rejects closed or missing issues unless the event is both closed and merged`, `pr-check still rejects private data in an edited merged pull request body`.

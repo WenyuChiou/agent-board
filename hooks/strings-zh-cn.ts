@@ -34,7 +34,7 @@ export const ZH_CN: Strings = {
   codexTrustApplied: (n: number): string => `Codex：已信任看板的 ${n} 个 hooks。开始新的 Codex 会话。`,
   codexTrustNone: 'Codex：看板的 hooks 已受信任。开始新的 Codex 会话。',
   codexPrivacy: '只保留 session、turn、状态及明确报告的任务摘要；不读对话记录，不保存 hook 的 prompt、工具输入或回复，不发送给其他模型。',
-  codexDoctor: '检查文件与 hook 定义，不能证明 hooks 已获信任或实际触发；仍须在 CLI 和桌面版分别验收。',
+  codexDoctor: '检查文件、hook 定义与 hook 信任状态，不能证明实际触发；仍须在 CLI 和桌面版分别验收。',
   setupSummary: {
     "preview": "将更新 {count} 个设置文件",
     "applied": "已更新 {count} 个设置文件",

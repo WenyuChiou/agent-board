@@ -458,7 +458,8 @@ export const outsideIssue = (issueData, number) => {
 
 // Changelog fragments and the generated files (the board bundle and its parts, the release table) are not the author's lines to review.
 const isGeneratedPath = path => path.startsWith('changelog.d/') || isBundleFile(path) || path === 'hooks/released.ts'
-const isOutsideGovernance = path => path === 'AGENTS.md' || path === 'CONTRIBUTING.md' || path === 'package.json' || path.startsWith('.github/') || path.startsWith('.claude-plugin/')
+// team-process.md holds the sections CONTRIBUTING rule 12 calls governance (From claim to merge, Standing approvals).
+const isOutsideGovernance = path => path === 'AGENTS.md' || path === 'CONTRIBUTING.md' || path === 'docs/dev/team-process.md' || path === 'package.json' || path.startsWith('.github/') || path.startsWith('.claude-plugin/')
 
 // Notes for the reviewer, never a failure: a large change, and a change to a file the maintainer looks at first.
 // numstat: { path, added, deleted } for each changed file; without it the size is not judged.
@@ -488,6 +489,10 @@ const tokenPatterns = [
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
 ]
+// An email address names a person (docs/dev/RULES.md, R8); git@, noreply addresses and the reserved example domains do not.
+const emailPattern = /\b([A-Za-z0-9._%+-]+)@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b/g
+const isPlaceholderEmail = ([, local, domain]) => /^(?:git|no-?reply)$/i.test(local) || /^no-?reply\b/i.test(local) ||
+  /(?:^|\.)(?:example\.(?:com|org|net)|example|invalid|test|localhost)$/i.test(domain) || /(?:^|\.)users\.noreply\.github\.com$/i.test(domain)
 const uuidPattern = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
 const homePattern = /(?:[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}|\/(?:Users|home)\/)([^\\/\s"'`]+)/gi
 // A web address, such as https://github.com/users/<name>, is not a home folder; file:///home/…,
@@ -519,6 +524,10 @@ export const privateData = ({ added, body }) => {
     if (tokenPatterns.some(pattern => [...text.matchAll(pattern)].length > 0)) {
       add('token or token link', 'remove it, and revoke the token if it was real.')
     }
+    // Addresses inside a link count too: a link can carry one in its path or query.
+    if ([...text.matchAll(emailPattern)].some(match => !isPlaceholderEmail(match))) {
+      add('email address', 'use a GitHub login or a placeholder such as name@example.com; this repository is public (docs/dev/RULES.md, R8).')
+    }
     if (path && /\.svg$/i.test(path) && /data:image\/(png|jpe?g|gif|webp)/i.test(text)) {
       add('embedded bitmap image', 'draw the SVG from synthetic data with docs/preview/render.ts instead.')
     }
@@ -532,6 +541,28 @@ export const privateData = ({ added, body }) => {
       output.problems.push(problem('private-data', `image without synthetic alt text in body line ${line}.`, imageFix))
     }
   }
+  return output
+}
+
+// docs/dev/RULES.md is the one-page summary of these three files (its R5): a change to one of them changes it too,
+// or the body says why not.
+const rulesSources = ['CONTRIBUTING.md', 'docs/dev/team-process.md', 'docs/RELEASING.md']
+export const rulesPage = ({ paths = [], body = '', headPaths }) => {
+  const output = result()
+  const changed = paths.filter(path => rulesSources.includes(path))
+  if (!changed.length) return output
+  // A deleted or renamed-away page is not a changed one; headPaths is unknown only where the tree cannot be listed.
+  const isPresent = headPaths === undefined || headPaths === null || [...headPaths].includes('docs/dev/RULES.md')
+  if (!isPresent) {
+    output.problems.push(problem('rules-page', `${changed.join(', ')} changed, and docs/dev/RULES.md is not in the head.`, 'keep docs/dev/RULES.md, changed to match (docs/dev/RULES.md, R5).'))
+    return output
+  }
+  if (paths.includes('docs/dev/RULES.md')) return output
+  if (linesOf(stripComments(body)).some(line => /^\s*Rules page: unchanged, \S/.test(line))) {
+    output.info.push('rules page: unchanged, with a reason in the body.')
+    return output
+  }
+  output.problems.push(problem('rules-page', `${changed.join(', ')} changed, but docs/dev/RULES.md did not.`, 'change docs/dev/RULES.md to match, or add a body line "Rules page: unchanged, <reason>" (docs/dev/RULES.md, R5).'))
   return output
 }
 
@@ -581,6 +612,7 @@ export const checkPr = data => {
   add(sections(data.body, data.template))
   add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, issues: issue.issues, titles: testTitles(data.testFiles), isRelease, isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) }))
   add(privateData({ added: data.added, body: data.body }))
+  add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
   if (issue.issue !== null) {
     // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
@@ -786,6 +818,16 @@ export const main = async (argv = process.argv.slice(2)) => {
       const event = readJson(readText(resolve(options['--event'])))
       const pr = event.pull_request
       if (!pr || !event.repository) throw new Error('event must contain pull_request and repository metadata.')
+      // Merged metadata cannot enter the merge queue again, but its public body still needs privacy checks.
+      if (pr.state === 'closed' && pr.merged === true) {
+        const checked = privateData({ added: [], body: pr.body ?? '' })
+        if (checked.problems.length) {
+          console.log(report(checked, 'merged pull request metadata'))
+          return 1
+        }
+        console.log('pr-check: contribution checks not run: the pull request is already merged; metadata privacy check passed.')
+        return 0
+      }
       repo = event.repository.full_name
       // author_association and user.login are in the event's pull_request; both stay undefined when it has none.
       data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.head?.ref, head: pr.head?.sha, isDraft: pr.draft, labels: pr.labels, association: pr.author_association, login: pr.user?.login }

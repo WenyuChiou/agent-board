@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test } from 'node:test'
@@ -59,17 +59,42 @@ test('native cleanup diagnostics allowlist unknown fields and missing markers', 
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
+const withoutCodexOnPath = pathValue => {
+  if (!pathValue) return ''
+  return pathValue
+    .split(delimiter)
+    .filter(dir => {
+      if (!dir) return false
+      try {
+        return !existsSync(join(dir, 'codex.exe')) && !existsSync(join(dir, 'codex')) && !existsSync(join(dir, 'codex.cmd'))
+      } catch {
+        return true
+      }
+    })
+    .join(delimiter)
+}
 // A runner may set XDG/host overrides. No synthetic home may inherit those and
 // write into another test or the account's actual native configuration.
-const isolatedEnv = home => ({
-  ...process.env, HOME: home, USERPROFILE: home,
-  LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
-  LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
-  CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
-  CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
-  XDG_CONFIG_HOME: join(home, '.config'), OPENCODE_CONFIG_DIR: join(home, '.config', 'opencode'),
-  OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
-})
+const isolatedEnv = home => {
+  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  const originalPath = process.env[pathKey] ?? ''
+  const cleanPath = withoutCodexOnPath(originalPath)
+  const env = {
+    ...process.env,
+    HOME: home, USERPROFILE: home,
+    LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
+    LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
+    CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
+    CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
+    XDG_CONFIG_HOME: join(home, '.config'), OPENCODE_CONFIG_DIR: join(home, '.config', 'opencode'),
+    OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
+  }
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === 'path') delete env[key]
+  }
+  env[pathKey] = cleanPath
+  return env
+}
 // A synchronous timeout kills cmd alone on Windows, leaving PowerShell/Node writing into
 // the fixture during cleanup. Wait for closed stdio and terminate only this owned tree.
 const stopNativeTree = child => {
@@ -147,6 +172,7 @@ const importTs = async path => {
   } })
   try { return await import(path) } finally { resolver.deregister() }
 }
+const launchOf = command => Buffer.from(command.split(' ').at(-1), 'base64').toString('utf16le')
 const turnOf = f => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`codex:${session}`).digest('hex') + '.json'))).turn
 
 const hookLog = f => existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(join(f.root, 'hook-errors.log'), 'utf8') : ''
@@ -912,7 +938,7 @@ test('Codex-only setup initializes the board and skill without Claude and is ide
   assert.deepEqual(JSON.parse(again.stdout).changes, [])
   const doctor = f.command(['--codex-doctor', '--home', f.home])
   assert.equal(JSON.parse(doctor.stdout).ready, true, doctor.stdout)
-  assert.equal(JSON.parse(doctor.stdout).hooksTrusted, 'unknown')
+  assert.equal(JSON.parse(doctor.stdout).hooksTrusted, false)
 }))
 
 test('on Windows the generated Codex hook command runs through PowerShell and through cmd, with spaces in the worker and progress paths', { skip: process.platform !== 'win32' && 'Windows shells only' }, () => fixture(async f => {
@@ -934,6 +960,8 @@ test('on Windows a Codex hook command for a Node path with no quote-free name ru
   const argv = hookCommandArgs(process.execPath, f.home, 'codex', join(f.root, 'agent-board-hook.mjs'), f.progress, 'UserPromptSubmit')
   const command = windowsHookCommand(argv, value => `"${value}"`, undefined)
   assert.match(command, /^powershell\.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/]+=*$/)
+  // The launch hands on its own start time, as the Antigravity one does (#625).
+  assert.match(launchOf(command), /' --hook-started \(\[DateTimeOffset\]::new\(\[Diagnostics\.Process\]::GetCurrentProcess\(\)\.StartTime\)\.ToUnixTimeMilliseconds\(\)\); exit \$LASTEXITCODE$/)
   for (const [shell, fire] of [['PowerShell', firePowerShell], ['cmd', fireCommand]]) {
     const turn = `encoded-${shell.toLowerCase()}-turn`
     const result = await fire(f, command, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: turn }))
@@ -941,6 +969,67 @@ test('on Windows a Codex hook command for a Node path with no quote-free name ru
     assert.equal(turnOf(f), turn, shell)
   }
   assert.throws(() => windowsHookCommand(argv, value => `"${value}"`, 'C:\\Program Files\\nodejs\\node.exe'), /UNSAFE_HOOK_EXECUTABLE/)
+}))
+
+test('on Windows a Codex hook command whose paths hold curly quotes runs from PowerShell and cmd', { skip: process.platform !== 'win32' && 'Windows shells only' }, () => fixture(async f => {
+  const { hookCommandArgs, windowsHookCommand } = await importTs('../hooks/local-agents.ts')
+  assert.equal(f.install('--apply').status, 0)
+  const safeNode = /^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i.test(process.execPath) ? process.execPath : 'C:\\Windows\\node.exe'
+  // PowerShell reads ’ as a single quote and ” as a double quote.
+  for (const [mark, node] of [['\u2019', undefined], ['\u201D', safeNode]]) {
+    const folder = join(f.home, `it${mark}s`)
+    mkdirSync(folder)
+    const argv = hookCommandArgs(process.execPath, f.home, 'codex', join(f.root, 'agent-board-hook.mjs'), join(folder, 'progress.md'), 'UserPromptSubmit')
+    const command = windowsHookCommand(argv, value => `"${value}"`, node)
+    assert.match(command, /^powershell\.exe .* -EncodedCommand /, mark)
+    for (const [shell, fire] of [['PowerShell', firePowerShell], ['cmd', fireCommand]]) {
+      const turn = `quote-${mark.charCodeAt(0).toString(16)}-${shell.toLowerCase()}-turn`
+      const result = await fire(f, command, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: turn }))
+      assert.equal(result.status, 0, `${shell}: ${hookFailure(result)}`)
+      assert.equal(turnOf(f), turn, `${shell} ${mark}`)
+    }
+  }
+}))
+
+test('sharing the encoded launch with Codex leaves the Antigravity command the same bytes', async () => {
+  const { antigravityCommand, hookCommandArgs } = await importTs('../hooks/local-agents.ts')
+  const quote = value => `"${value}"`
+  const argv = hookCommandArgs('C:\\Program Files\\nodejs\\node.exe', 'C:\\Users\\Ann O\'Neil', 'antigravity', 'C:\\Users\\Ann O\'Neil\\.agent-board\\agent-board-hook.mjs', 'C:\\Users\\Ann O\'Neil\\.agent-board\\progress.md', 'SessionStart', 'working')
+  // What 0.24.1 wrote, spelled out here so a change to the shared launch shows.
+  const single = value => "'" + value.split("'").join("''") + "'"
+  const launch = '& ' + argv.map(single).join(' ') + ' --hook-started ([DateTimeOffset]::new([Diagnostics.Process]::GetCurrentProcess().StartTime).ToUnixTimeMilliseconds()); exit $LASTEXITCODE'
+  assert.equal(antigravityCommand(argv, true, quote, undefined), `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(launch, 'utf16le').toString('base64')}`)
+  assert.equal(antigravityCommand(argv, false, quote, undefined), argv.map(quote).join(' '))
+})
+
+test('on Windows setup keeps the Node program it wrote last time when the short-name probe cannot run', { skip: process.platform !== 'win32' && 'Windows only' }, () => fixture(async f => {
+  const { windowsHookNode } = await importTs('../scripts/windows-hook-node.ts')
+  const spaced = join(f.home, 'node runtime', 'node.exe')
+  mkdirSync(dirname(spaced))
+  try { linkSync(process.execPath, spaced) } catch { copyFileSync(process.execPath, spaced) }
+  const short = windowsHookNode(spaced)
+  // A volume with 8.3 names turned off has nothing to keep.
+  if (short === undefined) return
+  const other = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'where.exe')
+  const missing = join(f.home, 'missing', 'cmd.exe')
+  const comSpec = process.env.ComSpec
+  process.env.ComSpec = missing
+  try {
+    // Without the last install, a probe that cannot run leaves the encoded launch.
+    assert.equal(windowsHookNode(spaced), undefined)
+    assert.equal(windowsHookNode(spaced, [`${short} "--input-type=commonjs" "-e" "x"`]), short)
+    // A program that is another file, or a command of another form, is not kept.
+    assert.equal(windowsHookNode(spaced, [`${other} "--input-type=commonjs"`, 'powershell.exe -NoLogo -EncodedCommand AAAA']), undefined)
+  } finally { process.env.ComSpec = comSpec }
+  // Setup on that Node, then again with the probe failing: Codex keeps trusting the same commands.
+  const install = env => spawnSync(spaced, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+  const first = install(f.env)
+  assert.equal(first.status, 0, first.stderr)
+  const written = readFileSync(f.hooks, 'utf8')
+  assert.ok(written.includes(JSON.stringify(short).slice(1, -1)), 'the first install starts Node by its short name')
+  const again = install({ ...f.env, ComSpec: missing })
+  assert.equal(again.status, 0, again.stderr)
+  assert.equal(readFileSync(f.hooks, 'utf8'), written)
 }))
 
 test('setup replaces a Codex hook command an earlier release wrote with every word quoted, without the person removing it', () => fixture(async f => {
@@ -2353,6 +2442,91 @@ test('the installed Codex host grants only six reviewed hashes and preserves unr
   const doctor = f.command(['--codex-doctor', '--codex-bin', executable])
   assert.equal(JSON.parse(doctor.stdout).hooksTrusted, true, doctor.stderr)
   assert.equal(JSON.parse(doctor.stdout).connected, 'unverified')
+}))
+
+test('--codex-doctor auto-discovers Codex on PATH and verifies hook trust', { skip: process.platform === 'win32' && 'Windows discovery requires native .exe' }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const config = join(f.home, '.codex', 'config.toml')
+  const hooksJson = join(f.home, '.codex', 'hooks.json')
+  const binDir = join(f.home, 'bin')
+  mkdirSync(binDir, { recursive: true })
+  const mockCodex = join(binDir, 'codex')
+
+  const hooksManifest = JSON.parse(readFileSync(hooksJson, 'utf8'))
+  const expectedHooks = Object.entries(hooksManifest.hooks).map(([event, list]) => ({
+    event: event[0].toLowerCase() + event.slice(1),
+    command: list[0].hooks[0].command,
+  }))
+
+  const stateFile = join(f.home, 'mock-codex-state.json')
+  writeFileSync(stateFile, JSON.stringify({ trusted: true }))
+
+  const mockServerScript = `#!/usr/bin/env node
+const fs = require('fs');
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', line => {
+  try {
+    const msg = JSON.parse(line);
+    if (msg.method === 'initialize') {
+      process.stdout.write(JSON.stringify({ id: msg.id, result: { capabilities: {} } }) + '\\n');
+    } else if (msg.method === 'hooks/list') {
+      const state = JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}, 'utf8'));
+      const expected = ${JSON.stringify(expectedHooks)};
+      const hooks = expected.map((item, i) => ({
+        sourcePath: ${JSON.stringify(hooksJson)},
+        eventName: item.event,
+        command: item.command,
+        key: 'hook-' + i,
+        enabled: true,
+        currentHash: 'sha256:' + 'a'.repeat(64),
+        trustStatus: state.trusted ? 'trusted' : 'untrusted'
+      }));
+      process.stdout.write(JSON.stringify({ id: msg.id, result: { data: [{ hooks, errors: [] }] } }) + '\\n');
+    }
+  } catch {}
+});
+`
+  writeFileSync(mockCodex, mockServerScript, { mode: 0o755 })
+
+  const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  const withBinOnPath = { [pathKey]: [binDir, f.env[pathKey]].filter(Boolean).join(delimiter) }
+
+  // Auto-discovery finds mock codex on PATH and verifies matching trust
+  const discovered = f.command(['--codex-doctor'], undefined, withBinOnPath)
+  assert.equal(discovered.status, 0, discovered.stderr)
+  assert.equal(JSON.parse(discovered.stdout).hooksTrusted, true, discovered.stderr)
+
+  // Untrusted hooks report hooksTrusted: false
+  writeFileSync(stateFile, JSON.stringify({ trusted: false }))
+  const untrusted = f.command(['--codex-doctor'], undefined, withBinOnPath)
+  assert.equal(untrusted.status, 0, untrusted.stderr)
+  assert.equal(JSON.parse(untrusted.stdout).hooksTrusted, false, untrusted.stderr)
+}))
+
+test('--codex-doctor detects missing trusted_hash and unverified hash without --codex-bin', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  // 1. Missing config.toml: doctor reports hooksTrusted: false
+  const initial = f.command(['--codex-doctor'])
+  assert.equal(initial.status, 0, initial.stderr)
+  assert.equal(JSON.parse(initial.stdout).hooksTrusted, false)
+
+  // 2. config.toml without trusted_hash: doctor reports hooksTrusted: false
+  const config = join(f.home, '.codex', 'config.toml')
+  f.save(config, '# Keep this comment\n[features]\nhooks = true\n')
+  const partial = f.command(['--codex-doctor'])
+  assert.equal(JSON.parse(partial.stdout).hooksTrusted, false)
+
+  // 3. config.toml with trusted_hash: unverified without Codex execution, reports 'unknown'
+  f.save(config, '[hooks.state."session_start"]\ntrusted_hash = "sha256:1"\n')
+  const unverified = f.command(['--codex-doctor'])
+  assert.equal(JSON.parse(unverified.stdout).hooksTrusted, 'unknown')
+}))
+
+test('--codex-doctor fails when explicit --codex-bin cannot be executed', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const result = f.command(['--codex-doctor', '--codex-bin', join(f.home, 'nonexistent-codex.exe')])
+  assert.notEqual(result.status, 0)
 }))
 
 test('Codex-only setup preserves unrelated hooks and refuses edited skill files', () => fixture(f => {
