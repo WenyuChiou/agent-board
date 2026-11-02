@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
@@ -22,6 +22,41 @@ const observe = (ledger: QuestionLedger, text: string, answered: string[] = [], 
   observeQuestions(ledger, parseProgress(text), null, answered, at, settled)
 const view = (ledger: QuestionLedger, text: string, answered: string[] = []) =>
   buildView(parseProgress(text), [], null, NOW, 0, {}, STRINGS.en, answered, {}, ledger)
+
+test('same-prefix peers keep independent unanswered question records and displays across agents', () => {
+  for (const ownAgent of ['claude', 'codex']) for (const peerAgent of ['claude', 'codex']) {
+    const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW, '', ownAgent), { subject: 'Alpha question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha work' }
+    const peer = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW, '', peerAgent), { subject: 'Beta question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Beta work' }
+    const ownFile = `## demo\n${renderAutoBlock(mine).join('\n')}\n`
+    const text = `${ownFile}${renderAutoBlock(peer).join('\n')}\n`
+    const projects = parseProgress(text)
+    const fresh = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
+    expect(fresh.records).toHaveLength(2)
+    expect(view(fresh, text).waiting.map(item => item.text).sort()).toEqual(['Alpha question?', 'Beta question?'])
+    const initial = observeQuestions(emptyQuestions(), parseProgress(ownFile), mine, [], NOW, true).ledger
+    const alphaId = initial.records[0]!.id
+    const ledger = observeQuestions(initial, projects, mine, [], NOW + 1, true).ledger
+    expect(ledger.records).toHaveLength(2)
+    expect(ledger.records.every(record => record.isPresent && record.isUnresolved)).toBe(true)
+    expect(new Set(ledger.records.map(record => record.scope)).size).toBe(2)
+    expect(ledger.records.find(record => record.words === 'Alpha question?')?.id).toBe(alphaId)
+    const ids = ledger.records.map(record => record.id).sort()
+    for (const current of [mine, peer, null]) {
+      const observed = observeQuestions(ledger, projects, current, [], NOW + 2, true).ledger
+      const shown = buildView(projects, [], current, NOW + 2, 0, {}, STRINGS.en, [], {}, observed)
+      expect(shown.waiting.map(item => item.text).sort()).toEqual(['Alpha question?', 'Beta question?'])
+      expect(shown.waiting.map(item => item.hideKey).sort()).toEqual(ids)
+      const hidden = buildView(projects, [], current, NOW + 2, 0, {}, STRINGS.en, [alphaId], {}, observed)
+      expect(hidden.hidden.map(item => item.text)).toEqual(['Alpha question?'])
+      expect(hidden.waiting.map(item => item.text)).toEqual(['Beta question?'])
+    }
+    const alone = observeQuestions(ledger, parseProgress(ownFile), mine, [alphaId], NOW + 3, true).ledger
+    expect(alone.records.find(record => record.words === 'Alpha question?' && record.isPresent)?.id).toBe(alphaId)
+    const frozen = new Set([questionScope('demo', ownAgent, 'a1b2c3d4'), questionScope('demo', peerAgent, 'a1b2c3d4')])
+    const held = observeQuestions(ledger, projects, null, [], NOW + 4, true, 'frozen', undefined, [], [], frozen).ledger
+    expect(held.records).toEqual(ledger.records)
+  }
+})
 
 test('compact question indexes preserve every value and parse like existing formatted indexes', () => {
   const ledger = observeQuestions(emptyQuestions(), parseProgress(file('- [?] 發送 synthetic plan, OK?')), null, [], NOW, true, 'birth').ledger

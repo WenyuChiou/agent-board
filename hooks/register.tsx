@@ -3194,7 +3194,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
 const othersNoteFor = async ($: EngineInterface): Promise<string | null> => {
   const mirror = await read($, mine)
 
-  return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : shortId(mirror.sessionId), await $.clock.now(), await wordsOf($))
+  return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : { ...mirror, agent: mirror.agent || 'claude' }, await $.clock.now(), await wordsOf($))
 }
 
 // Keeps the store to what the board still needs (retention.ts, #373). A pass reads at most

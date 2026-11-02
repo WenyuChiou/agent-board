@@ -1,7 +1,7 @@
 import type { CutBlock, ProgressAuto, ProgressMirror, ProgressProject, ProgressStepStatus, ProgressTask, QuestionLedger, QuestionProofs, QuestionRecord, QuestionSource } from '../types'
 import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
-import { cutOffTest, scanBlocks, shortId, stepWords } from './blocks'
+import { cutOffTest, matchesSpan, scanBlocks, shortId, stepWords } from './blocks'
 import { questionToken, waitsOnYou } from './mirror'
 import { sha256 } from './sha256'
 import type { TaskRef } from './view'
@@ -15,6 +15,44 @@ export const emptyQuestions = (): QuestionLedger => ({ version: 1, next: 1, reco
 export const questionsPath = (path: string): string => `${path.replace(/\.md$/i, '')}-questions.json`
 export const questionWords = (text: string): string => text.trim().replace(/\s+/g, ' ')
 export const questionScope = (project: string, agent: string, session: string): string => JSON.stringify([project, agent || 'claude', session])
+type QuestionOwner = Pick<ProgressAuto, 'session' | 'agent' | 'resume'>
+type QuestionScopeOf = (project: string, agent: string, session: string, resume?: string | null) => string
+const mirrorOwner = (mine: ProgressMirror): QuestionOwner => ({ session: shortId(mine.sessionId), agent: mine.agent || 'claude', resume: mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null) })
+const sourceOwner = (source: QuestionSource): QuestionOwner | null => {
+  if (source.kind === 'block') {
+    const auto = sourceSnapshot(source.data)?.auto ?? null
+    return auto?.isRun === true ? null : auto
+  }
+  const data = source.kind === 'own' ? parsedJson(source.data) : null
+  if (data === null || typeof data !== 'object' || !('sessionId' in data) || typeof data.sessionId !== 'string') return null
+  return { session: source.session, agent: source.agent, resume: 'resume' in data && typeof data.resume === 'string' ? data.resume : data.sessionId.length > 8 ? data.sessionId : null }
+}
+
+// Keep existing scopes until two canonical owners share an alias. Saved sources keep that
+// distinction after a peer leaves, without changing project-heading migration (#602).
+export const questionScopes = (projects: readonly ProgressProject[], mine: ProgressMirror | null, ledger?: QuestionLedger): QuestionScopeOf => {
+  const owners = new Map<string, Set<string>>()
+  const add = (project: string, auto: QuestionOwner): void => {
+    const canonical = auto.resume ?? (auto.session.length > 8 ? auto.session : null)
+    if (canonical === null) return
+    const scope = questionScope(project, auto.agent, auto.session)
+    const ids = owners.get(scope) ?? new Set<string>()
+    ids.add(canonical)
+    owners.set(scope, ids)
+  }
+  for (const project of projects) for (const task of project.tasks) if (task.auto !== null && task.auto.isRun !== true) add(project.name, task.auto)
+  if (mine !== null && mine.isRun !== true) add(mine.project, mirrorOwner(mine))
+  for (const record of ledger?.records ?? []) {
+    const auto = record.source === undefined ? null : sourceOwner(record.source)
+    if (auto !== null && record.source !== undefined) add(record.source.project, auto)
+  }
+  return (project: string, agent: string, session: string, resume?: string | null): string => {
+    const scope = questionScope(project, agent, session)
+    return (owners.get(scope)?.size ?? 0) > 1 && resume != null ? questionScope(project, agent, resume) : scope
+  }
+}
+const isFrozenQuestion = (record: QuestionRecord, frozen: ReadonlySet<string>): boolean =>
+  frozen.has(record.scope) || record.source !== undefined && frozen.has(questionScope(record.source.project, record.source.agent, record.source.session))
 export const questionSlot = (scope: string, index: number | string): string => JSON.stringify([scope, index])
 export const pendingQuestionSlot = (scope: string, text: string): string => questionSlot(scope, `inbox:${questionWords(text)}`)
 export const migrationKey = (legacy: string): string => `question-migrated:${sha256(legacy)}`
@@ -91,7 +129,7 @@ export const archiveQuestionsKept = (projects: readonly ProgressProject[], ref: 
   // token has no live identity, and an old copy of it cannot justify archiving the block.
   const tokens = task.steps.map(step => step.questionToken ?? '').filter(token => token !== '')
   if (task.steps.some(step => step.status === 'waiting' && (step.questionToken ?? '') !== '' && tokens.filter(token => token === step.questionToken).length > 1)) return false
-  const scope = questionScope(ref.project, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
+  const scope = questionScopes(projects, null, ledger)(ref.project, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
   // The copy no longer holds the title, so the record is tied to this task by its title and
   // session; two hand-kept tasks that ask the same have the same marks.
   return task.steps.filter(step => step.status === 'waiting').every(step => ledger.records.some(record => record.isUnresolved
@@ -386,11 +424,12 @@ export const questionFilesKey = (
 
 type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
-const ownObservations = (mine: ProgressMirror): Observation[] => {
+const ownObservations = (mine: ProgressMirror, scopeOf: QuestionScopeOf = questionScope): Observation[] => {
   if (mine.isRun === true) return []
   const own = shortId(mine.sessionId)
-  const scope = questionScope(mine.project, 'claude', own)
-  return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: 'claude', session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context }) } }))
+  const auto = mirrorOwner(mine)
+  const scope = scopeOf(mine.project, auto.agent, own, auto.resume)
+  return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: auto.agent, session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume }) } }))
 }
 
 // All a question pass reads from this session's own list: whose it is and the rows it gives.
@@ -399,16 +438,15 @@ const ownObservations = (mine: ProgressMirror): Observation[] => {
 export const ownQuestionsKey = (mine: ProgressMirror | null): string =>
   JSON.stringify(mine === null ? null : [shortId(mine.sessionId), mine.project, ownObservations(mine)])
 
-const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): Observation[] => {
-  const own = mine === null ? '' : shortId(mine.sessionId)
+const observations = (projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set(), scopeOf = questionScopes(projects, mine)): Observation[] => {
   const rows: Observation[] = []
   const scopes = new Set<string>()
   const ambiguous = new Set<string>()
   for (const project of projects) {
     for (const task of project.tasks) {
-      if (mine !== null && task.auto?.session === own) continue
-      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
-      if (frozen.has(scope)) continue
+      if (mine !== null && task.auto !== null && matchesSpan(task.auto, { ...mine, agent: mine.agent || 'claude' })) continue
+      const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
+      if (frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))) continue
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
       // The task's background and its copy as data are the same for each of its steps, so they
@@ -418,7 +456,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
     }
   }
-  if (mine !== null) rows.push(...ownObservations(mine))
+  if (mine !== null) rows.push(...ownObservations(mine, scopeOf))
   for (const turn of pending) {
     if (!turn.isQuestion || turn.id === undefined) continue
     const scope = questionScope(turn.project, turn.agent, turn.id)
@@ -445,13 +483,14 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
 // Seeing the source without its question ends a no-token resolution's lifetime.
 // A missing source alone cannot prove that an unchanged question was renewed.
 export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: readonly ProgressProject[], mine: ProgressMirror | null, pending: readonly PendingTurn[], frozen: ReadonlySet<string> = new Set()): string[] => {
-  const seen = observations(projects, mine, pending, frozen)
+  const scopeOf = questionScopes(projects, mine, ledger)
+  const seen = observations(projects, mine, pending, frozen, scopeOf)
   const scopes = new Set([
-    ...projects.flatMap(project => project.tasks.map(task => questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))),
-    ...(mine === null ? [] : [questionScope(mine.project, 'claude', shortId(mine.sessionId))]),
+    ...projects.flatMap(project => project.tasks.map(task => scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume))),
+    ...(mine === null ? [] : [scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mirrorOwner(mine).resume)]),
     ...seen.map(row => row.scope),
   ])
-  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !frozen.has(record.scope) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
+  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !isFrozenQuestion(record, frozen) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
 }
 
 // Words identify candidates, not questions. A durable sequence identifies each incarnation;
@@ -470,7 +509,12 @@ export const observeQuestions = (
   answeredTurns: readonly (AgentTurn | QuestionAnswerEvidence)[] = [],
   frozen: ReadonlySet<string> = new Set(),
 ): { ledger: QuestionLedger; keys: Record<string, string>; marked: string[] } => {
-  const records = ledger.records.map(row => ({ ...row }))
+  const scopeOf = questionScopes(projects, mine, ledger)
+  const records = ledger.records.map(row => {
+    const auto = row.source === undefined ? null : sourceOwner(row.source)
+    const scope = auto === null || row.source === undefined || row.scope !== questionScope(row.source.project, auto.agent, auto.session) ? row.scope : scopeOf(row.source.project, auto.agent, auto.session, auto.resume)
+    return { ...row, scope }
+  })
   for (const record of records) {
     if (record.source?.kind !== 'inbox' || !record.isUnresolved) continue
     let source: PendingTurn
@@ -485,7 +529,7 @@ export const observeQuestions = (
   }
   // Producer receipts and an explicit resolution suppress only the resolved incarnation.
   // A new file/content revision can still prove a fresh ask without changing its words.
-  const seen = observations(projects, mine, pending, frozen)
+  const seen = observations(projects, mine, pending, frozen, scopeOf)
   // Each row's copies (the rows of its scope with the same words, in order), indexed once:
   // comparing every row with every other took seconds on a board of a few thousand steps (#371).
   const copyKey = (row: Observation): string => JSON.stringify([row.scope, questionWords(row.text)])
@@ -590,7 +634,7 @@ export const observeQuestions = (
   }
   if (isSettled) {
     for (const record of records) {
-      if (!assigned.has(record.id) && !frozen.has(record.scope)) {
+      if (!assigned.has(record.id) && !isFrozenQuestion(record, frozen)) {
         // End, cleanup and disconnection are not evidence that this exact ask was answered.
         if (record.source?.kind === 'inbox' && record.isUnresolved) continue
         record.isPresent = false

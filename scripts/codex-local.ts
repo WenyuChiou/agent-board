@@ -90,7 +90,7 @@ export const codexStartNote = (raw: Json, run: RunSignal | undefined, session: s
   try { text = readLocal(progress) } catch {}
   if (text === null) return null
 
-  return othersNote(parseProgress(text), hereNames(raw.cwd), hash(`codex:${session}`).slice(0, 8), now, s, s.othersTailCodex)
+  return othersNote(parseProgress(text), hereNames(raw.cwd), { sessionId: hash(`codex:${session}`).slice(0, 8), agent: 'codex', resume: session }, now, s, s.othersTailCodex)
 }
 const withoutBom = (text: string): string => text.startsWith('\uFEFF') ? text.slice(1) : text
 const object = (value: unknown): Json => {

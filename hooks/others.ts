@@ -1,4 +1,6 @@
 import type { ProgressProject } from '../types'
+import { matchesSpan } from './blocks'
+import type { BlockIdentity } from './blocks'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { asData, dataBlock } from './mirror'
@@ -11,14 +13,15 @@ export const OTHERS_CAP = 8
 
 // For a session's first turn: work in this project that other sessions left or hold, from the
 // last 7 days. The Claude mod and the Codex hook both send it (#502). `own` is this session's
-// block id; `tail` is what the agent is told to do with it, in words its host has tools for.
-export const othersNote = (projects: readonly ProgressProject[], here: readonly string[], own: string, now: number, s: Strings = ZH_TW, tail: string = s.othersTail): string | null => {
+// canonical identity (a legacy block id is also accepted); `tail` is what the agent is told to
+// do with it, in words its host has tools for.
+export const othersNote = (projects: readonly ProgressProject[], here: readonly string[], own: BlockIdentity, now: number, s: Strings = ZH_TW, tail: string = s.othersTail): string | null => {
   const lines: string[] = []
   for (const project of projects) {
     if (!isHereProject(project.name, here)) continue
     for (const task of project.tasks) {
       const auto = task.auto
-      if (auto === null || auto.session === own || (auto.resume !== null && auto.resume === own) || auto.state === 'done' || isTaskComplete(task)) continue
+      if (auto === null || matchesSpan(auto, own) || auto.state === 'done' || isTaskComplete(task)) continue
       if (now - auto.updated > 7 * DAY) continue
       const { done, total } = countSteps(task)
       const open = task.steps.find(step => step.status !== 'done' && step.status !== 'cancelled')
