@@ -4565,9 +4565,15 @@ test('a pending archive note distinguishes crash-recovery retries from distinct 
   expect(parsePendingArchive(JSON.stringify({ entries: [entry] }))).toEqual([{ entry, held: NaN }])
   expect(parsePendingArchive(JSON.stringify([entry]))).toEqual([{ entry, held: NaN }])
   expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1 }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, boardHash: 'hash1', entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1, boardHash: 'hash1' }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1, boardHash: 'hash2' }] }))).toEqual([{ entry, held: 1, boardHash: 'hash2' }])
 
   // When pending recorded held = 0 and archive now holds 1: crash recovery skips re-adding.
   expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0 }])).toEqual([])
+  // When boardHash matches: crash recovery skips re-adding.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0, boardHash: 'hash1' }], 'hash1')).toEqual([])
+  // When boardHash does not match: treated as not saved so a twin is kept.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0, boardHash: 'hash1' }], 'hash2')).toEqual([entry])
   // When pending recorded held = 1 and archive holds only 1: archive write failed, so missing.
   expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 1 }])).toEqual([entry])
   // When pending has a legacy note without held: treated as not saved so twins are never dropped.

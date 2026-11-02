@@ -31,12 +31,16 @@ export const archivePath = (progressPath: string, now: number): string => `${pro
 export const pendingArchivePath = (progressPath: string): string =>
   `${progressPath.replace(/\.md$/i, '')}-archive.pending`
 
-export type PendingArchiveRecord = { entry: string; held: number }
+export type PendingArchiveRecord = { entry: string; held: number; boardHash?: string }
 
 export const parsePendingArchive = (text: string): PendingArchiveRecord[] => {
   if (text.trim() === '') return []
   try {
     const data: unknown = JSON.parse(text)
+    const topBoardHash =
+      data !== null && typeof data === 'object' && 'boardHash' in data && typeof (data as { boardHash: unknown }).boardHash === 'string'
+        ? (data as { boardHash: string }).boardHash
+        : undefined
     const list = Array.isArray(data)
       ? data
       : data !== null && typeof data === 'object' && 'entries' in data && Array.isArray((data as { entries: unknown }).entries)
@@ -46,12 +50,13 @@ export const parsePendingArchive = (text: string): PendingArchiveRecord[] => {
     const result: PendingArchiveRecord[] = []
     for (const item of list) {
       if (typeof item === 'string') {
-        result.push({ entry: norm(item), held: NaN })
+        result.push({ entry: norm(item), held: NaN, boardHash: topBoardHash })
       } else if (item !== null && typeof item === 'object') {
         const obj = item as Record<string, unknown>
         const entry = typeof obj.entry === 'string' ? obj.entry : typeof obj.text === 'string' ? obj.text : undefined
         const held = typeof obj.held === 'number' && Number.isFinite(obj.held) ? obj.held : NaN
-        if (entry !== undefined) result.push({ entry: norm(entry), held })
+        const itemHash = typeof obj.boardHash === 'string' ? obj.boardHash : topBoardHash
+        if (entry !== undefined) result.push({ entry: norm(entry), held, boardHash: itemHash })
       }
     }
     return result
@@ -101,6 +106,7 @@ export const missingEntries = (
   entries: readonly string[],
   written: ReadonlyMap<string, number> = new Map(),
   pending?: readonly (PendingArchiveRecord | string)[],
+  boardHash?: string,
 ): string[] => {
   const norm = (s: string): string => s.replace(/\r\n/g, '\n').replace(/\n+$/, '')
   if (pending === undefined) {
@@ -112,12 +118,13 @@ export const missingEntries = (
     const isHeld = new Map([...going].map(([key, count]) => [key, entryArchiveCount(pasts, key, written) >= count]))
     return entries.filter(entry => isHeld.get(norm(entry)) !== true)
   }
-  const pendingByEntry = new Map<string, number[]>()
+  const pendingByEntry = new Map<string, Array<{ held: number; boardHash?: string }>>()
   for (const item of pending) {
     const entry = typeof item === 'string' ? norm(item) : norm(item.entry)
     const held = typeof item === 'string' ? NaN : item.held
+    const itemHash = typeof item === 'string' ? undefined : item.boardHash
     const list = pendingByEntry.get(entry) ?? []
-    list.push(held)
+    list.push({ held, boardHash: itemHash })
     pendingByEntry.set(entry, list)
   }
   const inPastCount = new Map<string, number>()
@@ -134,10 +141,13 @@ export const missingEntries = (
     consumed.set(key, needed)
     const heldList = pendingByEntry.get(key)
     if (!heldList || heldList.length < needed) return true
-    const held = heldList[needed - 1]!
-    if (!Number.isFinite(held)) return true
+    const record = heldList[needed - 1]!
+    if (!Number.isFinite(record.held)) return true
+    if (boardHash !== undefined || record.boardHash !== undefined) {
+      if (record.boardHash !== boardHash) return true
+    }
     const nowHeld = inPastCount.get(key) ?? 0
-    return !(nowHeld >= held + needed)
+    return !(nowHeld >= record.held + needed)
   })
 }
 

@@ -2965,9 +2965,11 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   let pendingEntries: string[] = []
   let pendingKeys: string[] = []
   let pendingMoved: Array<{ session: string, text: string }> = []
+  let currentBoardHash = ''
   // The blocks that ask which a try has archived, by session, with the lines they had then.
   const moved = new Map<string, string>()
   const wrote = await rewrite($, path, async (text, isLast) => {
+    currentBoardHash = sha256(text)
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // The ledger is settled once for all of them. Another agent's write meanwhile (a new `[?]`
     // step) must not be written over with a result made from the older text: start again from it.
@@ -3003,7 +3005,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   }, undefined, async (path, text) => {
     // Made again after another session's write, the same blocks are not archived twice.
     const fresh = unwrittenEntries(pendingEntries, archived)
-    await appendArchive($, path, archivePath(path, at), fresh, s, archived)
+    await appendArchive($, path, archivePath(path, at), fresh, s, archived, currentBoardHash)
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
@@ -3012,7 +3014,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
       const isWin = await isWindows($, path)
       const removed = await removeFiles($, [pendingFile], isWin)
       if (!removed) {
-        process.stderr.write?.(`Failed to remove pending note ${pendingFile}\n`)
+        process.stderr.write?.(`${s.pendingNoteRemoveFailed(baseName(pendingFile))}\n`)
       }
     }
     // Another session's stale write can put the blocks back and the next try remove them again:
@@ -3055,7 +3057,15 @@ const keepAskedQuestions = async ($: EngineInterface, path: string, projects: re
 }
 
 // Entries added at the end of a month's archive file, after what it holds.
-const appendArchive = async ($: EngineInterface, progressFile: string, month: string, entries: readonly string[], s: Strings, written: ReadonlyMap<string, number> = new Map()): Promise<void> => {
+const appendArchive = async (
+  $: EngineInterface,
+  progressFile: string,
+  month: string,
+  entries: readonly string[],
+  s: Strings,
+  written: ReadonlyMap<string, number> = new Map(),
+  currentBoardHash?: string,
+): Promise<void> => {
   if (entries.length === 0) return
   const pendingFile = pendingArchivePath(progressFile)
   let pendingText = ''
@@ -3063,10 +3073,19 @@ const appendArchive = async ($: EngineInterface, progressFile: string, month: st
   const pending = parsePendingArchive(pendingText)
   const archive = await partFor($, month)
   const past = await readText($, archive)
-  const missing = missingEntries([past], entries, written, pending)
+  const missing = missingEntries([past], entries, written, pending, currentBoardHash)
   if (missing.length === 0) return
-  const noteEntries = missing.map(entry => ({ entry, held: entryArchiveCount([past], entry, written) }))
-  await $.fs.write(pendingFile, JSON.stringify({ version: 1, entries: noteEntries }) + '\n')
+  const recoveredEntries = pending.filter(p => !missing.includes(p.entry))
+  const newEntries = missing.map(entry => ({
+    entry,
+    held: entryArchiveCount([past], entry, written),
+    boardHash: currentBoardHash,
+  }))
+  const noteEntries = [
+    ...recoveredEntries.map(p => ({ entry: p.entry, held: p.held, boardHash: currentBoardHash })),
+    ...newEntries,
+  ]
+  await $.fs.write(pendingFile, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: noteEntries }) + '\n')
   const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
   await $.fs.write(archive, head + missing.join('\n\n') + '\n')
 }
@@ -3080,7 +3099,9 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const archived = new Set<string>()
   const observed = await read($, firstSeen)
   let pendingEntries: string[] = []
+  let currentBoardHash = ''
   const wrote = await rewrite($, path, async text => {
+    currentBoardHash = sha256(text)
     const projects = parseProgress(text)
     const hasQuestions = projects.some(project => project.name === ref.project && project.tasks.some(task => (ref.session === null ? task.title === ref.title : task.auto?.session === ref.session) && task.steps.some(step => step.status === 'waiting')))
     if (hasQuestions) {
@@ -3094,7 +3115,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
     return taken.text
   }, undefined, async (path, text) => {
     const fresh = pendingEntries.filter(entry => !archived.has(entry))
-    await appendArchive($, path, archivePath(path, at), fresh, s)
+    await appendArchive($, path, archivePath(path, at), fresh, s, new Map(), currentBoardHash)
     for (const entry of pendingEntries) archived.add(entry)
     await $.fs.write(path, text)
     const pendingFile = pendingArchivePath(path)
@@ -3102,7 +3123,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
       const isWin = await isWindows($, path)
       const removed = await removeFiles($, [pendingFile], isWin)
       if (!removed) {
-        process.stderr.write?.(`Failed to remove pending note ${pendingFile}\n`)
+        process.stderr.write?.(`${s.pendingNoteRemoveFailed(baseName(pendingFile))}\n`)
       }
     }
   })

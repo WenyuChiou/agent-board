@@ -714,6 +714,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
   const pendingFile = pendingArchivePath(path)
   let pending = existsSync(pendingFile) ? parsePendingArchive(read(pendingFile)) : []
   const wrote = rewrite(path, (text, isLast) => {
+    const currentBoardHash = createHash('sha256').update(text).digest('hex')
     const taken = take(text, isLast)
     if (taken === AGAIN) return AGAIN
     if (taken === null) return text
@@ -725,11 +726,20 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
       const before = earlier === undefined ? '' : read(earlier)
       const kept = rewrite(part, past => {
         // A previous process may have saved the archive but failed to remove the task.
-        const missing = missingEntries([past, before], fresh, archived, pending)
+        const missing = missingEntries([past, before], fresh, archived, pending, currentBoardHash)
         if (missing.length === 0) return past
-        const noteEntries = missing.map(entry => ({ entry, held: entryArchiveCount([past, before], entry, archived) }))
+        const recoveredEntries = (pending ?? []).filter(p => !missing.includes(p.entry))
+        const newEntries = missing.map(entry => ({
+          entry,
+          held: entryArchiveCount([past, before], entry, archived),
+          boardHash: currentBoardHash,
+        }))
+        const noteEntries = [
+          ...recoveredEntries.map(p => ({ entry: p.entry, held: p.held, boardHash: currentBoardHash })),
+          ...newEntries,
+        ]
         try {
-          writeFileSync(pendingFile, JSON.stringify({ version: 1, entries: noteEntries }) + '\n')
+          writeFileSync(pendingFile, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: noteEntries }) + '\n')
         } catch (error) {
           throw fileError(part, error)
         }
@@ -746,7 +756,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
     try {
       unlinkSync(pendingFile)
     } catch (error) {
-      process.stderr.write(`Failed to remove pending note ${pendingFile}: ${error instanceof Error ? error.message : String(error)}\n`)
+      process.stderr.write(`${s.pendingNoteRemoveFailed(basename(pendingFile), error instanceof Error ? error.message : String(error))}\n`)
     }
   }
 
