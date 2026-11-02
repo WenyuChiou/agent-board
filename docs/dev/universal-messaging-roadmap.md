@@ -43,7 +43,7 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
      - Message store path
      - Native agent name
      - OS PID and process creation time (verifying parent-child process relationship)
-      - Implementation risk (#685): on Windows, looking up a parent PID's creation time without dependencies may exceed the hook budget. #685 must measure it; if the binding cannot be verified within budget, the caller falls back to restricted mailbox mode and never receives the lease.
+       - Implementation risk (#685): on Windows, looking up a parent PID's creation time without dependencies may exceed the hook budget. #685 must measure it; if the binding cannot be verified within budget, the caller falls back to restricted mailbox mode and never receives the lease.
      - Canonical workspace path (`canonical(cwd)` matching `canonical(workspace)`)
      - Owner generation and trusted turn boundary
    - **Permitted rights**: `board_wait`, `board_ack`, `board_post` strictly within own assigned session and turn. Cannot impersonate other sessions, cannot grant tool permissions or bypass trust.
