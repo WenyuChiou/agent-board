@@ -729,6 +729,8 @@ export const ZH_TW = {
   pgTipNeeds: (n: number): string => `${n} 件需要你`,
   pgTipNeedsOne: '1 件需要你',
   pgTipWorking: '正在做',
+  pgTipOpen: (n: number): string => `${n} 件待辦`,
+  pgTipOpenOne: '1 件待辦',
   pgTipCantRead: '讀不到它的進度檔',
 }
 

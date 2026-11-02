@@ -685,5 +685,7 @@ export const ZH_CN: Strings = {
   pgTipNeeds: (n: number): string => `${n} 件需要你`,
   pgTipNeedsOne: '1 件需要你',
   pgTipWorking: '正在做',
+  pgTipOpen: (n: number): string => `${n} 件待办`,
+  pgTipOpenOne: '1 件待办',
   pgTipCantRead: '读不到它的进度文件',
 }
