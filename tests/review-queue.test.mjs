@@ -227,6 +227,23 @@ test('a reviewer already holding two open reviews is not suggested', () => {
   assert.equal(free.needsReviewer[0].suggested, 'bot-one')
 })
 
+test('a Reviewing comment with no verdict lapses after four hours and frees its reviewer', () => {
+  const comments = {
+    1: [ready(head, '2026-10-20T06:00:00Z'), taking('bot-two', '2026-10-20T07:00:00Z')],
+    2: [taking('bot-one', '2026-10-20T07:00:00Z')], 3: [taking('bot-one', '2026-10-20T07:00:00Z')],
+    4: [ready(head, '2026-10-20T10:00:00Z')],
+  }
+  const prs = [byAgent('claude'), pull(2), pull(3), pull(4, { body: 'Author: codex, branch' })]
+  const held = classify(prs, comments, '2026-10-20T10:59:00Z', team)
+  assert.deepEqual([held.needsReviewer[0].takenBy, held.needsReviewer[0].lapsedBy], ['bot-two', null])
+  // bot-one holds two reviews, so the fresh pull request goes to bot-two.
+  assert.equal(held.needsReviewer[1].suggested, 'bot-two')
+  const lapsed = classify(prs, comments, '2026-10-20T11:01:00Z', team)
+  assert.deepEqual([lapsed.needsReviewer[0].takenBy, lapsed.needsReviewer[0].lapsedBy], [null, 'bot-two'])
+  assert.equal(lapsed.needsReviewer[1].suggested, 'bot-one')
+  assert.match(formatQueue(lapsed), /#1 .*review by bot-two lapsed/)
+})
+
 test('a pull request Ready for more than four hours suggests the next reviewer and says it escalated', () => {
   const prs = [byAgent('codex'), pull(2, { body: 'Author: codex, branch', additions: 20 })]
   const comments = { 1: [ready(head, '2026-10-20T07:00:00Z')], 2: [ready(head, '2026-10-20T09:00:00Z')] }
