@@ -68,7 +68,7 @@ Your fork is then `origin` and this repository `upstream`. From then on:
 
 GitHub holds the PR check and CI on a pull request from a fork until a maintainer approves each run (step 6).
 
-Follow [AGENTS.md](../AGENTS.md), Working on this repository, for where code goes and how it is written. A change to `AGENTS.md`, `CONTRIBUTING.md` or anything under `.github/` needs the owner's written approval of its content, quoted in the pull request body ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 12). Use synthetic data only: made-up projects, sessions and paths.
+Follow [AGENTS.md](../AGENTS.md), Working on this repository, for where code goes and how it is written. A change to a governance file needs the owner's written approval of its content, quoted in the pull request body; [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 12 lists those files. Use synthetic data only: made-up projects, sessions and paths.
 
 ## 4. Run the checks
 

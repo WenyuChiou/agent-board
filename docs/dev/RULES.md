@@ -1,6 +1,6 @@
 # Agent Board rules, on one page
 
-Every person and every agent reads this page first. The longer pages ([CONTRIBUTING.md](../../CONTRIBUTING.md), [team-process.md](team-process.md), [RELEASING.md](../RELEASING.md), [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md)) explain the details. When one of them changes a rule here, it changes this page in the same pull request; the PR check fails otherwise (R5).
+Every person and every agent reads this page first. The longer pages ([CONTRIBUTING.md](../../CONTRIBUTING.md), [team-process.md](team-process.md), [RELEASING.md](../RELEASING.md), [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md)) explain the details. When one of them changes a rule here, it changes this page in the same pull request; the PR check fails otherwise (R5). Each rule is written in one place: [docs/README.md](../README.md) lists every file and what it is for, and another page links to a rule instead of repeating it, so two copies cannot drift apart.
 
 ## Start here
 
@@ -14,18 +14,25 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 - Claude Code, Codex, Antigravity, Cursor, cloud agents such as dot and Muse, and people by hand all follow this page. No rule here depends on which agent you are.
 - **Where an agent starts.** [AGENTS.md](../../AGENTS.md) is the entry point; it sends you here first. Codex, Antigravity and Cursor read `AGENTS.md` by themselves. Claude Code does not: the repository is also a Claude Code plugin, whose root `CLAUDE.md` is not loaded, so a Claude Code session is given this page's link in its first prompt, or its user adds `@AGENTS.md` to their own `CLAUDE.md`. The same goes for any other agent that reads neither.
 - **An agent works in the role of the person who runs it** (CONTRIBUTING, [Roles](../../CONTRIBUTING.md#roles)). An agent of the owner or of a collaborator may review and merge other authors' pull requests, as that person may.
-- **Who counts as the author.** The agent named in the `Author:` line, every agent it dispatched, and every agent that wrote part of the pull request or its brief. Another agent, of the same person or not, may review and approve it (R2).
+- **One GitHub account, many agents.** The owner runs many different agents from one GitHub account, and a collaborator may do the same from theirs, so GitHub cannot tell the agents apart and its own approval button is not used. The `Author: <agent>, <branch>` line of a pull request says who wrote it, and the `by <name>` of a `Review:` line says who reviewed it. Name the agent and where it runs, as in `claude (desktop)` or `codex (superd6)`.
+- **Who counts as the author.** The agent named in the `Author:` line, every agent it dispatched, and every agent that wrote part of the pull request or its brief. Any other agent or session, of the same person or not, is not an author and may review and approve it (R2).
+- **One driver per pull request.** The agent in the `Author:` line drives its pull request to the merge. Another agent continues it only after a `Handover:` from that agent ([CONTRIBUTING rule 14](../../CONTRIBUTING.md#pull-requests)), or after 24 hours with no word from it; it then adds its own name to the `Author:` line and says so in a comment. Two agents never push to one branch at the same time.
+- **Status goes in the body.** After a push, update the pull request body's Evidence for the new head instead of posting a status comment. Comments on a pull request are for `Ready for review`, `Reviewing:`, `Review:`, `Handover:` and `Question:` lines, and for answers to review findings.
 
 ## R1. Who decides what
 
 - The owner (Wenyu) sets direction: the roadmap, the must-ship issues of each milestone, and rules R2, R3, R7 and R8. A question that only the owner can answer gets the `needs-owner` label; there should be few.
-- Everything else is decided by the people doing the work: collaborators, the maintainer session and their agents. A change to process details (labels, merge order, wording) needs approval from two people who did not write it.
+- The owner's approval is needed only for the governance files: `.github/`, sections R1, R2, R3, R7 and R8 of this page, CONTRIBUTING rules 8, 9 and 12, docs/RELEASING.md and SECURITY.md ([CONTRIBUTING rule 12](../../CONTRIBUTING.md#pull-requests)).
+- Everything else is decided by the people doing the work: collaborators, the maintainer session and their agents. A change to process details (labels, merge order, wording) needs one approval from an agent or person who did not write it.
 
 ## R2. Nobody approves their own work
 
 - The author never approves their own pull request. A review by the author's own agent, lane or subagent does not count.
 - A review bot (Codex Code Review, Greptile) can stop a merge with an unresolved P0 or P1, but never approves one.
-- Each agent or computer is moving to its own GitHub account, so that GitHub itself refuses an author's approval. Until then, the `Author:` line and the reviewer's name in `Review: APPROVE <sha> by <name>` tell them apart.
+- The approval is the comment `Review: APPROVE <full head sha> by <name>`, where `<name>` is not an author of the pull request.
+- **A review stays on the pull request's issue.** Each finding in a `Review: REQUEST CHANGES` names the rule it breaks or the steps that show the bug. A finding with neither is advice: welcome, but it does not hold the merge.
+- A later round checks the earlier findings and what the new push changed. Something new found in code that an earlier round already read becomes an issue of its own, unless it is a P0 or P1.
+- A review bot's P0 or P1 that arrives after Ready is fixed, or the author shows on the pull request, with evidence, why it does not apply; the reviewer decides.
 
 ## R3. Merging
 
