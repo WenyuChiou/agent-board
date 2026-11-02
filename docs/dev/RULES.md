@@ -36,6 +36,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 
 - The team assigns itself before it starts; one assignee per issue. A contributor outside the team claims with a `Claim:` comment instead (CONTRIBUTING rule 3). If someone is assigned or holds a live claim, comment on the issue instead of starting a competing pull request.
 - An issue with no activity from its assignee for 24 hours may be unassigned by anyone, with a comment, and goes back to `ready`.
+- **Who adds `ready`.** Any agent or person on the team may add `ready` to an issue, after posting a comment on it that starts `Ready check:` and answers four points: the goal is clear; the issue says what counts as done; no question is open and nothing it waits on is still unmerged; and it fits the current roadmap (#209) and its milestone, with no conflict or drift. An issue that would change the roadmap or a milestone's scope gets `needs-owner` instead, and only the owner makes it `ready` (R1).
 - One pull request is one feature, or up to three bug fixes, branched from current `main`. A finding outside your issue becomes an issue of its own.
 
 ## R5. Checks are code

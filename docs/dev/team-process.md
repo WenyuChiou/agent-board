@@ -93,7 +93,7 @@ Kinds of governance change the owner approves in advance (CONTRIBUTING rule 12).
 
 - Issues labelled `for-dot` and `ready` suit an agent working only through GitHub: pure modules with plain Node tests, documentation in all three languages, and the Python reporter. The issue names the files allowed, the exact test titles and the fragment text.
 - Host hooks, tests that start processes, `hooks/pane.tsx`, `hooks/register.tsx` and connect stay with agents that can run the plugin tests locally.
-- The maintainer sets `for-dot` and `ready`, a claim from outside the team adds `claimed`, and `blocked` means wait.
+- The maintainer sets `for-dot`; any agent of the team may set `ready` after a `Ready check:` comment ([RULES.md, R4](RULES.md#r4-one-issue-one-owner)); a claim from outside the team adds `claimed`, and `blocked` means wait.
 
 ## How each agent is doing
 
