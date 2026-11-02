@@ -6196,7 +6196,7 @@ test('--tidy with corrupted held count (held: -1) in pending note archives 1 cop
     const pending = join(f.dir, 'progress-archive.pending')
     writeFileSync(f.path, one)
     const boardHash = createHash('sha256').update(one).digest('hex')
-    const savedEntry = `## Synthetic · ${new Date().toISOString().slice(0, 10)}\n### Local synthetic task\n- [x] Finished`
+    const savedEntry = '## Synthetic · 2026-10-16\n### Local synthetic task\n- [x] Finished'
     writeFileSync(pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry: savedEntry, held: -1, boardHash }] }) + '\n')
     const result = f.command(['--tidy', '--lang', 'en'])
     assert.equal(result.status, 0, result.stderr)
@@ -6207,7 +6207,7 @@ test('--tidy with corrupted held count (held: -1) in pending note archives 1 cop
   })
 })
 
-test('--tidy refuses pre-planted symlink pending note without truncating victim file', () => {
+test('--tidy refuses pre-planted symlink pending note without truncating victim file', t => {
   tidyFixture(f => {
     const one = `## Synthetic\n${f.block('a1b2c324', 'Local synthetic task', 'done', 13)}`
     writeFileSync(f.path, one)
@@ -6217,6 +6217,7 @@ test('--tidy refuses pre-planted symlink pending note without truncating victim 
     try {
       symlinkSync(victim, pending)
     } catch {
+      t.skip('symlink creation is unavailable on this environment')
       return
     }
     const result = f.command(['--tidy', '--lang', 'en'])

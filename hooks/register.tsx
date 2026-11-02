@@ -3111,8 +3111,9 @@ const appendArchive = async (
   const tempPending = `${pendingFile}.${Date.now().toString(36)}.board-tmp`
   await $.fs.write(tempPending, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n')
   const replaced = await replaceFile($, tempPending, pendingFile, isWin)
-  if (!replaced && !(await $.fs.exists(pendingFile))) {
+  if (!replaced) {
     await removeFiles($, [tempPending], isWin).catch(() => {})
+    throw new Error('PENDING_NOTE_WRITE_FAILED')
   }
   const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
   await $.fs.write(archive, head + planned.missing.join('\n\n') + '\n')
