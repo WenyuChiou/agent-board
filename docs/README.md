@@ -25,8 +25,8 @@ Each rule and each process step is written in one file, listed here. Another pag
 |---|---|---|
 | [docs/RELEASING.md](RELEASING.md) | How a version is cut, checked and published. | owner |
 | [docs/validation/USER-SIM.md](validation/USER-SIM.md), [docs/validation/PARITY-CHECKLIST.md](validation/PARITY-CHECKLIST.md) | How a simulated user and the vendor apps check a release. | non-author |
-| [CHANGELOG.md](../CHANGELOG.md) | What changed for the person using Agent Board, one line per change. Nothing else. | only the release pull request edits it |
-| [changelog.d/](../changelog.d/README.md) | One short entry per fix or feature, folded into CHANGELOG.md at release. | the pull request that adds it |
+| [CHANGELOG.md](../CHANGELOG.md) | What changed for the person using Agent Board, one line per change. Nothing else. | the release pull request (a pull request may add its own line under Unreleased, CONTRIBUTING rule 6) |
+| [changelog.d/](../changelog.d/README.md) | Closed: the old fragments wait here for the next release to fold them. Pull requests add none. | only the release pull request |
 | `docs/validation/<date>-*.md` | Dated records of a check someone ran. | non-author |
 
 ## Direction

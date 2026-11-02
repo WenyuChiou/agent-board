@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ambitionQuestions, foldText, fragmentIssue, orderFragments, parseArgs, parseFragment, runFold, stripTests } from '../scripts/changelog-fold.mjs'
+import { ambitionQuestions, commitEntries, foldText, fragmentIssue, orderFragments, parseArgs, parseFragment, readCommits, runFold, stripTests } from '../scripts/changelog-fold.mjs'
 
 const script = fileURLToPath(new URL('../scripts/changelog-fold.mjs', import.meta.url))
 const summary = issue => `- **Synthetic entry (#${issue}).** A synthetic result.`
@@ -137,6 +137,56 @@ test('the fold with --write refuses before writing when a fragment cannot be rem
     assert.deepEqual(paths.map(path => readFileSync(join(cwd, path))), before)
     assert.deepEqual(lines, [])
   }
+})
+
+test('the fold writes a CHANGELOG line from each fix and feature title that brought no entry of its own', () => {
+  const commits = [
+    { subject: 'fix(board): keep the column width after a restart. (#51)', paths: ['hooks/pane.tsx'] },
+    { subject: 'feat!: one command starts the board (#52)', paths: ['scripts/start.mjs'] },
+    { subject: 'feat: a synthetic feature with a fragment (#53)', paths: ['changelog.d/53-synthetic.md'] },
+    { subject: 'fix: a synthetic fix that wrote its own line (#54)', paths: ['CHANGELOG.md', 'hooks/pane.tsx'] },
+    { subject: 'docs: a synthetic page (#55)', paths: ['docs/x.md'] },
+    { subject: 'fix: a synthetic fix that names its issue (#56) (#57)', paths: ['hooks/pane.tsx'] },
+    { subject: 'fix: a synthetic fix pushed straight to main', paths: ['hooks/pane.tsx'] },
+  ]
+  assert.deepEqual(commitEntries(commits), ['- Keep the column width after a restart (#51).', '- One command starts the board (#52).', '- A synthetic fix that names its issue (#57).'])
+  commits.splice(5, 1)
+  const result = fold({ commits })
+  assert.equal(result.titleCount, 2)
+  assert.equal(result.text, '# Changelog\n\n## 1.1.0 — 2026-02-01\n\n' + summary(42) + '\n\n- Keep the column width after a restart (#51).\n\n- One command starts the board (#52).\n\n' + summary(10) + '\n\n' + history)
+  const titlesOnly = foldText({ text: '# Changelog\n\n## Unreleased\n\n' + history, commits, version: '1.1.0', date: '2026-02-01' })
+  assert.equal(titlesOnly.text, '# Changelog\n\n## 1.1.0 — 2026-02-01\n\n- Keep the column width after a restart (#51).\n\n- One command starts the board (#52).\n\n' + history)
+})
+
+test('the fold reads the pull request titles merged since the last release tag', t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'synthetic-changelog-commits-'))
+  t.after(() => rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
+  const git = (...args) => {
+    const execution = spawnSync('git', args, { cwd, encoding: 'utf8' })
+    assert.equal(execution.status, 0, execution.stderr)
+  }
+  const commit = (path, subject) => {
+    mkdirSync(join(cwd, path, '..'), { recursive: true })
+    writeFileSync(join(cwd, path), subject + '\n')
+    git('add', '--', path)
+    git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', subject)
+  }
+  git('init', '--initial-branch=main')
+  commit('a.txt', 'chore: synthetic start')
+  assert.deepEqual(readCommits({ cwd }), { commits: [], note: 'no release tag found, so no pull request titles were read' })
+  git('tag', 'agent-board--v1.0.0')
+  commit('b.txt', 'fix: a synthetic fix (#5)')
+  commit('changelog.d/6-synthetic.md', 'feat: a synthetic feature (#6)')
+  const { commits, note } = readCommits({ cwd })
+  assert.equal(note, null)
+  assert.deepEqual(commits, [
+    { subject: 'feat: a synthetic feature (#6)', paths: ['changelog.d/6-synthetic.md'] },
+    { subject: 'fix: a synthetic fix (#5)', paths: ['b.txt'] },
+  ])
+  assert.deepEqual(commitEntries(commits), ['- A synthetic fix (#5).'])
+  const lines = []
+  runFold({ cwd: fixture(t), argv: ['1.1.0', '--date', '2026-02-01'], log: line => lines.push(line), commitsOf: () => ({ commits, note: null }) })
+  assert.match(lines.join('\n'), /From pull request titles: 1\n/)
 })
 
 test('a dry run changes no file', t => {

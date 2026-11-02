@@ -480,21 +480,17 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   } else add('PASS', 'PR body check skipped; supply --body-file and --title to include it.')
 
   await check('CHANGELOG test titles', () => {
+    // The release writes each fix and feature's CHANGELOG line from its title, so a new pull request adds no fragment.
     const fragmentPaths = [...newPaths].filter(isFragmentPath)
-    const fragments = fragmentPaths.filter(path => fragmentIssue(path) !== null)
-    const invalid = fragmentPaths.filter(path => fragmentIssue(path) === null)
-    for (const path of invalid) add('FAIL', `${path}: invalid fragment name; use changelog.d/<issue>-<lowercase-slug>.md with a positive issue number without leading zeros (see changelog.d/README.md).`)
-    if (!invalid.length) {
-      if (!changed.has('CHANGELOG.md') && !fragments.length && [...changed].some(path => !path.endsWith('.md') && !path.startsWith('docs/'))) add('WARN', 'add a fragment in changelog.d/ (see changelog.d/README.md)')
-      else add('PASS', 'CHANGELOG is included or only documentation changed.')
-    }
+    for (const path of fragmentPaths) add('WARN', `${path} is a new changelog fragment; a new pull request adds none, since the release writes the CHANGELOG line from its title (CONTRIBUTING rule 6).`)
+    if (!fragmentPaths.length) add('PASS', 'no changelog fragment; the release writes the CHANGELOG line from the pull request title.')
     const lines = existsSync(join(cwd, 'CHANGELOG.md')) ? read(join(cwd, 'CHANGELOG.md')).split(/\r?\n/) : []
     const start = lines.findIndex(line => /^## Unreleased\s*$/.test(line))
     const next = lines.findIndex((line, i) => i > start && /^## /.test(line))
     const touched = new Set(added.filter(item => item.path === 'CHANGELOG.md').map(item => item.line))
     const titles = testDeclarations(cwd)
     const problems = []
-    const entries = fragments.map(path => added.filter(item => item.path === path).map(item => item.text).join('\n'))
+    const entries = []
     if (start !== -1) {
       let at = start + 1
       while (at < (next === -1 ? lines.length : next)) {

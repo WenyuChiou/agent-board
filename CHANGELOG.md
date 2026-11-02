@@ -2,6 +2,10 @@
 
 What changed for the person using Agent Board, one line per change, newest version first. How a change was built and tested is in its pull request. Entries up to 0.24.0 were shortened to this form on 2026-11-02; their full text is in `git show ddbef2a:CHANGELOG.md`.
 
+## Unreleased
+
+- A fix or feature pull request writes no changelog entry: the release writes each CHANGELOG line from the pull request title (#718). Tests: `the fold writes a CHANGELOG line from each fix and feature title that brought no entry of its own`, `pr-check keeps the fragment of a pull request opened before the change and asks a fix or feature for no entry`.
+
 ## 0.24.0 — 2026-10-25
 
 - Reduce repeated allocation in standalone question polls (#428).
