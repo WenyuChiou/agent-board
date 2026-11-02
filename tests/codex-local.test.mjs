@@ -2717,6 +2717,26 @@ test('native completion and run withdrawal select the full owner beside a same-p
   assert.equal(dropCodexBlock(text + text, owner), text + text)
 })
 
+test('run withdrawal refuses a block whose native resume contradicts its owner and keeps every byte', async () => {
+  const { dropCodexBlock, putCodexBlock } = await importTs('../hooks/codex.ts')
+  const [id, peer] = collisionSessions
+  const owner = collisionOwner(id), peerOwner = collisionOwner(peer)
+  const report = { session: id, agent: 'codex', turn: null, state: 'working', title: 'Owned task', project: 'Owned project', steps: ['- [~] Work'], updated: '2026-10-30T00:00:00Z' }
+  const own = putCodexBlock('', report, owner)
+  const both = putCodexBlock(putCodexBlock('', { ...report, session: peer, title: 'Peer task', project: 'Peer project' }, peerOwner), report, owner)
+  assert.ok(both.includes(`resume=${peer}`))
+  // A contradiction beside a valid peer, alone, with mixed line endings, and with a resume that could never be a session's.
+  for (const text of [
+    both.replace(`resume=${id}`, `resume=${peer}`),
+    own.replace(`resume=${id}`, `resume=${peer}`),
+    both.replace(`resume=${id}`, `resume=${peer}`).replaceAll('\n', '\r\n') + 'Keep this mixed ending.\n',
+    own.replace(`resume=${id}`, 'resume=x'),
+  ]) assert.equal(dropCodexBlock(text, owner), text)
+  // The peer's own valid binding is still withdrawn alone, and a block with no resume is still its owner's.
+  assert.equal(dropCodexBlock(both, peerOwner), putCodexBlock('', report, owner))
+  assert.equal(dropCodexBlock(own.replace(` resume=${id}`, ''), owner), '')
+})
+
 test('native reports preserve a different agent with the same hash prefix and mixed newline bytes', async () => {
   const { putCodexBlock, dropCodexBlock } = await importTs('../hooks/codex.ts')
   const id = 'cross-collision-fixture-22272', peer = 'cross-collision-fixture-63084'
