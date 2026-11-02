@@ -6623,6 +6623,34 @@ test('a Codex session a person starts gets the open work of other sessions in it
   assert.equal(run.stdout, '')
 }))
 
+test('a Codex start note keeps another Codex session with the same short id and leaves out its own block', async () => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  const dir = mkdtempSync(join(tmpdir(), 'codex-start-note-'))
+  try {
+    const { codexStartNote } = await import('../scripts/codex-local.ts')
+    const { STRINGS } = await import('../hooks/strings.ts')
+    const progress = join(dir, 'progress.md')
+    const cwd = join(dir, 'demo')
+    mkdirSync(cwd)
+    const session = '019a0000-0000-7000-8000-000000000001'
+    const id = createHash('sha256').update(`codex:${session}`).digest('hex').slice(0, 8)
+    const at = new Date(Date.now() - 3600000).toISOString()
+    const block = (resume, title) => `<!-- auto session=${id} agent=codex state=working updated=${at} resume=${resume} -->\n### ${title}\n- [~] One\n<!-- /auto session=${id} -->\n`
+    writeFileSync(progress, ['## demo', block(session, 'Synthetic own work'), block('019a0000-0000-7000-8000-000000000002', 'Synthetic peer work')].join('\n'))
+    const note = codexStartNote({ hook_event_name: 'SessionStart', source: 'startup', cwd }, undefined, session, progress, STRINGS.en)
+    assert.match(note, /Synthetic peer work/)
+    assert.doesNotMatch(note, /Synthetic own work/)
+  } finally {
+    resolver.deregister()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a Codex start note finds the project by a checkout folder, a worktree main folder, its remote name and a folder name with spaces', () => fixture(f => {
   f.install('--apply')
   const at = new Date(Date.now() - 3600000).toISOString()

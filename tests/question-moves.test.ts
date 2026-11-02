@@ -64,12 +64,26 @@ test('ambiguous live block destinations do not supersede a prior project questio
 test('a colliding destination question scope keeps the former project question unresolved', () => {
   const before = initial(A)
   const original = before.records[0]!
-  const after = observe(before, block({ project: 'NewProject', resume: A }) + block({ project: 'NewProject', resume: B }))
+  const after = observe(before, block({ project: 'NewProject', resume: A }) + block({ project: 'NewProject' }))
   const retained = after.records.find(record => record.id === original.id)!
   expect(retained.isUnresolved).toBe(true)
   expect(retained.firstObserved).toBe(original.firstObserved)
   expect(retained.source).toEqual(original.source)
   expect(after.records.filter(record => record.isUnresolved)).toHaveLength(1)
+})
+
+test('a move beside a same-prefix peer supersedes the mover alone', () => {
+  const before = initial(A)
+  const original = before.records[0]!
+  const text = block({ project: 'NewProject', resume: A, steps: '- [?] Mover question?' }) + block({ project: 'NewProject', resume: B, steps: '- [?] Peer question?' })
+  const after = observe(before, text)
+  const retained = after.records.find(record => record.id === original.id)!
+  expect(retained.isUnresolved).toBe(false)
+  expect(retained.firstObserved).toBe(original.firstObserved)
+  expect(retained.source).toEqual(original.source)
+  expect(after.records.filter(record => record.isUnresolved).map(record => record.words).sort()).toEqual(['Mover question?', 'Peer question?'])
+  const frozen = new Set([questionScope('NewProject', 'codex', 'deadbeef')])
+  expect(observe(before, text, true, frozen).records.find(record => record.id === original.id)?.isUnresolved).toBe(true)
 })
 
 test('a moved block without question steps still supersedes its previous project question', () => {

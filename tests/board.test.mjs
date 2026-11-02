@@ -1698,6 +1698,41 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   return { dir, path, url, port, token, call, rows, rowOf, keyOf, close, exited, stderr: () => stderr, served: servedAt(run, path) }
 }
 
+test('the page archives an ended same-prefix peer and leaves the other session on the board', { timeout: 30_000 }, async () => {
+  const ended = (resume, title, step) => `<!-- auto session=a1b2c3d4 agent=codex state=ended updated=${ago(60000)} resume=${resume} -->\n### ${title}\n${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  for (const [peerStep, label] of [['- [?] Beta question?', 'asking'], ['- [ ] Beta step', 'quiet']]) {
+    const board = await page()
+    try {
+      writeFileSync(board.path, `# Progress\n\n## Synthetic\n${ended('a1b2c3d4-person-a', 'Alpha work', '- [?] Alpha question?')}\n${ended('a1b2c3d4-person-b', 'Beta work', peerStep)}`)
+      const model = (await board.call('GET', '/api/board')).json().model
+      const rows = [...model.groups.flatMap(group => group.rows), ...model.stopped]
+      const row = rows.find(one => one.title === 'Beta work')
+      assert.ok(row !== undefined && row.canArchive === true, `${label}: ${JSON.stringify(rows.map(one => [one.title, one.canArchive]))}`)
+      const reply = await board.call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: '', fp: row.fp } })
+      assert.equal(reply.status, 200, `${label}: ${reply.body}`)
+      const left = readFileSync(board.path, 'utf8')
+      assert.ok(left.includes('Alpha work') && left.includes('Alpha question?') && !left.includes('Beta work'), `${label}: ${left}`)
+    } finally { await board.close() }
+  }
+})
+
+test('the page keeps a source copy for the archived same-title peer alone', { timeout: 30_000 }, async () => {
+  const block = (state, updated, resume, step) => `<!-- auto session=a1b2c3d4 agent=codex state=${state} updated=${updated} resume=${resume} -->\n### Same work\n${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const board = await page()
+  try {
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${block('waiting', ago(1000), 'a1b2c3d4-person-a', '- [?] Alpha question?')}\n${block('ended', ago(60000), 'a1b2c3d4-person-b', '- [?] Beta question?')}`)
+    const model = (await board.call('GET', '/api/board')).json().model
+    const row = [...model.groups.flatMap(group => group.rows), ...model.stopped].find(one => one.canArchive === true)
+    assert.ok(row !== undefined, JSON.stringify(model))
+    const reply = await board.call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: '', fp: row.fp } })
+    assert.equal(reply.status, 200, reply.body)
+    const left = readFileSync(board.path, 'utf8')
+    assert.ok(left.includes('Alpha question?') && !left.includes('Beta question?'), left)
+    const archived = readdirSync(board.dir).filter(name => name.includes('-questions-source-')).map(name => JSON.parse(readFileSync(join(board.dir, name), 'utf8'))).filter(one => one.disposition === 'archived')
+    assert.deepEqual(archived.map(one => one.record.words), ['Beta question?'])
+  } finally { await board.close() }
+})
+
 test('live blocks of every agent refuse forged web archives without writes and terminal a and tidy preserve them', { timeout: 30_000 }, async () => {
   const agents = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek', 'custom-agent']
   const blocks = agents.flatMap((agent, index) => ['working', 'waiting'].map((state, n) => {

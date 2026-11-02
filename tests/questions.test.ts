@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
@@ -11,6 +11,7 @@ import { markAsked } from '../hooks/digest'
 import { renderAutoBlock } from '../hooks/blocks'
 import { remindersOf } from '../hooks/remind'
 import { peekInbox } from '../hooks/board'
+import type { PendingTurn } from '../hooks/board'
 import { answerAgentPrompt, blockId } from '../hooks/inbox'
 import type { AgentTurn } from '../hooks/inbox'
 import { reusableQuestionObservation } from '../scripts/question-observation'
@@ -22,6 +23,170 @@ const observe = (ledger: QuestionLedger, text: string, answered: string[] = [], 
   observeQuestions(ledger, parseProgress(text), null, answered, at, settled)
 const view = (ledger: QuestionLedger, text: string, answered: string[] = []) =>
   buildView(parseProgress(text), [], null, NOW, 0, {}, STRINGS.en, answered, {}, ledger)
+
+test('same-prefix peers keep independent unanswered question records and displays across agents', () => {
+  for (const ownAgent of ['claude', 'codex']) for (const peerAgent of ['claude', 'codex']) {
+    const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW, '', ownAgent), { subject: 'Alpha question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha work' }
+    const peer = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW, '', peerAgent), { subject: 'Beta question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Beta work' }
+    const ownFile = `## demo\n${renderAutoBlock(mine).join('\n')}\n`
+    const text = `${ownFile}${renderAutoBlock(peer).join('\n')}\n`
+    const projects = parseProgress(text)
+    const fresh = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
+    expect(fresh.records).toHaveLength(2)
+    expect(view(fresh, text).waiting.map(item => item.text).sort()).toEqual(['Alpha question?', 'Beta question?'])
+    const initial = observeQuestions(emptyQuestions(), parseProgress(ownFile), mine, [], NOW, true).ledger
+    const alphaId = initial.records[0]!.id
+    const ledger = observeQuestions(initial, projects, mine, [], NOW + 1, true).ledger
+    expect(ledger.records).toHaveLength(2)
+    expect(ledger.records.every(record => record.isPresent && record.isUnresolved)).toBe(true)
+    expect(new Set(ledger.records.map(record => record.scope)).size).toBe(2)
+    expect(ledger.records.find(record => record.words === 'Alpha question?')?.id).toBe(alphaId)
+    const ids = ledger.records.map(record => record.id).sort()
+    for (const current of [mine, peer, null]) {
+      const observed = observeQuestions(ledger, projects, current, [], NOW + 2, true).ledger
+      const shown = buildView(projects, [], current, NOW + 2, 0, {}, STRINGS.en, [], {}, observed)
+      expect(shown.waiting.map(item => item.text).sort()).toEqual(['Alpha question?', 'Beta question?'])
+      expect(shown.waiting.map(item => item.hideKey).sort()).toEqual(ids)
+      const hidden = buildView(projects, [], current, NOW + 2, 0, {}, STRINGS.en, [alphaId], {}, observed)
+      expect(hidden.hidden.map(item => item.text)).toEqual(['Alpha question?'])
+      expect(hidden.waiting.map(item => item.text)).toEqual(['Beta question?'])
+    }
+    const alone = observeQuestions(ledger, parseProgress(ownFile), mine, [alphaId], NOW + 3, true).ledger
+    expect(alone.records.find(record => record.words === 'Alpha question?' && record.isPresent)?.id).toBe(alphaId)
+    const frozen = new Set([questionScope('demo', ownAgent, 'a1b2c3d4'), questionScope('demo', peerAgent, 'a1b2c3d4')])
+    const held = observeQuestions(ledger, projects, null, [], NOW + 4, true, 'frozen', undefined, [], [], frozen).ledger
+    expect(held.records).toEqual(ledger.records)
+  }
+})
+
+test('a question keeps its id, hide and resolution after a same-prefix peer with no question leaves', () => {
+  const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW), { subject: 'Alpha question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha work' }
+  const peer = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Quiet step' }, '1', NOW), title: 'Beta work' }
+  const ownFile = `## demo\n${renderAutoBlock(mine).join('\n')}\n`
+  const both = parseProgress(`${ownFile}${renderAutoBlock(peer).join('\n')}\n`)
+  const alone = parseProgress(ownFile)
+  const first = observeQuestions(emptyQuestions(), alone, mine, [], NOW, true).ledger
+  const id = first.records[0]!.id
+  const left = observeQuestions(observeQuestions(first, both, mine, [id], NOW + 1, true).ledger, alone, mine, [id], NOW + 2, true).ledger
+  expect(left.records.map(record => [record.id, record.isPresent, record.firstObserved])).toEqual([[id, true, first.records[0]!.firstObserved]])
+  const met = observeQuestions(first, both, mine, [id], NOW + 1, true).ledger
+  for (const ledger of [met, left]) {
+    expect(parseQuestions(questionsJson(ledger))).toEqual(ledger)
+    expect(parseQuestions(compactQuestionsJson(ledger))).toEqual(ledger)
+    const capture = captureJson(ledger.records[0]!, 'unresolved')
+    expect(parseCapture(capture, sha256(capture))?.record.id).toBe(id)
+  }
+  expect(buildView(alone, [], mine, NOW + 2, 0, {}, STRINGS.en, [id], {}, left).hidden.map(item => item.text)).toEqual(['Alpha question?'])
+
+  const fresh = observeQuestions(emptyQuestions(), both, null, [], NOW, true).ledger
+  const freshId = fresh.records[0]!.id
+  const freshLeft = observeQuestions(fresh, alone, null, [freshId], NOW + 1, true).ledger
+  expect(freshLeft.records.map(record => [record.id, record.isPresent])).toEqual([[freshId, true]])
+
+  const resolved = resolveQuestion(observeQuestions(emptyQuestions(), alone, null, [], NOW, true).ledger, observeQuestions(emptyQuestions(), alone, null, [], NOW, true).ledger.records[0]!.id, NOW + 1)
+  const after = observeQuestions(observeQuestions(resolved, both, null, [], NOW + 2, true).ledger, alone, null, [], NOW + 3, true).ledger
+  expect(after.records.filter(record => record.isUnresolved)).toEqual([])
+
+  const asker = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Beta question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Beta work' }
+  const paneOnly = parseProgress(`## demo\n${renderAutoBlock(asker).join('\n')}\n`)
+  const pane = observeQuestions(emptyQuestions(), paneOnly, mine, [], NOW, true).ledger
+  const betaId = pane.records.find(record => record.words === 'Beta question?')!.id
+  const script = observeQuestions(pane, paneOnly, null, [betaId], NOW + 1, true).ledger
+  expect(script.records.filter(record => record.words === 'Beta question?' && record.isPresent).map(record => record.id)).toEqual([betaId])
+})
+
+test('a run under the current session alias stays out of its questions', () => {
+  const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW), { subject: 'Alpha question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha work' }
+  const ownBlock = renderAutoBlock(mine).join('\n')
+  const at = new Date(NOW).toISOString()
+  const run = (task: string): string => `<!-- auto session=a1b2c3d4 agent=claude state=waiting updated=${at} resume=a1b2c3d4-run origin=run parent=a1b2c3d4-person-a -->\n### Run work\n${task}\n<!-- /auto session=a1b2c3d4 -->`
+  const first = observeQuestions(emptyQuestions(), parseProgress(`## demo\n${ownBlock}\n`), mine, [], NOW, true).ledger
+  const id = first.records[0]!.id
+  for (const task of [`- [?] Alpha question? <!-- id=1 -->`, `- [?] Run question? <!-- id=2 -->`]) {
+    const projects = parseProgress(`## demo\n${ownBlock}\n${run(task)}\n`)
+    expect(projects[0]!.tasks[1]!.auto?.isRun).toBe(true)
+    const next = observeQuestions(first, projects, mine, [id], NOW + 1, true).ledger
+    expect(next.records.map(record => [record.id, record.words, record.isPresent])).toEqual([[id, 'Alpha question?', true]])
+  }
+})
+
+test('archiving a same-prefix peer checks that peer alone', () => {
+  const ended = (id: string, title: string, step: string): string => `<!-- auto session=a1b2c3d4 agent=claude state=ended updated=${new Date(NOW).toISOString()} resume=${id} -->\n### ${title}\n${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const text = `## demo\n${ended('a1b2c3d4-person-a', 'Alpha work', '- [?] Alpha question?')}${ended('a1b2c3d4-person-b', 'Beta work', '- [?] Beta question?')}`
+  const projects = parseProgress(text)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
+  const refOf = (index: number) => {
+    const task = projects[0]!.tasks[index]!
+    return { project: 'demo', title: task.title, line: task.line, session: 'a1b2c3d4' }
+  }
+  expect(refTasks(projects, refOf(1)).map(task => task.title)).toEqual(['Beta work'])
+  expect(archiveQuestionsKept(projects, refOf(1), ledger)).toBe(true)
+  expect(archiveQuestionsKept(projects, refOf(1), emptyQuestions())).toBe(false)
+
+  const quiet = parseProgress(`## demo\n${ended('a1b2c3d4-person-a', 'Alpha work', '- [?] Alpha question?')}${ended('a1b2c3d4-person-b', 'Beta work', '- [x] Done')}`)
+  expect(refTasks(quiet, { project: 'demo', title: 'Beta work', line: quiet[0]!.tasks[1]!.line, session: 'a1b2c3d4' }).some(task => task.steps.some(step => step.status === 'waiting'))).toBe(false)
+
+  const sameTitle = parseProgress(`## demo\n${ended('a1b2c3d4-person-a', 'Same work', '- [?] Alpha question?')}${ended('a1b2c3d4-person-b', 'Same work', '- [?] Beta question?')}`)
+  const second = sameTitle[0]!.tasks[1]!
+  const secondRef = { project: 'demo', title: 'Same work', line: second.line, session: 'a1b2c3d4' }
+  expect(refTasks(sameTitle, secondRef)).toEqual([second])
+  const sameTitleLedger = observeQuestions(emptyQuestions(), sameTitle, null, [], NOW, true).ledger
+  expect(sameTitleLedger.records.filter(record => isAskedBy(record, secondRef, second)).map(record => record.words)).toEqual(['Beta question?'])
+  expect(archiveQuestionsKept(sameTitle, secondRef, sameTitleLedger)).toBe(true)
+
+  const crossText = (agent: string, step: string): string => ended('a1b2c3d4-person-a', 'Same work', step).replace('agent=claude', `agent=${agent}`)
+  const cross = parseProgress(`## demo\n${crossText('codex', '- [?] Alpha question?')}${crossText('claude', '- [?] Beta question?')}`)
+  const picked = cross[0]!.tasks[1]!
+  const crossRef = { project: 'demo', title: 'Same work', line: picked.line, session: 'a1b2c3d4' }
+  const crossLedger = observeQuestions(emptyQuestions(), cross, null, [], NOW, true).ledger
+  expect(refTasks(cross, crossRef)).toEqual([picked])
+  expect(crossLedger.records.filter(record => isAskedBy(record, crossRef, picked)).map(record => record.words)).toEqual(['Beta question?'])
+
+  const twins = parseProgress(`## demo\n${ended('a1b2c3d4-person-a', 'Twin work', '- [?] Twin question?')}${ended('a1b2c3d4-person-a', 'Twin work', '- [?] Twin question?')}`)
+  expect(refTasks(twins, { project: 'demo', title: 'Twin work', line: twins[0]!.tasks[1]!.line, session: 'a1b2c3d4' })).toHaveLength(2)
+})
+
+test('an own question saved before same-prefix identity keeps its record when a peer appears', () => {
+  const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW), { subject: 'Alpha question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha work' }
+  const peer = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Beta question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Beta work' }
+  const ownFile = `## demo\n${renderAutoBlock(mine).join('\n')}\n`
+  const saved = observeQuestions(emptyQuestions(), parseProgress(ownFile), mine, [], NOW, true).ledger
+  const old = { ...saved, records: saved.records.map(record => {
+    const { task, title, context } = JSON.parse(record.source!.data) as Record<string, unknown>
+    return { ...record, source: { ...record.source!, data: JSON.stringify({ task, title, context }) } }
+  }) }
+  const projects = parseProgress(`${ownFile}${renderAutoBlock(peer).join('\n')}\n`)
+  for (const current of [mine, null]) {
+    const next = observeQuestions(old, projects, current, [], NOW + 60000, true).ledger
+    const alpha = next.records.filter(record => record.words === 'Alpha question?')
+    expect(alpha.map(record => [record.id, record.firstObserved, record.isPresent])).toEqual([[saved.records[0]!.id, NOW, true]])
+    expect(parseQuestions(questionsJson(next))).toEqual(next)
+    expect(buildView(projects, [], current, NOW + 60000, 0, {}, STRINGS.en, [], {}, next).waiting.map(item => item.text).sort()).toEqual(['Alpha question?', 'Beta question?'])
+  }
+  const quiet = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Quiet step' }, '1', NOW), title: 'Beta work' }
+  const withQuiet = parseProgress(`${ownFile}${renderAutoBlock(quiet).join('\n')}\n`)
+  const resolved = resolveQuestion(old, saved.records[0]!.id, NOW + 1)
+  const gone = observeQuestions(observeQuestions(resolved, withQuiet, mine, [], NOW + 2, true).ledger, parseProgress(ownFile), mine, [], NOW + 3, true).ledger
+  expect(gone.records.filter(record => record.isUnresolved)).toEqual([])
+  expect(gone.records.map(record => record.id)).toEqual([saved.records[0]!.id])
+  expect(parseQuestions(compactQuestionsJson(gone))).toEqual(gone)
+})
+
+test('a pending question pairs with the same-prefix peer block that asked it', () => {
+  const block = (id: string, title: string, step: string): string => `<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} resume=${id} -->\n### ${title}\n- [?] ${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const projects = parseProgress(`## demo\n${block('a1b2c3d4-person-a', 'Alpha work', 'Same ask?')}${block('a1b2c3d4-person-b', 'Beta work', 'Other ask?')}`)
+  const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', text: 'Same ask?', isQuestion: true, at: NOW } as PendingTurn
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'pending', undefined, [turn]).ledger
+  expect(ledger.records.map(record => record.words).sort()).toEqual(['Other ask?', 'Same ask?'])
+  expect(isTurnRecorded(ledger, turn)).toBe(true)
+  expect(isTurnRecorded(emptyQuestions(), turn)).toBe(false)
+  const both = parseProgress(`## demo\n${block('a1b2c3d4-person-a', 'Alpha work', 'Same ask?')}${block('a1b2c3d4-person-b', 'Beta work', 'Same ask?')}`)
+  const shared = observeQuestions(emptyQuestions(), both, null, [], NOW, true, 'pending', undefined, [turn]).ledger
+  expect(shared.records.map(record => record.source?.kind)).toEqual(['block', 'block'])
+  expect(isTurnRecorded(shared, turn)).toBe(true)
+  const twice = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} -->\n### Alpha work\n- [?] Same ask?\n- [?] Same ask?\n<!-- /auto session=a1b2c3d4 -->\n`)
+  expect(observeQuestions(emptyQuestions(), twice, null, [], NOW, true, 'pending', undefined, [turn]).ledger.records.filter(record => record.source?.kind === 'inbox')).toHaveLength(1)
+})
 
 test('compact question indexes preserve every value and parse like existing formatted indexes', () => {
   const ledger = observeQuestions(emptyQuestions(), parseProgress(file('- [?] 發送 synthetic plan, OK?')), null, [], NOW, true, 'birth').ledger
