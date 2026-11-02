@@ -8,7 +8,7 @@ Each rule and each process step is written in one file, listed here. Another pag
 
 | File | What it is for | Who approves a change |
 |---|---|---|
-| [docs/dev/RULES.md](dev/RULES.md) | The rules, on one page. Every agent and person reads it first. | R1, R2, R3, R7, R8: owner. The rest: non-author |
+| [docs/dev/RULES.md](dev/RULES.md) | The rules, on one page. Every agent and person reads it first. | R2, R3: owner. The rest: non-author |
 | [AGENTS.md](../AGENTS.md) | Where an agent starts: the commands, the checks and a map of the code. | non-author |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | How a pull request is made, reviewed and merged. | rules 8, 9, 12: owner. The rest: non-author |
 | [docs/dev/team-process.md](dev/team-process.md) | How the owner's own agents share the work: lanes, merge order, hand-overs. | From claim to merge, Standing approvals: owner. The rest: non-author |
@@ -16,14 +16,14 @@ Each rule and each process step is written in one file, listed here. Another pag
 | [docs/dev/brief-rules.md](dev/brief-rules.md) | The checklist pasted into every task brief. | non-author |
 | [docs/dev/reviewers.json](dev/reviewers.json) | Who the review queue suggests as reviewer. A suggestion only. | non-author |
 | [docs/dev/CI.md](dev/CI.md) | Which CI jobs run for which change. | non-author |
-| [.github/](../.github) | CI workflows, and the issue and pull request templates. | owner, each workflow file on its own |
+| [.github/](../.github) | CI workflows, and the issue and pull request templates. | workflows: owner, each file on its own. Templates: non-author |
 | [scripts/pr-check.mjs](../scripts/pr-check.mjs), [scripts/review-queue.mjs](../scripts/review-queue.mjs) | The rules a machine checks (R5). | non-author |
 
 ## Releases
 
 | File | What it is for | Who approves a change |
 |---|---|---|
-| [docs/RELEASING.md](RELEASING.md) | How a version is cut, checked and published. | owner |
+| [docs/RELEASING.md](RELEASING.md) | How a version is cut, checked and published. | non-author |
 | [docs/validation/USER-SIM.md](validation/USER-SIM.md), [docs/validation/PARITY-CHECKLIST.md](validation/PARITY-CHECKLIST.md) | How a simulated user and the vendor apps check a release. | non-author |
 | [CHANGELOG.md](../CHANGELOG.md) | What changed for the person using Agent Board, one line per change. Nothing else. | only the release pull request edits it |
 | [changelog.d/](../changelog.d/README.md) | One short entry per fix or feature, folded into CHANGELOG.md at release. | the pull request that adds it |
@@ -42,5 +42,5 @@ Each rule and each process step is written in one file, listed here. Another pag
 |---|---|---|
 | [README.md](../README.md) (also in 繁體中文 and 简体中文) | What Agent Board is and how to install it. | non-author |
 | [docs/GUIDE.md](GUIDE.md), [docs/SETUP.md](SETUP.md) and the other pages in docs/ | How to use and set it up. | non-author |
-| [SECURITY.md](../SECURITY.md) | How to report a security problem privately. | owner |
+| [SECURITY.md](../SECURITY.md) | How to report a security problem privately. | non-author |
 | [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | How people here treat each other. | non-author |
