@@ -159,7 +159,8 @@ test('three real hub starts never leave two live owners of one message store', {
 
 test('three real --serve starts on the default store collide and every start prints its URL', { timeout: 240_000 }, async () => {
   const world = makeWorld()
-  let running, pagesLeft
+  // Declared out here so the cleanup below can use them after a failed round.
+  let running, pagesLeft, closePage
   try {
     const root = world.root
     const control = join(root, 'serve-barrier-control')
@@ -226,7 +227,7 @@ test('three real --serve starts on the default store collide and every start pri
       return look(root, 3)
     }
     const isAlive = pid => { try { process.kill(pid, 0); return true } catch (error) { return error.code !== 'ESRCH' } }
-    const closePage = async (page) => {
+    closePage = async (page) => {
       const uri = new URL(page.url)
       const status = await fetch(new URL('/api/close', uri), { method: 'POST', headers: { 'x-board-token': uri.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) })
         .then(answer => answer.status, () => 0)
@@ -279,7 +280,7 @@ test('three real --serve starts on the default store collide and every start pri
     assert.deepEqual((await pagesLeft()).map(one => one.pid), [], 'a page process of this board is still running after the last round')
   } finally {
     // A failed round leaves its page running; stop it so cleanup reports the round's failure, not a locked folder.
-    if (running !== undefined) await closePage(running).catch(() => {})
+    if (running !== undefined && closePage !== undefined) await closePage(running).catch(() => {})
     for (const one of await (pagesLeft ?? (async () => []))().catch(() => [])) try { process.kill(one.pid) } catch {}
     await wait(300)
     await world.close()
