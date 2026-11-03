@@ -1,2 +1,0 @@
-- **Page / message receipts** · A card's durable message receipt replaces its earlier Queued hint, so Replied no longer appears beside stale enqueue feedback. Feedback for another message or a new input error is preserved (#701).
-  Tests: `a durable replied receipt supersedes a local queued hint without another action`, `an earlier receipt preserves a new send error on the same card`, `a delayed enqueue response cannot restore Queued after its receipt is already visible`.

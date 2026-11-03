@@ -4,8 +4,9 @@
 the release writes one line for each fix and feature from its squash-merge
 title (CONTRIBUTING rule 6).
 
-The fragments in this folder were written before that change, and a pull
-request opened before it may keep the one it has. Leave them as they are. The
-next release folds them into CHANGELOG.md with
-`node scripts/changelog-fold.mjs <version> --write`, which removes them; after
+The fragments written before that change were shortened to one line each under
+`## Unreleased` in CHANGELOG.md on 2026-11-03; their full text is in
+`git show cd1cea3:changelog.d/<name>`. A pull request opened before the change
+may still carry a fragment. The next release folds it with
+`node scripts/changelog-fold.mjs <version> --write`, which removes it; after
 that, this README is the only file here.
