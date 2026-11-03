@@ -939,7 +939,7 @@ test('doctor and removal print a next step that works when a path holds characte
     assert.ok(!stdout.includes('{"'), stdout)
     return /^Next: [^:]+: (.+)$/m.exec(stdout)?.[1]
   }
-  for (const name of ['odd $HOME 100%', 'back\\slash', 'trailing space\\']) {
+  for (const name of ['odd $HOME 100%', 'bang!x', 'back\\slash', 'trailing space\\']) {
     const home = join(f.home, name)
     mkdirSync(home, { recursive: true })
     const data = join(f.home, 'data')
@@ -3076,14 +3076,8 @@ test('the installed Codex host grants only six reviewed hashes and preserves unr
   assert.equal(JSON.parse(doctor.stdout).connected, 'unverified')
 }))
 
-test('--codex-doctor auto-discovers Codex on PATH and verifies hook trust', { skip: process.platform === 'win32' && 'Windows discovery requires native .exe' }, () => fixture(async f => {
-  assert.equal(f.install('--apply').status, 0)
-  const config = join(f.home, '.codex', 'config.toml')
+const mockCodexServer = f => {
   const hooksJson = join(f.home, '.codex', 'hooks.json')
-  const binDir = join(f.home, 'bin')
-  mkdirSync(binDir, { recursive: true })
-  const mockCodex = join(binDir, 'codex')
-
   const hooksManifest = JSON.parse(readFileSync(hooksJson, 'utf8'))
   const expectedHooks = Object.entries(hooksManifest.hooks).map(([event, list]) => ({
     event: event[0].toLowerCase() + event.slice(1),
@@ -3119,6 +3113,32 @@ rl.on('line', line => {
   } catch {}
 });
 `
+  return { stateFile, mockServerScript }
+}
+
+test('a doctor that reached Codex prints a trust step that runs', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const { stateFile, mockServerScript } = mockCodexServer(f)
+  const executable = join(f.home, 'bin', 'codex-mock.js')
+  f.save(executable, mockServerScript)
+  writeFileSync(stateFile, JSON.stringify({ trusted: false }))
+  const doctor = f.command(['--codex-doctor', '--codex-bin', executable])
+  assert.equal(doctor.status, 0, doctor.stderr)
+  assert.ok(doctor.stdout.includes('Codex hooks are not all trusted.'), doctor.stdout)
+  const step = /^Next: preview the hook trust change: (.+)$/m.exec(doctor.stdout)?.[1]
+  assert.ok(step, doctor.stdout)
+  const preview = spawnSync(step, { shell: true, cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.ok(preview.stdout.includes('would trust'), preview.stdout)
+}))
+
+test('--codex-doctor auto-discovers Codex on PATH and verifies hook trust', { skip: process.platform === 'win32' && 'Windows discovery requires native .exe' }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const config = join(f.home, '.codex', 'config.toml')
+  const binDir = join(f.home, 'bin')
+  mkdirSync(binDir, { recursive: true })
+  const mockCodex = join(binDir, 'codex')
+  const { stateFile, mockServerScript } = mockCodexServer(f)
   writeFileSync(mockCodex, mockServerScript, { mode: 0o755 })
 
   const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
@@ -3139,7 +3159,11 @@ rl.on('line', line => {
   assert.equal(JSON.parse(untrusted.stdout).hooksTrusted, false, untrusted.stderr)
   const plainUntrusted = f.command(['--codex-doctor'], undefined, withBinOnPath).stdout
   assert.ok(plainUntrusted.includes('Codex hooks are not all trusted.'), plainUntrusted)
-  assert.ok(plainUntrusted.includes('Next: locate Codex'), plainUntrusted)
+  const step = /^Next: preview the hook trust change: (.+)$/m.exec(plainUntrusted)?.[1]
+  assert.ok(step?.includes('--codex-bin'), plainUntrusted)
+  const preview = spawnSync(step, { shell: true, cwd: f.home, env: { ...f.env, ...withBinOnPath }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.ok(preview.stdout.includes('would trust'), preview.stdout)
 }))
 
 test('--codex-doctor detects missing trusted_hash and unverified hash without --codex-bin', () => fixture(f => {

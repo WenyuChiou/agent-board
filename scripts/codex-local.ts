@@ -220,7 +220,7 @@ export const codexDoctorOutput = (result: LocalPlan & {
   hooksTrusted: boolean | 'unknown'
   problem?: string
   capabilities: { lifecycle: string }
-}, s: Strings, command: string): string => {
+}, s: Strings, command: string, trustCommand?: string): string => {
   const words = s.localSummary
   const host = s.agentNames[result.agent] ?? result.agent
   const hasHook = result.installed || result.reportHook === 'connect'
@@ -236,7 +236,7 @@ export const codexDoctorOutput = (result: LocalPlan & {
     : !hasHook ? words.setup(command)
     : isPending ? words.skill(host)
     // --codex-trust works only on an installed Codex, not on one the connector hooked.
-    : result.agent === 'codex' && result.installed && result.hooksTrusted !== true ? words.trust
+    : result.agent === 'codex' && result.installed && result.hooksTrusted !== true ? trustCommand ? words.trustRun(trustCommand) : words.trust
     : words.verify(host))
   return `${lines.join('\n')}\n`
 }
@@ -364,9 +364,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
   const manifest: Manifest = { files: object(loaded.files ?? {}) as Record<string, string>, groups: object(loaded.groups ?? {}), foreignGroups: object(loaded.foreignGroups ?? {}) }
   // A check must not fail on the words of its next step: an argument a shell would expand or eat goes through boardRun's code points.
-  const nextCommand = (nextMode: string): string => {
-    const rest = [nextMode, ...args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json')]
-    if (rest.some(arg => /["`$%\\\r\n]/.test(arg))) return boardRun(process.argv[1]!, rest)
+  const nextCommand = (nextMode: string, extra: string[] = []): string => {
+    const rest = [nextMode, ...args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json'), ...extra]
+    if (rest.some(arg => /["`$%!\\\r\n]/.test(arg))) return boardRun(process.argv[1]!, rest)
     return `${boardRun(process.argv[1]!)} ${rest.map(arg => /^[\w.:=/-]+$/.test(arg) ? arg : quote(arg)).join(' ')}`
   }
   const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
@@ -1019,7 +1019,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const isSkillOnly = reportHook === 'none' && skills.some(file => readLocal(file) !== null)
     const result = { ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor }
     if (args.includes('--json')) output(result)
-    else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup')))
+    // Name the Codex this check just reached: on Windows, command -v and where.exe's first line can be an npm shim that cannot start.
+    else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup'), host ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable!]) : undefined))
     return true
   }
   if (!args.includes('--apply')) { outputPlan(plan); return true }
