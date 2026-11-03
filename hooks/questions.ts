@@ -33,11 +33,6 @@ const sourceOwner = (source: QuestionSource): QuestionOwner | null => {
 // owners that already saved records under it; another owner sharing it uses its canonical id, and
 // so does each owner when two meet with nothing saved. An owner with a record under its canonical
 // id stays there after a peer leaves. Project-heading migration is unchanged (#602).
-const savedOwner = (source: QuestionSource): QuestionOwner | null => {
-  if (source.kind !== 'inbox') return sourceOwner(source)
-  const session = inboxSession(source)
-  return session === undefined || session.length <= 8 ? null : { session: source.session, agent: source.agent, resume: session }
-}
 export const questionScopes = (projects: readonly ProgressProject[], mine: ProgressMirror | null, ledger?: QuestionLedger): QuestionScopeOf => {
   const owners = new Map<string, Set<string>>()
   const holders = new Map<string, Set<string>>()
@@ -60,7 +55,7 @@ export const questionScopes = (projects: readonly ProgressProject[], mine: Progr
   for (const record of ledger?.records ?? []) {
     const source = record.source
     if (source === undefined) continue
-    const auto = savedOwner(source)
+    const auto = sourceOwner(source)
     if (auto === null) {
       // An own copy saved before it held the session id is known only by its alias and title.
       const ids = source.kind === 'own' ? titled.get(JSON.stringify([record.scope, source.task])) : undefined
@@ -73,6 +68,15 @@ export const questionScopes = (projects: readonly ProgressProject[], mine: Progr
     if (canonical === null) continue
     if (record.scope === questionScope(source.project, auto.agent, auto.session)) note(holders, record.scope, canonical)
     else if (record.scope === questionScope(source.project, auto.agent, canonical)) saved.add(record.scope)
+  }
+  // An inbox ask's block keeps the alias only while no other question has it: moving a peer that
+  // already holds it would take that peer's rows off their records.
+  const taken = new Set((ledger?.records ?? []).filter(record => record.source !== undefined && record.source.kind !== 'inbox').map(record => record.scope))
+  for (const record of ledger?.records ?? []) {
+    const session = record.source?.kind === 'inbox' ? inboxSession(record.source) : undefined
+    if (session === undefined || session.length <= 8 || taken.has(record.scope)) continue
+    const held = holders.get(record.scope)
+    if (held === undefined || held.has(session)) note(holders, record.scope, session)
   }
   return (project: string, agent: string, session: string, resume?: string | null): string => {
     const scope = questionScope(project, agent, session)
@@ -204,6 +208,12 @@ const isOwnerOf = (source: QuestionSource, session: string | undefined): boolean
 const inboxSession = (source: QuestionSource): string | undefined => {
   const data = parsedJson(source.data)
   return data !== null && typeof data === 'object' && 'session' in data && typeof data.session === 'string' ? data.session : undefined
+}
+// An inbox ask has no task title, so the block its session writes later is known by the full id alone.
+const isSameAsker = (source: QuestionSource | undefined, row: QuestionSource): boolean => {
+  if (source?.kind !== 'inbox') return false
+  const owner = sourceOwner(row)
+  return owner !== null && inboxSession(source) === canonicalOf(owner)
 }
 // An answer closes only the inbox ask of the session that gave it, not a same-prefix peer's.
 export const isAnsweredBy = (record: QuestionRecord, turn: QuestionAnswerEvidence): boolean => {
@@ -646,7 +656,7 @@ export const observeQuestions = (
     if (!row.isWaiting) return []
     const copies = copiesOf(row)
     const words = questionWords(row.text)
-    const record = records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === words && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && record.source?.task === row.source.task && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
+    const record = records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === words && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && (record.source?.task === row.source.task || isSameAsker(record.source, row.source)) && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
     return record === undefined ? [] : [{ row, record }]
   })
   const resolvedRows = new Set(resolved.map(item => item.row))

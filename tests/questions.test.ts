@@ -256,6 +256,41 @@ test('a saved inbox question keeps its id when its block appears beside a same-p
       expect(resolved.records.find(record => record.scope === questionScope('demo', 'codex', 'a1b2c3d4-person-b'))?.isUnresolved).toBe(true)
     }
   }
+  // A question resolved before its block appears stays resolved, with or without a peer, and a peer's stays open.
+  const done = resolveQuestion(saved, id, NOW + 1)
+  for (const other of ['', block('a1b2c3d4-person-b', 'Beta work', 'Inbox ask?')]) {
+    const file = block('a1b2c3d4-person-a', 'Alpha work', 'Inbox ask?') + other
+    const after = pass(done, file, [], NOW + 2)
+    expect(after.records.filter(record => record.isUnresolved).map(record => record.scope)).toEqual(other === '' ? [] : [questionScope('demo', 'codex', 'a1b2c3d4-person-b')])
+    expect(after.records.find(record => record.id === id)?.resolvedAt).toBe(done.records[0]!.resolvedAt)
+    expect(view(after, `## demo\n${file}`).waiting.map(item => item.text)).toEqual(other === '' ? [] : ['Inbox ask?'])
+  }
+  // The peer's block alone does not take the resolved question.
+  const peerFile = block('a1b2c3d4-person-b', 'Beta work', 'Inbox ask?')
+  expect(pass(done, peerFile, [], NOW + 2).records.filter(record => record.isUnresolved).map(record => record.scope)).toEqual([questionScope('demo', 'codex', 'a1b2c3d4-person-b')])
+  // The opposite order: a peer already holds the alias when the inbox ask arrives, and keeps its record.
+  const beta = block('a1b2c3d4-person-b', 'Beta work', 'Beta ask?')
+  const holding = pass(pass(emptyQuestions(), beta, [], NOW), block('a1b2c3d4-person-a', 'Alpha work', 'Quiet?').replace('- [?]', '- [x]') + beta, [], NOW + 1)
+  const betaId = holding.records[0]!.id
+  const ask = { ...turn, text: 'Alpha ask?' }
+  const asked = pass(holding, block('a1b2c3d4-person-a', 'Alpha work', 'Quiet?').replace('- [?]', '- [x]') + beta, [ask], NOW + 2)
+  const shown = block('a1b2c3d4-person-a', 'Alpha work', 'Alpha ask?') + beta
+  const answered = pass(asked, shown, [], NOW + 3)
+  const beside = answered.records.find(record => record.words === 'Beta ask?')!
+  expect([beside.id, beside.isPresent, beside.isUnresolved]).toEqual([betaId, true, true])
+  const rows = view(answered, `## demo\n${shown}`).waiting
+  expect(rows.filter(item => item.text === 'Beta ask?').map(item => item.questionId)).toEqual([betaId])
+  expect(rows.every(item => item.questionId !== undefined)).toBe(true)
+  // So does a block saved before it named a full session, once it does.
+  const unnamed = beta.replace(' resume=a1b2c3d4-person-b', '')
+  const first = pass(emptyQuestions(), unnamed, [], NOW)
+  const later = pass(pass(first, unnamed, [ask], NOW + 1), beta, [], NOW + 2)
+  expect(later.records.find(record => record.words === 'Beta ask?')?.id).toBe(first.records[0]!.id)
+  // Two inbox asks then both blocks with new words: each new ask gets a record of its own.
+  const twoAsks = pass(emptyQuestions(), '', [turn, { ...turn, session: 'a1b2c3d4-person-b', text: 'Bravo ask?', sourceRevisions: ['b'.repeat(64)] } as PendingTurn], NOW)
+  const fresh = block('a1b2c3d4-person-a', 'Alpha work', 'New A?') + block('a1b2c3d4-person-b', 'Beta work', 'New B?')
+  const freshPass = pass(twoAsks, fresh, [], NOW + 1)
+  expect(['New A?', 'New B?'].map(words => freshPass.records.filter(record => record.words === words && record.isPresent).length)).toEqual([1, 1])
   // A record that names no full session is not known to be either peer's.
   const { session: _session, ...oldTurn } = turn
   const old = pass(emptyQuestions(), '', [oldTurn as PendingTurn], NOW)
