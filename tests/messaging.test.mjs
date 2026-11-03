@@ -2619,41 +2619,44 @@ test('a claim that stays refused blocks the start and is left in place', () => {
     syncBuiltinESMExports()
   }
   try {
-    // Once, then after each of the four waits.
-    assert.equal(tries, 5)
+    // Once, then after each of the six waits.
+    assert.equal(tries, 7)
     assert.deepEqual(readdirSync(dir), [name])
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('a claim refused while it is looked up again after its release is looked at once more and counts as gone', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'board-message-removing-lookup-'))
-  const open = fs.openSync, lstat = fs.lstatSync
-  const nonce = 'b'.repeat(32), name = claimName(process.ppid, nonce)
-  let isRemoved = false
-  let claim
-  try {
-    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
-    fs.openSync = (file, ...args) => {
-      const fd = open(file, ...args)
-      if (basename(String(file)) === name) { unlinkSync(file); isRemoved = true }
-      return fd
+  // Refused while its owner removes it, or held by another program.
+  for (const refusal of [refused, () => Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' })]) {
+    const dir = mkdtempSync(join(tmpdir(), 'board-message-removing-lookup-'))
+    const open = fs.openSync, lstat = fs.lstatSync
+    const nonce = 'b'.repeat(32), name = claimName(process.ppid, nonce)
+    let isRemoved = false
+    let claim
+    try {
+      writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
+      fs.openSync = (file, ...args) => {
+        const fd = open(file, ...args)
+        if (basename(String(file)) === name) { unlinkSync(file); isRemoved = true }
+        return fd
+      }
+      fs.lstatSync = (file, ...args) => {
+        if (!isRemoved || basename(String(file)) !== name) return lstat(file, ...args)
+        isRemoved = false
+        throw refusal()
+      }
+      syncBuiltinESMExports()
+      claim = claimMessageStore(dir)
+    } finally {
+      fs.openSync = open
+      fs.lstatSync = lstat
+      syncBuiltinESMExports()
     }
-    fs.lstatSync = (file, ...args) => {
-      if (!isRemoved || basename(String(file)) !== name) return lstat(file, ...args)
-      isRemoved = false
-      throw refused()
-    }
-    syncBuiltinESMExports()
-    claim = claimMessageStore(dir)
-  } finally {
-    fs.openSync = open
-    fs.lstatSync = lstat
-    syncBuiltinESMExports()
+    try {
+      assert.equal(storeClaims(dir).length, 1)
+      assert.equal(existsSync(join(dir, name)), false)
+    } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
   }
-  try {
-    assert.equal(storeClaims(dir).length, 1)
-    assert.equal(existsSync(join(dir, name)), false)
-  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('a claim written again under its name while another start reads it blocks the start and stays', () => {
@@ -2726,10 +2729,122 @@ test('a claim rename that stays refused blocks the start and leaves nothing behi
     syncBuiltinESMExports()
   }
   try {
-    assert.equal(tries, 5)
+    assert.equal(tries, 7)
     assert.deepEqual(readdirSync(dir), [])
     // Nothing is left to stop the next start.
     claimMessageStore(dir).release()
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// Windows answers EBUSY while another program, such as a virus scanner, holds a file.
+const held = () => Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' })
+const ownClaim = file => basename(String(file)).startsWith('.message-claim-' + process.pid + '-')
+
+test('a start that loses to a live board and cannot remove its claim at once removes it after a wait and reports the folder in use', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-release-wait-'))
+  const unlink = fs.unlinkSync
+  const nonce = 'e'.repeat(32), name = claimName(process.ppid, nonce)
+  let tries = 0
+  try {
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
+    fs.unlinkSync = file => {
+      if (ownClaim(file) && tries++ === 0) throw held()
+      return unlink(file)
+    }
+    syncBuiltinESMExports()
+    assert.throws(() => claimMessageStore(dir), error => error.message === 'MESSAGE_STORE_IN_USE')
+  } finally {
+    fs.unlinkSync = unlink
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(tries, 2)
+    assert.deepEqual(readdirSync(dir), [name])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a release whose removal took effect but was reported refused counts as released', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-release-done-'))
+  const unlink = fs.unlinkSync
+  let tries = 0
+  const claim = claimMessageStore(dir)
+  try {
+    fs.unlinkSync = file => {
+      if (!ownClaim(file)) return unlink(file)
+      if (tries++ === 0) { unlink(file); throw held() }
+      return unlink(file)
+    }
+    syncBuiltinESMExports()
+    claim.release()
+    claim.release()
+  } finally {
+    fs.unlinkSync = unlink
+    syncBuiltinESMExports()
+  }
+  try {
+    // The second removal finds nothing; the second release does not try again.
+    assert.equal(tries, 2)
+    assert.deepEqual(readdirSync(dir), [])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a dead board\'s claim that cannot be removed at once is removed after a wait', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-retire-wait-'))
+  let pid = 2147483000
+  for (;;) {
+    try { process.kill(pid, 0); pid-- } catch (error) {
+      if (error.code === 'ESRCH') break
+      throw error
+    }
+  }
+  const unlink = fs.unlinkSync
+  const nonce = 'f'.repeat(32), name = claimName(pid, nonce)
+  let tries = 0
+  let claim
+  try {
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid, nonce }) + '\n')
+    fs.unlinkSync = file => {
+      if (basename(String(file)) === name && tries++ === 0) throw refused()
+      return unlink(file)
+    }
+    syncBuiltinESMExports()
+    claim = claimMessageStore(dir)
+  } finally {
+    fs.unlinkSync = unlink
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(tries, 2)
+    assert.equal(existsSync(join(dir, name)), false)
+    assert.equal(storeClaims(dir).length, 1)
+  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a claim another program holds for a moment is read after a wait, its own or another board\'s', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-held-claim-'))
+  const open = fs.openSync
+  const nonce = 'd'.repeat(32), name = claimName(process.ppid, nonce)
+  const refusedOnce = new Set()
+  try {
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
+    fs.openSync = (file, ...args) => {
+      const one = basename(String(file))
+      if ((one === name || ownClaim(file)) && !refusedOnce.has(one)) {
+        refusedOnce.add(one)
+        throw one === name ? held() : refused()
+      }
+      return open(file, ...args)
+    }
+    syncBuiltinESMExports()
+    // Both claims read, the other board is alive, and this start's claim is gone again.
+    assert.throws(() => claimMessageStore(dir), error => error.message === 'MESSAGE_STORE_IN_USE')
+  } finally {
+    fs.openSync = open
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(refusedOnce.size, 2)
+    assert.deepEqual(readdirSync(dir), [name])
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 

@@ -19,7 +19,7 @@ const readClaimOnce = (file: string, isOther: boolean): string => {
     const opened = fstatSync(fd)
     if (isOther && opened.nlink === 0 && opened.dev === before.dev && opened.ino === before.ino) {
       // Gone only if nothing has taken its name since.
-      try { lstatSync(file) } catch (error) { if (['ENOENT', 'EPERM'].includes(String((error as NodeJS.ErrnoException).code))) throw error }
+      try { lstatSync(file) } catch (error) { if (['ENOENT', 'EPERM', 'EBUSY', 'EAGAIN'].includes(String((error as NodeJS.ErrnoException).code))) throw error }
       throw blocked()
     }
     if (opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1 || opened.size > 512) throw blocked()
@@ -30,31 +30,16 @@ const readClaimOnce = (file: string, isOther: boolean): string => {
   } finally { closeSync(fd) }
 }
 
-const WAITS_MS = [10, 25, 50, 100]
+const WAITS_MS = [10, 25, 50, 100, 200, 400]
 const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
 
-// Windows refuses to open or stat a file while another process is removing it (EPERM until the
-// remover closes it). Another board's claim refused that way is looked at again: by then it is
-// gone, or it reads, and only one still refused after the waits blocks.
-const readClaim = (file: string, isOther = false): string => {
+// Windows refuses a file for a moment while another process removes it (EPERM until the remover
+// closes it), or while a virus scanner holds one just written (EPERM, EBUSY). Every step on a claim
+// file is tried again after short waits; only a refusal that outlasts them all counts.
+const patiently = <T>(step: () => T): T => {
   for (let attempt = 0; ; attempt++) {
     try {
-      return readClaimOnce(file, isOther)
-    } catch (error) {
-      const wait = WAITS_MS[attempt]
-      if (!isOther || wait === undefined || (error as NodeJS.ErrnoException).code !== 'EPERM') throw error
-      pause(wait)
-    }
-  }
-}
-
-// A file just written on Windows can be held for a moment (a virus scanner, the indexer), and its
-// rename fails then. A short wait clears it, as for the message store's own saves.
-const publish = (from: string, to: string): void => {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      renameSync(from, to)
-      return
+      return step()
     } catch (error) {
       const wait = WAITS_MS[attempt]
       if (wait === undefined || !['EPERM', 'EBUSY', 'EAGAIN'].includes(String((error as NodeJS.ErrnoException).code))) throw error
@@ -62,6 +47,9 @@ const publish = (from: string, to: string): void => {
     }
   }
 }
+
+// A claim refused while its owner removes it is, after a wait, gone or readable.
+const readClaim = (file: string, isOther = false): string => patiently(() => readClaimOnce(file, isOther))
 
 export type MessageStoreClaim = {
   check: (directory: string) => void
@@ -84,7 +72,7 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
   // for a broken one and refuses. A rename shows the whole claim or nothing.
   try {
     writeFileSync(pending, bytes, { flag: 'wx', mode: 0o600 })
-    publish(pending, file)
+    patiently(() => renameSync(pending, file))
   } catch (cause) {
     // The pending name holds this process's own nonce, so only an existing file is someone else's.
     if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') try { unlinkSync(pending) } catch {}
@@ -98,7 +86,9 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
       if (isReleased) return
       try {
         if (readClaim(file) !== bytes) throw blocked()
-        unlinkSync(file)
+        // A start that loses to a live board releases its claim just after writing it, while a
+        // scanner may still hold it; a refusal here would end that start instead of letting it retry.
+        patiently(() => unlinkSync(file))
         isReleased = true
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -144,7 +134,7 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
       // Only a proven-dead writer's exact immutable claim can be retired.
       try {
         if (readClaim(path, true) !== raw) throw blocked()
-        unlinkSync(path)
+        patiently(() => unlinkSync(path))
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw blocked()
       }
