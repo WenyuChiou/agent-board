@@ -1,6 +1,6 @@
-# Live parity checklist (every release)
+# Live parity checklist (every stable release)
 
-CI tests the code. It cannot show what a person sees inside each agent's own app or CLI. Before every release, open each installed mainstream agent and check the board from inside it. The owner's rule: every mainstream agent must work, in its UI and in its CLI, and each is opened for real, with a screenshot of the CLI.
+CI tests the code. It cannot show what a person sees inside each agent's own app or CLI. Before every stable release, open each installed mainstream agent and check the board from inside it. The owner's rule: every mainstream agent must work, in its UI and in its CLI, and each is opened for real, with a screenshot of the CLI.
 
 Write the result to `docs/validation/<date>-parity-<version>.md`, following `2026-10-20-parity-0.23.5.md`. No record, no claim: a surface without a row in that record ships as "untested" in the release notes.
 
@@ -46,7 +46,7 @@ A cell may add a short note, and a `*` that points to a sentence under the table
 
 ## How to run it safely
 
-- **Use the hooks as they are already connected.** Never run a connect, setup, install or remove against the real home.
+- **Use the hooks as they are already connected.** Never run a connect, setup, install or remove against the real home. For each agent whose hooks it checks, the record names the Agent Board version those hooks run and how that was read; each must be the version being released. The board's footer shows the board's version, not the hooks'.
 - **Isolate any connect.** If a check needs one, or any `claude` run with this plugin loaded, point every one of these at a scratch folder: `HOME`, `USERPROFILE`, `HERMES_HOME`, `GROK_HOME`, `OPENCLAW_STATE_DIR`, `CODEX_HOME`, `XDG_CONFIG_HOME`, `LOCALAPPDATA`, `APPDATA`, `CLAUDE_PROGRESS_FILE`, `CLAUDE_CONFIG_DIR`, `TEMP` and `TMP` (#212).
 - **Work in a scratch project folder, with synthetic prompts only** ("Synthetic test: …"). Board checks c, d and f use a synthetic board through `CLAUDE_PROGRESS_FILE`.
 - **Never open an existing conversation or project.** If an app opens on one, start a new chat in the scratch folder at once.
