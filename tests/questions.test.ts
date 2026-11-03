@@ -305,12 +305,25 @@ test('a saved inbox question keeps its id when its block appears beside a same-p
   const againId = askedAgain.records.find(record => record.words === 'Bravo ask?')!.id
   const back = pass(askedAgain, bravoFile, [], NOW + 5)
   expect(view(back, `## demo\n${bravoFile}`).waiting.filter(item => item.text === 'Bravo ask?').map(item => item.questionId)).toEqual([againId])
-  // A block's resolved question stays resolved when the block gains its full id beside a peer.
+  // An open block question keeps its id when the block gains its full id beside a peer.
   const plain = block('a1b2c3d4-person-a', 'Alpha work', 'Alpha ask?')
   const before = pass(emptyQuestions(), plain.replace(' resume=a1b2c3d4-person-a', ''), [], NOW)
-  const settled = pass(resolveQuestion(before, before.records[0]!.id, NOW + 1), plain + beta, [], NOW + 2)
-  expect(settled.records.filter(record => record.words === 'Alpha ask?').map(record => [record.id, record.isUnresolved])).toEqual([[before.records[0]!.id, false]])
-  expect(view(settled, `## demo\n${plain}${beta}`).waiting.map(item => item.text)).toEqual(['Beta ask?'])
+  const opened = pass(before, plain + beta, [], NOW + 1)
+  expect(opened.records.filter(record => record.words === 'Alpha ask?').map(record => [record.id, record.isUnresolved])).toEqual([[before.records[0]!.id, true]])
+  // A title alone doesn't carry an answer: the title can have moved to a peer, so the question stays visible.
+  const closedOld = resolveQuestion(before, before.records[0]!.id, NOW + 1)
+  const moved = [
+    plain + beta,
+    block('a1b2c3d4-person-a', 'Beta work', 'Beta ask?') + block('a1b2c3d4-person-b', 'Alpha work', 'Alpha ask?'),
+    block('a1b2c3d4-person-a', 'Renamed', 'Beta ask?') + block('a1b2c3d4-person-b', 'Alpha work', 'Alpha ask?'),
+  ]
+  for (const earlier of [closedOld, pass(closedOld, '', [], NOW + 2)]) for (const file of moved) {
+    const next = pass(earlier, file, [], NOW + 3)
+    const rows = view(next, `## demo\n${file}`).waiting
+    expect(rows.map(item => item.text).sort()).toEqual(['Alpha ask?', 'Beta ask?'])
+    expect(rows.every(item => item.questionId !== undefined && item.questionId !== before.records[0]!.id)).toBe(true)
+    expect(next.records.find(record => record.id === before.records[0]!.id)?.resolvedAt).toBe(closedOld.records[0]!.resolvedAt)
+  }
   // Two inbox asks then both blocks with new words: each new ask gets a record of its own.
   const twoAsks = pass(emptyQuestions(), '', [turn, { ...turn, session: 'a1b2c3d4-person-b', text: 'Bravo ask?', sourceRevisions: ['b'.repeat(64)] } as PendingTurn], NOW)
   const fresh = block('a1b2c3d4-person-a', 'Alpha work', 'New A?') + block('a1b2c3d4-person-b', 'Beta work', 'New B?')

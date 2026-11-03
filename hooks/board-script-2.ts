@@ -280,7 +280,7 @@ export const LINES = [
 "    const auto = sourceOwner(source);",
 "    const canonical = auto === null ? null : canonicalOf(auto);",
 "    if (auto === null || canonical === null) {",
-"      const ids = source.kind === \"own\" || auto !== null ? titled.get(JSON.stringify([record.scope, source.task])) : undefined;",
+"      const ids = source.kind === \"own\" || auto !== null && record.isUnresolved ? titled.get(JSON.stringify([record.scope, source.task])) : undefined;",
 "      const only = ids?.size === 1 ? [...ids][0] : undefined;",
 "      if (only !== undefined)",
 "        note(holders, record.scope, only);",

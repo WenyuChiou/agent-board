@@ -59,8 +59,9 @@ export const questionScopes = (projects: readonly ProgressProject[], mine: Progr
     const auto = sourceOwner(source)
     const canonical = auto === null ? null : canonicalOf(auto)
     if (auto === null || canonical === null) {
-      // A copy saved before it held the session id is known only by its alias and title.
-      const ids = source.kind === 'own' || auto !== null ? titled.get(JSON.stringify([record.scope, source.task])) : undefined
+      // A copy saved before it held the session id is known only by its alias and title. A block's
+      // title can move to a peer, so that keeps an open question's id but doesn't carry an answer.
+      const ids = source.kind === 'own' || (auto !== null && record.isUnresolved) ? titled.get(JSON.stringify([record.scope, source.task])) : undefined
       const only = ids?.size === 1 ? [...ids][0] : undefined
       if (only !== undefined) note(holders, record.scope, only)
       continue
