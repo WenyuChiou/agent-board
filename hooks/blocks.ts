@@ -337,7 +337,7 @@ const toIdentity = (target: BlockIdentity, agent?: string, resume?: string | nul
   }
 }
 
-export const matchesSpan = (span: BlockSpan, target: BlockIdentity, agent?: string, resume?: string | null): boolean => {
+export const matchesSpan = (span: Pick<BlockSpan, 'session' | 'agent' | 'resume'>, target: BlockIdentity, agent?: string, resume?: string | null): boolean => {
   const id = toIdentity(target, agent, resume)
   if (id.agent !== undefined && id.agent !== '') {
     const targetAgent = id.agent.toLowerCase()
