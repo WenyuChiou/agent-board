@@ -287,17 +287,27 @@ test('a setup record for another host folder leaves the connector to connect thi
   assert.equal(readFileSync(main, 'utf8'), saved)
 }))
 
-test('a setup hook in an encoded launch still leads to the record in its data folder', () => withSetup('codex', ({ f, run }) => {
-  // Node at a spaced path with no 8.3 name: the worker path exists only inside the base64.
+test('a setup hook still leads to the record in its data folder however its path is quoted', () => withSetup('codex', ({ f, run }) => {
   const file = join(f.home, '.codex', 'hooks.json')
   const worker = join(f.home, 'other', "it's data", 'agent-board-hook.mjs')
+  const setupHook = () => run('auto').state.setup.agents.find(one => one.agent === 'codex').hook
+  // As setup wrote it on this system.
+  const written = readFileSync(file, 'utf8')
+  assert.equal(setupHook(), 'setup')
+  assert.equal(readFileSync(file, 'utf8'), written)
+  // Node at a spaced path with no 8.3 name: the worker path exists only inside the base64.
   const launch = "& 'C:\\Program Files\\nodejs\\node.exe' '" + worker.replaceAll("'", "''") + "' 'SessionStart'; exit $LASTEXITCODE"
-  const command = 'powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + Buffer.from(launch, 'utf16le').toString('base64')
-  assert.equal(command.includes('agent-board-hook'), false)
-  const encoded = JSON.stringify(JSON.parse(readFileSync(file, 'utf8')), (key, value) => key === 'command' ? command : value, 2)
-  writeFileSync(file, encoded)
-  assert.equal(run('auto').state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
-  assert.equal(readFileSync(file, 'utf8'), encoded)
+  for (const command of [
+    'powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + Buffer.from(launch, 'utf16le').toString('base64'),
+    `node "${worker}" SessionStart`,
+    `node '${worker.replaceAll("'", "'\\''")}' SessionStart`,
+    `node '${worker.replaceAll("'", "''")}' SessionStart`,
+  ]) {
+    const quoted = JSON.stringify(JSON.parse(written), (key, value) => key === 'command' ? command : value, 2)
+    writeFileSync(file, quoted)
+    assert.equal(setupHook(), 'setup', command)
+    assert.equal(readFileSync(file, 'utf8'), quoted, command)
+  }
 }, home => ['--data-dir', join(home, 'other', "it's data")]))
 
 const DATA_DIR_HOSTS = { codex: '.codex', cursor: '.cursor', gemini: '.gemini', muse: 'muse', grok: '.grok', opencode: 'opencode', openclaw: '.openclaw' }

@@ -1004,12 +1004,17 @@ const setupRecordPaths = (text: string | null): string[] | null => {
 
 // The data folders a config's setup hooks run from.
 const setupHookRoots = (text: string): string[] => {
-  const unescaped = text.replace(/\\(["\\])/g, '$1')
-  // A spaced Node path with no 8.3 name puts the whole launch in PowerShell's encoded text, which doubles an apostrophe.
-  const encoded = [...text.matchAll(/-EncodedCommand\s+([A-Za-z0-9+/]+={0,2})/g)].flatMap(match => {
-    try { return [...encodedCommandText(match[1]!).matchAll(/'((?:[A-Za-z]:[\\/]|\/)(?:[^'\r\n]|'')*?)[\\/](?:agent-board-hook\.mjs|adapters[\\/]openclaw[\\/]agent-board-local\.mjs)'/g)].map(one => one[1]!.replace(/''/g, "'")) } catch { return [] }
+  const start = String.raw`(?:[A-Za-z]:[\\/]|/)`, worker = String.raw`[\\/](?:agent-board-hook\.mjs|adapters[\\/]openclaw[\\/]agent-board-local\.mjs)`
+  // A spaced Node path with no 8.3 name puts the whole launch in PowerShell's encoded text.
+  const decoded = [...text.matchAll(/-EncodedCommand\s+([A-Za-z0-9+/]+={0,2})/g)].flatMap(match => {
+    try { return [encodedCommandText(match[1]!)] } catch { return [] }
   })
-  return [...new Set([...encoded, ...[...unescaped.matchAll(/((?:[A-Za-z]:[\\/]|\/)[^"'`\r\n]*?)[\\/](?:agent-board-hook\.mjs|adapters[\\/]openclaw[\\/]agent-board-local\.mjs)/g)].map(match => match[1]!)])]
+  return [...new Set([text.replace(/\\(["\\])/g, '$1'), ...decoded].flatMap(source => [
+    // A quoted path can hold an apostrophe: doubled for PowerShell, closed and reopened for a POSIX shell.
+    ...[...source.matchAll(new RegExp(`'(${start}(?:[^'\\r\\n]|''|'\\\\'')*?)${worker}'`, 'g'))].map(match => match[1]!.replace(/'\\''|''/g, "'")),
+    ...[...source.matchAll(new RegExp(`"(${start}[^"\\r\\n]*?)${worker}"`, 'g'))].map(match => match[1]!),
+    ...[...source.matchAll(new RegExp(`(${start}[^"'\`\\r\\n]*?)${worker}`, 'g'))].map(match => match[1]!),
+  ]))]
 }
 
 // Setup owns an agent in the host folder its record names, or whose hook file names the record's
