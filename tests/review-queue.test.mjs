@@ -900,9 +900,14 @@ test('a governance, workflow or release pull request shows that a notice is not 
   assert.deepEqual(due.needsReviewer[0].notice, refused)
   assert.ok(formatQueue(due).split('\n').includes(refusal))
   // The same with no notice at all, Ready for more than 24 hours, for each kind of file the rule names.
-  const governed = ['.github/workflows/test.yml', '.github/pull_request_template.md', 'AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/RULES.md', 'docs/dev/team-process.md', 'docs/dev/universal-messaging-roadmap.md', 'docs/RELEASING.md', 'SECURITY.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json']
+  const governed = ['.github/workflows/test.yml', '.github/pull_request_template.md', 'AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/RULES.md', 'docs/dev/team-process.md', 'docs/dev/universal-messaging-roadmap.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json']
   for (const path of governed) {
     assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z', fields: touching('scripts/a.mjs', path) }), refused, path)
+  }
+  // Ordinary documentation remains eligible for the notice path when the other conditions hold.
+  const ordinaryDocs = ['SECURITY.md', 'docs/RELEASING.md', 'docs/GUIDE.md']
+  for (const path of ordinaryDocs) {
+    assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z', fields: touching(path) }), { state: 'allowed', at: null }, path)
   }
   const text = formatQueue(classify([pull(1, touching('CONTRIBUTING.md'))], { 1: [ready(head, '2026-10-19T11:00:00Z')] }, now))
   assert.ok(text.split('\n').includes(refusal))

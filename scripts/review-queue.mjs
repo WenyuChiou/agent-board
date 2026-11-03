@@ -94,8 +94,6 @@ const governedPaths = new Set([
   'docs/dev/RULES.md',
   'docs/dev/team-process.md',
   'docs/dev/universal-messaging-roadmap.md',
-  'docs/RELEASING.md',
-  'SECURITY.md',
   'CHANGELOG.md',
   'package.json',
   '.claude-plugin/plugin.json',
