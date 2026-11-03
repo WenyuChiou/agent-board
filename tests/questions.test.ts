@@ -235,6 +235,34 @@ test('a saved turn with no full session stays held while two same-prefix owners 
   expect(isTurnRecorded(besideRun, saved)).toBe(true)
 })
 
+test('a saved inbox question keeps its id when its block appears beside a same-prefix peer', () => {
+  const block = (id: string, title: string, step: string): string => `<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} resume=${id} -->\n### ${title}\n- [?] ${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', session: 'a1b2c3d4-person-a', text: 'Inbox ask?', isQuestion: true, at: NOW, sourceAt: NOW, sourceRevisions: ['a'.repeat(64)] } as PendingTurn
+  const pass = (ledger: QuestionLedger, text: string, pending: PendingTurn[], at = NOW + 1) => parseQuestions(questionsJson(observeQuestions(ledger, parseProgress(`## demo\n${text}`), null, [], at, true, 'pending', undefined, pending).ledger))
+  const saved = pass(emptyQuestions(), '', [turn], NOW)
+  const id = saved.records[0]!.id
+
+  for (const [other, words] of [['Other ask?', ['Inbox ask?', 'Other ask?']], ['Inbox ask?', ['Inbox ask?', 'Inbox ask?']]] as const) {
+    const file = block('a1b2c3d4-person-a', 'Alpha work', 'Inbox ask?') + block('a1b2c3d4-person-b', 'Beta work', other)
+    for (const pending of [[turn], []]) {
+      const met = pass(saved, file, pending)
+      expect(met.records.map(record => record.words)).toEqual([...words])
+      expect(met.records[0]!.id).toBe(id)
+      expect(met.records[1]!.scope).toBe(questionScope('demo', 'codex', 'a1b2c3d4-person-b'))
+      expect(isTurnRecorded(met, turn)).toBe(true)
+      expect(view(met, `## demo\n${file}`).waiting.map(item => item.text).sort()).toEqual([...words].sort())
+      const resolved = pass(resolveQuestion(met, id, NOW + 2), file, [], NOW + 3)
+      expect(resolved.records.find(record => record.id === id)?.resolvedAt).toBeDefined()
+      expect(resolved.records.find(record => record.scope === questionScope('demo', 'codex', 'a1b2c3d4-person-b'))?.isUnresolved).toBe(true)
+    }
+  }
+  // A record that names no full session is not known to be either peer's.
+  const { session: _session, ...oldTurn } = turn
+  const old = pass(emptyQuestions(), '', [oldTurn as PendingTurn], NOW)
+  const file = block('a1b2c3d4-person-a', 'Alpha work', 'Other ask?') + block('a1b2c3d4-person-b', 'Beta work', 'Beta ask?')
+  expect(pass(old, file, []).records.map(record => record.scope)).toEqual([questionScope('demo', 'codex', 'a1b2c3d4'), questionScope('demo', 'codex', 'a1b2c3d4-person-a'), questionScope('demo', 'codex', 'a1b2c3d4-person-b')])
+})
+
 test('a same-prefix peer neither answers an inbox ask nor takes its turn', () => {
   const session = 'a1b2c3d4-person-a'
   const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', session, text: 'Inbox ask?', isQuestion: true, at: NOW, sourceAt: NOW } as PendingTurn

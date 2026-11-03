@@ -33,6 +33,11 @@ const sourceOwner = (source: QuestionSource): QuestionOwner | null => {
 // owners that already saved records under it; another owner sharing it uses its canonical id, and
 // so does each owner when two meet with nothing saved. An owner with a record under its canonical
 // id stays there after a peer leaves. Project-heading migration is unchanged (#602).
+const savedOwner = (source: QuestionSource): QuestionOwner | null => {
+  if (source.kind !== 'inbox') return sourceOwner(source)
+  const session = inboxSession(source)
+  return session === undefined || session.length <= 8 ? null : { session: source.session, agent: source.agent, resume: session }
+}
 export const questionScopes = (projects: readonly ProgressProject[], mine: ProgressMirror | null, ledger?: QuestionLedger): QuestionScopeOf => {
   const owners = new Map<string, Set<string>>()
   const holders = new Map<string, Set<string>>()
@@ -55,7 +60,7 @@ export const questionScopes = (projects: readonly ProgressProject[], mine: Progr
   for (const record of ledger?.records ?? []) {
     const source = record.source
     if (source === undefined) continue
-    const auto = sourceOwner(source)
+    const auto = savedOwner(source)
     if (auto === null) {
       // An own copy saved before it held the session id is known only by its alias and title.
       const ids = source.kind === 'own' ? titled.get(JSON.stringify([record.scope, source.task])) : undefined
