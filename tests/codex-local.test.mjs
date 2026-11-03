@@ -951,8 +951,12 @@ test('doctor and removal print a next step that works when a path holds characte
     assert.ok(!repair.includes(home), repair)
     const previewed = printed(repair)
     assert.equal(previewed.status, 0, previewed.stderr)
-    assert.ok(previewed.stdout.includes('antigravity'), previewed.stdout)
-    assert.equal(board('--codex-setup', '--apply').status, 0)
+    const repaired = printed(nextStep(previewed.stdout))
+    assert.equal(repaired.status, 0, repaired.stderr)
+    assert.ok(repaired.stdout.includes('setup repair applied'), repaired.stdout)
+    const checked = printed(nextStep(repaired.stdout))
+    assert.equal(checked.status, 0, checked.stderr)
+    assert.ok(checked.stdout.includes('are installed'), checked.stdout)
     const preview = board('--codex-remove')
     assert.equal(preview.status, 0, preview.stderr)
     const apply = nextStep(preview.stdout)
@@ -961,6 +965,34 @@ test('doctor and removal print a next step that works when a path holds characte
     assert.equal(applied.status, 0, applied.stderr)
     assert.ok(applied.stdout.includes('removal applied'), applied.stdout)
   }
+}))
+
+test('the repair the doctor names prints plain lines in the board\'s language, and --codex-setup keeps its JSON otherwise', () => fixture(f => {
+  const runner = join(f.home, 'repair-cli.mjs')
+  f.save(runner, bundleFromDir(new URL('..', import.meta.url)))
+  const board = (...args) => spawnSync(process.execPath, [runner, '--home', f.home, '--data-dir', join(f.home, 'data'), '--agent', 'antigravity', ...args], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  for (const [lang, preview, applied, current, next] of [
+    ['en', 'nothing changed', 'repair applied', 'already current', 'Next:'],
+    ['zh-TW', '沒有更動任何內容', '修復已套用', '已是最新', '下一步：'],
+    ['zh-CN', '没有更改任何内容', '修复已应用', '已是最新', '下一步：'],
+  ]) {
+    const removed = board('--codex-remove', '--apply', '--lang', lang)
+    assert.equal(removed.status, 0, removed.stderr)
+    for (const [args, expected] of [[[], preview], [['--apply'], applied], [[], current]]) {
+      const plain = board('--codex-setup', '--plain', '--lang', lang, ...args)
+      assert.equal(plain.status, 0, plain.stderr)
+      assert.ok(plain.stdout.includes(expected), plain.stdout)
+      assert.ok(!plain.stdout.includes('{'), plain.stdout)
+      assert.equal(plain.stdout.split(next).length - 1, 1, plain.stdout)
+    }
+    assert.deepEqual(JSON.parse(board('--codex-setup', '--plain', '--json', '--lang', lang).stdout).conflicts, [])
+    assert.deepEqual(JSON.parse(board('--codex-setup', '--lang', lang).stdout).conflicts, [])
+  }
+  f.save(join(f.home, '.gemini', 'config', 'hooks.json'), '{not json')
+  const blocked = board('--codex-setup', '--plain', '--lang', 'en', '--apply')
+  assert.equal(blocked.status, 1, blocked.stderr)
+  assert.equal(blocked.stderr, '')
+  assert.ok(blocked.stdout.includes('blocked by conflicting files'), blocked.stdout)
 }))
 
 test('doctor and removal say plainly when an adapter is pending, a connector holds the hook, or nothing is left to remove', () => fixture(f => {

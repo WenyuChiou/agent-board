@@ -258,6 +258,19 @@ export const codexRemoveOutput = (result: LocalPlan, s: Strings, command: string
   return `${lines.join('\n')}\n`
 }
 
+export const codexSetupOutput = (result: LocalPlan, s: Strings, command: string, check: string): string => {
+  const words = s.localSummary
+  const host = s.agentNames[result.agent] ?? result.agent
+  const isApplied = result.applied === true && result.changes.length > 0
+  const lines = [words.removal(host, isApplied ? words.setupApplied : result.conflicts.length ? words.setupBlocked : result.changes.length ? words.setupPreview : words.setupCurrent)]
+  for (const change of result.changes) lines.push(isApplied ? words.setupWritten(change.file) : words.setupFile(change.file))
+  for (const file of result.conflicts) lines.push(words.conflict(file))
+  lines.push(result.conflicts.length ? words.review(command)
+    : isApplied || !result.changes.length ? words.setupCheck(check)
+    : words.setupApply(`${command} --apply`))
+  return `${lines.join('\n')}\n`
+}
+
 // What a person reads when a setup mode fails (#465): one sentence with its next step, never the code name, a stack or a path.
 export const setupFailure = (error: unknown, agent: string, s: Strings): { code: string; message: string; reason?: string } => {
   const detail = error as { code?: unknown; message?: unknown; record?: unknown } | null | undefined
@@ -365,7 +378,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const manifest: Manifest = { files: object(loaded.files ?? {}) as Record<string, string>, groups: object(loaded.groups ?? {}), foreignGroups: object(loaded.foreignGroups ?? {}) }
   // A check must not fail on the words of its next step: an argument a shell would expand or eat goes through boardRun's code points.
   const nextCommand = (nextMode: string, extra: string[] = []): string => {
-    const rest = [nextMode, ...args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json'), ...extra]
+    const rest = [nextMode, ...args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json' && arg !== '--plain'), ...extra]
     if (rest.some(arg => /["`$%!\\\r\n]/.test(arg))) return boardRun(process.argv[1]!, rest)
     return `${boardRun(process.argv[1]!)} ${rest.map(arg => /^[\w.:=/-]+$/.test(arg) ? arg : quote(arg)).join(' ')}`
   }
@@ -963,9 +976,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     alreadyGone, notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
+  // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.
+  const isPlainPlan = !args.includes('--json') && (remove || args.includes('--plain'))
   const outputPlan = (result: LocalPlan): void => {
-    if (remove && !args.includes('--json')) process.stdout.write(codexRemoveOutput(result, s, nextCommand('--codex-remove')))
-    else output(result)
+    if (!isPlainPlan) output(result)
+    else if (remove) process.stdout.write(codexRemoveOutput(result, s, nextCommand('--codex-remove')))
+    else process.stdout.write(codexSetupOutput(result, s, nextCommand('--codex-setup', ['--plain']), nextCommand('--codex-doctor')))
   }
   if (mode === '--codex-trust') {
     if (agent !== 'codex' || conflicts.length || changes.length || readLocal(manifestFile) === null) throw new Error('OWNED_CODEX_INSTALL_REQUIRED')
@@ -1020,14 +1036,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const result = { ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor }
     if (args.includes('--json')) output(result)
     // Name the Codex this check just reached: on Windows, command -v and where.exe's first line can be an npm shim that cannot start.
-    else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup'), host ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable!]) : undefined))
+    else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup', ['--plain']), host ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable!]) : undefined))
     return true
   }
   if (!args.includes('--apply')) { outputPlan(plan); return true }
   if (conflicts.length) {
     outputPlan(plan)
     // The plain removal already explains the conflict and its single next step.
-    if (remove && !args.includes('--json')) { process.exitCode = 1; return true }
+    if (isPlainPlan) { process.exitCode = 1; return true }
     throw new Error('INSTALL_CONFLICT')
   }
   withInstallLock(home, () => {
