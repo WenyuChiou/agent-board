@@ -342,7 +342,9 @@ To add a receiver, export `messagingReceiver` from its own import-safe `.mjs` or
 module under `scripts/` or `hooks/`; no central receiver list or other receiver changes
 are needed. The `MessagingReceiverRecord` type is in `scripts/message-client.mjs`.
 Each surface names its own `docs/validation/<date>-<host>-live.md` file, or `null`; the host's
-name in lower case starts the `<host>` part, and a surface may follow it. A dated note on a run
+name in lower case, with spaces and slashes as hyphens, starts the `<host>` part (`deepseek-harness`,
+`dot-web-chats`), and a surface may follow it. Importing a record module must start nothing;
+a test watches the scan for this. A dated note on a run
 that doesn't count goes in the optional `earlier`. A Copy-only tier 4 surface can be Verified
 with `isImplemented: false`, since it needs no receiver.
 Set `isImplemented` only for a merged receiver covered by synthetic tests; a proposed

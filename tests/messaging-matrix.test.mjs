@@ -103,6 +103,45 @@ test('the messaging matrix is generated from each receiver record and CI fails w
   } finally { rmSync(outside, { recursive: true, force: true }) }
 })
 
+const watchImports = `
+const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const log = process.env.MATRIX_WATCH_LOG
+const append = fs.appendFileSync
+let isNoting = false
+const note = name => { if (isNoting) return; isNoting = true; append(log, name + '\\n'); isNoting = false }
+const watch = (owner, label, names) => { for (const name of names) { const real = owner[name]; if (typeof real === 'function') owner[name] = function (...args) { note(label + '.' + name); return real.apply(this, args) } } }
+watch(require('node:child_process'), 'child_process', ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'])
+watch(require('node:net'), 'net', ['connect', 'createConnection', 'createServer'])
+watch(require('node:http'), 'http', ['request', 'get', 'createServer'])
+watch(require('node:https'), 'https', ['request', 'get'])
+watch(fs, 'fs', ['writeFileSync', 'renameSync', 'unlinkSync', 'rmSync', 'mkdirSync', 'watch'])
+watch(globalThis, 'global', ['fetch', 'setInterval', 'setTimeout', 'WebSocket'])
+syncBuiltinESMExports()
+`
+
+test('scanning receiver records starts no process, connection, timer or file write', () => fixture(directory => {
+  const preload = join(directory, 'watch.cjs')
+  writeFileSync(preload, watchImports)
+  const scan = cwd => {
+    const log = join(directory, 'watched.log')
+    writeFileSync(log, '')
+    const result = spawnSync(process.execPath, ['--require', preload, join(cwd, 'scripts/messaging-matrix.mjs'), '--check'], {
+      cwd, env: { ...process.env, NODE_TEST_CONTEXT: '', MATRIX_WATCH_LOG: log }, encoding: 'utf8', windowsHide: true, timeout: 30000,
+    })
+    assert.ifError(result.error)
+    return { status: result.status, stderr: result.stderr, seen: read(log).split('\n').filter(Boolean) }
+  }
+  const real = scan(root)
+  assert.equal(real.status, 0, real.stderr)
+  assert.deepEqual(real.seen, [])
+
+  // The watch itself works: a record module that starts something is seen.
+  writeFileSync(join(directory, 'scripts/noisy-receiver.mjs'), "import { spawnSync } from 'node:child_process'\nspawnSync(process.execPath, ['--version'])\nsetTimeout(() => {}, 1)\nexport const messagingReceiver = { host: 'Noisy', tier: 4, primitive: '[P5]', isImplemented: false, surfaces: [{ name: 'CLI', evidence: null }] }\n")
+  const noisy = scan(directory)
+  assert.deepEqual(noisy.seen.filter(name => !name.startsWith('fs.')), ['child_process.spawnSync', 'global.setTimeout'], JSON.stringify(noisy))
+}))
+
 test('a receiver record marks a surface Verified only when it names a live-run file that exists', () => fixture(directory => {
   const evidence = 'docs/validation/2026-11-03-synthetic-host-live.md'
   writeFileSync(join(directory, evidence), '# Synthetic live-run fixture, not native evidence\n')

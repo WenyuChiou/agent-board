@@ -445,13 +445,17 @@ test('a change the messaging table reads runs the matrix test and no other board
     await writeFixture(root, 'tests/e2e/l0-readme.test.mjs', 'export const contract = true')
     await writeFixture(root, 'tests/messaging-matrix.test.mjs', 'export const matrix = true')
     await writeFixture(root, 'tests/other.test.mjs', 'export const other = true')
+    await writeFixture(root, 'tests/messaging.test.mjs', "import '../scripts/receiver.mjs'\nimport '../hooks/typed.ts'\n")
     await writeFixture(root, 'scripts/receiver.mjs', 'export const messagingReceiver = {}')
     await writeFixture(root, 'hooks/typed.ts', 'export const messagingReceiver: object = {}')
-    for (const path of ['README.md', 'README.zh-CN.md', 'docs/MESSAGING.md', 'docs/validation/2026-11-03-codex-live.md', 'scripts/receiver.mjs', 'hooks/typed.ts']) {
+    await writeFixture(root, 'scripts/new-receiver.mjs', 'export const messagingReceiver = {}')
+    for (const path of ['README.md', 'README.zh-CN.md', 'README.zh-TW.md', 'docs/MESSAGING.md', 'docs/validation/2026-11-03-codex-live.md', 'scripts/receiver.mjs', 'hooks/typed.ts']) {
       const plan = await buildPlan([path], { roots: [root] })
       assert.equal(plan.checks.board, true, path)
       assert.deepEqual(plan.testFiles.board, ['tests/messaging-matrix.test.mjs'], path)
     }
+    // A new record file is still an unclassified path, so its own tests can't be missed.
+    assert.equal((await buildPlan(['scripts/new-receiver.mjs'], { roots: [root] })).full, true)
     const other = await buildPlan(['docs/GUIDE.md'], { roots: [root] })
     assert.equal(other.checks.board, false)
     const both = await buildPlan(['README.md', 'tests/other.test.mjs'], { roots: [root] })

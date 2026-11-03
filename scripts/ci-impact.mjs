@@ -60,10 +60,8 @@ export const makePlan = (files, options = {}) => {
       generated.bundle = true
       known = true
     }
-    if (options.matrixInputs?.has(path)) {
-      select('board', path)
-      known = true
-    }
+    // Selects without classifying: a new record file still goes full, for tests the walk can't see.
+    if (options.matrixInputs?.has(path)) select('board', path)
     if (['hooks/released.ts', 'tests/fixtures/released.ts', 'scripts/build-released.ts'].includes(path)) {
       generated.released = true
       select('generated', path)
