@@ -28,11 +28,11 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - Page: an agent whose sessions all ended in the last 30 minutes shows as offline, the Your own tasks chip counts open to-dos instead of saying No work yet, and the HTML board's Needs you no longer counts turns that are not questions (#616, #652).
 
-- Codex: start notes ignore an empty remote URL, strip quotes around one, and name a bare repository worktree by its folder; a Claude Code session's start note lists at most eight open tasks; the terminal board scrolls to follow the selection (#615, #646).
+- Codex: start notes ignore an empty remote URL, strip quotes around one, and name a bare repository worktree by its folder (#615, #646).
 
-- Terminal board: `agent-board --status` prints what needs you and what is working in one line, for a shell prompt or tmux, and writes nothing (#547, #663).
+- Board: `agent-board --status` prints what needs you and what is working in one line, for a shell prompt or tmux, and writes nothing (#547, #663).
 
-- Messaging: a Claude Code session in a terminal takes board messages, so Send to Claude works from the page (#805).
+- Messaging: a Claude Code session in a terminal takes board messages, so Send to Claude works from the page (#316, #805).
 
 - Board: on Windows, Copy on the terminal board puts text outside ASCII on the clipboard whole, on any code page, instead of garbled while it said it copied (#817, #821).
 
