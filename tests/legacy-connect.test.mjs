@@ -197,6 +197,21 @@ test('a probe takes out the Antigravity hook of an earlier connect', () => withS
   assert.doesNotMatch(hooks, /"agent-board"/)
 }))
 
+test('an Antigravity config that cannot be parsed is named, and its worker stays', () => withSetup('antigravity', ({ f, run, recordFile }) => {
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const record = readFileSync(recordFile, 'utf8')
+  writeFileSync(config, '{}')
+  unlinkSync(recordFile)
+  run('connect')
+  writeFileSync(recordFile, record)
+  const text = `// note\n${readFileSync(config, 'utf8')}`
+  writeFileSync(config, text)
+  for (const mode of ['auto', 'remove']) {
+    assert.ok(run(mode).result.problems.some(one => one.key === `removeFailed:${config}`), mode)
+    assert.equal(readFileSync(config, 'utf8'), text, mode)
+  }
+}))
+
 test('removing the connector names OpenClaw once', () => withBothHooks('openclaw', ({ run }) => {
   assert.deepEqual(run('remove').result.done.filter(label => label === 'OpenClaw'), ['OpenClaw'])
 }))

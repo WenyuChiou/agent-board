@@ -7054,7 +7054,7 @@ export const LINES = [
 "          continue;",
 "        const before = readLocal(file);",
 "        isReading = false;",
-"        if (before === \"\" || !hook.generated && hook.agent !== \"openclaw\" && !(hook.agent === \"antigravity\" ? hasAntigravityHook(before) : hasOurHook(before)))",
+"        if (before === \"\" || !hook.generated && hook.agent !== \"openclaw\" && !(hook.agent === \"antigravity\" ? before.includes('\"agent-board\"') : hasOurHook(before)))",
 "          continue;",
 "        const after = hook.edit(before, true, previousOutput(file));",
 "        if (after === COLLISION)",

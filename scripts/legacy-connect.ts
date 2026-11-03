@@ -134,7 +134,8 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   const setupManaged = setupManagedAgents(hooks, home, sep, existsSync)
   // A file with none of ours is left as it is: taking nothing out could still reformat it.
   // OpenClaw's config names our plugin, not the reporter, and its edit checks for that itself;
-  // Antigravity's hook runs the worker.
+  // Antigravity's hook runs the worker, and is looked for as text so a config that can't be
+  // parsed is still named.
   const retireHook = (hook: (typeof hooks)[number]): void => {
     for (const file of [hook.file, ...(hook.old === undefined ? [] : [hook.old])]) {
       let isReading = true
@@ -142,7 +143,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         if (!existsSync(file)) continue
         const before = readLocal(file)
         isReading = false
-        if (before === '' || (!hook.generated && hook.agent !== 'openclaw' && !(hook.agent === 'antigravity' ? hasAntigravityHook(before) : hasOurHook(before)))) continue
+        if (before === '' || (!hook.generated && hook.agent !== 'openclaw' && !(hook.agent === 'antigravity' ? before.includes('"agent-board"') : hasOurHook(before)))) continue
         const after = hook.edit(before, true, previousOutput(file))
         if (after === COLLISION) preserve(file)
         else if (after === null) warn(`removeFailed:${file}`, { message: 'connectRemoveFailed', args: [file] })
