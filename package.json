@@ -1,6 +1,6 @@
 {
   "name": "@wenyuchiou/agent-board",
-  "version": "0.24.1",
+  "version": "0.24.2",
   "description": "A local board for coding agents: shared progress, persistent questions and live replies. Optional Claude Code pane.",
   "type": "module",
   "bin": {
