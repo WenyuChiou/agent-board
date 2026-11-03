@@ -661,6 +661,7 @@ export const EN: Strings = {
   pasteUnchanged: 'Already on the board; unchanged.',
   pasteReview: (current: string, incoming: string): string => `Source order is unknown.\n\nOn the board:\n${current}\n\nIncoming report:\n${incoming}\n\nReplace this progress report? This sends no message and approves no action.`,
   pgNeeds: 'Needs you',
+  pgNeedsWhy: (why: string): string => `Needs you: ${why}`,
   pgAgents: 'Agents',
   pgOwn: 'Your own tasks',
   pgStopped: 'Stopped',

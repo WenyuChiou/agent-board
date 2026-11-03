@@ -76,7 +76,7 @@ test('a question on the terminal board is worded once, and a row that needs you 
   expect(screen).not.toContain(`● ${s.pgNeeds}`)
   expect(screen).toContain(`▸ 0 ${s.countActive}`)
   const text = boardText(view, [], s)
-  expect(text).not.toContain(`${s.pgNeeds}: ${question}`)
+  expect(text).not.toContain(s.pgNeedsWhy(question))
   expect(text).toContain(`▸ 0 ${s.countActive}`)
   expect(text).not.toContain(s.groupWorking(1))
 })

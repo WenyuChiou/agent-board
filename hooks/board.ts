@@ -223,7 +223,7 @@ const agentOf = (agent: string, isAgent: boolean, s: Strings): string => (agent 
 // How a row that needs the person says so. A question already on the board's list above is not
 // worded a second time; one the list has aged away, and a blocked step, are.
 const needsWords = (view: View, row: TaskRow, needs: { kind: 'stuck' | 'question'; reason: string }, s: Strings): string =>
-  needs.kind === 'question' && view.waiting.some(item => item.project === row.project && item.task === row.title && item.text === needs.reason) ? s.pgNeeds : `${s.pgNeeds}: ${needs.reason}`
+  needs.kind === 'question' && view.waiting.some(item => item.project === row.project && item.task === row.title && item.text === needs.reason) ? s.pgNeeds : s.pgNeedsWhy(needs.reason)
 
 const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelved = false): string[] => {
   const c = paint(o)
@@ -279,7 +279,7 @@ const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: 
   ...remainingInbox(view, pending).filter(turn => turn.isQuestion).map(turn => ({ where: [named(turn.project), label(turn.agent)].filter(part => part !== '').join(' · '), text: turn.text, task: '' })),
   ...blockedRows(view).map(row => ({
     where: [named(row.project), label(row.agent)].filter(part => part !== '').join(' · '),
-    text: `${s.pgNeeds}: ${rowNeedsYou(row)!.reason}`,
+    text: s.pgNeedsWhy(rowNeedsYou(row)!.reason),
     task: row.title,
   })),
 ]
