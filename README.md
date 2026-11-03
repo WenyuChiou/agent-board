@@ -267,4 +267,4 @@ The pane follows Claude Code's theme (`/config`, then **Theme**); the page and `
 
 [MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) and belong to their owners; an agent without a logo is shown by its initial.
 
-<p align="center"><sub>Version 0.24.0 · <a href="CHANGELOG.md">Changelog</a></sub></p>
+<p align="center"><sub>Version 0.24.1 · <a href="CHANGELOG.md">Changelog</a></sub></p>

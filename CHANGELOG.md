@@ -2,10 +2,13 @@
 
 What changed for the person using Agent Board, one line per change, newest version first. How a change was built and tested is in its pull request. Entries up to 0.24.0 were shortened to this form on 2026-11-02; their full text is in `git show ddbef2a:CHANGELOG.md`.
 
-## Unreleased
+## 0.24.1 — 2026-11-03
 
-- A fix or feature pull request writes no changelog entry: the release writes each CHANGELOG line from the pull request title (#718). Tests: `the fold writes a CHANGELOG line from each fix and feature title that brought no entry of its own`, `pr-check keeps the fragment of a pull request opened before the change and asks a fix or feature for no entry`.
-
+- Pane / Archive without Node: `/progress tidy` and the pane's Archive button archive a done task again on a computer where node is not on the path (#755).
+- Contributing / Review queue: `node scripts/review-queue.mjs` says when Codex's security review did not run on a pull request's latest commit (#750).
+- Contributing / CHANGELOG: the release's CHANGELOG fold reads every pull request merged since the last tag, not only those on main's first line of history, and checks that none is missing (#744).
+- Contributing / Review queue: a pull request that changes docs/dev/RULES.md is treated as a governance change (#731).
+- Contributing / CHANGELOG: a fix or feature pull request writes no changelog entry: the release writes each CHANGELOG line from the pull request title (#718).
 - Tests / native hooks: native Antigravity checks observe the recorded event after a hook safely queues it for automatic recovery (#706).
 - Antigravity / Windows fallback: long Windows installation paths no longer repeat shared directories in an oversized PowerShell fallback command (#705).
 - Page / message receipts: a card's durable message receipt replaces its earlier Queued hint, so Replied no longer appears beside stale enqueue feedback (#701).
