@@ -77,6 +77,25 @@ test('an address folder this account cannot show is its own gives no connection'
   expect(sent.length).toBe(0)
 })
 
+test('after a /clear the session goes on receiving, and after an exit it does not', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { sent } = hub(on, world)
+  await start($, 'task')
+  await clock.advance(2100)
+  expect(sent.filter(one => one.action === 'register').length).toBe(1)
+  await $.session.end({ reason: 'clear', sessionId: SESSION, resume: { sessionId: SESSION } as never })
+  await clock.advance(2100)
+  expect(sent.filter(one => one.action === 'disconnect').length).toBe(1)
+  expect(sent.filter(one => one.action === 'register').length).toBe(2)
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: SESSION, resume: { sessionId: SESSION } as never })
+  const count = sent.length
+  await clock.advance(6100)
+  expect(sent.filter(one => one.action === 'disconnect').length).toBe(2)
+  expect(sent.length - count).toBe(0)
+})
+
 test('a print-mode session does not register with the board', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: false }
   const clock = engineBeneath(on, world)

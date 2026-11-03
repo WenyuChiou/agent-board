@@ -1238,6 +1238,23 @@ test('the card offers Send only while the receiver is live and falls back to Cop
 Date.now = () => originalNow() + (fs.existsSync(path.join(directory, 'message-clock-offset')) ? Number(fs.readFileSync(path.join(directory, 'message-clock-offset'), 'utf8')) : 0)
 `))
 
+test('a poll tells a receiver it is contested, and replacing a lost self clears that', () => fixture(async (board, dir) => {
+  const registration = { agent: 'claude', session: CLAUDE_SESSION, turn: 'session', scope: 'session', surface: 'Claude Code' }
+  await board.call('/api/messages/register', registration)
+  const mine = (await board.call('/api/messages/register', registration)).body
+  const credentials = { connection: mine.id, secret: mine.secret, turn: 'session', receive: false }
+  assert.equal((await board.call('/api/messages/poll', credentials)).body.contested, true)
+  // The lost one's lease ends unrenewed.
+  writeFileSync(join(dir, 'message-clock-offset'), '10000')
+  await board.call('/api/messages/poll', credentials)
+  writeFileSync(join(dir, 'message-clock-offset'), '16000')
+  const clean = (await board.call('/api/messages/register', { ...registration, connection: mine.id, secret: mine.secret })).body
+  assert.equal(clean.contested, false)
+  assert.equal((await board.call('/api/messages/poll', { connection: clean.id, secret: clean.secret, turn: 'session', receive: false })).body.contested, false)
+}, `const originalNow = Date.now
+Date.now = () => originalNow() + (fs.existsSync(path.join(directory, 'message-clock-offset')) ? Number(fs.readFileSync(path.join(directory, 'message-clock-offset'), 'utf8')) : 0)
+`))
+
 test('a closed Codex session keeps resume-Send when the hub is on', () => fixture(async (board, dir) => {
   writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${CLAUDE_SESSION} dir=${encodeURIComponent(dir)} state=ended updated=${new Date().toISOString()} -->\n### Delivery\n- [ ] Next step\n<!-- /auto session=abcdef01 -->\n`)
   const { model } = (await board.call('/api/board')).body

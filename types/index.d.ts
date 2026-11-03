@@ -21,6 +21,8 @@ export type ReceiverState = {
   secret: string
   leaseUntil: number
   pending: ReceiverPending | null
+  // A delivery already reported uncertain whose turn may yet start; it stays out of the board too.
+  late?: ReceiverPending | null
   // The engine refused a prompt because the person stopped the session; nothing is taken until
   // they start a turn themselves.
   isStopped: boolean

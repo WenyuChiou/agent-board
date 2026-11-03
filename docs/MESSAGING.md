@@ -356,7 +356,8 @@ nothing to set up. `hooks/receiver.ts` holds the logic and `hooks/register.tsx` 
   includes the Desktop app today, do not register, and their cards stay on Copy.
 - **Taking a message.** It polls with `receive: true` only while no turn is running, it holds no
   message and it has not been stopped. It sends the `accepted` receipt before the prompt reaches the
-  engine; a refused receipt, such as a message taken back, means it never does.
+  engine. A refused receipt, such as a message taken back, means it never does; one that gets no
+  answer is asked again, as nothing has reached Claude yet.
 - **Delivery.** `$.prompt.submit({ text })` with the hub's framed text, never `asUser`, so Claude
   reads it as a plugin's message.
 - **Outcome.**
@@ -376,7 +377,17 @@ the journal, the question list or the step summary. Only the ACK line goes back,
 follows the ACK is shown; the rest of the reply stays in Claude's window.
 
 **Take back and Dismiss** both call `/api/messages/dismiss`, which also frees the session for the
-next message. Taking back a message that is already in Claude's turn does not stop that turn.
+next message. Take back is offered while a message waits, and keeps it from Claude. Once it is
+delivered the card offers Dismiss, which only clears the card: it stops no turn and recalls no
+prompt the engine already holds.
+
+**Contested.** Polling keeps a connection's lease, so a receiver contested by a lost self would stay
+so. The poll answer says `contested`; the receiver then registers again with its own credentials,
+at most every 16 s. A lost self's lease has run out by then. Another live window keeps it contested,
+and the card stays on Copy.
+
+After a `/clear` or a resume the same process goes on under another id, with no `session.start`:
+the receiver ends the old connection and registers the new id.
 
 ## Codex existing-owner adapter
 

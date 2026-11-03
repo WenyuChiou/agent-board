@@ -208,6 +208,7 @@ let receiver: Receiver | null = null
 let receiverTimer: { cancel: () => void } | null = null
 // A hub that does not answer within this holds no tick up: it is a poll that failed.
 const HUB_MS = 5000
+const RECEIVER_END_MS = 500
 let writes: Promise<unknown> = Promise.resolve()
 let questionTrims: Promise<void> = Promise.resolve()
 let settingSaves: Promise<unknown> = Promise.resolve()
@@ -4238,9 +4239,6 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
-    receiverTimer?.cancel()
-    await receiver?.end().catch(() => undefined)
-    receiver = null
     if (hasBackgroundActivity) await backgroundChanges
     await journal($)
     const mirror = await read($, mine)
@@ -4253,6 +4251,13 @@ export const register: Register = (on, options) => {
       })
       await queueWrite($)
     }
+    // After a /clear or a resume the process goes on under another id, with no session.start: the
+    // timer goes on and registers that id. Last, and bounded: this hook's time is short, and a
+    // session that could not say goodbye is gone from the board when its lease ends.
+    const isGoingOn = e.reason === 'clear' || e.reason === 'resume'
+    if (!isGoingOn) receiverTimer?.cancel()
+    if (receiver !== null) await isDoneWithin($, receiver.end().catch(() => undefined), RECEIVER_END_MS)
+    if (!isGoingOn) receiver = null
 
     return next(e)
   })

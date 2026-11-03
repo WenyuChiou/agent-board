@@ -126,6 +126,7 @@ test('only the reply\'s own first-line ACK acknowledges and nothing else from th
   expect(ackLine(`Sure.\nACK ${NONCE}`, NONCE)).toBe(null)
   expect(ackLine(`ACK ${NONCE}x`, NONCE)).toBe(null)
   expect(ackLine('ACK ffffff', NONCE)).toBe(null)
+  expect(ackLine(`ACK ${NONCE}\rmore`, NONCE)).toBe(`ACK ${NONCE}`)
   const w = world()
   w.get().queue.push(MESSAGE)
   const r = w.receiver()
@@ -194,6 +195,54 @@ test('a prompt handed over with no turn to show for it is uncertain, once, and n
   expect(w.submitted.length).toBe(1)
 })
 
+test('an accepted receipt the hub did not answer is asked again and nothing reaches Claude first', async () => {
+  const w = world()
+  w.get().queue.push(MESSAGE)
+  w.get().answers.set('receipt', { status: 503, json: { error: 'MESSAGE_STORE_BUSY' } })
+  const r = w.receiver()
+  await r.tick()
+  expect(w.submitted.length).toBe(0)
+  w.get().answers.set('receipt', null)
+  await r.tick()
+  expect(w.submitted.length).toBe(0)
+  w.get().answers.delete('receipt')
+  await r.tick()
+  expect(w.submitted.length).toBe(1)
+  expect(receipts(w.sent).map(one => one.status)).toEqual(['accepted', 'accepted', 'accepted'])
+})
+
+test('a contested receiver registers again with its own credentials, at most every 16 s', async () => {
+  const w = world()
+  const r = w.receiver()
+  await r.tick()
+  const first = w.get().kept
+  w.get().answers.set('poll', { status: 200, json: { messages: [], leaseMs: 15000, contested: true } })
+  await r.tick()
+  expect(of(w.sent, 'register').length).toBe(2)
+  expect(of(w.sent, 'register').at(-1)?.body.connection).toBe(first?.connection)
+  w.get().at += 10_000
+  await r.tick()
+  expect(of(w.sent, 'register').length).toBe(2)
+  w.get().at += 6_000
+  await r.tick()
+  expect(of(w.sent, 'register').length).toBe(3)
+})
+
+test('a turn that starts after its delivery was called uncertain still stays out of the board, and its ACK counts', async () => {
+  const w = world()
+  w.get().queue.push(MESSAGE)
+  const r = w.receiver()
+  await r.tick()
+  await settle()
+  w.get().at += 30_000
+  await r.tick()
+  expect(receipts(w.sent).at(-1)?.error).toBe('DELIVERY_UNCERTAIN')
+  expect(await r.turnStarted(MESSAGE.prompt, 't9')).toBe(true)
+  expect(await r.turnEnded('t9', `ACK ${NONCE}`, false)).toBe(true)
+  expect(receipts(w.sent).at(-1)?.status).toBe('acknowledged')
+  expect(await r.turnStarted(MESSAGE.prompt, 't10')).toBe(false)
+})
+
 test('a reload presents its own connection, so it does not contest itself', async () => {
   const w = world()
   await w.receiver().tick()
@@ -256,6 +305,11 @@ test('the session ending disconnects', async () => {
   await r.end()
   expect(of(w.sent, 'disconnect').length).toBe(1)
   expect(w.get().kept?.connection).toBe('')
+  // After a /clear the same receiver goes on under the new id, at once.
+  w.get().session = '99999999-2222-3333-4444-555555555555'
+  await r.tick()
+  expect(of(w.sent, 'register').at(-1)?.body.session).toBe('99999999-2222-3333-4444-555555555555')
+  expect(of(w.sent, 'register').at(-1)?.body.connection).toBeUndefined()
 })
 
 test('the address file is named as the page names it, and read only for its own board', () => {

@@ -341,7 +341,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
-        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], Date.now(), s)),
+        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s)),
         key: item.key,
         ...(ask.questionId === undefined ? {} : { questionId: ask.questionId }),
         project: ask.project,
@@ -385,7 +385,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const mode = connection ? 'connected' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
       // A Claude session still at work that this board cannot reach: its card says so and copies.
-      const isOpenClaude = send === 'claude' && row.auto !== 'ended'
+      const isOpenClaude = !isLan && send === 'claude' && row.auto !== 'ended'
       const nextLabel = row.next === null ? undefined : clipped(row.next.step, LABEL_ROOM)
       const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
@@ -400,7 +400,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
             : {}),
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
-        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], Date.now(), s)),
+        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s)),
         key: item.key,
         project: row.project,
         title: row.title,
@@ -670,7 +670,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
   'claudeSendNow', 'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1286,20 +1286,25 @@ const PAGE_SCRIPT = String.raw`
   }
   function agentName(agent) { return brand(agent || 'claude'); }
   // Take back and Dismiss both end a message on the hub, and free the session for the next one.
-  // Taken back in time, it never reaches the engine: the session's own receipt is refused.
+  // Take back is offered only while the message waits, when it does keep it from Claude. Once
+  // delivered, Dismiss clears the card and stops nothing in Claude's window.
   function dismissButton(label, receipt, key) {
     return button(label, function () {
-      call('/api/messages/dismiss', { id: receipt.id }).then(refresh, function () { say(w('messagesFailed'), 'alert', key, undefined, true); });
+      call('/api/messages/dismiss', { id: receipt.id }).then(function (data) {
+        if (!data.ok) say(w('pressFailed'), 'alert', key, undefined, true);
+        refresh();
+      }, function () { say(w('pressFailed'), 'alert', key, undefined, true); });
     });
   }
   // The card's line for a message to a Claude session, by what its receipt says (#316).
   function claudeReceipt(receipt, key, canSend) {
     var error = receipt.error || '';
-    if (error === 'DISMISSED') return null;
     var isStopped = receipt.status === 'rejected';
     var isReplied = receipt.status === 'acknowledged';
-    var isUnconfirmed = receipt.status === 'uncertain' && error !== '' || receipt.status === 'accepted' && error === 'DISCONNECTED';
-    if (isReplied) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+    // Whatever went nowhere can be sent again, under an id of its own.
+    if (isStopped || isReplied || error === 'DISMISSED') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+    if (error === 'DISMISSED') return null;
+    var isUnconfirmed = receipt.status === 'uncertain' || receipt.status === 'accepted' && error === 'DISCONNECTED';
     var line = el('p', 'receipt' + (isStopped ? ' t-alert' : ''), isStopped ? (error === 'STOPPED' ? w('claudeStopped') : w('messagesRejected'))
       : isReplied ? (receipt.reply ? w('claudeReplied', receipt.reply) : w('claudeGotIt'))
       : isUnconfirmed ? w('claudeUnconfirmed')
@@ -1311,9 +1316,10 @@ const PAGE_SCRIPT = String.raw`
     var words = receipt.text || (last ? last.text : '');
     var copyIt = words ? button(w('serveCopyMessage'), function () { copy(words, key); }, '', true) : null;
     var acts = isStopped ? add(el('div', 'acts'), last && canSend ? button(w('serveRetry'), function () { last.again(); }) : null, copyIt)
-      : isUnconfirmed ? add(el('div', 'acts'), copyIt, dismissButton(w('messageDismiss'), receipt, key))
+      // The hub has already let go of an expired message: nothing is left to dismiss.
+      : isUnconfirmed ? add(el('div', 'acts'), copyIt, error === 'EXPIRED' ? null : dismissButton(w('messageDismiss'), receipt, key))
       : isReplied ? null
-      : add(el('div', 'acts'), dismissButton(w('messageTakeBack'), receipt, key));
+      : add(el('div', 'acts'), dismissButton(w(receipt.status === 'queued' ? 'messageTakeBack' : 'messageDismiss'), receipt, key));
     return acts ? add(el('div', 'receipt-box'), line, acts) : line;
   }
   function receiptLine(receipt, key, agent, canSend) {

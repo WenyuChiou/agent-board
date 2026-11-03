@@ -9,6 +9,8 @@ export const RECEIVER_MS = 2000
 // The hub keeps a lease for 15 s, so a page that was closed stops offering Send within that.
 const LEASE_FALLBACK_MS = 15_000
 const REGISTER_AGAIN_MS = 10_000
+// A receiver that finds itself contested tries again once the lease of a lost self has run out.
+const CONTEST_AGAIN_MS = 16_000
 // A prompt handed to the engine with no turn to show for it, in an idle session.
 const SUBMIT_GRACE_MS = 30_000
 const ACK_ROOM = 200
@@ -75,7 +77,7 @@ export const parseAddress = (text: string, key: string): BoardAddress | null => 
 // The line the hub takes as this delivery's ACK: the reply's own first line, nothing past it. A
 // first line over the room keeps the ACK alone.
 export const ackLine = (answer: string, nonce: string): string | null => {
-  const line = (answer.split(/\r?\n/, 1)[0] ?? '').trim()
+  const line = (answer.split(/\r\n|\r|\n/, 1)[0] ?? '').trim()
   const ack = `ACK ${nonce}`
   if (line !== ack && !line.startsWith(`${ack} `)) return null
   return line.length > ACK_ROOM ? ack : line
@@ -100,6 +102,7 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
   let isTicking = false
   let isSubmitting = false
   let registerAfter = 0
+  let contestAfter = 0
 
   const state = async (): Promise<ReceiverState> => (held ??= (await deps.load().catch(() => undefined)) ?? emptyReceiver())
   const set = async (change: Partial<ReceiverState>): Promise<void> => {
@@ -110,11 +113,13 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
     if (address === null) return null
     return deps.call(address, action, body).catch(() => null)
   }
-  // Receipts are never sent twice: one that does not arrive leaves the card on what it last said.
-  const receipt = async (pending: ReceiverPending, status: string, extra: { reply?: string; error?: string } = {}): Promise<boolean> => {
+  // Receipts past the boundary are never sent twice: one that does not arrive leaves the card on
+  // what it last said. 'unreached' says the hub may not have seen it; 'refused' that it answered no.
+  const receipt = async (pending: ReceiverPending, status: string, extra: { reply?: string; error?: string } = {}): Promise<'done' | 'refused' | 'unreached'> => {
     const { connection, secret } = await state()
     const answer = await call('receipt', { connection, secret, id: pending.id, nonce: pending.nonce, status, ...extra })
-    return answer?.status === 200
+    if (answer === null || answer.status >= 500) return 'unreached'
+    return answer.status === 200 ? 'done' : 'refused'
   }
 
   const register = async (session: string, now: number): Promise<void> => {
@@ -138,9 +143,11 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
   const finish = async (change: Partial<ReceiverState> = {}): Promise<void> => set({ pending: null, ...change })
 
   const deliver = async (pending: ReceiverPending): Promise<void> => {
-    // The boundary: past this receipt the message may have reached Claude. Refused (taken back,
-    // or the page has gone), it never reaches the engine.
-    if (!(await receipt(pending, 'accepted'))) return finish()
+    // The boundary: past this receipt the message may have reached Claude. Refused (taken back),
+    // it never reaches the engine. Unanswered, nothing has reached Claude yet, so it is asked again.
+    const accepted = await receipt(pending, 'accepted')
+    if (accepted === 'refused') return finish()
+    if (accepted === 'unreached') return
     const submittedAt = await deps.now()
     await set({ pending: { ...pending, phase: 'submitted', submittedAt } })
     isSubmitting = true
@@ -170,8 +177,19 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
       await set({ connection: '', secret: '', leaseUntil: 0 })
       return
     }
-    const polled = answer.json as { messages?: unknown; leaseMs?: unknown }
+    const polled = answer.json as { messages?: unknown; leaseMs?: unknown; contested?: unknown }
     await set({ leaseUntil: now + (typeof polled.leaseMs === 'number' ? polled.leaseMs : LEASE_FALLBACK_MS) })
+    // Polling keeps a contested connection alive, so it would never clear. It may be contested by
+    // a lost self (a register whose answer never came, a process killed moments ago) whose lease
+    // ends unrenewed. Another live window keeps it contested, which is right: the card stays on Copy.
+    if (polled.contested === true) {
+      if (now >= contestAfter) {
+        contestAfter = now + CONTEST_AGAIN_MS
+        registerAfter = 0
+        await register((await state()).session, now)
+      }
+      return
+    }
     const message = Array.isArray(polled.messages) ? polled.messages[0] : undefined
     if (message === undefined) return
     if (!isMessage(message)) return
@@ -200,14 +218,18 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
         // Handed over and nothing came of it, as after a reload that lost the engine's answer.
         else if (pending.phase === 'submitted' && !isSubmitting && !deps.isBusy() && now - (pending.submittedAt ?? now) >= SUBMIT_GRACE_MS) {
           await receipt(pending, 'uncertain', { error: 'DELIVERY_UNCERTAIN' })
-          await finish()
+          await finish({ late: pending })
         }
       } finally { isTicking = false }
     },
     turnStarted: async (text, turnId) => {
-      const { pending, isStopped } = await state()
+      const { pending, isStopped, late } = await state()
       if (pending !== null && pending.phase !== 'running' && text.includes(`<<<AB-${pending.nonce}`)) {
         await set({ pending: { ...pending, phase: 'running', turnId } })
+        return true
+      }
+      if (late !== null && late !== undefined && text.includes(`<<<AB-${late.nonce}`)) {
+        await set({ late: { ...late, turnId } })
         return true
       }
       // Someone else's turn: the person's own, which also lifts a stop.
@@ -215,7 +237,13 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
       return false
     },
     turnEnded: async (turnId, answer, isAborted) => {
-      const { pending } = await state()
+      const { pending, late } = await state()
+      if (late !== null && late !== undefined && late.turnId === turnId) {
+        const line = isAborted ? null : ackLine(answer, late.nonce)
+        if (line !== null) await receipt(late, 'acknowledged', { reply: line })
+        await set({ late: null })
+        return true
+      }
       if (pending === null || pending.phase !== 'running' || pending.turnId !== turnId) return false
       const line = isAborted ? null : ackLine(answer, pending.nonce)
       if (line !== null) await receipt(pending, 'acknowledged', { reply: line })
@@ -226,7 +254,8 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
     end: async () => {
       const { connection, secret } = await state()
       if (connection !== '' && address !== null) await call('disconnect', { connection, secret, turn: 'session' })
-      await set({ connection: '', secret: '', leaseUntil: 0, pending: null })
+      await set({ connection: '', secret: '', leaseUntil: 0, pending: null, late: null, isStopped: false })
+      registerAfter = 0
     },
   }
 }
