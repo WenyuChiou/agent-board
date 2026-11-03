@@ -39,7 +39,8 @@ the store and only find the default folder; a board using `--messages-dir` has n
 
 Supported turn starts: Codex `SessionStart` / `UserPromptSubmit`, Antigravity
 `SessionStart` / `PreInvocation`, Gemini CLI `SessionStart` / `BeforeAgent`, Muse Code
-`UserPromptSubmit`, and Cursor `sessionStart` (never `beforeSubmitPrompt`). End events
+`UserPromptSubmit`, and Cursor `sessionStart` (never `beforeSubmitPrompt`, which Cursor
+ignores, so a Cursor message waits until that chat opens again and its card says so). End events
 are `SessionEnd` for Codex, Gemini and Muse, and `sessionEnd` for Cursor.
 
 The separate legacy `--serve --allow-resume` option deliberately allows a local reply to

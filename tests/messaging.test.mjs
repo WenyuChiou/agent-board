@@ -187,6 +187,22 @@ test('an ended session offers no mailbox, is not called contested, and can still
   assert.notEqual(action.note, EN.messagesContested)
 })
 
+test('a Cursor mailbox card says the message waits for the chat to open, not for its next turn', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now(), mailbox = enrollMailbox({ messages: [] }, 'cursor', 'mailbox-session', 'IDE (Composer)', now, 43_200_000).mailboxes[0]
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=cursor resume=mailbox-session state=waiting updated=${new Date(now).toISOString()} -->\n### Mailbox page\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+  const model = serveModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), false, { connections: [], mailboxes: [mailbox], messages: [] }, false, { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+  assert.equal(model.asks[0].send, 'mailbox')
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  const labels = page.cards().flatMap(card => page.buttons(card)).map(one => one.textContent)
+  assert.ok(labels.includes(EN.serveQueueNextOpen('Cursor')))
+  assert.ok(!labels.includes(EN.serveQueueNextTurn('Cursor')))
+  page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
+  assert.ok(page.text().includes(EN.serveNextOpenHint))
+  assert.ok(!page.text().includes(EN.serveNextTurnHint))
+})
+
 test('the page offers Queue for next turn beside Copy, prefers a live poller, and shows neither on the local network', async () => {
   const { servePage } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')

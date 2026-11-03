@@ -694,6 +694,8 @@ export const EN: Strings = {
   serveSend: (agent: string): string => `Send to ${agent}`,
   serveQueueNextTurn: (agent: string): string => `Queue for ${agent}'s next turn`,
   serveNextTurnHint: 'It waits for this session\'s next turn. It does not wake an idle session.',
+  serveQueueNextOpen: (agent: string): string => `Queue for when ${agent} reopens this chat`,
+  serveNextOpenHint: 'Cursor reads messages only when a chat opens, so this waits until then. Copy reaches it now.',
   serveSending: (agent: string): string => `Sending to ${agent}; waiting for its reply…`,
   serveQueued: (agent: string): string => `Sent to ${agent}; its reply shows here when it comes (it can take a few minutes).`,
   serveSent: (agent: string, reply: string): string => (reply === '' ? `Sent to ${agent}.` : `Sent to ${agent}. It replied: ${reply}`),

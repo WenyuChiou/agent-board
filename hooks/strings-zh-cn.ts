@@ -690,6 +690,8 @@ export const ZH_CN: Strings = {
   serveSend: (agent: string): string => `发给 ${agent}`,
   serveQueueNextTurn: (agent: string): string => `排入 ${agent} 的下一回合`,
   serveNextTurnHint: '等待此会话的下一回合，不会唤醒空闲的会话。',
+  serveQueueNextOpen: (agent: string): string => `排入 ${agent} 下次打开此会话时`,
+  serveNextOpenHint: 'Cursor 只在会话打开时读取消息，所以会等到那时。要现在送达请用复制。',
   serveSending: (agent: string): string => `正在发给 ${agent}，等它回完…`,
   serveQueued: (agent: string): string => `已发给 ${agent}；它回了就会显示在这里（可能要几分钟）。`,
   serveSent: (agent: string, reply: string): string => (reply === '' ? `已发给 ${agent}。` : `已发给 ${agent}，它回：${reply}`),

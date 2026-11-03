@@ -734,6 +734,8 @@ export const ZH_TW = {
   serveSend: (agent: string): string => `傳給 ${agent}`,
   serveQueueNextTurn: (agent: string): string => `排入 ${agent} 的下一回合`,
   serveNextTurnHint: '等待此對話的下一回合，不會喚醒閒置的對話。',
+  serveQueueNextOpen: (agent: string): string => `排入 ${agent} 下次開啟此對話時`,
+  serveNextOpenHint: 'Cursor 只在對話開啟時讀取訊息，所以會等到那時。要現在送達請用複製。',
   serveSending: (agent: string): string => `正在傳給 ${agent}，等它回完…`,
   serveQueued: (agent: string): string => `已傳給 ${agent}；它回了就會顯示在這裡（可能要幾分鐘）。`,
   serveSent: (agent: string, reply: string): string => (reply === '' ? `已傳給 ${agent}。` : `已傳給 ${agent}，它回：${reply}`),

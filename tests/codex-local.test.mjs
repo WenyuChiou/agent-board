@@ -331,6 +331,18 @@ test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, G
   }
 }))
 
+test('a turn-start hook with an empty mailbox prints exactly what it printed before', async () => mailboxFixture(async f => {
+  f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, messages: [] }))
+  const expected = { codex: [['UserPromptSubmit', '']], gemini: [['BeforeAgent', '{}\n'], ['SessionStart', '{}\n']], muse: [['UserPromptSubmit', '']], antigravity: [['PostInvocation', '{}\n']] }
+  for (const [agent, events] of Object.entries(expected)) for (const [event, output] of events) {
+    const result = f.call(agent, event)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.replace(/\r\n/g, '\n'), output, agent + ' ' + event)
+  }
+  assert.deepEqual(JSON.parse(f.call('cursor', 'sessionStart').stdout), { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: 'cursor' } })
+  assert.equal(f.state().messages.length, 0)
+}))
+
 test('Cursor beforeSubmitPrompt and terminal hooks leave mailbox messages queued', async () => mailboxFixture(async f => {
   const { isSessionEnd, isTurnStart } = await importTs('../hooks/hook-messages.ts')
   for (const agent of ['codex', 'antigravity', 'gemini', 'muse', 'cursor', 'grok', 'hermes', 'other']) {
