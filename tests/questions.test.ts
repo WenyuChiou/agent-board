@@ -285,7 +285,7 @@ test('a saved inbox question keeps its id when its block appears beside a same-p
   const unnamed = beta.replace(' resume=a1b2c3d4-person-b', '')
   const first = pass(emptyQuestions(), unnamed, [], NOW)
   const later = pass(pass(first, unnamed, [ask], NOW + 1), beta, [], NOW + 2)
-  expect(later.records.find(record => record.words === 'Beta ask?')?.id).toBe(first.records[0]!.id)
+  expect(later.records.filter(record => record.words === 'Beta ask?').map(record => record.id)).toEqual([first.records[0]!.id])
   // Two inbox asks then both blocks with new words: each new ask gets a record of its own.
   const twoAsks = pass(emptyQuestions(), '', [turn, { ...turn, session: 'a1b2c3d4-person-b', text: 'Bravo ask?', sourceRevisions: ['b'.repeat(64)] } as PendingTurn], NOW)
   const fresh = block('a1b2c3d4-person-a', 'Alpha work', 'New A?') + block('a1b2c3d4-person-b', 'Beta work', 'New B?')
