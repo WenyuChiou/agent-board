@@ -379,7 +379,9 @@ test('setup taking over Codex takes out the connector fallback instructions and 
   assert.match(fallback, /agent-board:start/)
   writeFileSync(instructions, 'Keep this line.\n\n' + fallback)
   writeFileSync(recordFile, record)
-  assert.equal(run('auto').state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  const { state, result } = run('auto')
+  assert.equal(state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  assert.equal(result.problems.some(one => one.key === 'codex:approval'), false)
   assert.equal(readFileSync(instructions, 'utf8').trim(), 'Keep this line.')
 }))
 
@@ -391,6 +393,9 @@ test('setup gives Hermes a skill, so a probe keeps the connector reporter it sti
   assert.match(reporter, /progress-report/)
   assert.deepEqual(run('auto').result.problems.filter(one => one.key !== 'codex:approval'), [])
   assert.equal(readFileSync(config, 'utf8'), reporter)
+  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], file)
+  run('remove')
+  assert.doesNotMatch(readFileSync(config, 'utf8'), /progress-report/)
   for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], file)
 }))
 
