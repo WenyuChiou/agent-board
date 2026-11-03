@@ -16,6 +16,7 @@ import { sha256 } from './sha256'
 import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
+import { identity } from './grouping'
 import { closedCopies, mergeCopies, recordFolder } from './question-merge'
 import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
 import type { RunGroup } from './runs'
@@ -179,6 +180,27 @@ export type TaskRow = {
 export type PrView = { text: string; url: string; tone: Tone }
 
 export type DoneItem = { key: string; project: string; title: string; when: string; questions?: WaitingItem[] }
+
+// The page and terminal share which live rows need the person. Shelved sessions keep their
+// last steps for reference without presenting a blocked step as a live request.
+export const rowNeedsYou = (row: TaskRow, isShelved = false): { kind: 'stuck' | 'question'; reason: string } | null => {
+  if (isShelved || row.auto === null || row.auto === 'ended') return null
+  const blocked = row.steps.find(step => step.status === 'blocked')
+  if (blocked !== undefined) return { kind: 'stuck', reason: (blocked.note || blocked.text).replace(/\s+/g, ' ').trim().slice(0, 80) }
+
+  return row.question === null ? null : { kind: 'question', reason: row.question }
+}
+
+// Whether a row needs the person now. A question counts while it has its card, by the page's own
+// match: copies of one question merge into one card and a later answer can cover an earlier copy,
+// so a row's own question may have no card left.
+export const rowNeedsNow = (row: TaskRow, cards: readonly WaitingItem[], isShelved = false): ReturnType<typeof rowNeedsYou> => {
+  const needs = rowNeedsYou(row, isShelved)
+  if (needs?.kind !== 'question') return needs
+  const own = identity(row.agent, false, row.project, row.title, row.dir)
+
+  return cards.some(item => identity(item.agent, false, item.project, item.task, item.dir) === own) ? needs : null
+}
 
 // Other work, one group per project, this session's project first; `summary` says it in a
 // line (`3 件 · 1 等你 · 1 已停`) for while the list is folded.
@@ -1113,20 +1135,6 @@ export const buildView = (
     if (group === undefined) groups.push({ project: row.project, isHere: row.isHere, rows: [row], summary: '' })
     else group.rows.push(row)
   }
-  for (const group of groups) {
-    const count = (test: (row: TaskRow) => boolean, word: (n: number) => string): string => {
-      const n = group.rows.filter(test).length
-      return n === 0 ? '' : word(n)
-    }
-    group.summary = [
-      s.groupCount(group.rows.length),
-      count(row => row.tone === 'warn', s.groupWaiting),
-      count(row => row.tone === 'alert', s.groupStuck),
-      count(row => row.auto === 'working', s.groupWorking),
-    ]
-      .filter(part => part !== '')
-      .join(' · ')
-  }
 
   const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined).flatMap(turn => {
     const updated = inactiveScopes.get(questionScope(turn.project, turn.agent, turn.id ?? ''))
@@ -1236,6 +1244,20 @@ export const buildView = (
   // question list, and the row keeps its own.
   const merged = mergeCopies([...all.filter(item => !isMarked(item)), ...retained, ...onRows].map(item => ({ item, ...seenAs(item), isStopped: item.questionId !== undefined && stoppedQuestions.has(item.questionId) })), closedCopies(observed?.ledger.records ?? [], marked))
   const asks: WaitingItem[] = merged.filter(item => item.ageStage === 'pending')
+  for (const group of groups) {
+    const count = (test: (row: TaskRow) => boolean, word: (n: number) => string): string => {
+      const n = group.rows.filter(test).length
+      return n === 0 ? '' : word(n)
+    }
+    group.summary = [
+      s.groupCount(group.rows.length),
+      count(row => row.tone === 'warn', s.groupWaiting),
+      count(row => row.tone === 'alert', s.groupStuck),
+      count(row => row.auto === 'working' && rowNeedsNow(row, asks) === null, s.groupWorking),
+    ]
+      .filter(part => part !== '')
+      .join(' · ')
+  }
   const reminder: WaitingItem[] = merged.filter(item => item.ageStage === 'reminder')
   const older: WaitingItem[] = merged.filter(item => item.ageStage === 'older')
   const stoppedAsking = older.filter(item => item.questionId !== undefined && stoppedQuestions.has(item.questionId)).length

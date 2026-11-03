@@ -718,6 +718,7 @@ export const ZH_TW = {
   pasteUnchanged: '看板已有相同進度，未變更。',
   pasteReview: (current: string, incoming: string): string => `無法判定來源先後。\n\n看板原有進度：\n${current}\n\n貼上的進度：\n${incoming}\n\n要取代這份進度嗎？這不會傳訊或批准任何動作。`,
   pgNeeds: '需要你',
+  pgNeedsWhy: (why: string): string => `需要你：${why}`,
   pgAgents: '代理程式',
   pgOwn: '你的待辦',
   pgStopped: '已停止',

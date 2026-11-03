@@ -674,6 +674,7 @@ export const ZH_CN: Strings = {
   pasteUnchanged: '看板已有相同进度，未变更。',
   pasteReview: (current: string, incoming: string): string => `无法判定来源先后。\n\n看板原有进度：\n${current}\n\n粘贴的进度：\n${incoming}\n\n要取代这份进度吗？这不会传信或批准任何动作。`,
   pgNeeds: '需要你',
+  pgNeedsWhy: (why: string): string => `需要你：${why}`,
   pgAgents: '代理',
   pgOwn: '你的待办',
   pgStopped: '已停止',
