@@ -117,7 +117,7 @@ An agent below these aims two weeks running takes smaller issues for a while: on
 2. **Branch**: one branch per PR from current `main`, in your own worktree.
 3. **Fix**: change only the files the issues name, or your lane's files (B4).
 4. **Test**: run the tests that cover the files you changed; full suites run in CI. At most 2 full local suites at once on one computer; if CPU stays above 85 % for 5 minutes, start no new run. Stop every test process you started when you are done.
-5. **Changelog**: add one fragment file per issue, `changelog.d/<issue>-<slug>.md`; never edit `CHANGELOG.md`.
+5. **Changelog**: write the title as what changed for the person; the release writes the CHANGELOG line from it. Add no `changelog.d/` file.
 6. **PR**: open it as a draft, with one `Fixes #N` or `Part of #N` line per issue, an `Author: <agent>, <branch>` line, an `Agent: <name> (<lane>)` trailer line for the merge commit, and the evidence (command output, screenshot, or the test names that cover it).
 7. **Ready**: when CI is green, comment `Ready for review <sha>`.
 8. **Review**: answer every finding in one push, then comment `Ready for review <new sha>`.
@@ -131,7 +131,7 @@ Open an issue only where the repo's rules tell you to (agent-board: when no issu
 - Bug fixes go two or three to a PR when several are waiting, never more than three; a lone or urgent fix may go by itself. Any other small issue (a small improvement, docs, a refactor, tests) follows the same rule with issues of its own kind, unless it belongs to a feature's PR. An improvement that spans several issues counts as a feature.
 - Never put a bug fix in a feature PR, so fixes can ship in a patch release while features wait.
 - In the PR body, give each issue its own `Fixes #N` or `Part of #N` line and its evidence (B1 step 6).
-- If review finds a problem in one issue, take that issue out of the PR (its changes, its changelog fragment and its `Fixes #N` or `Part of #N` line) and say so on the issue; fix it later in another PR, and do not hold up the rest.
+- If review finds a problem in one issue, take that issue out of the PR (its changes and its `Fixes #N` or `Part of #N` line) and say so on the issue; fix it later in another PR, and do not hold up the rest.
 - One branch per PR, and at most one PR of yours waiting for review or CI.
 
 ### B4. Shared files
