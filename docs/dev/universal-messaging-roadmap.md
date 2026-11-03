@@ -33,7 +33,7 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
 
 4. **Target Blocking, Transport Evidence & Semantic Acknowledgement**:
    - Retain `#388`'s target blocking: `claimMessages` blocks a target while an open message is `accepted` or `uncertain` (`hooks/messaging.ts:158–164`). This prevents out-of-order execution, split delivery, and race conditions.
-   - **A hook-only target is not held.** A target that has no ACK channel (a next-turn hook with no `board_ack`, Tier 3) can never answer `ACK <nonce>`, so the rule above would let it take one message per `OPEN_LIMIT_MS` (30 minutes). For such a target the hook's completed write is the delivery: the message is recorded `accepted` and does not block the target. Order still holds, because one claim hands over every message queued for that target. A target with an ACK channel keeps the blocking rule. Owner: #603.
+   - **A hook-only target is not held.** A target that has no ACK channel (a next-turn hook with no `board_ack`, Tier 3) can never answer `ACK <nonce>`, so the rule above would let it take one message per `OPEN_LIMIT_MS` (30 minutes). For such a target the hook's completed write is the delivery: the message is recorded `accepted` and does not block the target. Order still holds: `claimMessages` hands over one message per claim, the oldest queued first, so the target gets one message per turn in the order they were sent. A target with an ACK channel keeps the blocking rule. Owner: #603.
    - **Receipt stages**:
      1. *Prepared envelope*: In-memory claim formed, nonce issued, prompt framed.
      2. *Completed transport write / `accepted`*: External transport write verified complete (stdout pipe flushed, SDK turn submitted, or MCP tool call returned; process spawn alone is insufficient). Persists status as `accepted`; **target remains blocked**. This is strictly transport receipt evidence, **never** proof of model reading or semantic comprehension.
@@ -136,11 +136,11 @@ The lane is the suggested executor. It is not a claim: whoever takes a `ready` i
 | :--- | :--- | :--- | :--- | :--- |
 | Message store | `#315` (PR `#388`) | its current authors; `dot` pushes its pending patch first | `hooks/messaging.ts`, `scripts/board-messaging.ts`, `scripts/message-store-claim.ts`, `scripts/board-serve.ts`, `scripts/board-cli.ts` | wave 1 |
 | Web-chat relay | `#561` | `claude` (assigned) | `docs/validation/*-web-chat-relay.md`, `hooks/serve.ts`, `scripts/board-serve.ts` | `dot` and web chats, Tier 4 |
-| Vendor API spikes | step 1 of `#316`, `#722`, `#724`, `#725`, `#726` | a local agent with that app installed | `docs/validation/<date>-<host>-spike.md` | the slice that uses that API |
+| Vendor API spikes | step 1 of `#722`, `#724`, `#725`, `#726` | a local agent with that app installed | `docs/validation/<date>-<host>-spike.md` | the slice that uses that API |
 
 `#388` pre-merge fixes, both small: `dismissMessage` keeps an `accepted` message `accepted` (invariant 3), and the store gains `framingNonce` (invariant 4). It is approved by someone who wrote neither it nor its brief, such as the owner or `RyanGosling0508`.
 
-A spike is half a day: on a machine with the app, call the one API the slice depends on (Claude Code `$.prompt.submit`; Antigravity's wakeup on a background command exiting 0; OpenCode `client.session.promptAsync`; DeepSeek `agent.followup`; OpenClaw `chat.send`) and record the version, OS, call and result. A spike that fails stops its slice with a `Question:` before any code is written.
+A spike is half a day: on a machine with the app, call the one API the slice depends on (Antigravity's wakeup on a background command exiting 0; OpenCode `client.session.promptAsync`; DeepSeek `agent.followup`; OpenClaw `chat.send`) and record the version, OS, call and result. A spike that fails stops its slice with a `Question:` before any code is written. Claude Code needs none: `$.prompt.submit` already passed as L1 in [2026-10-20-send-spikes.md](../validation/2026-10-20-send-spikes.md), so #316 starts from that record.
 
 ### Wave 1: after `#388` merges
 
