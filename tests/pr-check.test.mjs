@@ -227,6 +227,34 @@ test('pr-check refuses a release that leaves fragments unfolded', async t => {
   assert.match(checked.stdout, /leaves fragments unfolded/)
 })
 
+test('pr-check validates that a release pull request CHANGELOG section includes every merged fix and feature PR', () => {
+  const baseData = {
+    ...syntheticPr(),
+    title: 'chore(release): 1.1.0',
+    headPaths: ['changelog.d/README.md', 'CHANGELOG.md'],
+    paths: ['CHANGELOG.md'],
+    changedPaths: ['CHANGELOG.md'],
+    addedPaths: [],
+    changelogText: '# Changelog\n\n## 1.1.0 — 2026-02-01\n\n- Fix something (#101).\n- Feat something (#102).\n\n## 1.0.0 — 2026-01-01\n',
+  }
+
+  // 1. All releaseNumbers are present in ## 1.1.0 section: PASS
+  const ok = checkPr({ ...baseData, releaseNumbers: [101, 102] })
+  assert.deepEqual(ok.problems.filter(p => p.check === 'changelog'), [])
+  assert.ok(ok.info.some(i => i.includes('includes all 2 merged fix and feature pull requests')))
+
+  // 2. Missing pull request #103: FAIL
+  const missing = checkPr({ ...baseData, releaseNumbers: [101, 102, 103] })
+  const changelogProblems = missing.problems.filter(p => p.check === 'changelog')
+  assert.equal(changelogProblems.length, 1)
+  assert.match(changelogProblems[0].message, /is missing pull request #103/)
+  assert.match(changelogProblems[0].fix, /changelog-fold\.mjs 1\.1\.0 --write/)
+
+  // 3. Section for version is missing altogether when releaseNumbers exist: FAIL
+  const noSection = checkPr({ ...baseData, changelogText: '# Changelog\n\n## 1.0.0 — 2026-01-01\n', releaseNumbers: [101] })
+  assert.ok(noSection.problems.some(p => p.check === 'changelog' && /has no section for version 1\.1\.0/.test(p.message)))
+})
+
 test('pr-check fails a body without a Fixes or Part of line and says how to add it', () => {
   const checked = issueLine('Author: codex, fix/example', 'fix: example')
   assert.equal(checked.problems.length, 1)
