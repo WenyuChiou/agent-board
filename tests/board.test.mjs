@@ -8761,8 +8761,8 @@ test('an agent with no open session shows as offline and its answers copy', asyn
 })
 
 test('an agent whose only session ended in the last 30 minutes shows as offline', async () => {
-  const model = redesignModel()
-  // Gemini's only task is stopped (ended a minute ago), its session ended, no open tasks or questions.
+  const model = viewed(redesignModel())
+  model.view.now = Date.UTC(2026, 9, 31, 12)
   model.asks = []
   model.working = []
   model.stopped = [{
@@ -8771,14 +8771,40 @@ test('an agent whose only session ended in the last 30 minutes shows as offline'
     project: 'demo',
     title: 'Finished session',
     steps: ['- [x] Done'],
-    at: Date.now() - 60_000,
+    at: model.view.now - 60_000,
     isClosed: true,
   }]
+  const agent = model.view.agents.find(one => one.agent === 'gemini')
+  if (agent) agent.last = model.view.now - 60_000
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   for (const node of [rowAgent(dom, 'gemini'), sideAgent(dom, 'gemini')]) {
     assert.equal(node.getAttribute('data-presence'), 'offline')
     assert.ok(node.getAttribute('aria-label').includes(EN.pgOffline), node.getAttribute('aria-label'))
   }
+})
+
+test('an agent with a recently finished task and no closed session shows as open', async () => {
+  const base = redesignModel()
+  base.asks = []
+  base.working = []
+  base.stopped = []
+  base.groups = []
+  base.recent = [{
+    key: 'row:codex:1',
+    agent: 'codex',
+    project: 'api-gateway',
+    title: 'Review routes',
+    when: 'Just now',
+    questions: [],
+  }]
+  const model = viewed(base)
+  model.view.now = Date.UTC(2026, 9, 31, 12)
+  const agent = model.view.agents.find(one => one.agent === 'codex')
+  if (agent) agent.last = model.view.now - 60_000
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const node = rowAgent(dom, 'codex')
+  assert.equal(node.getAttribute('data-presence'), 'open')
+  assert.equal(node.getAttribute('aria-label'), 'Codex: No work yet')
 })
 
 test('the own tasks chip label shows open task counts instead of empty when to-dos are open', async () => {
@@ -8793,8 +8819,8 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   const ownNode = rowAgent(dom, 'own')
   assert.ok(ownNode, 'own chip exists')
-  assert.equal(ownNode.getAttribute('aria-label'), `${EN.pgOwn}: ${EN.pgTipOpenOne}`)
-  assert.equal(ownNode.getAttribute('title'), `${EN.pgOwn}: ${EN.pgTipOpenOne}`)
+  assert.equal(ownNode.getAttribute('aria-label'), 'Your own tasks: 1 open')
+  assert.equal(ownNode.getAttribute('title'), 'Your own tasks: 1 open')
 
   // Multiple open tasks show the plural count
   const multiModel = redesignModel()
@@ -8807,8 +8833,45 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
   }]
   const multiDom = await pageDom(await sourcePage(), multiModel, { width: 1280 })
   const multiOwn = rowAgent(multiDom, 'own')
-  assert.equal(multiOwn.getAttribute('aria-label'), `${EN.pgOwn}: ${EN.pgTipOpen(2)}`)
-  assert.equal(multiOwn.getAttribute('title'), `${EN.pgOwn}: ${EN.pgTipOpen(2)}`)
+  assert.equal(multiOwn.getAttribute('aria-label'), 'Your own tasks: 2 open')
+  assert.equal(multiOwn.getAttribute('title'), 'Your own tasks: 2 open')
+
+  // A hand-kept task with a question shows needs you, not open count (finding 4: view.own.open.length avoids double-counting)
+  const questionModel = {
+    ...redesignModel(),
+    asks: [{
+      key: 'ask:own:1',
+      project: 'compost-rota',
+      task: 'Turn the compost heap',
+      text: 'Which bin, OK?',
+      isOwn: true,
+    }],
+    groups: [],
+    view: {
+      now: 0,
+      n: 1,
+      questions: 1,
+      stuck: 0,
+      versions: { board: '0.0.0', package: null },
+      agents: [],
+      needs: { n: 1, questions: 1, stuck: 0, cards: [{ key: 'ask:own:1', kind: 'question', agent: '', project: 'compost-rota', repo: 'compost-rota', at: 0 }], older: [] },
+      working: [],
+      all: { counts: { open: 1, needs: 1, stopped: 0, done: 0, older: 0 }, cards: [], open: [], stopped: [], done: [], older: [], isHidden: true },
+      own: {
+        counts: { open: 1, needs: 1, stopped: 0, done: 0, older: 0 },
+        cards: [{ key: 'ask:own:1', kind: 'question', agent: '', project: 'compost-rota', repo: 'compost-rota', at: 0 }],
+        open: [],
+        stopped: [],
+        done: [],
+        older: [],
+      },
+      projects: [],
+    },
+  }
+  const questionDom = await pageDom(await sourcePage(), questionModel, { width: 1280 })
+  const questionOwn = rowAgent(questionDom, 'own')
+  assert.equal(questionOwn.getAttribute('aria-label'), 'Your own tasks: 1 needs you')
+  assert.equal(questionOwn.getAttribute('title'), 'Your own tasks: 1 needs you')
 })
 
 test('on a wide screen the sidebar lists views, agents and projects', async () => {
