@@ -287,6 +287,19 @@ test('a setup record for another host folder leaves the connector to connect thi
   assert.equal(readFileSync(main, 'utf8'), saved)
 }))
 
+test('a setup hook in an encoded launch still leads to the record in its data folder', () => withSetup('codex', ({ f, run }) => {
+  // Node at a spaced path with no 8.3 name: the worker path exists only inside the base64.
+  const file = join(f.home, '.codex', 'hooks.json')
+  const worker = join(f.home, 'other', "it's data", 'agent-board-hook.mjs')
+  const launch = "& 'C:\\Program Files\\nodejs\\node.exe' '" + worker.replaceAll("'", "''") + "' 'SessionStart'; exit $LASTEXITCODE"
+  const command = 'powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + Buffer.from(launch, 'utf16le').toString('base64')
+  assert.equal(command.includes('agent-board-hook'), false)
+  const encoded = JSON.stringify(JSON.parse(readFileSync(file, 'utf8')), (key, value) => key === 'command' ? command : value, 2)
+  writeFileSync(file, encoded)
+  assert.equal(run('auto').state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  assert.equal(readFileSync(file, 'utf8'), encoded)
+}, home => ['--data-dir', join(home, 'other', "it's data")]))
+
 const DATA_DIR_HOSTS = { codex: '.codex', cursor: '.cursor', gemini: '.gemini', muse: 'muse', grok: '.grok', opencode: 'opencode', openclaw: '.openclaw' }
 for (const [agent, folder] of Object.entries(DATA_DIR_HOSTS)) {
   test(`${agent} set up with its own data folder gets no second hook`, () => withSetup(agent, ({ f, run, before }) => {
