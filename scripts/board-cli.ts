@@ -24,6 +24,7 @@ import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
+import { addressFileName } from '../hooks/receiver'
 import { idleTimeout } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
@@ -1253,7 +1254,7 @@ let served: string | undefined
 const board = (file: string): string => resolve(file)
 const serveFile = (): string => {
   if (served !== undefined) return served
-  const name = `agent-board-${createHash('sha256').update(board(path)).digest('hex').slice(0, 16)}.json`
+  const name = addressFileName(board(path))
   return (served = join(runFolder(name), name))
 }
 const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? serveFile().replace(/\.json$/, '-messages'))

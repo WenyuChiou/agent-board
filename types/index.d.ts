@@ -2,6 +2,30 @@
 // someone else) · blocked [!] · cancelled [-]
 export type ProgressStepStatus = 'done' | 'doing' | 'todo' | 'waiting' | 'running' | 'blocked' | 'cancelled'
 
+// This session as a receiver of board messages (#316). hooks/receiver.ts reads and writes it.
+export type ReceiverPending = {
+  id: string
+  nonce: string
+  prompt: string
+  // claimed: ours, not yet handed to the engine. submitted: handed over. running: its turn began.
+  phase: 'claimed' | 'submitted' | 'running'
+  submittedAt?: number
+  turnId?: string
+}
+
+// Kept in $.state, so a reload of the mod finds its connection and presents it as `replaces`
+// instead of contesting itself.
+export type ReceiverState = {
+  session: string
+  connection: string
+  secret: string
+  leaseUntil: number
+  pending: ReceiverPending | null
+  // The engine refused a prompt because the person stopped the session; nothing is taken until
+  // they start a turn themselves.
+  isStopped: boolean
+}
+
 export type QuestionSource = {
   kind: 'block' | 'own' | 'manual' | 'inbox'
   project: string
@@ -227,6 +251,7 @@ declare module 'claude-code' {
       answer: ProgressAnswer | null
       resolveResult: ResolveResult | null
       isNotifyOn: boolean
+      receiver: ReceiverState
       theme: string
       today: number
       isLegendOpen: boolean
