@@ -86,7 +86,7 @@ Claude 明确再次提问时，即使文字相同，也会更新该问题的标�
 
 #### 在手机上
 
-网页的布局适合手机。要从和电脑连同一个 Wi-Fi 的手机打开，运行 `node ~/.agent-board/agent-board.mjs --serve --lan`：除了电脑本机的网址，它还会打印网页在你网络上的网址和它的二维码，用手机相机对着扫就好。电脑有不止一个网络地址时，用 `--lan 192.168.1.23` 指定一个。Windows 可能会问要不要让 Node.js 使用网络：在专用网络上允许，并确认 Windows 把你的 Wi-Fi 算作专用网络（刚连上的网络它会先当成公用网络），不然手机连不到网页。跨网络访问须另行设置远程连接。
+网页的布局适合手机。要从和电脑连同一个 Wi-Fi 的手机打开，运行 `node "$HOME/.agent-board/agent-board.mjs" --serve --lan`：除了电脑本机的网址，它还会打印网页在你网络上的网址和它的二维码，用手机相机对着扫就好。电脑有不止一个网络地址时，用 `--lan 192.168.1.23` 指定一个。Windows 可能会问要不要让 Node.js 使用网络：在专用网络上允许，并确认 Windows 把你的 Wi-Fi 算作专用网络（刚连上的网络它会先当成公用网络），不然手机连不到网页。跨网络访问须另行设置远程连接。
 
 网络上的网页有这些限制：
 
@@ -137,7 +137,7 @@ claude plugin install agent-board@agent-board
 
 可选侧栏在 session 开始与每小时清理：完成区块等 12 小时，其他已停／过时区块等三天。持续运行的 `--serve` 网页也每小时整理一次。手动工作每个步骤都是 `[x]` 或 `[-]`，且被观察完成满三天后，才计入可归档数量；0.24.1 的自动整理只计数，不移走任何手动工作。详细信息行会显示“可归档 N 个已完成的任务”；数量为零时不显示。工作中或等待中的 agent 区块，最后写入后 12 小时内仍算运行中；侧栏、终端与网页会说明暂不能归档，整理也会保留。停止或结束后，展开工作即可立即归档。 自动整理归档仍有 `[?]` 的区块时，只有在保存并读回与明确归档相同的完整问题快照后才会归档，而且要等够久：已结束或已完成的区块满三天，仍在工作或等待中的区块则是满七天都没有新报告；快照存不了就保留原处。问题会保留，列在“更早、尚未回答的问题”下，仍可隐藏与再显示。明确归档任何时候都必须先有这份快照，来源移走后仍可找回；存储失败便保留来源。
 
-运行 `node ~/.agent-board/agent-board.mjs --tidy` 可在没有 Claude session 或网页时，按正常等待时间整理一次；不会安装计划任务，也不会写入 `progress-seen.json`。侧栏、`--watch` 或 `--serve` 会记录手动工作首次被观察完成的时间，以及三天规则首次运行的时间。三天从两者较晚的时间起算，让 0.24.0 就已完成的工作从升级后再等三天。电脑若只运行 `--tidy`，不会写入启用规则的保留记录，缺少这笔记录便不计数。未知、未来或读不到的观察时间都保留手动工作；`--tidy` 仍可归档等待时间已到的 agent 区块。网页的每小时整理若读不到观察文件，便跳过该次整理，不写入任何文件。
+运行 `node "$HOME/.agent-board/agent-board.mjs" --tidy` 可在没有 Claude session 或网页时，按正常等待时间整理一次；不会安装计划任务，也不会写入 `progress-seen.json`。侧栏、`--watch` 或 `--serve` 会记录手动工作首次被观察完成的时间，以及三天规则首次运行的时间。三天从两者较晚的时间起算，让 0.24.0 就已完成的工作从升级后再等三天。电脑若只运行 `--tidy`，不会写入启用规则的保留记录，缺少这笔记录便不计数。未知、未来或读不到的观察时间都保留手动工作；`--tidy` 仍可归档等待时间已到的 agent 区块。网页的每小时整理若读不到观察文件，便跳过该次整理，不写入任何文件。
 
 在侧栏或网页按“清理”（Clean up），会归档完成满三天的手动工作，正好就是数量行计算的那些，再加上一般整理会移动的代理区块。先写入同一组每月归档文件，再从看板移走；未满三天、未完成或有 `[?]` 步骤的工作会留下。若读不到完成时间记录，清理不会归档任何项目，也不会写入任何文件，并会说明原因。0.24.1 的无人操作整理（侧栏启动与每小时、`--tidy`、网页每小时）只计数，不移走手动工作。侧栏的“现在归档”与 `/progress tidy`、网页的“现在归档”，以及任务行的“归档”，仍可立即把完成工作移到每月归档文件，不会删除工作。侧栏与网页在大小警告旁显示一个“清理”按钮，只要可归档数量大于零也会显示，即使小看板没有大小警告。数字及可归档数量放在详细信息行。终端看板、聊天和 `--html` 也显示详细信息，但没有按钮。
 
@@ -162,11 +162,11 @@ claude plugin install agent-board@agent-board
 
 独立安装：将干净 checkout 更新到指定版本，预览 `node scripts/setup-agent.mjs`，再应用已批准范围。修改过的文件列为冲突，不覆盖。host 可能要重新加载；不安装自动更新器或开机服务。
 
-用已安装程序预览／应用目标移除：
+用已安装程序预览／应用移除，每个设置过的 agent 各做一次。下面以 Codex 为例；其他 agent 换成它的名称（`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-remove --agent <name>
-node ~/.agent-board/agent-board.mjs --codex-remove --agent <name> --apply
+node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 ```
 
 `--codex-remove`、`--codex-doctor` 是沿用的维护名称，可搭配各目标。先关闭该看板。只移除未修改的自有定义／文件；其他目标还需要的共享文件保留，进度、session 记录、归档、日志及用户修改也保留。
@@ -236,7 +236,7 @@ node ~/.agent-board/agent-board.mjs --codex-remove --agent <name> --apply
 
 ### 怎么卸载？
 
-独立安装：先关闭看板，预览 `node ~/.agent-board/agent-board.mjs --codex-remove --agent <name>`，确认后加上 `--apply`。进度和历史会保留。可选 Claude 插件的卸载方式：
+独立安装：先关闭看板，预览 `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`，确认后加上 `--apply`。进度和历史会保留。可选 Claude 插件的卸载方式：
 
 ```sh
 claude -p "/progress connect remove"

@@ -206,10 +206,10 @@ export const codexTrustOutput = (result: { changes: number; applied: boolean }, 
 }
 
 // What a person reads when a setup mode fails (#465): one sentence with its next step, never the code name, a stack or a path.
-export const setupFailure = (error: unknown, agent: string, s: Strings): { code: string; message: string } => {
+export const setupFailure = (error: unknown, agent: string, s: Strings): { code: string; message: string; reason?: string } => {
   const detail = error as { code?: unknown; message?: unknown; record?: unknown } | null | undefined
   const isCode = (value: unknown): value is string => typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value)
-  const code = isCode(detail?.code) ? detail.code : isCode(detail?.message) ? detail.message : error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : 'UNKNOWN'
+  const code = isCode(detail?.code) ? detail.code : isCode(detail?.message) ? detail.message : 'UNKNOWN'
   const unknown = s.setupAgentUnknown.toLowerCase()
   const host = localAgents.includes(agent as LocalAgent) ? s.agentNames[agent] ?? unknown : unknown
   const record = typeof detail?.record === 'string' && /^install-[a-z]+\.json$/.test(detail.record) ? detail.record : 'install-*.json'
@@ -223,8 +223,9 @@ export const setupFailure = (error: unknown, agent: string, s: Strings): { code:
     : ['INSTALL_CHANGED', 'LOCK_BUSY', 'LOCK_OWNERSHIP_LOST'].includes(code) ? s.setupErrorBusy
     : ['CODEX_BINARY_REQUIRED', 'ABSOLUTE_CODEX_BINARY_REQUIRED'].includes(code) ? s.setupErrorCodexBinary
     : code === 'OWNED_CODEX_INSTALL_REQUIRED' ? s.setupErrorCodexInstall
-    : s.setupErrorOther(host)
-  return { code, message }
+    : s.setupErrorDetails[code as keyof typeof s.setupErrorDetails] ?? (code === 'UNKNOWN' ? s.setupErrorOther(host) : s.setupErrorCode(code))
+  const reason = typeof detail?.message === 'string' && detail.message.trim() ? detail.message : 'Unknown error'
+  return code === 'UNKNOWN' ? { code, message, reason } : { code, message }
 }
 
 const saveReporterTail = (progress: string, fragment: Buffer): string => {

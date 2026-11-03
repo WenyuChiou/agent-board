@@ -1,9 +1,9 @@
 // Preview every selected target before applying any of them. Each target keeps its own
 // ownership record while sharing one script, skill and local progress file.
 import { spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
@@ -39,7 +39,8 @@ const summaries = [
     "connector": "managed by the Claude Code plugin connector; keeps its board at {progress}",
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
-    "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin <full path to codex>, then run it again with --apply (in the Codex CLI, /hooks also works). Then start a new session.",
+    "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works). Then start a new session.",
+    "codexMissing": "Codex: setup could not find Codex; run where.exe codex in PowerShell or command -v codex in bash, then pass its full path to --codex-bin.",
     "reload": "{host}: enable its reporting hooks or plugin, then start a new session.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
@@ -56,7 +57,8 @@ const summaries = [
     "connector": "由 Claude Code 外掛的連接器管理；保留看板 {progress}",
     "next": "接下來：",
     "apply": "套用這些變更：{command}",
-    "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin <codex 的完整路徑> 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。然後開始新的工作階段。",
+    "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。然後開始新的工作階段。",
+    "codexMissing": "Codex：setup 找不到 Codex；請在 PowerShell 執行 where.exe codex 或在 bash 執行 command -v codex，再用 --codex-bin 傳入完整路徑。",
     "reload": "{host}：啟用回報 hooks 或外掛，再開始新的工作階段。",
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
     "plugin": "Claude Code：執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。",
@@ -73,7 +75,8 @@ const summaries = [
     "connector": "由 Claude Code 插件的连接器管理；保留看板 {progress}",
     "next": "接下来：",
     "apply": "应用这些更改：{command}",
-    "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} --codex-trust --codex-bin <codex 的完整路径> 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。然后开始新的会话。",
+    "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。然后开始新的会话。",
+    "codexMissing": "Codex：setup 找不到 Codex；请在 PowerShell 运行 where.exe codex 或在 bash 运行 command -v codex，再用 --codex-bin 传入完整路径。",
     "reload": "{host}：启用报告 hooks 或插件，再开始新的会话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",
@@ -103,6 +106,27 @@ const unknownFailed = message(
   'agent-board：setup 在完成前中止了。加上 --json 再執行一次，就能看到原因。',
   'agent-board：setup 在完成前中止了。加上 --json 再运行一次，就能看到原因。',
 )
+const systemFailures = {
+  EINVAL: message('agent-board: the operating system rejected a setup argument; check the supplied paths and run the command again.', 'agent-board：作業系統拒絕了 setup 參數；請檢查輸入的路徑並重新執行命令。', 'agent-board：操作系统拒绝了 setup 参数；请检查输入的路径并重新运行命令。'),
+  ENOENT: message('agent-board: a file or program needed by setup was not found; check the supplied paths and run the command again.', 'agent-board：找不到 setup 需要的檔案或程式；請檢查輸入的路徑並重新執行命令。', 'agent-board：找不到 setup 需要的文件或程序；请检查输入的路径并重新运行命令。'),
+  EISDIR: message('agent-board: setup expected a file but found a folder; move the folder out of the setup data path and run the command again.', 'agent-board：setup 需要檔案，卻找到了資料夾；請移開設定資料路徑中的資料夾並重新執行命令。', 'agent-board：setup 需要文件，却找到了文件夹；请移走设置数据路径中的文件夹并重新运行命令。'),
+  ENOTDIR: message('agent-board: a setup path contains a file where a folder is needed; choose another folder and run the command again.', 'agent-board：setup 路徑中需要資料夾的地方是檔案；請選擇其他資料夾並重新執行命令。', 'agent-board：setup 路径中需要文件夹的地方是文件；请选择其他文件夹并重新运行命令。'),
+  EACCES: message('agent-board: setup was denied access to a file or folder; correct its permissions and run the command again.', 'agent-board：setup 無權存取檔案或資料夾；請修正權限並重新執行命令。', 'agent-board：setup 无权访问文件或文件夹；请修正权限并重新运行命令。'),
+  EPERM: message('agent-board: the operating system refused a setup file operation; correct the file permissions and run the command again.', 'agent-board：作業系統拒絕 setup 的檔案操作；請修正檔案權限並重新執行命令。', 'agent-board：操作系统拒绝 setup 的文件操作；请修正文件权限并重新运行命令。'),
+  ENOSPC: message('agent-board: the disk has no space for setup; free disk space and run the command again.', 'agent-board：磁碟沒有空間供 setup 使用；請釋放磁碟空間並重新執行命令。', 'agent-board：磁盘没有空间供 setup 使用；请释放磁盘空间并重新运行命令。'),
+  EROFS: message('agent-board: setup cannot write to a read-only filesystem; choose a writable data folder and run the command again.', 'agent-board：setup 無法寫入唯讀檔案系統；請選擇可寫入的資料夾並重新執行命令。', 'agent-board：setup 无法写入只读文件系统；请选择可写入的文件夹并重新运行命令。'),
+  EEXIST: message('agent-board: a file appeared where setup needed to create one; inspect that file and run the command again.', 'agent-board：setup 要建立檔案的位置已有檔案；請檢查該檔案並重新執行命令。', 'agent-board：setup 要创建文件的位置已有文件；请检查该文件并重新运行命令。'),
+  EBUSY: message('agent-board: a setup file is in use; close the program using it and run the command again.', 'agent-board：setup 的檔案正在使用中；請關閉使用它的程式並重新執行命令。', 'agent-board：setup 的文件正在使用中；请关闭使用它的程序并重新运行命令。'),
+  EAGAIN: message('agent-board: a setup resource is temporarily unavailable; wait for the other operation to finish and run the command again.', 'agent-board：setup 需要的資源暫時無法使用；請等其他操作完成後重新執行命令。', 'agent-board：setup 需要的资源暂时不可用；请等其他操作完成后重新运行命令。'),
+  EIO: message('agent-board: the operating system reported an input or output error during setup; check the disk and run the command again.', 'agent-board：setup 期間作業系統回報輸入或輸出錯誤；請檢查磁碟並重新執行命令。', 'agent-board：setup 期间操作系统报告输入或输出错误；请检查磁盘并重新运行命令。'),
+  ENAMETOOLONG: message('agent-board: a setup path is too long; choose a shorter data folder and run the command again.', 'agent-board：setup 路徑太長；請選擇較短的資料夾並重新執行命令。', 'agent-board：setup 路径太长；请选择较短的文件夹并重新运行命令。'),
+}
+const systemFailed = code => systemFailures[code] ?? message(
+  `agent-board: setup encountered ${code}; check the reported system error and run the command again.`,
+  `agent-board：setup 發生 ${code} 系統錯誤；請檢查該錯誤並重新執行命令。`,
+  `agent-board：setup 发生 ${code} 系统错误；请检查该错误并重新运行命令。`,
+)
+const isCode = value => typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value)
 class SetupFailure extends Error {
   constructor(code, message, extra = {}) {
     super(message)
@@ -111,6 +135,24 @@ class SetupFailure extends Error {
   }
 }
 const fail = (code, message, extra = {}) => { throw new SetupFailure(code, message, extra) }
+
+// Report a path the user can pass back without starting Codex during setup.
+const findCodex = () => {
+  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path')
+  const path = (pathKey ? process.env[pathKey] : '') || ''
+  const names = process.platform === 'win32' ? ['codex.exe', 'codex.cmd', 'codex.ps1'] : ['codex']
+  for (const entry of path.split(delimiter)) {
+    const directory = process.platform === 'win32' ? entry.replace(/^"(.*)"$/, '$1') : entry
+    if (!isAbsolute(directory)) continue
+    for (const name of names) {
+      const file = resolve(directory, name)
+      try {
+        const stat = statSync(file)
+        if (stat.isFile() && (process.platform === 'win32' || (stat.mode & 0o111) !== 0)) return file
+      } catch {}
+    }
+  }
+}
 
 const main = () => {
   const at = args.indexOf('--agent')
@@ -145,7 +187,11 @@ const main = () => {
   const script = fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
   const run = (agent, isApplying) => {
     const result = spawnSync(process.execPath, [script, ...common, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
-    const fallback = () => fail('SETUP_FAILED', childFailed(names[agent]), { agent, cause: result.error?.code ?? 'UNKNOWN' })
+    const fallback = () => {
+      const cause = isCode(result.error?.code) ? result.error.code : 'UNKNOWN'
+      const reason = result.error?.message || (result.stderr ?? '').trim().split(/\r?\n/).filter(Boolean).pop() || 'The setup helper did not return a result.'
+      fail('SETUP_FAILED', cause === 'UNKNOWN' ? childFailed(names[agent]) : systemFailed(cause), { agent, cause, ...(cause === 'UNKNOWN' ? { reason } : {}) })
+    }
     if (result.error) fallback()
     if (result.status !== 0) {
       for (const line of (result.stderr ?? '').trim().split(/\r?\n/).reverse()) {
@@ -153,7 +199,7 @@ const main = () => {
         try { error = JSON.parse(line)?.error } catch {}
         if (error !== null && typeof error === 'object' && typeof error.code === 'string' && typeof error.message === 'string') {
           if (error.code === 'INVALID_CONNECT_RECORD') fail(error.code, error.message, { agent })
-          fail('SETUP_FAILED', error.message, { agent, cause: error.code })
+          fail('SETUP_FAILED', error.message, { agent, cause: error.code, ...(typeof error.reason === 'string' ? { reason: error.reason } : {}) })
         }
       }
       fallback()
@@ -191,7 +237,8 @@ const main = () => {
   for (const agent of available) {
     const plan = results[selected.indexOf(agent)]
     if (plan.managedBy === 'connector') continue
-    steps.push(words(agent === 'codex' ? 'codex' : plan.capabilities.lifecycle === 'adapter-pending' ? 'skill' : 'reload', { host: names[agent], command: boardCommand }))
+    const codex = agent === 'codex' ? findCodex() : undefined
+    steps.push(words(agent === 'codex' ? codex ? 'codex' : 'codexMissing' : plan.capabilities.lifecycle === 'adapter-pending' ? 'skill' : 'reload', { host: names[agent], command: boardCommand, codex: codex ? quote(codex) : '' }))
   }
   for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
   if (hasClaude) steps.push(words('plugin'))
@@ -209,8 +256,9 @@ try { main() } catch (error) {
     const { code, message, ...extra } = error
     failure = { code, message, ...extra }
   } else {
-    const cause = error?.code
-    failure = { code: 'UNKNOWN', message: unknownFailed, ...(typeof cause === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(cause) ? { cause } : {}) }
+    const code = isCode(error?.code) ? error.code : 'UNKNOWN'
+    const reason = typeof error?.message === 'string' && error.message.trim() ? error.message : 'Unknown error'
+    failure = code === 'UNKNOWN' ? { code, message: unknownFailed, reason } : { code: 'UNKNOWN', cause: code, message: systemFailed(code) }
   }
   process.stderr.write(`${isJson ? JSON.stringify({ error: failure }) : failure.message}\n`)
 }
