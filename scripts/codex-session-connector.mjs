@@ -1,5 +1,14 @@
 import { boardClient, deliveryPrompt } from './message-client.mjs'
 
+/** @type {import('./message-client.mjs').MessagingReceiverRecord} */
+export const messagingReceiver = {
+  host: 'Codex',
+  surfaces: [{ name: 'Exclusive-owner app-server', evidence: null }],
+  tier: 1,
+  primitive: '[P1]',
+  isImplemented: true,
+}
+
 // For an application that already owns a loaded Codex session and its notifications.
 // No socket, thread or model is created by attaching this adapter. `session` scope
 // means the host can queue a new turn on its own idle session, not a fabricated turn id.

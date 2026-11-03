@@ -278,7 +278,53 @@ restored on restart. They never send, retry, approve or create a progress block.
 
 ## Agent and surface support
 
-The progress support described in the README is separate from connected-session messaging:
+<!-- messaging-matrix:start -->
+
+Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a dated live-run file for that exact surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.
+
+| Host | Surface | Tier | Primitive | Status | Live run | Receiver |
+| --- | --- | --- | --- | --- | --- | --- |
+| Antigravity | 2.0 Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Not tested | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) |
+| Antigravity | IDE | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Code | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Not tested | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) |
+| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Implemented | Not tested | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |
+| Cursor | cursor-agent CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Cursor | IDE (Composer) | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini CLI | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Muse Code | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+
+<!-- messaging-matrix:end -->
+
+### What earlier runs saw
+
+This table is written by hand and covers progress reporting too. Its runs predate dated live-run records, so none of them makes a surface Verified above.
 
 | Agent / surface | Progress integration in this repository | Connected-session messaging evidence |
 | --- | --- | --- |
@@ -291,6 +337,20 @@ The progress support described in the README is separate from connected-session 
 | Grok Build | Existing reporter hooks; optional legacy resume requires `--allow-resume` | No live receiving adapter acceptance |
 | DeepSeek Harness | Independent Cordis lifecycle plugin and native skill | Generic client contract checked; no DeepSeek-native receiver or model ACK acceptance |
 | dot / other UIs | Explicit progress relay where documented | No native receiving connector or real ACK established |
+
+To add a receiver, export `messagingReceiver` from its own import-safe `.mjs` or `.ts`
+module under `scripts/` or `hooks/`; no central receiver list or other receiver changes
+are needed. The `MessagingReceiverRecord` type is in `scripts/message-client.mjs`.
+Each surface names its own dated live-run file under `docs/validation/`, or `null`.
+Set `isImplemented` only for a merged receiver covered by synthetic tests; a proposed
+receiver stays `false`, even if a spike record exists. Tier and primitive follow the
+[roadmap](dev/universal-messaging-roadmap.md#4-five-delivery-primitives--four-honest-ui-tiers).
+An owned app-server or CLI stream is a separate surface from a CLI TTY, desktop app or
+IDE. Earlier transport spikes and progress-hook runs do not verify those surfaces.
+
+Run `node scripts/messaging-matrix.mjs --write` after changing a record or its evidence.
+`node scripts/messaging-matrix.mjs --check` checks all four copies without writing and
+exits non-zero when any is stale or has missing markers.
 
 One machine's installation does not automatically attach every already-running agent.
 Each host needs its own authorized session binding and supported transport. A native
