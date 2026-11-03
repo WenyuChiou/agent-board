@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { renameSync, statSync } from 'node:fs'
+import { readFileSync, renameSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { EN } from '../../hooks/strings-en.ts'
 import { makeWorld } from './lib/world.mjs'
@@ -446,6 +446,19 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       }
       await inspectSurfaces(world)
     } finally { await world.close() }
+  })
+
+  // clip.exe reads its input in the console's code page, so on a Chinese Windows it garbled a Chinese answer (#817).
+  test('a working day: on Windows a copied answer outside ASCII reaches the clipboard whole through PowerShell, and ASCII through clip.exe', { skip: process.platform !== 'win32' && 'the board picks the clipboard program this way on Windows only' }, async () => {
+    for (const [lang, answer, program] of [['zh-TW', '好，照做', /[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/i], ['en', 'Yes, go ahead', /[\\/]System32[\\/]clip\.exe$/i]]) {
+      const world = makeWorld({ lang })
+      try {
+        ask(world)
+        const after = await terminal.keys(world, 'y')
+        assert.equal(readFileSync(world.env.E2E_CLIPBOARD, 'utf8'), answer, after)
+        assert.match(readFileSync(`${world.env.E2E_CLIPBOARD}.program`, 'utf8'), program)
+      } finally { await world.close() }
+    }
   })
 
   test('a working day: every press along the day shows a result or a reason next to its card', async () => {

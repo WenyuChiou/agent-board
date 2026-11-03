@@ -1,5 +1,7 @@
 import { BOARD_SCRIPT } from './board-script'
 import { connectRecordPath, hasOwnConnectData, recoveryUnreadableCode } from './connect-pure'
+import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiver, parseAddress, RECEIVER_MS } from './receiver'
+import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
 import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
@@ -173,6 +175,7 @@ const pressResults = atom({ plugin: 'agent-board', key: 'pressResults' } as cons
 const answer = atom({ plugin: 'agent-board', key: 'answer' } as const, null as ProgressAnswer | null)
 const resolveResult = atom({ plugin: 'agent-board', key: 'resolveResult' } as const, null as ResolveResult | null)
 const isNotifyOn = atom({ plugin: 'agent-board', key: 'isNotifyOn' } as const, true)
+const receiverState = atom({ plugin: 'agent-board', key: 'receiver' } as const, emptyReceiver())
 // The person's /config theme, which picks the dark or light 和色 set.
 const theme = atom({ plugin: 'agent-board', key: 'theme' } as const, 'dark')
 // Steps finished today, from the journal.
@@ -201,6 +204,11 @@ const wordsOf = async ($: EngineInterface): Promise<Strings> => STRINGS[langOf(a
 // Module state: reset by a reload, which only happens between turns.
 let isPolling = false
 let isTurnRunning = false
+let receiver: Receiver | null = null
+let receiverTimer: { cancel: () => void } | null = null
+// A hub that does not answer within this holds no tick up: it is a poll that failed.
+const HUB_MS = 5000
+const RECEIVER_END_MS = 500
 let writes: Promise<unknown> = Promise.resolve()
 let questionTrims: Promise<void> = Promise.resolve()
 let settingSaves: Promise<unknown> = Promise.resolve()
@@ -3728,9 +3736,63 @@ const answerHere = async ($: EngineInterface): Promise<void> => {
   await settle($)
 }
 
+// POSIX only: a folder that only this account can reach, and in it, when named, a plain file of its own.
+const OWN_ADDRESS = "const fs=require('fs');const[d,f]=process.argv.slice(1);const a=fs.statSync(d),u=process.getuid();const b=f&&fs.lstatSync(f);process.exit(a.isDirectory()&&a.uid===u&&(a.mode&63)===0&&(!b||b.isFile()&&b.uid===u)?0:1)"
+const isOwnAddress = async ($: EngineInterface, ...paths: string[]): Promise<boolean> =>
+  (await $.process.run(['node', '-e', OWN_ADDRESS, '--', ...paths], { timeoutMs: 5000 }).catch(() => null))?.exitCode === 0
+
+// Where the running page left its address, or null: no page, or nothing this account can trust.
+const readAddress = async ($: EngineInterface): Promise<BoardAddress | null> => {
+  const path = await progressPath($)
+  const key = addressKey(path)
+  if (key === null) return null
+  const isWin = await isWindows($, path)
+  const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '')
+  const runtime = await $.env.get('XDG_RUNTIME_DIR')
+  const isRuntimeOwn = !isWin && runtime !== undefined && runtime !== '' && await isOwnAddress($, runtime)
+  const folder = addressFolder(isWin, home, runtime, isRuntimeOwn)
+  if (folder === null) return null
+  const file = [folder, addressFileName(key)].join(isWin ? '\\' : '/')
+  const found = await $.fs.stat(file).catch(() => undefined)
+  if (found === undefined || found.isLink || found.kind !== 'file') return null
+  if (!isWin && !(await isOwnAddress($, folder, file))) return null
+
+  return parseAddress(await $.fs.read(file), key)
+}
+
+const makeReceiver = ($: EngineInterface): Receiver => createReceiver({
+  session: () => $.session.id(),
+  address: () => readAddress($),
+  call: async (address, action, body) => {
+    const asked = $.http.fetch(`${address.origin}/api/messages/${action}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-board-token': address.token },
+      body: JSON.stringify(body),
+    })
+    const hung = $.clock.sleep(HUB_MS).then(() => { throw new Error('HUB_TIMEOUT') })
+    const { status, text } = await Promise.race([asked, hung])
+    return { status, json: JSON.parse(text) as unknown }
+  },
+  isBusy: () => isTurnRunning,
+  now: () => $.clock.now(),
+  submit: text => $.prompt.submit({ text }),
+  load: () => read($, receiverState),
+  save: state => update($, receiverState, () => state),
+})
+
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     isInteractiveSession = e.isInteractive !== false
+    // Started before anything is awaited: a slow start must not cost the session its address.
+    // Each tick looks for the page itself; none of it runs inside this hook's budget.
+    receiver = null
+    if (isInteractiveSession) {
+      const own = makeReceiver($)
+      receiver = own
+      receiverTimer = $.clock.every(RECEIVER_MS, () => {
+        own.tick().catch(() => undefined)
+      })
+    }
     pendingCache = null
     progressChangedAt = null
     heldInboxQuestions.clear()
@@ -3985,7 +4047,10 @@ export const register: Register = (on, options) => {
     hasTurnBackgroundLaunch = false
     turnBackgroundJobIds = new Set()
     turnBackgroundLaunchesWithoutId = 0
-    turnPrompt = e.text.trim()
+    // A board message's turn: neither what it said nor what Claude answered joins the board's
+    // own records. Only its ACK goes back, as the message's receipt.
+    const isDelivery = (await receiver?.turnStarted(e.text, e.turnId).catch(() => false)) === true
+    turnPrompt = isDelivery ? '' : e.text.trim()
     const isAnswer = isNextTurnAnswer && e.text.trim() !== ''
     isNextTurnAnswer = false
     const isNotification = nextTurnNotification
@@ -4002,7 +4067,7 @@ export const register: Register = (on, options) => {
       await saveBackground($, one => finishBackgroundJob(one, e.text, isNotification === true))
       mirror = await read($, mine)
     }
-    if (mirror !== null && mirror.firstPrompt === '' && e.text.trim() !== '') {
+    if (mirror !== null && !isDelivery && mirror.firstPrompt === '' && e.text.trim() !== '') {
       await saveMine($, one => ({ ...one, firstPrompt: promptKey(e.text) }))
     }
     // The person is answering: what waited on them from the last turn's question is settled.
@@ -4029,16 +4094,23 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    if (receiver !== null && e.agentId === undefined && result !== undefined) await receiver.stepAnswered(e.turnId, result.answer).catch(() => undefined)
+    return result
+  })
+
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     if (hasBackgroundActivity) await backgroundChanges
     isTurnRunning = false
+    const isDelivery = (await receiver?.turnEnded(e.turnId, e.answer, e.isAborted).catch(() => false)) === true
     const mirror = await read($, mine)
     const hasRunningTurnBackgroundJob = (mirror?.backgroundJobIds ?? []).some(id => turnBackgroundJobIds.has(id)) ||
       (turnBackgroundLaunchesWithoutId > 0 && (mirror?.backgroundJobs ?? 0) > (mirror?.backgroundJobIds?.length ?? 0))
     if ((mirror?.backgroundReleases?.length ?? 0) > 0 || (mirror?.backgroundReleaseCount ?? 0) > 0)
       await saveBackground($, one => ({ ...one, backgroundReleases: [], backgroundReleaseCount: 0 })).catch(() => undefined)
-    const question = e.isAborted ? null : lastQuestion(e.answer)
+    const question = e.isAborted || isDelivery ? null : lastQuestion(e.answer)
     if (mirror !== null && mirror.tasks.length > 0) {
       const branch = await branchName($)
       await saveMine($, one => ({ ...one, branch }))
@@ -4058,7 +4130,7 @@ export const register: Register = (on, options) => {
     if (mirror !== null && mirror.tasks.length === 0 && mirror.source === 'turns') await settle($)
     // No Task list: a turn that changed something, or any turn once the session is tracked,
     // is summed up into steps.
-    if (mirror !== null && !e.isAborted && (mirror.tasks.length === 0 || mirror.source === 'turns')) {
+    if (mirror !== null && !e.isAborted && !isDelivery && (mirror.tasks.length === 0 || mirror.source === 'turns')) {
       const hasWork = mirror.source === 'turns' || hasTurnBackgroundLaunch || isWork(turnTools(await $.session.messages().catch(() => [])))
       if (hasWork) {
         const prompt = turnPrompt
@@ -4185,6 +4257,13 @@ export const register: Register = (on, options) => {
       })
       await queueWrite($)
     }
+    // After a /clear or a resume the process goes on under another id, with no session.start: the
+    // timer goes on and registers that id. Last, and bounded: this hook's time is short, and a
+    // session that could not say goodbye is gone from the board when its lease ends.
+    const isGoingOn = e.reason === 'clear' || e.reason === 'resume'
+    if (!isGoingOn) receiverTimer?.cancel()
+    if (receiver !== null) await isDoneWithin($, receiver.end().catch(() => undefined), RECEIVER_END_MS)
+    if (!isGoingOn) receiver = null
 
     return next(e)
   })
