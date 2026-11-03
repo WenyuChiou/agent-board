@@ -37,7 +37,7 @@ to track work, reports real steps after each change. On desktop a URL-opening to
 that web page in a panel. It is not a native Codex pane. In CLI another terminal can run:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --watch
+node "$HOME/.agent-board/agent-board.mjs" --watch
 ```
 
 The existing keyboard actions, web controls and clipboard actions are the same as the
@@ -45,7 +45,7 @@ standalone board. On Windows use the absolute path printed by setup. To report, 
 passes minimal task summaries as JSON on stdin to:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-report
+node "$HOME/.agent-board/agent-board.mjs" --codex-report
 ```
 
 ```json
@@ -127,11 +127,11 @@ ACK after the user confirms the binding.
 ## Inspect, repair and remove
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-doctor
+node "$HOME/.agent-board/agent-board.mjs" --codex-doctor
 node scripts/setup-codex.mjs
 node scripts/setup-codex.mjs --apply
-node ~/.agent-board/agent-board.mjs --codex-remove
-node ~/.agent-board/agent-board.mjs --codex-remove --apply
+node "$HOME/.agent-board/agent-board.mjs" --codex-remove
+node "$HOME/.agent-board/agent-board.mjs" --codex-remove --apply
 ```
 
 Doctor checks generated file hashes and hook definitions, querying Codex trust when a binary is supplied or discovered on PATH/LOCALAPPDATA, or inspecting config.toml when Codex is not available.
