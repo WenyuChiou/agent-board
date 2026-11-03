@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import { BOARD_SCRIPT } from '../../hooks/board-script.ts'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
+import { processList } from './lib/processes.mjs'
 
 const wait = ms => new Promise(done => setTimeout(done, ms))
 
@@ -158,7 +159,7 @@ test('three real hub starts never leave two live owners of one message store', {
 
 test('three real --serve starts on the default store collide and every start prints its URL', { timeout: 240_000 }, async () => {
   const world = makeWorld()
-  let running
+  let running, pagesLeft
   try {
     const root = world.root
     const control = join(root, 'serve-barrier-control')
@@ -211,7 +212,10 @@ test('three real --serve starts on the default store collide and every start pri
         let names = []
         try { names = readdirSync(dir, { withFileTypes: true }) } catch { return undefined }
         for (const one of names) {
-          if (one.isFile() && /^agent-board-[0-9a-f]{16}\.json$/.test(one.name)) return JSON.parse(readFileSync(join(dir, one.name), 'utf8'))
+          if (one.isFile() && /^agent-board-[0-9a-f]{16}\.json$/.test(one.name)) {
+            const file = join(dir, one.name)
+            return { ...JSON.parse(readFileSync(file, 'utf8')), messages: file.replace(/\.json$/, '-messages') }
+          }
         }
         for (const one of names) {
           const found = one.isDirectory() && depth > 0 ? look(join(dir, one.name), depth - 1) : undefined
@@ -236,26 +240,31 @@ test('three real --serve starts on the default store collide and every start pri
       return { status, isRefused, isGone }
     }
 
+    // Every page process of this test's board script, whether or not a start printed its address.
+    pagesLeft = async () => (await processList({ spawnIsolated, world })).list
+      .filter(one => one.pid !== process.pid && one.command.includes(script) && one.command.includes('--serve-child'))
+
     const rounds = 20
     for (let r = 0; r < rounds; r++) {
       const roundDir = join(control, `round-${r}`)
       mkdirSync(roundDir, { recursive: true })
       const outcomes = await Promise.all([runOne(roundDir), runOne(roundDir), runOne(roundDir)])
+      // Known before any check, so a failed round still closes its page.
+      running = runningPage()
       for (let i = 0; i < 3; i++) {
-        assert.equal(outcomes[i].code, 0, `Round ${r} start ${i} failed (code ${outcomes[i].code}): stderr=${outcomes[i].stderr}`)
+        assert.equal(outcomes[i].code, 0, `Round ${r} start ${i} failed (code ${outcomes[i].code}): stdout=${JSON.stringify(outcomes[i].stdout)} stderr=${JSON.stringify(outcomes[i].stderr)}`)
       }
       const urls = outcomes.map(o => {
         const match = /(http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/.exec(o.stdout)
         return match?.[1]
       })
       for (let i = 0; i < 3; i++) {
-        assert.ok(urls[i], `Round ${r} start ${i} printed no URL: stdout=${outcomes[i].stdout}`)
+        assert.ok(urls[i], `Round ${r} start ${i} printed no URL: stdout=${JSON.stringify(outcomes[i].stdout)} stderr=${JSON.stringify(outcomes[i].stderr)}`)
       }
       assert.equal(urls[0], urls[1], `Round ${r} starts 0 and 1 printed different URLs`)
       assert.equal(urls[1], urls[2], `Round ${r} starts 1 and 2 printed different URLs`)
-      const page = runningPage()
+      const page = running
       assert.equal(page?.url, urls[0], `Round ${r}: the running page is not the one every start printed`)
-      running = page
 
       // Each round's page must stop, or the next round only finds it again.
       const closed = await closePage(page)
@@ -263,10 +272,15 @@ test('three real --serve starts on the default store collide and every start pri
       assert.equal(closed.isRefused, true, `Round ${r}: the page still answers 5 s after /api/close`)
       assert.equal(closed.isGone, true, `Round ${r}: the page process ${page.pid} still runs 5 s after /api/close`)
       running = undefined
+      // A page holds the message folder through its claim; none may be left once the round's page stopped.
+      assert.deepEqual(readdirSync(page.messages).filter(name => name.startsWith('.message-claim-')), [], `Round ${r}: a message claim is left after the page stopped`)
     }
+    // Listing processes takes seconds on Windows, so the search for a page no start printed runs once, at the end.
+    assert.deepEqual((await pagesLeft()).map(one => one.pid), [], 'a page process of this board is still running after the last round')
   } finally {
     // A failed round leaves its page running; stop it so cleanup reports the round's failure, not a locked folder.
     if (running !== undefined) await closePage(running).catch(() => {})
+    for (const one of await (pagesLeft ?? (async () => []))().catch(() => [])) try { process.kill(one.pid) } catch {}
     await wait(300)
     await world.close()
   }

@@ -2573,6 +2573,166 @@ test('a claim its owner releases while another start reads it counts as gone, no
   } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
 })
 
+// Windows answers EPERM while another process is still removing a file.
+const refused = () => Object.assign(new Error('EPERM: operation not permitted, open'), { code: 'EPERM' })
+
+test('a claim refused while its owner removes it is looked at again and counts as gone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-removing-claim-'))
+  const open = fs.openSync
+  const nonce = 'c'.repeat(32), name = claimName(process.ppid, nonce)
+  let claim
+  try {
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
+    fs.openSync = (file, ...args) => {
+      if (basename(String(file)) !== name) return open(file, ...args)
+      unlinkSync(file)
+      throw refused()
+    }
+    syncBuiltinESMExports()
+    claim = claimMessageStore(dir)
+  } finally {
+    fs.openSync = open
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(storeClaims(dir).length, 1)
+    assert.equal(existsSync(join(dir, name)), false)
+  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a claim that stays refused blocks the start and is left in place', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-refused-claim-'))
+  const open = fs.openSync
+  const nonce = 'd'.repeat(32), name = claimName(process.ppid, nonce)
+  let tries = 0
+  try {
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
+    fs.openSync = (file, ...args) => {
+      if (basename(String(file)) !== name) return open(file, ...args)
+      tries++
+      throw refused()
+    }
+    syncBuiltinESMExports()
+    assert.throws(() => claimMessageStore(dir), /MESSAGE_STORE_CLAIM_BLOCKED/)
+  } finally {
+    fs.openSync = open
+    syncBuiltinESMExports()
+  }
+  try {
+    // Once, then after each of the four waits.
+    assert.equal(tries, 5)
+    assert.deepEqual(readdirSync(dir), [name])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a claim refused while it is looked up again after its release is looked at once more and counts as gone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-removing-lookup-'))
+  const open = fs.openSync, lstat = fs.lstatSync
+  const nonce = 'b'.repeat(32), name = claimName(process.ppid, nonce)
+  let isRemoved = false
+  let claim
+  try {
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
+    fs.openSync = (file, ...args) => {
+      const fd = open(file, ...args)
+      if (basename(String(file)) === name) { unlinkSync(file); isRemoved = true }
+      return fd
+    }
+    fs.lstatSync = (file, ...args) => {
+      if (!isRemoved || basename(String(file)) !== name) return lstat(file, ...args)
+      isRemoved = false
+      throw refused()
+    }
+    syncBuiltinESMExports()
+    claim = claimMessageStore(dir)
+  } finally {
+    fs.openSync = open
+    fs.lstatSync = lstat
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(storeClaims(dir).length, 1)
+    assert.equal(existsSync(join(dir, name)), false)
+  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a claim written again under its name while another start reads it blocks the start and stays', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-renamed-claim-'))
+  const open = fs.openSync
+  const nonce = 'a'.repeat(32), name = claimName(process.ppid, nonce)
+  const bytes = JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n'
+  let isDone = false
+  try {
+    writeFileSync(join(dir, name), bytes)
+    fs.openSync = (file, ...args) => {
+      const fd = open(file, ...args)
+      if (!isDone && basename(String(file)) === name) {
+        isDone = true
+        unlinkSync(file)
+        writeFileSync(file, bytes)
+      }
+      return fd
+    }
+    syncBuiltinESMExports()
+    assert.throws(() => claimMessageStore(dir), /MESSAGE_STORE_CLAIM_BLOCKED/)
+  } finally {
+    fs.openSync = open
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(isDone, true)
+    assert.deepEqual(readdirSync(dir), [name])
+    assert.equal(readFileSync(join(dir, name), 'utf8'), bytes)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a claim rename refused for a moment is tried again and the claim is published', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-rename-wait-'))
+  const rename = fs.renameSync
+  let tries = 0
+  let claim
+  try {
+    fs.renameSync = (from, to) => {
+      if (basename(String(from)).startsWith('.message-pending-') && tries++ === 0) throw refused()
+      return rename(from, to)
+    }
+    syncBuiltinESMExports()
+    claim = claimMessageStore(dir)
+  } finally {
+    fs.renameSync = rename
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(tries, 2)
+    assert.equal(storeClaims(dir).length, 1)
+    assert.deepEqual(readdirSync(dir).filter(one => one.startsWith('.message-pending-')), [])
+  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a claim rename that stays refused blocks the start and leaves nothing behind', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-rename-refused-'))
+  const rename = fs.renameSync
+  let tries = 0
+  try {
+    fs.renameSync = (from, to) => {
+      if (!basename(String(from)).startsWith('.message-pending-')) return rename(from, to)
+      tries++
+      throw refused()
+    }
+    syncBuiltinESMExports()
+    assert.throws(() => claimMessageStore(dir), /MESSAGE_STORE_CLAIM_BLOCKED/)
+  } finally {
+    fs.renameSync = rename
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(tries, 5)
+    assert.deepEqual(readdirSync(dir), [])
+    // Nothing is left to stop the next start.
+    claimMessageStore(dir).release()
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('a pending claim left by a writer that died is removed and a live writer\'s is kept', () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-message-pending-claim-'))
   let pid = 2147483000

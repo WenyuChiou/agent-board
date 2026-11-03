@@ -26,7 +26,9 @@ export const readMessageStoreFiles = directory => {
         const after = lstatSync(file)
         if (count > 512 || after.isSymbolicLink() || after.dev !== opened.dev || after.ino !== opened.ino || after.nlink !== 1) throw new Error('changed claim')
         entries.push({ name, bytes: buffer.subarray(0, count) })
-      } catch {
+      } catch (error) {
+        // A pending claim renamed since the listing has only changed name; the next look sees the claim.
+        if (error?.code === 'ENOENT' && stagedName.test(name)) continue
         entries.push({ name, bytes: undefined })
       } finally { if (fd !== undefined) closeSync(fd) }
     }

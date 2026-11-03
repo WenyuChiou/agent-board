@@ -9,20 +9,58 @@ const LIMIT = 1024
 const blocked = (): Error => new Error('MESSAGE_STORE_CLAIM_BLOCKED')
 const canonical = (path: string): string => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path)
 
-const readClaim = (file: string): string => {
+// Another board's claim (`isOther`) whose owner released it during this read has no name left
+// (nlink 0): that claim is gone, not broken. A board's own claim never goes that way.
+const readClaimOnce = (file: string, isOther: boolean): string => {
   const before = lstatSync(file)
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 512) throw blocked()
   const fd = openSync(file, 'r')
   try {
     const opened = fstatSync(fd)
-    // Its owner released it while this read: the claim is gone, not broken.
-    if (opened.nlink === 0 && opened.dev === before.dev && opened.ino === before.ino) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    if (isOther && opened.nlink === 0 && opened.dev === before.dev && opened.ino === before.ino) {
+      // Gone only if nothing has taken its name since.
+      try { lstatSync(file) } catch (error) { if (['ENOENT', 'EPERM'].includes(String((error as NodeJS.ErrnoException).code))) throw error }
+      throw blocked()
+    }
     if (opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1 || opened.size > 512) throw blocked()
     const buffer = Buffer.alloc(513)
     const count = readSync(fd, buffer, 0, buffer.length, 0)
     if (count === 0 || count > 512) throw blocked()
     return buffer.subarray(0, count).toString('utf8')
   } finally { closeSync(fd) }
+}
+
+const WAITS_MS = [10, 25, 50, 100]
+const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+
+// Windows refuses to open or stat a file while another process is removing it (EPERM until the
+// remover closes it). Another board's claim refused that way is looked at again: by then it is
+// gone, or it reads, and only one still refused after the waits blocks.
+const readClaim = (file: string, isOther = false): string => {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return readClaimOnce(file, isOther)
+    } catch (error) {
+      const wait = WAITS_MS[attempt]
+      if (!isOther || wait === undefined || (error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+      pause(wait)
+    }
+  }
+}
+
+// A file just written on Windows can be held for a moment (a virus scanner, the indexer), and its
+// rename fails then. A short wait clears it, as for the message store's own saves.
+const publish = (from: string, to: string): void => {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      renameSync(from, to)
+      return
+    } catch (error) {
+      const wait = WAITS_MS[attempt]
+      if (wait === undefined || !['EPERM', 'EBUSY', 'EAGAIN'].includes(String((error as NodeJS.ErrnoException).code))) throw error
+      pause(wait)
+    }
+  }
 }
 
 export type MessageStoreClaim = {
@@ -46,7 +84,7 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
   // for a broken one and refuses. A rename shows the whole claim or nothing.
   try {
     writeFileSync(pending, bytes, { flag: 'wx', mode: 0o600 })
-    renameSync(pending, file)
+    publish(pending, file)
   } catch (cause) {
     // The pending name holds this process's own nonce, so only an existing file is someone else's.
     if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') try { unlinkSync(pending) } catch {}
@@ -84,7 +122,7 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
       if (other === name) { claim.check(root); continue }
       const path = join(root, other)
       let raw: string
-      try { raw = readClaim(path) } catch (error) {
+      try { raw = readClaim(path, true) } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
         throw blocked()
       }
@@ -105,7 +143,7 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
       }
       // Only a proven-dead writer's exact immutable claim can be retired.
       try {
-        if (readClaim(path) !== raw) throw blocked()
+        if (readClaim(path, true) !== raw) throw blocked()
         unlinkSync(path)
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw blocked()
