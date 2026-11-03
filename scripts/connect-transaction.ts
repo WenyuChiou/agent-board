@@ -2,7 +2,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, 
 import { createHash, randomBytes } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Lang, Strings } from '../hooks/i18n'
-import { BOARD_FOR, agentHooks, connectDataRoots, connectPath, isNodeSupported, isSetupState, setupManagedAgents, nodeVersionOf, setupSeed, setupProblemText, withoutSection } from '../hooks/connect-pure'
+import { BOARD_FOR, agentHooks, connectDataRoots, connectPath, isNodeSupported, isSetupState, setupOwnership, nodeVersionOf, setupSeed, setupProblemText, withoutSection } from '../hooks/connect-pure'
 import { managedCommandLines } from '../hooks/codex-fallback'
 import { codexBinaryOf, codexConfigHash, findCodexExecutable, inspectCodexHooks } from './codex-host'
 import { codexApproval } from './codex-approval'
@@ -364,7 +364,7 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
     const { isWindows } = context
     const { problems, hasForeignRecovery, hasLiveRecovery } = foreignHostCheck(transaction, context, folder, STRINGS[request.lang])
     const checkedSetup = (stored: SetupState | undefined): SetupState => {
-      const managedAgents = setupManagedAgents(agentHooks(context), request.home, context.sep, file => transaction.exists(file))
+      const { managed: managedAgents, held } = setupOwnership(agentHooks(context), request.home, context.sep, file => transaction.exists(file), file => transaction.maybe(file))
       const managed = agentHooks(context).filter(hook => hook.label !== '' && managedAgents.has(hook.agent))
       const missing = request.mode === 'status' ? missingBoardHosts(transaction, context).filter(agent => !managedAgents.has(agent)) : []
       const s = STRINGS[request.lang]
@@ -379,7 +379,7 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
         codexTrusted: trusted,
         problems: [
           ...(stored?.problems ?? []).filter(one => one.key !== 'codex:approval' && !one.key.startsWith('missingBoard:')
-            && !/^(?:otherData|checkUnreadable):/.test(one.key)
+            && !/^(?:otherData|checkUnreadable|setupRecord):/.test(one.key)
             && !problems.some(problem => problem.key === one.key)),
           ...problems,
         ],
@@ -388,6 +388,7 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
       for (const hook of managed) if (!setup.agents.some(one => one.agent === hook.agent)) {
         setup.agents.push({ agent: hook.agent, label: hook.label, hook: 'setup', board: 'none' })
       }
+      for (const [agent, file] of held) if (!managedAgents.has(agent)) setup.problems.push({ key: `setupRecord:${file}`, message: 'connectReadFailed', args: [s.agentNames[agent] ?? agent, file] })
       for (const agent of missing) setup.problems.push({ key: `missingBoard:${agent}`, text: s.setupMissingBoardScript(s.agentNames[agent] ?? agent) })
       setup.agents = setup.agents.map(one => missing.includes(one.agent) ? { ...one, board: 'failed' } : one)
       if (setup.agents.some(one => one.agent === 'codex' && one.hook !== 'setup') && !trusted) {

@@ -1,4 +1,4 @@
-import { reporterPs1, reporterSh, agentHooks, setupManagedAgents, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
+import { reporterPs1, reporterSh, agentHooks, setupOwnership, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
 import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
@@ -131,7 +131,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     failedLabels.add(label)
   }
   const hooks = agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, node: nodePath, antigravityNode, progress: path, s: STRINGS[fileLang] })
-  const setupManaged = setupManagedAgents(hooks, home, sep, existsSync)
+  const { managed: setupManaged, held: setupHeld } = setupOwnership(hooks, home, sep, existsSync, readMaybe)
   // A file with none of ours is left as it is: taking nothing out could still reformat it.
   // OpenClaw's config names our plugin, not the reporter, and its edit checks for that itself;
   // Antigravity's hook runs the worker, and is looked for as text so a config that can't be
@@ -178,6 +178,14 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       if (hook.label !== '') {
         mark(hook, 'setup')
         retireHook(hook)
+      }
+      continue
+    }
+    const heldBy = setupHeld.get(hook.agent)
+    if (heldBy !== undefined) {
+      if (hook.label !== '') {
+        failedLabels.add(hook.label)
+        warn(`setupRecord:${heldBy}`, { message: 'connectReadFailed', args: [hook.label, heldBy] })
       }
       continue
     }
@@ -324,7 +332,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   let codexTrusted = decision.trusted
   if (remove || decision.approval === undefined) delete transaction.state.codexApproval
   else transaction.state.codexApproval = decision.approval
-  if (existsSync(codexHome) && (remove || !setupManaged.has('codex'))) {
+  if (existsSync(codexHome) && (remove || !setupManaged.has('codex') && !setupHeld.has('codex'))) {
     const instructions = [[codexHome, 'AGENTS.md'].join(sep), [codexHome, 'AGENTS.override.md'].join(sep)]
     const effective = existsSync(instructions[1]!) && readMaybe(instructions[1]!)?.trim() !== '' ? instructions[1]! : instructions[0]!
     if (!remove && !codexTrusted) warn('codex:approval', { message: 'setupCodexApproval', args: [] })

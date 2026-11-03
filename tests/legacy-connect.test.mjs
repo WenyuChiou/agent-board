@@ -65,7 +65,7 @@ const snapshot = directory => Object.fromEntries(readdirSync(directory, { withFi
 
 // Keep setup and the probe in separate processes, outside the source checkout, as the
 // installed plugin runs them. The target was absent from the first connect's scope.
-const withSetup = (agent, check) => fixture(async f => {
+const withSetup = (agent, check, setupArgs = home => []) => fixture(async f => {
   const dirs = agent === 'codex' ? { codex: join(f.home, 'absent-codex') } : undefined
   if (agent === 'codex') mkdirSync(join(f.home, '.cursor'))
   const initial = f.run(f.request('connect', { dirs }))
@@ -84,13 +84,13 @@ const withSetup = (agent, check) => fixture(async f => {
     XDG_CONFIG_HOME: join(f.home, '.config'), OPENCODE_CONFIG_DIR: join(f.home, '.config', 'opencode'),
     OPENCLAW_STATE_DIR: join(f.home, '.openclaw'), DSH_HOME: join(f.home, '.dsh'),
   }
-  const installed = spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--agent', agent, '--apply', '--json'], {
+  const installed = spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--agent', agent, '--apply', '--json', ...setupArgs(f.home)], {
     cwd: f.home, env, encoding: 'utf8', windowsHide: true, timeout: 30000,
   })
   assert.equal(installed.status, 0, installed.stderr + installed.stdout)
   assert.equal(JSON.parse(installed.stdout).plans[0].managedBy, undefined)
-  assert.ok(existsSync(join(f.home, '.agent-board', `install-${agent}.json`)))
-  const recordFile = join(f.home, '.agent-board', `install-${agent}.json`)
+  const recordFile = join(setupArgs(f.home)[1] ?? join(f.home, '.agent-board'), `install-${agent}.json`)
+  assert.ok(existsSync(recordFile))
   const owned = Object.keys(JSON.parse(readFileSync(recordFile, 'utf8')).files)
   assert.ok(owned.length > 0)
   const run = (mode, lang = 'en') => {
@@ -104,7 +104,7 @@ const withSetup = (agent, check) => fixture(async f => {
     })
     assert.equal(done.status, 0, done.stderr + done.stdout)
   }
-  await check({ f, run, setup, recordFile, owned, before: snapshot(f.home) })
+  await check({ f, env, run, setup, recordFile, owned, before: snapshot(f.home) })
 })
 const setupThenProbe = agent => withSetup(agent, ({ f, run, owned, before }) => {
   // Status must identify the installer even before the next probe refreshed its record.
@@ -154,7 +154,7 @@ const withBothHooks = (agent, check) => withSetup(agent, async ({ f, run, record
   const hooked = run('connect')
   assert.equal(hooked.state.setup.agents.find(one => one.agent === agent).hook, 'configured', agent)
   writeFileSync(recordFile, record)
-  await check({ f, run, owned, before })
+  await check({ f, run, recordFile, owned, before })
 })
 
 test('a probe takes out the hook an earlier probe left beside the setup hook', async t => {
@@ -197,7 +197,7 @@ test('a probe takes out the Antigravity hook of an earlier connect', () => withS
   assert.doesNotMatch(hooks, /"agent-board"/)
 }))
 
-test('an Antigravity config that cannot be parsed is named, and its worker stays', () => withSetup('antigravity', ({ f, run, recordFile }) => {
+test('an Antigravity config that cannot be parsed is named, and its worker stays', () => withSetup('antigravity', ({ f, run, recordFile, owned }) => {
   const config = join(f.home, '.gemini', 'config', 'hooks.json')
   const record = readFileSync(recordFile, 'utf8')
   writeFileSync(config, '{}')
@@ -209,6 +209,7 @@ test('an Antigravity config that cannot be parsed is named, and its worker stays
   for (const mode of ['auto', 'remove']) {
     assert.ok(run(mode).result.problems.some(one => one.key === `removeFailed:${config}`), mode)
     assert.equal(readFileSync(config, 'utf8'), text, mode)
+    for (const file of owned) assert.ok(existsSync(file), `${mode} ${file}`)
   }
 }))
 
@@ -259,8 +260,71 @@ test('which agents setup manages is read each time and never stored', () => with
 test('status names a setup managed agent before any probe', () => fixture(async f => {
   mkdirSync(join(f.home, '.grok', 'sessions'), { recursive: true })
   mkdirSync(join(f.home, '.agent-board'), { recursive: true })
-  writeFileSync(join(f.home, '.agent-board', 'install-grok.json'), '{}')
+  const record = join(f.home, '.agent-board', 'install-grok.json')
+  writeFileSync(record, JSON.stringify({ config: join(f.home, '.grok', 'hooks', 'agent-board-local.json') }))
   assert.equal(f.run(f.request('status')).state.setup.agents.find(one => one.agent === 'grok').hook, 'setup')
+  writeFileSync(record, '{}')
+  assert.notEqual(f.run(f.request('status')).state.setup?.agents.find(one => one.agent === 'grok')?.hook, 'setup')
+}))
+
+test('a setup record for another host folder leaves the connector to connect this one', () => withSetup('codex', ({ f, env, recordFile }) => {
+  const other = join(f.home, 'other-codex')
+  mkdirSync(other)
+  const main = join(f.home, '.codex', 'hooks.json')
+  const saved = readFileSync(main, 'utf8')
+  assert.ok(JSON.parse(readFileSync(recordFile, 'utf8')).config)
+  const run = mode => {
+    const result = f.command(f.request(mode, { dirs: { codex: other } }), { cwd: f.home, env })
+    assert.equal(result.status, 0, result.stderr + result.stdout)
+    return JSON.parse(result.stdout)
+  }
+  const connected = run('connect')
+  const reporter = readFileSync(join(other, 'hooks.json'), 'utf8')
+  assert.equal(connected.state.setup.agents.find(one => one.agent === 'codex').hook, 'configured')
+  assert.notEqual(run('auto').state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  assert.equal(readFileSync(join(other, 'hooks.json'), 'utf8'), reporter)
+  assert.notEqual(run('status').state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  assert.equal(readFileSync(main, 'utf8'), saved)
+}))
+
+test('setup with its own data folder is found through its hook, and no second hook is added', () => withSetup('codex', ({ f, run, before }) => {
+  const { state } = run('auto')
+  assert.equal(state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  const codex = files => Object.entries(files).filter(([file]) => file.includes('.codex'))
+  assert.deepEqual(codex(snapshot(f.home)), codex(before))
+}, home => ['--data-dir', join(home, 'elsewhere')]))
+
+test('a setup record with no config counts where the hook file names its data folder', () => withSetup('codex', ({ f, run, recordFile }) => {
+  const { config, ...old } = JSON.parse(readFileSync(recordFile, 'utf8'))
+  writeFileSync(recordFile, JSON.stringify(old))
+  assert.equal(run('auto').state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  const saved = readFileSync(config, 'utf8')
+  writeFileSync(config, '{}')
+  assert.notEqual(run('status').state.setup?.agents.find(one => one.agent === 'codex')?.hook, 'setup')
+  assert.ok(saved.length > 0)
+}))
+
+test('a setup record that cannot be read is named, and nothing is added or retired', () => withBothHooks('grok', ({ f, run, recordFile }) => {
+  const hook = join(f.home, '.grok', 'hooks', 'agent-board.json')
+  const saved = readFileSync(hook, 'utf8')
+  writeFileSync(recordFile, 'not a record')
+  for (const mode of ['auto', 'status']) {
+    const { result, state } = run(mode)
+    assert.ok([...(result?.problems ?? []), ...(state.setup?.problems ?? [])].some(one => one.key === `setupRecord:${recordFile}`), mode)
+    assert.equal(readFileSync(hook, 'utf8'), saved, mode)
+  }
+  rmSync(hook)
+  run('auto')
+  assert.equal(existsSync(hook), false)
+}))
+
+test('a setup record that cannot be read leaves Codex without fallback instructions', () => withSetup('codex', ({ f, run, recordFile }) => {
+  writeFileSync(recordFile, 'not a record')
+  run('auto')
+  assert.equal(existsSync(join(f.home, '.codex', 'AGENTS.md')), false)
+  unlinkSync(recordFile)
+  run('connect')
+  assert.ok(existsSync(join(f.home, '.codex', 'AGENTS.md')))
 }))
 
 test('removing the connector takes out its hook and leaves the setup hook', () => withBothHooks('grok', ({ f, run, owned, before }) => {

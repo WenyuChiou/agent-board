@@ -986,13 +986,48 @@ export const setupProblemText = (problem: SetupProblem, s: Strings = ZH_TW): str
 const HOOK_RANK: Record<HookState, number> = { configured: 0, setup: 0, tooOld: 1, unreadable: 2, failed: 3 }
 export const worseHook = (one: HookState, other: HookState): HookState => (HOOK_RANK[other] > HOOK_RANK[one] ? other : one)
 
-// Setup's record says it owns an agent: its remove deletes the record, and its apply puts back a
-// hook taken out by hand. A hook of setup's that is gone is not a reason to add ours, because the
-// next apply would then leave two.
-export const setupManagedAgents = (hooks: readonly AgentHook[], home: string, sep: string, exists: (file: string) => boolean): Set<string> =>
-  new Set(hooks.filter(hook => hook.label !== ''
-    && exists([home, '.agent-board', `install-${hook.agent}.json`].join(sep))
-    && (hook.dirs ?? [hook.dir]).some(exists)).map(hook => hook.agent))
+// The paths a setup record owns: the files it wrote and the config holding its hook. A record saved
+// before it held `config` names only the files. A record that can't be read is null.
+const setupRecordPaths = (text: string | null): string[] | null => {
+  if (text === null) return null
+  try {
+    const record: unknown = JSON.parse(text)
+    if (record === null || typeof record !== 'object' || Array.isArray(record)) return null
+    const { files, config } = record as { files?: unknown; config?: unknown }
+    return [...(files !== null && typeof files === 'object' ? Object.keys(files) : []), ...(typeof config === 'string' ? [config] : [])]
+  } catch { return null }
+}
+
+// The data folders a config's setup hooks run from.
+const setupHookRoots = (text: string): string[] => {
+  const unescaped = text.replace(/\\(["\\])/g, '$1')
+  return [...new Set([...unescaped.matchAll(/((?:[A-Za-z]:[\\/]|\/)[^"'`\r\n]*?)[\\/]agent-board-hook\.mjs/g)].map(match => match[1]!))]
+}
+
+// Setup owns an agent in the host folder its record names, or whose hook file names the record's
+// data folder: its remove deletes the record, and its apply puts back a hook taken out by hand, so
+// a hook of setup's that is gone there is not a reason to add ours. A record for another folder says
+// nothing about this one. One that can't be read leaves the agent held: nothing is added or retired.
+export const setupOwnership = (hooks: readonly AgentHook[], home: string, sep: string, exists: (file: string) => boolean, read: (file: string) => string | null): { managed: Set<string>; held: Map<string, string> } => {
+  const isWindows = sep === '\\'
+  const managed = new Set<string>()
+  const held = new Map<string, string>()
+  for (const hook of hooks) {
+    if (hook.label === '' || !(hook.dirs ?? [hook.dir]).some(exists)) continue
+    const roots = setupHookRoots(exists(hook.file) ? read(hook.file) ?? '' : '')
+    const named = roots.map(root => connectPath(root, isWindows))
+    const dirs = [hook.dir, ...(hook.dirs ?? []), hook.file.slice(0, hook.file.lastIndexOf(sep))].map(dir => connectPath(dir, isWindows))
+    for (const root of [[home, '.agent-board'].join(sep), ...roots]) {
+      const file = [root, `install-${hook.agent}.json`].join(sep)
+      if (!exists(file)) continue
+      const paths = setupRecordPaths(read(file))
+      if (paths === null) { held.set(hook.agent, file); continue }
+      const isHere = paths.some(path => dirs.some(dir => connectPath(path, isWindows).startsWith(`${dir}/`)))
+      if (isHere || named.includes(connectPath(root, isWindows))) managed.add(hook.agent)
+    }
+  }
+  return { managed, held }
+}
 
 // The agents each board file (`boardCommands`, by its agent) shows the board in.
 export const BOARD_FOR: Record<string, readonly string[]> = {
