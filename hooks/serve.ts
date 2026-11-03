@@ -667,8 +667,40 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
   return null
 }
 
+// The chat prompt goes as it is in every language: the chat reads it, not the person.
+const RELAY_PROMPT = `Report your progress on this work as one Agent Board block. After each step, and
+whenever you stop to wait for me, end your reply with the whole block again, inside
+a code block, written exactly like this:
+
+## <project>
+<!-- auto session=<ID> agent=<name> state=<working|waiting|done|ended> updated=<UTC time, like 2026-10-17T08:10:52Z> -->
+### <the outcome, in plain words>
+> Context: <one line on why this work exists>
+- [x] <a finished step>
+- [~] <the step you are on>
+- [?] <a step that needs me> — <one line saying what you need>
+- [ ] <the next step>
+<!-- /auto session=<ID> -->
+
+Rules:
+- <ID> is 8 random lower-case hex characters (0-9, a-f). Pick it once and keep it
+  for the whole conversation.
+- <name> is your own name in lower case, for example muse or dot.
+- If you are Claude, write claude-web. The name claude alone is refused.
+- <project> is the project's name; keep it the same every time.
+- Write the two marker lines exactly as shown, starting at the beginning of the line.
+  No other marker names.
+- The line after the start marker is the ### title. No other # headings, code
+  fences or HTML comments inside the block.
+- Marks: [x] done, [~] doing, [ ] to do, [?] needs me, [>] waiting on someone else,
+  [!] blocked, [-] cancelled. End a yes/no question in a [?] step with "OK?".
+- state=waiting when you hand back to me with steps left, working when you start
+  again, done when every step is [x] or [-], ended if you stop for good with steps
+  left. updated= is the time of this update in UTC, ending in Z.`
+
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
+  'webChatConnect', 'webChatCopied', 'importClipboard', 'importNoBlock', 'importUseKeys', 'pasteReview',
   'claudeSendNow', 'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
   'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
@@ -684,7 +716,6 @@ const PAGE_WORDS = [
   'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
-// The chat prompt goes as it is in every language: the chat reads it, not the person.
 export const pageWords = (s: Strings): Record<string, string> => ({
   ...Object.fromEntries(Object.entries(s.agentNames).map(([agent, name]) => [`agent:${agent}`, name])),
   ...Object.fromEntries(
@@ -747,12 +778,12 @@ ${sheetCss}
 .q{margin:0;font-size:var(--text-lg);line-height:1.4;font-weight:600;overflow-wrap:anywhere}
 .note,.context{margin:0;color:var(--muted)}
 .answers{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;padding-top:var(--s1)}
-.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
+.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close,.pfoot #connect-web-chat,.pfoot #import-clipboard{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)}
 button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
-.btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover,.pfoot #close:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
-button.quiet:hover,.side .pfoot #close:hover{background-color:var(--hover)}
+.btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover,.pfoot #close:hover,.pfoot #connect-web-chat:hover,.pfoot #import-clipboard:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
+button.quiet:hover,.side .pfoot #close:hover,.side .pfoot #connect-web-chat:hover,.side .pfoot #import-clipboard:hover{background-color:var(--hover)}
 .chev{display:inline-block;transition:transform var(--dur-base) var(--ease-out)}.chev::before{content:"▸"}
 .open>.shelf-head .chev{transform:rotate(90deg)}
 code{display:block;max-width:100%;overflow-x:auto;white-space:pre;font:var(--text-xs)/1.5 var(--font-mono);padding:6px var(--s2);border:1px solid var(--line);border-radius:var(--radius-s);background:var(--inset);color:var(--ink)}
@@ -870,7 +901,7 @@ ${CLIP_CSS}
 .side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
 .side .pfoot .set-row{order:-1;flex-basis:100%;margin-left:calc(var(--s2) * -1)}
 .side .pfoot .grow{display:none}
-.side .pfoot #close{min-height:32px;padding-inline:8px;border-color:transparent;background:transparent;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
+.side .pfoot #close,.side .pfoot #connect-web-chat,.side .pfoot #import-clipboard{min-height:32px;padding-inline:8px;border-color:transparent;background:transparent;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
 .side .pfoot p{order:3;flex-basis:100%}
 .ver-link{display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-size:var(--text-xs);text-decoration:none;border-radius:var(--radius-s);white-space:nowrap}
 .ver-link:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
@@ -940,7 +971,7 @@ ${CLIP_CSS}
 }
 /* A finger, not the width, decides target size: a narrow window with a mouse keeps the desktop sizes. */
 @media (pointer:coarse){
-  .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.s-item{min-height:44px}
+  .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.pfoot #connect-web-chat,.pfoot #import-clipboard,.s-item{min-height:44px}
   .link{min-height:44px}
   .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet{flex:0 0 auto;min-height:44px}
@@ -994,11 +1025,12 @@ ${PAGE_CSS}
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span><button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
+<footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" id="connect-web-chat" data-static>${esc(s.webChatConnect)}</button><button type="button" id="import-clipboard" data-static>${esc(s.importClipboard)}</button>`}<button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
 </div>
+${isLan ? '' : `<script type="application/json" id="relay-prompt">${JSON.stringify(RELAY_PROMPT).replace(/</g, '\\u003c')}</script>`}
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
@@ -2395,6 +2427,48 @@ const PAGE_SCRIPT = String.raw`
       if (!isClosed) timer = setTimeout(refresh, 3000);
     });
   }
+  function importBlock(text, isPaste) {
+    if (text.indexOf('\x3c!-- auto session=') < 0) {
+      if (!isPaste) say(w('importNoBlock'), 'alert', 'close');
+      return;
+    }
+    call('/api/paste', { text: text }).then(function (data) {
+      if (data.review && window.confirm(w('pasteReview', data.review.current, data.review.incoming))) {
+        return call('/api/paste', { text: text, reviewToken: data.review.token });
+      }
+      return data;
+    }).then(function (data) {
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'close');
+      refresh();
+    }, function () { say(w('pressFailed'), 'alert', 'close'); unreachable(); });
+  }
+  if (typeof document.addEventListener === 'function') document.addEventListener('paste', function (event) {
+    if (isUnreachable) return;
+    var target = event.target;
+    var tag = target && target.tagName ? target.tagName.toLowerCase() : '';
+    if (tag === 'input' || tag === 'textarea' || target && target.isContentEditable) return;
+    var text = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
+    if (text.indexOf('\x3c!-- auto session=') < 0) return;
+    event.preventDefault();
+    beginPress();
+    importBlock(text, true);
+  });
+  var connectWebChat = document.getElementById('connect-web-chat');
+  if (connectWebChat) connectWebChat.addEventListener('click', function () {
+    if (isUnreachable) return;
+    beginPress();
+    var prompt = JSON.parse(document.getElementById('relay-prompt').textContent);
+    copy(prompt, 'close', function () { say(w('webChatCopied'), 'done', 'close'); });
+  });
+  var importClipboard = document.getElementById('import-clipboard');
+  if (importClipboard) importClipboard.addEventListener('click', function () {
+    if (isUnreachable) return;
+    beginPress();
+    function useKeys() { say(w('importUseKeys'), 'alert', 'close'); }
+    if (navigator.clipboard && navigator.clipboard.readText && window.isSecureContext) {
+      navigator.clipboard.readText().then(function (text) { importBlock(text); }, useKeys);
+    } else useKeys();
+  });
   if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
     if (event.key !== 'Escape') return;
     // Only the panel the focus is in (or its More button) closes; with no focus anywhere, every open one does.
