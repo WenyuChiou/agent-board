@@ -695,8 +695,8 @@ test('a Merging after notice for the current head waits until its time and is th
   assert.equal(noticeOf([posted], { current: '2026-10-22T12:00:00Z' }).state, 'due')
   assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted] }, now)), /\n {4}notice: merges after 2026-10-22 12:00 UTC\n/)
   const dueNow = '2026-10-23T08:00:00Z'
-  assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted] }, dueNow)), /\n {4}notice due: merge if checks are green and the author's code-review subagent approved this head and no bot P0\/P1 is open\n/)
-  // The author's own subagent approval moves the pull request to the approved group, and the notice still shows there.
+  assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted] }, dueNow)), /\n {4}notice due: merge if checks are green, someone other than the author approved this head and no bot P0\/P1 is open\n/)
+  // An approval moves the pull request to the approved group, and the notice still shows there.
   const approved = classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted, verdict('APPROVE', head, '2026-10-20T11:00:00Z', 3)] }, dueNow)
   assert.deepEqual([approved.needsReviewer.length, approved.approved.length, approved.approved[0].notice.state], [0, 1, 'due'])
   assert.match(formatQueue(approved), /One at a time.*\n#1 .*\n {4}codex: .*\n {4}notice due: /)

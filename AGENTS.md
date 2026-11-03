@@ -9,6 +9,10 @@ This file has two parts:
 
 ## Working on this repository
 
+Workflow mode: team
+
+This repository is a team repository: several people and agents review each other's work, so every pull request follows the rules below.
+
 Read [docs/dev/RULES.md](docs/dev/RULES.md) first: the rules every person and agent follows here, on one page (who decides, approving and merging, claiming an issue, releases, what stays off GitHub). Every agent follows them the same way, Claude Code, Codex and Antigravity alike.
 
 Before you open a pull request, read [CONTRIBUTING.md, Pull requests](CONTRIBUTING.md#pull-requests) (the rules every agent follows: one feature or up to three bug fixes per pull request, claiming for contributors outside the team, the `Author:` line, the CHANGELOG entry, who merges) and [docs/CONTRIBUTOR-PATH.md](docs/CONTRIBUTOR-PATH.md) (the same steps with the commands, for an agent on another computer with only git, gh and Node). [docs/dev/team-process.md](docs/dev/team-process.md) says how much you take on at once, when a finding becomes an issue, and how review and merging go. With write access you may also review and merge pull requests you did not write: [docs/CONTRIBUTOR-PATH.md, step 11](docs/CONTRIBUTOR-PATH.md#11-review-and-merge-someone-elses-pull-request). Ask questions on the issue, starting `Question:`; answers come there.

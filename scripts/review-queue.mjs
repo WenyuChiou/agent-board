@@ -483,7 +483,7 @@ const botText = bots => [codexText[bots?.codex], bots?.greptile ? 'greptile: rev
 const noticeText = notice => {
   if (notice.state === 'allowed') return 'notice allowed outside the governance files (team-process, From claim to merge)'
   if (notice.state === 'waiting') return `notice: merges after ${formatUtc(Date.parse(notice.at))}`
-  if (notice.state === 'due') return 'notice due: merge if checks are green and the author\'s code-review subagent approved this head and no bot P0/P1 is open'
+  if (notice.state === 'due') return 'notice due: merge if checks are green, someone other than the author approved this head and no bot P0/P1 is open'
   if (notice.state === 'not-allowed') return 'no notice: governance, workflow or release pull requests merge only with an approval (CONTRIBUTING rules 8 and 12)'
   if (notice.state === 'too-early') return `notice too early: post it once Ready is ${noticeWaitHours} hours old with nobody reviewing, or everyone else away, naming a time ${noticeGapHours} hours after the notice and after Ready`
   return 'notice cancelled'
