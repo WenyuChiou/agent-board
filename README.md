@@ -169,7 +169,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
 | Antigravity | IDE | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Claude Code | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |

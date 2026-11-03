@@ -169,7 +169,7 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 | Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | 未知 | Implemented（已实现） | 早期运行（不计入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
 | Antigravity | IDE | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| Claude Code | CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented（已实现） | 未测试 | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | Codex | CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |

@@ -65,6 +65,8 @@ const PROPS: RenderPropsOf['Pane'] = {
 }
 
 type World = {
+  // Whether the check a receiver runs on the board's address folder finds it this account's own.
+  isAddressOwn?: boolean
   files: Map<string, string>
   dirs?: Set<string>
   unlistable?: Set<string>
@@ -272,6 +274,9 @@ const engineBeneath = (on: On, world: World): MockClock => {
     value: world.hasTasks ? [{ name: 'TaskCreate', description: '', mcp: false }] : [{ name: 'Read', description: '', mcp: false }],
   }))
   on('process.run', async ($, e) => {
+    if (e.argv[0] === 'node' && e.argv[1] === '-e' && world.isAddressOwn !== undefined) {
+      return { value: { exitCode: world.isAddressOwn ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (world.browserExitCode !== undefined && e.argv.some(arg => /\.html$/.test(arg))) {
       world.ran?.push([...e.argv])
       return { value: { exitCode: world.browserExitCode, stdout: '', stderr: 'synthetic browser refusal', isStdoutTruncated: false, isStderrTruncated: false } }

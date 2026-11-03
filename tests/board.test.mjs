@@ -2848,7 +2848,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     window: win,
     ...(storage === undefined ? {} : { localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { storage.set(key, value) }, removeItem: key => { storage.delete(key) } } }),
     ...(motion === undefined ? {} : { requestAnimationFrame: run => { run(); return 1 } }),
-    crypto: { randomUUID: () => 'synthetic-offline-attempt' },
+    crypto: { randomUUID: () => `synthetic-offline-attempt-${requests.length}` },
     setTimeout: (run, delay) => {
       delays.push(delay)
       // Only the board's own poll (every 3 seconds) is the next redraw; the short waits of a moving page are not.
@@ -4243,7 +4243,7 @@ test('the page keeps actionable progress delays without connection inventory or 
         await dom.redraw({
           ...model,
           asks: [{ key: 'question', project: 'Synthetic', agent: 'codex', text: 'Review the route?', answers: [], canTick: true, receipt }],
-          stopped: [{ key: 'task', title: 'Review the route', status: '', steps: [], receipt }],
+          stopped: [{ key: 'task', agent: 'codex', title: 'Review the route', status: '', steps: [], receipt }],
         })
         const lines = []
         const collect = node => {
@@ -8656,6 +8656,69 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   const line = descendants(card(refused)).find(node => node.className === 'receipt t-alert')
   assert.equal(line.textContent, EN.messagesRejected)
   assert.deepEqual(descendants(line.parentNode).filter(node => node.tag === 'button').map(node => node.textContent), [EN.serveRetry, EN.serveCopyMessage])
+})
+
+test('words sent again after a Claude message went nowhere are a new message, not the old one', async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const ask = { ...model.asks[0], key: 'ask-claude', agent: 'claude', answers: ['Yes'], kind: 'confirm', session: 'synthetic-session', fp: 'f1', send: 'connected', delivery: { id: 'c1', turn: 'session', agent: 'claude' } }
+  model.asks = [ask]
+  const dom = await pageDom(html, model, { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  const answer = ask.answers[0]
+  const press = () => dom.buttons().find(button => button.textContent === EN.pgSendReply(answer)).click()
+  const ids = []
+  for (const ending of [{ status: 'uncertain', error: 'DISMISSED' }, { status: 'uncertain', error: 'EXPIRED' }, { status: 'rejected', error: 'STOPPED' }, { status: 'acknowledged', error: '' }]) {
+    await dom.redraw(model)
+    press()
+    await dom.settle()
+    const { id } = dom.requests.at(-1).body
+    ids.push(id)
+    const ended = redesignModel()
+    ended.asks = [{ ...ask, receipt: { id, reply: '', text: answer, when: '', ...ending } }]
+    await dom.redraw(ended)
+  }
+  assert.equal(new Set(ids).size, 4, ids.join())
+})
+
+test("a Claude card's line and buttons follow its message, and Take back and Dismiss end it", async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const ask = { ...model.asks[0], key: 'ask-claude', agent: 'claude', send: 'connected', delivery: { id: 'c1', turn: 'session', agent: 'claude' }, session: 'session1' }
+  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', error: '', text: 'the words', when: '2 min ago', ...receipt } }]; return next }
+  const dom = await pageDom(html, withReceipt({ status: 'accepted' }), { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  const box = () => dom.node('needs').querySelectorAll('[data-ref-key]')[0]
+  const receipt = () => descendants(box()).find(node => (node.className || '').split(' ').includes('receipt'))
+  const buttons = () => descendants(receipt().parentNode).filter(node => node.tag === 'button').map(node => node.textContent)
+  assert.equal(receipt().textContent, `${EN.claudeDelivered} · 2 min ago`)
+  assert.deepEqual(buttons(), [EN.messageDismiss])
+  await dom.redraw(withReceipt({ status: 'queued' }))
+  assert.equal(receipt().textContent, EN.claudeSendWorking)
+  assert.deepEqual(buttons(), [EN.messageTakeBack])
+  descendants(receipt().parentNode).find(node => node.textContent === EN.messageTakeBack && node.tag === 'button').click()
+  await dom.settle()
+  assert.deepEqual(dom.requests.at(-1).body, { id: 'm1' })
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'ACK_MISSING' }))
+  assert.equal(receipt().textContent, EN.claudeUnconfirmed)
+  assert.deepEqual(buttons(), [EN.serveCopyMessage, EN.messageDismiss])
+  // A claim whose delivery never got going is not called delivered.
+  await dom.redraw(withReceipt({ status: 'uncertain' }))
+  assert.equal(receipt().textContent, EN.claudeUnconfirmed)
+  // The hub has let go of an expired message: no Dismiss that could only fail. No attempt id stays
+  // either, or the same words sent again would answer with this dead message.
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'EXPIRED' }))
+  assert.deepEqual(buttons(), [EN.serveCopyMessage])
+  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED' }))
+  assert.equal(receipt().textContent, EN.claudeStopped)
+  assert.ok(buttons().includes(EN.serveCopyMessage))
+  // The hub lets go of a finished message's words: with none to copy, no Copy button.
+  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED', text: '' }))
+  assert.ok(!buttons().includes(EN.serveCopyMessage))
+  await dom.redraw(withReceipt({ status: 'acknowledged', reply: 'on it' }))
+  assert.equal(receipt().textContent, EN.claudeReplied('on it'))
+  await dom.redraw(withReceipt({ status: 'acknowledged' }))
+  assert.equal(receipt().textContent, EN.claudeGotIt)
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'DISMISSED' }))
+  assert.equal(receipt(), undefined)
 })
 
 test('an agent with no open session shows as offline and its answers copy', async () => {

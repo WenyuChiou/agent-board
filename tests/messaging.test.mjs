@@ -1211,6 +1211,57 @@ test('a contested connection cannot acknowledge a claimed message, and the board
   assert.equal(state.messaging.messages[0].reply, '')
 }))
 
+const CLAUDE_SESSION = '11111111-2222-4333-8444-555555555555'
+const claudeRow = (dir, state) => `## Synthetic\n<!-- auto session=abcdef01 agent=claude resume=${CLAUDE_SESSION} dir=${encodeURIComponent(dir)} state=${state} updated=${new Date().toISOString()} -->\n### Delivery\n- [~] Next step\n<!-- /auto session=abcdef01 -->\n`
+const claudeCard = model => [...model.groups.flatMap(one => one.rows), ...model.stopped][0]
+
+test('the card offers Send only while the receiver is live and falls back to Copy within 15 s', () => fixture(async (board, dir) => {
+  writeFileSync(join(dir, 'progress.md'), claudeRow(dir, 'working'))
+  const offline = claudeCard((await board.call('/api/board')).body.model)
+  assert.equal(offline.send, 'claude')
+  assert.equal(offline.hasCopyBox, true)
+  assert.equal(offline.info, EN.serveSendOpen('Claude'))
+  const connection = (await board.call('/api/messages/register', { agent: 'claude', session: CLAUDE_SESSION, turn: 'session', scope: 'session', surface: 'Claude Code' })).body
+  const live = claudeCard((await board.call('/api/board')).body.model)
+  assert.equal(live.send, 'connected')
+  assert.equal(live.where, EN.claudeSendWorking)
+  assert.equal(live.delivery.id, connection.id)
+  assert.doesNotMatch(JSON.stringify([live.where, live.info]), /[0-9a-f]{32}|11111111/)
+  writeFileSync(join(dir, 'progress.md'), claudeRow(dir, 'waiting'))
+  assert.equal(claudeCard((await board.call('/api/board')).body.model).where, EN.claudeSendNow)
+  writeFileSync(join(dir, 'message-clock-offset'), '15001')
+  const gone = claudeCard((await board.call('/api/board')).body.model)
+  assert.equal(gone.send, 'claude')
+  assert.equal(gone.hasCopyBox, true)
+  assert.equal(gone.delivery, undefined)
+}, `const originalNow = Date.now
+Date.now = () => originalNow() + (fs.existsSync(path.join(directory, 'message-clock-offset')) ? Number(fs.readFileSync(path.join(directory, 'message-clock-offset'), 'utf8')) : 0)
+`))
+
+test('a poll tells a receiver it is contested, and replacing a lost self clears that', () => fixture(async (board, dir) => {
+  const registration = { agent: 'claude', session: CLAUDE_SESSION, turn: 'session', scope: 'session', surface: 'Claude Code' }
+  await board.call('/api/messages/register', registration)
+  const mine = (await board.call('/api/messages/register', registration)).body
+  const credentials = { connection: mine.id, secret: mine.secret, turn: 'session', receive: false }
+  assert.equal((await board.call('/api/messages/poll', credentials)).body.contested, true)
+  // The lost one's lease ends unrenewed.
+  writeFileSync(join(dir, 'message-clock-offset'), '10000')
+  await board.call('/api/messages/poll', credentials)
+  writeFileSync(join(dir, 'message-clock-offset'), '16000')
+  const clean = (await board.call('/api/messages/register', { ...registration, connection: mine.id, secret: mine.secret })).body
+  assert.equal(clean.contested, false)
+  assert.equal((await board.call('/api/messages/poll', { connection: clean.id, secret: clean.secret, turn: 'session', receive: false })).body.contested, false)
+}, `const originalNow = Date.now
+Date.now = () => originalNow() + (fs.existsSync(path.join(directory, 'message-clock-offset')) ? Number(fs.readFileSync(path.join(directory, 'message-clock-offset'), 'utf8')) : 0)
+`))
+
+test('a closed Codex session keeps resume-Send when the hub is on', () => fixture(async (board, dir) => {
+  writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${CLAUDE_SESSION} dir=${encodeURIComponent(dir)} state=ended updated=${new Date().toISOString()} -->\n### Delivery\n- [ ] Next step\n<!-- /auto session=abcdef01 -->\n`)
+  const { model } = (await board.call('/api/board')).body
+  assert.equal(model.stopped[0].send, 'send')
+  assert.equal(model.stopped[0].delivery, undefined)
+}, '', ['--allow-resume']))
+
 test('a second registration for the same agent and session leaves the card on Copy', async () => {
   for (const extra of [[], ['--allow-resume']]) await fixture(async (board, dir) => {
     writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=11111111-2222-4333-8444-555555555555 dir=${encodeURIComponent(dir)} state=ended updated=${new Date().toISOString()} -->\n### Contested\n- [?] Continue, OK?\n<!-- /auto session=abcdef01 -->\n`)

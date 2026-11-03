@@ -3907,7 +3907,7 @@ test('the terminal board, progress.html and the board page name the session that
   expect(html).toContain('到「Backfill the events」那個對話回覆，這裡回不了。')
   expect(html).not.toContain('到 data-pipeline 的對話')
   const page = serveModel(view, [], STRINGS['zh-CN']).asks.find(ask => ask.task === 'Backfill the events')
-  expect(page?.info).toBe('到“Backfill the events”那个对话回复，这里回不了。')
+  expect(page?.info).toBe('Claude 没有连上这个看板。请复制后粘贴到那边。')
 })
 
 test('a Claude Code block with no resume id offers its block id to copy only when it is a plain id', () => {
