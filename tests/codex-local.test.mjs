@@ -3053,6 +3053,32 @@ test('Codex trust requires an owned installation and an explicit host binary', (
   assert.match(f.command(['--codex-trust', '--json']).stderr, /CODEX_BINARY_REQUIRED/)
 }))
 
+test('the doctor and the trust step asked in another language than the install still find it installed', () => fixture(f => {
+  // Gemini and OpenCode also get a board command in the install's words.
+  const agents = ['codex', 'gemini', 'opencode']
+  for (const agent of agents) assert.equal(f.install('--agent', agent, '--lang', 'en', '--apply').status, 0)
+  const doctor = (agent, lang) => {
+    const run = f.command(['--codex-doctor', '--agent', agent, '--lang', lang, '--json'])
+    assert.equal(run.status, 0, run.stderr)
+    return JSON.parse(run.stdout)
+  }
+  for (const lang of ['zh-TW', 'zh-CN']) {
+    for (const agent of agents) {
+      const result = doctor(agent, lang)
+      assert.equal(result.installed, true, `${agent} ${lang}: ${JSON.stringify(result)}`)
+      assert.equal(result.reportHook, 'installer', agent)
+      assert.equal(result.problem, undefined, agent)
+    }
+    assert.match(f.command(['--codex-trust', '--lang', lang, '--json']).stderr, /CODEX_BINARY_REQUIRED/)
+  }
+  const [head, ...rest] = readFileSync(f.script, 'utf8').split('\n')
+  assert.match(head, /"lang":"en"/)
+  // A board script whose language alone was changed no longer matches its skill, in any language asked.
+  f.save(f.script, [head.replace('"lang":"en"', '"lang":"zh-TW"'), ...rest].join('\n'))
+  for (const lang of ['en', 'zh-TW']) assert.equal(doctor('codex', lang).installed, false, lang)
+  assert.match(f.command(['--codex-trust', '--json']).stderr, /OWNED_CODEX_INSTALL_REQUIRED/)
+}))
+
 test('--codex-trust prints one plain line by default and the JSON only with --json', async () => {
   const resolver = registerHooks({ resolve(specifier, context, next) {
     try { return next(specifier, context) } catch (error) {
