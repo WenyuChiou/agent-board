@@ -9390,7 +9390,7 @@ export const LINES = [
 "var isPromptEvent = (payload) => PROMPT_EVENTS.test(String(payload.hook_event_name ?? payload.hookEventName));",
 "",
 "// scripts/board-cli.ts",
-"import { chmodSync, closeSync as closeSync9, existsSync as existsSync6, linkSync as linkSync2, lstatSync as lstatSync8, mkdirSync as mkdirSync7, openSync as openSync9, readdirSync as readdirSync9, readFileSync as readFileSync12, readSync as readSync6, renameSync as renameSync5, statSync as statSync10, unlinkSync as unlinkSync9, writeFileSync as writeFileSync8 } from \"node:fs\";",
+"import { chmodSync, closeSync as closeSync9, existsSync as existsSync6, linkSync as linkSync2, lstatSync as lstatSync8, mkdirSync as mkdirSync7, openSync as openSync9, readdirSync as readdirSync9, readFileSync as readFileSync12, readSync as readSync6, renameSync as renameSync6, statSync as statSync10, unlinkSync as unlinkSync9, writeFileSync as writeFileSync8 } from \"node:fs\";",
 "import { createHash as createHash6, randomUUID as randomUUID2 } from \"node:crypto\";",
 "import { homedir as homedir4, tmpdir } from \"node:os\";",
 "import { basename as basename5, dirname as dirname8, join as join16, resolve as resolve10 } from \"node:path\";",
