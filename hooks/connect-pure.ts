@@ -1,7 +1,7 @@
 import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from './board-commands'
 import { HOOK_VERSION, hookGuardSource, hostHookTimeout } from './hook-safety'
 import { INBOX_DROPPED_COPY, INBOX_DROPPED_FILE, INBOX_DROPPED_FOLD_BYTES, INBOX_DROPPED_KEEP_DAYS, INBOX_DROPPED_STALE_MINUTES, INBOX_MAX_BYTES, INBOX_MAX_FILES } from './hook-reporters'
-import { antigravityCommand, antigravityHooks, directHookArgs, encodedCommandText, hookCommandArgs } from './local-agents'
+import { antigravityCommand, antigravityHooks, directHookArgs, encodedCommandText, hookCommandArgs, lifecycleCapability } from './local-agents'
 import { legacyOpenClawPlugin, legacyOpenCodePlugin } from './legacy-hook-plugins'
 import { LANGS, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -1012,9 +1012,10 @@ const setupHookRoots = (text: string): string[] => {
 // data folder: its remove deletes the record, and its apply puts back a hook taken out by hand, so
 // a hook of setup's that is gone there is not a reason to add ours. A record for another folder says
 // nothing about this one. One that can't be read leaves the agent held: nothing is added or retired.
-export const setupOwnership = (hooks: readonly AgentHook[], home: string, sep: string, exists: (file: string) => boolean, read: (file: string) => string | null): { managed: Set<string>; held: Map<string, string> } => {
+export const setupOwnership = (hooks: readonly AgentHook[], home: string, sep: string, exists: (file: string) => boolean, read: (file: string) => string | null): { managed: Set<string>; skillOnly: Set<string>; held: Map<string, string> } => {
   const isWindows = sep === '\\'
   const managed = new Set<string>()
+  const skillOnly = new Set<string>()
   const held = new Map<string, string>()
   for (const hook of hooks) {
     if (hook.label === '' || !(hook.dirs ?? [hook.dir]).some(exists)) continue
@@ -1027,10 +1028,13 @@ export const setupOwnership = (hooks: readonly AgentHook[], home: string, sep: s
       const paths = setupRecordPaths(read(file))
       if (paths === null) { held.set(hook.agent, file); continue }
       const isHere = paths.some(path => dirs.some(dir => connectPath(path, isWindows).startsWith(`${dir}/`)))
-      if (isHere || named.includes(connectPath(root, isWindows))) managed.add(hook.agent)
+      if (!isHere && !named.includes(connectPath(root, isWindows))) continue
+      // Setup gives Hermes a skill and no reporter yet, so its hooks stay the connector's to keep.
+      if (hook.agent === 'hermes' && lifecycleCapability('hermes') === 'adapter-pending') skillOnly.add(hook.agent)
+      else managed.add(hook.agent)
     }
   }
-  return { managed, held }
+  return { managed, skillOnly, held }
 }
 
 // The agents each board file (`boardCommands`, by its agent) shows the board in.

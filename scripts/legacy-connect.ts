@@ -131,7 +131,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     failedLabels.add(label)
   }
   const hooks = agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, node: nodePath, antigravityNode, progress: path, s: STRINGS[fileLang] })
-  const { managed: setupManaged, held: setupHeld } = setupOwnership(hooks, home, sep, existsSync, readMaybe)
+  const { managed: setupManaged, skillOnly: setupSkillOnly, held: setupHeld } = setupOwnership(hooks, home, sep, existsSync, readMaybe)
   // A file with none of ours is left as it is: taking nothing out could still reformat it.
   // OpenClaw's config names our plugin, not the reporter, and its edit checks for that itself;
   // Antigravity's hook runs the worker, and is looked for as text so a config that can't be
@@ -193,6 +193,10 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         mark(hook, 'setup')
         retireHook(hook)
       } else if (remove) retireCommand(hook)
+      continue
+    }
+    if (hook.label === '' && setupSkillOnly.has(hook.agent)) {
+      if (remove) retireCommand(hook)
       continue
     }
     const heldBy = setupHeld.get(hook.agent)
@@ -346,27 +350,29 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   let codexTrusted = decision.trusted
   if (remove || decision.approval === undefined) delete transaction.state.codexApproval
   else transaction.state.codexApproval = decision.approval
-  if (existsSync(codexHome) && (remove || !setupManaged.has('codex') && !setupHeld.has('codex'))) {
+  const setupOwnsCodex = !remove && setupManaged.has('codex')
+  if (existsSync(codexHome) && (remove || !setupHeld.has('codex'))) {
     const instructions = [[codexHome, 'AGENTS.md'].join(sep), [codexHome, 'AGENTS.override.md'].join(sep)]
     const effective = existsSync(instructions[1]!) && readMaybe(instructions[1]!)?.trim() !== '' ? instructions[1]! : instructions[0]!
-    if (!remove && !codexTrusted) warn('codex:approval', { message: 'setupCodexApproval', args: [] })
+    if (!remove && !setupOwnsCodex && !codexTrusted) warn('codex:approval', { message: 'setupCodexApproval', args: [] })
     for (const file of instructions) {
       try {
         const before = readLocal(file)
         // Instruction reads can yield to an external editor. Recheck source and
         // owned executables at each retirement, not only when the lock was taken.
-        if (codexTrusted && (decision.approval?.sourceHash !== sha256(readLocal(codexSource)) || decision.approval?.configHash !== configHashViaTransaction())) {
+        if (!setupOwnsCodex && codexTrusted && (decision.approval?.sourceHash !== sha256(readLocal(codexSource)) || decision.approval?.configHash !== configHashViaTransaction())) {
           codexTrusted = false
           warn('codex:approval', { message: 'setupCodexApproval', args: [] })
         }
         const ownsBoard = !remove && transaction.previous(board) !== undefined
         const canRetireFallback = codexTrusted && hasReporter && hasBoard && ownsBoard && transaction.previous(script) !== undefined
         const canRestore = !remove && !canRetireFallback && file === effective && ownsBoard
-        const after = managedFallback(before, remove || canRetireFallback ? null : canRestore ? s.codexFallbackInstructions(codexFallbackCommand(board, path)) : '')
+        // Setup reports for Codex now, and these words would keep sending it to the connector's board.
+        const after = managedFallback(before, remove || setupOwnsCodex || canRetireFallback ? null : canRestore ? s.codexFallbackInstructions(codexFallbackCommand(board, path)) : '')
         if (after === null) { preserve(file); continue }
         // An empty content sentinel retains existing text without creating instructions
         // when the board is foreign or this is the overridden file.
-        if (after !== before && (remove || canRetireFallback || canRestore)) writeFile(file, after)
+        if (after !== before && (remove || setupOwnsCodex || canRetireFallback || canRestore)) writeFile(file, after)
       } catch (error) {
         if (error instanceof Error && error.message === 'RECOVERY_CONFLICT') throw error
         warn(`fallback:${file}`, { message: remove ? 'connectRemoveFailed' : 'connectBoardFailed', args: [file] })

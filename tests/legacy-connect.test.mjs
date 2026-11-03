@@ -142,7 +142,7 @@ const setupThenProbe = agent => withSetup(agent, ({ f, run, owned, before }) => 
 
 test('a connector probe leaves Grok with only the setup hook and reports its installer', () => setupThenProbe('grok'))
 
-const BOTH_INSTALLERS = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw']
+const BOTH_INSTALLERS = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'openclaw']
 test('connect and automatic probes leave setup managed agents unchanged', async t => {
   for (const agent of BOTH_INSTALLERS) await t.test(agent, () => setupThenProbe(agent))
 })
@@ -368,6 +368,30 @@ test('remove keeps a board command naming setup, and an edited one keeps the boa
   run('remove')
   assert.ok(readFileSync(command, 'utf8').endsWith('# mine\n'))
   assert.ok(existsSync(script))
+}))
+
+test('setup taking over Codex takes out the connector fallback instructions and keeps the rest', () => withSetup('codex', ({ f, run, recordFile }) => {
+  const instructions = join(f.home, '.codex', 'AGENTS.md')
+  const record = readFileSync(recordFile, 'utf8')
+  unlinkSync(recordFile)
+  run('connect')
+  const fallback = readFileSync(instructions, 'utf8')
+  assert.match(fallback, /agent-board:start/)
+  writeFileSync(instructions, 'Keep this line.\n\n' + fallback)
+  writeFileSync(recordFile, record)
+  assert.equal(run('auto').state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  assert.equal(readFileSync(instructions, 'utf8').trim(), 'Keep this line.')
+}))
+
+test('setup gives Hermes a skill, so a probe keeps the connector reporter it still needs', () => withSetup('hermes', ({ f, run, owned, before }) => {
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const { state } = run('auto')
+  assert.notEqual(state.setup.agents.find(one => one.agent === 'hermes')?.hook, 'setup')
+  const reporter = readFileSync(config, 'utf8')
+  assert.match(reporter, /progress-report/)
+  assert.deepEqual(run('auto').result.problems.filter(one => one.key !== 'codex:approval'), [])
+  assert.equal(readFileSync(config, 'utf8'), reporter)
+  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], file)
 }))
 
 test('removing the connector takes out its hook and leaves the setup hook', () => withBothHooks('grok', ({ f, run, owned, before }) => {
