@@ -7,7 +7,7 @@ const PREFIX = '.message-claim-'
 const PENDING = '.message-pending-'
 const LIMIT = 1024
 // DIAGNOSTIC ONLY (#795 CI): reverted before merge.
-export const claimDebug = (why: string): void => { const file = process.env.AGENT_BOARD_CLAIM_DEBUG; if (file) try { appendFileSync(file, process.pid + ' ' + why + String.fromCharCode(10)) } catch {} }
+export const claimDebug = (why: string): void => { const file = process.env.AGENT_BOARD_CLAIM_DEBUG; if (file) try { appendFileSync(file, (Date.now() % 1e7) + ' ' + process.pid + ' ' + why + String.fromCharCode(10)) } catch {} }
 const codeOf = (error: unknown): string => String((error as NodeJS.ErrnoException)?.code ?? (error as Error)?.message ?? error)
 const blocked = (why = '?'): Error => { claimDebug('BLOCKED ' + why); return new Error('MESSAGE_STORE_CLAIM_BLOCKED') }
 const canonical = (path: string): string => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path)

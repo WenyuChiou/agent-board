@@ -5518,7 +5518,7 @@ export const LINES = [
 "  const file = process.env.AGENT_BOARD_CLAIM_DEBUG;",
 "  if (file)",
 "    try {",
-"      appendFileSync(file, process.pid + \" \" + why + String.fromCharCode(10));",
+"      appendFileSync(file, Date.now() % 1e7 + \" \" + process.pid + \" \" + why + String.fromCharCode(10));",
 "    } catch {}",
 "};",
 "var codeOf = (error) => String(error?.code ?? error?.message ?? error);",

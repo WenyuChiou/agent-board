@@ -245,7 +245,7 @@ test('three real --serve starts on the default store collide and every start pri
     pagesLeft = async () => (await processList({ spawnIsolated, world })).list
       .filter(one => one.pid !== process.pid && one.command.includes(script) && one.command.includes('--serve-child'))
 
-    const rounds = 20
+    const rounds = 80
     for (let r = 0; r < rounds; r++) {
       const roundDir = join(control, `round-${r}`)
       mkdirSync(roundDir, { recursive: true })
@@ -283,9 +283,10 @@ test('three real --serve starts on the default store collide and every start pri
     try {
       const lines = readFileSync(join(world.root, 'serve-barrier-control', 'claim-debug.txt'), 'utf8').split(/\r?\n/).filter(Boolean)
       const counts = {}
-      for (const line of lines) { const key = line.replace(/^\d+ /, ''); counts[key] = (counts[key] ?? 0) + 1 }
+      for (const line of lines) { const key = line.replace(/^\d+ \d+ /, '').replace(/pid=\d+/g, 'pid=N'); counts[key] = (counts[key] ?? 0) + 1 }
       console.log('CLAIM-DEBUG counts ' + JSON.stringify(counts))
-      console.log('CLAIM-DEBUG lines ' + JSON.stringify(lines.filter(line => !line.endsWith('OUTER MESSAGE_STORE_IN_USE')).slice(0, 150)))
+      const isUsual = line => line.endsWith('OUTER MESSAGE_STORE_IN_USE') || line.endsWith('SERVE-FAILED MESSAGE_STORE_IN_USE') || line.includes('MESSAGE_STORE_FAILED MESSAGE_STORE_IN_USE')
+      console.log('CLAIM-DEBUG lines ' + JSON.stringify(lines.filter(line => !isUsual(line)).slice(0, 150)))
     } catch (error) { console.log('CLAIM-DEBUG none ' + error.code) }
     // A failed round leaves its page running; stop it so cleanup reports the round's failure, not a locked folder.
     if (running !== undefined && closePage !== undefined) await closePage(running).catch(() => {})
