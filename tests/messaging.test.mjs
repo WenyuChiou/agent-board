@@ -203,6 +203,29 @@ test('a Cursor mailbox card says the message waits for the chat to open, not for
   assert.ok(!page.text().includes(EN.serveNextTurnHint))
 })
 
+test('the same text queued again after the first was handed over is a new message', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now(), seed = mailboxSeed(now), mailbox = seed.mailboxes[0]
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=mailbox-session state=working updated=${new Date(now).toISOString()} -->\n### Mailbox page\n- [~] Keep going\n<!-- /auto session=abcdef01 -->\n`
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  const model = messages => serveModel(view, [], EN, new Set(), false, { connections: [], mailboxes: [mailbox], messages }, false, group)
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model([]), async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  const press = async () => {
+    const card = page.cards().find(one => page.buttons(one).some(button => button.textContent === EN.serveQueueNextTurn('Codex')))
+    page.inputs(card)[0].value = 'Continue'
+    page.buttons(card).find(button => button.textContent === EN.serveQueueNextTurn('Codex')).click()
+    await page.flush()
+  }
+  await press()
+  const first = page.requests.at(-1).body.id
+  const handed = acceptMailboxMessage(mailboxTake(mailboxQueue(seed, first)).state, 'codex', 'mailbox-session', first, 'abcdef', now + 2)
+  await page.redraw(model(handed.messages))
+  await press()
+  assert.notEqual(page.requests.at(-1).body.id, first)
+})
+
 test('the page offers Queue for next turn beside Copy, prefers a live poller, and shows neither on the local network', async () => {
   const { servePage } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
