@@ -205,7 +205,7 @@ const wordsOf = async ($: EngineInterface): Promise<Strings> => STRINGS[langOf(a
 let isPolling = false
 let isTurnRunning = false
 let receiver: Receiver | null = null
-let stopReceiver: () => void = () => undefined
+let receiverTimer: { cancel: () => void } | null = null
 // A hub that does not answer within this holds no tick up: it is a poll that failed.
 const HUB_MS = 5000
 let writes: Promise<unknown> = Promise.resolve()
@@ -3788,7 +3788,7 @@ export const register: Register = (on, options) => {
     if (isInteractiveSession) {
       const own = makeReceiver($)
       receiver = own
-      stopReceiver = $.clock.every(RECEIVER_MS, () => {
+      receiverTimer = $.clock.every(RECEIVER_MS, () => {
         own.tick().catch(() => undefined)
       })
     }
@@ -4238,7 +4238,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
-    stopReceiver()
+    receiverTimer?.cancel()
     await receiver?.end().catch(() => undefined)
     receiver = null
     if (hasBackgroundActivity) await backgroundChanges
