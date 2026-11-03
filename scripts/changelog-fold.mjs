@@ -1,4 +1,5 @@
 import { accessSync, constants, existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -59,7 +60,35 @@ export const stripTests = text => {
   return kept.join('')
 }
 
-export const foldText = ({ text, fragments = [], version, date }) => {
+// A squash merge's subject is its pull request title and number. A fix or feature gets its CHANGELOG line from that
+// title, unless it added a fragment or wrote its own line in CHANGELOG.md, which already holds its entry.
+const commitSubject = /^(?:fix|feat)(?:\([^)]*\))?!?:\s*(.+?)\s*\(#([1-9]\d*)\)\s*$/
+export const commitEntries = (commits = []) => commits.flatMap(({ subject = '', paths = [] }) => {
+  const match = subject.match(commitSubject)
+  if (!match || paths.some(path => path === 'CHANGELOG.md' || isFragmentPath(path))) return []
+  // A title that already ends in its issue number, as in 'fix: x (#560) (#579)', keeps only the pull request's.
+  const summary = match[1].replace(/(?:\s*\(#\d+\))+$/, '').replace(/[.\s]+$/, '')
+  return [`- ${summary.charAt(0).toUpperCase()}${summary.slice(1)} (#${match[2]}).`]
+})
+
+// Each commit since the last release tag on main's first-parent line, with the files it changed.
+export const readCommits = ({ cwd = process.cwd(), run = spawnSync } = {}) => {
+  const git = args => run('git', args, { cwd, encoding: 'utf8' })
+  const tag = git(['describe', '--tags', '--abbrev=0', '--match', 'agent-board--v*'])
+  if (tag.status !== 0 || !tag.stdout.trim()) {
+    const isShallow = git(['rev-parse', '--is-shallow-repository']).stdout?.trim() === 'true'
+    return { commits: [], note: isShallow ? 'this clone is shallow, so no release tag was found; run git fetch --unshallow and fold again' : 'no release tag found, so no pull request titles were read' }
+  }
+  const log = git(['log', `${tag.stdout.trim()}..HEAD`, '--first-parent', '--format=%x1e%s', '--name-only'])
+  if (log.status !== 0) return { commits: [], note: 'git log failed, so no pull request titles were read' }
+  const commits = log.stdout.split('\x1e').filter(item => item.trim()).map(item => {
+    const [subject, ...paths] = item.split(/\r?\n/)
+    return { subject: subject.trim(), paths: paths.map(path => path.trim()).filter(Boolean) }
+  })
+  return { commits, note: null }
+}
+
+export const foldText = ({ text, fragments = [], commits = [], version, date }) => {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('version must be digits.digits.digits')
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('date must be a valid YYYY-MM-DD')
   const headings = [...text.matchAll(/^## ([^\r\n]*)(?:\r?\n|$)/gm)]
@@ -69,10 +98,11 @@ export const foldText = ({ text, fragments = [], version, date }) => {
   const end = heading ? headings[start + 1]?.index ?? text.length : headings[0]?.index ?? text.length
   const unreleased = heading ? stripTests(text.slice(heading.index + heading[0].length, end)).trim() : ''
   const ordered = orderFragments(fragments.filter(item => item.path !== 'changelog.d/README.md').map(parseFragment))
-  if (!ordered.length && !unreleased) throw new Error('nothing to release')
+  const fromTitles = commitEntries(commits)
+  if (!ordered.length && !unreleased && !fromTitles.length) throw new Error('nothing to release')
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const title = `## ${version} — ${date}`
-  const entries = [...ordered.map(item => stripTests(item.text).trim().replace(/\r?\n/g, eol)), ...(unreleased ? [unreleased] : [])]
+  const entries = [...ordered.map(item => stripTests(item.text).trim().replace(/\r?\n/g, eol)), ...fromTitles, ...(unreleased ? [unreleased] : [])]
   const prefix = text.slice(0, heading?.index ?? end)
   const prefixEol = prefix.match(/\r?\n(?=[^\n]*$)/)?.[0] ?? eol
   const separator = prefix && !/(?:\r?\n){2}$/.test(prefix) ? (prefix.endsWith('\n') ? prefixEol : prefixEol + prefixEol) : ''
@@ -82,6 +112,7 @@ export const foldText = ({ text, fragments = [], version, date }) => {
     heading: title,
     fragments: ordered.map(item => item.path),
     unreleasedCount: (unreleased.match(/^- /gm) ?? []).length,
+    titleCount: fromTitles.length,
   }
 }
 
@@ -106,7 +137,7 @@ export const parseArgs = (argv, now = new Date()) => {
   return options
 }
 
-export const runFold = ({ cwd = process.cwd(), argv = process.argv.slice(2), now = new Date(), log = console.log, checkWritable = path => accessSync(path, constants.W_OK) } = {}) => {
+export const runFold = ({ cwd = process.cwd(), argv = process.argv.slice(2), now = new Date(), log = console.log, checkWritable = path => accessSync(path, constants.W_OK), commitsOf = readCommits } = {}) => {
   const options = parseArgs(argv, now)
   const directory = join(cwd, 'changelog.d')
   const fragments = existsSync(directory) ? readdirSync(directory).filter(name => name !== 'README.md').map(name => {
@@ -114,7 +145,8 @@ export const runFold = ({ cwd = process.cwd(), argv = process.argv.slice(2), now
     if (fragmentIssue(path) === null) throw new Error(`invalid fragment name: ${path}`)
     return { path, text: readFileSync(join(cwd, path), 'utf8') }
   }) : []
-  const folded = foldText({ ...options, text: readFileSync(join(cwd, 'CHANGELOG.md'), 'utf8'), fragments })
+  const { commits, note } = commitsOf({ cwd })
+  const folded = foldText({ ...options, text: readFileSync(join(cwd, 'CHANGELOG.md'), 'utf8'), fragments, commits })
   if (options.isWrite) {
     // Removing a file needs write access to its folder on Linux and macOS.
     for (const path of ['CHANGELOG.md', ...folded.fragments, ...(folded.fragments.length ? ['changelog.d'] : [])]) checkWritable(join(cwd, path))
@@ -123,6 +155,7 @@ export const runFold = ({ cwd = process.cwd(), argv = process.argv.slice(2), now
   }
   log(`${options.isWrite ? 'Wrote' : 'Dry run:'} ${folded.heading}`)
   log(`Fragments (${folded.fragments.length}):${folded.fragments.length ? '\n' + folded.fragments.join('\n') : ' none'}`)
+  log(`From pull request titles: ${folded.titleCount}${note ? ` (${note})` : ''}`)
   log(`Unreleased entries kept: ${folded.unreleasedCount}`)
   if (options.isWrite) {
     log(`Removed ${folded.fragments.length} folded fragment(s).`)

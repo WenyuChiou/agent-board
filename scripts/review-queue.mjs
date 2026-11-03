@@ -168,15 +168,19 @@ export const loadReviewers = ({ read = readFileSync, path = reviewersPath } = {}
   try { return { map: parseReviewers(read(path, 'utf8')), note: null } } catch { return { map: null, note: reviewerNote } }
 }
 
+// A Reviewing comment with no verdict lapses after this many hours, and anyone else may take the review (team-process).
+const reviewingLapseHours = 4
+const isLapsed = (time, nowMs) => Number.isFinite(nowMs) && Number.isFinite(time) && nowMs - time > reviewingLapseHours * hour
+
 // Reviews taken and not yet answered, by reviewer, over every open pull request (drafts too): a Reviewing comment
-// counts until the same name posts a verdict later on that pull request.
-export const countOpenReviews = (prs, commentsByNumber) => {
+// counts until the same name posts a verdict later on that pull request, or until it lapses when nowMs is given.
+export const countOpenReviews = (prs, commentsByNumber, nowMs) => {
   const counts = new Map()
   for (const pr of prs) {
     const open = new Set()
-    for (const { comment } of entriesOf(commentsFor(commentsByNumber, pr.number))) {
+    for (const { comment, time } of entriesOf(commentsFor(commentsByNumber, pr.number))) {
       const taker = reviewingName(comment.body)
-      if (taker) open.add(taker)
+      if (taker && !isLapsed(time, nowMs)) open.add(taker)
       const giver = verdictName(comment.body)
       if (giver) open.delete(giver)
     }
@@ -201,7 +205,7 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
   const result = { needsReviewer: [], needsMain: [], approved: [], approvedNow: [], approvedOneAtATime: [], waitingForAuthor: [], drafts: 0 }
   const nowMs = new Date(now).getTime()
   if (!Number.isFinite(nowMs)) throw new Error('invalid current time')
-  const openCounts = reviewers ? countOpenReviews(prs, commentsByNumber) : null
+  const openCounts = reviewers ? countOpenReviews(prs, commentsByNumber, nowMs) : null
   const collaborators = Array.isArray(context.collaborators) ? context.collaborators : null
   const awayLogins = new Set(context.awayLogins ?? [])
   const backs = context.backs ?? []
@@ -232,16 +236,21 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     const headVerdicts = verdicts.filter(entry => matchesHead(head, entry.verdict.sha))
     const latestHeadVerdict = headVerdicts.at(-1)
     const reviewAfterReady = ready && headVerdicts.some(entry => entry.order > ready.order)
-    const takenBy = ready ? comments.slice(ready.order + 1)
-      .map(entry => (entry.comment.body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1]?.trim())
-      .filter(Boolean).at(-1) ?? null : null
+    const taking = ready ? comments.slice(ready.order + 1)
+      .map(entry => ({ name: (entry.comment.body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1]?.trim(), time: entry.time }))
+      .filter(entry => entry.name).at(-1) ?? null : null
+    // A Reviewing comment past its 4 hours no longer holds the review; the queue names who let it lapse.
+    const takenBy = taking && !isLapsed(taking.time, nowMs) ? taking.name : null
+    const lapsedBy = taking && !takenBy ? taking.name : null
     const author = (pr.author?.login ?? '').toLowerCase()
     const hasBackSince = since => backs.some(back => back.time > since && back.login !== author && (!collaborators || collaborators.includes(back.login)))
     // What the review bots and the merge-after-notice say about the head. A missing bot review never moves a pull request between groups.
     const extras = {
       bots: { codex: codexStateOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
+      // A lapse frees the reviewer slot and the suggestion only: any Reviewing after the Ready still closes the notice path, as it
+      // still cancels a notice (team-process, From claim to merge).
       notice: noticeFor({
-        comments, head, ready, takenBy, nowMs,
+        comments, head, ready, takenBy: taking?.name ?? null, nowMs,
         readyHours: ready && Number.isFinite(ready.time) ? Math.max(0, nowMs - ready.time) / hour : null,
         isInQueue: Boolean(ready && !reviewAfterReady),
         isAllAway: isEveryOtherAway(collaborators, awayLogins, author), hasBackSince, author,
@@ -254,7 +263,7 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
       const hours = Math.max(0, nowMs - ready.time) / hour
       const isOverFourHours = hours > 4
       const suggestion = reviewers ? suggestReviewer(reviewers, { author: nameOf(item.author), isOverFourHours }, openCounts) : {}
-      result.needsReviewer.push({ ...item, readyAt: ready.comment.created_at, hours, isOverFourHours, takenBy, ...suggestion, ...extras })
+      result.needsReviewer.push({ ...item, readyAt: ready.comment.created_at, hours, isOverFourHours, takenBy, lapsedBy, ...suggestion, ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
       const isOneAtATime = !Array.isArray(pr.files) || pr.files.some(file => isSharedPath(file?.path ?? ''))
@@ -463,7 +472,7 @@ const codexText = {
 }
 const botText = bots => [codexText[bots?.codex], bots?.greptile ? 'greptile: reviewed' : ''].filter(Boolean).join('  ')
 const noticeText = notice => {
-  if (notice.state === 'allowed') return 'notice allowed if only a collaborator or the owner may approve it (team-process, From claim to merge)'
+  if (notice.state === 'allowed') return 'notice allowed outside the governance files (team-process, From claim to merge)'
   if (notice.state === 'waiting') return `notice: merges after ${formatUtc(Date.parse(notice.at))}`
   if (notice.state === 'due') return 'notice due: merge if checks are green and the author\'s code-review subagent approved this head and no bot P0/P1 is open'
   if (notice.state === 'not-allowed') return 'no notice: governance, workflow or release pull requests merge only with an approval (CONTRIBUTING rules 8 and 12)'
@@ -489,7 +498,7 @@ export const formatQueue = queue => {
     lines.push(`${heading} (${items.length})`)
     for (const item of items) {
       const detail = heading === 'Needs a reviewer'
-        ? `Ready ${item.hours.toFixed(1)} h${item.isOverFourHours ? ' over 4 h' : ''}${item.takenBy ? ` taken by ${item.takenBy}` : ''}${item.suggested === undefined ? '' : `  suggested: ${item.suggested ?? 'none'}${item.isEscalated ? ' escalated' : ''}`}`
+        ? `Ready ${item.hours.toFixed(1)} h${item.isOverFourHours ? ' over 4 h' : ''}${item.takenBy ? ` taken by ${item.takenBy}` : ''}${item.lapsedBy ? ` review by ${item.lapsedBy} lapsed` : ''}${item.suggested === undefined ? '' : `  suggested: ${item.suggested ?? 'none'}${item.isEscalated ? ' escalated' : ''}`}`
         : item.detail
       lines.push(`#${item.number}  ${item.size} lines  ${item.author}  ${item.title.slice(0, 70)}  ${detail}`)
       if (!detailedGroups.has(heading)) continue

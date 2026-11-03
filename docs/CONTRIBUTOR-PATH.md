@@ -116,14 +116,15 @@ Known traps, all found on Windows in earlier pull requests:
 - Destroying a child process's stdio and calling `unref()` does not free its handles on Windows; a test that gives up on a child must end the run itself (#184).
 - Tests that start a board page or a host process can time out on a busy machine. Locally, rerun the one that failed on its own and report both runs; in CI, a timeout is a flaky test, as above.
 
-## 5. Write the CHANGELOG fragment
+## 5. Title it for the CHANGELOG
 
-A fix or feature pull request adds one new file for each issue it names, `changelog.d/<N>-<slug>.md` (three bug fixes add three files), holding that issue's entry exactly as it will read in `CHANGELOG.md` ([changelog.d/README.md](../changelog.d/README.md)). Do not edit `CHANGELOG.md` or another pull request's fragment. The slug uses lowercase letters, digits and single hyphens; if the issue already has a fragment from another pull request, pick a different slug.
+You write no CHANGELOG entry. The release writes one line for each fix and feature from its squash-merge title, so the title says what changed for the person using agent-board, in one plain sentence:
 
-```markdown
-- **What changed, in plain words (#N).** What went wrong and what it does now.
-  Tests: `exact title one`, `exact title two`.
+```text
+fix(board): the column width stays the same after a restart
 ```
+
+Do not add a file to `changelog.d/` or edit `CHANGELOG.md` ([CONTRIBUTING.md rule 6](../CONTRIBUTING.md#pull-requests)).
 
 Copy each title exactly from its `test('…')` call. A change to documentation only writes `Tests: none (documentation only).`
 
@@ -150,7 +151,7 @@ If the PR check says you are over the open pull request limit for contributors f
 
 ## 7. Mark it ready
 
-Before you mark it ready, run the local preflight. It checks the branch against `main`, runs the Node test files you touched, the string tables, the language copies of the docs, the bundle, the fragment and the body:
+Before you mark it ready, run the local preflight. It checks the branch against `main`, runs the Node test files you touched, the string tables, the language copies of the docs, the bundle, the CHANGELOG and the body:
 
 ```sh
 node scripts/preflight.mjs --body-file ../pr-body.md --title "fix(cli): <summary>"
@@ -207,7 +208,7 @@ The rebuild also removes a part that `main` no longer has, and `add -A` stages t
 
 When `scripts/build-board.ts` says a bundle part is over 1,000,000 bytes, do not remove or shorten features to make it fit. Add a split point to `PART_STARTS` in `scripts/build-board.ts` and rebuild, or say so on your issue and the maintainer adds it.
 
-Fragments in `changelog.d/` do not conflict, since each pull request adds its own file. Run the checks again and push. Once the pull request is Ready, merge `main` only while answering `Review: REQUEST CHANGES` if a conflict needs it, or when GitHub reports a conflict ([docs/dev/team-process.md, Merge order](dev/team-process.md#merge-order)), not because `main` moved; after that push, comment `Ready for review <new full head sha>`. After `Review: APPROVE`, leave merging `main` to the reviewer.
+Since no pull request edits `CHANGELOG.md`, it never conflicts. Run the checks again and push. Once the pull request is Ready, merge `main` only while answering `Review: REQUEST CHANGES` if a conflict needs it, or when GitHub reports a conflict ([docs/dev/team-process.md, Merge order](dev/team-process.md#merge-order)), not because `main` moved; after that push, comment `Ready for review <new full head sha>`. After `Review: APPROVE`, leave merging `main` to the reviewer.
 
 ## 10. After the merge, or handing over
 

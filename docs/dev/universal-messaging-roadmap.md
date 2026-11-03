@@ -200,6 +200,8 @@ gh issue list --repo WenyuChiou/agent-board --state open --milestone "0.25.0 Sen
 ### Step 3 — Label Unlocks After Each Merge
 After a merge, remove `blocked` and add `ready` on each issue the merge unlocks, once everything in its row has merged:
 
+Before each `--add-label ready` below, post the issue's `Ready check:` comment ([RULES.md, R4](RULES.md#r4-one-issue-one-owner)); the merge settles only what the issue waits on, not the other three points.
+
 | When this merges | Unlock |
 | :--- | :--- |
 | `#388` (`#315`) | `#603`, `#720`, `#316`, `#318`, `#317` |
