@@ -3110,22 +3110,36 @@ const appendArchive = async (
   }
   const payload = JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n'
   const stagedRun = await $.process.run(['node', '-e', PENDING_STAGE, '--', pendingFile], { timeoutMs: 10000 }).catch(() => null)
-  let stage: PendingStage | null = null
-  if (stagedRun !== null && stagedRun.exitCode === 0 && !stagedRun.isStdoutTruncated) {
+  if (stagedRun === null || stagedRun.exitCode === 127) {
+    // Computers without Node still need a complete recovery note before the archive changes.
+    const isWin = await isWindows($, progressFile)
+    const suffix = Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
+    const temporary = `${pendingFile}.${suffix}.tmp`
     try {
-      stage = pendingStage(JSON.parse(stagedRun.stdout))
-    } catch {}
-  }
-  if (stage === null) throw new Error('PENDING_NOTE_WRITE_FAILED')
-  try {
-    await $.fs.write(stage.file, payload)
-  } catch {
-    await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, ''], { timeoutMs: 10000 }).catch(() => null)
-    throw new Error('PENDING_NOTE_WRITE_FAILED')
-  }
-  const committed = await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, sha256(payload)], { timeoutMs: 10000 }).catch(() => null)
-  if (committed === null || committed.exitCode !== 0) {
-    throw new Error('PENDING_NOTE_WRITE_FAILED')
+      await $.fs.write(temporary, payload)
+      if (!(await replaceFile($, temporary, pendingFile, isWin))) throw new Error('PENDING_NOTE_WRITE_FAILED')
+    } catch {
+      await removeFiles($, [temporary], isWin).catch(() => false)
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+  } else {
+    let stage: PendingStage | null = null
+    if (stagedRun.exitCode === 0 && !stagedRun.isStdoutTruncated) {
+      try {
+        stage = pendingStage(JSON.parse(stagedRun.stdout))
+      } catch {}
+    }
+    if (stage === null) throw new Error('PENDING_NOTE_WRITE_FAILED')
+    try {
+      await $.fs.write(stage.file, payload)
+    } catch {
+      await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, ''], { timeoutMs: 10000 }).catch(() => null)
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+    const committed = await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, sha256(payload)], { timeoutMs: 10000 }).catch(() => null)
+    if (committed === null || committed.exitCode !== 0) {
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
   }
   if (planned.missing.length > 0) {
     const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
