@@ -83,6 +83,8 @@ What changed for the person using Agent Board, one line per change, newest versi
 - Every card names its agent by brand, a noted choice question keeps its options, and Reply comes first with at most three buttons (#461).
 - A synthetic big board for the tests (#460).
 - The messaging tests start their page in the order `--serve` does on Windows (#458).
+- Verify the actual owned classifier process has exited after a Windows timeout, so an interrupted or recycled PID marker cannot falsely report a live process (#457).
+- Fix the strict runtime type contracts for nullable archive lines, completed-session view state and the existing local-session cache guard without changing their data-safety behavior (#455).
 - Common setup accepts a UTF-8 BOM in existing Codex hook JSON (#451).
 - The sender matrix keeps its own test watchdog (#447).
 - Antigravity now shows its official SVG mark, DeepSeek Harness its official whale, and Muse Code the blue Muse brand mark (#442).
