@@ -28,7 +28,7 @@ const withQuestion = async (name, run) => browserFixture(name, async fixture => 
     verify: async () => true, canReceive: () => canReceive,
     deliver: async message => {
       deliveries.push(message)
-      return 'ACK ' + message.id + ' Synthetic reply.'
+      return 'ACK ' + (message.nonce || message.id) + ' Synthetic reply.'
     },
     onError: error => errors.push(error.message),
   })
