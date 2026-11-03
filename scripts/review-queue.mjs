@@ -87,8 +87,9 @@ export const parseNotice = body => {
   return Number.isFinite(at) && shas.length ? { at, shas } : null
 }
 
-// Governance files, workflows and the release files: a pull request touching one never merges after a notice (team-process, From claim to merge).
-const governedPaths = new Set(['AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/team-process.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json'])
+// Governance files, the owner's files in docs/README.md, workflows and the release files: a pull request touching one
+// never merges after a notice (team-process, From claim to merge).
+const governedPaths = new Set(['AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/RULES.md', 'docs/dev/team-process.md', 'docs/dev/universal-messaging-roadmap.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json'])
 const isGovernedPath = path => governedPaths.has(path) || path.startsWith('.github/')
 
 // Checks whether an unresolved REQUEST CHANGES verdict exists for the current head.
