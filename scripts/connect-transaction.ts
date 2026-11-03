@@ -93,7 +93,13 @@ export class ConnectTransaction {
     }
   }
 
-  save(): void { atomic(this.file, `${JSON.stringify(this.state, null, 2)}\n`) }
+  // Which agents setup manages is read from its records each time, never stored: it would go
+  // stale, and an older build refuses a record with a hook state it doesn't know.
+  save(): void {
+    const { setup } = this.state
+    const stored = setup === undefined ? this.state : { ...this.state, setup: { ...setup, agents: setup.agents.filter(one => one.hook !== 'setup') } }
+    atomic(this.file, `${JSON.stringify(stored, null, 2)}\n`)
+  }
 
   read(file: string): string {
     const text = readLocal(file)
@@ -409,7 +415,7 @@ export const legacyConnect = async (value: unknown, bundle: string): Promise<{ s
     const authority = join(installControlRoot(request.home), 'legacy-connect-authority')
     if (!existsSync(authority)) writeFileSync(authority, '1\n', { flag: 'wx', mode: 0o600 })
     if (request.mode === 'status') {
-      const hasSetup = state.setup !== undefined || setup.problems.length > 0
+      const hasSetup = state.setup !== undefined || setup.problems.length > 0 || setup.agents.length > 0
       return { state: { ...state, ...(hasSetup ? { setup } : {}) }, result: null }
     }
     if (request.mode === 'ack') {

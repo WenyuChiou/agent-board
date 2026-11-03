@@ -1,7 +1,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -72,7 +72,7 @@ const withSetup = (agent, check) => fixture(async f => {
   assert.ok(initial.state.setup.agents.some(one => one.hook === 'configured'))
   assert.equal(initial.state.setup.agents.some(one => one.agent === agent), false)
   const signs = {
-    codex: '.codex', cursor: '.cursor', opencode: '.config/opencode', gemini: '.gemini',
+    codex: '.codex', cursor: '.cursor', opencode: '.config/opencode', gemini: '.gemini', antigravity: '.gemini/antigravity',
     grok: '.grok/sessions', muse: '.config/muse', hermes: '.hermes', openclaw: '.openclaw',
   }
   mkdirSync(join(f.home, signs[agent]), { recursive: true })
@@ -173,9 +173,65 @@ test('a probe takes out the hook an earlier probe left beside the setup hook', a
   }))
 })
 
+// Antigravity shares ~/.gemini with Gemini CLI, which the connector may still connect, so it has its own test.
+test('a setup managed Antigravity is reported and keeps the setup files', () => withSetup('antigravity', ({ run, owned, before }) => {
+  for (const mode of ['status', 'auto', 'connect']) {
+    assert.equal(run(mode).state.setup.agents.find(one => one.agent === 'antigravity').hook, 'setup', mode)
+    for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], `${mode}: ${file}`)
+  }
+}))
+
+test('a hook that cannot be taken out is named, and the other agents still connect', () => withBothHooks('codex', ({ f, run }) => {
+  const config = join(f.home, '.codex', 'hooks.json')
+  const lock = isLocked => process.platform === 'win32'
+    ? execFileSync('attrib', [isLocked ? '+R' : '-R', config])
+    : chmodSync(join(f.home, '.codex'), isLocked ? 0o555 : 0o755)
+  lock(true)
+  try {
+    mkdirSync(join(f.home, '.grok', 'sessions'), { recursive: true })
+    const output = run('auto')
+    assert.equal(output.state.setup.agents.find(one => one.agent === 'grok').hook, 'configured')
+    assert.ok(output.result.problems.some(one => one.key === `removeFailed:${config}`))
+  } finally {
+    lock(false)
+  }
+  run('auto')
+  assert.doesNotMatch(readFileSync(config, 'utf8'), /progress-report/)
+}))
+
+test('a config that cannot be parsed is named when its hook cannot be taken out', () => withBothHooks('muse', ({ f, run }) => {
+  const config = join(f.home, '.config', 'muse', 'settings.json')
+  writeFileSync(config, `// mine\n${readFileSync(config, 'utf8')}`)
+  for (const mode of ['auto', 'remove']) assert.ok(run(mode).result.problems.some(one => one.key === `removeFailed:${config}`), mode)
+}))
+
+test('a probe leaves a setup managed config with nothing of ours as it is', () => withSetup('cursor', ({ f, run }) => {
+  const config = join(f.home, '.cursor', 'hooks.json')
+  const saved = JSON.parse(readFileSync(config, 'utf8'))
+  const text = JSON.stringify({ ...saved, hooks: { ...saved.hooks, PersonEvent: [] } }, null, 4)
+  writeFileSync(config, text)
+  run('auto')
+  assert.equal(readFileSync(config, 'utf8'), text)
+}))
+
+test('which agents setup manages is read each time and never stored', () => withSetup('grok', ({ f, run, setup }) => {
+  run('auto')
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).setup.agents.some(one => one.hook === 'setup'), false)
+  setup('remove')
+  assert.equal(run('status').state.setup.agents.some(one => one.agent === 'grok'), false)
+}))
+
+test('status names a setup managed agent before any probe', () => fixture(async f => {
+  mkdirSync(join(f.home, '.grok', 'sessions'), { recursive: true })
+  mkdirSync(join(f.home, '.agent-board'), { recursive: true })
+  writeFileSync(join(f.home, '.agent-board', 'install-grok.json'), '{}')
+  assert.equal(f.run(f.request('status')).state.setup.agents.find(one => one.agent === 'grok').hook, 'setup')
+}))
+
 test('removing the connector takes out its hook and leaves the setup hook', () => withBothHooks('grok', ({ f, run, owned, before }) => {
   assert.ok(existsSync(join(f.home, '.grok', 'hooks', 'agent-board.json')))
-  run('remove')
+  const { result } = run('remove')
+  assert.ok(result.done.includes('Grok Build'))
   assert.equal(existsSync(join(f.home, '.grok', 'hooks', 'agent-board.json')), false)
   for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], file)
 }))

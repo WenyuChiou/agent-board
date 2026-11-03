@@ -132,14 +132,32 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   }
   const hooks = agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, node: nodePath, antigravityNode, progress: path, s: STRINGS[fileLang] })
   const setupManaged = setupManagedAgents(hooks, home, sep, existsSync)
+  // A file with none of ours is left as it is: taking nothing out could still reformat it.
+  // OpenClaw's config names our plugin, not the reporter, and its edit checks for that itself.
   const retireHook = (hook: (typeof hooks)[number]): void => {
     for (const file of [hook.file, ...(hook.old === undefined ? [] : [hook.old])]) {
-      const before = readMaybe(file)
-      if (before === null || before === '') continue
-      const after = hook.edit(before, true, previousOutput(file))
-      if (after === COLLISION) preserve(file)
-      else if (after === DELETE) removeFile(file)
-      else if (typeof after === 'string' && after !== before) writeFile(file, after, hook.generated)
+      let isReading = true
+      try {
+        if (!existsSync(file)) continue
+        const before = readLocal(file)
+        isReading = false
+        if (before === '' || (!hook.generated && hook.agent !== 'openclaw' && !hasOurHook(before))) continue
+        const after = hook.edit(before, true, previousOutput(file))
+        if (after === COLLISION) preserve(file)
+        else if (after === null) warn(`removeFailed:${file}`, { message: 'connectRemoveFailed', args: [file] })
+        else if (after !== before) {
+          if (after === DELETE) removeFile(file)
+          else writeFile(file, after, hook.generated)
+          if (remove) done.push(hook.label)
+          continue
+        }
+        if (after === COLLISION || after === null) failedLabels.add(hook.label)
+      } catch (error) {
+        if (error instanceof Error && error.message === 'RECOVERY_CONFLICT') throw error
+        failedLabels.add(hook.label)
+        if (isReading) warn(`unreadable:${file}`, { message: 'connectReadFailed', args: [hook.label, file] })
+        else warn(`removeFailed:${file}`, { message: 'connectRemoveFailed', args: [file] })
+      }
     }
   }
   for (const hook of hooks) {
