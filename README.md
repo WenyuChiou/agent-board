@@ -227,7 +227,7 @@ Start with the doctor. It checks what the installer wrote for one agent and chan
 node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 ```
 
-Use the agent's own name after `--agent` (the doctor keeps its old name for every agent). `installed` says the files are in place and `ready` that the agent has a status adapter. `connected` stays `unverified`: only a new session that shows up on the board proves the connection.
+Use the agent's own name after `--agent` (the doctor keeps its old name for every agent). It prints whether the files are in place, what is wrong and one next step. Only a new session that shows up on the board proves the connection. With `--json`, `installed` says the files are in place and `ready` that the agent has a status adapter; `connected` stays `unverified`.
 
 | You see | Try |
 |---|---|

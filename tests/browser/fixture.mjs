@@ -258,7 +258,7 @@ export const browserFixture = async (name, run) => {
     assert.deepEqual(JSON.parse(readFileSync(hooks, 'utf8')).auth, foreignHooks.auth)
     assert.deepEqual(JSON.parse(readFileSync(hooks, 'utf8')).hooks.Stop[0], foreignHooks.hooks.Stop[0])
     assert.equal(readFileSync(auth, 'utf8'), foreignAuth)
-    const doctor = await nodeJson(evidence, 'doctor', installedScript, ['--codex-doctor', '--agent', 'codex', '--home', home, '--codex-dir', directories.codex, '--progress-file', progress, '--lang', 'en'], env)
+    const doctor = await nodeJson(evidence, 'doctor', installedScript, ['--codex-doctor', '--agent', 'codex', '--home', home, '--codex-dir', directories.codex, '--progress-file', progress, '--lang', 'en', '--json'], env)
     assert.equal(doctor.installed, true)
     assert.equal(doctor.connected, 'unverified')
     assert.equal(doctor.capabilities.liveReply, false)

@@ -227,7 +227,7 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 ```
 
-`--agent` 后面换成那个 agent 的名字（doctor 对每个 agent 都沿用这个旧名称）。`installed` 表示文件都在，`ready` 表示这个 agent 有报告状态的 adapter。`connected` 一律是 `unverified`：只有新开的对话真的出现在看板上，才算证明接通了。
+`--agent` 后面换成那个 agent 的名字（doctor 对每个 agent 都沿用这个旧名称）。它会说明文件在不在、哪里有问题，并给一个下一步。只有新开的对话真的出现在看板上，才算证明接通了。加 `--json` 时，`installed` 表示文件都在，`ready` 表示这个 agent 有报告状态的 adapter，`connected` 一律是 `unverified`。
 
 | 你看到 | 试试 |
 |---|---|
