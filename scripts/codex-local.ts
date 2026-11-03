@@ -391,6 +391,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const connectedProgress = localProgressPath(undefined, connectorProgress!)
     const explicitProgress = flag('--progress-file')
     if (explicitProgress !== undefined && resolve(explicitProgress) !== connectedProgress) throw new Error('SHARED_BOARD_PATH_CONFLICT')
+    if (args.includes('--plain') && !args.includes('--json')) {
+      process.stdout.write(`${s.localSummary.removal(s.agentNames[agent] ?? agent, s.setupSummary.connector.replace('{progress}', connectedProgress))}\n${s.localSummary.connectRepair}\n`)
+      return true
+    }
     output({
       mode: 'install', agent, progress: connectedProgress, data: root, script: join(dirname(connectedProgress), 'agent-board.mjs'),
       managedBy: 'connector', changes: [], conflicts: [],

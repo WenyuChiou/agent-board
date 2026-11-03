@@ -82,6 +82,7 @@ export const ZH_CN: Strings = {
     setupWritten: (file: string): string => `已写入：${file}`,
     setupApply: (command: string): string => `下一步：应用这次修复：${command}`,
     setupCheck: (command: string): string => `下一步：再检查一次：${command}`,
+    connectRepair: '下一步：在 Claude Code 运行 /progress connect 来修复。',
   },
   setupSummary: {
     "preview": "将更新 {count} 个设置文件",

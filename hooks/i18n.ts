@@ -120,6 +120,7 @@ export const ZH_TW = {
     setupWritten: (file: string): string => `已寫入：${file}`,
     setupApply: (command: string): string => `下一步：套用這次修復：${command}`,
     setupCheck: (command: string): string => `下一步：再檢查一次：${command}`,
+    connectRepair: '下一步：在 Claude Code 執行 /progress connect 來修復。',
   },
   setupSummary: {
     "preview": "將更新 {count} 個設定檔案",

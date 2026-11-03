@@ -1026,6 +1026,14 @@ test('doctor and removal say plainly when an adapter is pending, a connector hol
   assert.ok(connector.stdout.includes('Next: start a new Codex session'), connector.stdout)
   assert.ok(!connector.stdout.includes('--codex-bin') && !connector.stdout.includes('hooks are'), connector.stdout)
   assert.ok(isOneNext(connector.stdout), connector.stdout)
+  for (const apply of [[], ['--apply']]) {
+    const repair = board(connected, '--codex-setup', '--agent', 'codex', '--plain', '--lang', 'en', ...apply)
+    assert.equal(repair.status, 0, repair.stderr)
+    assert.ok(repair.stdout.includes('managed by the Claude Code plugin connector'), repair.stdout)
+    assert.ok(repair.stdout.includes('Next: run /progress connect in Claude Code'), repair.stdout)
+    assert.ok(!repair.stdout.includes('{') && isOneNext(repair.stdout), repair.stdout)
+    assert.equal(JSON.parse(board(connected, '--codex-setup', '--agent', 'codex', '--plain', '--json', '--lang', 'en', ...apply).stdout).managedBy, 'connector')
+  }
 }))
 
 test('doctor explains Claude Code plugin support in every language', () => fixture(f => {

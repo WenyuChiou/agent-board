@@ -82,6 +82,7 @@ export const EN: Strings = {
     setupWritten: (file: string): string => `Wrote: ${file}`,
     setupApply: (command: string): string => `Next: apply this repair: ${command}`,
     setupCheck: (command: string): string => `Next: check it again: ${command}`,
+    connectRepair: 'Next: run /progress connect in Claude Code to repair it.',
   },
   setupSummary: {
     "preview": "would update {count} setup files",
