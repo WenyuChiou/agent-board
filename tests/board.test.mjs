@@ -8732,6 +8732,12 @@ test('a block the parser would read is posted once while it is on its way, and n
   release()
   await dom.settle()
   assert.ok(dom.node('note').textContent.includes('Synthetic added'))
+  // Done with the first, the page takes the next.
+  dom.paste(text)
+  await dom.flush()
+  assert.equal(dom.requests.length, 2)
+  release()
+  await dom.settle()
   const closing = await pageDom(html, redesignModel(), { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
   closing.node('close').click()
   await closing.settle()
