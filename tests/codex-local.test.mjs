@@ -238,7 +238,7 @@ const nativeReportContext = (result, label, readLog = () => '') => {
   const context = JSON.parse(result.stdout).injectSteps?.[0]?.systemMessage?.systemMessage
   if (typeof context !== 'string') {
     // Read only on failure, and keep fixed codes instead of commands or log text.
-    const known = new Set(['UNSUPPORTED_AGENT', 'REPORTER_UPGRADE_REQUIRED', 'REPORTER_TIMEOUT', 'INPUT_TOO_LARGE', 'INPUT_TIMEOUT', 'INCOMPLETE_INPUT', 'REPORTER_FAILED', 'REPORTER_QUEUED'])
+    const known = new Set(['UNSUPPORTED_AGENT', 'HOOK_WORKER_UNAVAILABLE', 'REPORTER_UPGRADE_REQUIRED', 'REPORTER_TIMEOUT', 'INPUT_TOO_LARGE', 'INPUT_TIMEOUT', 'INCOMPLETE_INPUT', 'REPORTER_FAILED', 'REPORTER_QUEUED'])
     let log = '', hasLog = true
     try { log = readLog() } catch { hasLog = false }
     const codes = log.split(/\r?\n/).flatMap(line => {
@@ -266,6 +266,11 @@ test('native report context failures keep hook codes without exposing command ou
   })
   assert.throws(() => nativeReportContext(result, 'setup zh-CN', () => { throw Error('PRIVATE_READ') }), error => {
     assert.match(error.message, /missing native report context.*hook codes=unavailable/)
+    assert.ok(!error.message.includes('PRIVATE_'))
+    return true
+  })
+  assert.throws(() => nativeReportContext({ ...result, stdout: '{}' }, 'setup en', () => '2026-11-03T00:00:00Z antigravity HOOK_WORKER_UNAVAILABLE PRIVATE_LOG'), error => {
+    assert.match(error.message, /status=0; hook codes=HOOK_WORKER_UNAVAILABLE/)
     assert.ok(!error.message.includes('PRIVATE_'))
     return true
   })
