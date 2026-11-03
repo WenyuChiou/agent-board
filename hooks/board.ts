@@ -10,6 +10,7 @@ import { agentLabel } from './strings'
 import { isSameName, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
+import type { TidyPreview } from './tidy'
 
 // The board as plain text, for agents other than Claude Code: the standalone script that
 // `/progress connect` writes beside progress.md prints it in a terminal (once, or live with
@@ -585,7 +586,7 @@ export type BoardItem =
 
 // `key` is the chosen line's, so the choice stays on it when lines above it come or go. `seen`
 // holds each line's fingerprint as the last draw showed it (null before the first draw).
-export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean }
+export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean; bulkTidy?: { token: string; preview: TidyPreview } }
 
 export type BoardAction =
   | { type: 'tick'; ref: StepRef }

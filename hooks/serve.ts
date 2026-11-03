@@ -674,6 +674,7 @@ const PAGE_WORDS = [
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
   'archiveNow', 'cleanUp', 'stoppedCount',
+  'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
@@ -994,6 +995,7 @@ ${PAGE_CSS}
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
+<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details>
 <footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span><button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
@@ -1080,6 +1082,7 @@ const PAGE_SCRIPT = String.raw`
   var resultSlots = {};
   var lostResults = [];
   resultSlot(document.querySelector('.pfoot'), 'close', '', w('serveClose'));
+  resultSlot(document.getElementById('tidy-bulk'), 'tidy', '', w('tidyBulk'));
   function resultSlot(card, key, revision, label) {
     card.setAttribute('data-card-key', key);
     var previous = results[key];
@@ -1117,6 +1120,7 @@ const PAGE_SCRIPT = String.raw`
     }
   }
   function beginPress() {
+    resetTidy(false);
     note.textContent = '';
     note.className = '';
     lostResults.forEach(function (card) { card.remove(); });
@@ -2265,8 +2269,10 @@ const PAGE_SCRIPT = String.raw`
     pg.cardNodes = {};
     cardParts = {};
     var closeSlot = resultSlots.close;
+    var tidySlot = resultSlots.tidy;
     resultSlots = {};
     if (closeSlot) resultSlots.close = closeSlot;
+    if (tidySlot) resultSlots.tidy = tidySlot;
     agentPresence = presenceMap(view);
     drawChips(view);
     var parts = [];
@@ -2445,6 +2451,66 @@ const PAGE_SCRIPT = String.raw`
         refresh();
       }
     }, function () { say(w('serveOffline'), 'alert', 'close'); unreachable(); });
+  });
+  // A bulk archive previews first and archives only on a second, separate press. Any
+  // other press drops the preview; the token on the server then simply expires.
+  var tidyToken = '';
+  var tidyPreview = null;
+  var tidyBusy = false;
+  var tidyCommitting = false;
+  function resetTidy(cancel) {
+    if (tidyCommitting) return;
+    if (cancel && tidyToken) call('/api/tidy-bulk', { kind: 'cancel', token: tidyToken }).catch(function () {});
+    tidyToken = '';
+    tidyPreview = null;
+    var confirm = document.getElementById('tidy-confirm');
+    var cancelButton = document.getElementById('tidy-cancel');
+    if (confirm) confirm.disabled = true;
+    if (cancelButton) cancelButton.disabled = true;
+  }
+  function tidySelector() {
+    var kind = document.getElementById('tidy-kind').value;
+    if (kind === 'agent') return { kind: kind, value: document.getElementById('tidy-value').value.trim() };
+    if (kind === 'older') return { kind: kind, days: Number(document.getElementById('tidy-value').value.trim()) };
+    return { kind: 'stopped' };
+  }
+  document.getElementById('tidy-preview').addEventListener('click', function () {
+    if (isUnreachable || tidyBusy) return;
+    var selector = tidySelector();
+    if (selector.kind === 'agent' && !/^[a-z][a-z0-9-]{0,63}$/.test(selector.value || '')) { say(w('tidyInvalid'), 'alert', 'tidy'); return; }
+    if (selector.kind === 'older' && !(Number.isSafeInteger(selector.days) && selector.days >= 1 && selector.days <= 365000)) { say(w('tidyInvalid'), 'alert', 'tidy'); return; }
+    tidyBusy = true;
+    say(w('pressPending'), '', 'tidy');
+    call('/api/tidy-bulk', { kind: 'preview', selector: selector }).then(function (data) {
+      tidyBusy = false;
+      if (!data.token || !data.preview) { say(data.note || w('pressFailed'), 'alert', 'tidy'); return; }
+      tidyToken = data.token;
+      tidyPreview = data.preview;
+      document.getElementById('tidy-confirm').disabled = false;
+      document.getElementById('tidy-cancel').disabled = false;
+      say(data.note || '', 'quiet', 'tidy');
+    }, function () { tidyBusy = false; say(w('serveOffline'), 'alert', 'tidy'); unreachable(); });
+  });
+  document.getElementById('tidy-confirm').addEventListener('click', function () {
+    if (isUnreachable || tidyBusy || !tidyToken || !tidyPreview) return;
+    tidyBusy = true;
+    tidyCommitting = true;
+    say(w('pressPending'), '', 'tidy');
+    call('/api/tidy-bulk', { kind: 'confirm', token: tidyToken, preview: tidyPreview }).then(function (data) {
+      tidyBusy = false;
+      tidyCommitting = false;
+      tidyToken = '';
+      tidyPreview = null;
+      document.getElementById('tidy-confirm').disabled = true;
+      document.getElementById('tidy-cancel').disabled = true;
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'tidy');
+      refresh();
+    }, function () { tidyBusy = false; tidyCommitting = false; say(w('serveOffline'), 'alert', 'tidy'); unreachable(); });
+  });
+  document.getElementById('tidy-cancel').addEventListener('click', function () {
+    if (tidyBusy) return;
+    resetTidy(true);
+    say(w('tidyCancelled'), '', 'tidy');
   });
   refresh();
 })();

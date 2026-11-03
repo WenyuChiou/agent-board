@@ -5950,6 +5950,137 @@ test('--tidy twice on the same day with one same-title same-steps done block eac
   })
 })
 
+const bulkBlock = (session, agent, state, hours, step = '- [x] Finished') => `<!-- auto session=${session} agent=${agent} state=${state} updated=${ago(hours * 3600000)} -->\n### ${agent} ${state} ${session}\n${step}\n<!-- /auto session=${session} -->\n`
+
+test('tidy --stopped moves every stopped block and names the count', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${bulkBlock('b1c2d3e1', 'codex', 'ended', 73)}\n${bulkBlock('b1c2d3e2', 'grok', 'working', 73, '- [~] Paused')}\n${bulkBlock('b1c2d3e3', 'codex', 'working', 1, '- [ ] Next')}\n${bulkBlock('b1c2d3e4', 'codex', 'done', 11)}`)
+    const preview = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'preview', selector: { kind: 'stopped' } } })
+    assert.equal(preview.status, 200, preview.body)
+    assert.equal(preview.json().note, 'Preview: 3 blocks would be archived.')
+    assert.equal(preview.json().count, 3)
+    const confirmed = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'confirm', token: preview.json().token, preview: preview.json().preview } })
+    assert.equal(confirmed.status, 200, confirmed.body)
+    assert.equal(confirmed.json().note, 'Archived 3 blocks.')
+    const after = readFileSync(board.path, 'utf8')
+    assert.ok(!after.includes('b1c2d3e1') && !after.includes('b1c2d3e2') && !after.includes('b1c2d3e4'), after)
+    assert.ok(after.includes('b1c2d3e3'), after)
+    const archive = readdirSync(board.dir).filter(name => name.startsWith('progress-archive-'))
+    assert.equal(archive.length, 1)
+    const history = readFileSync(join(board.dir, archive[0]), 'utf8')
+    assert.ok(history.includes('b1c2d3e1') && history.includes('b1c2d3e2') && history.includes('b1c2d3e4'), history)
+  } finally { await board.close() }
+})
+
+test('tidy --agent grok leaves other agents\' blocks alone', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${bulkBlock('b1c2d3f1', 'codex', 'ended', 73)}\n${bulkBlock('b1c2d3f2', 'grok', 'ended', 73)}\n${bulkBlock('b1c2d3f3', 'muse', 'ended', 73)}`)
+    const preview = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'preview', selector: { kind: 'agent', value: 'grok' } } })
+    assert.equal(preview.status, 200, preview.body)
+    assert.equal(preview.json().count, 1)
+    const confirmed = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'confirm', token: preview.json().token, preview: preview.json().preview } })
+    assert.equal(confirmed.status, 200, confirmed.body)
+    assert.equal(confirmed.json().note, 'Archived 1 block.')
+    const after = readFileSync(board.path, 'utf8')
+    assert.ok(after.includes('b1c2d3f1') && after.includes('b1c2d3f3') && !after.includes('b1c2d3f2'), after)
+  } finally { await board.close() }
+})
+
+test('tidy --older 14 refuses a row that changed during the sweep', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const first = bulkBlock('b1c2d401', 'codex', 'ended', 24 * 20)
+    const second = bulkBlock('b1c2d402', 'codex', 'ended', 24 * 20)
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${first}\n${second}\n${bulkBlock('b1c2d403', 'codex', 'ended', 24 * 5)}`)
+    const preview = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'preview', selector: { kind: 'older', days: 14 } } })
+    assert.equal(preview.status, 200, preview.body)
+    assert.equal(preview.json().count, 2)
+    // The row changes between the preview and the confirm: a step is reworded.
+    writeFileSync(board.path, readFileSync(board.path, 'utf8').replace('- [x] Finished', '- [x] Finished later'))
+    const confirmed = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'confirm', token: preview.json().token, preview: preview.json().preview } })
+    assert.equal(confirmed.status, 200, confirmed.body)
+    assert.equal(confirmed.json().note, 'Archived 1 block; 1 refused because its state changed.')
+    const after = readFileSync(board.path, 'utf8')
+    assert.ok(after.includes('Finished later') && after.includes('b1c2d403'), after)
+    assert.ok(!after.includes('b1c2d402'), after)
+    const journals = readdirSync(board.dir).filter(name => name.startsWith('progress-journal-'))
+    assert.equal(journals.length, 1)
+    const journal = readFileSync(join(board.dir, journals[0]), 'utf8')
+    assert.equal(journal.split('"state":"prepared"').length - 1, 1, journal)
+    assert.equal(journal.split('"state":"committed"').length - 1, 1, journal)
+    assert.ok(journal.includes('b1c2d402') && !journal.includes('b1c2d401'), journal)
+  } finally { await board.close() }
+})
+
+test('tidy --stopped refuses a block that asks when its question has no kept record, and journals the block it moves', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${bulkBlock('b1c2d411', 'codex', 'ended', 73, '- [?] Publish, OK?')}\n${bulkBlock('b1c2d412', 'codex', 'ended', 73)}`)
+    const preview = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'preview', selector: { kind: 'stopped' } } })
+    assert.equal(preview.json().count, 2)
+    const confirmed = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'confirm', token: preview.json().token, preview: preview.json().preview } })
+    assert.equal(confirmed.status, 200, confirmed.body)
+    assert.equal(confirmed.json().note, 'Archived 1 block; 1 refused because its state changed.')
+    const after = readFileSync(board.path, 'utf8')
+    assert.ok(after.includes('Publish, OK?') && !after.includes('b1c2d412'), after)
+  } finally { await board.close() }
+})
+
+test('the page shows the bulk archive section, and cancelling a preview discards its token', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${bulkBlock('b1c2d421', 'codex', 'ended', 73)}`)
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    assert.ok(html.includes('id="tidy-bulk"'), html)
+    assert.ok(html.includes('Bulk archive') && html.includes('Stopped sessions') && html.includes('One agent') && html.includes('Older than'), html)
+    const preview = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'preview', selector: { kind: 'stopped' } } })
+    assert.equal(preview.json().count, 1)
+    const cancelled = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'cancel', token: preview.json().token } })
+    assert.equal(cancelled.status, 200, cancelled.body)
+    assert.equal(cancelled.json().note, 'Cancelled. Nothing was archived.')
+    const confirmed = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'confirm', token: preview.json().token, preview: preview.json().preview } })
+    assert.equal(confirmed.status, 409, confirmed.body)
+    assert.equal(confirmed.json().note, 'The preview expired. Preview again.')
+    assert.ok(readFileSync(board.path, 'utf8').includes('b1c2d421'))
+  } finally { await board.close() }
+})
+
+test('--tidy --stopped without a terminal only previews, and conflicting or invalid selectors change nothing', () => {
+  tidyFixture(f => {
+    const file = `## Synthetic\n${f.block('a1b2c321', 'Old ended', 'ended', 73)}\n${f.block('a1b2c322', 'Active', 'working', 1, '- [~] Working')}`
+    writeFileSync(f.path, file)
+    const preview = f.command(['--tidy', '--stopped'])
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.equal(preview.stdout, 'Preview: 1 block would be archived.\nA terminal confirmation is needed. Preview and type ARCHIVE in a terminal, or use the board page.\n')
+    assert.equal(readFileSync(f.path, 'utf8'), file)
+    assert.deepEqual(readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')), [])
+    const conflict = f.command(['--tidy', '--stopped', '--agent', 'grok'])
+    assert.equal(conflict.status, 1)
+    assert.equal(conflict.stdout, 'Choose a valid scope.\n')
+    assert.equal(readFileSync(f.path, 'utf8'), file)
+    const invalid = f.command(['--tidy', '--agent', 'GROK!'])
+    assert.equal(invalid.status, 1)
+    assert.equal(invalid.stdout, 'Choose a valid scope.\n')
+    assert.equal(readFileSync(f.path, 'utf8'), file)
+  })
+})
+
+test('terminal A previews stopped blocks on the first press and archives them on the second', () => {
+  tidyFixture(f => {
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c331', 'Old ended', 'ended', 73)}\n${f.block('a1b2c332', 'Active', 'working', 1, '- [~] Working')}`)
+    const once = execFileSync(process.execPath, [join(f.dir, 'agent-board.mjs'), '--keys', 'A'], { env: { ...process.env, NO_COLOR: '1' }, encoding: 'utf8', timeout: 5000 })
+    assert.match(once, /Preview: 1 block would be archived\./)
+    assert.match(once, /Press A again to confirm the archive/)
+    assert.ok(readFileSync(f.path, 'utf8').includes('Old ended'))
+    const twice = execFileSync(process.execPath, [join(f.dir, 'agent-board.mjs'), '--keys', 'A A'], { env: { ...process.env, NO_COLOR: '1' }, encoding: 'utf8', timeout: 5000 })
+    assert.match(twice, /Archived 1 block\./)
+    const after = readFileSync(f.path, 'utf8')
+    assert.ok(!after.includes('Old ended') && after.includes('Active'), after)
+  })
+})
+
 test('--tidy with archive saved and task not removed (simulated failure), then tidy again: one entry, not two', () => {
   tidyFixture(f => {
     const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
