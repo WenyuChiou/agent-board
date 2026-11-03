@@ -36,6 +36,7 @@ const summaries = [
     "retry": "Retry after fixing the conflicting files: {command}",
     "skillOnly": "board skill only; automatic reporting is unavailable",
     "claude": "connects through its plugin",
+    "connector": "managed by the Claude Code plugin connector; keeps its board at {progress}",
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
     "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin <full path to codex>, then run it again with --apply (in the Codex CLI, /hooks also works). Then start a new session.",
@@ -52,6 +53,7 @@ const summaries = [
     "retry": "修正衝突的檔案後重試：{command}",
     "skillOnly": "僅提供看板技能；尚無自動回報功能",
     "claude": "透過外掛接上看板",
+    "connector": "由 Claude Code 外掛的連接器管理；保留看板 {progress}",
     "next": "接下來：",
     "apply": "套用這些變更：{command}",
     "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin <codex 的完整路徑> 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。然後開始新的工作階段。",
@@ -68,6 +70,7 @@ const summaries = [
     "retry": "修复冲突的文件后重试：{command}",
     "skillOnly": "仅提供看板技能；暂无自动报告功能",
     "claude": "通过插件接上看板",
+    "connector": "由 Claude Code 插件的连接器管理；保留看板 {progress}",
     "next": "接下来：",
     "apply": "应用这些更改：{command}",
     "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} --codex-trust --codex-bin <codex 的完整路径> 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。然后开始新的会话。",
@@ -148,7 +151,10 @@ const main = () => {
       for (const line of (result.stderr ?? '').trim().split(/\r?\n/).reverse()) {
         let error
         try { error = JSON.parse(line)?.error } catch {}
-        if (error !== null && typeof error === 'object' && typeof error.code === 'string' && typeof error.message === 'string') fail('SETUP_FAILED', error.message, { agent, cause: error.code })
+        if (error !== null && typeof error === 'object' && typeof error.code === 'string' && typeof error.message === 'string') {
+          if (error.code === 'INVALID_CONNECT_RECORD') fail(error.code, error.message, { agent })
+          fail('SETUP_FAILED', error.message, { agent, cause: error.code })
+        }
       }
       fallback()
     }
@@ -172,17 +178,19 @@ const main = () => {
   const setupCommand = extra => [command || nodeCommand(fileURLToPath(import.meta.url)), ...common.map(quote), ...extra.map(quote)].join(' ')
   const lines = selected.map((agent, i) => {
     const plan = results[i]
-    const status = plan.conflicts.length ? words('skipped', { files: plan.conflicts.join(', '), command: setupCommand(['--agent', agent, '--apply']) })
+    const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.join(', '), command: setupCommand(['--agent', agent, '--apply']) })
       : !plan.changes.length ? words('ready') : words(apply ? 'applied' : 'preview', { count: plan.changes.length })
-    const capability = !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
+    const capability = plan.managedBy !== 'connector' && !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
     return `${names[agent]}: ${status}${capability}`
   })
   if (hasClaude) lines.push(`Claude Code: ${words('claude')}`)
   const steps = []
-  const boardCommand = available.length ? nodeCommand(join(results[selected.indexOf(available[0])].data, 'agent-board.mjs')) : ''
+  const boardPlan = available.length ? results[selected.indexOf(available[0])] : null
+  const boardCommand = boardPlan ? nodeCommand(boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs')) : ''
   if (!apply && available.some(agent => plans[selected.indexOf(agent)].changes.length)) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
   for (const agent of available) {
     const plan = results[selected.indexOf(agent)]
+    if (plan.managedBy === 'connector') continue
     steps.push(words(agent === 'codex' ? 'codex' : plan.capabilities.lifecycle === 'adapter-pending' ? 'skill' : 'reload', { host: names[agent], command: boardCommand }))
   }
   for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))

@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test } from 'node:test'
@@ -427,6 +427,11 @@ test('setup preserves malformed BOM-prefixed Codex hooks when it refuses install
 
 const setupAgent = (f, ...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
 
+const homeSnapshot = home => Object.fromEntries(readdirSync(home, { recursive: true, withFileTypes: true }).map(entry => {
+  const path = join(entry.parentPath, entry.name)
+  return [path.slice(home.length), entry.isDirectory() ? 'directory' : { bytes: readFileSync(path).toString('base64'), mtimeMs: statSync(path).mtimeMs }]
+}))
+
 test('setup prints a plain summary with each agent and the next steps, and --json keeps today\'s JSON', () => fixture(f => {
   const installer = readFileSync(resolve('scripts/setup-agent.mjs'), 'utf8')
   const start = installer.indexOf('const summaries = ') + 'const summaries = '.length
@@ -707,6 +712,204 @@ const jsonHosts = [
   ['antigravity', '.gemini/config/hooks.json', 'Antigravity'],
   ['openclaw', '.openclaw/openclaw.json', 'OpenClaw'],
 ]
+
+test('Antigravity setup recreates owned config and standalone files that went missing', () => fixture(f => {
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const antigravitySkill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
+  const installed = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  unlinkSync(config)
+  unlinkSync(antigravitySkill)
+
+  const preview = f.install('--agent', 'antigravity')
+  assert.equal(preview.status, 0, preview.stderr)
+  const plan = JSON.parse(preview.stdout)
+  assert.deepEqual(plan.conflicts, [])
+  assert.equal(plan.changes.find(change => change.file === config)?.action, 'create')
+  assert.equal(plan.changes.find(change => change.file === antigravitySkill)?.action, 'create')
+  assert.equal(existsSync(config), false)
+  assert.equal(existsSync(antigravitySkill), false)
+
+  const applied = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.ok(JSON.parse(readFileSync(config, 'utf8'))['agent-board-local'])
+  assert.deepEqual(readFileSync(antigravitySkill), readFileSync(f.skill))
+}))
+
+test('Antigravity setup recreates its missing hook entry without changing unrelated definitions', () => fixture(f => {
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const foreign = { 'foreign-hooks': { PreInvocation: [{ type: 'command', command: 'synthetic-foreign', timeout: 5 }] } }
+  f.save(config, `${JSON.stringify(foreign, null, 2)}\n`)
+  const installed = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const withoutOwned = JSON.parse(readFileSync(config, 'utf8'))
+  delete withoutOwned['agent-board-local']
+  const missing = `${JSON.stringify(withoutOwned, null, 2)}\n`
+  f.save(config, missing)
+
+  const preview = f.install('--agent', 'antigravity')
+  assert.equal(preview.status, 0, preview.stderr)
+  const plan = JSON.parse(preview.stdout)
+  assert.deepEqual(plan.conflicts, [])
+  assert.deepEqual(plan.changes.find(change => change.file === config), { file: config, action: 'create' })
+  assert.equal(readFileSync(config, 'utf8'), missing)
+
+  const applied = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  const restored = JSON.parse(readFileSync(config, 'utf8'))
+  assert.deepEqual(restored['foreign-hooks'], foreign['foreign-hooks'])
+  assert.ok(restored['agent-board-local'])
+}))
+
+test('Antigravity removal finishes when owned files and hook entries are already gone', () => fixture(f => {
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const antigravitySkill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
+  const manifest = join(f.root, 'install-antigravity.json')
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const foreign = { 'foreign-hooks': { Stop: [{ type: 'command', command: 'synthetic-foreign', timeout: 5 }] } }
+  f.save(config, `${JSON.stringify(foreign, null, 2)}\n`)
+  const installed = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  unlinkSync(antigravitySkill)
+  const withoutOwned = JSON.parse(readFileSync(config, 'utf8'))
+  delete withoutOwned['agent-board-local']
+  const missingGroup = `${JSON.stringify(withoutOwned, null, 2)}\n`
+  f.save(config, missingGroup)
+
+  const removed = f.command(['--codex-remove', '--agent', 'antigravity', '--apply'])
+  assert.equal(removed.status, 0, removed.stderr)
+  const result = JSON.parse(removed.stdout)
+  assert.equal(result.applied, true)
+  assert.deepEqual(result.conflicts, [])
+  assert.ok(result.alreadyGone.includes(antigravitySkill), removed.stdout)
+  assert.ok(result.alreadyGone.includes(`${config}:agent-board-local`), removed.stdout)
+  assert.match(result.notice, /already gone/i)
+  assert.ok(result.notice.includes(antigravitySkill), result.notice)
+  assert.ok(result.notice.includes(`${config}:agent-board-local`), result.notice)
+  assert.ok(!result.changes.some(change => change.file === antigravitySkill || change.file === config), removed.stdout)
+  for (const file of [f.script, worker, f.skill, manifest]) assert.equal(existsSync(file), false, file)
+  assert.equal(readFileSync(config, 'utf8'), missingGroup)
+  assert.ok(existsSync(f.progress))
+}))
+
+test('Antigravity setup still reports a user-edited owned file as a conflict', () => fixture(f => {
+  const antigravitySkill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
+  const installed = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const edited = `${readFileSync(antigravitySkill, 'utf8')}Synthetic user edit\n`
+  f.save(antigravitySkill, edited)
+
+  const preview = f.install('--agent', 'antigravity')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.ok(JSON.parse(preview.stdout).conflicts.includes(antigravitySkill), preview.stdout)
+  const applied = f.install('--agent', 'antigravity', '--apply')
+  assert.notEqual(applied.status, 0)
+  assert.ok(JSON.parse(applied.stdout).conflicts.includes(antigravitySkill), applied.stdout)
+  assert.equal(readFileSync(antigravitySkill, 'utf8'), edited)
+}))
+
+test('setup hashes foreign hook entries and restores a missing owned hook beside them', () => fixture(f => {
+  const foreign = { hooks: [{ type: 'command', command: 'synthetic-foreign-stop --token synthetic-private-value' }] }
+  f.save(f.hooks, JSON.stringify({ hooks: { Stop: [foreign] } }))
+  const installed = f.install('--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const manifest = readFileSync(join(f.root, 'install-codex.json'), 'utf8')
+  assert.ok(!manifest.includes('synthetic-private-value'))
+  assert.ok(!manifest.includes(JSON.stringify(foreign)))
+  assert.deepEqual(JSON.parse(manifest).foreignGroups.Stop, [createHash('sha256').update(JSON.stringify(foreign)).digest('hex')])
+  const config = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  const owned = config.hooks.Stop[1]
+  config.hooks.Stop = [foreign]
+  f.save(f.hooks, JSON.stringify(config))
+  const preview = f.install()
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts, [])
+  assert.equal(JSON.parse(preview.stdout).changes.find(change => change.file === f.hooks)?.action, 'create')
+  const applied = f.install('--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.Stop, [foreign, owned])
+  f.save(f.hooks, JSON.stringify(config))
+  const removed = f.command(['--codex-remove', '--apply'])
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  assert.ok(JSON.parse(removed.stdout).alreadyGone.includes(`${f.hooks}:Stop`))
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.Stop, [foreign])
+}))
+
+test('removal keeps an ambiguous foreign hook when an older record has no foreign history', () => fixture(f => {
+  const foreign = { hooks: [{ type: 'command', command: 'synthetic-foreign-stop' }] }
+  f.save(f.hooks, JSON.stringify({ hooks: { Stop: [foreign] } }))
+  assert.equal(f.install('--apply').status, 0)
+  const manifestFile = join(f.root, 'install-codex.json')
+  const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+  delete manifest.foreignGroups
+  f.save(manifestFile, JSON.stringify(manifest))
+  const config = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  config.hooks.Stop = [foreign]
+  f.save(f.hooks, JSON.stringify(config))
+
+  const removed = f.command(['--codex-remove', '--apply'])
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  assert.ok(JSON.parse(removed.stdout).alreadyGone.includes(`${f.hooks}:Stop`))
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.Stop, [foreign])
+  assert.equal(existsSync(manifestFile), false)
+}))
+
+test('removal refuses an owned array hook the user edited when the record has foreign history', () => fixture(f => {
+  const foreign = { hooks: [{ type: 'command', command: 'synthetic-foreign-stop' }] }
+  f.save(f.hooks, JSON.stringify({ hooks: { Stop: [foreign] } }))
+  assert.equal(f.install('--apply').status, 0)
+  const config = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  config.hooks.Stop[1].hooks[0].timeout = 99
+  const edited = JSON.stringify(config)
+  f.save(f.hooks, edited)
+  const files = readdirSync(f.root).sort()
+
+  const removed = f.command(['--codex-remove', '--apply'])
+  assert.notEqual(removed.status, 0)
+  const plan = JSON.parse(removed.stdout)
+  assert.ok(plan.conflicts.includes(`${f.hooks}:Stop`), removed.stdout)
+  assert.ok(!(plan.alreadyGone ?? []).includes(`${f.hooks}:Stop`))
+  assert.equal(readFileSync(f.hooks, 'utf8'), edited)
+  assert.deepEqual(readdirSync(f.root).sort(), files)
+}))
+
+test('setup refuses an edited owned array hook even when its command was completely replaced', () => fixture(f => {
+  const installed = f.install('--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const config = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  config.hooks.Stop[0].hooks[0].command = 'synthetic-personal-replacement'
+  const edited = JSON.stringify(config)
+  f.save(f.hooks, edited)
+  const applied = f.install('--apply')
+  assert.notEqual(applied.status, 0)
+  assert.ok(JSON.parse(applied.stdout).conflicts.includes(`${f.hooks}:Stop`))
+  assert.equal(readFileSync(f.hooks, 'utf8'), edited)
+}))
+
+test('setup restores missing OpenClaw and DeepSeek configuration entries while keeping unrelated settings', async () => {
+  for (const agent of ['openclaw', 'deepseek']) await fixture(f => {
+    const installed = f.install('--agent', agent, '--apply')
+    assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+    const file = agent === 'openclaw' ? join(f.home, '.openclaw', 'openclaw.json') : join(f.home, '.dsh', 'cordis.patch.yml')
+    unlinkSync(file)
+    const preview = f.install('--agent', agent)
+    assert.equal(preview.status, 0, preview.stderr + preview.stdout)
+    assert.deepEqual(JSON.parse(preview.stdout).conflicts, [], agent)
+    assert.equal(JSON.parse(preview.stdout).changes.find(change => change.file === file)?.action, 'create', agent)
+    const restored = f.install('--agent', agent, '--apply')
+    assert.equal(restored.status, 0, restored.stderr + restored.stdout)
+    if (agent === 'openclaw') {
+      const config = JSON.parse(readFileSync(file, 'utf8'))
+      delete config.plugins.entries['agent-board-local']
+      config.synthetic = 'keep me'
+      f.save(file, JSON.stringify(config))
+    } else f.save(file, '- synthetic-foreign-entry\n')
+    const reapplied = f.install('--agent', agent, '--apply')
+    assert.equal(reapplied.status, 0, reapplied.stderr + reapplied.stdout)
+    assert.ok(readFileSync(file, 'utf8').includes(agent === 'openclaw' ? 'keep me' : 'synthetic-foreign-entry'))
+    assert.ok(readFileSync(file, 'utf8').includes('agent-board-local'))
+  })
+})
 
 test('setup accepts a UTF-8 BOM in the existing hook config of each JSON host without losing foreign data', async () => {
   for (const [host, relative] of jsonHosts) await fixture(f => {
@@ -3427,6 +3630,23 @@ test('OpenClaw metadata setup preserves other plugins and refuses edited or disa
   assert.deepEqual(removed.plugins.load.paths, ['other.mjs'])
 }))
 
+test('OpenClaw re-apply refuses a user-removed plugin path or allowlist entry without writing', async () => {
+  for (const editedPart of ['path', 'allow']) await fixture(f => {
+    const file = join(f.home, '.openclaw', 'openclaw.json')
+    f.save(file, JSON.stringify({ plugins: { allow: ['user-only'] } }))
+    assert.equal(f.install('--agent', 'openclaw', '--apply').status, 0)
+    const config = JSON.parse(readFileSync(file, 'utf8'))
+    if (editedPart === 'path') config.plugins.load.paths = []
+    else config.plugins.allow = ['user-only']
+    f.save(file, JSON.stringify(config))
+    const before = homeSnapshot(f.home)
+    const result = f.install('--agent', 'openclaw', '--apply')
+    assert.notEqual(result.status, 0, editedPart)
+    assert.ok(JSON.parse(result.stdout).conflicts.includes(`${file}:agent-board-local`), editedPart)
+    assert.deepEqual(homeSnapshot(f.home), before, editedPart)
+  })
+})
+
 test('OpenClaw native metadata callbacks fence stale runs and never request conversation access', async () => {
   const home = mkdtempSync(join(tmpdir(), 'openclaw-status-'))
   try {
@@ -5493,6 +5713,229 @@ const legacyConnect = (f, progress, mode = 'connect', lang = 'en') => {
 // skills as code points; read those back before looking for a folder name (as legacy-connect tests do).
 const decoded = text => text.replace(/String\.fromCodePoint\(([\d,]+)\)/g, (_, codes) => String.fromCodePoint(...codes.split(',').map(Number)))
 
+test('setup installs its hook when the connector did not configure that agent', async () => {
+  for (const hook of ['failed', 'unreadable', 'tooOld', null]) await fixture(f => {
+    const progress = join(f.home, '.claude', 'progress.md')
+    const record = { version: 1, revision: 1, disabled: false, owned: {}, notified: [], connectedProgress: progress, setup: { agents: [{ agent: 'codex', label: 'Codex', hook, board: 'none' }], problems: [], node: process.version } }
+    f.save(join(f.root, 'legacy-connect.json'), JSON.stringify(record))
+    const result = f.install('--agent', 'codex', '--apply')
+    assert.equal(result.status, 0, `${hook}: ${result.stderr}${result.stdout}`)
+    const plan = JSON.parse(result.stdout)
+    assert.equal(plan.managedBy, undefined, String(hook))
+    assert.equal(plan.progress, progress, String(hook))
+    assert.ok(JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.Stop.length, String(hook))
+  })
+})
+
+test('setup keeps each installer\'s board when the connector and independent installer coexist', () => fixture(f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const before = JSON.parse(f.install('--agent', 'antigravity').stdout)
+  mkdirSync(join(f.home, '.codex'), { recursive: true })
+  f.save(join(f.home, '.gemini', 'settings.json'), '{}')
+  const progress = join(f.home, '.claude', 'progress.md')
+  legacyConnect(f, progress)
+
+  for (const apply of [false, true]) {
+    const result = setupAgent(f, '--json', ...(apply ? ['--apply'] : []))
+    assert.equal(result.status, 0, result.stderr + result.stdout)
+    const plans = JSON.parse(result.stdout).plans
+    for (const agent of ['codex', 'gemini']) {
+      const plan = plans.find(one => one.agent === agent)
+      assert.equal(plan.managedBy, 'connector', agent)
+      assert.equal(plan.progress, progress, agent)
+      assert.equal(plan.script, join(dirname(progress), 'agent-board.mjs'), agent)
+      assert.ok(plan.notice.includes(progress), agent)
+      if (apply) assert.equal(plan.applied, true, agent)
+    }
+    const antigravity = plans.find(one => one.agent === 'antigravity')
+    assert.equal(antigravity.managedBy, undefined)
+    assert.equal(antigravity.progress, f.progress)
+    assert.deepEqual(antigravity.changes, before.changes)
+    assert.deepEqual(antigravity.conflicts, before.conflicts)
+  }
+  const explicit = setupAgent(f, '--agent', 'codex', '--progress-file', progress, '--json')
+  assert.equal(explicit.status, 0, explicit.stderr + explicit.stdout)
+  const wrong = setupAgent(f, '--agent', 'codex', '--progress-file', f.progress, '--json')
+  assert.equal(wrong.status, 1)
+  assert.equal(JSON.parse(wrong.stderr).error.cause, 'SHARED_BOARD_PATH_CONFLICT')
+}))
+
+test('setup explains damaged connector records without changing the home and the recovery works', async () => {
+  const sentence = 'agent-board: setup cannot read ~/.agent-board/legacy-connect.json and changed nothing. Move that file and, if present, ~/.agent-board/legacy-connect-authority out of ~/.agent-board, then run /progress connect in Claude Code again.'
+  for (const kind of ['invalid JSON', 'unsupported version', 'directory']) await fixture(f => {
+    const record = join(f.root, 'legacy-connect.json')
+    const authority = join(f.root, 'legacy-connect-authority')
+    f.save(authority, '1\n')
+    if (kind === 'directory') f.save(join(record, 'keep.txt'), 'synthetic directory contents')
+    else f.save(record, kind === 'invalid JSON' ? '{' : JSON.stringify({ version: 2 }))
+    const before = homeSnapshot(f.home)
+    for (const apply of [false, true]) {
+      const options = ['--agent', 'codex', '--lang', 'en', ...(apply ? ['--apply'] : [])]
+      const plain = setupAgent(f, ...options)
+      assert.equal(plain.status, 1, kind)
+      assert.equal(plain.stderr.trimEnd(), sentence, kind)
+      const json = setupAgent(f, ...options, '--json')
+      assert.equal(json.status, 1, kind)
+      assert.equal(JSON.parse(json.stderr).error.code, 'INVALID_CONNECT_RECORD', kind)
+      assert.equal(JSON.parse(json.stderr).error.message, sentence, kind)
+      assert.deepEqual(homeSnapshot(f.home), before, kind)
+    }
+    for (const [lang, hint] of [['zh-TW', '讀不懂'], ['zh-CN', '读不懂']]) {
+      const result = setupAgent(f, '--agent', 'codex', '--lang', lang)
+      assert.equal(result.status, 1, kind)
+      assert.ok(result.stderr.includes(hint), `${kind}: ${result.stderr}`)
+      assert.ok(result.stderr.includes('legacy-connect-authority'), result.stderr)
+      assert.deepEqual(homeSnapshot(f.home), before, kind)
+    }
+    renameSync(record, join(f.home, 'saved-connector-record'))
+    renameSync(authority, join(f.home, 'saved-connector-authority'))
+    const progress = join(f.home, '.claude', 'progress.md')
+    mkdirSync(dirname(progress), { recursive: true })
+    legacyConnect(f, progress)
+    assert.equal(JSON.parse(readFileSync(record, 'utf8')).version, 1, kind)
+    assert.equal(readFileSync(authority, 'utf8'), '1\n', kind)
+  })
+})
+
+test('setup previews the connector board without duplicate hooks or conflicts for its managed agents', () => fixture(f => {
+  for (const folder of ['.codex', '.cursor', '.gemini/antigravity', '.grok/sessions', '.config/muse', '.config/opencode', '.hermes']) mkdirSync(join(f.home, folder), { recursive: true })
+  const progress = join(f.home, '.claude', 'progress.md')
+  legacyConnect(f, progress)
+  const agents = ['codex', 'cursor', 'gemini', 'grok', 'muse', 'opencode', 'hermes', 'antigravity']
+  const files = [f.hooks, join(f.home, '.cursor', 'hooks.json'), join(f.home, '.gemini', 'settings.json'), join(f.home, '.grok', 'hooks', 'agent-board.json'), join(f.home, '.config', 'opencode', 'plugin', 'agent-board.js'), join(f.home, '.gemini', 'config', 'hooks.json')]
+  const before = files.map(file => readFileSync(file, 'utf8'))
+  const preview = setupAgent(f, '--agent', agents.join(','), '--json')
+  assert.equal(preview.status, 0, preview.stderr + preview.stdout)
+  const result = JSON.parse(preview.stdout)
+  assert.deepEqual(result.targets, agents)
+  for (const plan of result.plans) {
+    assert.equal(plan.progress, progress, plan.agent)
+    assert.equal(plan.managedBy, 'connector', plan.agent)
+    assert.deepEqual(plan.changes, [], plan.agent)
+    assert.deepEqual(plan.conflicts, [], plan.agent)
+  }
+  assert.deepEqual(files.map(file => readFileSync(file, 'utf8')), before)
+  for (const file of [f.progress, f.script, join(f.home, '.grok', 'hooks', 'agent-board-local.json'), join(f.home, '.config', 'opencode', 'plugins', 'agent-board-local.js')]) assert.equal(existsSync(file), false, file)
+  const summary = setupAgent(f, '--agent', 'antigravity')
+  assert.equal(summary.status, 0, summary.stderr)
+  assert.ok(summary.stdout.includes('managed by the Claude Code plugin connector'))
+  assert.ok(summary.stdout.includes(progress))
+  assert.ok(!summary.stdout.includes('--codex-trust'))
+}))
+
+test('after setup apply each connected hook delivers one synthetic event to the connector board', () => fixture(async f => {
+  for (const folder of ['.codex', '.cursor', '.gemini/antigravity', '.grok/sessions', '.config/muse']) mkdirSync(join(f.home, folder), { recursive: true })
+  const progress = join(f.home, '.claude', 'progress.md')
+  legacyConnect(f, progress)
+  const agents = ['codex', 'cursor', 'gemini', 'grok', 'muse', 'antigravity']
+  const applied = setupAgent(f, '--agent', agents.join(','), '--apply', '--json')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.equal(JSON.parse(applied.stdout).applied, true)
+  const definitions = [
+    ['codex', f.hooks, 'Stop'],
+    ['cursor', join(f.home, '.cursor', 'hooks.json'), 'afterAgentResponse'],
+    ['gemini', join(f.home, '.gemini', 'settings.json'), 'AfterAgent'],
+    ['grok', join(f.home, '.grok', 'hooks', 'agent-board.json'), 'Stop'],
+    ['muse', join(f.home, '.config', 'muse', 'settings.json'), 'Stop'],
+  ]
+  for (const [agent, file, event] of definitions) {
+    const groups = JSON.parse(readFileSync(file, 'utf8')).hooks[event]
+    assert.equal(groups.length, 1, agent)
+    const command = groups[0].command ?? groups[0].hooks[0].command
+    const id = `synthetic-connected-${agent}`
+    const fired = await fireCommand(f, command, JSON.stringify({ session_id: id, conversation_id: id, generation_id: 'synthetic-turn', hook_event_name: event, cwd: f.home, last_assistant_message: `Synthetic ${agent} report`, text: `Synthetic ${agent} report`, prompt_response: `Synthetic ${agent} report` }))
+    assert.equal(fired.status, 0, `${agent}: ${hookFailure(fired)}`)
+    const inbox = join(dirname(progress), 'progress-inbox')
+    const delivered = readdirSync(inbox).filter(name => name.startsWith(`${agent}-turn-`) && name.endsWith('.json'))
+    assert.equal(delivered.length, 1, agent)
+    assert.ok(readFileSync(join(inbox, delivered[0]), 'utf8').includes(id), agent)
+  }
+  const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))
+  assert.deepEqual(Object.keys(hooks), ['agent-board'])
+  const fired = await fireCommand(f, hooks['agent-board'].Stop[0].command, JSON.stringify({ conversationId: 'synthetic-connected-antigravity', cwd: f.home }))
+  assert.equal(fired.status, 0, hookFailure(fired))
+  assert.equal((readFileSync(progress, 'utf8').match(/<!-- auto .*agent=antigravity /g) ?? []).length, 1)
+  assert.ok(!existsSync(f.progress))
+  assert.ok(!existsSync(f.script))
+}))
+
+test('the npm launcher keeps a custom connector board after setup apply', () => fixture(f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
+  const progress = join(f.home, 'synthetic-selected-board', 'progress.md')
+  mkdirSync(dirname(progress), { recursive: true })
+  legacyConnect(f, progress)
+  f.save(progress, '## Synthetic project\n### Synthetic connector board\n- [ ] Retain this task\n')
+  const applied = setupAgent(f, '--agent', 'antigravity', '--apply', '--json')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  const launched = spawnSync(process.execPath, [resolve('bin/agent-board.mjs'), '--print'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(launched.status, 0, launched.stderr + launched.stdout)
+  assert.match(launched.stdout, /Synthetic connector board/)
+  assert.ok(!existsSync(f.progress))
+}))
+
+test('the npm launcher prefers the remembered connector board when an independent board also exists', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  f.save(f.progress, '## Independent project\n### Independent board\n- [ ] Keep this task\n')
+  mkdirSync(join(f.home, '.codex'), { recursive: true })
+  const progress = join(f.home, 'synthetic-connected-board', 'progress.md')
+  mkdirSync(dirname(progress), { recursive: true })
+  legacyConnect(f, progress)
+  f.save(progress, '## Connector project\n### Selected connector board\n- [ ] Keep this task\n')
+  assert.ok(existsSync(f.script))
+  const launched = spawnSync(process.execPath, [resolve('bin/agent-board.mjs'), '--print'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(launched.status, 0, launched.stderr + launched.stdout)
+  assert.match(launched.stdout, /Selected connector board/)
+  assert.doesNotMatch(launched.stdout, /Independent board/)
+}))
+
+test('a connector record written by an automatic probe uses its configured Claude directory', () => fixture(f => {
+  mkdirSync(join(f.home, '.codex'), { recursive: true })
+  f.env.CLAUDE_CONFIG_DIR = join(f.home, 'synthetic-claude-config')
+  mkdirSync(f.env.CLAUDE_CONFIG_DIR, { recursive: true })
+  const progress = join(f.env.CLAUDE_CONFIG_DIR, 'progress.md')
+  legacyConnect(f, progress, 'auto')
+  const record = JSON.parse(readFileSync(join(f.root, 'legacy-connect.json'), 'utf8'))
+  assert.equal(record.connectedProgress, undefined)
+  const result = setupAgent(f, '--agent', 'codex', '--json')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  const plan = JSON.parse(result.stdout).plans[0]
+  assert.equal(plan.managedBy, 'connector')
+  assert.equal(plan.progress, progress)
+  assert.equal(plan.script, join(dirname(progress), 'agent-board.mjs'))
+}))
+
+test('a disabled connector leaves fresh setup on the independent board', () => fixture(f => {
+  mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
+  const progress = join(f.home, '.claude', 'progress.md')
+  legacyConnect(f, progress)
+  legacyConnect(f, progress, 'remove')
+  const installed = setupAgent(f, '--agent', 'antigravity', '--apply', '--json')
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+  assert.equal(JSON.parse(installed.stdout).plans[0].progress, f.progress)
+  assert.ok(existsSync(f.progress))
+  assert.ok(existsSync(f.script))
+}))
+
+test('fresh setup still creates the independent progress file', () => fixture(f => {
+  const result = setupAgent(f, '--agent', 'antigravity', '--apply', '--json')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.equal(JSON.parse(result.stdout).plans[0].progress, f.progress)
+  assert.ok(existsSync(f.progress))
+}))
+
+test('Antigravity removal finishes when its owned config file is missing', () => fixture(f => {
+  const installed = f.install('--agent', 'antigravity', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  unlinkSync(config)
+  const removed = f.command(['--codex-remove', '--agent', 'antigravity', '--apply'])
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  assert.ok(JSON.parse(removed.stdout).alreadyGone.includes(config))
+  for (const file of [config, f.script, f.skill, join(f.root, 'install-antigravity.json')]) assert.equal(existsSync(file), false, file)
+  assert.ok(existsSync(f.progress))
+}))
+
 test('connection data roots distinguish POSIX apostrophes from encoded PowerShell quoting', async () => {
   const resolver = registerHooks({ resolve(specifier, context, next) {
     try { return next(specifier, context) } catch (error) {
@@ -5593,42 +6036,25 @@ test('Windows Antigravity hook commands start the verified Node directly and kee
   } finally { resolver.deregister() }
 })
 
-test('antigravity: setup-agent takes over a home the legacy connect hooked first', () => fixture(async f => {
+test('antigravity setup leaves an active connector as the owner through its next probe', () => fixture(async f => {
   mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
   legacyConnect(f, progress)
   const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
-  const previous = readFileSync(skill, 'utf8')
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const previous = readFileSync(skill, 'utf8'), hooksBefore = readFileSync(config, 'utf8')
   const installed = f.install('--agent', 'antigravity', '--apply')
   assert.equal(installed.status, 0, installed.stderr + installed.stdout)
-  assert.ok(!(installed.stderr + installed.stdout).includes('INSTALL_CONFLICT'))
-  const installerSkill = readFileSync(skill, 'utf8')
-  assert.notEqual(installerSkill, previous)
-  assert.equal(installerSkill, readFileSync(f.skill, 'utf8'))
-  const config = join(f.home, '.gemini', 'config', 'hooks.json')
-  assert.ok(JSON.parse(readFileSync(config, 'utf8'))['agent-board-local'])
-  legacyConnect(f, progress)
-  const hooks = JSON.parse(readFileSync(config, 'utf8'))
-  assert.equal(hooks['agent-board'], undefined)
-  assert.ok(hooks['agent-board-local'])
-  assert.equal(readFileSync(skill, 'utf8'), installerSkill)
-  const runner = legacyConnect(f, progress, 'status')
-  const status = spawnSync(process.execPath, [runner, '--legacy-connect-request', JSON.stringify({ mode: 'status', home: f.home, progress, lang: 'en', node: process.version })], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
-  assert.equal(status.status, 0, status.stderr + status.stdout)
-  const agent = JSON.parse(status.stdout).state.setup.agents.find(one => one.agent === 'antigravity')
-  assert.ok(agent)
-  assert.notEqual(agent.hook, 'failed')
-  assert.notEqual(agent.board, 'failed')
-  const doctor = f.command(['--codex-doctor', '--agent', 'antigravity'])
+  assert.equal(JSON.parse(installed.stdout).managedBy, 'connector')
+  assert.equal(readFileSync(skill, 'utf8'), previous)
+  assert.equal(readFileSync(config, 'utf8'), hooksBefore)
+  assert.ok(!existsSync(f.script))
+  legacyConnect(f, progress, 'auto')
+  assert.equal(readFileSync(skill, 'utf8'), previous)
+  assert.equal(readFileSync(config, 'utf8'), hooksBefore)
+  const doctor = spawnSync(process.execPath, [join(dirname(progress), 'agent-board.mjs'), '--home', f.home, '--codex-doctor', '--agent', 'antigravity'], { env: f.env, encoding: 'utf8', windowsHide: true })
   assert.equal(doctor.status, 0, doctor.stderr + doctor.stdout)
-  assert.equal(JSON.parse(doctor.stdout).reportHook, 'installer')
-  // The connect never records setup-agent's skill as its own output, and its remove leaves it.
-  const { owned } = JSON.parse(readFileSync(join(f.home, '.agent-board', 'legacy-connect.json'), 'utf8'))
-  const installerHash = createHash('sha256').update(installerSkill).digest('hex')
-  assert.ok(!Object.values(owned).includes(installerHash), JSON.stringify(owned))
-  legacyConnect(f, progress, 'remove')
-  assert.equal(readFileSync(skill, 'utf8'), installerSkill)
-  assert.ok(JSON.parse(readFileSync(config, 'utf8'))['agent-board-local'])
+  assert.equal(JSON.parse(doctor.stdout).reportHook, 'connect')
 }))
 
 test('antigravity connect: where setup-agent hooked Antigravity first, the connect adds no definition and no worker', () => fixture(async f => {
@@ -5648,7 +6074,7 @@ test('antigravity connect: where setup-agent hooked Antigravity first, the conne
   assert.notEqual(agent.hook, 'failed')
 }))
 
-test("antigravity: setup-agent takes over the connect's skill for a progress file outside the default folder", () => fixture(async f => {
+test("antigravity: setup keeps the connector's skill for a progress file outside the default folder", () => fixture(async f => {
   mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
   const progress = join(f.home, 'synthetic-progress-folder', 'progress.md')
   mkdirSync(dirname(progress), { recursive: true })
@@ -5659,10 +6085,12 @@ test("antigravity: setup-agent takes over the connect's skill for a progress fil
   const installed = f.install('--agent', 'antigravity', '--apply')
   assert.equal(installed.status, 0, installed.stderr + installed.stdout)
   assert.ok(!(installed.stderr + installed.stdout).includes('INSTALL_CONFLICT'))
-  assert.equal(readFileSync(skill, 'utf8'), readFileSync(f.skill, 'utf8'))
+  assert.ok(decoded(readFileSync(skill, 'utf8')).includes('synthetic-progress-folder'))
+  assert.equal(JSON.parse(installed.stdout).progress, progress)
+  assert.ok(!existsSync(f.script))
 }))
 
-test("antigravity: setup-agent takes over the connect's skill for a progress file that CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names", async () => {
+test("antigravity: setup keeps the connector board that CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names", async () => {
   for (const name of ['CLAUDE_CONFIG_DIR', 'CLAUDE_PROGRESS_FILE']) await fixture(async f => {
     mkdirSync(join(f.home, '.gemini', 'antigravity'), { recursive: true })
     const progress = join(f.home, 'synthetic-config-folder', 'progress.md')
@@ -5675,13 +6103,15 @@ test("antigravity: setup-agent takes over the connect's skill for a progress fil
     f.save(record, JSON.stringify(rest))
     const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
     const install = (extraEnv, ...args) => spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--agent', 'antigravity', '--apply', ...args], { env: { ...f.env, ...extraEnv }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
-    // Without the variable nothing marks the skill as the connect's, so setup-agent refuses it.
-    const refused = install({}, '--json')
-    assert.match(refused.stderr + refused.stdout, /INSTALL_CONFLICT/, name)
+    const withoutVariable = install({})
+    assert.equal(withoutVariable.status, 0, `${name}: ${withoutVariable.stderr}${withoutVariable.stdout}`)
+    assert.equal(JSON.parse(withoutVariable.stdout).progress, join(f.home, '.claude', 'progress.md'), name)
     const installed = install({ [name]: name === 'CLAUDE_CONFIG_DIR' ? dirname(progress) : progress })
     assert.equal(installed.status, 0, `${name}: ${installed.stderr}${installed.stdout}`)
     assert.ok(!(installed.stderr + installed.stdout).includes('INSTALL_CONFLICT'), name)
-    assert.equal(readFileSync(skill, 'utf8'), readFileSync(f.skill, 'utf8'), name)
+    assert.equal(JSON.parse(installed.stdout).progress, progress, name)
+    assert.ok(decoded(readFileSync(skill, 'utf8')).includes('synthetic-config-folder'), name)
+    assert.ok(!existsSync(f.script), name)
   })
 })
 

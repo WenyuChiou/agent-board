@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 
@@ -215,10 +215,17 @@ for (let i = 0; i < args.length; i++) {
   dataDir = value
 }
 const beside = path => join(dirname(resolve(path)), 'agent-board.mjs')
+const connectorProgress = (() => {
+  try {
+    const record = JSON.parse(readFileSync(join(home, '.agent-board', 'legacy-connect.json'), 'utf8'))
+    return record.version === 1 && record.disabled === false && typeof record.connectedProgress === 'string' && isAbsolute(record.connectedProgress) ? record.connectedProgress : undefined
+  } catch { return undefined }
+})()
 const candidates = [
   ...(flag('--progress-file') ? [beside(flag('--progress-file'))] : []),
   ...(dataDir ? [join(resolve(dataDir), 'agent-board.mjs')] : [
     ...(process.env.CLAUDE_PROGRESS_FILE ? [beside(process.env.CLAUDE_PROGRESS_FILE)] : []),
+    ...(connectorProgress ? [beside(connectorProgress)] : []),
     join(home, '.agent-board', 'agent-board.mjs'),
     join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'agent-board.mjs'),
   ]),

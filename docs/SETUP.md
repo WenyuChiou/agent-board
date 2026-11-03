@@ -33,8 +33,8 @@ still reports `applied: true`, so scripts should check `plans[].conflicts`. Clau
 detection keeps empty `targets` and `plans` and
 `applied` false. Other setup errors give one sentence with a next step; `--json` prints
 them as one JSON line on stderr, `{"error":{"code":"...","message":"..."}}`, with
-codes `INVALID_TARGETS`, `MISSING_ARGUMENT`, `SETUP_FAILED` (with the failing `agent`
-and its `cause`) or `UNKNOWN`. Conflicts stay in `plans` on stdout with no JSON stderr
+codes `INVALID_TARGETS`, `MISSING_ARGUMENT`, `INVALID_CONNECT_RECORD`, `SETUP_FAILED`
+(with the failing `agent` and its `cause`) or `UNKNOWN`. Conflicts stay in `plans` on stdout with no JSON stderr
 line. A leading UTF-8 byte-order mark in a JSON host config is read; setup writes that
 file back without it, and refuses malformed JSON whether or not it starts with one.
 
@@ -49,6 +49,8 @@ Independent setup needs neither Claude Code nor another model. It creates one sh
 Use `--progress-file /absolute/path/progress.md` to select another existing local board.
 Each target has an ownership manifest; shared files remain while another target needs
 them. Only an agent's own proven native id may report its task steps.
+With an active Claude Code plugin connector, setup keeps its selected board and leaves
+agents it already manages to that connector, without adding another hook or board script.
 
 The installed skill opens the interactive web board. Reopen with:
 
@@ -163,6 +165,7 @@ lasting `agent-board` command in place of `npx`.
 
 Every other call (`--serve`, `--watch`, `--chat`, `--html`, or none to print the board)
 runs the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
+the board the Claude Code plugin's connector last connected, else
 `~/.agent-board/agent-board.mjs`, else the Claude Code plugin's beside
 `~/.claude/progress.md`. It never runs a second copy from the package, which would restart
 the page the installed copy serves. When the installed copy comes from another release,
@@ -247,9 +250,7 @@ The Claude plugin's `/progress connect` writes the same four commands under its 
 `agent-board` definition, next to the board skill, and runs them through `progress-hook.mjs`
 beside its progress file. Where this installer's `agent-board-local` definition is there,
 the connect writes none and takes out one it wrote before. When this installer runs after
-the connect, both definitions report until the connect next runs (the next Claude Code
-session, or `/progress connect`). This installer takes over the skill file the connect
-wrote, and the connect then leaves this installer's skill as it is. While a host has the
+an active connect, that connector keeps managing Antigravity's hook and skill. While a host has the
 skill but neither definition,
 `--codex-doctor --agent antigravity` says `skill only, no report hook`.
 

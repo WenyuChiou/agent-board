@@ -35,6 +35,7 @@ export const EN: Strings = {
   codexTrustNone: "Codex: the board's hooks are already trusted. Start a new Codex session.",
   codexPrivacy: 'Keeps only session, turn, state and explicit task summaries. Never reads transcripts, stores hook prompts, tool inputs or replies, or sends content to another model.',
   codexDoctor: 'Checks files, hook definitions and hook trust, not hook execution. Verify CLI and desktop separately.',
+  setupAlreadyGone: (files: string): string => `Already gone: ${files}.`,
   setupSummary: {
     "preview": "would update {count} setup files",
     "applied": "updated {count} setup files",
@@ -43,6 +44,7 @@ export const EN: Strings = {
     "retry": "Retry after fixing the conflicting files: {command}",
     "skillOnly": "board skill only; automatic reporting is unavailable",
     "claude": "connects through its plugin",
+    "connector": "managed by the Claude Code plugin connector; keeps its board at {progress}",
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
     "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin <full path to codex>, then run it again with --apply (in the Codex CLI, /hooks also works). Then start a new session.",
@@ -54,6 +56,7 @@ export const EN: Strings = {
   setupErrorMissingValue: 'agent-board: a setup option is missing its value. Options such as --agent, --home and --data-dir each take one; add it after the option and run setup again.',
   setupErrorConfig: (host: string): string => `agent-board: setup cannot read or safely update the settings for ${host}, so it left them as they were. Fix or move that agent's config file, then run setup again.`,
   setupErrorRecord: (file: string): string => `agent-board: setup cannot read ${file}, its own record of an earlier setup, so it left everything as it was. Move that file out of the folder where setup keeps its data, then run setup again.`,
+  setupErrorConnectRecord: 'agent-board: setup cannot read ~/.agent-board/legacy-connect.json and changed nothing. Move that file and, if present, ~/.agent-board/legacy-connect-authority out of ~/.agent-board, then run /progress connect in Claude Code again.',
   setupErrorConflict: (host: string): string => `agent-board: setup cannot safely update some of the files for ${host}, so it changed nothing. Run setup again without --apply to list them under "conflicts", then fix or move those files.`,
   setupErrorUnsafePath: 'agent-board: setup cannot write its hook commands because a path it needs contains a quote, backtick, $ or % character. Put the setup data folder somewhere else with --data-dir, then run setup again.',
   setupErrorBoardPath: 'agent-board: another agent was set up with a different progress file, and setup keeps one shared board, so nothing was changed. Run setup again with --progress-file set to the file your other agents use.',
