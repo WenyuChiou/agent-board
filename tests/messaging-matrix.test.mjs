@@ -87,6 +87,13 @@ test('the messaging matrix is generated from each receiver record and CI fails w
       for (const file of matrixFiles) assert.match(read(join(directory, file)), /Synthetic Host \| Synthetic IDE \| 2 \| &#91;P4&#93; \| Implemented/)
       assert.deepEqual(connectors.map(file => read(join(directory, 'scripts', file))), before)
 
+      mkdirSync(join(directory, 'hooks'))
+      writeFileSync(join(directory, 'hooks/typed.ts'), "export const messagingReceiver: { host: string, tier: number, primitive: string, isImplemented: boolean, surfaces: { name: string, evidence: null }[] } = { host: 'Typed Host', tier: 3, primitive: '[P3]', isImplemented: true, surfaces: [{ name: 'CLI', evidence: null }] }\n")
+      writeFileSync(join(directory, 'scripts/named.mjs'), "const messagingReceiver = { host: 'Named Host', tier: 3, primitive: '[P3]', isImplemented: true, surfaces: [{ name: 'CLI', evidence: null }] }\nexport { messagingReceiver }\n")
+      assert.equal(run(directory, '--check', outside).status, 1)
+      assert.equal(run(directory, '--write', outside).status, 0)
+      for (const file of matrixFiles) assert.match(read(join(directory, file)), /Named Host \| CLI[^]*Typed Host \| CLI/)
+
       const path = join(directory, 'README.md')
       writeFileSync(path, read(path).replace(end, ''))
       const bad = run(directory, '--write', outside)
@@ -99,14 +106,21 @@ test('the messaging matrix is generated from each receiver record and CI fails w
 test('a receiver record marks a surface Verified only when it names a live-run file that exists', () => fixture(directory => {
   const evidence = 'docs/validation/2026-11-03-synthetic-host-live.md'
   writeFileSync(join(directory, evidence), '# Synthetic live-run fixture, not native evidence\n')
-  mkdirSync(join(directory, 'docs/validation/2026-11-03-directory-live.md'))
+  mkdirSync(join(directory, 'docs/validation/2026-11-03-synthetic-host-directory-live.md'))
+  for (const name of ['synthetic-host-spike', 'codex-live', 'synthetic-hostile-live']) writeFileSync(join(directory, `docs/validation/2026-11-03-${name}.md`), '# Fixture\n')
+  writeFileSync(join(directory, 'docs/validation/2026-99-99-synthetic-host-live.md'), '# Fixture\n')
   const record = {
     host: 'Synthetic Host', tier: 1, primitive: '[P1]', isImplemented: true,
     surfaces: [
       { name: 'CLI', evidence },
       { name: 'Desktop App', evidence: null },
-      { name: 'IDE', evidence: 'docs/validation/2026-11-03-missing-live.md' },
-      { name: 'Directory', evidence: 'docs/validation/2026-11-03-directory-live.md' },
+      { name: 'IDE', evidence: 'docs/validation/2026-11-03-synthetic-host-missing-live.md' },
+      { name: 'Directory', evidence: 'docs/validation/2026-11-03-synthetic-host-directory-live.md' },
+      { name: 'Not live', evidence: 'docs/validation/2026-11-03-synthetic-host-spike.md' },
+      { name: 'Other host', evidence: 'docs/validation/2026-11-03-codex-live.md' },
+      { name: 'Longer host', evidence: 'docs/validation/2026-11-03-synthetic-hostile-live.md' },
+      { name: 'Bad date', evidence: 'docs/validation/2026-99-99-synthetic-host-live.md' },
+      { name: 'Earlier', evidence: null, earlier: 'docs/validation/2026-11-03-synthetic-host-spike.md' },
       { name: 'Undated', evidence: 'docs/validation/notes.md' },
       { name: 'Traversal', evidence: 'docs/validation/../validation/2026-11-03-synthetic-host-live.md' },
     ],
@@ -114,9 +128,11 @@ test('a receiver record marks a surface Verified only when it names a live-run f
   writeFileSync(join(directory, 'docs/validation/notes.md'), '# Not a dated live run\n')
   putRecord(directory, 'synthetic-receiver.mjs', record)
   const rows = receiverRows([{ ...record, source: 'scripts/synthetic-receiver.mjs' }], directory)
-  assert.deepEqual(rows.map(row => row.status), ['Verified', 'Implemented', 'Implemented', 'Implemented', 'Implemented', 'Implemented'])
-  assert.deepEqual(rows.map(row => row.evidence), [evidence, null, null, null, null, null])
+  assert.deepEqual(rows.map(row => row.status), ['Verified', ...record.surfaces.slice(1).map(() => 'Implemented')])
+  assert.deepEqual(rows.map(row => row.evidence), [evidence, ...record.surfaces.slice(1).map(() => null)])
+  assert.deepEqual(rows.filter(row => row.earlier).map(row => row.surface), ['Earlier'])
   assert.equal(receiverRows([{ ...record, isImplemented: false }], directory)[0].status, 'Proposed')
+  assert.equal(receiverRows([{ ...record, isImplemented: false, tier: 4 }], directory)[0].status, 'Verified')
 
   const generated = run(directory, '--write', directory)
   assert.equal(generated.status, 0, generated.stderr)
@@ -126,6 +142,7 @@ test('a receiver record marks a surface Verified only when it names a live-run f
     assert.ok(table.includes((file.startsWith('docs/') ? '../' : '') + evidence))
     assert.ok(table.includes(file.includes('.zh-CN.') ? '未测试' : file.includes('.zh-TW.') ? '未測試' : 'Not tested'))
     assert.ok(!table.includes('missing-live.md'))
+    assert.ok(table.includes('synthetic-host-spike.md'))
   }
   putRecord(directory, 'unnamed-primitive.mjs', { host: 'Unnamed Host', tier: 1, primitive: 'unknown', isImplemented: true, surfaces: [{ name: 'CLI', evidence: null }] })
   assert.equal(run(directory, '--write', directory).status, 0)

@@ -3,7 +3,7 @@ import { boardClient, deliveryPrompt } from './message-client.mjs'
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
   host: 'Codex',
-  surfaces: [{ name: 'Exclusive-owner app-server', evidence: null }],
+  surfaces: [{ name: 'Exclusive-owner app-server', evidence: null, earlier: 'docs/validation/2026-10-19-native-hooks.md' }],
   tier: 1,
   primitive: '[P1]',
   isImplemented: true,

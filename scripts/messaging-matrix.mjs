@@ -29,24 +29,27 @@ const targets = [
 const words = {
   en: {
     headers: ['Host', 'Surface', 'Tier', 'Primitive', 'Status', 'Live run', 'Receiver'],
-    intro: 'Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a dated live-run file for that exact surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.',
+    intro: 'Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.',
     notTested: 'Not tested',
+    earlier: 'Earlier run, not counted:',
     unknown: 'Unknown',
     none: 'None',
     statuses: { Verified: 'Verified', Implemented: 'Implemented', Proposed: 'Proposed' },
   },
   'zh-CN': {
     headers: ['宿主', '运行界面', '层级', '原语', '状态', '现场运行', '接收器'],
-    intro: '由接收器记录生成：`node scripts/messaging-matrix.mjs --write`。进度报告与消息接收分别验证。Verified 需要该运行界面的带日期现场记录；合成测试只能证明 Implemented。未连接的目标使用 Tier 4 / [P5] 复制回退，不代表已有原生接收器。“未知”表示路线图没有为该运行界面指定原语。',
+    intro: '由接收器记录生成：`node scripts/messaging-matrix.mjs --write`。进度报告与消息接收分别验证。Verified 需要该运行界面的 `<date>-<host>-live.md` 文件；合成测试只能证明 Implemented。未连接的目标使用 Tier 4 / [P5] 复制回退，不代表已有原生接收器。“未知”表示路线图没有为该运行界面指定原语。',
     notTested: '未测试',
+    earlier: '早期运行（不计入）：',
     unknown: '未知',
     none: '无',
     statuses: { Verified: 'Verified（已验证）', Implemented: 'Implemented（已实现）', Proposed: 'Proposed（规划中）' },
   },
   'zh-TW': {
     headers: ['宿主', '執行介面', '層級', '原語', '狀態', '現場執行', '接收器'],
-    intro: '由接收器紀錄產生：`node scripts/messaging-matrix.mjs --write`。進度回報與訊息接收分別驗證。Verified 需要該執行介面的附日期現場紀錄；合成測試只能證明 Implemented。未連線的目標使用 Tier 4 / [P5] 複製備援，不代表已有原生接收器。「未知」表示路線圖沒有為該執行介面指定原語。',
+    intro: '由接收器紀錄產生：`node scripts/messaging-matrix.mjs --write`。進度回報與訊息接收分別驗證。Verified 需要該執行介面的 `<date>-<host>-live.md` 檔案；合成測試只能證明 Implemented。未連線的目標使用 Tier 4 / [P5] 複製備援，不代表已有原生接收器。「未知」表示路線圖沒有為該執行介面指定原語。',
     notTested: '未測試',
+    earlier: '早期執行（不計入）：',
     unknown: '未知',
     none: '無',
     statuses: { Verified: 'Verified（已驗證）', Implemented: 'Implemented（已實作）', Proposed: 'Proposed（規劃中）' },
@@ -62,19 +65,21 @@ const sourceFiles = directory => {
   return entries.sort((a, b) => a.name.localeCompare(b.name, 'en')).flatMap(entry => {
     const path = join(directory, entry.name)
     if (entry.isDirectory()) return sourceFiles(path)
-    return entry.isFile() && /\.(?:mjs|ts)$/.test(entry.name) ? [path] : []
+    return entry.isFile() && /\.(?:mjs|tsx?)$/.test(entry.name) ? [path] : []
   })
 }
+
+export const hasReceiverRecord = text => /^export\s+const\s+messagingReceiver\b|^export\s*\{[^}]*\bmessagingReceiver\b/m.test(text)
 
 const isText = value => typeof value === 'string' && value.trim() !== '' && !/[\r\n]/.test(value)
 
 export const readReceiverRecords = async (directory = root) => {
   const records = []
   for (const path of [...sourceFiles(join(directory, 'scripts')), ...sourceFiles(join(directory, 'hooks'))]) {
-    if (!/^export const messagingReceiver\s*=/m.test(readFileSync(path, 'utf8'))) continue
+    if (!hasReceiverRecord(readFileSync(path, 'utf8'))) continue
     // Record modules must be safe to import: no host startup or model calls at load time.
     const { messagingReceiver: record } = await import(pathToFileURL(path).href)
-    if (!record || !isText(record.host) || ![1, 2, 3, 4].includes(record.tier) || !/^(?:\[P[1-5]\]|unknown)$/.test(record.primitive) || typeof record.isImplemented !== 'boolean' || !Array.isArray(record.surfaces) || !record.surfaces.length || record.surfaces.some(surface => !isText(surface?.name) || surface.evidence !== null && !isText(surface.evidence))) {
+    if (!record || !isText(record.host) || ![1, 2, 3, 4].includes(record.tier) || !/^(?:\[P[1-5]\]|unknown)$/.test(record.primitive) || typeof record.isImplemented !== 'boolean' || !Array.isArray(record.surfaces) || !record.surfaces.length || record.surfaces.some(surface => !isText(surface?.name) || surface.evidence !== null && !isText(surface.evidence) || surface.earlier !== undefined && !isText(surface.earlier))) {
       throw new Error('Invalid messaging receiver record: ' + relative(directory, path))
     }
     records.push({ ...record, source: relative(directory, path).split('\\').join('/') })
@@ -82,20 +87,35 @@ export const readReceiverRecords = async (directory = root) => {
   return records
 }
 
-const hasLiveRun = (directory, evidence) => {
-  if (typeof evidence !== 'string' || !/^docs\/validation\/\d{4}-\d{2}-\d{2}-[^/\\]+\.md$/.test(evidence)) return false
-  try { return lstatSync(join(directory, evidence)).isFile() } catch (error) {
+const isFile = (directory, path) => {
+  try { return lstatSync(join(directory, path)).isFile() } catch (error) {
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false
     throw error
   }
 }
 
+const isRealDate = date => {
+  const parsed = new Date(date + 'T00:00:00Z')
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date
+}
+
+// Roadmap section 8: docs/validation/<date>-<host>-live.md. A surface may follow the host in the name.
+const hasLiveRun = (directory, evidence, host) => {
+  const match = typeof evidence === 'string' ? /^docs\/validation\/(\d{4}-\d{2}-\d{2})-([a-z0-9-]+)-live\.md$/.exec(evidence) : null
+  if (!match || !isRealDate(match[1])) return false
+  const slug = host.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+  return (match[2] + '-').startsWith(slug + '-') && isFile(directory, evidence)
+}
+
+const hasEarlierRun = (directory, earlier) => typeof earlier === 'string' && /^docs\/validation\/\d{4}-\d{2}-\d{2}-[a-z0-9-]+\.md$/.test(earlier) && isFile(directory, earlier)
+
 export const receiverRows = (records, directory = root) => records.flatMap(record => record.surfaces.map(surface => {
-  const isVerified = record.isImplemented && hasLiveRun(directory, surface.evidence)
+  // Copy needs no receiver, so a tier 4 surface can be run with nothing implemented.
+  const isVerified = (record.isImplemented || record.tier === 4) && hasLiveRun(directory, surface.evidence, record.host)
   return {
     host: record.host, surface: surface.name, tier: record.tier, primitive: record.primitive,
     status: isVerified ? 'Verified' : record.isImplemented ? 'Implemented' : 'Proposed',
-    evidence: isVerified ? surface.evidence : null, source: record.source,
+    evidence: isVerified ? surface.evidence : null, earlier: !isVerified && hasEarlierRun(directory, surface.earlier) ? surface.earlier : null, source: record.source,
   }
 }))
 
@@ -115,7 +135,7 @@ export const renderMatrix = (records, file, directory = root) => {
     '| ' + s.headers.map(() => '---').join(' | ') + ' |',
     ...rows.map(row => '| ' + [
       cell(row.host), cell(row.surface), row.tier, row.primitive === 'unknown' ? s.unknown : cell(row.primitive), s.statuses[row.status],
-      row.evidence ? link(row.evidence, file) : s.notTested,
+      row.evidence ? link(row.evidence, file) : row.earlier ? s.earlier + ' ' + link(row.earlier, file) : s.notTested,
       row.source ? link(row.source, file) : s.none,
     ].join(' | ') + ' |'),
     '', end,

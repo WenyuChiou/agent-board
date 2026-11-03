@@ -6,7 +6,8 @@
  * to one exact surface; a CLI run must never verify a desktop or IDE implicitly.
  * @typedef {Object} MessagingReceiverRecord
  * @property {string} host
- * @property {{ name: string, evidence: string | null }[]} surfaces
+ * @property {{ name: string, evidence: string | null, earlier?: string }[]} surfaces `evidence` is a
+ *   `docs/validation/<date>-<host>-live.md` file; `earlier` is a dated note on a run that doesn't count as one.
  * @property {1 | 2 | 3 | 4} tier
  * @property {'[P1]' | '[P2]' | '[P3]' | '[P4]' | '[P5]' | 'unknown'} primitive `unknown` when the roadmap names none for this surface.
  * @property {boolean} isImplemented True for a merged receiver with synthetic tests.

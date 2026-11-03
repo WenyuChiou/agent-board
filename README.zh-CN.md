@@ -161,13 +161,13 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 <!-- messaging-matrix:start -->
 
-由接收器记录生成：`node scripts/messaging-matrix.mjs --write`。进度报告与消息接收分别验证。Verified 需要该运行界面的带日期现场记录；合成测试只能证明 Implemented。未连接的目标使用 Tier 4 / [P5] 复制回退，不代表已有原生接收器。“未知”表示路线图没有为该运行界面指定原语。
+由接收器记录生成：`node scripts/messaging-matrix.mjs --write`。进度报告与消息接收分别验证。Verified 需要该运行界面的 `<date>-<host>-live.md` 文件；合成测试只能证明 Implemented。未连接的目标使用 Tier 4 / [P5] 复制回退，不代表已有原生接收器。“未知”表示路线图没有为该运行界面指定原语。
 
 | 宿主 | 运行界面 | 层级 | 原语 | 状态 | 现场运行 | 接收器 |
 | --- | --- | --- | --- | --- | --- | --- |
 | Antigravity | 2.0 Desktop App | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | 未知 | Implemented（已实现） | 未测试 | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
+| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | 未知 | Implemented（已实现） | 早期运行（不计入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
 | Antigravity | IDE | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | Claude Code | CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
@@ -175,7 +175,7 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 | Codex | CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | Codex | Daemon | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented（已实现） | 未测试 | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
+| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented（已实现） | 早期运行（不计入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
 | Codex | Existing-owner proxy (active turn only) | 2 | 未知 | Implemented（已实现） | 未测试 | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
 | Cursor | cursor-agent CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | Cursor | IDE (Composer) | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |

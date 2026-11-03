@@ -3,7 +3,7 @@ import { boardClient, deliveryPrompt } from './message-client.mjs'
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
   host: 'Antigravity',
-  surfaces: [{ name: 'Exclusive-owner Stream CLI (stdin)', evidence: null }],
+  surfaces: [{ name: 'Exclusive-owner Stream CLI (stdin)', evidence: null, earlier: 'docs/validation/2026-10-19-native-hooks.md' }],
   tier: 1,
   primitive: 'unknown',
   isImplemented: true,

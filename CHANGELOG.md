@@ -4,7 +4,7 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 ## Unreleased
 
-- Messaging: receiver records generate the per-surface support table in the messaging guide and all three READMEs, with live evidence required for Verified (#720). Tests: `the messaging matrix is generated from each receiver record and CI fails when it is stale`, `a receiver record marks a surface Verified only when it names a live-run file that exists`, `preflight fails when the messaging matrix is stale`
+- Messaging: receiver records generate the per-surface support table in the messaging guide and all three READMEs, with live evidence required for Verified (#720). Tests: `the messaging matrix is generated from each receiver record and CI fails when it is stale`, `a receiver record marks a surface Verified only when it names a live-run file that exists`, `preflight fails when the messaging matrix is stale`, `a change the messaging table reads runs the matrix test and no other board test`
 
 ## 0.24.1 — 2026-11-03
 

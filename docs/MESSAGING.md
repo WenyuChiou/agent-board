@@ -280,13 +280,13 @@ restored on restart. They never send, retry, approve or create a progress block.
 
 <!-- messaging-matrix:start -->
 
-Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a dated live-run file for that exact surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.
+Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.
 
 | Host | Surface | Tier | Primitive | Status | Live run | Receiver |
 | --- | --- | --- | --- | --- | --- | --- |
 | Antigravity | 2.0 Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Not tested | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) |
+| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) |
 | Antigravity | IDE | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Claude Code | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
@@ -294,7 +294,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Codex | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Not tested | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) |
+| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) |
 | Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Implemented | Not tested | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |
 | Cursor | cursor-agent CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Cursor | IDE (Composer) | 4 | &#91;P5&#93; | Proposed | Not tested | None |
@@ -324,7 +324,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 
 ### What earlier runs saw
 
-This table is written by hand and covers progress reporting too. Its runs predate dated live-run records, so none of them makes a surface Verified above.
+This table is written by hand and covers progress reporting too. Its runs have no `<date>-<host>-live.md` record, so none of them makes a surface Verified above; the notes for the Codex and Antigravity runs are in [2026-10-19-native-hooks.md](validation/2026-10-19-native-hooks.md).
 
 | Agent / surface | Progress integration in this repository | Connected-session messaging evidence |
 | --- | --- | --- |
@@ -341,7 +341,10 @@ This table is written by hand and covers progress reporting too. Its runs predat
 To add a receiver, export `messagingReceiver` from its own import-safe `.mjs` or `.ts`
 module under `scripts/` or `hooks/`; no central receiver list or other receiver changes
 are needed. The `MessagingReceiverRecord` type is in `scripts/message-client.mjs`.
-Each surface names its own dated live-run file under `docs/validation/`, or `null`.
+Each surface names its own `docs/validation/<date>-<host>-live.md` file, or `null`; the host's
+name in lower case starts the `<host>` part, and a surface may follow it. A dated note on a run
+that doesn't count goes in the optional `earlier`. A Copy-only tier 4 surface can be Verified
+with `isImplemented: false`, since it needs no receiver.
 Set `isImplemented` only for a merged receiver covered by synthetic tests; a proposed
 receiver stays `false`, even if a spike record exists. Tier and primitive follow the
 [roadmap](dev/universal-messaging-roadmap.md#4-five-delivery-primitives--four-honest-ui-tiers).
