@@ -4,6 +4,8 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 ## 0.24.1 — 2026-11-03
 
+- Setup / Windows: the README's board commands, `--codex-trust` with the Codex that npm installed, and setup's error messages work as the README says on Windows PowerShell 5.1 (#779).
+- Setup / plugin-connected computers: setup keeps the board the Claude Code plugin connected instead of starting a second one, and puts back a missing file it installed instead of calling it a conflict (#781).
 - Pane / Archive without Node: `/progress tidy` and the pane's Archive button archive a done task again on a computer where node is not on the path (#755).
 - Contributing / Review queue: `node scripts/review-queue.mjs` says when Codex's security review did not run on a pull request's latest commit (#750).
 - Contributing / CHANGELOG: the release's CHANGELOG fold reads every pull request merged since the last tag, not only those on main's first line of history, and checks that none is missing (#744).
