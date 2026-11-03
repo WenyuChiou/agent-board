@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
+import { fragmentIssue, isFragmentPath, titleCommitNumbers } from './changelog-fold.mjs'
 import { bundleFiles, isBundleFile } from './bundle-text.mjs'
 
 // Pull requests from outside the team (CONTRIBUTING.md, Outside contributors; #482): two open per GitHub login and
@@ -282,14 +282,40 @@ export const changelogEntry = ({ entry, issue, titles, isDocsOnly, location = 'U
 
 // isRequired: a fix or feature that edits CHANGELOG.md writes its own line under Unreleased, because the release
 // then leaves its title out. Every other pull request needs no entry.
-export const changelog = ({ text, added, issue, titles, isRelease, isFold = false, isDocsOnly, isRequired = true, paths = [], addedPaths = [], headPaths }) => {
+export const changelog = ({ text, added, issue, titles, isRelease, isFold = false, isDocsOnly, isRequired = true, paths = [], addedPaths = [], headPaths, title = '', releaseNumbers = [] }) => {
   const output = fragmentChanges({ paths, addedPaths, headPaths, isRelease, isFold })
-  if (isRelease) {
-    output.info.push('changelog: skipped for a release pull request.')
-    return output
-  }
   if (isFold) {
     output.info.push('changelog: Unreleased lines not checked for a pull request that folds the old fragments.')
+    return output
+  }
+  if (isRelease) {
+    const versionMatch = title.match(/(?:^|\s)v?(\d+\.\d+\.\d+)\b/)
+    const version = versionMatch ? versionMatch[1] : null
+    const lines = linesOf(text)
+    const escapedVersion = version ? version.replace(/\./g, '\\.') : null
+    const headingIndex = escapedVersion ? lines.findIndex(line => new RegExp(`^## ${escapedVersion}(?:\\s|$)`).test(line)) : -1
+    if (headingIndex === -1) {
+      if (releaseNumbers.length > 0) {
+        output.problems.push(problem('changelog', version ? `CHANGELOG.md has no section for version ${version}.` : 'the release pull request title must name the version being released.', version ? `run node scripts/changelog-fold.mjs ${version} --write.` : 'name the version in the title, e.g. chore(release): 1.1.0.'))
+        return output
+      }
+      output.info.push('changelog: skipped for a release pull request.')
+      return output
+    }
+    const nextHeadingIndex = lines.findIndex((line, idx) => idx > headingIndex && /^## /.test(line))
+    const sectionLines = lines.slice(headingIndex, nextHeadingIndex === -1 ? lines.length : nextHeadingIndex)
+    const sectionText = sectionLines.join('\n')
+    const sectionNumbers = new Set([...sectionText.matchAll(/#([1-9]\d*)\b/g)].map(m => Number(m[1])))
+    const missing = releaseNumbers.filter(n => !sectionNumbers.has(n))
+    if (missing.length > 0) {
+      output.problems.push(problem(
+        'changelog',
+        `the release section for ${version} is missing pull request ${missing.map(n => `#${n}`).join(', ')}.`,
+        `run node scripts/changelog-fold.mjs ${version} --write to include late merges before releasing.`
+      ))
+      return output
+    }
+    output.info.push(`changelog: release section for ${version} includes all ${releaseNumbers.length} merged fix and feature pull requests.`)
     return output
   }
   // A kept fragment must still fold at release: it names its own issue and its covering tests.
@@ -586,7 +612,7 @@ export const checkPr = data => {
   }
   add(naming(data.title, data.branch))
   add(sections(data.body, data.template))
-  add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, titles: testTitles(data.testFiles), isRelease, isFold: !isOutside && isFoldTitle(data.title), isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) && data.paths.includes('CHANGELOG.md') }))
+  add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, titles: testTitles(data.testFiles), isRelease, isFold: !isOutside && isFoldTitle(data.title), isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) && data.paths.includes('CHANGELOG.md'), title: data.title, releaseNumbers: data.releaseNumbers ?? [] }))
   add(privateData({ added: data.added, body: data.body }))
   add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
@@ -855,6 +881,20 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.headPaths = headPaths
     data.changelogText = headPaths.has('CHANGELOG.md') ? git(cwd, 'show', `${data.head}:CHANGELOG.md`) : ''
     data.testFiles = linesOf(git(cwd, 'ls-tree', '-r', '--name-only', data.head, '--', 'tests')).filter(path => /\.test\.(mjs|ts|tsx)"?$/.test(path)).map(diffPath).map(path => ({ path, text: git(cwd, 'show', `${data.head}:${path}`) }))
+    if (isReleaseTitle(data.title)) {
+      const tagCheck = spawnSync('git', ['describe', '--tags', '--abbrev=0', '--match', 'agent-board--v*'], { cwd, encoding: 'utf8', maxBuffer })
+      const lastTag = tagCheck.status === 0 ? tagCheck.stdout.trim() : null
+      if (lastTag) {
+        const logCheck = spawnSync('git', ['log', `${lastTag}..${base}`, '--format=%x1e%s', '--name-only'], { cwd, encoding: 'utf8', maxBuffer })
+        if (logCheck.status === 0) {
+          const commits = logCheck.stdout.split('\x1e').filter(item => item.trim()).map(item => {
+            const [subject, ...paths] = item.split(/\r?\n/)
+            return { subject: subject.trim(), paths: paths.map(path => path.trim()).filter(Boolean) }
+          })
+          data.releaseNumbers = titleCommitNumbers(commits)
+        }
+      }
+    }
     data.issueData = null
     data.issueComments = null
     data.open = null
