@@ -12,7 +12,7 @@ const hub = (on: Parameters<Parameters<typeof test>[1]>[1], world: World) => {
   const sent: Array<{ action: string; body: Record<string, unknown>; token: unknown }> = []
   const queue: unknown[] = [{ id: 'AB-1', nonce: NONCE, prompt: PROMPT }]
   const submitted: Array<Record<string, unknown>> = []
-  on('process.run', ($, e, next) => (e.argv[0] === 'node' && e.argv[1] === '-e' ? { exitCode: 0, stdout: '', stderr: '' } : next(e)))
+  world.isAddressOwn ??= true
   on('http.fetch', ($, e) => {
     const action = e.url.split('/').at(-1) ?? ''
     const body = JSON.parse(String(e.init?.body)) as Record<string, unknown>
@@ -20,7 +20,7 @@ const hub = (on: Parameters<Parameters<typeof test>[1]>[1], world: World) => {
     const json = action === 'register' ? { id: 'c1', secret: 's1', leaseMs: 15000 }
       : action === 'poll' ? { messages: body.receive === true ? queue.splice(0, 1) : [], leaseMs: 15000 }
       : { ok: true }
-    return { status: 200, ok: true, headers: {}, text: JSON.stringify(json) }
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(json) } }
   })
   on('prompt.submit', ($, e) => {
     submitted.push({ ...e })
@@ -65,6 +65,16 @@ test('a busy session keeps its address and does not take a message until its tur
   await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(2100)
   expect(submitted.length).toBe(1)
+})
+
+test('an address folder this account cannot show is its own gives no connection', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, isAddressOwn: false }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { sent } = hub(on, world)
+  await start($, 'task')
+  await clock.advance(2100)
+  expect(sent.length).toBe(0)
 })
 
 test('a print-mode session does not register with the board', async ($, on) => {
