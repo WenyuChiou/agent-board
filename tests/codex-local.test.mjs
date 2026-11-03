@@ -931,17 +931,69 @@ test('removal preview and apply print plain changes and one next step unless JSO
   }
 }))
 
-test('doctor and removal still answer when a path holds characters a shell would expand', () => fixture(f => {
+test('doctor and removal print a next step that works when a path holds characters a shell would expand or eat', () => fixture(f => {
   const runner = join(f.home, 'next-step-cli.mjs')
   f.save(runner, bundleFromDir(new URL('..', import.meta.url)))
-  const home = join(f.home, 'odd $HOME 100%')
-  mkdirSync(home, { recursive: true })
-  for (const mode of ['--codex-doctor', '--codex-remove']) {
-    const plain = spawnSync(process.execPath, [runner, '--home', home, '--data-dir', join(f.home, 'data'), mode, '--agent', 'antigravity', '--lang', 'en'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
-    assert.equal(plain.status, 0, plain.stderr)
-    assert.equal(plain.stdout.split('Next:').length - 1, 1, plain.stdout)
-    assert.ok(!plain.stdout.includes('{"'), plain.stdout)
+  const nextStep = stdout => {
+    assert.equal(stdout.split('Next:').length - 1, 1, stdout)
+    assert.ok(!stdout.includes('{"'), stdout)
+    return /^Next: [^:]+: (.+)$/m.exec(stdout)?.[1]
   }
+  for (const name of ['odd $HOME 100%', 'back\\slash', 'trailing space\\']) {
+    const home = join(f.home, name)
+    mkdirSync(home, { recursive: true })
+    const data = join(f.home, 'data')
+    const board = (...args) => spawnSync(process.execPath, [runner, '--home', home, '--data-dir', data, ...args, '--agent', 'antigravity', '--lang', 'en'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    const printed = command => spawnSync(command, { shell: true, cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    const doctor = board('--codex-doctor')
+    assert.equal(doctor.status, 0, doctor.stderr)
+    const repair = nextStep(doctor.stdout)
+    assert.ok(!repair.includes(home), repair)
+    const previewed = printed(repair)
+    assert.equal(previewed.status, 0, previewed.stderr)
+    assert.ok(previewed.stdout.includes('antigravity'), previewed.stdout)
+    assert.equal(board('--codex-setup', '--apply').status, 0)
+    const preview = board('--codex-remove')
+    assert.equal(preview.status, 0, preview.stderr)
+    const apply = nextStep(preview.stdout)
+    assert.ok(!apply.includes(home), apply)
+    const applied = printed(apply)
+    assert.equal(applied.status, 0, applied.stderr)
+    assert.ok(applied.stdout.includes('removal applied'), applied.stdout)
+  }
+}))
+
+test('doctor and removal say plainly when an adapter is pending, a connector holds the hook, or nothing is left to remove', () => fixture(f => {
+  const runner = join(f.home, 'states-cli.mjs')
+  f.save(runner, bundleFromDir(new URL('..', import.meta.url)))
+  const isolated = ['--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes')]
+  const board = (file, ...args) => spawnSync(process.execPath, [file, ...isolated, ...args], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const isOneNext = stdout => stdout.split('Next:').length - 1 === 1
+
+  for (const apply of [[], ['--apply']]) {
+    const nothing = board(runner, '--codex-remove', '--agent', 'codex', '--lang', 'en', ...apply)
+    assert.equal(nothing.status, 0, nothing.stderr)
+    assert.ok(nothing.stdout.includes('no owned Agent Board files to remove'), nothing.stdout)
+    assert.ok(nothing.stdout.includes('Next: no removal is needed.'), nothing.stdout)
+    assert.ok(!nothing.stdout.includes('removal applied') && !nothing.stdout.includes('restart'), nothing.stdout)
+    assert.ok(isOneNext(nothing.stdout), nothing.stdout)
+  }
+
+  assert.equal(f.install('--agent', 'hermes', '--lang', 'en', '--apply').status, 0)
+  const pending = board(runner, '--codex-doctor', '--agent', 'hermes', '--lang', 'en')
+  assert.equal(pending.status, 0, pending.stderr)
+  assert.ok(pending.stdout.includes('Automatic reporting adapter is not available yet.'), pending.stdout)
+  assert.ok(pending.stdout.includes('Next: open the board with the agent-board skill'), pending.stdout)
+  assert.ok(isOneNext(pending.stdout), pending.stdout)
+
+  mkdirSync(join(f.home, '.codex'), { recursive: true })
+  const connected = legacyConnect(f, join(f.home, '.claude', 'progress.md'))
+  const connector = board(connected, '--codex-doctor', '--agent', 'codex', '--lang', 'en')
+  assert.equal(connector.status, 0, connector.stderr)
+  assert.ok(connector.stdout.includes('managed by the Claude Code plugin connector'), connector.stdout)
+  assert.ok(connector.stdout.includes('Next: start a new Codex session'), connector.stdout)
+  assert.ok(!connector.stdout.includes('--codex-bin') && !connector.stdout.includes('hooks are'), connector.stdout)
+  assert.ok(isOneNext(connector.stdout), connector.stdout)
 }))
 
 test('doctor explains Claude Code plugin support in every language', () => fixture(f => {
@@ -3076,12 +3128,18 @@ rl.on('line', line => {
   const discovered = f.command(['--codex-doctor', '--json'], undefined, withBinOnPath)
   assert.equal(discovered.status, 0, discovered.stderr)
   assert.equal(JSON.parse(discovered.stdout).hooksTrusted, true, discovered.stderr)
+  const plainTrusted = f.command(['--codex-doctor'], undefined, withBinOnPath).stdout
+  assert.ok(plainTrusted.includes('Codex hooks are trusted.'), plainTrusted)
+  assert.ok(plainTrusted.includes('Next: start a new Codex session'), plainTrusted)
 
   // Untrusted hooks report hooksTrusted: false
   writeFileSync(stateFile, JSON.stringify({ trusted: false }))
   const untrusted = f.command(['--codex-doctor', '--json'], undefined, withBinOnPath)
   assert.equal(untrusted.status, 0, untrusted.stderr)
   assert.equal(JSON.parse(untrusted.stdout).hooksTrusted, false, untrusted.stderr)
+  const plainUntrusted = f.command(['--codex-doctor'], undefined, withBinOnPath).stdout
+  assert.ok(plainUntrusted.includes('Codex hooks are not all trusted.'), plainUntrusted)
+  assert.ok(plainUntrusted.includes('Next: locate Codex'), plainUntrusted)
 }))
 
 test('--codex-doctor detects missing trusted_hash and unverified hash without --codex-bin', () => fixture(f => {
@@ -3101,6 +3159,9 @@ test('--codex-doctor detects missing trusted_hash and unverified hash without --
   f.save(config, '[hooks.state."session_start"]\ntrusted_hash = "sha256:1"\n')
   const unverified = f.command(['--codex-doctor', '--json'])
   assert.equal(JSON.parse(unverified.stdout).hooksTrusted, 'unknown')
+  const plainUnknown = f.command(['--codex-doctor']).stdout
+  assert.ok(plainUnknown.includes('Codex hook trust could not be verified.'), plainUnknown)
+  assert.ok(plainUnknown.includes('Next: locate Codex'), plainUnknown)
 }))
 
 test('--codex-doctor fails when explicit --codex-bin cannot be executed', () => fixture(f => {

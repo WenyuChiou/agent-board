@@ -235,7 +235,8 @@ export const codexDoctorOutput = (result: LocalPlan & {
   lines.push(result.conflicts.length ? words.review(command)
     : !hasHook ? words.setup(command)
     : isPending ? words.skill(host)
-    : result.agent === 'codex' && result.hooksTrusted !== true ? words.trust
+    // --codex-trust works only on an installed Codex, not on one the connector hooked.
+    : result.agent === 'codex' && result.installed && result.hooksTrusted !== true ? words.trust
     : words.verify(host))
   return `${lines.join('\n')}\n`
 }
@@ -243,7 +244,8 @@ export const codexDoctorOutput = (result: LocalPlan & {
 export const codexRemoveOutput = (result: LocalPlan, s: Strings, command: string): string => {
   const words = s.localSummary
   const host = s.agentNames[result.agent] ?? result.agent
-  const lines = [words.removal(host, result.applied ? words.removed : result.conflicts.length ? words.blocked : result.changes.length ? words.preview : words.absent)]
+  const isRemoved = result.applied === true && result.changes.length > 0
+  const lines = [words.removal(host, isRemoved ? words.removed : result.conflicts.length ? words.blocked : result.changes.length ? words.preview : words.absent)]
   for (const change of result.changes) lines.push(change.action === 'remove'
     ? result.applied ? words.removedFile(change.file) : words.removeFile(change.file)
     : result.applied ? words.updatedFile(change.file) : words.updateFile(change.file))
@@ -251,7 +253,7 @@ export const codexRemoveOutput = (result: LocalPlan, s: Strings, command: string
   for (const file of result.conflicts) lines.push(words.conflict(file))
   lines.push(words.kept(result.progress))
   lines.push(result.conflicts.length ? words.review(command)
-    : result.applied ? words.restart(host)
+    : isRemoved ? words.restart(host)
     : result.changes.length ? words.apply(`${command} --apply`) : words.none)
   return `${lines.join('\n')}\n`
 }
@@ -361,11 +363,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const deepseekDir = resolve(flag('--deepseek-dir') ?? (process.env.DSH_HOME || join(home, '.dsh')))
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
   const manifest: Manifest = { files: object(loaded.files ?? {}) as Record<string, string>, groups: object(loaded.groups ?? {}), foreignGroups: object(loaded.foreignGroups ?? {}) }
-  // A check must not fail on the words of its next step: an argument the shell would expand goes through boardRun's code points.
+  // A check must not fail on the words of its next step: an argument a shell would expand or eat goes through boardRun's code points.
   const nextCommand = (nextMode: string): string => {
     const rest = [nextMode, ...args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json')]
-    if (rest.some(arg => /["`$%\r\n]/.test(arg))) return boardRun(process.argv[1]!, rest)
-    return `${boardRun(process.argv[1]!)} ${rest.map(arg => /^[\w.:=/\\-]+$/.test(arg) ? arg : quote(arg)).join(' ')}`
+    if (rest.some(arg => /["`$%\\\r\n]/.test(arg))) return boardRun(process.argv[1]!, rest)
+    return `${boardRun(process.argv[1]!)} ${rest.map(arg => /^[\w.:=/-]+$/.test(arg) ? arg : quote(arg)).join(' ')}`
   }
   const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
 

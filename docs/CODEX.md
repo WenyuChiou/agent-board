@@ -255,7 +255,7 @@ session id actually provided by that host, never a guessed name or a transcript 
 | OpenClaw | Shared board and skill installed | Native adapter pending; no conversation grant added |
 | Antigravity | Named native lifecycle hooks and board skill | No session-end event or turn fence; verify CLI/App/IDE separately |
 
-Doctor distinguishes `installed`, `ready` and `connected`. Pending native adapters never
+Doctor's `--json` result distinguishes `installed`, `ready` and `connected`. Pending native adapters never
 report ready; `connected` stays unverified until host execution is observed. Shared-file
 tests are not evidence that every host discovered its adapter or accepted its hook schema.
 This release is a common foundation; full multi-agent and desktop acceptance remains separate. See the [native CLI record](validation/2026-10-19-native-hooks.md).
