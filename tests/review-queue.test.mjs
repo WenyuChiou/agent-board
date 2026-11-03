@@ -431,7 +431,10 @@ test('Codex security review shows as skipped when it did not complete on the hea
   // A failed run reports findings as well; it still counts as not run, since nothing was reviewed.
   assert.equal(stateOf(securityState(head, 'failed', true, '2026-10-20T10:00:00Z', 2)), 'skipped')
   assert.equal(stateOf(securityState(head, 'in_progress', null, '2026-10-20T10:00:00Z', 2)), 'skipped')
-  assert.equal(stateOf(securityState(head, 'completed', null, '2026-10-20T10:00:00Z', 2)), 'clean')
+  assert.equal(stateOf(securityState(head, 'completed', false, '2026-10-20T10:00:00Z', 2)), 'clean')
+  // A completed review that does not say false or true is unknown, never clean.
+  for (const findings of [null, undefined, 'true', 'false', 0, 1])
+    assert.equal(stateOf(securityState(head, 'completed', findings, '2026-10-20T10:00:00Z', 2)), 'unknown', String(findings))
   assert.equal(stateOf(securityState(head.slice(0, 7), 'completed', true, '2026-10-20T10:00:00Z', 2)), 'open')
   assert.equal(stateOf(securityState(oldHead, 'failed', true, '2026-10-20T10:00:00Z', 2)), 'stale')
   assert.equal(stateOf(securityState(head, 'failed', true, '2026-10-20T09:00:00Z', 2), securityState(head, 'completed', false, '2026-10-20T10:00:00Z', 3)), 'clean')
@@ -441,18 +444,21 @@ test('Codex security review shows as skipped when it did not complete on the hea
 })
 
 test('the queue names a security review that did not run or left findings, and nothing else about it', () => {
-  const prs = [pull(1), pull(2), pull(3)]
+  const prs = [pull(1), pull(2), pull(3), pull(4)]
   const comments = {
     1: [ready(), securityState(head, 'failed', true, '2026-10-20T10:00:00Z', 2)],
     2: [ready(), securityState(head, 'completed', true, '2026-10-20T10:00:00Z', 2)],
-    3: [ready(), securityState(head, 'completed', null, '2026-10-20T10:00:00Z', 2)],
+    3: [ready(), securityState(head, 'completed', false, '2026-10-20T10:00:00Z', 2)],
+    4: [ready(), securityState(head, 'completed', null, '2026-10-20T10:00:00Z', 2)],
   }
   const queue = classify(prs, comments, now)
-  assert.deepEqual(queue.needsReviewer.map(item => item.number), [1, 2, 3])
+  assert.deepEqual(queue.needsReviewer.map(item => item.number), [1, 2, 3, 4])
+  assert.deepEqual(queue.needsReviewer.map(item => item.bots.codexSecurity), ['skipped', 'open', 'clean', 'unknown'])
   const text = formatQueue(queue)
   assert.match(text, /\n#1 .*\n {4}codex: no findings {2}codex security: did not run on this head \(usage limit or failure\); review security yourself\n/)
   assert.match(text, /\n#2 .*\n {4}codex: no findings {2}codex security: findings open — answer each before approving\n/)
   assert.match(text, /\n#3 .*\n {4}codex: no findings\n/)
+  assert.match(text, /\n#4 .*\n {4}codex: no findings\n/)
 })
 
 test('Greptile shows as reviewed only when a comment or review of its own mentions the head', () => {

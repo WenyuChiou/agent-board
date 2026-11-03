@@ -84,7 +84,10 @@ const codexSecurityOf = (comments, head) => {
     if (!/^[0-9a-f]{7,40}$/.test(sha) || typeof review.status !== 'string') continue
     if (!head.startsWith(sha)) return 'stale'
     if (review.status !== 'completed') return 'skipped'
-    return review.has_unresolved_findings === true ? 'open' : 'clean'
+    // Only an explicit answer says whether findings are open. Codex leaves the field null on most completed reviews, so an
+    // unknown one is kept apart from clean and, like clean, adds no line.
+    if (review.has_unresolved_findings === true) return 'open'
+    return review.has_unresolved_findings === false ? 'clean' : 'unknown'
   }
   return 'none'
 }
