@@ -123,7 +123,7 @@ Rules:
 ```
 
 On the board's page, **Connect a web chat** copies this prompt. After that, press
-Copy on the assistant's block and press Ctrl+V on the board's page, or press
+Copy on the assistant's block and press Ctrl+V (Cmd+V on a Mac) on the board's page, or press
 **Import from clipboard**. Text that is not a block stays in the page. Without
 the page, save and merge it:
 

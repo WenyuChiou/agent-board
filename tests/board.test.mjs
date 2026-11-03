@@ -8720,13 +8720,34 @@ test('Import from clipboard posts a block, says when there is none, and says to 
   }
 })
 
+test('a block the parser would read is posted once while it is on its way, and not at all on a closed page', async () => {
+  const html = await sourcePage()
+  const text = relayFragment(ago(60_000)).replace('<!-- auto', '<!--auto')
+  let release
+  const dom = await pageDom(html, redesignModel(), { post: () => new Promise(done => { release = () => done({ ok: true, json: async () => ({ ok: true, note: 'Synthetic added' }) }) }) })
+  dom.paste(text)
+  dom.paste(text)
+  await dom.flush()
+  assert.deepEqual(dom.requests.map(request => request.body.text), [text])
+  release()
+  await dom.settle()
+  assert.ok(dom.node('note').textContent.includes('Synthetic added'))
+  const closing = await pageDom(html, redesignModel(), { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  closing.node('close').click()
+  await closing.settle()
+  const before = closing.requests.length
+  assert.equal(closing.paste(text), false)
+  await closing.settle()
+  assert.equal(closing.requests.length, before)
+})
+
 test('a refused block shows its reason, and one of unknown order asks before it replaces', async () => {
   const html = await sourcePage()
   const text = relayFragment(ago(60_000))
   const refused = await pageDom(html, redesignModel(), { post: async () => ({ ok: false, json: async () => ({ note: 'Synthetic clock refused' }) }) })
   refused.paste(text)
   await refused.settle()
-  assert.ok(refused.node('.pfoot').textContent.includes('Synthetic clock refused'))
+  assert.ok(refused.node('note').textContent.includes('Synthetic clock refused'))
   for (const accept of [false, true]) {
     const questions = []
     const review = { token: 'synthetic-review', current: 'Synthetic current', incoming: 'Synthetic incoming' }
@@ -8740,12 +8761,12 @@ test('a refused block shows its reason, and one of unknown order asks before it 
     await dom.settle()
     assert.deepEqual(questions, [EN.pasteReview(review.current, review.incoming)])
     assert.deepEqual(dom.requests.map(request => request.body), [{ text }, ...(accept ? [{ text, reviewToken: review.token }] : [])])
-    assert.ok(dom.node('.pfoot').textContent.includes(accept ? 'Synthetic replaced' : 'Synthetic compare first'))
+    assert.ok(dom.node('note').textContent.includes(accept ? 'Synthetic replaced' : 'Synthetic compare first'))
   }
   const failed = await pageDom(html, redesignModel(), { post: async () => { throw new Error('Synthetic offline') } })
   failed.paste(text)
   await failed.settle()
-  assert.ok(failed.node('.pfoot').textContent.includes(EN.pressFailed))
+  assert.ok(failed.node('note').textContent.includes(EN.pressFailed))
   assert.equal(failed.paste(text), false)
 })
 

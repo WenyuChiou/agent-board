@@ -38,20 +38,21 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
       const board = new BoardPage(page)
       await board.open(await startServer())
       const requests = []
-      page.on('request', request => { if (new URL(request.url()).pathname === '/api/paste') requests.push(request.postDataJSON()) })
+      // Chromium on Windows hands the clipboard back with CRLF, which the merge accepts.
+      page.on('request', request => { if (new URL(request.url()).pathname === '/api/paste') requests.push(request.postDataJSON().text.replaceAll('\r\n', '\n')) })
       const title = 'Synthetic Muse clipboard report'
       const report = block('a561cafe', 'muse', 'working', 'Synthetic clipboard', title, ['- [~] Check synthetic relay'])
       await page.evaluate(text => navigator.clipboard.writeText(text), report)
       await page.locator('body').click({ position: { x: 2, y: 2 } })
       await page.keyboard.press('ControlOrMeta+V')
       await board.task(title).waitFor()
-      assert.deepEqual(requests, [{ text: report }])
+      assert.deepEqual(requests, [report])
       await page.evaluate(text => navigator.clipboard.writeText(text), 'not a block')
       // Wait for the browser paste event itself, so the assertion does not race its delivery.
       await page.evaluate(() => { window.syntheticPasteSeen = false; document.addEventListener('paste', () => { window.syntheticPasteSeen = true }, { once: true }) })
       await page.keyboard.press('ControlOrMeta+V')
       await page.waitForFunction(() => window.syntheticPasteSeen)
-      assert.deepEqual(requests, [{ text: report }])
+      assert.deepEqual(requests, [report])
     })
   })
 

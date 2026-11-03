@@ -2427,28 +2427,36 @@ const PAGE_SCRIPT = String.raw`
       if (!isClosed) timer = setTimeout(refresh, 3000);
     });
   }
+  // Wider than the parser's start marker, so a block it would take is never dropped here.
+  var blockStart = /\x3c!--\s*auto\s/;
+  var isImporting = false;
+  // A paste may come with the footer off screen: its result goes in the sticky note line.
   function importBlock(text, isPaste) {
-    if (text.indexOf('\x3c!-- auto session=') < 0) {
-      if (!isPaste) say(w('importNoBlock'), 'alert', 'close');
+    var key = isPaste ? null : 'close';
+    if (!blockStart.test(text)) {
+      say(w('importNoBlock'), 'alert', key);
       return;
     }
+    if (isImporting) return;
+    isImporting = true;
     call('/api/paste', { text: text }).then(function (data) {
       if (data.review && window.confirm(w('pasteReview', data.review.current, data.review.incoming))) {
         return call('/api/paste', { text: text, reviewToken: data.review.token });
       }
       return data;
     }).then(function (data) {
-      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'close');
+      isImporting = false;
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key);
       refresh();
-    }, function () { say(w('pressFailed'), 'alert', 'close'); unreachable(); });
+    }, function () { isImporting = false; say(w('pressFailed'), 'alert', key); unreachable(); });
   }
   if (typeof document.addEventListener === 'function') document.addEventListener('paste', function (event) {
-    if (isUnreachable) return;
+    if (isUnreachable || isClosed) return;
     var target = event.target;
     var tag = target && target.tagName ? target.tagName.toLowerCase() : '';
     if (tag === 'input' || tag === 'textarea' || target && target.isContentEditable) return;
     var text = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
-    if (text.indexOf('\x3c!-- auto session=') < 0) return;
+    if (!blockStart.test(text)) return;
     event.preventDefault();
     beginPress();
     importBlock(text, true);
