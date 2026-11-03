@@ -177,6 +177,14 @@ test('preflight refuses a second live local test run without starting another te
   assert.equal(hasStarted, false)
 })
 
+test('preflight fails when the messaging matrix is stale', async t => {
+  const f = fixture(t)
+  f.write('scripts/messaging-matrix.mjs', "console.error('Messaging matrix is stale: README.md.'); process.exitCode = 1\n")
+  assert.ok(has(await f.check(), 'FAIL', 'messaging matrix: Messaging matrix is stale: README.md.'))
+  f.write('scripts/messaging-matrix.mjs', "if (process.argv[2] === '--check') console.log('ok')\n")
+  assert.ok(has(await f.check(), 'PASS', 'messaging matrix is up to date.'))
+})
+
 test('preflight recovers a stale test lock and releases its own lock after a failed run', async t => {
   const f = fixture(t)
   f.write('tests/stale.test.mjs', '')

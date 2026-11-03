@@ -2,6 +2,10 @@
 
 What changed for the person using Agent Board, one line per change, newest version first. How a change was built and tested is in its pull request. Entries up to 0.24.0 were shortened to this form on 2026-11-02; their full text is in `git show ddbef2a:CHANGELOG.md`.
 
+## Unreleased
+
+- Messaging: receiver records generate the per-surface support table in the messaging guide and all three READMEs, with live evidence required for Verified (#720). Tests: `the messaging matrix is generated from each receiver record and CI fails when it is stale`, `a receiver record marks a surface Verified only when it names a live-run file that exists`, `preflight fails when the messaging matrix is stale`, `a change the messaging table reads runs the matrix test and no other board test`, `scanning receiver records starts no process, connection, timer or file write`
+
 ## 0.24.1 — 2026-11-03
 
 - Setup / Windows: the README's board commands and `--codex-trust` with the Codex that npm installed work on Windows PowerShell 5.1, and each setup and doctor error now says what went wrong and what to do next instead of asking for `--json` (#779).
