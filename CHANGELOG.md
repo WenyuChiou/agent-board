@@ -5,6 +5,7 @@ What changed for the person using Agent Board, one line per change, newest versi
 ## Unreleased
 
 - A fix or feature pull request writes no changelog entry: the release writes each CHANGELOG line from the pull request title (#718). Tests: `the fold writes a CHANGELOG line from each fix and feature title that brought no entry of its own`, `pr-check keeps the fragment of a pull request opened before the change and asks a fix or feature for no entry`.
+
 - Tests / native hooks: native Antigravity checks observe the recorded event after a hook safely queues it for automatic recovery (#706).
 - Antigravity / Windows fallback: long Windows installation paths no longer repeat shared directories in an oversized PowerShell fallback command (#705).
 - Page / message receipts: a card's durable message receipt replaces its earlier Queued hint, so Replied no longer appears beside stale enqueue feedback (#701).

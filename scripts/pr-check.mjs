@@ -23,6 +23,8 @@ const escapeRegex = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const result = () => ({ problems: [], info: [] })
 const problem = (check, message, fix) => ({ check, message, fix })
 const isReleaseTitle = title => /^chore\(release\):/.test(title)
+// A team pull request titled chore(changelog): shortens every fragment to one line under Unreleased and removes it.
+const isFoldTitle = title => /^chore\(changelog\):/.test(title)
 // The type is read as rule 6 reads it for the CHANGELOG: the word before "(", "!" or ":".
 const isFixTitle = title => /^fix[(!:]/.test(title)
 const linesOf = text => text.split(/\r?\n/)
@@ -231,12 +233,15 @@ export const titleKnown = (span, titles) => titles.exact.has(span)
 
 // The release writes each fix and feature's CHANGELOG line from its pull request title, so a new pull request adds no
 // fragment to changelog.d/. One opened before that change keeps its fragment, which the release folds in place of
-// the title; a fragment already on main is not edited.
-export const fragmentChanges = ({ paths = [], addedPaths = [], headPaths, isRelease }) => {
+// the title; a fragment already on main is not edited, except by the release or a chore(changelog): pull request
+// that folds every fragment.
+export const fragmentChanges = ({ paths = [], addedPaths = [], headPaths, isRelease, isFold = false }) => {
   const output = result()
-  if (isRelease) {
+  if (isRelease || isFold) {
+    const who = isRelease ? 'the release' : 'the fold'
+    const fix = isRelease ? 'run node scripts/changelog-fold.mjs <version> --write and include the fragment removals.' : 'shorten each remaining fragment to one line under ## Unreleased and remove it.'
     if (headPaths === undefined || headPaths === null) output.info.push('changelog: unfolded fragment check skipped; head tree listing is unavailable.')
-    else if ([...headPaths].some(isFragmentPath)) output.problems.push(problem('changelog', 'the release leaves fragments unfolded in changelog.d/.', 'run node scripts/changelog-fold.mjs <version> --write and include the fragment removals.'))
+    else if ([...headPaths].some(isFragmentPath)) output.problems.push(problem('changelog', `${who} leaves fragments unfolded in changelog.d/.`, fix))
     return output
   }
   const fresh = addedPaths.filter(isFragmentPath)
@@ -277,10 +282,14 @@ export const changelogEntry = ({ entry, issue, titles, isDocsOnly, location = 'U
 
 // isRequired: a fix or feature that edits CHANGELOG.md writes its own line under Unreleased, because the release
 // then leaves its title out. Every other pull request needs no entry.
-export const changelog = ({ text, added, issue, titles, isRelease, isDocsOnly, isRequired = true, paths = [], addedPaths = [], headPaths }) => {
-  const output = fragmentChanges({ paths, addedPaths, headPaths, isRelease })
+export const changelog = ({ text, added, issue, titles, isRelease, isFold = false, isDocsOnly, isRequired = true, paths = [], addedPaths = [], headPaths }) => {
+  const output = fragmentChanges({ paths, addedPaths, headPaths, isRelease, isFold })
   if (isRelease) {
     output.info.push('changelog: skipped for a release pull request.')
+    return output
+  }
+  if (isFold) {
+    output.info.push('changelog: Unreleased lines not checked for a pull request that folds the old fragments.')
     return output
   }
   // A kept fragment must still fold at release: it names its own issue and its covering tests.
@@ -577,7 +586,7 @@ export const checkPr = data => {
   }
   add(naming(data.title, data.branch))
   add(sections(data.body, data.template))
-  add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, titles: testTitles(data.testFiles), isRelease, isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) && data.paths.includes('CHANGELOG.md') }))
+  add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, titles: testTitles(data.testFiles), isRelease, isFold: !isOutside && isFoldTitle(data.title), isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) && data.paths.includes('CHANGELOG.md') }))
   add(privateData({ added: data.added, body: data.body }))
   add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))

@@ -192,6 +192,23 @@ test('pr-check refuses a fix that edits an existing fragment', () => {
   assert.ok(checkPr(data).problems.some(item => /existing fragment was edited or removed/.test(item.message)))
 })
 
+test('pr-check lets a chore(changelog) pull request remove every fragment, but not leave one or come from outside', () => {
+  const fold = () => ({
+    ...syntheticPr(), title: 'chore(changelog): fold the synthetic fragments into Unreleased',
+    paths: ['CHANGELOG.md', 'changelog.d/229-old.md'], changedPaths: ['CHANGELOG.md', 'changelog.d/229-old.md'],
+    addedPaths: [], headPaths: ['CHANGELOG.md', 'changelog.d/README.md'],
+    added: [{ path: 'CHANGELOG.md', line: 4, text: '- A synthetic change, shortened (#229).' }],
+  })
+  const checked = checkPr(fold())
+  assert.deepEqual(checked.problems.filter(item => item.check === 'changelog'), [])
+  assert.ok(checked.info.includes('changelog: Unreleased lines not checked for a pull request that folds the old fragments.'))
+  const left = fold()
+  left.headPaths.push('changelog.d/230-left.md')
+  assert.deepEqual(checkPr(left).problems.filter(item => item.check === 'changelog').map(item => item.message), ['the fold leaves fragments unfolded in changelog.d/.'])
+  const outside = { ...fold(), association: 'CONTRIBUTOR' }
+  assert.ok(checkPr(outside).problems.some(item => /existing fragment was edited or removed/.test(item.message)))
+})
+
 test('pr-check refuses a release that leaves fragments unfolded', async t => {
   const data = { ...syntheticPr(), title: 'chore(release): 1.1.0', headPaths: ['changelog.d/README.md', 'changelog.d/42-synthetic.md'] }
   assert.ok(checkPr(data).problems.some(item => /leaves fragments unfolded/.test(item.message)))
