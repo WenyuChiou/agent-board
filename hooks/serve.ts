@@ -10,7 +10,7 @@ import type { Strings } from './i18n'
 import { agentLabel } from './strings'
 import type { Tone } from './palette'
 import { RESUME } from './parse'
-import { OLDER_SHOWN, replyHint, wayBackText } from './view'
+import { OLDER_SHOWN, replyHint, rowNeedsYou, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message } from './messaging'
 
@@ -373,6 +373,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     }
     if (item.type === 'row') {
       const { row } = item
+      const needs = rowNeedsYou(row, idleKeys.has(row.key) || stoppedKeys.has(row.key))
       const connection = isLan ? undefined : liveTarget(row.agent, row.nativeSession, messaging?.connections ?? [])
       const baseMode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
       const mode = connection ? 'connected' : (messaging || !allowResume) && baseMode === 'send' ? 'open' : baseMode
@@ -386,8 +387,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
           dir: row.dir ?? null,
           ...(row.nativeSession === undefined ? {} : { sessionId: row.nativeSession }),
           // Run ownership is not reported by the current producer (#399).
-          ...(!idleKeys.has(row.key) && !stoppedKeys.has(row.key) && row.auto !== null && row.auto !== 'ended' && row.steps.some(step => step.status === 'blocked')
-            ? { stuck: { reason: (row.steps.find(step => step.status === 'blocked')?.note || row.steps.find(step => step.status === 'blocked')?.text || '').replace(/\s+/g, ' ').trim().slice(0, 80) } }
+          ...(needs?.kind === 'stuck'
+            ? { stuck: { reason: needs.reason } }
             : {}),
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),

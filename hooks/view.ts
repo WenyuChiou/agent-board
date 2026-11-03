@@ -180,6 +180,16 @@ export type PrView = { text: string; url: string; tone: Tone }
 
 export type DoneItem = { key: string; project: string; title: string; when: string; questions?: WaitingItem[] }
 
+// The page and terminal share which live rows need the person. Shelved sessions keep their
+// last steps for reference without presenting a blocked step as a live request.
+export const rowNeedsYou = (row: TaskRow, isShelved = false): { kind: 'stuck' | 'question'; reason: string } | null => {
+  if (isShelved || row.auto === null || row.auto === 'ended') return null
+  const blocked = row.steps.find(step => step.status === 'blocked')
+  if (blocked !== undefined) return { kind: 'stuck', reason: (blocked.note || blocked.text).replace(/\s+/g, ' ').trim().slice(0, 80) }
+
+  return row.question === null ? null : { kind: 'question', reason: row.question }
+}
+
 // Other work, one group per project, this session's project first; `summary` says it in a
 // line (`3 件 · 1 等你 · 1 已停`) for while the list is folded.
 export type RowGroup = { project: string; isHere: boolean; rows: TaskRow[]; summary: string }
@@ -1122,7 +1132,7 @@ export const buildView = (
       s.groupCount(group.rows.length),
       count(row => row.tone === 'warn', s.groupWaiting),
       count(row => row.tone === 'alert', s.groupStuck),
-      count(row => row.auto === 'working', s.groupWorking),
+      count(row => row.auto === 'working' && rowNeedsYou(row) === null, s.groupWorking),
     ]
       .filter(part => part !== '')
       .join(' · ')
