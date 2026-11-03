@@ -33,7 +33,7 @@ const sourceOwner = (source: QuestionSource): QuestionOwner | null => {
 // owners that already saved records under it; another owner sharing it uses its canonical id, and
 // so does each owner when two meet with nothing saved. An owner with a record under its canonical
 // id stays there after a peer leaves. Project-heading migration is unchanged (#602).
-export const questionScopes = (projects: readonly ProgressProject[], mine: ProgressMirror | null, ledger?: QuestionLedger): QuestionScopeOf => {
+const scopeTables = (projects: readonly ProgressProject[], mine: ProgressMirror | null, ledger?: QuestionLedger): { scopeOf: QuestionScopeOf; owners: ReadonlyMap<string, ReadonlySet<string>> } => {
   const owners = new Map<string, Set<string>>()
   const holders = new Map<string, Set<string>>()
   const titled = new Map<string, Set<string>>()
@@ -82,16 +82,20 @@ export const questionScopes = (projects: readonly ProgressProject[], mine: Progr
     const held = holders.get(scope)
     if (held === undefined || held.has(session)) note(holders, scope, session)
   }
-  return (project: string, agent: string, session: string, resume?: string | null): string => {
-    const scope = questionScope(project, agent, session)
-    if (resume == null) return scope
-    const own = questionScope(project, agent, resume)
-    if (saved.has(own)) return own
-    const held = holders.get(scope)
-    if (held !== undefined) return held.has(resume) ? scope : own
-    return (owners.get(scope)?.size ?? 0) > 1 ? own : scope
+  return {
+    owners,
+    scopeOf: (project: string, agent: string, session: string, resume?: string | null): string => {
+      const scope = questionScope(project, agent, session)
+      if (resume == null) return scope
+      const own = questionScope(project, agent, resume)
+      if (saved.has(own)) return own
+      const held = holders.get(scope)
+      if (held !== undefined) return held.has(resume) ? scope : own
+      return (owners.get(scope)?.size ?? 0) > 1 ? own : scope
+    },
   }
 }
+export const questionScopes = (projects: readonly ProgressProject[], mine: ProgressMirror | null, ledger?: QuestionLedger): QuestionScopeOf => scopeTables(projects, mine, ledger).scopeOf
 const isFrozenQuestion = (record: QuestionRecord, frozen: ReadonlySet<string>): boolean =>
   frozen.has(record.scope) || record.source !== undefined && frozen.has(questionScope(record.source.project, record.source.agent, record.source.session))
 export const questionSlot = (scope: string, index: number | string): string => JSON.stringify([scope, index])
@@ -613,7 +617,7 @@ export const observeQuestions = (
   answeredTurns: readonly (AgentTurn | QuestionAnswerEvidence)[] = [],
   frozen: ReadonlySet<string> = new Set(),
 ): { ledger: QuestionLedger; keys: Record<string, string>; marked: string[] } => {
-  const scopeOf = questionScopes(projects, mine, ledger)
+  const { scopeOf, owners } = scopeTables(projects, mine, ledger)
   const records = ledger.records.map(row => ({ ...row }))
   for (const record of records) {
     if (record.source?.kind !== 'inbox' || !record.isUnresolved) continue
@@ -656,11 +660,18 @@ export const observeQuestions = (
     hashes.set(record.id, hash)
     return retired.has(hash)
   }
+  // Holding the alias says where a session's records go, not that it asked each older one. Saved with
+  // no full id, an answer can't be told from another session's once the alias has two: it shows again.
+  const isAnotherOwners = (record: QuestionRecord, row: Observation): boolean => {
+    const asker = record.source === undefined || record.source.kind === 'inbox' ? undefined : sourceOwner(record.source)
+    const owner = sourceOwner(row.source)
+    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && (owners.get(record.scope)?.size ?? 0) > 1
+  }
   const resolved = seen.flatMap(row => {
     if (!row.isWaiting) return []
     const copies = copiesOf(row)
     const words = questionWords(row.text)
-    const record = records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === words && record.isUnresolved === false && (row.producer !== '' || (record.resolvedAt !== undefined && (record.source?.task === row.source.task || isSameAsker(record.source, row.source)) && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
+    const record = records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === words && record.isUnresolved === false && !isAnotherOwners(record, row) && (row.producer !== '' || (record.resolvedAt !== undefined && (record.source?.task === row.source.task || isSameAsker(record.source, row.source)) && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
     return record === undefined ? [] : [{ row, record }]
   })
   const resolvedRows = new Set(resolved.map(item => item.row))
