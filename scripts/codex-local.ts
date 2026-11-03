@@ -205,6 +205,57 @@ export const codexTrustOutput = (result: { changes: number; applied: boolean }, 
   return `${line}\n`
 }
 
+type LocalPlan = {
+  agent: string
+  progress: string
+  changes: { file: string; action: string }[]
+  conflicts: string[]
+  alreadyGone: string[]
+  applied?: boolean
+}
+
+export const codexDoctorOutput = (result: LocalPlan & {
+  installed: boolean
+  reportHook: string
+  hooksTrusted: boolean | 'unknown'
+  problem?: string
+  capabilities: { lifecycle: string }
+}, s: Strings, command: string): string => {
+  const words = s.localSummary
+  const host = s.agentNames[result.agent] ?? result.agent
+  const hasHook = result.installed || result.reportHook === 'connect'
+  const lines = [words.doctor(host, result.installed ? words.installed : hasHook ? words.connector : words.missing)]
+  if (result.problem) lines.push(result.problem)
+  for (const file of result.conflicts) lines.push(words.conflict(file))
+  if (!hasHook) for (const change of result.changes) lines.push(words.needsUpdate(change.file))
+  const isPending = result.capabilities.lifecycle === 'adapter-pending'
+  if (isPending) lines.push(words.pending)
+  if (result.agent === 'codex' && result.installed) lines.push(result.hooksTrusted === true ? words.trusted : result.hooksTrusted === false ? words.untrusted : words.trustUnknown)
+  lines.push(s.codexDoctor)
+  lines.push(result.conflicts.length ? words.review(command)
+    : !hasHook ? words.setup(command)
+    : isPending ? words.skill(host)
+    : result.agent === 'codex' && result.hooksTrusted !== true ? words.trust
+    : words.verify(host))
+  return `${lines.join('\n')}\n`
+}
+
+export const codexRemoveOutput = (result: LocalPlan, s: Strings, command: string): string => {
+  const words = s.localSummary
+  const host = s.agentNames[result.agent] ?? result.agent
+  const lines = [words.removal(host, result.applied ? words.removed : result.conflicts.length ? words.blocked : result.changes.length ? words.preview : words.absent)]
+  for (const change of result.changes) lines.push(change.action === 'remove'
+    ? result.applied ? words.removedFile(change.file) : words.removeFile(change.file)
+    : result.applied ? words.updatedFile(change.file) : words.updateFile(change.file))
+  for (const file of result.alreadyGone) lines.push(s.setupAlreadyGone(file))
+  for (const file of result.conflicts) lines.push(words.conflict(file))
+  lines.push(words.kept(result.progress))
+  lines.push(result.conflicts.length ? words.review(command)
+    : result.applied ? words.restart(host)
+    : result.changes.length ? words.apply(`${command} --apply`) : words.none)
+  return `${lines.join('\n')}\n`
+}
+
 // What a person reads when a setup mode fails (#465): one sentence with its next step, never the code name, a stack or a path.
 export const setupFailure = (error: unknown, agent: string, s: Strings): { code: string; message: string; reason?: string } => {
   const detail = error as { code?: unknown; message?: unknown; record?: unknown } | null | undefined
@@ -310,6 +361,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const deepseekDir = resolve(flag('--deepseek-dir') ?? (process.env.DSH_HOME || join(home, '.dsh')))
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
   const manifest: Manifest = { files: object(loaded.files ?? {}) as Record<string, string>, groups: object(loaded.groups ?? {}), foreignGroups: object(loaded.foreignGroups ?? {}) }
+  // A check must not fail on the words of its next step: an argument the shell would expand goes through boardRun's code points.
+  const nextCommand = (nextMode: string): string => {
+    const rest = [nextMode, ...args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json')]
+    if (rest.some(arg => /["`$%\r\n]/.test(arg))) return boardRun(process.argv[1]!, rest)
+    return `${boardRun(process.argv[1]!)} ${rest.map(arg => /^[\w.:=/\\-]+$/.test(arg) ? arg : quote(arg)).join(' ')}`
+  }
   const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
 
   // Keep the connector as the sole writer for its agents, including its next automatic probe.
@@ -904,6 +961,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     alreadyGone, notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
+  const outputPlan = (result: LocalPlan): void => {
+    if (remove && !args.includes('--json')) process.stdout.write(codexRemoveOutput(result, s, nextCommand('--codex-remove')))
+    else output(result)
+  }
   if (mode === '--codex-trust') {
     if (agent !== 'codex' || conflicts.length || changes.length || readLocal(manifestFile) === null) throw new Error('OWNED_CODEX_INSTALL_REQUIRED')
     const executable = flag('--codex-bin')
@@ -954,11 +1015,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connected.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
     const reportHook = installed ? 'installer' : hasConnectHook ? 'connect' : 'none'
     const isSkillOnly = reportHook === 'none' && skills.some(file => readLocal(file) !== null)
-    output({ ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor })
+    const result = { ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor }
+    if (args.includes('--json')) output(result)
+    else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup')))
     return true
   }
-  if (!args.includes('--apply')) { output(plan); return true }
-  if (conflicts.length) { output(plan); throw new Error('INSTALL_CONFLICT') }
+  if (!args.includes('--apply')) { outputPlan(plan); return true }
+  if (conflicts.length) {
+    outputPlan(plan)
+    // The plain removal already explains the conflict and its single next step.
+    if (remove && !args.includes('--json')) { process.exitCode = 1; return true }
+    throw new Error('INSTALL_CONFLICT')
+  }
   withInstallLock(home, () => {
     // Compare the bytes used to build the plan, not a fresh snapshot taken after
     // planning: another installer or host may have changed them in that interval.
@@ -996,7 +1064,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
   })
-  output({ ...plan, applied: true })
+  outputPlan({ ...plan, applied: true })
   return true
 }
 
