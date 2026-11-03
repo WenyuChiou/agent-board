@@ -287,7 +287,7 @@ test('a setup record for another host folder leaves the connector to connect thi
   assert.equal(readFileSync(main, 'utf8'), saved)
 }))
 
-const DATA_DIR_HOSTS = { codex: '.codex', cursor: '.cursor', gemini: '.gemini', muse: 'muse', grok: '.grok', opencode: 'opencode' }
+const DATA_DIR_HOSTS = { codex: '.codex', cursor: '.cursor', gemini: '.gemini', muse: 'muse', grok: '.grok', opencode: 'opencode', openclaw: '.openclaw' }
 for (const [agent, folder] of Object.entries(DATA_DIR_HOSTS)) {
   test(`${agent} set up with its own data folder gets no second hook`, () => withSetup(agent, ({ f, run, before }) => {
     assert.equal(run('auto').state.setup.agents.find(one => one.agent === agent).hook, 'setup')

@@ -1005,7 +1005,7 @@ const setupRecordPaths = (text: string | null): string[] | null => {
 // The data folders a config's setup hooks run from.
 const setupHookRoots = (text: string): string[] => {
   const unescaped = text.replace(/\\(["\\])/g, '$1')
-  return [...new Set([...unescaped.matchAll(/((?:[A-Za-z]:[\\/]|\/)[^"'`\r\n]*?)[\\/]agent-board-hook\.mjs/g)].map(match => match[1]!))]
+  return [...new Set([...unescaped.matchAll(/((?:[A-Za-z]:[\\/]|\/)[^"'`\r\n]*?)[\\/](?:agent-board-hook\.mjs|adapters[\\/]openclaw[\\/]agent-board-local\.mjs)/g)].map(match => match[1]!))]
 }
 
 // Setup owns an agent in the host folder its record names, or whose hook file names the record's
