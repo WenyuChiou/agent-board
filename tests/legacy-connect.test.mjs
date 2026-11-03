@@ -287,12 +287,21 @@ test('a setup record for another host folder leaves the connector to connect thi
   assert.equal(readFileSync(main, 'utf8'), saved)
 }))
 
-test('setup with its own data folder is found through its hook, and no second hook is added', () => withSetup('codex', ({ f, run, before }) => {
-  const { state } = run('auto')
-  assert.equal(state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
-  const codex = files => Object.entries(files).filter(([file]) => file.includes('.codex'))
-  assert.deepEqual(codex(snapshot(f.home)), codex(before))
-}, home => ['--data-dir', join(home, 'elsewhere')]))
+const DATA_DIR_HOSTS = { codex: '.codex', cursor: '.cursor', gemini: '.gemini', muse: 'muse', grok: '.grok', opencode: 'opencode' }
+for (const [agent, folder] of Object.entries(DATA_DIR_HOSTS)) {
+  test(`${agent} set up with its own data folder gets no second hook`, () => withSetup(agent, ({ f, run, before }) => {
+    assert.equal(run('auto').state.setup.agents.find(one => one.agent === agent).hook, 'setup')
+    const host = files => Object.entries(files).filter(([file]) => file.includes(folder) && !file.includes('install-'))
+    assert.deepEqual(host(snapshot(f.home)), host(before))
+  }, home => ['--data-dir', join(home, 'other', 'my data')]))
+  test(`${agent} with a setup record from before config gets no second hook`, () => withSetup(agent, ({ f, run, recordFile, before }) => {
+    const { config, ...old } = JSON.parse(readFileSync(recordFile, 'utf8'))
+    writeFileSync(recordFile, JSON.stringify(old))
+    assert.equal(run('auto').state.setup.agents.find(one => one.agent === agent).hook, 'setup')
+    const host = files => Object.entries(files).filter(([file]) => file.includes(folder) && !file.includes('install-'))
+    assert.deepEqual(host(snapshot(f.home)), host(before))
+  }))
+}
 
 test('a setup record with no config counts where the hook file names its data folder', () => withSetup('codex', ({ f, run, recordFile }) => {
   const { config, ...old } = JSON.parse(readFileSync(recordFile, 'utf8'))

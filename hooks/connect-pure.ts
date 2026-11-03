@@ -230,6 +230,8 @@ export type AgentHook = {
   // Any of these says the agent is installed, when there is more than one place to look.
   dirs?: string[]
   file: string
+  // Where setup keeps its hook, when that isn't `file`.
+  setupFile?: string
   // The file an earlier name of the plugin wrote instead, taken away when connecting or removing.
   old?: string
   generated?: boolean
@@ -449,6 +451,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: ctx.grokHome,
       dirs: grokSigns(ctx),
       file: [ctx.grokHome, 'hooks', 'agent-board.json'].join(ctx.sep),
+      setupFile: [ctx.grokHome, 'hooks', 'agent-board-local.json'].join(ctx.sep),
       old: [ctx.grokHome, 'hooks', 'progress-pane.json'].join(ctx.sep),
       generated: true,
       edit: generatedFile(
@@ -513,6 +516,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       label: 'OpenCode',
       dir: opencodeHome,
       file: [opencodeHome, 'plugin', 'agent-board.js'].join(ctx.sep),
+      setupFile: [opencodeHome, 'plugins', 'agent-board-local.js'].join(ctx.sep),
       old: [opencodeHome, 'plugin', 'progress-pane.js'].join(ctx.sep),
       generated: true,
       edit: generatedFile(opencodePlugin(ctx), [opencodePlugin(ctx, false), legacyOpenCodePlugin(ctx), legacyOpenCodePlugin(ctx, false), legacyOpenCodePlugin(ctx, true, false)]),
@@ -1014,7 +1018,7 @@ export const setupOwnership = (hooks: readonly AgentHook[], home: string, sep: s
   const held = new Map<string, string>()
   for (const hook of hooks) {
     if (hook.label === '' || !(hook.dirs ?? [hook.dir]).some(exists)) continue
-    const roots = setupHookRoots(exists(hook.file) ? read(hook.file) ?? '' : '')
+    const roots = [hook.file, ...(hook.setupFile === undefined ? [] : [hook.setupFile])].flatMap(one => setupHookRoots(exists(one) ? read(one) ?? '' : ''))
     const named = roots.map(root => connectPath(root, isWindows))
     const dirs = [hook.dir, ...(hook.dirs ?? []), hook.file.slice(0, hook.file.lastIndexOf(sep))].map(dir => connectPath(dir, isWindows))
     for (const root of [[home, '.agent-board'].join(sep), ...roots]) {
