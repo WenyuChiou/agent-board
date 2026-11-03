@@ -1,6 +1,7 @@
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { lastQuestionInProse, normalizeReply } from './digest'
+import { identity } from './grouping'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
 import { DARK, LIGHT } from './palette'
@@ -220,10 +221,20 @@ const stepLine = (step: ViewStep): string => `${MARK[step.status] ?? '○'} ${st
 // with no agent is Claude Code's.
 const agentOf = (agent: string, isAgent: boolean, s: Strings): string => (agent !== '' ? agentLabel(agent, s) : isAgent ? agentLabel('claude', s) : '')
 
-// How a row that needs the person says so. A question already on the board's list above is not
-// worded a second time; one the list has aged away, and a blocked step, are.
-const needsWords = (view: View, row: TaskRow, needs: { kind: 'stuck' | 'question'; reason: string }, s: Strings): string =>
-  needs.kind === 'question' && view.waiting.some(item => item.project === row.project && item.task === row.title && item.text === needs.reason) ? s.pgNeeds : s.pgNeedsWhy(needs.reason)
+// Whether this row needs the person on this board. A question counts while it has its card, by
+// the page's own match: copies of one question merge into one card and a later answer can cover
+// an earlier copy, so a row's own question may have no card left.
+const boardNeeds = (view: View, row: TaskRow, isShelved = false): ReturnType<typeof rowNeedsYou> => {
+  const needs = rowNeedsYou(row, isShelved)
+  if (needs?.kind !== 'question') return needs
+  const own = identity(row.agent, false, row.project, row.title, row.dir)
+
+  return view.waiting.some(item => identity(item.agent, false, item.project, item.task, item.dir) === own) ? needs : null
+}
+
+// How a row that needs the person says so. Its question is already on the board's list above, so
+// it is not worded a second time; a blocked step has no other line.
+const needsWords = (needs: { kind: 'stuck' | 'question'; reason: string }, s: Strings): string => (needs.kind === 'question' ? s.pgNeeds : s.pgNeedsWhy(needs.reason))
 
 const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelved = false): string[] => {
   const c = paint(o)
@@ -232,8 +243,8 @@ const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelv
   const name = agentOf(row.agent, row.auto !== null, s)
   const who = name === '' ? '' : ` · ${name}`
   const count = row.total > 0 ? `${row.done}/${row.total} ` : ''
-  const needs = rowNeedsYou(row, isShelved)
-  const status = needs === null ? row.status : needsWords(view, row, needs, s)
+  const needs = boardNeeds(view, row, isShelved)
+  const status = needs === null ? row.status : needsWords(needs, s)
   const lines = [`  ${c('bold', cut(row.title, o.width - 4))}`, `    ${c('quiet', cut(`${count}${status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6))}`]
   if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
   if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
@@ -251,7 +262,7 @@ const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelv
 const countLine = (view: View, pending: readonly PendingTurn[], s: Strings, c: ReturnType<typeof paint>): string => {
   const { due, today } = view.overview
   // A row that needs the person is counted as waiting, as the page does, and not as moving too.
-  const active = view.overview.active - liveRows(view).filter(row => rowNeedsYou(row) !== null).length
+  const active = view.overview.active - liveRows(view).filter(row => boardNeeds(view, row) !== null).length
   const waiting = view.overview.waiting + blockedRows(view).length + remainingInbox(view, pending).filter(turn => turn.isQuestion).length
 
   return `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`, true)}  ${c('accent', `▸ ${active} ${s.countActive}`, true)}  ${c('alert', `⚑ ${due} ${s.countDue}`, true)}  ${c('done', `✓ ${today} ${s.countToday}`, true)}`
@@ -621,13 +632,15 @@ export const olderKey = (ask: WaitingItem): string => `older:${ask.key}@${ask.qu
 // The full action catalog includes idle rows for the page server. Terminal callers pass
 // their shelf state so only rows the person can see are selectable.
 export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOpen = true, isOlderOpen = false): BoardItem[] => {
-  // The page's order: what is working now, then the rest by project, work due soon first; a row
-  // is listed once.
+  // The page's order: what is stuck, what is working now, then the rest by project, work due soon
+  // first; a row is listed once, and each heading the screen draws comes once.
   const shelved = new Set([...view.idle, ...view.stopped].map(row => row.key))
   const listed = [...view.due, ...view.groups.flatMap(group => group.rows), ...(isIdleOpen ? [...view.idle, ...view.stopped] : [])].filter((row, index, all) => all.findIndex(one => one.key === row.key) === index)
-  const isWorking = (row: TaskRow): boolean => row.auto === 'working' && !shelved.has(row.key)
-  const rest = listed.filter(row => !isWorking(row))
-  const rows = [...listed.filter(isWorking), ...[...new Set(rest.map(row => row.project))].flatMap(project => rest.filter(row => row.project === project))]
+  const needsOf = (row: TaskRow): ReturnType<typeof rowNeedsYou> => boardNeeds(view, row, shelved.has(row.key))
+  const isStuck = (row: TaskRow): boolean => needsOf(row)?.kind === 'stuck'
+  const isWorking = (row: TaskRow): boolean => row.auto === 'working' && !shelved.has(row.key) && needsOf(row) === null
+  const rest = listed.filter(row => !isStuck(row) && !isWorking(row))
+  const rows = [...listed.filter(isStuck), ...listed.filter(isWorking), ...[...new Set(rest.map(row => row.project))].flatMap(project => rest.filter(row => row.project === project))]
 
   return [
     // A question's key holds its words, so a press made while it showed one question is refused
@@ -895,7 +908,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
     const isHere = index === at
     const isOpen = state.open === item.key
     const mark = isHere ? c('accent', '›', true) : ' '
-    const needs = item.type === 'row' ? rowNeedsYou(item.row, shelved.has(item.row.key)) : null
+    const needs = item.type === 'row' ? boardNeeds(view, item.row, shelved.has(item.row.key)) : null
     const isWorking = item.type === 'row' && item.row.auto === 'working' && !shelved.has(item.row.key) && needs === null
     // A question has its own line under Waiting on you, so its row stays with its project.
     const isStuck = needs?.kind === 'stuck'
@@ -948,7 +961,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const lead = [(isWorking || isStuck) && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
       // The step it is on, in the accent colour, where its status only says that it works.
       const step = needs === null && (row.tone === 'quiet' || row.tone === 'accent') ? row.steps.find(one => one.isCurrent && (one.status === 'doing' || one.status === 'todo')) : undefined
-      const status = cut(`${lead}${needs !== null ? needsWords(view, row, needs, s) : step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve)
+      const status = cut(`${lead}${needs !== null ? needsWords(needs, s) : step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve)
       const quiet = status.startsWith(lead) ? lead : ''
       lines.push(`    ${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
       if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)

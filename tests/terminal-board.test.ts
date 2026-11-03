@@ -5,6 +5,7 @@ import { isLifecycleStep, LIFECYCLE_STEPS } from '../hooks/codex'
 import { DARK, LIGHT } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
 import { serveModel } from '../hooks/serve'
+import { emptyQuestions, observeQuestions, resolveQuestion } from '../hooks/questions'
 import { STRINGS } from '../hooks/strings'
 import { buildView, rowNeedsYou } from '../hooks/view'
 
@@ -95,6 +96,60 @@ test('a blocked row is counted once when it is both due and in its group, and no
   expect(count({ ...view, due: [row] })).toContain(`● 1 ${s.countWaiting}`)
   expect(count({ ...view, idle: [row] })).toContain(`● 0 ${s.countWaiting}`)
   expect(count({ ...view, stopped: [row] })).toContain(`● 0 ${s.countWaiting}`)
+})
+
+test('a row whose question merged into another card, or was covered by an answer, is in progress on the terminal board as on the page', () => {
+  const s = STRINGS.en
+  const page = (board: ReturnType<typeof viewOf>) => serveModel(board, [], s, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } }).view!
+  const block = (id: string, title: string): string => `<!-- auto session=${id} agent=antigravity state=working updated=${at(5)} dir=/synthetic/p -->
+### ${title}
+- [?] Ship it, OK?
+<!-- /auto session=${id} -->
+`
+  const first = block('ab770007', 'First copy')
+  const both = parseProgress(`## sample-api
+${first}${block('ab770008', 'Second copy')}`)
+  const seen = observeQuestions(emptyQuestions(), parseProgress(`## sample-api
+${first}`), null, [], NOW - 2000, true, 's1').ledger
+  const ledger = observeQuestions(seen, both, null, [], NOW - 1000, true, 's2').ledger
+  const later = ledger.records.find(record => record.scope.includes('ab770008'))!
+  for (const [view, waiting, active] of [
+    [buildView(both, [], null, NOW, 0, {}, s, [], {}, ledger), 1, 1],
+    [buildView(both, [], null, NOW, 0, {}, s, [later.id], {}, resolveQuestion(ledger, later.id, NOW)), 0, 2],
+  ] as const) {
+    const onPage = page(view)
+    expect(onPage.needs.n).toBe(waiting)
+    expect(onPage.working.length).toBe(active)
+    for (const out of [boardText(view, [], s, { width: 100, isColor: false }), boardScreen(view, [], emptyBoardState, s, { width: 100, isColor: false })]) {
+      expect(out).toContain(`● ${waiting} ${s.countWaiting}`)
+      expect(out).toContain(`▸ ${active} ${s.countActive}`)
+      expect(out).not.toContain(`${s.pgNeeds}: `)
+    }
+  }
+})
+
+test('the terminal board draws each heading once when a row that needs you sits among rows at work', () => {
+  const s = STRINGS.en
+  const row = (id: string, state: string, title: string, step: string): string => `<!-- auto session=${id} agent=antigravity state=${state} updated=${at(5)} -->
+### ${title}
+- ${step}
+<!-- /auto session=${id} -->
+`
+  const drawn = (rows: string): string => {
+    const view = viewOf(`## sample-api
+${rows}`)
+    return boardScreen(view, [], emptyBoardState, s, { width: 100, isColor: false })
+  }
+  const heads = (out: string, word: string): number => out.split('\n').filter(line => line.trim() === word).length
+  const stuck = drawn(`${row('ab770009', 'working', 'At work one', '[~] Write')}${row('ab77000a', 'working', 'Blocked', '[!] Supply the synthetic key')}${row('ab77000b', 'working', 'At work two', '[~] Test')}`)
+  expect(heads(stuck, `● ${s.pgNeeds}`)).toBe(1)
+  expect(heads(stuck, `▸ ${s.sectionActive}`)).toBe(1)
+  expect(stuck.indexOf('Blocked')).toBeLessThan(stuck.indexOf('At work one'))
+  const asking = drawn(`${row('ab77000c', 'working', 'At work one', '[~] Write')}${row('ab77000d', 'working', 'Asking', '[?] Ship it, OK?')}${row('ab77000e', 'working', 'At work two', '[~] Test')}`)
+  expect(heads(asking, `▸ ${s.sectionActive}`)).toBe(1)
+  const waiting = drawn(`${row('ab77000f', 'waiting', 'Paused one', '[ ] Write')}${row('ab770010', 'waiting', 'Blocked', '[!] Supply the synthetic key')}${row('ab770011', 'waiting', 'Paused two', '[ ] Test')}`)
+  expect(heads(waiting, `● ${s.pgNeeds}`)).toBe(1)
+  expect(heads(waiting, 'sample-api')).toBe(1)
 })
 
 test('terminal attention follows live questions and leaves stopped and hand-kept blockers on their shelves', () => {
