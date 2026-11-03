@@ -1,0 +1,9 @@
+# The governance files of CONTRIBUTING rule 12. Once main requires review from
+# code owners, a pull request that changes one of these waits for the owner's own
+# review on GitHub; an agent's comment cannot stand in for it.
+# No other path has an owner, so every other pull request is reviewed as before.
+/.github/CODEOWNERS @WenyuChiou
+/.github/workflows/ @WenyuChiou
+/CONTRIBUTING.md @WenyuChiou
+/docs/dev/RULES.md @WenyuChiou
+/docs/dev/team-process.md @WenyuChiou
