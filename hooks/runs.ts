@@ -42,7 +42,11 @@ export const startersOf = (projects: readonly ProgressProject[]): ((auto: Progre
   // A person's block wins an id shared with a run, just as it does in the live fold.
   for (const auto of [...blocks.filter(auto => auto.isRun !== true), ...blocks.filter(auto => auto.isRun === true)]) {
     for (const id of [auto.resume, auto.session]) {
-      if (id !== null && !byId.has(id)) byId.set(id, auto)
+      if (id !== null) {
+        if (!byId.has(id)) byId.set(id, auto)
+        const composite = `${auto.agent}:${id}`
+        if (!byId.has(composite)) byId.set(composite, auto)
+      }
     }
   }
 
@@ -50,7 +54,12 @@ export const startersOf = (projects: readonly ProgressProject[]): ((auto: Progre
     let at = auto
     const seen = new Set([auto])
     for (let hop = 0; hop < MAX_HOPS; hop += 1) {
-      const next = at.parent === undefined ? undefined : byId.get(at.parent)
+      const parentId = at.parent
+      if (parentId === undefined) return null
+      const bare = byId.get(parentId)
+      const next = (bare !== undefined && bare.isRun !== true)
+        ? bare
+        : (byId.get(`${at.agent}:${parentId}`) ?? bare)
       if (next === undefined || seen.has(next)) return null
       if (next.isRun !== true) return next
       seen.add(next)
@@ -127,14 +136,22 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
   const byId = new Map<string, Entry>()
   for (const entry of [...kept.filter(entry => !isRun(entry)), ...kept.filter(isRun)]) {
     for (const id of [entry.auto.resume, entry.auto.session]) {
-      if (id !== null && !byId.has(id)) byId.set(id, entry)
+      if (id !== null) {
+        if (!byId.has(id)) byId.set(id, entry)
+        const composite = `${entry.auto.agent}:${id}`
+        if (!byId.has(composite)) byId.set(composite, entry)
+      }
     }
   }
   const rootOf = (entry: Entry): Entry | null => {
     let at = entry
     for (let hop = 0; hop < MAX_HOPS; hop += 1) {
       const id = parentOf(at)
-      const next = id === undefined ? undefined : byId.get(id)
+      if (id === undefined) return null
+      const bare = byId.get(id)
+      const next = (bare !== undefined && !isRun(bare))
+        ? bare
+        : (byId.get(`${at.auto.agent}:${id}`) ?? bare)
       if (next === undefined || next === at) return null
       if (!isRun(next)) return next
       at = next
@@ -197,16 +214,31 @@ export const pickParent = (projects: readonly ProgressProject[], project: string
   const name = project.trim().toLowerCase()
   if (name === '') return null
   const runs = new Set<string>()
-  for (const one of projects) for (const task of one.tasks) if (task.auto?.isRun === true) runs.add(task.auto.resume ?? task.auto.session)
+  for (const one of projects) {
+    for (const task of one.tasks) {
+      if (task.auto?.isRun === true) {
+        if (task.auto.resume !== null) {
+          runs.add(task.auto.resume)
+          runs.add(`${task.auto.agent}:${task.auto.resume}`)
+        } else {
+          runs.add(task.auto.session)
+          runs.add(`${task.auto.agent}:${task.auto.session}`)
+        }
+      }
+    }
+  }
   const found = new Set<string>()
   for (const one of projects) {
     if (one.name.trim().toLowerCase() !== name) continue
     for (const task of one.tasks) {
       const auto = task.auto
       if (auto === null || auto.isRun === true || auto.state !== 'working' || now - auto.updated > STALE_MS) continue
-      if (self.includes(auto.session) || auto.resume !== null && self.includes(auto.resume)) continue
-      const id = auto.resume ?? auto.session
-      if (!runs.has(id)) found.add(id)
+      const autoKey = auto.resume ?? auto.session
+      if (self.includes(auto.session) || (auto.resume !== null && self.includes(auto.resume)) || self.includes(`${auto.agent}:${autoKey}`)) continue
+      const isRunTwin = auto.resume !== null
+        ? (runs.has(auto.resume) || runs.has(`${auto.agent}:${auto.resume}`))
+        : (runs.has(auto.session) || runs.has(`${auto.agent}:${auto.session}`))
+      if (!isRunTwin) found.add(autoKey)
     }
   }
 

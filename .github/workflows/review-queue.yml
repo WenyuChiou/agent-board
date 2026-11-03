@@ -1,0 +1,41 @@
+# Posts the review queue (scripts/review-queue.mjs) every hour as one comment on one pinned issue, edited in place,
+# so anyone can see which pull requests wait for a reviewer, for main or for their author without running the script.
+# It also takes `claimed` off issues whose claim ran out (CONTRIBUTING rule 3), with one comment on each.
+# It runs main's own scripts (a run by hand from another branch does nothing) and never checks out a pull request. The token may write issues and their comments and
+# only read the code and the pull requests; the checkout keeps no credentials.
+name: review-queue
+
+on:
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: review-queue
+  cancel-in-progress: false
+
+jobs:
+  post:
+    name: post the review queue
+    # A fork's copy has nothing of its own to post.
+    if: github.repository == 'WenyuChiou/agent-board' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Post the queue and take claimed off claims that ran out
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The runner's user name is not private; left set, a title saying "runner" would print as <user>.
+          USER: ''
+        run: node scripts/review-queue-post.mjs --repo "$GITHUB_REPOSITORY"

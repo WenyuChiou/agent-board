@@ -19,6 +19,7 @@ node scripts/setup-agent.mjs --apply
 
 讀回定義，完成 host 的信任／啟用。Codex 可在使用者核准後執行限定信任，詳見 [Codex](CODEX.md)。已開啟的 session 可能需要重新載入。CLI、桌面 App、IDE 各自驗收。
 
+
 ## 其他 agent
 
 共用安裝器寫入看板、skill 及已實作的原生 adapter，不需要 Claude Code 或另一個模型。[支援範圍](SETUP.md#native-status-adapters)會區分已安裝與待實作項目。
@@ -85,7 +86,7 @@ Claude 明確再次提問時，即使文字相同，也會更新該問題的識�
 
 #### 在手機上
 
-網頁的版面適合手機。要從和電腦連同一個 Wi-Fi 的手機打開，跑 `node ~/.agent-board/agent-board.mjs --serve --lan`：除了電腦本機的網址，它還會印出網頁在你網路上的網址和它的 QR code，用手機相機對著掃就好。電腦有不只一個網路位址時，用 `--lan 192.168.1.23` 指定一個。Windows 可能會問要不要讓 Node.js 使用網路：在私人網路上允許，並確認 Windows 把你的 Wi-Fi 算成私人網路（剛連上的網路它會先當成公用網路），不然手機連不到網頁。跨網路存取須另行設定遠端連線。
+網頁的版面適合手機。要從和電腦連同一個 Wi-Fi 的手機打開，跑 `node "$HOME/.agent-board/agent-board.mjs" --serve --lan`：除了電腦本機的網址，它還會印出網頁在你網路上的網址和它的 QR code，用手機相機對著掃就好。電腦有不只一個網路位址時，用 `--lan 192.168.1.23` 指定一個。Windows 可能會問要不要讓 Node.js 使用網路：在私人網路上允許，並確認 Windows 把你的 Wi-Fi 算成私人網路（剛連上的網路它會先當成公用網路），不然手機連不到網頁。跨網路存取須另行設定遠端連線。
 
 網路上的網頁有這些限制：
 
@@ -136,7 +137,7 @@ claude plugin install agent-board@agent-board
 
 選用側欄在 session 開始與每小時清理：完成區塊等 12 小時，其他已停／過時區塊等三天。持續執行的 `--serve` 網頁也每小時整理一次。手動工作每個步驟都是 `[x]` 或 `[-]`，且被觀察完成滿三天後，才計入可封存數量；0.24.1 的自動整理只計數，不移走任何手動工作。詳細資訊行會顯示「可封存 N 個已完成的任務」；數量為零時不顯示。工作中或等待中的 agent 區塊，最後寫入後 12 小時內仍算執行中；側欄、終端與網頁會說明暫不能封存，整理也會保留。停止或結束後，展開工作即可立即封存。 自動整理封存仍有 `[?]` 的區塊時，只有在保存並讀回與明確封存相同的完整問題快照後才會封存，而且要等夠久：已結束或已完成的區塊滿三天，仍在工作或等待中的區塊則是滿七天都沒有新報告；快照存不了就保留原處。問題會保留，列在「更早、尚未回答的問題」下，仍可隱藏與再顯示。明確封存任何時候都必須先有這份快照，來源移走後仍可找回；儲存失敗便保留來源。
 
-執行 `node ~/.agent-board/agent-board.mjs --tidy` 可在沒有 Claude session 或網頁時，依正常等待時間整理一次；不會安裝排程，也不會寫入 `progress-seen.json`。側欄、`--watch` 或 `--serve` 會記錄手動工作首次被觀察完成的時間，以及三天規則首次執行的時間。三天從兩者較晚的時間起算，讓 0.24.0 就已完成的工作從升級後再等三天。電腦若只執行 `--tidy`，不會寫入啟用規則的保留紀錄，缺少這筆紀錄便不計數。未知、未來或讀不到的觀察時間都保留手動工作；`--tidy` 仍可封存時間已到的 agent 區塊。網頁的每小時整理若讀不到觀察檔，便跳過該次整理，不寫入任何檔案。
+執行 `node "$HOME/.agent-board/agent-board.mjs" --tidy` 可在沒有 Claude session 或網頁時，依正常等待時間整理一次；不會安裝排程，也不會寫入 `progress-seen.json`。側欄、`--watch` 或 `--serve` 會記錄手動工作首次被觀察完成的時間，以及三天規則首次執行的時間。三天從兩者較晚的時間起算，讓 0.24.0 就已完成的工作從升級後再等三天。電腦若只執行 `--tidy`，不會寫入啟用規則的保留紀錄，缺少這筆紀錄便不計數。未知、未來或讀不到的觀察時間都保留手動工作；`--tidy` 仍可封存時間已到的 agent 區塊。網頁的每小時整理若讀不到觀察檔，便跳過該次整理，不寫入任何檔案。
 
 在側欄或網頁按「清理」（Clean up），會封存完成滿三天的手動工作，正好就是數量行計算的那些，再加上一般整理會移動的代理區塊。先寫入同一組每月封存檔，再從看板移走；未滿三天、未完成或有 `[?]` 步驟的工作會留下。若讀不到完成時間紀錄，清理不會封存任何項目，也不會寫入任何檔案，並會說明原因。0.24.1 的無人操作整理（側欄啟動與每小時、`--tidy`、網頁每小時）只計數，不移走手動工作。側欄的「現在封存」與 `/progress tidy`、網頁的「現在封存」，以及工作列的「封存」，仍可立即把完成工作移到每月封存檔，不會刪除工作。側欄與網頁在大小警告旁顯示一個「清理」按鈕，只要可封存數量大於零也會顯示，即使小看板沒有大小警告。數字及可封存數量放在詳細資訊行。終端看板、聊天和 `--html` 也顯示詳細資訊，但沒有按鈕。
 
@@ -161,11 +162,11 @@ claude plugin install agent-board@agent-board
 
 獨立安裝：將乾淨 checkout 更新到指定版本，預覽 `node scripts/setup-agent.mjs`，再套用已核准範圍。修改過的檔案列為衝突，不覆寫。host 可能要重新載入；不安裝自動更新器或開機服務。
 
-用已安裝程式預覽／套用目標移除：
+用已安裝程式預覽／套用移除，每個設定過的 agent 各做一次。下面以 Codex 為例；其他 agent 換成它的名稱（`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-remove --agent <name>
-node ~/.agent-board/agent-board.mjs --codex-remove --agent <name> --apply
+node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 ```
 
 `--codex-remove`、`--codex-doctor` 是沿用的維護名稱，可搭配各目標。先關閉該看板。只移除未修改的自有定義／檔案；其他目標還需要的共用檔案保留，進度、session 紀錄、封存、日誌及使用者修改也保留。
@@ -235,7 +236,7 @@ node ~/.agent-board/agent-board.mjs --codex-remove --agent <name> --apply
 
 ### 怎麼移除？
 
-獨立安裝：先關閉看板，預覽 `node ~/.agent-board/agent-board.mjs --codex-remove --agent <name>`，確認後加上 `--apply`。進度與歷史會保留。選用 Claude 外掛的移除方式：
+獨立安裝：先關閉看板，預覽 `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`，確認後加上 `--apply`。進度與歷史會保留。選用 Claude 外掛的移除方式：
 
 ```sh
 claude -p "/progress connect remove"
@@ -246,6 +247,10 @@ claude plugin marketplace remove agent-board
 第一行會把其他 agent 裡的 hook 拿掉；先處理完列出的清理問題，再移除外掛。歷史紀錄、回報腳本和收件匣會留著。重試方式、已經移除外掛時的補救步驟，以及保留檔案的位置，請看上面的[更新與移除](#更新與移除)。
 
 ## 疑難排解
+
+截斷的報告標記即使把工作標題藏進註解，仍會顯示標記未寫完的警告；隱藏的工作與原始內容不會因此改寫。
+
+獨立本機 session 即使回報短 ID 相同，只要完整原生綁定與 owner 摘要能區分，仍可各自回報；寫入時保留另一個區塊。缺少歸屬、綁定矛盾或重複歸屬仍會拒絕寫入；重試前先檢查檔案，不要刪除另一個 session 的區塊。
 
 - **沒卡片：** 檢查路徑、adapter、信任與重新載入；觀察真正事件並讀回確切 session 區塊，不手動製造事件宣稱通過。
 - **不能傳送：** 確切原生 session 需要受支援的在線 adapter，hooks 本身不等於可收訊，桌面與 CLI 結果不可互代。

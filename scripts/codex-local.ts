@@ -9,7 +9,8 @@ import type { CodexReport } from '../hooks/codex'
 import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
-import { parseProgress, progressTail, STALE_MS } from '../hooks/parse'
+import { parseProgress, STALE_MS } from '../hooks/parse'
+import { reporterTail } from './reporter-tail'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
@@ -17,9 +18,10 @@ import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCo
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
 import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
-import { trustCodex } from './codex-host'
+import { discoverCodexBinary, inspectCodexConfigToml, trustCodex } from './codex-host'
 import { withLocalLock } from './local-lock'
 import { installControlRoot, withInstallLock } from './install-control'
+import { ConnectTransaction } from './connect-transaction'
 import { boardPromptHelper, boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
 import { windowsHookNode } from './windows-hook-node'
@@ -28,7 +30,7 @@ import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 
 type Json = Record<string, unknown>
-type Manifest = { files: Record<string, string>; groups: Record<string, unknown> }
+type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
 // Folder names are display labels; reports bind to the whole directory without retaining its path.
@@ -89,7 +91,7 @@ export const codexStartNote = (raw: Json, run: RunSignal | undefined, session: s
   try { text = readLocal(progress) } catch {}
   if (text === null) return null
 
-  return othersNote(parseProgress(text), hereNames(raw.cwd), hash(`codex:${session}`).slice(0, 8), now, s, s.othersTailCodex)
+  return othersNote(parseProgress(text), hereNames(raw.cwd), { sessionId: hash(`codex:${session}`).slice(0, 8), agent: 'codex', resume: session }, now, s, s.othersTailCodex)
 }
 const withoutBom = (text: string): string => text.startsWith('\uFEFF') ? text.slice(1) : text
 const object = (value: unknown): Json => {
@@ -203,16 +205,83 @@ export const codexTrustOutput = (result: { changes: number; applied: boolean }, 
   return `${line}\n`
 }
 
+type LocalPlan = {
+  agent: string
+  progress: string
+  changes: { file: string; action: string }[]
+  conflicts: string[]
+  alreadyGone: string[]
+  applied?: boolean
+}
+
+export const codexDoctorOutput = (result: LocalPlan & {
+  installed: boolean
+  reportHook: string
+  hooksTrusted: boolean | 'unknown'
+  problem?: string
+  capabilities: { lifecycle: string }
+}, s: Strings, command: string, trustCommand?: string): string => {
+  const words = s.localSummary
+  const host = s.agentNames[result.agent] ?? result.agent
+  const hasHook = result.installed || result.reportHook === 'connect'
+  const lines = [words.doctor(host, result.installed ? words.installed : hasHook ? words.connector : words.missing)]
+  if (result.problem) lines.push(result.problem)
+  for (const file of result.conflicts) lines.push(words.conflict(file))
+  if (!hasHook) for (const change of result.changes) lines.push(words.needsUpdate(change.file))
+  const isPending = result.capabilities.lifecycle === 'adapter-pending'
+  if (isPending) lines.push(words.pending)
+  if (result.agent === 'codex' && result.installed) lines.push(result.hooksTrusted === true ? words.trusted : result.hooksTrusted === false ? words.untrusted : words.trustUnknown)
+  lines.push(s.codexDoctor)
+  lines.push(result.conflicts.length ? words.review(command)
+    : !hasHook ? words.setup(command)
+    : isPending ? words.skill(host)
+    // --codex-trust works only on an installed Codex, not on one the connector hooked.
+    : result.agent === 'codex' && result.installed && result.hooksTrusted !== true ? trustCommand ? words.trustRun(trustCommand) : words.trust
+    : words.verify(host))
+  return `${lines.join('\n')}\n`
+}
+
+export const codexRemoveOutput = (result: LocalPlan, s: Strings, command: string): string => {
+  const words = s.localSummary
+  const host = s.agentNames[result.agent] ?? result.agent
+  const isRemoved = result.applied === true && result.changes.length > 0
+  const lines = [words.removal(host, isRemoved ? words.removed : result.conflicts.length ? words.blocked : result.changes.length ? words.preview : words.absent)]
+  for (const change of result.changes) lines.push(change.action === 'remove'
+    ? result.applied ? words.removedFile(change.file) : words.removeFile(change.file)
+    : result.applied ? words.updatedFile(change.file) : words.updateFile(change.file))
+  for (const file of result.alreadyGone) lines.push(s.setupAlreadyGone(file))
+  for (const file of result.conflicts) lines.push(words.conflict(file))
+  lines.push(words.kept(result.progress))
+  lines.push(result.conflicts.length ? words.review(command)
+    : isRemoved ? words.restart(host)
+    : result.changes.length ? words.apply(`${command} --apply`) : words.none)
+  return `${lines.join('\n')}\n`
+}
+
+export const codexSetupOutput = (result: LocalPlan, s: Strings, command: string, check: string): string => {
+  const words = s.localSummary
+  const host = s.agentNames[result.agent] ?? result.agent
+  const isApplied = result.applied === true && result.changes.length > 0
+  const lines = [words.removal(host, isApplied ? words.setupApplied : result.conflicts.length ? words.setupBlocked : result.changes.length ? words.setupPreview : words.setupCurrent)]
+  for (const change of result.changes) lines.push(isApplied ? words.setupWritten(change.file) : words.setupFile(change.file))
+  for (const file of result.conflicts) lines.push(words.conflict(file))
+  lines.push(result.conflicts.length ? words.review(command)
+    : isApplied || !result.changes.length ? words.setupCheck(check)
+    : words.setupApply(`${command} --apply`))
+  return `${lines.join('\n')}\n`
+}
+
 // What a person reads when a setup mode fails (#465): one sentence with its next step, never the code name, a stack or a path.
-export const setupFailure = (error: unknown, agent: string, s: Strings): { code: string; message: string } => {
+export const setupFailure = (error: unknown, agent: string, s: Strings): { code: string; message: string; reason?: string } => {
   const detail = error as { code?: unknown; message?: unknown; record?: unknown } | null | undefined
   const isCode = (value: unknown): value is string => typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value)
-  const code = isCode(detail?.code) ? detail.code : isCode(detail?.message) ? detail.message : error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : 'UNKNOWN'
+  const code = isCode(detail?.code) ? detail.code : isCode(detail?.message) ? detail.message : 'UNKNOWN'
   const unknown = s.setupAgentUnknown.toLowerCase()
   const host = localAgents.includes(agent as LocalAgent) ? s.agentNames[agent] ?? unknown : unknown
   const record = typeof detail?.record === 'string' && /^install-[a-z]+\.json$/.test(detail.record) ? detail.record : 'install-*.json'
   const message = code === 'MISSING_ARGUMENT' ? s.setupErrorMissingValue
     : code === 'INVALID_INSTALL_RECORD' ? s.setupErrorRecord(record)
+    : code === 'INVALID_CONNECT_RECORD' ? s.setupErrorConnectRecord
     : code === 'INSTALL_CONFLICT' ? s.setupErrorConflict(host)
     : code === 'UNSAFE_COMMAND_PATH' ? s.setupErrorUnsafePath
     : ['INVALID_JSON_OBJECT', 'INVALID_HOOK_GROUP', 'INVALID_PLUGIN_CONFIG'].includes(code) ? s.setupErrorConfig(host)
@@ -220,22 +289,9 @@ export const setupFailure = (error: unknown, agent: string, s: Strings): { code:
     : ['INSTALL_CHANGED', 'LOCK_BUSY', 'LOCK_OWNERSHIP_LOST'].includes(code) ? s.setupErrorBusy
     : ['CODEX_BINARY_REQUIRED', 'ABSOLUTE_CODEX_BINARY_REQUIRED'].includes(code) ? s.setupErrorCodexBinary
     : code === 'OWNED_CODEX_INSTALL_REQUIRED' ? s.setupErrorCodexInstall
-    : s.setupErrorOther(host)
-  return { code, message }
-}
-
-const reporterTail = (original: Buffer): { bytes: Buffer; fragment: Buffer | null } => {
-  // Latin-1 keeps offsets in bytes, even when the last UTF-8 character was interrupted.
-  const tail = progressTail(original.toString('latin1'))
-  if (tail === null) return { bytes: original, fragment: null }
-  const fragment = original.subarray(tail.offset)
-  const lines = fragment.toString('latin1').split('\n')
-  if (/\S/.test(lines.slice(1).join('\n'))) return { bytes: original, fragment: null }
-  const eol = original.includes(Buffer.from('\r\n')) ? '\r\n' : '\n'
-  const replacement = Buffer.from(tail.close === null ? '' : `<!-- /auto session=${tail.close} -->${eol}`, 'latin1')
-  const bytes = Buffer.concat([original.subarray(0, tail.offset), replacement])
-  if (progressTail(bytes.toString('latin1')) !== null) throw new Error('INCOMPLETE_PROGRESS_TAIL')
-  return { bytes, fragment }
+    : s.setupErrorDetails[code as keyof typeof s.setupErrorDetails] ?? (code === 'UNKNOWN' ? s.setupErrorOther(host) : s.setupErrorCode(code))
+  const reason = typeof detail?.message === 'string' && detail.message.trim() ? detail.message : 'Unknown error'
+  return code === 'UNKNOWN' ? { code, message, reason } : { code, message }
 }
 
 const saveReporterTail = (progress: string, fragment: Buffer): string => {
@@ -283,6 +339,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const record = object(JSON.parse(initial(file) ?? '{}'))
       if (record.files !== undefined) object(record.files)
       if (record.groups !== undefined) object(record.groups)
+      if (record.foreignGroups !== undefined) object(record.foreignGroups)
       return record
     } catch (error) {
       if (error instanceof SyntaxError || error instanceof Error && error.message === 'INVALID_JSON_OBJECT') throw Object.assign(new Error('INVALID_INSTALL_RECORD'), { record: basename(file) })
@@ -292,9 +349,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const manifestFile = join(root, `install-${agent}.json`)
   const loaded = jsonInitial(manifestFile)
   const otherManifests = localAgents.filter(one => one !== agent).map(one => jsonInitial(join(root, `install-${one}.json`)))
-  const storedProgress = loaded.progress ?? otherManifests.find(one => typeof one.progress === 'string')?.progress
+  const control = join(installControlRoot(home), 'legacy-connect.json')
+  const authority = join(installControlRoot(home), 'legacy-connect-authority')
+  let connection: ConnectTransaction['state'] | undefined
+  try {
+    connection = mode === '--codex-setup' && (initial(control) !== null || initial(authority) !== null) ? new ConnectTransaction(home, undefined).state : undefined
+  } catch {
+    throw new Error('INVALID_CONNECT_RECORD')
+  }
+  const activeConnection = connection?.disabled === false ? connection : undefined
+  const connectorProgress = activeConnection === undefined ? undefined : activeConnection.connectedProgress ?? join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'progress.md')
+  const storedProgress = loaded.progress ?? otherManifests.find(one => typeof one.progress === 'string')?.progress ?? connectorProgress
   const progress = localProgressPath(flag('--progress-file'), mode === '--codex-setup' ? join(root, 'progress.md') : boardPath, storedProgress)
-  if (mode === '--codex-setup' && otherManifests.some(one => typeof one.progress === 'string' && resolve(one.progress) !== progress)) throw new Error('SHARED_BOARD_PATH_CONFLICT')
   const configs: Partial<Record<LocalAgent, string>> = {
     codex: resolve(flag('--codex-dir') ?? (process.env.CODEX_HOME || join(home, '.codex')), 'hooks.json'),
     cursor: join(home, '.cursor', 'hooks.json'),
@@ -305,12 +371,51 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const config = configs[agent] ?? ''
   const script = join(root, 'agent-board.mjs')
+  // The doctor and the trust step only read the board's files, so they compare them with what an install in the
+  // board's own language wrote, which its first line holds: asked in another language, only the printed words change (#807).
+  const fileWords = ((): Strings => {
+    if (mode !== '--codex-doctor' && mode !== '--codex-trust') return s
+    const head = /^globalThis\.AGENT_BOARD = (.*)$/.exec(readLocal(script)?.split('\n', 1)[0] ?? '')
+    try {
+      const lang = object(JSON.parse(head?.[1] ?? '')).lang
+      return typeof lang === 'string' && Object.hasOwn(STRINGS, lang) ? STRINGS[lang as keyof typeof STRINGS] : s
+    } catch { return s }
+  })()
   const opencodeDir = resolve(flag('--opencode-dir') ?? (process.env.OPENCODE_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode')))
   const openclawDir = resolve(flag('--openclaw-dir') ?? (process.env.OPENCLAW_STATE_DIR || join(home, '.openclaw')))
   const deepseekDir = resolve(flag('--deepseek-dir') ?? (process.env.DSH_HOME || join(home, '.dsh')))
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
-  const manifest: Manifest = { files: object(loaded.files ?? {}) as Record<string, string>, groups: object(loaded.groups ?? {}) }
+  const manifest: Manifest = { files: object(loaded.files ?? {}) as Record<string, string>, groups: object(loaded.groups ?? {}), foreignGroups: object(loaded.foreignGroups ?? {}) }
+  // A check must not fail on the words of its next step: an argument a shell would expand or eat goes through boardRun's code points.
+  const nextCommand = (nextMode: string, extra: string[] = []): string => {
+    const rest = [nextMode, ...args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json' && arg !== '--plain'), ...extra]
+      // A Codex path a person can read: Windows takes forward slashes, and they need no code points.
+      .map((arg, index, all) => process.platform === 'win32' && all[index - 1] === '--codex-bin' ? arg.replaceAll('\\', '/') : arg)
+    if (rest.some(arg => /["`$%!\\\r\n]/.test(arg))) return boardRun(process.argv[1]!, rest)
+    return `${boardRun(process.argv[1]!)} ${rest.map(arg => /^[\w.:=/-]+$/.test(arg) ? arg : quote(arg)).join(' ')}`
+  }
   const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
+
+  // Keep the connector as the sole writer for its agents, including its next automatic probe.
+  if (activeConnection?.setup?.agents.some(one => one.agent === agent && one.hook === 'configured') && initial(manifestFile) === null) {
+    const connectedProgress = localProgressPath(undefined, connectorProgress!)
+    const explicitProgress = flag('--progress-file')
+    if (explicitProgress !== undefined && resolve(explicitProgress) !== connectedProgress) throw new Error('SHARED_BOARD_PATH_CONFLICT')
+    if (args.includes('--plain') && !args.includes('--json')) {
+      process.stdout.write(`${s.localSummary.removal(s.agentNames[agent] ?? agent, s.setupSummary.connector.replace('{progress}', connectedProgress))}\n${s.localSummary.connectRepair}\n`)
+      return true
+    }
+    output({
+      mode: 'install', agent, progress: connectedProgress, data: root, script: join(dirname(connectedProgress), 'agent-board.mjs'),
+      managedBy: 'connector', changes: [], conflicts: [],
+      notice: s.setupSummary.connector.replace('{progress}', connectedProgress), privacy: s.codexPrivacy,
+      capabilities: { lifecycle: lifecycleCapability(agent), liveReply: false },
+      ...(args.includes('--apply') ? { applied: true } : {}),
+    })
+    return true
+  }
+
+  if (mode === '--codex-setup' && otherManifests.some(one => typeof one.progress === 'string' && resolve(one.progress) !== progress)) throw new Error('SHARED_BOARD_PATH_CONFLICT')
 
   if (mode === '--codex-event' || mode === '--codex-report' || mode === '--agent-status' || mode === '--recover-hooks') {
     const isRecovery = mode === '--recover-hooks'
@@ -488,7 +593,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }, clock, s) : base
       const priorActivity = previous?.activity ?? []
       // Only a weak hint needs a parent; a strong run keeps its record without a block.
-      const parent = origin.origin !== 'run' ? undefined : isRun ? origin.parent : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner.slice(0, 8), session]) ?? undefined
+      const parent = origin.origin !== 'run' ? undefined : isRun ? origin.parent : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner, owner.slice(0, 8), session]) ?? undefined
       const marked = { ...(origin.origin === undefined ? {} : { origin: origin.origin }), ...(parent === undefined ? {} : { parent }), ...(origin.isWeak === true ? { isWeak: true as const } : {}) }
       const { origin: _origin, parent: _parent, isWeak: _isWeak, ...lifecycle } = initial
       const directory = agent === 'codex' && mode === '--codex-event' && name !== ''
@@ -729,11 +834,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
   const changes: { file: string; action: string }[] = []
+  const alreadyGone: string[] = []
+  let hasMissingGroup = false
   const nextHooks: Json = { ...hooks }
   const groups: Json = {}
+  const foreignGroups: Json = {}
   // Codex runs its hooks through PowerShell on Windows (#623).
   const isPowerShellHost = agent === 'codex' && process.platform === 'win32'
-  const hostNode = isPowerShellHost ? windowsHookNode(process.execPath) : undefined
+  // Only the program is kept from the last install; every other word is written from this run.
+  const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
+  const earlier = commandsOf(Object.values(manifest.groups)).filter((command): command is string => typeof command === 'string')
+  const hostNode = isPowerShellHost ? windowsHookNode(process.execPath, earlier) : undefined
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
     const eventCommand = isPowerShellHost ? windowsHookCommand(hookArgs(event, state), quote, hostNode) : hookArgs(event, state).map(quote).join(' ')
@@ -742,7 +853,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const entries = (hooks[event] ?? []) as unknown[]
     const old = manifest.groups[event]
     const kept = old === undefined ? entries : entries.filter(entry => !isSame(entry, old))
-    if (isReadable && old !== undefined && !entries.some(entry => isSame(entry, old))) conflicts.push(`${config}:${event}`)
+    foreignGroups[event] = kept.map(entry => hash(JSON.stringify(entry)))
+    if (isReadable && old !== undefined && !entries.some(entry => isSame(entry, old))) {
+      // Remember foreign entries so a removed group cannot be confused with an edited command.
+      const foreign = manifest.foreignGroups[event]
+      const hasUnknown = entries.some(entry => !Array.isArray(foreign) || !foreign.includes(hash(JSON.stringify(entry))))
+      // With foreign history, an unknown entry is the user's edit of this hook; older records cannot tell.
+      if (remove && Array.isArray(foreign) && hasUnknown) conflicts.push(`${config}:${event}`)
+      else if (remove) alreadyGone.push(`${config}:${event}`)
+      else if (entries.length && hasUnknown) conflicts.push(`${config}:${event}`)
+      else hasMissingGroup = true
+    }
     if (!remove) {
       // Exact generated bytes can be adopted after a partially interrupted install.
       nextHooks[event] = [...kept.filter(entry => !isSame(entry, group)), group]
@@ -760,7 +881,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const desired = antigravityHooks((event, state) => antigravityCommand(hookArgs(event, state), process.platform === 'win32', quote, directNode))
     const existing = hookConfig[name], owned = manifest.groups[name]
     if (isReadable && existing !== undefined && !(owned !== undefined && isSame(existing, owned)) && !(!remove && isSame(existing, desired))) conflicts.push(`${config}:${name}`)
-    if (isReadable && owned !== undefined && existing === undefined) conflicts.push(`${config}:${name}`)
+    if (isReadable && owned !== undefined && existing === undefined) {
+      if (remove) alreadyGone.push(`${config}:${name}`)
+      else hasMissingGroup = true
+    }
     nextConfig = { ...hookConfig }
     if (!remove) { nextConfig[name] = desired; groups[name] = desired }
     else if (owned !== undefined) delete nextConfig[name]
@@ -777,7 +901,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const allow = plugins.allow as unknown[] | undefined
     const existing = entries[id], owned = manifest.groups[id]
     const desired = { enabled: true, hooks: { allowConversationAccess: false } }
-    if (isReadable && (plugins.enabled === false || existing !== undefined && !isSame(existing, owned ?? desired) || owned !== undefined && (!isSame(existing, owned) || !paths.includes(pluginFile) || allow?.length && !allow.includes(id)))) conflicts.push(`${nativeConfig}:${id}`)
+    if (isReadable && (plugins.enabled === false || existing !== undefined && !isSame(existing, owned ?? desired) || owned !== undefined && existing !== undefined && (!paths.includes(pluginFile) || allow?.length && !allow.includes(id)))) conflicts.push(`${nativeConfig}:${id}`)
+    if (isReadable && owned !== undefined && existing === undefined) {
+      if (remove) alreadyGone.push(`${nativeConfig}:${id}`)
+      else hasMissingGroup = true
+    }
     nextConfig = { ...hookConfig, plugins: {
       ...plugins,
       load: { ...load, paths: remove ? paths.filter(path => path !== pluginFile) : [...paths.filter(path => path !== pluginFile), pluginFile] },
@@ -791,12 +919,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
   }
   if (agent === 'deepseek') {
-    const patch = deepseekPatch(initial(nativeConfig) ?? '', manifest.groups.patch, pathToFileURL(join(root, 'adapters', 'deepseek.mjs')).href, remove)
+    const text = initial(nativeConfig) ?? ''
+    if (manifest.groups.patch !== undefined && !text.includes('agent-board-local')) {
+      if (remove) alreadyGone.push(`${nativeConfig}:agent-board-local`)
+      else hasMissingGroup = true
+    }
+    const patch = deepseekPatch(text, manifest.groups.patch, pathToFileURL(join(root, 'adapters', 'deepseek.mjs')).href, remove)
     if (patch.conflict) conflicts.push(nativeConfig)
     nextConfigText = patch.text
     if (patch.group) groups.patch = patch.group
   }
-  const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(s.localAgentSkillDescription)}\n---\n\n${s.localAgentSkill(`${quote(process.execPath)} ${quote(script)}`)}\n\n${s.localAgentHandoff}\n\n${s.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
+  const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(fileWords.localAgentSkillDescription)}\n---\n\n${fileWords.localAgentSkill(`${quote(process.execPath)} ${quote(script)}`)}\n\n${fileWords.localAgentHandoff}\n\n${fileWords.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
   // The connect writes its board beside the progress file it connected: the default one, one a
   // CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names, or the one its own record keeps (#285).
   // Releases before de40dde wrote the command as node "<path>" for any path; later ones use boardRun.
@@ -810,11 +943,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const antigravitySkill = join(home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
   const original = readFileSync(process.argv[1] ?? '', 'utf8').replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, '')
   const files: Record<string, string> = {
-    [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === s)?.[0] ?? 'en' })}\n${original}`,
+    [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === fileWords)?.[0] ?? 'en' })}\n${original}`,
     [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, s.localAgentSkillDescription, home, s.localAgentStepFormat)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat)
   if (agent === 'openclaw') {
     files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home)
     files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
@@ -826,8 +959,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (agent === 'hermes') files[join(flag('--hermes-dir') ?? (process.env.HERMES_HOME || join(home, '.hermes')), 'skills', 'agent-board', 'SKILL.md')] = skillText
   if (agent === 'antigravity') files[antigravitySkill] = skillText
-  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'board.toml')] = `description = ${JSON.stringify(s.boardCommandDescription)}\nprompt = '''${s.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)} --serve}\n'''\n`
-  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'board.md')] = `---\ndescription: ${JSON.stringify(s.boardCommandDescription)}\n---\n\n${s.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)} --serve\`\n`
+  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)} --serve}\n'''\n`
+  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)} --serve\`\n`
   const isReleasedBoard = (text: string): boolean => {
     const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))
     return RELEASED.some(release => release.board.includes(bodyHash))
@@ -836,6 +969,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
     if (remove && shared && otherManifests.some(one => one.files !== undefined)) continue
+    if (remove && existing === null && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
     const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing))))
     if (existing !== null && !owned && existing !== desired) conflicts.push(file)
     else if (remove ? owned : existing !== desired) changes.push({ file, action: remove ? 'remove' : existing === null ? 'create' : 'update' })
@@ -847,15 +981,23 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   nextConfigText ??= `${JSON.stringify(nextConfig, null, 2)}\n`
   if (hasNativeConfig && (!remove || Object.keys(manifest.groups).length)) {
     if (parsedConfig === null) conflicts.push(nativeConfig)
-    else if (agent === 'deepseek' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig)) changes.push({ file: nativeConfig, action: 'update' })
+    else if (remove && initial(nativeConfig) === null) alreadyGone.push(nativeConfig)
+    else if (agent === 'deepseek' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig)) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
   }
   if (!remove && readLocal(progress) === null) { before.set(progress, null); changes.push({ file: progress, action: 'create' }) }
-  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, progress }, null, 2)}\n`
+  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    notice: agent === 'codex' ? s.codexTrust : s.localHostReview, privacy: s.codexPrivacy,
+    alreadyGone, notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
+  }
+  // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.
+  const isPlainPlan = !args.includes('--json') && (remove || args.includes('--plain'))
+  const outputPlan = (result: LocalPlan): void => {
+    if (!isPlainPlan) output(result)
+    else if (remove) process.stdout.write(codexRemoveOutput(result, s, nextCommand('--codex-remove')))
+    else process.stdout.write(codexSetupOutput(result, s, nextCommand('--codex-setup', ['--plain']), nextCommand('--codex-doctor')))
   }
   if (mode === '--codex-trust') {
     if (agent !== 'codex' || conflicts.length || changes.length || readLocal(manifestFile) === null) throw new Error('OWNED_CODEX_INSTALL_REQUIRED')
@@ -867,7 +1009,27 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (mode === '--codex-doctor') {
     const installed = conflicts.length === 0 && changes.length === 0 && readLocal(manifestFile) !== null
-    const host = installed && agent === 'codex' && flag('--codex-bin') ? await trustCodex(flag('--codex-bin')!, config, manifest.groups, false) : null
+    const configToml = join(dirname(configs.codex!), 'config.toml')
+    const explicitBin = flag('--codex-bin')
+    const executable = installed && agent === 'codex' ? (explicitBin ?? discoverCodexBinary()) : undefined
+    let host: { hooks: { trust: string }[] } | null = null
+    if (executable) {
+      if (explicitBin) {
+        host = await trustCodex(executable, config, manifest.groups, false)
+      } else {
+        try {
+          host = await trustCodex(executable, config, manifest.groups, false)
+        } catch {
+          host = null
+        }
+      }
+    }
+    let hooksTrusted: boolean | 'unknown' = 'unknown'
+    if (host) {
+      hooksTrusted = host.hooks.every(hook => hook.trust === 'trusted')
+    } else if (installed && agent === 'codex') {
+      hooksTrusted = inspectCodexConfigToml(configToml)
+    }
     // /progress connect may have hooked the host instead, or left only its skill (#285).
     const connected = agentHooks({
       home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32', script: '', inbox: '',
@@ -887,11 +1049,19 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connected.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
     const reportHook = installed ? 'installer' : hasConnectHook ? 'connect' : 'none'
     const isSkillOnly = reportHook === 'none' && skills.some(file => readLocal(file) !== null)
-    output({ ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted: host ? host.hooks.every(hook => hook.trust === 'trusted') : 'unknown', reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor })
+    const result = { ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor }
+    if (args.includes('--json')) output(result)
+    // Name the Codex this check just reached: on Windows, command -v and where.exe's first line can be an npm shim that cannot start.
+    else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup', ['--plain']), host ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable!]) : undefined))
     return true
   }
-  if (!args.includes('--apply')) { output(plan); return true }
-  if (conflicts.length) { output(plan); throw new Error('INSTALL_CONFLICT') }
+  if (!args.includes('--apply')) { outputPlan(plan); return true }
+  if (conflicts.length) {
+    outputPlan(plan)
+    // The plain removal already explains the conflict and its single next step.
+    if (isPlainPlan) { process.exitCode = 1; return true }
+    throw new Error('INSTALL_CONFLICT')
+  }
   withInstallLock(home, () => {
     // Compare the bytes used to build the plan, not a fresh snapshot taken after
     // planning: another installer or host may have changed them in that interval.
@@ -929,7 +1099,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
   })
-  output({ ...plan, applied: true })
+  outputPlan({ ...plan, applied: true })
   return true
 }
 

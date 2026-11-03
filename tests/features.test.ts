@@ -11,9 +11,9 @@ import { boardRun } from '../hooks/board-commands'
 import { dashboardHtml } from '../hooks/dashboard'
 import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
-import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
+import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
-import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, progressReport, unwrittenEntries } from '../hooks/journal'
+import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, progressReport, unwrittenEntries } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
@@ -734,6 +734,108 @@ test('a note that holds a choice does not replace the options in the question', 
   expect(askOf('用 win rate 還是 Elo？', '之後用 A 還是 B？')).toMatchObject({ kind: 'choose', options: ['win rate', 'Elo'] })
 })
 
+test('a choice wrapped in quote marks gives options without the quotes in every language', () => {
+  const choices = [
+    ['Top shelf or bottom shelf?', ['Top shelf', 'bottom shelf']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['先开旗标，还是全部开？', ['先开旗标', '全部开']],
+    ['A first, or B?', ['A first', 'B']],
+  ] as const
+  for (const [open, close] of [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]) {
+    for (const [question, options] of choices) {
+      expect(askOf(`${open}${question}${close}`, '').options).toEqual([...options])
+      expect(askOf('Pick', `${open}${question}${close}`).options).toEqual([...options])
+    }
+  }
+  expect(askOf(' (「Top shelf or bottom shelf?」) ', '').options).toEqual(['Top shelf', 'bottom shelf'])
+  expect(askOf('“the "red" shelf or the blue shelf?”', '').options).toEqual(['the "red" shelf', 'the blue shelf'])
+  expect(askOf("'Alice's shelf or Bob's shelf?'", '').options).toEqual(["Alice's shelf", "Bob's shelf"])
+  expect(askOf('Pick', '', { ask: 'choose', options: ['"quoted"', '(literal)'] }).options).toEqual(['"quoted"', '(literal)'])
+  expect(askOf('"red" shelf or "blue shelf?"', '').options).toEqual(['"red" shelf', '"blue shelf'])
+  expect(askOf('「先開旗標」還是「全部開？」', '').options).toEqual(['「先開旗標」', '「全部開'])
+  expect(askOf('(Top shelf) or (bottom shelf?)', '').options).toEqual(['(Top shelf)', '(bottom shelf'])
+  expect(askOf('(Top (high) shelf or bottom?)', '').options).toEqual(['Top (high) shelf', 'bottom'])
+  expect(askOf(String.raw`"a \"red\" shelf or blue?"`, '').options).toEqual([String.raw`a \"red\" shelf`, 'blue'])
+  expect(askOf('Please review "the shelf"', '').options).toEqual([])
+})
+
+test('a quoted choice extracted from prose keeps clean answer options and inner quotes', () => {
+  const choices = [
+    ['Top shelf or bottom shelf?', ['Top shelf', 'bottom shelf']],
+    ['Left row or right row?', ['Left row', 'right row']],
+    ['A first, or B?', ['A first', 'B']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['先开旗标，还是全部开？', ['先开旗标', '全部开']],
+  ] as const
+  for (const [open, close] of [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]) {
+    for (const [question, options] of choices) {
+      const extracted = lastQuestionInProse(`The labels are ready.\n\n${open}${question}${close}`, true)
+      expect(extracted).toBe(`${open}${question}${close}`)
+      expect(askOf(extracted ?? '', '')).toMatchObject({ kind: 'choose', options: [...options] })
+      expect(askOf('Shelf placement', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+    }
+  }
+  for (const [reply, options] of [
+    ['(「Top shelf or bottom shelf?」)', ['Top shelf', 'bottom shelf']],
+    ['“the "red" row or the blue row?”', ['the "red" row', 'the blue row']],
+    ["'Alice's row or Bob's row?'", ["Alice's row", "Bob's row"]],
+    ['(Top (high) shelf or bottom?)', ['Top (high) shelf', 'bottom']],
+    ['(Top shelf) or (bottom shelf?)', ['(Top shelf)', '(bottom shelf']],
+    [String.raw`"a \"red\" row or blue?"`, [String.raw`a \"red\" row`, 'blue']],
+    ['"red" row or "blue row?"', ['"red" row', '"blue row']],
+    ['「先開旗標」還是「全部開？」', ['「先開旗標」', '「全部開']],
+  ] as const) {
+    const extracted = lastQuestionInProse(reply, true)
+    expect(extracted).not.toBeNull()
+    expect(askOf('Shelf placement', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+  }
+  expect(askOf('"Top shelf or bottom shelf? Explain your choice', '').options).toEqual(['"Top shelf', 'bottom shelf'])
+})
+
+test('lexical apostrophes stay in choice options from questions and extracted replies', () => {
+  for (const [question, options] of [
+    ["'90s or modern?", ["'90s", 'modern']],
+    ["'80s or retro?", ["'80s", 'retro']],
+    ["'em or them?", ["'em", 'them']],
+  ] as const) {
+    expect(askOf(question, '')).toMatchObject({ kind: 'choose', options: [...options] })
+    expect(askOf('Pick', question)).toMatchObject({ kind: 'choose', options: [...options] })
+    const extracted = lastQuestionInProse(question, true)
+    expect(extracted).toBe(question)
+    expect(askOf('Pick', extracted ?? '')).toMatchObject({ kind: 'choose', options: [...options] })
+  }
+})
+
+test('paired question wrappers preserve inferred kinds and confirmation notes', () => {
+  const pairs = [['"', '"'], ["'", "'"], ['“', '”'], ['「', '」'], ['『', '』'], ['(', ')']]
+  for (const question of ['可以推到 main 嗎？', '合併可以嗎？', 'Ready, OK?']) {
+    for (const [open, close] of pairs) {
+      const wrapped = `${open}${question}${close}`
+      const extracted = lastQuestionInProse(wrapped, true)
+      expect(extracted).toBe(wrapped)
+      expect(askOf(wrapped, '')).toMatchObject({ kind: 'confirm', options: [] })
+      expect(askOf(extracted ?? '', '')).toMatchObject({ kind: 'confirm', options: [] })
+      expect(askOf('Top shelf or bottom shelf?', extracted ?? '')).toMatchObject({ kind: 'confirm', options: [] })
+    }
+  }
+  for (const [question, kind] of [
+    ['waiting for the report?', 'wait'],
+    ['Which folder?', 'input'],
+    ['Please review the diff?', 'review'],
+    ['Run `npm test`?', 'do'],
+    ['Review https://example.com/report?', 'review'],
+  ] as const) {
+    const direct = askOf(question, '')
+    const extracted = askOf('Task', lastQuestionInProse(question, true) ?? '')
+    expect(direct.kind).toBe(kind)
+    for (const [open, close] of pairs) {
+      const wrapped = `${open}${question}${close}`
+      expect(askOf(wrapped, '')).toEqual(direct)
+      expect(askOf('Task', lastQuestionInProse(wrapped, true) ?? '')).toEqual(extracted)
+    }
+  }
+})
+
 test('options the agent gave win over options found in the question or the note', () => {
   expect(askOf('win rate or Elo?', 'A or B?', { options: [' X ', 'Y', '', null] })).toMatchObject({ kind: 'choose', options: ['X', 'Y'] })
   expect(askOf('win rate or Elo?', 'A or B?', { ask: 'choose', options: ['X'] }).options).toEqual(['X'])
@@ -1356,7 +1458,7 @@ test('JSON scalars remain prose as written while objects and arrays without text
     expect(pending?.fullText).toBe(answer)
     expect(pending?.text).not.toBe(STRINGS.en.turnUnreadable)
   }
-  expect(lastQuestion('"Ship it?"')).toBe('"Ship it?')
+  expect(lastQuestion('"Ship it?"')).toBe('"Ship it?"')
   expect(parseDigest('TITLE: work\nASK: "Ship it?"')?.ask).toBe('"Ship it?"')
   for (const answer of ['{}', '[]']) {
     const file = { name: 'codex-turn-30-1.json', body: JSON.stringify({ session_id: 'structured', cwd: '/w/app', last_assistant_message: answer }), at: 30 }
@@ -3203,6 +3305,9 @@ test('a press on the page is worked out from the file as it is now: a line that 
   expect(resumeAction(items, { key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Which port?' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   expect(resumeAction(items, { key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   expect(resumeAction(items, { key: 'row:gone', type: 'tick', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  // A stale send on a row where a receiver has connected is refused rather than launching a native process.
+  const grokConnected = [{ id: 'c1', agent: 'grok', session: GROK.resume, surface: 'Grok CLI', turn: 't1', expires: Date.now() + 60000 }]
+  expect(serveAction(items, { key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked, fp: fpIn(items, grok) }, STRINGS.en, false, grokConnected, true, true)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   // An open Codex session is answered in its own window.
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
   expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('Codex') })
@@ -4461,10 +4566,10 @@ test('an ordinary board never resumes a closed session even without messaging en
   expect(row).toMatchObject({ send: 'open', hasCopyBox: true })
   const items = boardItems(serveView(), [])
   expect(serveAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.messagesFailed })
-  // An explicit legacy opt-in still cannot become fallback for an enabled message hub.
+  // An explicit legacy opt-in keeps resume-Send for a closed session while the hub runs.
   const hub = { connections: [], messages: [] }
-  expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).stopped.find(one => one.title === 'Pick the cache')?.send).toBe('open')
-  expect(resumeAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en, false, [], true).type).toBe('refuse')
+  expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).stopped.find(one => one.title === 'Pick the cache')?.send).toBe('send')
+  expect(resumeAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en, false, [], true).type).toBe('send')
 })
 
 
@@ -4554,4 +4659,43 @@ test('archive entries are counted with their number: a new twin of an archived e
   expect(missingEntries(['', archive(3)], [entry, entry])).toEqual([])
   expect(missingEntries([archive(3)], [entry], new Map([[entry, 2]]))).toEqual([])
   expect(missingEntries([archive(2)], [entry], new Map([[entry, 2]]))).toEqual([entry])
+})
+
+test('a pending archive note distinguishes crash-recovery retries from distinct same-day twins', () => {
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const archive = `# Archive\n\n${entry}\n`
+  expect(pendingArchivePath('/work/progress.md')).toBe('/work/progress-archive.pending')
+  expect(parsePendingArchive('')).toEqual([])
+  expect(parsePendingArchive('broken')).toEqual([])
+  expect(parsePendingArchive(JSON.stringify({ entries: [entry] }))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify([entry]))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1 }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, boardHash: 'hash1', entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1, boardHash: 'hash1' }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1, boardHash: 'hash2' }] }))).toEqual([{ entry, held: 1, boardHash: 'hash2' }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: -1 }] }))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: -0 }] }))).toEqual([{ entry, held: 0 }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1.5 }] }))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: Infinity }] }))).toEqual([{ entry, held: NaN }])
+
+  // When pending recorded held = 0 and archive now holds 1: crash recovery skips re-adding.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0 }])).toEqual([])
+  // When boardHash matches: crash recovery skips re-adding.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0, boardHash: 'hash1' }], 'hash1')).toEqual([])
+  // When boardHash does not match: treated as not saved so a twin is kept.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0, boardHash: 'hash1' }], 'hash2')).toEqual([entry])
+  // When pending recorded held = 1 and archive holds only 1: archive write failed, so missing.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 1 }])).toEqual([entry])
+  // When pending has an invalid or negative held count: treated as unproven so an unsaved entry is never dropped.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: -1 }])).toEqual([entry])
+  // When pending has a legacy note without held: treated as not saved so twins are never dropped.
+  expect(missingEntries([archive], [entry], new Map(), [entry])).toEqual([entry])
+  // When pending does not hold the entry: a same-day twin is added even if archive already has one.
+  expect(missingEntries([archive], [entry], new Map(), [])).toEqual([entry])
+  expect(nextPendingArchive([archive], [entry], new Map([[entry, 1]]), [{ entry, held: 0, boardHash: 'hash1' }], 'hash2')).toEqual({
+    missing: [entry],
+    records: [
+      { entry, held: 0, boardHash: 'hash2' },
+      { entry, held: 0, boardHash: 'hash2' },
+    ],
+  })
 })

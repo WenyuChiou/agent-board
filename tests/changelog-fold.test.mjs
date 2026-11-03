@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ambitionQuestions, foldText, fragmentIssue, orderFragments, parseArgs, parseFragment, runFold, stripTests } from '../scripts/changelog-fold.mjs'
+import { ambitionQuestions, commitEntries, foldText, fragmentIssue, orderFragments, parseArgs, parseFragment, readCommits, runFold, stripTests, titleCommitNumbers, unreadableMerges } from '../scripts/changelog-fold.mjs'
 
 const script = fileURLToPath(new URL('../scripts/changelog-fold.mjs', import.meta.url))
 const summary = issue => `- **Synthetic entry (#${issue}).** A synthetic result.`
@@ -139,6 +139,56 @@ test('the fold with --write refuses before writing when a fragment cannot be rem
   }
 })
 
+test('the fold writes a CHANGELOG line from each fix and feature title that brought no entry of its own', () => {
+  const commits = [
+    { subject: 'fix(board): keep the column width after a restart. (#51)', paths: ['hooks/pane.tsx'] },
+    { subject: 'feat!: one command starts the board (#52)', paths: ['scripts/start.mjs'] },
+    { subject: 'feat: a synthetic feature with a fragment (#53)', paths: ['changelog.d/53-synthetic.md'] },
+    { subject: 'fix: a synthetic fix that wrote its own line (#54)', paths: ['CHANGELOG.md', 'hooks/pane.tsx'] },
+    { subject: 'docs: a synthetic page (#55)', paths: ['docs/x.md'] },
+    { subject: 'fix: a synthetic fix that names its issue (#56) (#57)', paths: ['hooks/pane.tsx'] },
+    { subject: 'fix: a synthetic fix pushed straight to main', paths: ['hooks/pane.tsx'] },
+  ]
+  assert.deepEqual(commitEntries(commits), ['- Keep the column width after a restart (#51).', '- One command starts the board (#52).', '- A synthetic fix that names its issue (#57).'])
+  commits.splice(5, 1)
+  const result = fold({ commits })
+  assert.equal(result.titleCount, 2)
+  assert.equal(result.text, '# Changelog\n\n## 1.1.0 — 2026-02-01\n\n' + summary(42) + '\n\n- Keep the column width after a restart (#51).\n\n- One command starts the board (#52).\n\n' + summary(10) + '\n\n' + history)
+  const titlesOnly = foldText({ text: '# Changelog\n\n## Unreleased\n\n' + history, commits, version: '1.1.0', date: '2026-02-01' })
+  assert.equal(titlesOnly.text, '# Changelog\n\n## 1.1.0 — 2026-02-01\n\n- Keep the column width after a restart (#51).\n\n- One command starts the board (#52).\n\n' + history)
+})
+
+test('the fold reads the pull request titles merged since the last release tag', t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'synthetic-changelog-commits-'))
+  t.after(() => rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
+  const git = (...args) => {
+    const execution = spawnSync('git', args, { cwd, encoding: 'utf8' })
+    assert.equal(execution.status, 0, execution.stderr)
+  }
+  const commit = (path, subject) => {
+    mkdirSync(join(cwd, path, '..'), { recursive: true })
+    writeFileSync(join(cwd, path), subject + '\n')
+    git('add', '--', path)
+    git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', subject)
+  }
+  git('init', '--initial-branch=main')
+  commit('a.txt', 'chore: synthetic start')
+  assert.deepEqual(readCommits({ cwd }), { commits: [], note: 'no release tag found, so no pull request titles were read' })
+  git('tag', 'agent-board--v1.0.0')
+  commit('b.txt', 'fix: a synthetic fix (#5)')
+  commit('changelog.d/6-synthetic.md', 'feat: a synthetic feature (#6)')
+  const { commits, note } = readCommits({ cwd })
+  assert.equal(note, null)
+  assert.deepEqual(commits, [
+    { subject: 'feat: a synthetic feature (#6)', paths: ['changelog.d/6-synthetic.md'] },
+    { subject: 'fix: a synthetic fix (#5)', paths: ['b.txt'] },
+  ])
+  assert.deepEqual(commitEntries(commits), ['- A synthetic fix (#5).'])
+  const lines = []
+  runFold({ cwd: fixture(t), argv: ['1.1.0', '--date', '2026-02-01'], log: line => lines.push(line), commitsOf: () => ({ commits, note: null }) })
+  assert.match(lines.join('\n'), /From pull request titles: 1\n/)
+})
+
 test('a dry run changes no file', t => {
   const cwd = fixture(t)
   const paths = ['CHANGELOG.md', 'changelog.d/README.md', 'changelog.d/42-synthetic.md']
@@ -191,4 +241,84 @@ test('the fold with --write ends with the three next-version questions and a dry
   assert.equal(ambitionQuestions.length, 3)
   assert.deepEqual(lines.slice(-4), ['\nBefore planning the next version, answer in its plan:', ...ambitionQuestions.map((question, index) => `${index + 1}. ${question}`)])
   assert.match(lines.join('\n'), /goal sits above[^]*hard number[^]*other field/)
+})
+
+test('the fold reads commits without --first-parent and includes fixes reached through a merge of main', t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'changelog-merge-main-'))
+  t.after(() => rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
+  const git = (...args) => {
+    const run = spawnSync('git', args, { cwd, encoding: 'utf8' })
+    if (run.error) throw run.error
+    if (run.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${run.stderr}`)
+    return run.stdout
+  }
+  const commit = (path, subject) => {
+    writeFileSync(join(cwd, path), subject + '\n')
+    git('add', '--', path)
+    git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', subject)
+  }
+  git('init', '--initial-branch=main')
+  commit('a.txt', 'chore: initial')
+  git('tag', 'agent-board--v0.0.1')
+  commit('b.txt', 'fix(board): first fix (#1)')
+  git('checkout', '-b', 'release')
+  commit('c.txt', 'chore(release): Agent Board 0.0.2')
+  git('checkout', 'main')
+  commit('d.txt', 'fix(board): second fix (#2)')
+  git('checkout', 'release')
+  git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', 'merge', 'main', '--no-edit')
+
+  const { commits } = readCommits({ cwd })
+  const entries = commitEntries(commits)
+  assert.ok(entries.some(e => e.includes('#1')))
+  assert.ok(entries.some(e => e.includes('#2')))
+})
+
+test('the fold prints how many fix- or feature-looking merges it could not read, by number', t => {
+  const commits = [
+    { subject: 'fix(board): clean entry (#1)', paths: ['src/a.ts'] },
+    { subject: 'fix: an unreadable fix without pr number', paths: ['src/b.ts'] },
+    { subject: 'Merge pull request #596 from user/feature', paths: ['src/c.ts'] },
+    { subject: 'docs: normal docs commit', paths: ['docs/a.md'] },
+  ]
+  const unreadable = unreadableMerges(commits)
+  assert.deepEqual(unreadable, ['fix: an unreadable fix without pr number', '#596'])
+  const lines = []
+  runFold({ cwd: fixture(t), argv: ['1.1.0', '--date', '2026-02-01'], log: line => lines.push(line), commitsOf: () => ({ commits, note: null }) })
+  assert.match(lines.join('\n'), /Unreadable fix or feature merges: 2 \(fix: an unreadable fix without pr number, #596\)/)
+})
+
+test('the fold updates an existing version heading when run a second time after a late merge and folds late fragments', () => {
+  const initialCommits = [{ subject: 'fix: first fix (#1)', paths: ['src/a.ts'] }]
+  const folded = foldText({ text: '# Changelog\n\n## Unreleased\n\n- Existing unreleased (#0).\n', commits: initialCommits, version: '1.1.0', date: '2026-02-01' })
+  assert.match(folded.text, /## 1\.1\.0 — 2026-02-01/)
+  assert.match(folded.text, /- First fix \(#1\)\./)
+
+  // Late merge arrives: fix #2 (title) and late fragment for #388
+  const lateCommits = [
+    { subject: 'fix: first fix (#1)', paths: ['src/a.ts'] },
+    { subject: 'fix: second late fix (#2)', paths: ['src/b.ts'] },
+    { subject: 'feat: grandfathered fragment feat (#388)', paths: ['changelog.d/388-hub-safe.md'] },
+  ]
+  const lateFragments = [
+    { path: 'changelog.d/388-hub-safe.md', text: '- **Safe messaging (#388).** Default hub safe.\n  Tests: `messaging hub starts cleanly`.\n' },
+  ]
+  assert.throws(() => foldText({ text: folded.text, commits: lateCommits, fragments: lateFragments, version: '1.1.0', date: '2026-02-01' }), /already has a heading.*--into-existing/)
+  const updated = foldText({ text: folded.text, commits: lateCommits, fragments: lateFragments, version: '1.1.0', date: '2026-02-01', intoExisting: true })
+  assert.equal(updated.titleCount, 1)
+  assert.deepEqual(updated.fragments, ['changelog.d/388-hub-safe.md'])
+  assert.match(updated.text, /- First fix \(#1\)\./)
+  assert.match(updated.text, /- Second late fix \(#2\)\./)
+  assert.match(updated.text, /- \*\*Safe messaging \(#388\)\.\*\* Default hub safe\./)
+})
+
+test('titleCommitNumbers extracts numbers only from commits that do not change CHANGELOG or fragments', () => {
+  const commits = [
+    { subject: 'fix: a title-only fix (#101)', paths: ['src/a.ts'] },
+    { subject: 'fix: an unreleased fix (#102)', paths: ['CHANGELOG.md'] },
+    { subject: 'feat: a fragment feat (#103)', paths: ['changelog.d/103-x.md'] },
+    { subject: 'fix: another title-only (#104)', paths: ['hooks/x.ts'] },
+    { subject: 'docs: a doc change (#105)', paths: ['docs/x.md'] },
+  ]
+  assert.deepEqual(titleCommitNumbers(commits), [101, 104])
 })

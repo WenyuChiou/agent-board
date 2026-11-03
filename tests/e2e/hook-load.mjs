@@ -4,7 +4,7 @@ import { homedir, tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
-import { hookLoadMarker, makeRedact, percentile, queuedSessions, redactDeep, tallyOf } from './lib/soak-report.mjs'
+import { classifyHookLoadChecks, makeRedact, percentile, queuedSessions, redactDeep, tallyOf } from './lib/soak-report.mjs'
 import { stopTree } from './lib/processes.mjs'
 
 process.stdout.on('error', () => {})
@@ -19,9 +19,7 @@ process.stderr.on('error', () => {})
 // --stop-on-stdin: a line "stop" on stdin, or stdin closing, stops the run as a signal does. soak.mjs
 // passes it, so a soak that stops or dies never leaves this run going.
 
-// A check that fails on main because of an open issue goes through knownFailure, but only while the
-// failure fits that issue's pattern (hookLoadMarker); any other failure stays a failure. Every check
-// here depends on load, so a lucky pass is allowed.
+// Every measured check passes only when its outcome passes; an unfinished check fails as unmeasured.
 const TITLES = {
   leftovers: 'L6 hook load: no process the check started is alive 30 s after it ends',
   hooks: 'L6 hook load: each hook run ends within 3 s',
@@ -83,8 +81,8 @@ const writeJson = (dir, value) => {
 }
 
 const hookLoad = async ({ out, isStdinStop }) => {
-  const [{ makeWorld }, { HOOK_TIMEOUT_MS, PAGE_MS }, { hook, hookHosts }, { serve }, { knownFailure }, { spawnIsolated }] = await Promise.all([
-    import('./lib/world.mjs'), import('./lib/budget.mjs'), import('./lib/writers.mjs'), import('./lib/surfaces.mjs'), import('./lib/known.mjs'), import('./lib/spawn.mjs'),
+  const [{ makeWorld }, { HOOK_TIMEOUT_MS, PAGE_MS }, { hook, hookHosts }, { serve }, { spawnIsolated }] = await Promise.all([
+    import('./lib/world.mjs'), import('./lib/budget.mjs'), import('./lib/writers.mjs'), import('./lib/surfaces.mjs'), import('./lib/spawn.mjs'),
   ])
   const size = isFull ? FULL : SMOKE
   const t0 = performance.now()
@@ -400,20 +398,7 @@ const hookLoad = async ({ out, isStdinStop }) => {
     } catch (error) { outcomes.leftovers = { ok: false, line: `The processes could not be counted: ${firstLine(error)}` } }
   }
 
-  for (const [key, title] of Object.entries(TITLES)) {
-    const outcome = outcomes[key]
-    if (outcome === undefined) { report.checks.push({ title, status: 'fail', line: 'Not measured: the run ended before this check.' }); continue }
-    const marker = hookLoadMarker({ key, outcome, platform: process.platform, budgetMs: HOOK_TIMEOUT_MS })
-    if (marker === undefined || (!outcome.ok && !marker.explains)) {
-      report.checks.push({ title, status: outcome.ok ? 'pass' : 'fail', line: `${outcome.line}${marker ? ` Not the pattern of #${marker.issue}.` : ''}` })
-      continue
-    }
-    const { issue } = marker
-    try {
-      await knownFailure(issue, () => { if (!outcome.ok) assert.fail(outcome.line) }, { mayPass: true })
-      report.checks.push(outcome.ok ? { title, status: 'pass', line: outcome.line } : { title, status: 'known', line: `${outcome.line} Known problem (#${issue}).` })
-    } catch (error) { report.checks.push({ title, status: 'fail', line: `${firstLine(error)} ${outcome.line}` }) }
-  }
+  report.checks.push(...classifyHookLoadChecks({ outcomes, titles: TITLES }))
   if (report.status === 'running') report.status = 'finished'
   report.finishedAt = new Date().toISOString()
   save()
@@ -422,7 +407,7 @@ const hookLoad = async ({ out, isStdinStop }) => {
   say(`hook load: ${tallyOf(report.checks)}; ${report.status}`)
   if (saveFailure !== undefined) say(`hook load: the report could not be written (${saveFailure.code ?? saveFailure.message}).`)
   clearTimeout(deadline)
-  return report.status === 'finished' && saveFailure === undefined && report.checks.every(check => check.status === 'pass' || check.status === 'known') ? 0 : 1
+  return report.status === 'finished' && saveFailure === undefined && report.checks.every(check => check.status === 'pass') ? 0 : 1
 }
 
 const argv = process.argv.slice(2)

@@ -185,7 +185,7 @@ type Asker = { agent: string; isOwn?: true; isRun?: true; parent?: string }
 
 const holderOf = (item: Asker): Holder => ({ agent: item.agent, isOwn: item.isOwn === true, isRun: item.isRun === true, parent: item.parent })
 
-const identity = (agent: string, isOwn: boolean, project: string, title: string, dir: string | null | undefined): string => JSON.stringify([isOwn ? '' : keyOf(agent), project, title, folderOf(dir ?? '')])
+export const identity = (agent: string, isOwn: boolean, project: string, title: string, dir: string | null | undefined): string => JSON.stringify([isOwn ? '' : keyOf(agent), project, title, folderOf(dir ?? '')])
 
 // Whether a stopped row is the one a finished task came from, when the task has no key: the task
 // says whose it was, or nothing, and then any agent's row fits.

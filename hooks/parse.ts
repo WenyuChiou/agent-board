@@ -123,7 +123,7 @@ const dueOf = (task: ProgressTask): string | null => {
 // block or heading the other skips: null inside a code fence (the fence lines too) or a
 // multi-line HTML comment; else the line with its comments taken out, an auto marker kept
 // whole.
-export const readable = (lines: readonly string[]): Array<string | null> => {
+export const readable = (lines: readonly string[], isDiagnostic = false): Array<string | null> => {
   let isFenced = false
   let isComment = false
 
@@ -146,8 +146,10 @@ export const readable = (lines: readonly string[]): Array<string | null> => {
       // A later board boundary before the comment close belongs to the next writer.
       let hasBoundary = false
       let hasClose = false
+      let hasTask = false
       for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex++) {
         const next = lines[nextIndex] ?? ''
+        if (TASK.test(next)) hasTask = true
         if (AUTO_START.test(next) || AUTO_END.test(next) || PROJECT.test(next)) hasBoundary = true
         if (next.includes('-->')) {
           hasClose = true
@@ -155,6 +157,11 @@ export const readable = (lines: readonly string[]): Array<string | null> => {
         }
       }
       if (hasBoundary || !hasClose) return raw
+      // Diagnostics keep the cut line without making its commented-out tasks visible.
+      if (isDiagnostic && hasTask) {
+        isComment = true
+        return raw
+      }
     }
     line = line.replace(/<!--.*?-->/g, '')
     const open = line.indexOf('<!--')
@@ -171,7 +178,7 @@ export const readable = (lines: readonly string[]): Array<string | null> => {
 // Keep its boundary in the original string; writers must preserve the prefix exactly.
 export const progressTail = (markdown: string): ProgressTail | null => {
   const raws = markdown.split('\n')
-  const lines = readable(raws)
+  const lines = readable(raws, true)
   let offset = 0
   let open: { session: string; tasks: number } | null = null
   let torn: ProgressTail | null = null
@@ -349,7 +356,7 @@ export const parseStaleMs = (value: unknown, fallback: number = DEFAULT_STALE_MS
 export const FUTURE_SKEW_MS = 5 * 60 * 1000
 
 export const futureTimeKey = (auto: ProgressAuto): string =>
-  `future:${sha256(JSON.stringify(['future-time', auto.agent, auto.session, auto.updated]))}`
+  `future:${sha256(JSON.stringify(['future-time', auto.agent, auto.resume ?? auto.session, auto.updated]))}`
 
 // Keep the writer's stamp intact. The local observation belongs to that exact update,
 // and remains authoritative when the local clock eventually catches up with it.

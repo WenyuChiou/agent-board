@@ -37,7 +37,7 @@ to track work, reports real steps after each change. On desktop a URL-opening to
 that web page in a panel. It is not a native Codex pane. In CLI another terminal can run:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --watch
+node "$HOME/.agent-board/agent-board.mjs" --watch
 ```
 
 The existing keyboard actions, web controls and clipboard actions are the same as the
@@ -45,7 +45,7 @@ standalone board. On Windows use the absolute path printed by setup. To report, 
 passes minimal task summaries as JSON on stdin to:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-report
+node "$HOME/.agent-board/agent-board.mjs" --codex-report
 ```
 
 ```json
@@ -127,14 +127,14 @@ ACK after the user confirms the binding.
 ## Inspect, repair and remove
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-doctor
+node "$HOME/.agent-board/agent-board.mjs" --codex-doctor
 node scripts/setup-codex.mjs
 node scripts/setup-codex.mjs --apply
-node ~/.agent-board/agent-board.mjs --codex-remove
-node ~/.agent-board/agent-board.mjs --codex-remove --apply
+node "$HOME/.agent-board/agent-board.mjs" --codex-remove
+node "$HOME/.agent-board/agent-board.mjs" --codex-remove --apply
 ```
 
-Doctor checks generated file hashes and hook definitions, reporting hook trust as unknown.
+Doctor checks generated file hashes and hook definitions, querying Codex trust when a binary is supplied or discovered on PATH/LOCALAPPDATA, or inspecting config.toml when Codex is not available.
 Reinstall repairs missing generated files; edited files or hooks require review. Removal
 takes only unchanged owned files and exact owned hook groups. It preserves progress,
 session records, archives, journals and foreign hooks. Close a test board with its Close
@@ -255,7 +255,7 @@ session id actually provided by that host, never a guessed name or a transcript 
 | OpenClaw | Shared board and skill installed | Native adapter pending; no conversation grant added |
 | Antigravity | Named native lifecycle hooks and board skill | No session-end event or turn fence; verify CLI/App/IDE separately |
 
-Doctor distinguishes `installed`, `ready` and `connected`. Pending native adapters never
+Doctor's `--json` result distinguishes `installed`, `ready` and `connected`. Pending native adapters never
 report ready; `connected` stays unverified until host execution is observed. Shared-file
 tests are not evidence that every host discovered its adapter or accepted its hook schema.
 This release is a common foundation; full multi-agent and desktop acceptance remains separate. See the [native CLI record](validation/2026-10-19-native-hooks.md).
@@ -263,6 +263,6 @@ This release is a common foundation; full multi-agent and desktop acceptance rem
 Progress sharing is local file interoperability. It does not imply active-session messaging,
 remote synchronization, a real dot connection, or tool/merge approval from ordinary replies.
 
-The opt-in [connected-session messaging](MESSAGING.md) feature provides a separate web
+The [connected-session messaging](MESSAGING.md) hub, which starts with `--serve`, provides a separate web
 card reply action and host-adapter API. Its live connection and ACK acceptance are independent
 of this progress integration. No receiving target is inferred from an agent name or card.
