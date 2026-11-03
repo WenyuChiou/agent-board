@@ -432,6 +432,95 @@ const homeSnapshot = home => Object.fromEntries(readdirSync(home, { recursive: t
   return [path.slice(home.length), entry.isDirectory() ? 'directory' : { bytes: readFileSync(path).toString('base64'), mtimeMs: statSync(path).mtimeMs }]
 }))
 
+test('setup preview lists every planned file under its agent and apply changes only those files', () => fixture(f => {
+  f.save(f.hooks, '{"other":{"keep":true},"hooks":{}}\n')
+  f.save(join(f.home, 'notes.txt'), 'Keep this file.\n')
+  f.save(join(f.home, '.codex', 'auth.json'), '{"synthetic":"keep"}\n')
+  const run = (...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--agent', 'codex', ...args], {
+    cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000,
+  })
+  const before = homeSnapshot(f.home)
+  let planned
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const json = run('--lang', lang, '--json')
+    assert.equal(json.status, 0, json.stderr)
+    const plan = JSON.parse(json.stdout).plans[0]
+    const child = f.install('--lang', lang, '--json')
+    assert.equal(child.status, 0, child.stderr)
+    assert.equal(json.stdout, `${JSON.stringify({ targets: ['codex'], plans: [JSON.parse(child.stdout)], applied: false }, null, 2)}\n`)
+    assert.ok(plan.changes.some(change => change.action === 'create'))
+    assert.ok(plan.changes.some(change => change.action === 'update'))
+    planned = plan.changes.map(change => change.file).sort()
+    const preview = run('--lang', lang)
+    assert.equal(preview.status, 0, preview.stderr)
+    const lines = preview.stdout.split(/\r?\n/)
+    assert.match(lines[0], /^Codex:/)
+    assert.deepEqual(lines.slice(1, plan.changes.length + 1), plan.changes.map(change => `  ~${change.file.slice(f.home.length)}`))
+    assert.deepEqual(homeSnapshot(f.home), before)
+  }
+  const applied = run('--lang', 'en', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.ok(!applied.stdout.includes('  ~'), applied.stdout)
+  const after = homeSnapshot(f.home)
+  const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter(path => before[path] !== 'directory' && after[path] !== 'directory' && JSON.stringify(before[path]) !== JSON.stringify(after[path]))
+    .map(path => `${f.home}${path}`).sort()
+  assert.deepEqual(changed, planned)
+}))
+
+test('setup preview names the record of another installed agent that apply would rewrite', () => fixture(f => {
+  const run = (...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, ...args], {
+    cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000,
+  })
+  assert.equal(run('--agent', 'codex,cursor', '--lang', 'en', '--apply').status, 0)
+  const before = homeSnapshot(f.home)
+  const preview = run('--agent', 'codex', '--lang', 'zh-TW')
+  assert.equal(preview.status, 0, preview.stderr)
+  const listedIn = out => [...new Set(out.split(/\r?\n/).filter(line => line.startsWith('  ~')).map(line => join(f.home, line.slice(3))))].sort()
+  const changedSince = earlier => {
+    const after = homeSnapshot(f.home)
+    return Object.keys(after).filter(path => after[path] !== 'directory' && JSON.stringify(earlier[path]) !== JSON.stringify(after[path])).map(path => `${f.home}${path}`).sort()
+  }
+  const listed = listedIn(preview.stdout)
+  assert.ok(listed.includes(join(f.root, 'install-cursor.json')), preview.stdout)
+  assert.deepEqual(homeSnapshot(f.home), before)
+  assert.equal(run('--agent', 'codex', '--lang', 'zh-TW', '--apply').status, 0)
+  assert.deepEqual(changedSince(before), listed)
+  // An agent selected but skipped for a conflict changes no file of its own, yet its record still changes.
+  f.save(join(f.home, '.cursor', 'hooks.json'), '{not json')
+  const skipped = homeSnapshot(f.home)
+  const mixed = run('--agent', 'codex,cursor', '--lang', 'en')
+  assert.ok(listedIn(mixed.stdout).includes(join(f.root, 'install-cursor.json')), mixed.stdout)
+  run('--agent', 'codex,cursor', '--lang', 'en', '--apply')
+  assert.deepEqual(changedSince(skipped), listedIn(mixed.stdout))
+}))
+
+test('setup preview groups files per agent and shortens only paths inside the selected home', () => fixture(f => {
+  const home = join(f.home, 'home')
+  const data = join(f.home, 'home-other')
+  mkdirSync(home)
+  const run = (...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', home, '--data-dir', data, '--agent', 'codex,hermes', ...args], {
+    cwd: f.home, env: isolatedEnv(home), encoding: 'utf8', windowsHide: true, timeout: 30000,
+  })
+  const before = homeSnapshot(f.home)
+  const json = run('--json')
+  assert.equal(json.status, 0, json.stderr)
+  const preview = run()
+  assert.equal(preview.status, 0, preview.stderr)
+  const lines = preview.stdout.split(/\r?\n/)
+  const plans = JSON.parse(json.stdout).plans
+  let offset = 0
+  for (const [index, name] of ['Codex', 'Hermes Agent'].entries()) {
+    const plan = plans[index]
+    assert.ok(lines[offset].startsWith(`${name}:`))
+    const expected = plan.changes.map(change => `  ${change.file.startsWith(`${home}/`) || change.file.startsWith(`${home}\\`) ? `~${change.file.slice(home.length)}` : change.file}`)
+    assert.deepEqual(lines.slice(offset + 1, offset + 1 + plan.changes.length), expected)
+    offset += 1 + plan.changes.length
+  }
+  assert.ok(preview.stdout.includes(`  ${join(data, 'agent-board.mjs')}\n`))
+  assert.deepEqual(homeSnapshot(f.home), before)
+}))
+
 test('setup prints a plain summary with each agent and the next steps, and --json keeps today\'s JSON', () => fixture(f => {
   const installer = readFileSync(resolve('scripts/setup-agent.mjs'), 'utf8')
   const start = installer.indexOf('const summaries = ') + 'const summaries = '.length

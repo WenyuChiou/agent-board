@@ -16,7 +16,7 @@ not created its configuration yet, select its known target with `--agent <name>`
 `--agent all` previews all supported targets; it does not install the AI applications.
 
 Setup prints a short summary in the board's language (`--lang en`, `zh-TW` or `zh-CN`):
-one line per agent, followed by numbered next steps. The lines say what would change,
+one line per agent, in a preview with the files it would change under that line, followed by numbered next steps. The lines say what would change,
 what changed, what is already set up, or which conflicting files caused an agent to be
 skipped. With `--apply`, agents without conflicts are still set up; a skipped agent's
 line gives the `--agent <name>` command to retry after fixing its files. Setup exits

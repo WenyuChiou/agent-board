@@ -5,9 +5,10 @@ import { performance } from 'node:perf_hooks'
 import { dirname } from 'node:path'
 import { attachCodexSession } from '../../../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../../../scripts/antigravity-session-connector.mjs'
-import { deliveryPrompt } from '../../../scripts/message-client.mjs'
+import { deliveryText } from '../../../hooks/messaging.ts'
 import { makeWorld } from './world.mjs'
 import { block } from './writers.mjs'
+import { readStore } from './hub-wire.mjs'
 import { pageDom, serve } from './surfaces.mjs'
 import { noMachineIds, noSilentPress, seenWithin } from './expect.mjs'
 import { knownFailure } from './known.mjs'
@@ -18,19 +19,15 @@ const pause = ms => new Promise(done => setTimeout(done, ms))
 const ownedProxies = new Set()
 process.once('exit', () => { for (const child of ownedProxies) if (child.exitCode === null && child.signalCode === null) child.kill() })
 const promptParts = prompt => {
-  const match = prompt.match(/^Agent Board message (\S+) from (\S+)\./)
+  const match = prompt.match(/Reply first with this line alone: ACK ([0-9a-f]{6})\n<<<AB-\1\n([\s\S]*)\nAB-\1>>>$/)
   assert.ok(match, prompt)
-  return { id: match[1], from: match[2], text: prompt.slice(prompt.indexOf('\n\n') + 2), prompt }
+  return { nonce: match[1], text: match[2], prompt }
 }
 
 // A reply that names how many messages this receiver has had, so its card's receipt line
-// differs from the one an earlier message left on the same card (the page strips "ACK <id>").
-const ackReply = (message, actor) => `ACK ${message.id} reply ${actor.received.length}`
-const receiptText = (receipt, s = 'Replied') => {
-  const ack = 'ACK ' + receipt.id
-  const rest = receipt.reply.startsWith(ack) ? receipt.reply.slice(ack.length).trim() : receipt.reply
-  return rest ? `${s} · ${rest}` : s
-}
+// differs from the one an earlier message left on the same card (the page strips "ACK <nonce>").
+const ackReply = (message, actor) => `ACK ${message.nonce} reply ${actor.received.length}`
+const receiptText = (receipt, s = 'Replied') => receipt.reply ? `${s} · ${receipt.reply}` : s
 
 // The owned transport shapes come from tests/messaging.test.mjs:584 and :735.
 // Only these adapters represent native receivers; generic client registration
@@ -97,7 +94,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(actor.session)}], nextCursor: null } })
   if (value.method === 'turn/steer') {
     emit({ id: value.id, result: { turnId: 'proxy-turn' } })
-    const id = value.params.input[0].text.match(/^Agent Board message (\\S+)/)[1]
+    const id = value.params.input[0].text.match(/Reply first with this line alone: ACK ([0-9a-f]{6})/)[1]
     emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(actor.session)}, turnId: 'proxy-turn', item: { type: 'agentMessage', text: 'ACK ' + id } } })
   }
 })
@@ -200,7 +197,9 @@ export const receiptBudget = async hub => {
 // A hub that stays open until close(): a world, its server and page, and one actor per spec,
 // each native one attached. withHub closes it after fn; a suite that shares one hub across
 // its tests opens it in before() and closes it in after().
-export const openHub = async specs => {
+// prepare({ world, messages }) runs once the actors' blocks are written and before the server starts,
+// to put more on the board or in the message folder first; callers that pass none see no change.
+export const openHub = async (specs, { prepare } = {}) => {
   const world = makeWorld()
   // Messaging leases and latency use real clocks in both parent and server; with no jump,
   // world.now is the real time too.
@@ -209,10 +208,12 @@ export const openHub = async specs => {
   try {
     const actors = specs.map((spec, index) => ({ ...spec, session: `${String(index + 1).padStart(8, '0')}-2222-4333-8444-555555555555`, block: (0xa1000001 + index).toString(16), title: spec.title ?? `Prepare ${spec.agent} ${index + 1}`, received: [], errors: [] }))
     for (const actor of actors) block(world, { agent: actor.agent, session: actor.block, resume: actor.session, dir: world.root, title: actor.title, updated: new Date().toISOString(), steps: ['- [~] Review synthetic message'] })
-    server = await serve.start(world, ['--messages-dir', dirname(world.write('messages/.keep', ''))])
+    const messages = dirname(world.write('messages/.keep', ''))
+    await prepare?.({ world, messages })
+    server = await serve.start(world, ['--messages-dir', messages])
     let dom
     const hub = {
-      world, server, actors,
+      world, server, actors, messages,
       snapshot: async () => (await server.get('/api/board')).json(),
       page: async () => {
         const model = (await hub.snapshot()).model
@@ -262,22 +263,27 @@ export const openHub = async specs => {
         await source.connector.send({ id, target: target.connector.id, turn: target.connector.turn, text })
         return { id, text, started, from: source.agent + ':' + source.session }
       },
-      receipt: async (actor, sent) => {
-        let receipt, card
+      receipt: async (actor, sent, { extraMs = 0 } = {}) => {
+        let receipt, card, received
         const budget = await receiptBudget(hub)
         await seenWithin(async () => {
           const snapshot = await hub.snapshot()
           receipt = snapshot.messaging.messages.find(one => one.id === sent.id)
+          actor.refresh?.()
+          // The board shows the reply without the nonce its ACK line carries, so the store says which
+          // delivery was acknowledged.
+          const stored = receipt?.status === 'acknowledged' ? readStore(hub.messages).find(one => one.id === sent.id)?.reply ?? '' : ''
+          received = actor.received.find(one => stored === 'ACK ' + one.nonce || stored.startsWith('ACK ' + one.nonce + ' '))
           card = (await hub.card(actor)).textContent
           return card
-        }, text => receipt?.status === 'acknowledged' && receipt.reply.startsWith('ACK ' + sent.id) && text.includes(receiptText(receipt)), Math.max(1, budget.measuredMs - budget.pagePollMs - (performance.now() - sent.started)))
+        }, text => receipt?.status === 'acknowledged' && received && text.includes(receiptText(receipt)), Math.max(1, budget.measuredMs + extraMs - budget.pagePollMs - (performance.now() - sent.started)))
         const elapsed = performance.now() - sent.started + budget.pagePollMs
-        assert.ok(elapsed <= budget.measuredMs, `${elapsed} ms including the page poll exceeds ${budget.measuredMs} ms`)
-        actor.refresh?.()
-        const received = actor.received.find(one => one.id === sent.id)
+        assert.ok(elapsed <= budget.measuredMs + extraMs, `${elapsed} ms including the page poll exceeds ${budget.measuredMs + extraMs} ms`)
         assert.ok(received, 'Native transport did not receive this message')
+        assert.ok(!JSON.stringify(receipt).includes(received.nonce), 'The board shows the nonce: ' + JSON.stringify(receipt))
         assert.equal(received.text, sent.text)
-        assert.equal(received.prompt, deliveryPrompt({ ...sent, from: sent.from }))
+        // A finished message no longer carries its text, so the sent text stands in for it.
+        assert.equal(received.prompt, deliveryText({ ...receipt, text: sent.text, nonce: received.nonce }))
         assert.equal(receipt.from, sent.from)
         assert.equal(receipt.to, actor.agent + ':' + actor.session)
         console.log(`receipt ${actor.agent}: ${Math.round(elapsed)} ms`)
@@ -317,8 +323,8 @@ export const openHub = async specs => {
   }
 }
 
-export const withHub = async (specs, fn) => {
-  const hub = await openHub(specs)
+export const withHub = async (specs, fn, options) => {
+  const hub = await openHub(specs, options)
   try {
     await fn(hub)
   } finally {
