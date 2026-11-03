@@ -162,6 +162,20 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       }
     }
   }
+  // A board command our connect wrote still runs our board script, which remove then deletes.
+  // One naming setup's data folder is setup's and stays; one still naming ours but edited keeps the script.
+  const retireCommand = (hook: (typeof hooks)[number]): void => {
+    try {
+      if (!existsSync(hook.file)) return
+      const before = readLocal(hook.file)
+      if (hook.edit(before, true, previousOutput(hook.file)) === DELETE) removeFile(hook.file)
+      else if (connectDataRoots(before, true).some(root => connectPath(root, isWin) === connectPath(folder, isWin))) canRemoveBoard = false
+    } catch (error) {
+      if (error instanceof Error && error.message === 'RECOVERY_CONFLICT') throw error
+      canRemoveBoard = false
+      warn(`removeFailed:${hook.file}`, { message: 'connectRemoveFailed', args: [hook.file] })
+    }
+  }
   for (const hook of hooks) {
     let isInstalled = false
     for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (existsSync(dir))
@@ -178,7 +192,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       if (hook.label !== '') {
         mark(hook, 'setup')
         retireHook(hook)
-      }
+      } else if (remove) retireCommand(hook)
       continue
     }
     const heldBy = setupHeld.get(hook.agent)
@@ -186,7 +200,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
       if (hook.label !== '') {
         failedLabels.add(hook.label)
         warn(`setupRecord:${heldBy}`, { message: 'connectReadFailed', args: [hook.label, heldBy] })
-      }
+      } else if (remove) retireCommand(hook)
       continue
     }
     // Found, but its reporter or the board script is not ours to run: the problem with that

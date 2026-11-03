@@ -336,6 +336,40 @@ test('a setup record that cannot be read leaves Codex without fallback instructi
   assert.ok(existsSync(join(f.home, '.codex', 'AGENTS.md')))
 }))
 
+for (const [agent, parts] of [['gemini', ['.gemini', 'commands', 'board.toml']], ['opencode', ['.config', 'opencode', 'commands', 'board.md']]]) test(`${agent} remove leaves no board command naming the script it deleted`, () => withSetup(agent, ({ f, run, recordFile, owned, before }) => {
+  // A record from setup beside a /board command the connector wrote.
+  const command = join(f.home, ...parts)
+  const record = readFileSync(recordFile, 'utf8')
+  unlinkSync(recordFile)
+  unlinkSync(command)
+  run('connect')
+  writeFileSync(recordFile, record)
+  const script = join(dirname(f.progress), 'agent-board.mjs')
+  assert.ok(readFileSync(command, 'utf8').replaceAll('\\\\', '\\').includes(script), readFileSync(command, 'utf8').slice(0, 500))
+  const { result } = run('remove')
+  assert.deepEqual(result.problems, [])
+  assert.equal(existsSync(script), false)
+  assert.equal(existsSync(command), false)
+  for (const file of owned) if (file !== command) assert.equal(readFileSync(file, 'utf8'), before[file], file)
+}))
+
+test('remove keeps a board command naming setup, and an edited one keeps the board script it runs', () => withSetup('gemini', ({ f, run, recordFile, before }) => {
+  const command = join(f.home, '.gemini', 'commands', 'board.toml')
+  const script = join(dirname(f.progress), 'agent-board.mjs')
+  assert.deepEqual(run('remove').result.problems, [])
+  assert.equal(readFileSync(command, 'utf8'), before[command])
+
+  const record = readFileSync(recordFile, 'utf8')
+  unlinkSync(recordFile)
+  unlinkSync(command)
+  run('connect')
+  writeFileSync(recordFile, record)
+  writeFileSync(command, readFileSync(command, 'utf8') + '# mine\n')
+  run('remove')
+  assert.ok(readFileSync(command, 'utf8').endsWith('# mine\n'))
+  assert.ok(existsSync(script))
+}))
+
 test('removing the connector takes out its hook and leaves the setup hook', () => withBothHooks('grok', ({ f, run, owned, before }) => {
   assert.ok(existsSync(join(f.home, '.grok', 'hooks', 'agent-board.json')))
   const { result } = run('remove')
