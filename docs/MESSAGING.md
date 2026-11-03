@@ -340,6 +340,44 @@ Calling `accepted()` also marks delivery as begun. Safe uppercase error codes ar
 other exception text is not stored. Adapters with fewer than three declared parameters
 keep the older behavior: entering `deliver` already counts as beginning delivery.
 
+## Claude Code session receiver
+
+A Claude Code session started in a terminal receives board messages by itself (#316); there is
+nothing to set up. `hooks/receiver.ts` holds the logic and `hooks/register.tsx` connects it.
+
+- **Finding the board.** Every 2 s the session looks for the address file the running page left
+  for its `progress.md`, in the folder `--serve` uses. It reads the file only when it can show the
+  file is this account's: on POSIX through a check of the owner and mode; on Windows it uses only
+  the folder under the home directory, and a set `XDG_RUNTIME_DIR` means no connection. The address
+  must name this board and `127.0.0.1`. Anything else leaves the card on Copy.
+- **Binding.** It registers as `agent: claude` with the session's full id, `scope: session`,
+  `turn: session`. That id is the `resume=` in its progress block, which is how the card finds it. A
+  reload presents the old connection, so it does not contest itself. A `-p` run and the SDK, which
+  includes the Desktop app today, do not register, and their cards stay on Copy.
+- **Taking a message.** It polls with `receive: true` only while no turn is running, it holds no
+  message and it has not been stopped. It sends the `accepted` receipt before the prompt reaches the
+  engine; a refused receipt, such as a message taken back, means it never does.
+- **Delivery.** `$.prompt.submit({ text })` with the hub's framed text, never `asUser`, so Claude
+  reads it as a plugin's message.
+- **Outcome.**
+
+| What happened | Receipt | Error | Card |
+| --- | --- | --- | --- |
+| The delivery turn's first line is its ACK | `acknowledged` | | Claude replied: ... (what follows the ACK), or Claude got this. |
+| The turn ended with no ACK on its first line | `uncertain` | `ACK_MISSING` | Sent, but Claude hasn't confirmed. |
+| The person stopped the delivery turn | `uncertain` | `TURN_ABORTED` | Sent, but Claude hasn't confirmed. |
+| The engine dropped the prompt, as the person pressed Esc | `rejected` | `STOPPED` | Stopped in Claude. Not delivered. |
+| The submit failed, or no turn came of it within 30 s of idle time | `uncertain` | `DELIVERY_UNCERTAIN` | Sent, but Claude hasn't confirmed. |
+
+After a drop it takes nothing more until the person starts a turn. Nothing is ever submitted twice.
+
+**What stays out of the board.** A delivery turn's words and answer do not reach `progress.md`,
+the journal, the question list or the step summary. Only the ACK line goes back, and only what
+follows the ACK is shown; the rest of the reply stays in Claude's window.
+
+**Take back and Dismiss** both call `/api/messages/dismiss`, which also frees the session for the
+next message. Taking back a message that is already in Claude's turn does not stop that turn.
+
 ## Codex existing-owner adapter
 
 `scripts/codex-message-connector.mjs` uses the installed Codex executable's existing

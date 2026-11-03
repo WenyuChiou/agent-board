@@ -8660,6 +8660,9 @@ test("a Claude card's line and buttons follow its message, and Take back and Dis
   await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED' }))
   assert.equal(receipt().textContent, EN.claudeStopped)
   assert.ok(buttons().includes(EN.serveCopyMessage))
+  // The hub lets go of a finished message's words: with none to copy, no Copy button.
+  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED', text: '' }))
+  assert.ok(!buttons().includes(EN.serveCopyMessage))
   await dom.redraw(withReceipt({ status: 'acknowledged', reply: 'on it' }))
   assert.equal(receipt().textContent, EN.claudeReplied('on it'))
   await dom.redraw(withReceipt({ status: 'acknowledged' }))
