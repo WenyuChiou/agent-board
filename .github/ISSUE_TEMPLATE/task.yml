@@ -23,7 +23,7 @@ body:
     id: acceptance
     attributes:
       label: Acceptance tests
-      description: One test title per line, each a sentence about behaviour. The pull request adds tests with these titles and names them in its CHANGELOG entry; a title that changes is explained in the pull request.
+      description: One test title per line, each a sentence about behaviour. The pull request adds tests with these titles and names them under Tests in its body; a title that changes is explained in the pull request.
       placeholder: "- tidy --stopped moves every stopped block and names the count"
     validations:
       required: true
@@ -37,7 +37,6 @@ body:
         - dot or Muse (for-dot)
         - Codex (local)
         - Antigravity (local)
-        - Maintainer decides
     validations:
       required: true
   - type: input

@@ -118,7 +118,7 @@ Known traps, all found on Windows in earlier pull requests:
 
 ## 5. Title it for the CHANGELOG
 
-You write no CHANGELOG entry. The release writes one line for each fix and feature from its squash-merge title, so the title says what changed for the person using agent-board, in one plain sentence:
+You normally write no CHANGELOG entry (to word the line yourself, see [rule 6](../CONTRIBUTING.md#pull-requests)). The release writes one line for each fix and feature from its squash-merge title, so the title says what changed for the person using agent-board, in one plain sentence:
 
 ```text
 fix(board): the column width stays the same after a restart
@@ -223,7 +223,7 @@ gh issue edit <N> -R WenyuChiou/agent-board --remove-label claimed   # if you cl
 
 ## 11. Review and merge someone else's pull request
 
-With write access to this repository you may also review and merge pull requests you did not write ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 8 and 9). If the owner names you in [Roles](../CONTRIBUTING.md#roles), a code-review subagent you run may also approve your own pull request, under the conditions in rule 8. In this step `<PR>` is the pull request you are reviewing, and `<N>` is each linked issue. Start every review block from the queue below, then take one marked `Ready for review <sha>` that nobody is reviewing, and say so first.
+With write access to this repository you may also review and merge pull requests you did not write ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 8 and 9). In this step `<PR>` is the pull request you are reviewing, and `<N>` is each linked issue. Start every review block from the queue below, then take one marked `Ready for review <sha>` that nobody is reviewing, and say so first.
 
 `node scripts/review-queue.mjs` is where a collaborator, the maintainer, a stand-in or the owner starts. It lists the pull requests waiting on a reviewer, smallest first, with how long each has waited since its `Ready for review <sha>` and a suggested reviewer; then those with a conflict with `main` (a conflicted one gets no CI until `main` is merged; one that is only behind `main` is queued like any other); the approved ones in merge order, where those that touch a source of the board bundle or the release table go one at a time; and those waiting on their author. Under a pull request it shows what Codex review said about the current head (a bot that has not reviewed a head never holds a pull request up) and, when one applies, where its merge-after-notice stands. After the queue come the collaborators who have posted `Away:` on the roadmap issue (`--roadmap N` names another issue) and the claims that have run out. Take the small ones first. The rules behind these lines are [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 3 and 8 and [team-process, From claim to merge](dev/team-process.md#from-claim-to-merge).
 
@@ -239,7 +239,7 @@ gh api repos/WenyuChiou/agent-board/pulls/<PR>/comments --paginate
 gh pr checks <PR> -R WenyuChiou/agent-board
 ```
 
-Read the diff against the issues on the body's first lines, and each P0 or P1 finding from Greptile or Codex. If either bot did not review this head (a fork, a failed or stuck run), run a code review of the head yourself, such as a local Codex run or your agent's code-review subagent, and post its result on the pull request. Then post one verdict with all findings at once: `Review: APPROVE <full head sha> by <login>` with what you verified, or `Review: REQUEST CHANGES <full head sha> by <login>` with each finding by file and line. Your own agent, lane or subagent cannot approve your own pull request, except under rule 8's conditions for the maintainer and for every collaborator, among them that the checks rule 9 requires have passed on the current head and no P0 or P1 from a bot or the subagent stands unresolved. A bot can block a merge but never approves one.
+Read the diff against the issues on the body's first lines, and each P0 or P1 finding from Greptile or Codex. If either bot did not review this head (a fork, a failed or stuck run), run a code review of the head yourself, such as a local Codex run or your agent's code-review subagent, and post its result on the pull request. Then post one verdict with all findings at once: `Review: APPROVE <full head sha> by <login>` with what you verified, or `Review: REQUEST CHANGES <full head sha> by <login>` with each finding by file and line. Your own agent, lane or subagent cannot approve your own pull request, whoever you are ([RULES.md, R2](dev/RULES.md#r2-nobody-approves-their-own-work)). A bot can block a merge but never approves one.
 
 Merge only when the latest verdict is an approval satisfying rule 8 for the current head (or for a head the branch has since moved from only by a clean merge of `main`, without conflicts or anything else in the merge commit), and impact planning, CI validation, every selected CI job, every other applicable workflow in `.github/workflows/`, and the `Greptile Review` check have succeeded on the current head; when Greptile did not review that head, your own code review posted for it stands in for that check (rule 9). Skipped, neutral, cancelled or missing selected checks are not passes; only groups explicitly omitted as unaffected by the plan may be skipped (rule 9):
 
@@ -252,4 +252,4 @@ Don't sit and watch CI. Once you approve, start the wait in the background (`gh 
 
 A pull request that changes the board page's messages, the setup output or the one-line row summaries also runs the journeys it touches in [USER-SIM.md](validation/USER-SIM.md) on its head, with an AI playing the new user, and puts the PASS, FRICTION or FAIL rows under Checks.
 
-GitHub deletes a merged branch from this repository. A governance pull request also needs the owner's approval quoted in its body (rule 12), and a release pull request stays with the maintainer ([Releases](../CONTRIBUTING.md#releases)).
+GitHub deletes a merged branch from this repository. A governance pull request also needs the owner's approval quoted in its body (rule 12), and a release pull request follows [Releases](../CONTRIBUTING.md#releases): it merges like any other once approved ([RULES.md, R3](dev/RULES.md#r3-merging)), and the maintainer, or a collaborator when the maintainer is away, tags it.
