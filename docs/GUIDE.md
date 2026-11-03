@@ -19,6 +19,7 @@ Fresh independent installs use `~/.agent-board/progress.md`. Existing installs r
 
 Read back the generated definitions and complete the host's trust/enablement requirements. Codex supports a previewed, scoped trust operation after user approval; see [Codex](CODEX.md). Existing sessions may need reload. CLI, desktop App and IDE must each execute their own acceptance test.
 
+
 ## Other agents
 
 The common installer writes the shared board, skills and available native adapters. It needs neither Claude Code nor another model. [Adapter coverage](SETUP.md#native-status-adapters) distinguishes installed adapters from pending ones.
@@ -85,7 +86,7 @@ A card offers Send only when its exact session has a live adapter. Otherwise use
 
 #### On a phone
 
-The page fits a phone's screen. To open it from a phone on the same Wi-Fi as the computer, run `node ~/.agent-board/agent-board.mjs --serve --lan`. Besides the computer's address, it prints the page's address on your network and a QR code of it: point the phone's camera at the code. When the computer has more than one network address, `--lan 192.168.1.23` picks one. Windows may ask whether Node.js may use the network: allow it on private networks, and check that Windows counts your Wi-Fi as a private one (it calls a network it has just joined public), or the phone can't reach the page. Access from another network requires a separately configured remote connection.
+The page fits a phone's screen. To open it from a phone on the same Wi-Fi as the computer, run `node "$HOME/.agent-board/agent-board.mjs" --serve --lan`. Besides the computer's address, it prints the page's address on your network and a QR code of it: point the phone's camera at the code. When the computer has more than one network address, `--lan 192.168.1.23` picks one. Windows may ask whether Node.js may use the network: allow it on private networks, and check that Windows counts your Wi-Fi as a private one (it calls a network it has just joined public), or the phone can't reach the page. Access from another network requires a separately configured remote connection.
 
 The page on your network comes with these limits:
 
@@ -136,7 +137,7 @@ Strong Codex runs and Claude print-mode sessions write no new board block. The b
 
 The optional pane sweeps on session start and hourly: done blocks after 12 hours, other stopped/stale blocks after three days. A running `--serve` page also sweeps every hour. A hand-kept task with every step `[x]` or `[-]` counts toward the archive after three days observed done; in 0.24.1 scheduled sweeps only count these tasks and move none. The details line says "N finished tasks can be archived"; a zero count is omitted. A working or waiting agent block stays live for 12 hours after its last write: the pane, terminal and page explain why Archive is unavailable, and tidy keeps it. Once stopped or ended, open the row to archive it immediately. Automatic sweeps take a block with an unresolved `[?]` step only when the same complete question snapshot the explicit archive requires is saved and read back, and only when it has been quiet long enough: three days after its last write if it has ended or is done, seven days with no report if it is still working or waiting. A block whose snapshot cannot be saved stays. The question is kept and shows under Older unanswered questions, where it can be hidden and shown again. Explicit archive requires that snapshot at any age, preserving recovery after the source moves; storage failure leaves the source in place.
 
-Run `node ~/.agent-board/agent-board.mjs --tidy` for one normal age-based sweep without a Claude session or page. It installs no scheduler and does not write `progress-seen.json`: the pane, `--watch` or `--serve` must first observe a completed hand-kept task and record when the three-day rule first ran. The three days count from the later of those two observations, giving work seen done under 0.24.0 three days from the upgrade. A machine running only `--tidy` never arms that rule and counts nothing without the reserved entry. Unknown, future or unreadable observations retain manual tasks; `--tidy` can still archive eligible dated agent blocks. The page's hourly sweep skips its pass and writes nothing if the seen file cannot be read.
+Run `node "$HOME/.agent-board/agent-board.mjs" --tidy` for one normal age-based sweep without a Claude session or page. It installs no scheduler and does not write `progress-seen.json`: the pane, `--watch` or `--serve` must first observe a completed hand-kept task and record when the three-day rule first ran. The three days count from the later of those two observations, giving work seen done under 0.24.0 three days from the upgrade. A machine running only `--tidy` never arms that rule and counts nothing without the reserved entry. Unknown, future or unreadable observations retain manual tasks; `--tidy` can still archive eligible dated agent blocks. The page's hourly sweep skips its pass and writes nothing if the seen file cannot be read.
 
 Clean up on the pane or page archives the finished hand-kept tasks whose three days are up, exactly the ones the count line counts, plus what the normal sweep moves. It writes to the same monthly archive before removing work from the board; tasks inside their three days, open tasks and `[?]` tasks stay. If the seen file cannot be read, Clean up archives nothing and says so. In 0.24.1 unattended sweeps (pane start and hourly, `--tidy`, and page hourly) only count hand-kept tasks and move none. The pane's Archive now and `/progress tidy`, the page's Archive now, and a row's Archive still move finished work at once; nothing is deleted. The pane and page offer one Clean up button with the size warning and whenever the count is above zero, even on a small board. Numbers and the count sit in the details line. The terminal board, chat and `--html` show the details without a button.
 
@@ -161,11 +162,11 @@ Question tags: [Confirm] yes or no · [Choose] pick an option · [Input] type a 
 
 Independent installations: update a clean checkout to the intended release, preview `node scripts/setup-agent.mjs`, then apply the approved plan. Edited files are conflicts, not overwritten. Existing host sessions may need reload. No unattended updater or startup service is installed.
 
-Preview and apply removal for the selected target using the installed program:
+Preview and apply removal with the installed program, once for each agent you set up. The example removes Codex; for another agent, use its name (`cursor`, `opencode`, `gemini`, `grok`, `muse`, `hermes`, `openclaw`, `antigravity`, `deepseek`):
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-remove --agent <name>
-node ~/.agent-board/agent-board.mjs --codex-remove --agent <name> --apply
+node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 ```
 
 `--codex-remove` and `--codex-doctor` are retained maintenance names for all targets. Close that board before removal. Only unchanged owned definitions/files are removed; shared files stay while another target needs them. Progress, session records, archives, journals and user changes remain.
@@ -235,7 +236,7 @@ The plugin was renamed in 0.10.0 and doesn't move over by itself. Run the steps 
 
 ### How do I uninstall it?
 
-Independent setup: close the board, preview `node ~/.agent-board/agent-board.mjs --codex-remove --agent <name>`, then add `--apply` after review. Progress and history remain. For the optional Claude plugin:
+Independent setup: close the board, preview `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`, then add `--apply` after review. Progress and history remain. For the optional Claude plugin:
 
 ```sh
 claude -p "/progress connect remove"
@@ -246,6 +247,10 @@ claude plugin marketplace remove agent-board
 The first line disconnects the other agents; finish any reported cleanup before uninstalling. Your history, reporter scripts and inbox stay. See [Update and uninstall](#update-and-uninstall) for retries, recovery if you already uninstalled, and the retained files and their locations.
 
 ## Troubleshooting
+
+A cut report marker that hides task headings inside a comment still produces the cut-marker warning; the hidden tasks and original bytes remain intact.
+
+Independent local sessions with the same short report id can both keep reporting when their full native bindings and owner digests distinguish them. Each writer preserves the other block. An unowned, contradictory or duplicated binding still refuses the write; inspect the file before retrying rather than removing another session’s block.
 
 - **No card:** check the selected progress path, installed adapter, trust and reload status. Observe a real event and read back that exact session's block. Do not fabricate success with a manual event.
 - **No Send:** the exact native session needs a supported live adapter. Hooks alone do not establish receiving. Desktop and CLI results are not interchangeable.

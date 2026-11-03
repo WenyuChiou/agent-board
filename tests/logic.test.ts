@@ -116,7 +116,7 @@ test('a Codex block set to working says Codex is working, not Claude', () => {
   const after = upsertAutoBlock(before, next, s)
   expect(after).toContain('> Codex is working')
   expect(after).not.toContain('Claude is working')
-  expect(removeAutoBlock(after, mirror.sessionId)).toBe(removeAutoBlock(before, mirror.sessionId))
+  expect(removeAutoBlock(after, mirror)).toBe(removeAutoBlock(before, mirror))
   const task = parseProgress(after).find(project => project.name === mirror.project)?.tasks[0]
   expect(task?.auto?.agent).toBe('codex')
   expect(task?.auto?.state).toBe('working')

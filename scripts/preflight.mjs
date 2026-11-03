@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -15,11 +15,34 @@ const read = path => readFileSync(path, 'utf8')
 const isTest = path => /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|ts|tsx)$/.test(path)
 const splitPaths = text => text.split('\0').filter(Boolean)
 
-export const accountTestLockPath = ({ platform = process.platform, temp = tmpdir(), account = userInfo() } = {}) => {
+export const accountTestLockPath = ({ platform = process.platform, account = userInfo() } = {}) => {
   const identity = platform === 'win32'
     ? createHash('sha256').update(String(account.homedir)).digest('hex')
     : String(account.uid)
-  return join(temp, `agent-board-preflight-tests-${identity}`)
+  // userInfo reads the account database, unlike HOME, USERPROFILE or the temp environment.
+  return join(account.homedir, `.agent-board-preflight-tests-${identity}`)
+}
+
+export const testLockDirectoryProblem = (stat, { platform = process.platform, uid = userInfo().uid } = {}) => {
+  if (stat.isSymbolicLink()) return 'test lock directory is a symbolic link.'
+  if (!stat.isDirectory()) return 'test lock directory is not a directory.'
+  if (platform !== 'win32') {
+    if (stat.uid !== uid) return 'test lock directory belongs to another account.'
+    if (stat.mode & 0o022) return 'test lock directory is writable by group or others.'
+  }
+  return null
+}
+
+const prepareTestLockDirectory = directory => {
+  try { mkdirSync(directory, { mode: 0o700 }) } catch (error) {
+    if (error?.code !== 'EEXIST') throw new Error('test lock directory could not be created; check account directory access.')
+  }
+  let stat
+  try { stat = lstatSync(directory) } catch {
+    throw new Error('test lock directory could not be inspected; check account directory access.')
+  }
+  const problem = testLockDirectoryProblem(stat)
+  if (problem) throw new Error(problem)
 }
 
 const isLiveProcess = pid => {
@@ -41,20 +64,31 @@ const releaseTestLock = path => {
 }
 
 const acquireTestLock = (directory, onPublished) => {
-  mkdirSync(directory, { recursive: true })
+  prepareTestLockDirectory(directory)
   const marker = `${process.pid}-${randomUUID()}.lock`
   const path = join(directory, marker)
   let isPublished = false
   try {
-    const file = openSync(path, 'wx')
+    const file = openSync(path, 'wx', 0o600)
     isPublished = true
     closeSync(file)
     onPublished?.()
     let isBlocked = false
     for (const name of readdirSync(directory)) {
       if (name === marker) continue
-      const match = /^(\d+)-[^.]+\.lock$/.exec(name)
-      if (!match || isLiveProcess(Number(match[1]))) {
+      const match = /^([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.lock$/i.exec(name)
+      if (!match) continue
+      const pid = Number(match[1])
+      // Node's process.kill accepts signed 32-bit PIDs; larger values are not usable owner markers.
+      if (!Number.isInteger(pid) || pid > 2147483647) continue
+      let stat
+      try { stat = lstatSync(join(directory, name)) } catch (error) {
+        if (error?.code === 'ENOENT') continue
+        throw error
+      }
+      // Unfamiliar entries, including links and directories, never become stale markers.
+      if (!stat.isFile() || stat.size !== 0) continue
+      if (isLiveProcess(pid)) {
         isBlocked = true
         continue
       }
@@ -72,18 +106,48 @@ const acquireTestLock = (directory, onPublished) => {
 }
 
 // Child diagnostics can contain private paths or terminal control characters.
-export const safeLine = value => {
+export const safeLine = (value, { hasSpacedUnixPaths = false } = {}) => {
   let text = String(value).replace(/[\r\n\u0085\u2028\u2029]+/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '')
+  // A file URL must reach the path rules before its e:/ can look like a drive.
+  if (hasSpacedUnixPaths) text = text.replace(/\bfile:\/\/[^/\s]*(?=\/)/gi, '')
   // Home directory names can contain spaces even in unquoted diagnostics.
+  // TAP names need conservative path removal; status lines keep adjacent relative paths.
+  const unixPath = hasSpacedUnixPaths
+    ? /(^|[^\w])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g
+    : /(^|[\s"'`(])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g
   text = text.replace(/(?:[A-Za-z]:[\\/]Users[\\/]|\/(?:home|Users)\/)[^\\/"'`<>]+(?=[\\/])/gi, match => match.replaceAll(' ', '\ue000'))
   text = text.replace(/(?:[A-Za-z]:[\\/]|\\\\)(?:[^\s\\/"'`<>:|?]+(?: [^\s\\/"'`<>:|?]+)*[\\/])*(?:[^\s\\/"'`<>:|?]+(?: [^\s\\/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g, '<path>')
-    .replace(/(^|[\s"'`(])(?:file:\/\/)?\/(?:[^\s/"'`<>:|?]+\/)*(?:[^\s/"'`<>:|?]+(?: [^\s/"'`<>:|?]+)*?\.[\w-]+(?=$|[\s"'`<>,;:)])|[^\s"'`<>?]*)/g, '$1<path>')
+    .replace(unixPath, '$1<path>')
     .replace(/([?&]t=)[^\s&#"'`<>]+/gi, '$1<token>')
     .replace(/\b(?:ghp_|github_pat_|sk-)[A-Za-z0-9_-]+/gi, '<token>')
   for (const name of [process.env.USERNAME, process.env.USER].filter(value => value && value.length > 2)) {
     text = text.replace(new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '<user>')
   }
   return text
+}
+
+const failedTapNames = output => {
+  const names = []
+  let diagnosticIndent
+  for (const line of output.split(/\r?\n/)) {
+    const opening = /^(\s*)---\s*$/.exec(line)
+    if (diagnosticIndent === undefined && opening) {
+      diagnosticIndent = opening[1]
+      continue
+    }
+    if (diagnosticIndent !== undefined) {
+      const closing = /^(\s*)\.\.\.\s*$/.exec(line)
+      if (closing?.[1] === diagnosticIndent) diagnosticIndent = undefined
+      continue
+    }
+    const match = /^\s*not ok \d+ - (.+?)\s*$/.exec(line)
+    if (!match || /\s+#\s*(?:TODO|SKIP)\b/i.test(match[1])) continue
+    // TAP escapes paths and hashes; decode before the path sanitizer sees them.
+    const name = safeLine(match[1].replace(/\\(.)/g, '$1'), { hasSpacedUnixPaths: true }).slice(0, 160)
+    if (name && !names.includes(name)) names.push(name)
+    if (names.length === 3) break
+  }
+  return names
 }
 
 // Keep literals as tokens so braces and helper names inside prose cannot become code.
@@ -308,7 +372,11 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   await check('touched Node tests', () => {
     const paths = [...changed].filter(path => isTest(path) && path.endsWith('.mjs') && existsSync(join(cwd, path)))
     if (!paths.length) add('PASS', 'no touched Node test files need running.')
-    const owner = paths.length ? acquireTestLock(lockPath, onLockPublished) : null
+    let owner = null
+    try { owner = paths.length ? acquireTestLock(lockPath, onLockPublished) : null } catch (error) {
+      add('FAIL', error.message?.startsWith('test lock directory ') ? error.message : 'test lock directory could not be used; check account directory access.')
+      return
+    }
     if (paths.length && !owner) add('FAIL', 'another preflight test run is already active on this computer; finish it before running preflight again.')
     if (owner) {
       try {
@@ -326,7 +394,9 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
             const count = output.match(/^# fail (\d+)\s*$/m)?.[1]
             const total = output.match(/^# tests (\d+)\s*$/m)?.[1]
             const isPassed = !tested.error && tested.status === 0 && count === '0'
-            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
+            const failedNames = isPassed ? [] : failedTapNames(output)
+            const failedDetail = failedNames.length ? `; failed: ${failedNames.join('; ')}` : ''
+            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
           } finally {
             rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
           }
@@ -384,6 +454,13 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     else add('PASS', 'board bundle and its sources changed together or are unchanged.')
   })
 
+  await check('messaging matrix check', () => {
+    if (!existsSync(join(cwd, 'scripts/messaging-matrix.mjs'))) { add('PASS', 'no messaging matrix in this tree.'); return }
+    const checked = command(process.execPath, ['scripts/messaging-matrix.mjs', '--check'])
+    if (!checked.error && checked.status === 0) add('PASS', 'messaging matrix is up to date.')
+    else add('FAIL', `messaging matrix: ${checked.stderr?.split(/\r?\n/)[0] || 'the check could not finish'}`)
+  })
+
   await check('engine helper scan', () => {
     const problems = changed.has('hooks/register.tsx') ? engineProblems(read(join(cwd, 'hooks/register.tsx'))) : []
     if (!problems.length) add('PASS', 'engine helper declarations have no detected problem.')
@@ -410,21 +487,18 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   } else add('PASS', 'PR body check skipped; supply --body-file and --title to include it.')
 
   await check('CHANGELOG test titles', () => {
+    // The release writes each fix and feature's CHANGELOG line from its title, so a new pull request adds no fragment.
     const fragmentPaths = [...newPaths].filter(isFragmentPath)
-    const fragments = fragmentPaths.filter(path => fragmentIssue(path) !== null)
-    const invalid = fragmentPaths.filter(path => fragmentIssue(path) === null)
-    for (const path of invalid) add('FAIL', `${path}: invalid fragment name; use changelog.d/<issue>-<lowercase-slug>.md with a positive issue number without leading zeros (see changelog.d/README.md).`)
-    if (!invalid.length) {
-      if (!changed.has('CHANGELOG.md') && !fragments.length && [...changed].some(path => !path.endsWith('.md') && !path.startsWith('docs/'))) add('WARN', 'add a fragment in changelog.d/ (see changelog.d/README.md)')
-      else add('PASS', 'CHANGELOG is included or only documentation changed.')
-    }
+    for (const path of fragmentPaths) add('WARN', `${path} is a new changelog fragment; a new pull request adds none, since the release writes the CHANGELOG line from its title (CONTRIBUTING rule 6).`)
+    if (!fragmentPaths.length) add('PASS', 'no changelog fragment; the release writes the CHANGELOG line from the pull request title.')
     const lines = existsSync(join(cwd, 'CHANGELOG.md')) ? read(join(cwd, 'CHANGELOG.md')).split(/\r?\n/) : []
     const start = lines.findIndex(line => /^## Unreleased\s*$/.test(line))
     const next = lines.findIndex((line, i) => i > start && /^## /.test(line))
     const touched = new Set(added.filter(item => item.path === 'CHANGELOG.md').map(item => item.line))
     const titles = testDeclarations(cwd)
     const problems = []
-    const entries = fragments.map(path => added.filter(item => item.path === path).map(item => item.text).join('\n'))
+    // A fragment kept from before the change still names its covering tests, so the release can fold it.
+    const entries = fragmentPaths.filter(path => fragmentIssue(path) !== null).map(path => added.filter(item => item.path === path).map(item => item.text).join('\n'))
     if (start !== -1) {
       let at = start + 1
       while (at < (next === -1 ? lines.length : next)) {
@@ -450,10 +524,11 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   return checks
 }
 
-export const main = async (argv = process.argv.slice(2)) => {
+// Module callers can isolate synthetic CLI fixtures without a command-line lock override.
+export const main = async (argv = process.argv.slice(2), { lockPath, onLockPublished } = {}) => {
   let checks
   const print = item => console.log(`${item.state} ${item.message}`)
-  try { checks = await runPreflight({ ...parseArgs(argv), onCheck: print, onProgress: console.log }) } catch (error) {
+  try { checks = await runPreflight({ ...parseArgs(argv), lockPath, onLockPublished, onCheck: print, onProgress: console.log }) } catch (error) {
     checks = [{ state: 'FAIL', message: safeLine(error.message) }]
     print(checks[0])
   }

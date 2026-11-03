@@ -111,10 +111,10 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 
 | Where | Command |
 |---|---|
-| Any terminal | `node ~/.agent-board/agent-board.mjs --watch` (`--html` opens it in the browser) |
-| A browser | `node ~/.agent-board/agent-board.mjs --serve` |
-| A chat app, through an agent (Hermes Agent, OpenClaw) | `node ~/.agent-board/agent-board.mjs --chat` |
-| Check one agent's setup | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
+| Any terminal | `node "$HOME/.agent-board/agent-board.mjs" --watch` (`--html` opens it in the browser) |
+| A browser | `node "$HOME/.agent-board/agent-board.mjs" --serve` |
+| A chat app, through an agent (Hermes Agent, OpenClaw) | `node "$HOME/.agent-board/agent-board.mjs" --chat` |
+| Check one agent's setup | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 
 **In a chat app,** `--chat` prints the board as plain text cut to fit one message, with no page or link. It shows your home folder as `~` and hides the credential forms it knows, such as `token=...`; a secret in another shape is not recognised, so keep secrets out of the board.
 
@@ -157,6 +157,52 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 
 Hooks say whether a session is working or waiting; its steps and when it is done come from the agent's own reports. Gemini CLI is still a target (`--agent gemini`) for paid and enterprise use: see [setup](docs/SETUP.md#legacy-gemini-cli-compatibility).
 
+### Connected-session messaging
+
+<!-- messaging-matrix:start -->
+
+Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.
+
+| Host | Surface | Tier | Primitive | Status | Live run | Receiver |
+| --- | --- | --- | --- | --- | --- | --- |
+| Antigravity | 2.0 Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
+| Antigravity | IDE | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Code | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
+| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Implemented | Not tested | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
+| Cursor | cursor-agent CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Cursor | IDE (Composer) | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini CLI | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Muse Code | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+
+<!-- messaging-matrix:end -->
+
 <details>
 <summary><b>How each agent was checked</b></summary>
 
@@ -197,7 +243,7 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 
 ### The board's page
 
-The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node ~/.agent-board/agent-board.mjs --serve` does the same; run it again to reopen the page. On the page you can:
+The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node "$HOME/.agent-board/agent-board.mjs" --serve` does the same; run it again to reopen the page. On the page you can:
 
 - **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
@@ -224,10 +270,10 @@ For architectural positioning and coexistence with memory tools, see the [Archit
 Start with the doctor. It checks what the installer wrote for one agent and changes nothing:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 ```
 
-Use the agent's own name after `--agent` (the doctor keeps its old name for every agent). `installed` says the files are in place and `ready` that the agent has a status adapter. `connected` stays `unverified`: only a new session that shows up on the board proves the connection.
+Use the agent's own name after `--agent` (the doctor keeps its old name for every agent). It prints whether the files are in place, what is wrong and one next step. Only a new session that shows up on the board proves the connection. With `--json`, `installed` says the files are in place and `ready` that the agent has a status adapter; `connected` stays `unverified`.
 
 | You see | Try |
 |---|---|
