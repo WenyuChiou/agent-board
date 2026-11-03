@@ -26,6 +26,7 @@ import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server
 import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
 import { idleTimeout } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
+import { boardStatus } from '../hooks/board-status'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
@@ -1261,6 +1262,7 @@ const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? serveF
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
 const built = (() => {
+  if (args.includes('--status')) return ''
   try {
     return String(statSync(script).mtimeMs)
   } catch {
@@ -1780,6 +1782,10 @@ const runWatchTerminal = async (): Promise<void> => {
 }
 
 const run = async (): Promise<void> => {
+  if (args.includes('--status')) {
+    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs())}\n`)
+    return
+  }
   const request = flag('--legacy-connect-request')
   if (request !== undefined) {
     const trusted = (globalThis as { AGENT_BOARD_WORKER_SOURCE?: string }).AGENT_BOARD_WORKER_SOURCE
