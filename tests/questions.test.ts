@@ -297,6 +297,20 @@ test('a saved inbox question keeps its id when its block appears beside a same-p
     expect(view(rejoined, `## demo\n${bravoFile}`).waiting.filter(item => item.text === 'Bravo ask?').map(item => item.questionId)).toEqual([bravoId])
     expect(view(rejoined, `## demo\n${bravoFile}`).waiting.length).toBe(rows)
   }
+  // Nor does one known only from a record saved earlier, with its block long gone.
+  const oldFile = block('a1b2c3d4-person-a', 'Alpha work', 'Old ask?') + block('a1b2c3d4-person-b', 'Beta work', 'Quiet?').replace('- [?]', '- [x]')
+  const oldPass = pass(emptyQuestions(), oldFile, [], NOW)
+  const gone = pass(resolveQuestion(oldPass, oldPass.records[0]!.id, NOW + 1), '', [], NOW + 2)
+  const askedAgain = pass(pass(gone, '', [turn], NOW + 3), '', [bravo], NOW + 4)
+  const againId = askedAgain.records.find(record => record.words === 'Bravo ask?')!.id
+  const back = pass(askedAgain, bravoFile, [], NOW + 5)
+  expect(view(back, `## demo\n${bravoFile}`).waiting.filter(item => item.text === 'Bravo ask?').map(item => item.questionId)).toEqual([againId])
+  // A block's resolved question stays resolved when the block gains its full id beside a peer.
+  const plain = block('a1b2c3d4-person-a', 'Alpha work', 'Alpha ask?')
+  const before = pass(emptyQuestions(), plain.replace(' resume=a1b2c3d4-person-a', ''), [], NOW)
+  const settled = pass(resolveQuestion(before, before.records[0]!.id, NOW + 1), plain + beta, [], NOW + 2)
+  expect(settled.records.filter(record => record.words === 'Alpha ask?').map(record => [record.id, record.isUnresolved])).toEqual([[before.records[0]!.id, false]])
+  expect(view(settled, `## demo\n${plain}${beta}`).waiting.map(item => item.text)).toEqual(['Beta ask?'])
   // Two inbox asks then both blocks with new words: each new ask gets a record of its own.
   const twoAsks = pass(emptyQuestions(), '', [turn, { ...turn, session: 'a1b2c3d4-person-b', text: 'Bravo ask?', sourceRevisions: ['b'.repeat(64)] } as PendingTurn], NOW)
   const fresh = block('a1b2c3d4-person-a', 'Alpha work', 'New A?') + block('a1b2c3d4-person-b', 'Beta work', 'New B?')
