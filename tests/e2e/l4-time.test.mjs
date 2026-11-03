@@ -310,9 +310,9 @@ describe('L4 time and scale', () => {
       assert.ok(idle.perPoll <= 35, `idle poll cost rose past today's 29.7: ${idle.perPoll}`)
       // The count does not depend on how busy the machine is, so a pass is a fix and the marker has
       // no mayPass. Every poll reads the board's files again even when nothing changed, and each
-      // question adds to that. The budget of 6 is #254's, which was closed and folded into the
-      // open umbrella #346. It was 29.7 here against that budget.
-      await knownFailure(346, () => assert.ok(idle.perPoll <= IDLE_POLL_FILE_OPS, `${idle.perPoll} file operations per idle poll on a board of 5 tasks and 1 ask, the budget is ${IDLE_POLL_FILE_OPS}`))
+      // question adds to that. The budget of 6 is #254's, which was reopened after the umbrella #346
+      // closed. It was 29.7 here against that budget.
+      await knownFailure(254, () => assert.ok(idle.perPoll <= IDLE_POLL_FILE_OPS, `${idle.perPoll} file operations per idle poll on a board of 5 tasks and 1 ask, the budget is ${IDLE_POLL_FILE_OPS}`))
     } finally { await world.close() }
   })
 

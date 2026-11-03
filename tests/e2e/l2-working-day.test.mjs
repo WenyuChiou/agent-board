@@ -417,7 +417,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       // The question is never lost, archived or not; only the archive itself is the known gap.
       const kept = [world.read('progress.md'), ...world.files().filter(name => /progress-(archive-.*\.md|questions.*\.json)$/.test(name)).map(name => world.read(name))].join('\n')
       assert.match(kept, /Notify the team, OK\?/)
-      await knownFailure('hold:terminal-archive-ask', () => {
+      await knownFailure(754, () => {
         assert.ok(!world.read('progress.md').includes('Publish the gateway'), `The live file still holds Publish the gateway.\n${after}`)
       })
       await inspectSurfaces(world)

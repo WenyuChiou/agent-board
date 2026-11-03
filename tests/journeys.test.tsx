@@ -302,7 +302,7 @@ describe('L3 across agents and sessions', () => {
 })
 
 describe('L3b messages between sessions and agents', () => {
-  test('messages: a Claude pane shows the Codex fallback while native reply remains tracked by #58', async ($, on) => {
+  test('messages: a Claude pane shows the Codex fallback while native reply remains tracked by #318', async ($, on) => {
     const source = block({
       state: 'waiting',
       title: 'Review gateway message',
@@ -330,7 +330,7 @@ describe('L3b messages between sessions and agents', () => {
       noSilentPress({ surface: 'pane', card: 'Review gateway message', button: 'Copy resume command', before, after })
       expect(after).toContain('node check-gateway.mjs')
       await noPaneMachineIds(after, world, { allow: [task.auto!.resume!] })
-      await knownFailure(58, async () => {
+      await knownFailure(318, async () => {
         expect(await ui.find({ type: 'Input', key: `${key}::reply` })).toBeDefined()
         await ui.input({ key: `${key}::reply`, text: 'The gateway is ready.' })
       })
