@@ -922,7 +922,7 @@ export const connectDataRoots = (text: string, isNearestOnly = false): string[] 
 
 // What a session start found for each agent here, so a written hook is never taken for a
 // working board, and `/progress connect status` can say it again later.
-export type HookState = 'configured' | 'failed' | 'unreadable' | 'tooOld'
+export type HookState = 'configured' | 'setup' | 'failed' | 'unreadable' | 'tooOld'
 export type BoardState = 'ready' | 'runtime' | 'failed' | 'none'
 export type AgentSetup = { agent: string; label: string; hook: HookState | null; board: BoardState }
 type ProblemArgs<T> = {
@@ -983,8 +983,16 @@ export const setupProblemText = (problem: SetupProblem, s: Strings = ZH_TW): str
 }
 
 // Of an agent's files, the worst one says how its hook came out: OpenClaw takes two.
-const HOOK_RANK: Record<HookState, number> = { configured: 0, tooOld: 1, unreadable: 2, failed: 3 }
+const HOOK_RANK: Record<HookState, number> = { configured: 0, setup: 0, tooOld: 1, unreadable: 2, failed: 3 }
 export const worseHook = (one: HookState, other: HookState): HookState => (HOOK_RANK[other] > HOOK_RANK[one] ? other : one)
+
+// Setup's record says it owns an agent: its remove deletes the record, and its apply puts back a
+// hook taken out by hand. A hook of setup's that is gone is not a reason to add ours, because the
+// next apply would then leave two.
+export const setupManagedAgents = (hooks: readonly AgentHook[], home: string, sep: string, exists: (file: string) => boolean): Set<string> =>
+  new Set(hooks.filter(hook => hook.label !== ''
+    && exists([home, '.agent-board', `install-${hook.agent}.json`].join(sep))
+    && (hook.dirs ?? [hook.dir]).some(exists)).map(hook => hook.agent))
 
 // The agents each board file (`boardCommands`, by its agent) shows the board in.
 export const BOARD_FOR: Record<string, readonly string[]> = {
@@ -1005,7 +1013,8 @@ export const setupAgents = (
 ): AgentSetup[] => {
   const all = boards.antigravity === undefined || hooks.some(one => one.agent === 'antigravity') ? [...hooks] : [...hooks, { agent: 'antigravity', label: 'Antigravity', hook: null }]
 
-  return all.map(one => {
+  return all.map((one): AgentSetup => {
+    if (one.hook === 'setup') return { ...one, board: 'none' }
     const read = Object.keys(BOARD_FOR).filter(file => BOARD_FOR[file]?.includes(one.agent)).map(file => boards[file])
     const board: BoardState = read.includes('ok') ? (isNodeReady ? 'ready' : 'runtime') : read.includes('failed') ? 'failed' : 'none'
     return { ...one, board }
@@ -1017,18 +1026,22 @@ export const setupAgents = (
 export const setupLines = (state: StoredSetupState, s: Strings = ZH_TW, withProblems = true): string[] => {
   const problems = state.problems.filter(isSetupProblem)
   const hookWords = (one: AgentSetup): string[] => {
+    if (one.hook === 'setup') return [s.setupManaged]
     // Its skill opens the board, but none of its turns reach it (#285).
     if (one.hook === null) return one.board === 'ready' || one.board === 'runtime' ? [s.setupSkillOnly] : []
     if (one.hook !== 'configured') return [one.hook === 'unreadable' ? s.setupHookUnreadable : one.hook === 'tooOld' ? s.setupHookTooOld : s.setupHookFailed]
     const needs = one.agent === 'codex' ? (state.codexTrusted === true ? [] : [s.setupCodexTrust]) : one.agent === 'hermes' ? [s.setupHermesTrust] : one.agent === 'openclaw' ? [s.setupOpenclawRestart] : []
     return [s.setupHookConfigured, ...needs]
   }
+  const plugin = state.agents.filter(one => one.hook === 'configured').map(one => one.label)
   const boardWords = (one: AgentSetup): string[] =>
     one.board === 'ready' ? [s.setupBoardReady] : one.board === 'runtime' ? [s.setupBoardNeedsNode(NODE_MIN)] : one.board === 'failed' ? [s.setupBoardFailed] : []
 
   return [
     s.setupStatusTitle,
     ...(state.agents.length === 0 ? (withProblems && problems.length > 0 ? [] : [s.connectNone]) : state.agents.map(one => s.setupAgent(one.label, [...hookWords(one), ...boardWords(one)]))),
+    // Only where the two installers share a computer does it matter which one has an agent.
+    ...(state.agents.some(one => one.hook === 'setup') && plugin.length > 0 ? [s.setupPluginManaged(plugin)] : []),
     ...(withProblems ? problems.map(one => setupProblemText(one, s)) : []),
   ]
 }
@@ -1038,7 +1051,7 @@ export const isSetupState = (value: unknown): value is StoredSetupState => {
   if (typeof value !== 'object' || value === null) return false
   const { agents, problems } = value as { agents?: unknown; problems?: unknown }
   const isObject = (one: unknown): one is Record<string, unknown> => typeof one === 'object' && one !== null
-  const hooks: unknown[] = [null, 'configured', 'failed', 'unreadable', 'tooOld']
+  const hooks: unknown[] = [null, 'configured', 'setup', 'failed', 'unreadable', 'tooOld']
   const boards: unknown[] = ['ready', 'runtime', 'failed', 'none']
   return (
     Array.isArray(agents) &&
@@ -1101,7 +1114,7 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
       dirs: [ctx.codexHome, join(ctx, '.cursor'), ...grokSigns(ctx), ctx.openclawHome, join(ctx, '.gemini'), opencodeHome, join(ctx, '.config', 'muse')],
       file: join(ctx, '.agents', 'skills', SKILL, 'SKILL.md'),
       generated: true,
-      edit: file('skill'),
+      edit: (text, remove, previous) => isInstallerSkill(text) ? text : file('skill')(text, remove, previous),
     },
     { agent: 'gemini', label: '', dir: join(ctx, '.gemini'), file: join(ctx, '.gemini', 'commands', 'board.toml'), generated: true, edit: file('gemini') },
     { agent: 'opencode', label: '', dir: opencodeHome, file: [opencodeHome, 'commands', 'board.md'].join(ctx.sep), generated: true, edit: file('opencode') },

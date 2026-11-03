@@ -331,6 +331,8 @@ export const EN: Strings = {
   setupStatusTitle: 'Agent Board, agent by agent (as of the last connect):',
   setupAgent: (label: string, parts: string[]): string => `${label}: ${parts.join('; ')}`,
   setupHookConfigured: 'reporting hook configured',
+  setupManaged: 'managed by setup',
+  setupPluginManaged: (labels: string[]): string => `Connected by the plugin: ${labels.join(', ')}`,
   setupHookFailed: 'reporting hook not configured, see below',
   setupSkillOnly: 'skill only, no report hook',
   setupHookUnreadable: 'config not understood, left out',

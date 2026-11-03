@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -61,6 +61,139 @@ const decoded = text => text.replace(/String\.fromCodePoint\(([\d,]+)\)/g, (_, c
 const snapshot = directory => Object.fromEntries(readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
   const path = join(directory, entry.name)
   return entry.isDirectory() ? Object.entries(snapshot(path)) : [[path, readFileSync(path, 'utf8')]]
+}))
+
+// Keep setup and the probe in separate processes, outside the source checkout, as the
+// installed plugin runs them. The target was absent from the first connect's scope.
+const withSetup = (agent, check) => fixture(async f => {
+  const dirs = agent === 'codex' ? { codex: join(f.home, 'absent-codex') } : undefined
+  if (agent === 'codex') mkdirSync(join(f.home, '.cursor'))
+  const initial = f.run(f.request('connect', { dirs }))
+  assert.ok(initial.state.setup.agents.some(one => one.hook === 'configured'))
+  assert.equal(initial.state.setup.agents.some(one => one.agent === agent), false)
+  const signs = {
+    codex: '.codex', cursor: '.cursor', opencode: '.config/opencode', gemini: '.gemini',
+    grok: '.grok/sessions', muse: '.config/muse', hermes: '.hermes', openclaw: '.openclaw',
+  }
+  mkdirSync(join(f.home, signs[agent]), { recursive: true })
+  const env = {
+    ...process.env, HOME: f.home, USERPROFILE: f.home, LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
+    APPDATA: join(f.home, 'AppData', 'Roaming'), LOCALAPPDATA: join(f.home, 'AppData', 'Local'),
+    CLAUDE_CONFIG_DIR: join(f.home, '.claude'), CLAUDE_PROGRESS_FILE: '',
+    CODEX_HOME: join(f.home, '.codex'), GROK_HOME: join(f.home, '.grok'), HERMES_HOME: join(f.home, '.hermes'),
+    XDG_CONFIG_HOME: join(f.home, '.config'), OPENCODE_CONFIG_DIR: join(f.home, '.config', 'opencode'),
+    OPENCLAW_STATE_DIR: join(f.home, '.openclaw'), DSH_HOME: join(f.home, '.dsh'),
+  }
+  const installed = spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--agent', agent, '--apply', '--json'], {
+    cwd: f.home, env, encoding: 'utf8', windowsHide: true, timeout: 30000,
+  })
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+  assert.equal(JSON.parse(installed.stdout).plans[0].managedBy, undefined)
+  assert.ok(existsSync(join(f.home, '.agent-board', `install-${agent}.json`)))
+  const recordFile = join(f.home, '.agent-board', `install-${agent}.json`)
+  const owned = Object.keys(JSON.parse(readFileSync(recordFile, 'utf8')).files)
+  assert.ok(owned.length > 0)
+  const run = (mode, lang = 'en') => {
+    const result = f.command(f.request(mode, { lang, openclawVersion: '2026.10.1' }), { cwd: f.home, env })
+    assert.equal(result.status, 0, result.stderr + result.stdout)
+    return JSON.parse(result.stdout)
+  }
+  const setup = script => {
+    const done = spawnSync(process.execPath, script === 'apply' ? [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--agent', agent, '--apply', '--json'] : [join(f.home, '.agent-board', 'agent-board.mjs'), '--codex-remove', '--agent', agent, '--apply'], {
+      cwd: f.home, env, encoding: 'utf8', windowsHide: true, timeout: 30000,
+    })
+    assert.equal(done.status, 0, done.stderr + done.stdout)
+  }
+  await check({ f, run, setup, recordFile, owned, before: snapshot(f.home) })
+})
+const setupThenProbe = agent => withSetup(agent, ({ f, run, owned, before }) => {
+  // Status must identify the installer even before the next probe refreshed its record.
+  assert.equal(run('status').state.setup.agents.find(one => one.agent === agent).hook, 'setup')
+  for (const mode of ['auto', 'connect']) {
+    const output = run(mode)
+    const status = output.state.setup.agents.find(one => one.agent === agent)
+    assert.equal(status.hook, 'setup', agent)
+    assert.equal(status.board, 'none', agent)
+    assert.match(output.result.text, new RegExp(`${status.label}: managed by setup`))
+    assert.equal(output.result.problems.some(one => one.key.startsWith('preserved:')), false, agent)
+    assert.equal(output.result.done.includes(status.label), false)
+    for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], `${mode}: ${file}`)
+    for (const [file, text] of Object.entries(snapshot(f.home))) {
+      if (file.startsWith(join(f.home, '.agent-board'))) continue
+      assert.equal(text, before[file], `${mode}: unexpected host change ${file}`)
+    }
+  }
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const state = run('status', lang).state.setup
+    assert.equal(state.agents.find(one => one.agent === agent).hook, 'setup')
+    const { text } = run('connect', lang).result
+    assert.match(text, /managed by setup|由 setup 管理/)
+    assert.match(text, /Connected by the plugin: |由(?:外掛|插件)連?连?接：/)
+    assert.equal(state.problems.some(one => one.key === `missingBoard:${agent}` || agent === 'codex' && one.key === 'codex:approval'), false)
+  }
+  if (agent === 'grok') {
+    assert.ok(existsSync(join(f.home, '.grok', 'hooks', 'agent-board-local.json')))
+    assert.equal(existsSync(join(f.home, '.grok', 'hooks', 'agent-board.json')), false)
+    assert.equal(existsSync(join(f.home, '.grok', 'hooks', 'progress-pane.json')), false)
+  }
+  run('remove')
+  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], `remove: ${file}`)
+})
+
+test('a connector probe leaves Grok with only the setup hook and reports its installer', () => setupThenProbe('grok'))
+
+const BOTH_INSTALLERS = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw']
+test('connect and automatic probes leave setup managed agents unchanged', async t => {
+  for (const agent of BOTH_INSTALLERS) await t.test(agent, () => setupThenProbe(agent))
+})
+
+// A computer an earlier build reached: the probe added its hook because it did not read setup's record.
+const withBothHooks = (agent, check) => withSetup(agent, async ({ f, run, recordFile, owned, before }) => {
+  const record = readFileSync(recordFile, 'utf8')
+  unlinkSync(recordFile)
+  const hooked = run('connect')
+  assert.equal(hooked.state.setup.agents.find(one => one.agent === agent).hook, 'configured', agent)
+  writeFileSync(recordFile, record)
+  await check({ f, run, owned, before })
+})
+
+test('a probe takes out the hook an earlier probe left beside the setup hook', async t => {
+  for (const agent of BOTH_INSTALLERS) await t.test(agent, () => withBothHooks(agent, ({ f, run, owned, before }) => {
+    const output = run('auto')
+    assert.equal(output.state.setup.agents.find(one => one.agent === agent).hook, 'setup', agent)
+    assert.equal(output.result.problems.some(one => one.key.startsWith('preserved:')), false, agent)
+    for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], `${agent}: ${file}`)
+    const after = snapshot(f.home)
+    for (const [file, text] of Object.entries(before)) {
+      if (!file.startsWith(join(f.home, '.agent-board'))) assert.equal(after[file], text, `${agent}: ${file}`)
+    }
+    for (const [file, text] of Object.entries(after)) {
+      if (!(file in before) && !file.startsWith(join(f.home, '.agent-board'))) assert.doesNotMatch(text, /progress-report|progress-hook|const INBOX =/, `${agent}: ${file}`)
+    }
+  }))
+})
+
+test('removing the connector takes out its hook and leaves the setup hook', () => withBothHooks('grok', ({ f, run, owned, before }) => {
+  assert.ok(existsSync(join(f.home, '.grok', 'hooks', 'agent-board.json')))
+  run('remove')
+  assert.equal(existsSync(join(f.home, '.grok', 'hooks', 'agent-board.json')), false)
+  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], file)
+}))
+
+test('a setup record with its hook deleted by hand keeps the connector out until setup removes it', () => withSetup('grok', ({ f, run, setup, recordFile }) => {
+  const local = join(f.home, '.grok', 'hooks', 'agent-board-local.json'), connector = join(f.home, '.grok', 'hooks', 'agent-board.json')
+  unlinkSync(local)
+  assert.equal(run('auto').state.setup.agents.find(one => one.agent === 'grok').hook, 'setup')
+  assert.equal(existsSync(connector), false)
+  setup('apply')
+  assert.ok(existsSync(local))
+  assert.equal(existsSync(connector), false)
+  unlinkSync(local)
+  setup('remove')
+  assert.equal(existsSync(recordFile), false)
+  assert.equal(run('connect').state.setup.agents.find(one => one.agent === 'grok').hook, 'configured')
+  assert.ok(existsSync(connector))
+  assert.equal(existsSync(local), false)
 }))
 
 test("only a manual connect changes the machine's selected progress file", () => fixture(async f => {
