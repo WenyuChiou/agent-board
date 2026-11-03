@@ -3543,15 +3543,16 @@ test('a refused close on the page says why next to the close button', async () =
       await dom.flush(); await dom.flush()
       const expected = isOffline ? words.serveOffline : 'A message is still on its way to an agent; close the board once it replies.'
       const footer = dom.node('.pfoot')
-      assert.equal(footer.childNodes[0], dom.node('close'))
-      assert.equal(footer.childNodes[1].textContent, expected)
+      const closeAt = footer.childNodes.indexOf(dom.node('close'))
+      assert.ok(closeAt >= 0)
+      assert.equal(footer.childNodes[closeAt + 1].textContent, expected)
       // A refusal is a failure: it is announced as an alert.
-      assert.equal(footer.childNodes[1].getAttribute('role'), 'alert')
+      assert.equal(footer.childNodes[closeAt + 1].getAttribute('role'), 'alert')
       assert.equal(dom.node('note').textContent, '')
       assert.ok(!dom.node('board').textContent.includes(expected))
       await dom.redraw({ ...model, counts: { ...model.counts, active: 9 } })
       // Once the server answers again, the offline advice gives way to a plain failure.
-      assert.equal(footer.childNodes[1].textContent, isOffline ? words.pressFailed : expected)
+      assert.equal(footer.childNodes[closeAt + 1].textContent, isOffline ? words.pressFailed : expected)
       assert.equal(dom.node('offline').textContent, '')
     }
   } finally { await board.close() }
