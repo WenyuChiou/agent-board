@@ -420,6 +420,47 @@ test('a Codex state comment from someone else or with unreadable JSON is passed 
   }
 })
 
+// The same state comment carries Codex's security review, which fails on its own when the paying account is out of usage.
+const securityState = (sha, status, hasFindings, at, id) =>
+  by('chatgpt-codex-connector[bot]', comment(`<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { commit_sha: sha, has_unresolved_findings: false, status: 'completed' }, security_review: { commit_sha: sha, has_unresolved_findings: hasFindings, status } })} -->`, at, id))
+
+test('Codex security review shows as skipped when it did not complete on the head, and open when it left findings', () => {
+  const stateOf = (...items) => botsOf(items).codexSecurity
+  assert.equal(stateOf(), 'none')
+  assert.equal(stateOf(codexState(head, false, '2026-10-20T10:00:00Z', 2)), 'none')
+  // A failed run reports findings as well; it still counts as not run, since nothing was reviewed.
+  assert.equal(stateOf(securityState(head, 'failed', true, '2026-10-20T10:00:00Z', 2)), 'skipped')
+  assert.equal(stateOf(securityState(head, 'in_progress', null, '2026-10-20T10:00:00Z', 2)), 'skipped')
+  assert.equal(stateOf(securityState(head, 'completed', false, '2026-10-20T10:00:00Z', 2)), 'clean')
+  // A completed review that does not say false or true is unknown, never clean.
+  for (const findings of [null, undefined, 'true', 'false', 0, 1])
+    assert.equal(stateOf(securityState(head, 'completed', findings, '2026-10-20T10:00:00Z', 2)), 'unknown', String(findings))
+  assert.equal(stateOf(securityState(head.slice(0, 7), 'completed', true, '2026-10-20T10:00:00Z', 2)), 'open')
+  assert.equal(stateOf(securityState(oldHead, 'failed', true, '2026-10-20T10:00:00Z', 2)), 'stale')
+  assert.equal(stateOf(securityState(head, 'failed', true, '2026-10-20T09:00:00Z', 2), securityState(head, 'completed', false, '2026-10-20T10:00:00Z', 3)), 'clean')
+  assert.equal(stateOf(by('alice', comment(securityState(head, 'failed', true, '2026-10-20T10:00:00Z', 2).body, '2026-10-20T10:00:00Z', 2))), 'none')
+  // The code review keeps its own state beside it.
+  assert.equal(botsOf([securityState(head, 'failed', true, '2026-10-20T10:00:00Z', 2)]).codex, 'clean')
+})
+
+test('the queue names a security review that did not run or left findings, and nothing else about it', () => {
+  const prs = [pull(1), pull(2), pull(3), pull(4)]
+  const comments = {
+    1: [ready(), securityState(head, 'failed', true, '2026-10-20T10:00:00Z', 2)],
+    2: [ready(), securityState(head, 'completed', true, '2026-10-20T10:00:00Z', 2)],
+    3: [ready(), securityState(head, 'completed', false, '2026-10-20T10:00:00Z', 2)],
+    4: [ready(), securityState(head, 'completed', null, '2026-10-20T10:00:00Z', 2)],
+  }
+  const queue = classify(prs, comments, now)
+  assert.deepEqual(queue.needsReviewer.map(item => item.number), [1, 2, 3, 4])
+  assert.deepEqual(queue.needsReviewer.map(item => item.bots.codexSecurity), ['skipped', 'open', 'clean', 'unknown'])
+  const text = formatQueue(queue)
+  assert.match(text, /\n#1 .*\n {4}codex: no findings {2}codex security: did not run on this head \(usage limit or failure\); review security yourself\n/)
+  assert.match(text, /\n#2 .*\n {4}codex: no findings {2}codex security: findings open — answer each before approving\n/)
+  assert.match(text, /\n#3 .*\n {4}codex: no findings\n/)
+  assert.match(text, /\n#4 .*\n {4}codex: no findings\n/)
+})
+
 test('Greptile shows as reviewed only when a comment or review of its own mentions the head', () => {
   const said = (login, body) => by(login, comment(body, '2026-10-20T10:00:00Z', 2))
   const isReviewed = (items, reviews) => botsOf(items, { reviews }).greptile
@@ -446,7 +487,7 @@ test('a missing bot review leaves a pull request where it was and the text shows
   assert.deepEqual(queue.needsReviewer.map(item => item.number), [1, 3])
   assert.deepEqual(queue.approved.map(item => item.number), [2])
   assert.deepEqual(queue.waitingForAuthor.map(item => item.number), [4])
-  assert.deepEqual(queue.needsReviewer[0].bots, { codex: 'none', greptile: false })
+  assert.deepEqual(queue.needsReviewer[0].bots, { codex: 'none', codexSecurity: 'none', greptile: false })
   const text = formatQueue(queue)
   assert.match(text, /\n#1 .*\n {4}codex: not on this head \(ask @codex review\)\n#3 /)
   assert.match(text, /\n#3 .*\n {4}codex: no findings {2}greptile: reviewed\n/)
@@ -772,8 +813,8 @@ test('JSON lists the bots and the notice of each pull request', () => {
   })
   assert.equal(status, 0)
   const [first, second] = JSON.parse(output[0]).needsReviewer
-  assert.deepEqual([first.number, first.bots, first.notice], [1, { codex: 'clean', greptile: false }, { state: 'allowed', at: null }])
-  assert.deepEqual([second.number, second.bots, second.notice], [2, { codex: 'none', greptile: false }, null])
+  assert.deepEqual([first.number, first.bots, first.notice], [1, { codex: 'clean', codexSecurity: 'none', greptile: false }, { state: 'allowed', at: null }])
+  assert.deepEqual([second.number, second.bots, second.notice], [2, { codex: 'none', codexSecurity: 'none', greptile: false }, null])
 })
 
 test('a pull request touching a bundle source or the release table merges one at a time', () => {

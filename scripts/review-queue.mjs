@@ -72,6 +72,26 @@ const codexStateOf = (comments, head) => {
   return 'none'
 }
 
+// Codex also runs a security review, reported in the same state comment. When the paying account is out of usage the code
+// review still completes but the security review fails, so a reviewer needs to see that it never ran on this head.
+const codexSecurityOf = (comments, head) => {
+  for (const { comment } of [...comments].reverse()) {
+    const json = codexLogin.test(comment.user?.login ?? '') ? (comment.body ?? '').match(codexMarker)?.[1] : null
+    if (!json) continue
+    let review
+    try { review = JSON.parse(json)?.security_review } catch { continue }
+    const sha = typeof review?.commit_sha === 'string' ? review.commit_sha.toLowerCase() : ''
+    if (!/^[0-9a-f]{7,40}$/.test(sha) || typeof review.status !== 'string') continue
+    if (!head.startsWith(sha)) return 'stale'
+    if (review.status !== 'completed') return 'skipped'
+    // Only an explicit answer says whether findings are open. Codex leaves the field null on most completed reviews, so an
+    // unknown one is kept apart from clean and, like clean, adds no line.
+    if (review.has_unresolved_findings === true) return 'open'
+    return review.has_unresolved_findings === false ? 'clean' : 'unknown'
+  }
+  return 'none'
+}
+
 // Greptile is often absent, so only its presence on the head is reported and its absence is not.
 const isGreptile = login => (login ?? '').toLowerCase().includes('greptile')
 const hasGreptileReview = (comments, reviews, head) =>
@@ -255,7 +275,7 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     const hasBackSince = since => backs.some(back => back.time > since && back.login !== author && (!collaborators || collaborators.includes(back.login)))
     // What the review bots and the merge-after-notice say about the head. A missing bot review never moves a pull request between groups.
     const extras = {
-      bots: { codex: codexStateOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
+      bots: { codex: codexStateOf(comments, head), codexSecurity: codexSecurityOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
       // A lapse frees the reviewer slot and the suggestion only: any Reviewing after the Ready still closes the notice path, as it
       // still cancels a notice (team-process, From claim to merge).
       notice: noticeFor({
@@ -479,7 +499,12 @@ const codexText = {
   clean: 'codex: no findings',
   open: 'codex: findings open — answer each P0/P1 before approving',
 }
-const botText = bots => [codexText[bots?.codex], bots?.greptile ? 'greptile: reviewed' : ''].filter(Boolean).join('  ')
+// Only a security review that did not run, or left findings open, is named: a clean or missing one adds nothing to the code review line.
+const codexSecurityText = {
+  skipped: 'codex security: did not run on this head (usage limit or failure); review security yourself',
+  open: 'codex security: findings open — answer each before approving',
+}
+const botText = bots => [codexText[bots?.codex], codexSecurityText[bots?.codexSecurity], bots?.greptile ? 'greptile: reviewed' : ''].filter(Boolean).join('  ')
 const noticeText = notice => {
   if (notice.state === 'allowed') return 'notice allowed outside the governance files (team-process, From claim to merge)'
   if (notice.state === 'waiting') return `notice: merges after ${formatUtc(Date.parse(notice.at))}`
