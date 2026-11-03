@@ -3,6 +3,9 @@ import { join } from 'node:path'
 
 const standard = /^(?:messages\.json|server\.lock|[^/\\]+\.tmp)$/
 const claimName = /^\.message-claim-([1-9][0-9]*)-([a-f0-9]{32})\.json$/
+// A hub writes its claim under this name, then renames it to the claim's.
+const stagedName = /^\.message-pending-([1-9][0-9]*)-([a-f0-9]{32})\.json$/
+const claimOf = name => name.replace(stagedName, '.message-claim-$1-$2.json')
 
 // Read at most 513 bytes, without accepting links or a replaced file as evidence.
 export const readMessageStoreFiles = directory => {
@@ -37,18 +40,19 @@ export const messageStoreFileState = () => ({ stray: new Set(), pending: new Set
 // exact canonical claim from a hub this run started, even across its crash test.
 export const classifyMessageStoreFiles = (entries, ownedPids, previous = messageStoreFileState()) => {
   const next = { stray: new Set(previous.stray), pending: new Set(), verified: new Set(previous.verified), observed: new Map() }
-  const present = new Set(entries.map(one => one.name))
+  const present = new Set(entries.map(one => claimOf(one.name)))
   for (const name of previous.pending) if (!present.has(name)) next.stray.add(name)
   for (const { name, bytes } of entries) {
-    const match = name.match(claimName)
+    const isStaged = stagedName.test(name)
+    const match = name.match(claimName) ?? name.match(stagedName)
     const pid = Number(match?.[1])
     if (!match || !Number.isSafeInteger(pid) || pid > 2147483647 || !ownedPids.has(pid)) { next.stray.add(name); continue }
     const expected = Buffer.from(JSON.stringify({ version: 1, pid, nonce: match[2] }) + '\n')
-    if (bytes !== undefined && bytes.equals(expected)) {
+    if (bytes !== undefined && bytes.equals(expected) && !isStaged) {
       next.verified.add(name)
       next.observed.set(name, pid)
-    } else if (bytes !== undefined && bytes.length < expected.length && expected.subarray(0, bytes.length).equals(bytes)) {
-      next.pending.add(name)
+    } else if (bytes !== undefined && bytes.length <= expected.length && expected.subarray(0, bytes.length).equals(bytes)) {
+      next.pending.add(claimOf(name))
     } else next.stray.add(name)
   }
   return next

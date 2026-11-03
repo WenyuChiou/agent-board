@@ -1,7 +1,7 @@
 import childProcess, { execFileSync, spawn, spawnSync } from 'node:child_process'
-import fs, { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import fs, { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { createServer, request } from 'node:http'
 import { createHash } from 'node:crypto'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
@@ -2372,6 +2372,13 @@ test('the messaging soak requires partial claims to finish and positively identi
   const restarted = classifyMessageStoreFiles([{ name: nextName, bytes: nextBytes }], new Set([pid, nextPid]), previous)
   assert.equal(isMessageStoreClean(restarted, nextPid), true)
   assert.equal(isMessageStoreClean(restarted, pid), false)
+  // A claim still under its pending name is unfinished until it is renamed to the claim's own name.
+  const staged = `.message-pending-${pid}-${nonce}.json`
+  const writing = classifyMessageStoreFiles([{ name: staged, bytes }], new Set([pid]))
+  assert.ok(writing.pending.has(name))
+  assert.equal(isMessageStoreClean(writing, pid), false)
+  assert.equal(isMessageStoreClean(classifyMessageStoreFiles([{ name, bytes }], new Set([pid]), writing), pid), true)
+  assert.ok(classifyMessageStoreFiles([], new Set([pid]), writing).stray.has(name))
 })
 
 test('a valid claim naming an unrelated live process stays blocked and its recovery advice preserves message evidence', () => {
@@ -2510,12 +2517,14 @@ test('failed message store initialization releases its claim without changing me
 })
 
 
-test('a failed claim publication preserves partial evidence and reports a claim problem', () => {
+test('a failed claim publication reports a claim problem and leaves no half-written claim behind', () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-message-partial-claim-'))
   const write = fs.writeFileSync
+  const written = []
   try {
     fs.writeFileSync = (file, text, ...args) => {
-      if (String(file).startsWith(dir) && String(file).includes('.message-claim-')) {
+      if (String(file).startsWith(dir) && basename(String(file)).startsWith('.message-')) {
+        written.push(basename(String(file)))
         write(file, '', ...args)
         throw Object.assign(new Error('synthetic partial publication'), { code: 'EIO' })
       }
@@ -2527,14 +2536,63 @@ test('a failed claim publication preserves partial evidence and reports a claim 
     fs.writeFileSync = write
     syncBuiltinESMExports()
   }
+  let claim
   try {
-    const names = storeClaims(dir)
-    assert.equal(names.length, 1)
-    assert.equal(readFileSync(join(dir, names[0]), 'utf8'), '')
-    assert.throws(() => claimMessageStore(dir), /MESSAGE_STORE_CLAIM_BLOCKED/)
-    assert.deepEqual(storeClaims(dir), names)
+    // The claim is written under its pending name and only renamed once whole.
+    assert.equal(written.length, 1)
+    assert.match(written[0], /^\.message-pending-/)
+    assert.deepEqual(readdirSync(dir), [])
+    claim = claimMessageStore(dir)
+    assert.equal(storeClaims(dir).length, 1)
     assert.match(EN.serveStoreFailed('MESSAGE_STORE_CLAIM_BLOCKED', dir), /Keep messages\.json/)
-  } finally { rmSync(dir, { recursive: true, force: true }) }
+  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a claim its owner releases while another start reads it counts as gone, not broken', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-released-claim-'))
+  const open = fs.openSync
+  // Another live board's claim; it releases it just as this start opens it to read.
+  const nonce = 'e'.repeat(32), name = claimName(process.ppid, nonce)
+  let claim
+  try {
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
+    fs.openSync = (file, ...args) => {
+      const fd = open(file, ...args)
+      if (basename(String(file)) === name) unlinkSync(file)
+      return fd
+    }
+    syncBuiltinESMExports()
+    claim = claimMessageStore(dir)
+  } finally {
+    fs.openSync = open
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.deepEqual(storeClaims(dir).length, 1)
+    assert.equal(existsSync(join(dir, name)), false)
+  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a pending claim left by a writer that died is removed and a live writer\'s is kept', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-pending-claim-'))
+  let pid = 2147483000
+  for (;;) {
+    try { process.kill(pid, 0); pid-- } catch (error) {
+      if (error.code === 'ESRCH') break
+      throw error
+    }
+  }
+  const dead = `.message-pending-${pid}-${'f'.repeat(32)}.json`
+  const live = `.message-pending-${process.ppid}-${'a'.repeat(32)}.json`
+  let claim
+  try {
+    writeFileSync(join(dir, dead), '{"version":1')
+    writeFileSync(join(dir, live), '{"version":1')
+    claim = claimMessageStore(dir)
+    assert.equal(existsSync(join(dir, dead)), false)
+    assert.equal(existsSync(join(dir, live)), true)
+    assert.equal(storeClaims(dir).length, 1)
+  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('a dead message claim changed during verification remains blocked and is not deleted', () => {

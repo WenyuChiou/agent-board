@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import { BOARD_SCRIPT } from '../../hooks/board-script.ts'
@@ -158,6 +158,7 @@ test('three real hub starts never leave two live owners of one message store', {
 
 test('three real --serve starts on the default store collide and every start prints its URL', { timeout: 240_000 }, async () => {
   const world = makeWorld()
+  let running
   try {
     const root = world.root
     const control = join(root, 'serve-barrier-control')
@@ -166,13 +167,13 @@ test('three real --serve starts on the default store collide and every start pri
     writeFileSync(barrier, [
       "const fs = require('node:fs')",
       "const path = require('node:path')",
-      "const origWrite = fs.writeFileSync",
-      "fs.writeFileSync = function(file, data, options) {",
-      "  const res = origWrite.apply(this, arguments)",
+      "const origRename = fs.renameSync",
+      "fs.renameSync = function(from, to) {",
+      "  const res = origRename.apply(this, arguments)",
       "  const roundDir = process.env.ROUND_CONTROL_DIR",
-      "  if (roundDir && typeof file === 'string' && path.basename(file).startsWith('.message-claim-')) {",
+      "  if (roundDir && typeof to === 'string' && path.basename(to).startsWith('.message-claim-')) {",
       "    try {",
-      "      origWrite.call(fs, path.join(roundDir, 'ready-' + process.pid), '')",
+      "      fs.writeFileSync(path.join(roundDir, 'ready-' + process.pid), '')",
       "      const end = Date.now() + 5000",
       "      while (Date.now() < end) {",
       "        const files = fs.readdirSync(roundDir).filter(f => f.startsWith('ready-'))",
@@ -204,6 +205,37 @@ test('three real --serve starts on the default store collide and every start pri
       })
     }
 
+    // The page's address file, wherever this system keeps it: { pid, port, url, ... }.
+    const runningPage = () => {
+      const look = (dir, depth) => {
+        let names = []
+        try { names = readdirSync(dir, { withFileTypes: true }) } catch { return undefined }
+        for (const one of names) {
+          if (one.isFile() && /^agent-board-[0-9a-f]{16}\.json$/.test(one.name)) return JSON.parse(readFileSync(join(dir, one.name), 'utf8'))
+        }
+        for (const one of names) {
+          const found = one.isDirectory() && depth > 0 ? look(join(dir, one.name), depth - 1) : undefined
+          if (found !== undefined) return found
+        }
+        return undefined
+      }
+      return look(root, 3)
+    }
+    const isAlive = pid => { try { process.kill(pid, 0); return true } catch (error) { return error.code !== 'ESRCH' } }
+    const closePage = async (page) => {
+      const uri = new URL(page.url)
+      const status = await fetch(new URL('/api/close', uri), { method: 'POST', headers: { 'x-board-token': uri.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) })
+        .then(answer => answer.status, () => 0)
+      let isRefused = false, isGone = false
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline && !(isRefused && isGone)) {
+        if (!isRefused) isRefused = await fetch(new URL('/api/ping', uri), { signal: AbortSignal.timeout(200) }).then(() => false, () => true)
+        if (!isGone) isGone = !isAlive(page.pid)
+        if (!(isRefused && isGone)) await wait(50)
+      }
+      return { status, isRefused, isGone }
+    }
+
     const rounds = 20
     for (let r = 0; r < rounds; r++) {
       const roundDir = join(control, `round-${r}`)
@@ -221,24 +253,20 @@ test('three real --serve starts on the default store collide and every start pri
       }
       assert.equal(urls[0], urls[1], `Round ${r} starts 0 and 1 printed different URLs`)
       assert.equal(urls[1], urls[2], `Round ${r} starts 1 and 2 printed different URLs`)
+      const page = runningPage()
+      assert.equal(page?.url, urls[0], `Round ${r}: the running page is not the one every start printed`)
+      running = page
 
-      // Close the running server before the next round
-      const uri = new URL(urls[0])
-      try {
-        await fetch(new URL('/api/close', uri), { method: 'POST', headers: { 'x-board-token': uri.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) })
-      } catch {}
-      const closeDeadline = Date.now() + 5000
-      while (Date.now() < closeDeadline) {
-        try {
-          await fetch(new URL('/api/ping', uri), { signal: AbortSignal.timeout(200) })
-          await wait(50)
-        } catch {
-          break
-        }
-      }
-      await wait(150)
+      // Each round's page must stop, or the next round only finds it again.
+      const closed = await closePage(page)
+      assert.equal(closed.status, 200, `Round ${r}: /api/close answered ${closed.status}`)
+      assert.equal(closed.isRefused, true, `Round ${r}: the page still answers 5 s after /api/close`)
+      assert.equal(closed.isGone, true, `Round ${r}: the page process ${page.pid} still runs 5 s after /api/close`)
+      running = undefined
     }
   } finally {
+    // A failed round leaves its page running; stop it so cleanup reports the round's failure, not a locked folder.
+    if (running !== undefined) await closePage(running).catch(() => {})
     await wait(300)
     await world.close()
   }

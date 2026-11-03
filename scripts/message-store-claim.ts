@@ -1,8 +1,10 @@
 import { randomBytes } from 'node:crypto'
-import { closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const PREFIX = '.message-claim-'
+// A claim is written under this name first and renamed into place.
+const PENDING = '.message-pending-'
 const LIMIT = 1024
 const blocked = (): Error => new Error('MESSAGE_STORE_CLAIM_BLOCKED')
 const canonical = (path: string): string => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path)
@@ -13,6 +15,8 @@ const readClaim = (file: string): string => {
   const fd = openSync(file, 'r')
   try {
     const opened = fstatSync(fd)
+    // Its owner released it while this read: the claim is gone, not broken.
+    if (opened.nlink === 0 && opened.dev === before.dev && opened.ino === before.ino) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
     if (opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1 || opened.size > 512) throw blocked()
     const buffer = Buffer.alloc(513)
     const count = readSync(fd, buffer, 0, buffer.length, 0)
@@ -36,9 +40,18 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
   const name = PREFIX + process.pid + '-' + nonce + '.json'
   const file = join(root, name)
   const bytes = JSON.stringify({ version: 1, pid: process.pid, nonce }) + '\n'
+  const pending = join(root, PENDING + process.pid + '-' + nonce + '.json')
   let isReleased = false
-  try { writeFileSync(file, bytes, { flag: 'wx', mode: 0o600 }) }
-  catch (cause) { throw new Error('MESSAGE_STORE_CLAIM_BLOCKED', { cause }) }
+  // Created in place, a claim is empty until it is written, and a contender scanning then takes it
+  // for a broken one and refuses. A rename shows the whole claim or nothing.
+  try {
+    writeFileSync(pending, bytes, { flag: 'wx', mode: 0o600 })
+    renameSync(pending, file)
+  } catch (cause) {
+    // The pending name holds this process's own nonce, so only an existing file is someone else's.
+    if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') try { unlinkSync(pending) } catch {}
+    throw new Error('MESSAGE_STORE_CLAIM_BLOCKED', { cause })
+  }
   const claim: MessageStoreClaim = {
     check: directory => {
       if (isReleased || canonical(directory) !== canonical(root) || readClaim(file) !== bytes) throw blocked()
@@ -56,7 +69,16 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
     },
   }
   try {
-    const names = readdirSync(root).filter(one => one.startsWith(PREFIX))
+    const all = readdirSync(root)
+    // A writer that died between writing and renaming leaves its pending file; only a proven-dead one goes.
+    for (const other of all) {
+      const writer = /^\.message-pending-([1-9][0-9]*)-[a-f0-9]{32}\.json$/.exec(other)
+      if (!writer || Number(writer[1]) === process.pid) continue
+      try { process.kill(Number(writer[1]), 0) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') try { unlinkSync(join(root, other)) } catch {}
+      }
+    }
+    const names = all.filter(one => one.startsWith(PREFIX))
     if (names.length > LIMIT || !names.includes(name)) throw blocked()
     for (const other of names) {
       if (other === name) { claim.check(root); continue }
