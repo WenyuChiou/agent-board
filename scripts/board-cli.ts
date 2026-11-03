@@ -18,7 +18,7 @@ import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, co
 import type { ConfirmedTask } from '../hooks/blocks'
 import { startServer } from './board-serve'
 import { moveLockAside } from './board-messaging'
-import { claimDebug, claimMessageStore, hasLiveClaims } from './message-store-claim'
+import { claimMessageStore, hasLiveClaims } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -1510,8 +1510,7 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
       child.once('error', () => end(null))
     })
     // One that has not answered in time would start late and hold a page nobody was told about.
-    if (url === null && child.exitCode === null) { claimDebug('CHILD-KILLED pid=' + child.pid); child.kill() }
-    if (url === null) claimDebug('CHILD-NO-URL pid=' + child.pid + ' exit=' + child.exitCode + ' stderr=' + JSON.stringify(stderr.slice(-300)))
+    if (url === null && child.exitCode === null) child.kill()
     child.stdout?.destroy()
     child.stderr?.destroy()
     child.unref()
@@ -1569,7 +1568,7 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
           && readFileSync(lock, 'utf8') === held) {
           isMoved = moveLockAside(lock, held, claim)
         }
-      } catch (error) { claimDebug('TAKEOVER ' + String((error as NodeJS.ErrnoException)?.code ?? (error as Error)?.message)) } finally { releaseClaim?.() }
+      } catch {} finally { releaseClaim?.() }
       // Another try only when this --serve moved the lock, or the lock is gone or holds another pid.
       // It may be gone because its hub stopped meanwhile; another --serve's page may still be starting.
       // The next try waits for that page; the same pid (put back, or never moved) is not tried again.

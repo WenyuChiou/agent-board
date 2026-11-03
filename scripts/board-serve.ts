@@ -21,7 +21,6 @@ import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { createMessaging } from './board-messaging'
-import { claimDebug } from './message-store-claim'
 import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
 
@@ -252,7 +251,7 @@ export const startServer = (o: ServeOptions): void => {
   const messaging = (() => {
     try { return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory) }
     // The code (EACCES, EPERM) goes along, so the person gets advice that fits the cause.
-    catch (error) { claimDebug('SERVE-FAILED ' + (error instanceof AggregateError ? error.errors.map(one => String((one as NodeJS.ErrnoException)?.code ?? (one as Error)?.message)).join('+') : String((error as NodeJS.ErrnoException)?.code ?? (error as Error)?.message))); throw Object.assign(new Error(error instanceof Error ? error.message : '', { cause: 'MESSAGE_STORE_FAILED' }), { code: error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined }) }
+    catch (error) { throw Object.assign(new Error(error instanceof Error ? error.message : '', { cause: 'MESSAGE_STORE_FAILED' }), { code: error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined }) }
   })()
   const token = randomBytes(24).toString('base64url')
   const sending = new Set<string>()
