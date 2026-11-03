@@ -34,7 +34,7 @@ detection keeps empty `targets` and `plans` and
 `applied` false. Other setup errors give one sentence with a next step; `--json` prints
 them as one JSON line on stderr, `{"error":{"code":"...","message":"..."}}`, with
 codes `INVALID_TARGETS`, `MISSING_ARGUMENT`, `SETUP_FAILED` (with the failing `agent`
-and its `cause`) or `UNKNOWN`. Conflicts stay in `plans` on stdout with no JSON stderr
+and its `cause`) or `UNKNOWN` (with the system error's `cause` when there is one, or a `reason` in words when there is none). Conflicts stay in `plans` on stdout with no JSON stderr
 line. A leading UTF-8 byte-order mark in a JSON host config is read; setup writes that
 file back without it, and refuses malformed JSON whether or not it starts with one.
 
@@ -53,7 +53,7 @@ them. Only an agent's own proven native id may report its task steps.
 The installed skill opens the interactive web board. Reopen with:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --serve
+node "$HOME/.agent-board/agent-board.mjs" --serve
 ```
 
 On Windows use the exact Node and script paths printed by setup. Closing a browser tab
@@ -63,7 +63,7 @@ idle shutdown. No startup service is installed.
 To run the normal archive sweep without a Claude session:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --tidy
+node "$HOME/.agent-board/agent-board.mjs" --tidy
 ```
 
 Use the exact installed Node and script paths for a scheduler, including on Windows.
@@ -109,7 +109,7 @@ lock or an unavailable reporter leaves the metadata and records
 problem, run an explicit pass with the exact installed Node and script paths:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --recover-hooks
+node "$HOME/.agent-board/agent-board.mjs" --recover-hooks
 ```
 
 The JSON result names the processed and remaining metadata counts for the selected

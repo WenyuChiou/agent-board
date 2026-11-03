@@ -440,6 +440,16 @@ test('setup prints a plain summary with each agent and the next steps, and --jso
   })
   assert.deepEqual(bootstrap, tables)
 
+  const noCodex = setupAgent(f, '--lang', 'en', '--agent', 'codex')
+  assert.equal(noCodex.status, 0, noCodex.stderr)
+  assert.match(noCodex.stdout, /where\.exe codex.*command -v codex/)
+  assert.doesNotMatch(noCodex.stdout, /<full path to codex>/)
+  const bin = join(f.home, 'synthetic bin')
+  mkdirSync(bin)
+  const codex = join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex')
+  writeFileSync(codex, 'synthetic Codex', { mode: 0o755 })
+  const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  f.env[pathKey] = [bin, f.env[pathKey]].filter(Boolean).join(delimiter)
   const summaries = []
   for (const lang of ['en', 'zh-TW', 'zh-CN']) {
     const result = setupAgent(f, '--lang', lang, '--agent', 'codex,hermes')
@@ -451,6 +461,7 @@ test('setup prints a plain summary with each agent and the next steps, and --jso
     const codexStep = result.stdout.split(/\r?\n/).find(line => /^\d+\.\s+Codex[：:]/.test(line))
     assert.ok(codexStep, result.stdout)
     for (const text of ['--codex-trust', '--codex-bin', f.script, '/hooks']) assert.ok(codexStep.includes(text), codexStep)
+    assert.ok(codexStep.includes(`--codex-bin '${codex}'`), codexStep)
     assert.match(result.stdout, /--apply/)
     assert.match(result.stdout, /agent-board/)
     assert.match(result.stdout, /--serve/)
@@ -632,7 +643,7 @@ const setupErrorCases = async check => {
   })
   await fixture(f => {
     mkdirSync(join(f.root, 'install-codex.json'), { recursive: true })
-    check(f, (...extra) => f.install('--agent', 'codex', '--lang', 'en', ...extra), { code: 'EISDIR', message: 'agent-board: setup stopped while working on Codex. Run it again with --json to see the reason.' })
+    check(f, (...extra) => f.install('--agent', 'codex', '--lang', 'en', ...extra), { code: 'EISDIR', message: 'agent-board: setup expected a file but found a folder; move the folder out of the setup data path and run the command again.' })
   })
   await fixture(f => {
     check(f, (...extra) => setupAgent(f, '--lang', 'en', '--agent', 'codex', '--data-dir', join(f.home, 'a%b'), ...extra), { code: 'SETUP_FAILED', cause: 'UNSAFE_COMMAND_PATH', agent: 'codex', message: 'agent-board: setup cannot write its hook commands because a path it needs contains a quote, backtick, $ or % character. Put the setup data folder somewhere else with --data-dir, then run setup again.' })
@@ -698,6 +709,173 @@ test('setup --json keeps its error codes', async () => {
     }
   })
 })
+
+test('setup and doctor explain each known failure in all three languages', async () => {
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  try {
+    const { setupFailure } = await import('../scripts/codex-local.ts')
+    const { STRINGS } = await import('../hooks/strings.ts')
+    const common = ['MISSING_ARGUMENT', 'INVALID_INSTALL_RECORD', 'INSTALL_CONFLICT', 'UNSAFE_COMMAND_PATH', 'INVALID_JSON_OBJECT', 'INVALID_HOOK_GROUP', 'INVALID_PLUGIN_CONFIG', 'SHARED_BOARD_PATH_CONFLICT', 'INSTALL_CHANGED', 'LOCK_BUSY', 'LOCK_OWNERSHIP_LOST', 'CODEX_BINARY_REQUIRED', 'ABSOLUTE_CODEX_BINARY_REQUIRED', 'OWNED_CODEX_INSTALL_REQUIRED']
+    for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+      const strings = STRINGS[lang]
+      for (const code of [...common, ...Object.keys(strings.setupErrorDetails)]) {
+        const result = setupFailure(Object.assign(new Error(code), { code }), 'codex', strings)
+        assert.equal(result.code, code)
+        assert.equal(result.message.split('\n').length, 1, `${lang} ${code}`)
+        assert.notEqual(result.message, strings.setupErrorOther(strings.agentNames.codex), `${lang} ${code}`)
+        assert.equal(result.reason, undefined)
+      }
+      const unknown = setupFailure(new Error('synthetic underlying reason'), 'codex', strings)
+      assert.equal(unknown.code, 'UNKNOWN')
+      assert.equal(unknown.message, strings.setupErrorOther(strings.agentNames.codex))
+      assert.equal(unknown.reason, 'synthetic underlying reason')
+      const unusual = setupFailure(Object.assign(new Error('failure'), { code: 'SYNTHETIC_CODE' }), 'codex', strings)
+      assert.match(unusual.message, /SYNTHETIC_CODE/)
+    }
+  } finally { resolver.deregister() }
+})
+
+test('doctor explains Claude Code plugin support in every language', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const plain = f.command(['--codex-doctor', '--agent', 'claude', '--lang', lang])
+    assert.equal(plain.status, 1)
+    for (const name of ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek', 'Claude Code', 'claude plugin list']) assert.ok(plain.stderr.includes(name), plain.stderr)
+    const json = f.command(['--codex-doctor', '--agent', 'claude', '--lang', lang, '--json'])
+    const { error } = JSON.parse(json.stderr)
+    assert.equal(error.code, 'UNSUPPORTED_AGENT')
+    assert.equal(error.message, plain.stderr.trim())
+  }
+}))
+
+test('uncoded setup failures preserve their reason in JSON and coded failures name the error', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const preload = join(f.home, 'synthetic-error.cjs')
+  f.save(preload, `const fs = require('node:fs')
+const original = fs.readFileSync
+fs.readFileSync = function(file, ...args) {
+  if (file === ${JSON.stringify(join(f.root, 'install-codex.json'))}) {
+    const error = new Error('synthetic underlying reason')
+    if (process.env.SYNTHETIC_ERROR_CODE) error.code = process.env.SYNTHETIC_ERROR_CODE
+    throw error
+  }
+  return original.call(this, file, ...args)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const env = { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+  const plain = f.command(['--codex-doctor', '--lang', 'en'], undefined, env)
+  assert.equal(plain.status, 1)
+  assert.match(plain.stderr, /Run it again with --json/)
+  const json = f.command(['--codex-doctor', '--lang', 'en', '--json'], undefined, env)
+  assert.deepEqual(JSON.parse(json.stderr).error, { code: 'UNKNOWN', message: plain.stderr.trim(), reason: 'synthetic underlying reason' })
+  const coded = f.command(['--codex-doctor', '--lang', 'en', '--json'], undefined, { ...env, SYNTHETIC_ERROR_CODE: 'EINVAL' })
+  assert.equal(JSON.parse(coded.stderr).error.code, 'EINVAL')
+  assert.match(JSON.parse(coded.stderr).error.message, /rejected a setup argument/)
+  assert.doesNotMatch(coded.stderr, /Run it again with --json/)
+  f.env.NODE_OPTIONS = env.NODE_OPTIONS
+  const bootstrap = setupAgent(f, '--agent', 'codex', '--lang', 'en', '--json')
+  const failure = JSON.parse(bootstrap.stderr).error
+  assert.equal(failure.code, 'SETUP_FAILED')
+  assert.equal(failure.cause, 'UNKNOWN')
+  assert.equal(failure.reason, 'synthetic underlying reason')
+}))
+
+test('the setup bootstrap explains helper launch errors in every language', () => fixture(f => {
+  const preload = join(f.home, 'synthetic-spawn-error.cjs')
+  f.save(preload, `const child = require('node:child_process')
+const original = child.spawnSync
+child.spawnSync = function(file, args, options) {
+  if (Array.isArray(args) && String(args[0]).endsWith('setup-codex.mjs')) {
+    const error = new Error('synthetic helper failure')
+    if (process.env.SYNTHETIC_ERROR_CODE) error.code = process.env.SYNTHETIC_ERROR_CODE
+    return { error, status: null, stdout: '', stderr: '' }
+  }
+  return original.call(this, file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  f.env.SYNTHETIC_ERROR_CODE = 'EINVAL'
+  for (const [lang, detail] of [['en', 'rejected a setup argument'], ['zh-TW', '拒絕了 setup 參數'], ['zh-CN', '拒绝了 setup 参数']]) {
+    const result = setupAgent(f, '--agent', 'codex', '--lang', lang, '--json')
+    assert.equal(result.status, 1)
+    const { error } = JSON.parse(result.stderr)
+    assert.equal(error.code, 'SETUP_FAILED')
+    assert.equal(error.cause, 'EINVAL')
+    assert.ok(error.message.includes(detail), error.message)
+    assert.doesNotMatch(error.message, /--json/)
+  }
+  delete f.env.SYNTHETIC_ERROR_CODE
+  const unknown = setupAgent(f, '--agent', 'codex', '--json')
+  assert.equal(JSON.parse(unknown.stderr).error.reason, 'synthetic helper failure')
+}))
+
+test('Windows Codex npm shims resolve without a shell and unknown shims give a next step', { skip: process.platform !== 'win32' }, () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const bin = join(f.home, 'shim & synthetic')
+  const root = join(bin, 'node_modules', '@openai', 'codex')
+  const launcher = join(root, 'bin', 'codex.js')
+  const entries = Object.entries(JSON.parse(readFileSync(f.hooks, 'utf8')).hooks).map(([event, groups], i) => ({
+    sourcePath: f.hooks, eventName: event[0].toLowerCase() + event.slice(1), command: groups[0].hooks[0].command,
+    key: `hook-${i}`, enabled: true, currentHash: `sha256:${'a'.repeat(64)}`, trustStatus: 'untrusted',
+  }))
+  f.save(join(root, 'package.json'), JSON.stringify({ name: '@openai/codex', type: 'module' }))
+  f.save(launcher, `import { createInterface } from 'node:readline'
+createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line)
+  if (request.method === 'initialize') console.log(JSON.stringify({ id: request.id, result: {} }))
+  if (request.method === 'hooks/list') console.log(JSON.stringify({ id: request.id, result: { data: [{ hooks: ${JSON.stringify(entries)}, errors: [] }] } }))
+})
+`)
+  for (const [name, source] of [
+    ['codex.cmd', '@echo off\r\n"%dp0%\\node.exe" "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n'],
+    ['codex.ps1', '& "$basedir/node" "$basedir/node_modules/@openai/codex/bin/codex.js" $args\n'],
+  ]) {
+    assert.equal(f.install('--lang', 'en', '--apply').status, 0)
+    const shim = join(bin, name)
+    f.save(shim, source)
+    const result = f.command(['--codex-trust', '--codex-bin', shim, '--json'])
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(JSON.parse(result.stdout).hooks.length, 6)
+    assert.equal(JSON.parse(result.stdout).applied, false)
+    f.save(shim, 'not an npm shim')
+    for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+      const installed = f.install('--lang', lang, '--apply')
+      assert.equal(installed.status, 0, installed.stderr)
+      const rejected = f.command(['--codex-trust', '--codex-bin', shim, '--lang', lang, '--json'])
+      const error = JSON.parse(rejected.stderr).error
+      assert.equal(error.code, 'CODEX_SHIM_UNSUPPORTED')
+      assert.match(error.message, /codex\.exe.*Get-ChildItem|Get-ChildItem.*codex\.exe/)
+      assert.doesNotMatch(error.message, /EINVAL|--json/)
+    }
+  }
+}))
+
+test('documented doctor and removal previews work from PowerShell and bash in an installed synthetic home', { timeout: 120000 }, t => fixture(f => {
+  const bash = process.platform === 'win32' ? join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe') : '/bin/bash'
+  if (!existsSync(bash)) return t.skip('bash is unavailable')
+  assert.equal(f.install('--apply').status, 0)
+  const env = { ...f.env }
+  const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  env[pathKey] = [dirname(process.execPath), env[pathKey]].filter(Boolean).join(delimiter)
+  const guard = process.platform === 'win32' ? '[ "$HOME" -ef "$(cygpath -u "$USERPROFILE")" ] || exit 97; ' : '[ "$HOME" -ef "$USERPROFILE" ] || exit 97; '
+  const shells = [[bash, ['-c'], guard]]
+  if (process.platform === 'win32') shells.push([join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-Command'], 'if ($HOME -ne $env:USERPROFILE) { exit 97 }; '])
+  for (const [shell, prefix, homeGuard] of shells) {
+    for (const [args, expected] of [['--codex-doctor --agent codex', /"installed":\s*true/], ['--codex-remove --agent codex', /"mode":\s*"remove"/]]) {
+      const result = spawnSync(shell, [...prefix, `${homeGuard}node "$HOME/.agent-board/agent-board.mjs" ${args}`], { cwd: f.home, env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+      assert.equal(result.status, 0, `${shell}: ${result.stderr}`)
+      assert.match(result.stdout, expected)
+      assert.doesNotMatch(result.stderr, /MODULE_NOT_FOUND|Cannot find module/)
+    }
+  }
+}))
 
 const jsonHosts = [
   ['cursor', '.cursor/hooks.json', 'Cursor'],

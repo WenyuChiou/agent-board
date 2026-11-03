@@ -46,9 +46,9 @@ const NOT_RUN_LIVE = ['Antigravity', 'Cursor', 'Grok Build', 'Muse Code', 'DeepS
 // The agents whose only check is the synthetic home: their row in the table of checks has no host version or record.
 const SYNTHETIC_ONLY = ['Cursor', 'Muse Code']
 // Every command the single Key commands table held before #407 split it.
-const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/board', '/agent-board', 'node ~/.agent-board/agent-board.mjs --watch', '--html', 'node ~/.agent-board/agent-board.mjs --serve', 'node ~/.agent-board/agent-board.mjs --chat', 'node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex']
+const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/board', '/agent-board', 'node "$HOME/.agent-board/agent-board.mjs" --watch', '--html', 'node "$HOME/.agent-board/agent-board.mjs" --serve', 'node "$HOME/.agent-board/agent-board.mjs" --chat', 'node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']
 // The code each row of the surface table holds, in its order: terminal, browser, chat app, one agent's setup.
-const SURFACE_COMMANDS = [['node ~/.agent-board/agent-board.mjs --watch', '--html'], ['node ~/.agent-board/agent-board.mjs --serve'], ['node ~/.agent-board/agent-board.mjs --chat'], ['node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex']]
+const SURFACE_COMMANDS = [['node "$HOME/.agent-board/agent-board.mjs" --watch', '--html'], ['node "$HOME/.agent-board/agent-board.mjs" --serve'], ['node "$HOME/.agent-board/agent-board.mjs" --chat'], ['node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']]
 // Per language: the strip's label, the two command subsections, the caveat on a command
 // not run live yet, the board's page heading, and how each surface row starts.
 const WORDS = {
