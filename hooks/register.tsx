@@ -137,7 +137,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -419,9 +419,9 @@ let answersAdded = 0
 const rememberAnswered = (turns: readonly AgentTurn[]): void => {
   for (const turn of turns) {
     if ((turn.event !== 'prompt' && (turn.event !== 'turn' || turn.answer.trim() === '')) || turn.at === undefined || !Number.isFinite(turn.at)) continue
-    const key = JSON.stringify([turn.agent, turn.id])
+    const key = JSON.stringify([turn.agent, turn.id, turn.session])
     if ((answeredPending.get(key)?.at ?? -Infinity) >= turn.at) continue
-    answeredPending.set(key, { agent: turn.agent, id: turn.id, event: turn.event, at: turn.at })
+    answeredPending.set(key, { agent: turn.agent, id: turn.id, session: turn.session, event: turn.event, at: turn.at })
     answeredKeptSince.delete(key)
     answersAdded += 1
   }
@@ -835,7 +835,7 @@ const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects:
   rememberAnswered(evidence)
   if (evidence.length > 0 && questionsRunning !== null) return
   try {
-    const matches = (record: QuestionRecord, turn: QuestionAnswerEvidence): boolean => record.source?.kind === 'inbox' && record.source.agent === turn.agent && record.source.session === turn.id
+    const matches = isAnsweredBy
     const batch = [...answeredPending.entries()]
     // Counted with the batch, so an answer remembered while the key is read is not taken as carried.
     const added = answersAdded
@@ -2500,11 +2500,7 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
         // A turn the pass never records (not a question, or no session) goes as before. Only this
         // turn's own evidence counts: an earlier ask of the same words by the same session, answered
         // long ago, is not a record of this one.
-        const scope = !turn.isQuestion || turn.id === undefined ? null : questionScope(turn.project, turn.agent, turn.id)
-        const json = JSON.stringify(turn)
-        const revisions = turn.sourceRevisions ?? []
-        const isRecorded = scope === null || ledger.records.some(record => record.scope === scope && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
-        if (isRecorded) await discard(key)
+        if (isTurnRecorded(ledger, turn)) await discard(key)
         else {
           hasUnrecorded = true
           // Held like a cut-off block's turn: tried again once progress.md changes, not on every
@@ -2867,7 +2863,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
         if (unkept.length > 0) await holdBack(unkept, new Error('PENDING_QUESTION_NOT_KEPT'))
         // A question and its answer can arrive in one look: the answer was remembered before
         // the question was kept, so it settles now instead of at the next poll.
-        const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id])))
+        const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id, one.session])))
         // Its failure is made good at the next poll, so it sends back no run.
         if ([...answeredPending.keys()].some(key => asked.has(key))) await progressPath($).then(path => pollAnsweredQuestions($, path, undefined)).catch(() => undefined)
       } catch (error) {
@@ -3066,8 +3062,9 @@ const keepAskedQuestions = async ($: EngineInterface, path: string, projects: re
   if (!isSettled && !(await pollQuestions($, path, projects, true))) return false
   const ledger = await read($, questionLedger)
   if (!archiveQuestionsKept(projects, ref, ledger)) return false
+  const task = refTasks(projects, ref)[0]
   for (const record of ledger.records) {
-    if (record.isUnresolved && isAskedBy(record, ref)) await keepQuestionCapture($, path, record, 'archived')
+    if (record.isUnresolved && isAskedBy(record, ref, task)) await keepQuestionCapture($, path, record, 'archived')
   }
 
   return true
@@ -3160,7 +3157,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const wrote = await rewrite($, path, async text => {
     currentBoardHash = sha256(text)
     const projects = parseProgress(text)
-    const hasQuestions = projects.some(project => project.name === ref.project && project.tasks.some(task => (ref.session === null ? task.title === ref.title : task.auto?.session === ref.session) && task.steps.some(step => step.status === 'waiting')))
+    const hasQuestions = refTasks(projects, ref).some(task => task.steps.some(step => step.status === 'waiting'))
     if (hasQuestions) {
       if (!(await keepAskedQuestions($, path, projects, ref))) throw new Error('QUESTION_RETENTION_FAILED')
       // Another agent's write while the question check ran is not written over with the older text.
@@ -3294,7 +3291,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
 const othersNoteFor = async ($: EngineInterface): Promise<string | null> => {
   const mirror = await read($, mine)
 
-  return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : shortId(mirror.sessionId), await $.clock.now(), await wordsOf($))
+  return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : { ...mirror, agent: mirror.agent || 'claude' }, await $.clock.now(), await wordsOf($))
 }
 
 // Keeps the store to what the board still needs (retention.ts, #373). A pass reads at most
