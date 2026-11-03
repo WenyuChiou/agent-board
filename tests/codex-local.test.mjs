@@ -275,6 +275,158 @@ const fixture = async fn => {
   finally { if (isSafeToRemove) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 
+const mailboxFixture = async fn => fixture(async f => {
+  const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
+  const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  const script = join(f.home, 'mailbox-board.mjs')
+  f.save(script, bundleFromDir(new URL('..', import.meta.url)))
+  const progress = join(f.home, 'mailbox-progress.md')
+  f.save(progress, '')
+  const env = { ...f.env, XDG_RUNTIME_DIR: join(f.home, 'runtime') }
+  const directory = defaultMessagesDirectory(progress, f.home, env, process.platform)
+  const call = (agent, event, extra = {}, flags = []) => spawnSync(process.execPath, [script,
+    '--home', f.home, '--data-dir', f.root, '--progress-file', progress, '--agent', agent,
+    ...(['codex', 'cursor'].includes(agent) ? ['--codex-event'] : ['--agent-status', '--state', /SessionEnd|sessionEnd/.test(event) ? 'ended' : /SessionStart|Stop|AfterAgent/.test(event) ? 'waiting' : 'working']),
+    ...(agent === 'antigravity' ? ['--event', event] : []), ...flags,
+  ], { cwd: f.home, env, input: JSON.stringify({ session_id: session, conversation_id: session, conversationId: session, hook_event_name: event, turn_id: 'mailbox-turn', generation_id: 'mailbox-turn', ...extra }), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const seed = (agent = 'codex') => {
+    const now = Date.now()
+    const state = enrollMailbox({ messages: [] }, agent, session, 'CLI', now, 43_200_000)
+    const target = state.mailboxes[0]
+    const queued = queueMessage(state, { id: 'hook-mailbox-message', target: target.id, turn: 'session', text: 'Synthetic mailbox payload' }, 'board', target, now).state
+    f.save(join(directory, 'messages.json'), JSON.stringify({ version: 2, ...queued }))
+  }
+  const state = () => JSON.parse(readFileSync(join(directory, 'messages.json'), 'utf8'))
+  await fn({ ...f, script, progress, env, directory, call, seed, state, mailboxId })
+})
+
+test('hookWorker preserves host timeouts above 3 seconds instead of clamping to 3000 ms', () => {
+  const source = hookWorker('synthetic-home', 'synthetic-script', '')
+  assert.ok(source.includes('started + hostTimeout - 1000'))
+  assert.ok(!source.includes('Math.min(3000, hostTimeout - 1000)'))
+})
+
+test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, Gemini, Muse, and Cursor sessionStart only', async () => mailboxFixture(async f => {
+  const { turnStartEnvelope } = await importTs('../hooks/hook-messages.ts')
+  assert.equal(turnStartEnvelope('codex', 'SessionStart', 'message', 'note').hookSpecificOutput.additionalContext, 'note\n\nmessage')
+  assert.equal(turnStartEnvelope('codex', 'UserPromptSubmit', 'message', 'note').hookSpecificOutput.additionalContext, 'message')
+  for (const [agent, events] of Object.entries({ codex: ['SessionStart', 'UserPromptSubmit'], antigravity: ['SessionStart', 'PreInvocation'], gemini: ['SessionStart', 'BeforeAgent'], muse: ['UserPromptSubmit'], cursor: ['sessionStart'] })) {
+    for (const event of events) {
+      f.seed(agent)
+      const result = f.call(agent, event)
+      assert.equal(result.status, 0, result.stderr)
+      const output = JSON.parse(result.stdout)
+      assert.ok(JSON.stringify(output).includes('Synthetic mailbox payload'), agent + ' ' + event + ': ' + result.stdout)
+      if (agent === 'codex' || agent === 'gemini' || agent === 'muse') assert.equal(output.hookSpecificOutput.hookEventName, event)
+      if (agent === 'antigravity') assert.ok((event === 'SessionStart' ? output.injectSteps[0].systemMessage.systemMessage : output.injectSteps[0].ephemeralMessage).includes('Synthetic mailbox payload'))
+      if (agent === 'cursor') assert.ok(output.additional_context.includes('Synthetic mailbox payload'))
+      assert.equal(f.state().messages[0].status, 'accepted')
+      const again = f.call(agent, event)
+      assert.equal(again.status, 0, again.stderr)
+      assert.ok(!again.stdout.includes('Synthetic mailbox payload'))
+      if (agent === 'cursor') assert.equal(output.env.AGENT_BOARD_SESSION_ID, session)
+      if (agent === 'gemini') assert.equal(output.decision, 'allow')
+    }
+  }
+}))
+
+test('Cursor beforeSubmitPrompt and terminal hooks leave mailbox messages queued', async () => mailboxFixture(async f => {
+  const { isSessionEnd, isTurnStart } = await importTs('../hooks/hook-messages.ts')
+  for (const agent of ['codex', 'antigravity', 'gemini', 'muse', 'cursor', 'grok', 'hermes', 'other']) {
+    for (const event of ['beforeSubmitPrompt', 'Stop', 'stop', 'afterAgentResponse', 'AfterAgent', 'PostInvocation', 'PermissionRequest', 'Interrupt', 'SessionEnd', 'sessionEnd']) assert.equal(isTurnStart(agent, event), false, agent + ' ' + event)
+    assert.equal(isSessionEnd(agent, 'SessionEnd'), ['codex', 'gemini', 'muse'].includes(agent))
+    assert.equal(isSessionEnd(agent, 'sessionEnd'), agent === 'cursor')
+  }
+  for (const [agent, event] of [['cursor', 'beforeSubmitPrompt'], ['cursor', 'stop'], ['codex', 'Stop'], ['gemini', 'AfterAgent'], ['muse', 'Stop'], ['antigravity', 'PostInvocation']]) {
+    const start = f.call(agent, agent === 'cursor' ? 'beforeSubmitPrompt' : agent === 'gemini' ? 'BeforeAgent' : agent === 'antigravity' ? 'PreInvocation' : 'UserPromptSubmit')
+    assert.equal(start.status, 0, agent + ': ' + start.stderr)
+    f.seed(agent)
+    const result = f.call(agent, event)
+    assert.equal(result.status, 0, agent + ' ' + event + ': ' + result.stderr)
+    assert.equal(f.state().messages[0].status, 'queued', agent + ' ' + event)
+  }
+}))
+
+test('a corrupt or busy message store fails open without failing progress hooks or --codex-report', async () => mailboxFixture(async f => {
+  for (const busy of [false, true]) {
+    f.seed()
+    if (busy) writeFileSync(join(f.directory, 'server.lock'), String(process.pid))
+    else writeFileSync(join(f.directory, 'messages.json'), '{broken')
+    const before = readFileSync(join(f.directory, 'messages.json'), 'utf8')
+    const hook = f.call('codex', 'SessionStart')
+    assert.equal(hook.status, 0, hook.stderr)
+    const report = spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--codex-report', '--session', session], {
+      cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, input: JSON.stringify({ title: 'Synthetic report', state: 'working', steps: ['- [~] Check'] }), timeout: 15000,
+    })
+    assert.equal(report.status, 0, report.stderr)
+    assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
+  }
+}))
+
+test('a replayed hook event never claims a mailbox message', async () => mailboxFixture(async f => {
+  f.seed()
+  const pending = join(f.root, 'pending', '000000000000001-replay.json')
+  f.save(pending, JSON.stringify({ version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session, now: new Date().toISOString(), at: Date.now(), isPrompt: false, isBoardPrompt: false, payload: { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'replay-turn' } }))
+  const result = spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--recover-hooks'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).processed, 1)
+  assert.equal(f.state().messages[0].status, 'queued')
+}))
+
+test('a live hub takes hook mailbox calls over loopback and the hook does not write the store itself', async () => mailboxFixture(async f => {
+  const { createServer } = await import('node:http')
+  f.seed()
+  const before = readFileSync(join(f.directory, 'messages.json'), 'utf8'), calls = []
+  const message = { ...f.state().messages[0], nonce: 'abcdef', status: 'uncertain' }
+  const server = createServer(async (req, res) => {
+    let body = ''
+    for await (const chunk of req) body += chunk
+    calls.push([req.url, JSON.parse(body), req.headers['x-board-token']])
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify(req.url.endsWith('mailbox-turn') ? { message } : { ok: true }))
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  try {
+    writeFileSync(join(f.directory, 'server.lock'), String(process.pid))
+    writeFileSync(join(f.directory, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token` }))
+    const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--codex-event'], { cwd: f.home, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = '', err = ''
+    child.stdout.on('data', chunk => { out += chunk })
+    child.stderr.on('data', chunk => { err += chunk })
+    const exited = new Promise(done => child.once('close', done))
+    child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }))
+    assert.equal(await exited, 0, err)
+    assert.ok(out.includes('Synthetic mailbox payload'))
+    assert.deepEqual(calls.map(one => one[0]), ['/api/messages/mailbox-turn', '/api/messages/mailbox-accept'])
+    assert.ok(calls.every(one => one[2] === 'synthetic-token'))
+    assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
+  } finally { await new Promise(done => server.close(done)) }
+}))
+
+test('a hook never creates the messages folder', async () => mailboxFixture(async f => {
+  assert.equal(existsSync(f.directory), false)
+  const result = f.call('codex', 'SessionStart')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(f.directory), false)
+}))
+
+test('the hook finds the same default messages folder as --serve', async () => mailboxFixture(async f => {
+  const { serve } = await import('./e2e/lib/surfaces.mjs')
+  const { makeWorld } = await import('./e2e/lib/world.mjs')
+  const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
+  const world = makeWorld()
+  try {
+    const server = await serve.start(world)
+    const directory = defaultMessagesDirectory(world.path, world.home, world.env, process.platform)
+    assert.equal(existsSync(join(directory, 'server.lock')), true)
+    const hook = spawnSync(process.execPath, [world.script, '--codex-event', '--home', world.home, '--progress-file', world.path], { cwd: world.root, env: world.env, encoding: 'utf8', windowsHide: true, timeout: 15000, input: JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }) })
+    assert.equal(hook.status, 0, hook.stderr)
+    const snapshot = (await server.get('/api/board')).json()
+    assert.equal(snapshot.messaging.mailboxes[0].session, session)
+  } finally { await world.close() }
+}))
+
 test('the codex-local fixture removes its own prefix\'s folders older than six hours and keeps newer ones', async () => {
   const older = mkdtempSync(join(tmpdir(), 'codex local-'))
   const newer = mkdtempSync(join(tmpdir(), 'codex local-'))
@@ -2066,7 +2218,7 @@ test('the hook deadline counts from the process start, not from when the worker 
   const worker = join(f.root, 'agent-board-hook.mjs')
   const argv = ['--hook-version', '1', '--hook-event', 'BeforeAgent', '--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
   const payload = { session_id: session }
-  const at = Date.now() - 3050
+  const at = Date.now() - 4050
   const result = spawnSync(process.execPath, [worker, ...argv, '--hook-started', String(at)], { env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000 })
   assert.equal(result.status, 0, result.stderr)
   assert.equal(readFileSync(f.progress, 'utf8').includes('agent=gemini'), false)
@@ -2376,7 +2528,7 @@ test('raw replay classifies board requests and ordinary prompts like live events
   holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   for (const [index, prompt] of ['/agent-board', 'Continue the task'].entries()) {
-    const at = Date.now() - 3050
+    const at = Date.now() - 4050
     const sessions = [`live-prompt-session-${index}`, `raw-prompt-session-${index}`]
     for (const session_id of sessions) {
       const report = f.command(['--codex-report', '--agent', 'gemini', '--session', session_id, '--hook-started', String(at - 1000)], { title: 'Question', state: 'waiting', steps: ['- [?] Choose a path'] })

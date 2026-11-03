@@ -5,12 +5,56 @@ import { performance } from 'node:perf_hooks'
 import { CONNECTOR_POLL_MS, GAPS, NATIVE_RECEIVERS, RECEIVERS, SENDERS, openHub, receiptBudget, withHub } from './lib/hub.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { noMachineIds, noSilentPress, seenWithin } from './lib/expect.mjs'
-import { chat, terminal } from './lib/surfaces.mjs'
+import { chat, pageDom, run, serve, terminal } from './lib/surfaces.mjs'
+import { makeWorld } from './lib/world.mjs'
+import { EN } from '../../hooks/strings-en.ts'
 import { BLOCKS, LIVE_SESSIONS, PAGE_MS } from './lib/budget.mjs'
 import { block } from './lib/writers.mjs'
 import { finishedRecord, isFinishedRecord, readStore, seedStore } from './lib/hub-wire.mjs'
 
 const text = 'Review route /health?mode=ready — 測試 intact\nKeep both lines.'
+
+test('messages: a Codex session with no poller takes a page message on its next turn, and the card says next turn, not delivered', async () => {
+  const world = makeWorld()
+  world.env.NODE_OPTIONS = world.env.NODE_OPTIONS.split(' ').filter(one => !one.includes('clock-preload')).join(' ')
+  const session = '60300000-2222-4333-8444-555555555555'
+  try {
+    const server = await serve.start(world)
+    const hook = event => run(world, ['--codex-event', '--home', world.home, '--progress-file', world.path], { input: JSON.stringify({ session_id: session, hook_event_name: event, turn_id: 'next-turn' }) })
+    const enrolled = await hook('SessionStart')
+    assert.equal(enrolled.status, 0, enrolled.stderr)
+    let snapshot = (await server.get('/api/board')).json()
+    assert.equal(snapshot.messaging.connections.length, 0)
+    assert.equal(snapshot.messaging.mailboxes.length, 1)
+    snapshot = (await server.get('/api/board')).json()
+    const page = await pageDom((await server.get(new URL(server.url).pathname + new URL(server.url).search)).body, snapshot.model, async request => {
+      const response = await server.post(request.path, request.body)
+      return { ok: response.status < 400, json: async () => response.json() }
+    })
+    const card = page.cards().find(one => page.buttons(one).some(button => button.textContent.startsWith('Queue for Codex')))
+    assert.ok(card, page.text())
+    assert.ok(page.buttons(card).some(button => button.textContent === EN.pgCopyAnswer))
+    const queue = page.buttons(card).find(button => button.textContent.startsWith('Queue for Codex'))
+    assert.ok(page.reveal(queue))
+    page.inputs(card)[0].value = 'Synthetic next-turn mailbox message'
+    queue.click()
+    await page.flush()
+    snapshot = (await server.get('/api/board')).json()
+    assert.equal(snapshot.messaging.messages[0].status, 'queued')
+    const delivered = await hook('UserPromptSubmit')
+    assert.equal(delivered.status, 0, delivered.stderr)
+    assert.ok(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext.includes('Synthetic next-turn mailbox message'))
+    snapshot = (await server.get('/api/board')).json()
+    assert.equal(snapshot.messaging.messages[0].status, 'accepted')
+    await page.redraw(snapshot.model)
+    assert.ok(page.text().includes('Handed to the session at its turn start. No reply is confirmed.'))
+    assert.ok(!page.text().includes('Delivered'))
+    assert.ok(!page.text().includes('Waiting for a reply'))
+    const again = await hook('UserPromptSubmit')
+    assert.equal(again.status, 0, again.stderr)
+    assert.ok(!again.stdout.includes('Synthetic next-turn mailbox message'))
+  } finally { await world.close() }
+})
 const nativeDelivery = async (hub, source, receiver, id = 'AB-synthetic-message', options) => {
   const sent = await hub.send(source, receiver, text, id)
   const result = await hub.receipt(receiver, sent, options)
