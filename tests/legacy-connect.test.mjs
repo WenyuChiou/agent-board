@@ -181,6 +181,26 @@ test('a setup managed Antigravity is reported and keeps the setup files', () => 
   }
 }))
 
+test('a probe takes out the Antigravity hook of an earlier connect', () => withSetup('antigravity', ({ f, run, setup, recordFile }) => {
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const record = readFileSync(recordFile, 'utf8')
+  writeFileSync(config, '{}')
+  unlinkSync(recordFile)
+  run('connect')
+  assert.match(readFileSync(config, 'utf8'), /"agent-board"/)
+  writeFileSync(recordFile, record)
+  run('auto')
+  assert.doesNotMatch(readFileSync(config, 'utf8'), /"agent-board"/)
+  setup('apply')
+  const hooks = readFileSync(config, 'utf8')
+  assert.match(hooks, /"agent-board-local"/)
+  assert.doesNotMatch(hooks, /"agent-board"/)
+}))
+
+test('removing the connector names OpenClaw once', () => withBothHooks('openclaw', ({ run }) => {
+  assert.deepEqual(run('remove').result.done.filter(label => label === 'OpenClaw'), ['OpenClaw'])
+}))
+
 test('a hook that cannot be taken out is named, and the other agents still connect', () => withBothHooks('codex', ({ f, run }) => {
   const config = join(f.home, '.codex', 'hooks.json')
   const lock = isLocked => process.platform === 'win32'
