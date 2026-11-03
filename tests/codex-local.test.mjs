@@ -468,6 +468,23 @@ test('setup preview lists every planned file under its agent and apply changes o
   assert.deepEqual(changed, planned)
 }))
 
+test('setup preview names the record of another installed agent that apply would rewrite', () => fixture(f => {
+  const run = (...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, ...args], {
+    cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000,
+  })
+  assert.equal(run('--agent', 'codex,cursor', '--lang', 'en', '--apply').status, 0)
+  const before = homeSnapshot(f.home)
+  const preview = run('--agent', 'codex', '--lang', 'zh-TW')
+  assert.equal(preview.status, 0, preview.stderr)
+  const listed = preview.stdout.split(/\r?\n/).filter(line => line.startsWith('  ~')).map(line => join(f.home, line.slice(3))).sort()
+  assert.ok(listed.includes(join(f.root, 'install-cursor.json')), preview.stdout)
+  assert.deepEqual(homeSnapshot(f.home), before)
+  assert.equal(run('--agent', 'codex', '--lang', 'zh-TW', '--apply').status, 0)
+  const after = homeSnapshot(f.home)
+  const changed = Object.keys(after).filter(path => after[path] !== 'directory' && JSON.stringify(before[path]) !== JSON.stringify(after[path])).map(path => `${f.home}${path}`).sort()
+  assert.deepEqual(changed, listed)
+}))
+
 test('setup preview groups files per agent and shortens only paths inside the selected home', () => fixture(f => {
   const home = join(f.home, 'home')
   const data = join(f.home, 'home-other')

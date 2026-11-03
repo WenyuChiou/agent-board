@@ -1,7 +1,7 @@
 // Preview every selected target before applying any of them. Each target keeps its own
 // ownership record while sharing one script, skill and local progress file.
 import { spawnSync } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -226,12 +226,20 @@ const main = () => {
     const path = relative(resolve(home), file)
     return path === '' ? '~' : path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path) ? join('~', path) : file
   }
+  // Applying also rewrites the record of an installed agent that was not selected when it holds a
+  // shared file that changes, so the preview names that record too.
+  const records = plan => targets.filter(other => !selected.includes(other)).map(other => join(plan.data, `install-${other}.json`)).filter(file => {
+    try {
+      const held = JSON.parse(readFileSync(file, 'utf8')).files ?? {}
+      return plan.changes.some(change => Object.hasOwn(held, change.file))
+    } catch { return false }
+  })
   const lines = selected.map((agent, i) => {
     const plan = results[i]
     const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.join(', '), command: setupCommand(['--agent', agent, '--apply']) })
       : !plan.changes.length ? words('ready') : words(apply ? 'applied' : 'preview', { count: plan.changes.length })
     const capability = plan.managedBy !== 'connector' && !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
-    const files = !apply && !plan.conflicts.length ? plan.changes.map(change => `  ${shortPath(change.file)}`) : []
+    const files = !apply && !plan.conflicts.length ? [...plan.changes.map(change => change.file), ...records(plan)].map(file => `  ${shortPath(file)}`) : []
     return [`${names[agent]}: ${status}${capability}`, ...files].join('\n')
   })
   if (hasClaude) lines.push(`Claude Code: ${words('claude')}`)
