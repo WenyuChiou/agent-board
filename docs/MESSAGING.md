@@ -364,8 +364,8 @@ nothing to set up. `hooks/receiver.ts` holds the logic and `hooks/register.tsx` 
 
 | What happened | Receipt | Error | Card |
 | --- | --- | --- | --- |
-| The delivery turn's first line is its ACK | `acknowledged` | | Claude replied: ... (what follows the ACK), or Claude got this. |
-| The turn ended with no ACK on its first line | `uncertain` | `ACK_MISSING` | Sent, but Claude hasn't confirmed. |
+| A step of the delivery turn starts with its ACK | `acknowledged` | | Claude replied: ... (what follows the ACK), or Claude got this. |
+| The turn ended with no step starting with its ACK | `uncertain` | `ACK_MISSING` | Sent, but Claude hasn't confirmed. |
 | The person stopped the delivery turn | `uncertain` | `TURN_ABORTED` | Sent, but Claude hasn't confirmed. |
 | The engine dropped the prompt, as the person pressed Esc | `rejected` | `STOPPED` | Stopped in Claude. Not delivered. |
 | The submit failed, or no turn came of it within 30 s of idle time | `uncertain` | `DELIVERY_UNCERTAIN` | Sent, but Claude hasn't confirmed. |

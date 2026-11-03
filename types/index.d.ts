@@ -11,6 +11,8 @@ export type ReceiverPending = {
   phase: 'claimed' | 'submitted' | 'running'
   submittedAt?: number
   turnId?: string
+  // The ACK line of a step of its turn; the turn's final text may be another step's.
+  ack?: string
 }
 
 // Kept in $.state, so a reload of the mod finds its connection and presents it as `replaces`

@@ -87,6 +87,7 @@ export type Receiver = {
   tick: () => Promise<void>
   // True when this turn is the delivery's: its text and answer stay out of the board's records.
   turnStarted: (text: string, turnId: string) => Promise<boolean>
+  stepAnswered: (turnId: string, answer: string) => Promise<void>
   turnEnded: (turnId: string, answer: string, isAborted: boolean) => Promise<boolean>
   end: () => Promise<void>
 }
@@ -148,6 +149,8 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
     const accepted = await receipt(pending, 'accepted')
     if (accepted === 'refused') return finish()
     if (accepted === 'unreached') return
+    // A /clear during that receipt ended this message's session: it stays out of the next one.
+    if ((await state()).pending?.id !== pending.id) return
     const submittedAt = await deps.now()
     await set({ pending: { ...pending, phase: 'submitted', submittedAt } })
     isSubmitting = true
@@ -236,16 +239,26 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
       if (isStopped) await set({ isStopped: false })
       return false
     },
+    // A turn that uses a tool answers in steps, and the ACK comes first while turn.complete has only
+    // the last. Each step is read, as the model may also call its tools before it says anything.
+    stepAnswered: async (turnId, answer) => {
+      const { pending, late } = await state()
+      const line = (one: ReceiverPending | null | undefined) => one?.turnId === turnId && one.ack === undefined ? ackLine(answer, one.nonce) : null
+      const inPending = line(pending)
+      if (inPending !== null && pending !== null) await set({ pending: { ...pending, ack: inPending } })
+      const inLate = line(late)
+      if (inLate !== null && late !== null && late !== undefined) await set({ late: { ...late, ack: inLate } })
+    },
     turnEnded: async (turnId, answer, isAborted) => {
       const { pending, late } = await state()
       if (late !== null && late !== undefined && late.turnId === turnId) {
-        const line = isAborted ? null : ackLine(answer, late.nonce)
+        const line = isAborted ? null : late.ack ?? ackLine(answer, late.nonce)
         if (line !== null) await receipt(late, 'acknowledged', { reply: line })
         await set({ late: null })
         return true
       }
       if (pending === null || pending.phase !== 'running' || pending.turnId !== turnId) return false
-      const line = isAborted ? null : ackLine(answer, pending.nonce)
+      const line = isAborted ? null : pending.ack ?? ackLine(answer, pending.nonce)
       if (line !== null) await receipt(pending, 'acknowledged', { reply: line })
       else await receipt(pending, 'uncertain', { error: isAborted ? 'TURN_ABORTED' : 'ACK_MISSING' })
       await finish()

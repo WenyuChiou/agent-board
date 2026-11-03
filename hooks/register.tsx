@@ -4094,6 +4094,12 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    if (receiver !== null && e.agentId === undefined && result !== undefined) await receiver.stepAnswered(e.turnId, result.answer).catch(() => undefined)
+    return result
+  })
+
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     if (hasBackgroundActivity) await backgroundChanges

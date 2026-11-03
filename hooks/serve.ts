@@ -1302,7 +1302,7 @@ const PAGE_SCRIPT = String.raw`
     var isStopped = receipt.status === 'rejected';
     var isReplied = receipt.status === 'acknowledged';
     // Whatever went nowhere can be sent again, under an id of its own.
-    if (isStopped || isReplied || error === 'DISMISSED') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+    if (isStopped || isReplied || error === 'DISMISSED' || error === 'EXPIRED') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
     if (error === 'DISMISSED') return null;
     var isUnconfirmed = receipt.status === 'uncertain' || receipt.status === 'accepted' && error === 'DISCONNECTED';
     var line = el('p', 'receipt' + (isStopped ? ' t-alert' : ''), isStopped ? (error === 'STOPPED' ? w('claudeStopped') : w('messagesRejected'))

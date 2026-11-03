@@ -25,12 +25,14 @@ const world = () => {
     answers: new Map<string, HubAnswer | null>(),
     kept: undefined as ReceiverState | undefined,
     engine: (): Promise<{ drop?: string }> => Promise.resolve({}),
+    onReceipt: null as null | (() => Promise<void>),
   }
   const receiver = () => createReceiver({
     session: async () => box.session,
     address: async () => (box.hasAddress ? { origin: 'http://127.0.0.1:1', token: 't' } : null),
     call: async (_, action, body) => {
       sent.push({ action, body })
+      if (action === 'receipt' && box.onReceipt !== null) { const run = box.onReceipt; box.onReceipt = null; await run() }
       const answer = box.answers.get(action)
       if (answer === null) throw new Error('unreachable')
       if (answer !== undefined) return answer
@@ -226,6 +228,42 @@ test('a contested receiver registers again with its own credentials, at most eve
   w.get().at += 6_000
   await r.tick()
   expect(of(w.sent, 'register').length).toBe(3)
+})
+
+test('an ACK in the first step counts when the turn ends on another step', async () => {
+  const w = world()
+  w.get().queue.push(MESSAGE)
+  const r = w.receiver()
+  await r.tick()
+  await settle()
+  await r.turnStarted(MESSAGE.prompt, 't1')
+  await r.stepAnswered('someone else', `ACK ${NONCE}`)
+  await r.stepAnswered('t1', `ACK ${NONCE}`)
+  await r.stepAnswered('t1', `ACK ${NONCE} a later one does not replace it`)
+  expect(await r.turnEnded('t1', 'All the tests pass.', false)).toBe(true)
+  expect(receipts(w.sent).at(-1)).toMatchObject({ status: 'acknowledged', reply: `ACK ${NONCE}` })
+})
+
+test('an ACK in a step does not outweigh an interrupted turn', async () => {
+  const w = world()
+  w.get().queue.push(MESSAGE)
+  const r = w.receiver()
+  await r.tick()
+  await settle()
+  await r.turnStarted(MESSAGE.prompt, 't1')
+  await r.stepAnswered('t1', `ACK ${NONCE}`)
+  await r.turnEnded('t1', '', true)
+  expect(receipts(w.sent).at(-1)).toMatchObject({ status: 'uncertain', error: 'TURN_ABORTED' })
+})
+
+test('a session ended during the accepted receipt keeps the message out of the next one', async () => {
+  const w = world()
+  w.get().queue.push(MESSAGE)
+  const r = w.receiver()
+  w.get().onReceipt = () => r.end()
+  await r.tick()
+  await settle()
+  expect(w.submitted.length).toBe(0)
 })
 
 test('a turn that starts after its delivery was called uncertain still stays out of the board, and its ACK counts', async () => {

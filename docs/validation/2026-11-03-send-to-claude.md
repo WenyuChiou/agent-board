@@ -25,6 +25,8 @@ Date: 2026-11-03. Part of #316.
 | Take back | During a 25 s turn: `Claude is working. It gets this when this step ends.` with Take back. Pressed: the line went and the message never reached the model. |
 | Esc | A message sent after a stop: `Stopped in Claude. Not delivered.` with Send again and Copy message. |
 | After Esc | A second message stayed `queued` until the person typed, then was delivered once. |
+| A turn that uses a tool | The stand-in answered `ACK <nonce>` and a tool call, then other words. Before the fix: `uncertain` / `ACK_MISSING`. After: `acknowledged`. |
+| `/clear` | The session registered under its new id and acknowledged a message sent there. |
 | Closed session | After `/exit` the connection was gone and the card showed `Claude isn't connected to this board. Copy this and paste it there.` with Copy answer. |
 
 The page was driven in the app's browser pane, its buttons pressed by script, as the window was not
