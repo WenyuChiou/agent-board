@@ -3,6 +3,15 @@ import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { boardClient, deliveryPrompt } from './message-client.mjs'
 
+/** @type {import('./message-client.mjs').MessagingReceiverRecord} */
+export const messagingReceiver = {
+  host: 'Codex',
+  surfaces: [{ name: 'Existing-owner proxy (active turn only)', evidence: null }],
+  tier: 2,
+  primitive: 'unknown',
+  isImplemented: true,
+}
+
 // Connects only to an already-running Codex control socket. `proxy` does not start,
 // resume or search saved threads. No credential file or transcript is opened here.
 export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, surface = 'Codex local proxy', socket, onError }) => {

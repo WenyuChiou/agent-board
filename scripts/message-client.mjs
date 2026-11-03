@@ -1,5 +1,18 @@
 // Adapter API for an existing, explicitly authorized host connection. Importing this
 // module does not open an AI application, discover credentials or send a model message.
+
+/**
+ * A receiver exports `messagingReceiver` beside its implementation. Evidence belongs
+ * to one exact surface; a CLI run must never verify a desktop or IDE implicitly.
+ * @typedef {Object} MessagingReceiverRecord
+ * @property {string} host
+ * @property {{ name: string, evidence: string | null, earlier?: string }[]} surfaces `evidence` is a
+ *   `docs/validation/<date>-<host>-live.md` file; `earlier` is a dated note on a run that doesn't count as one.
+ * @property {1 | 2 | 3 | 4} tier
+ * @property {'[P1]' | '[P2]' | '[P3]' | '[P4]' | '[P5]' | 'unknown'} primitive `unknown` when the roadmap names none for this surface.
+ * @property {boolean} isImplemented True for a merged receiver with synthetic tests.
+ */
+
 export const deliveryPrompt = message => {
   if (typeof message.prompt !== 'string' || !message.prompt) throw new Error('PROMPT_REQUIRED')
   return message.prompt

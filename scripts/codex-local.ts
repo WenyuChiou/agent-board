@@ -371,6 +371,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const config = configs[agent] ?? ''
   const script = join(root, 'agent-board.mjs')
+  // The doctor and the trust step only read the board's files, so they compare them with what an install in the
+  // board's own language wrote, which its first line holds: asked in another language, only the printed words change (#807).
+  const fileWords = ((): Strings => {
+    if (mode !== '--codex-doctor' && mode !== '--codex-trust') return s
+    const head = /^globalThis\.AGENT_BOARD = (.*)$/.exec(readLocal(script)?.split('\n', 1)[0] ?? '')
+    try {
+      const lang = object(JSON.parse(head?.[1] ?? '')).lang
+      return typeof lang === 'string' && Object.hasOwn(STRINGS, lang) ? STRINGS[lang as keyof typeof STRINGS] : s
+    } catch { return s }
+  })()
   const opencodeDir = resolve(flag('--opencode-dir') ?? (process.env.OPENCODE_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode')))
   const openclawDir = resolve(flag('--openclaw-dir') ?? (process.env.OPENCLAW_STATE_DIR || join(home, '.openclaw')))
   const deepseekDir = resolve(flag('--deepseek-dir') ?? (process.env.DSH_HOME || join(home, '.dsh')))
@@ -919,7 +929,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     nextConfigText = patch.text
     if (patch.group) groups.patch = patch.group
   }
-  const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(s.localAgentSkillDescription)}\n---\n\n${s.localAgentSkill(`${quote(process.execPath)} ${quote(script)}`)}\n\n${s.localAgentHandoff}\n\n${s.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
+  const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(fileWords.localAgentSkillDescription)}\n---\n\n${fileWords.localAgentSkill(`${quote(process.execPath)} ${quote(script)}`)}\n\n${fileWords.localAgentHandoff}\n\n${fileWords.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
   // The connect writes its board beside the progress file it connected: the default one, one a
   // CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names, or the one its own record keeps (#285).
   // Releases before de40dde wrote the command as node "<path>" for any path; later ones use boardRun.
@@ -933,11 +943,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const antigravitySkill = join(home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
   const original = readFileSync(process.argv[1] ?? '', 'utf8').replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, '')
   const files: Record<string, string> = {
-    [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === s)?.[0] ?? 'en' })}\n${original}`,
+    [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === fileWords)?.[0] ?? 'en' })}\n${original}`,
     [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, s.localAgentSkillDescription, home, s.localAgentStepFormat)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat)
   if (agent === 'openclaw') {
     files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home)
     files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
@@ -949,8 +959,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (agent === 'hermes') files[join(flag('--hermes-dir') ?? (process.env.HERMES_HOME || join(home, '.hermes')), 'skills', 'agent-board', 'SKILL.md')] = skillText
   if (agent === 'antigravity') files[antigravitySkill] = skillText
-  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'board.toml')] = `description = ${JSON.stringify(s.boardCommandDescription)}\nprompt = '''${s.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)} --serve}\n'''\n`
-  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'board.md')] = `---\ndescription: ${JSON.stringify(s.boardCommandDescription)}\n---\n\n${s.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)} --serve\`\n`
+  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)} --serve}\n'''\n`
+  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)} --serve\`\n`
   const isReleasedBoard = (text: string): boolean => {
     const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))
     return RELEASED.some(release => release.board.includes(bodyHash))

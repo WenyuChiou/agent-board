@@ -22,6 +22,10 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - Board: the board script knows the files 0.24.1 wrote, so it tells them apart from files the person changed (#793).
 
+- Messaging: the READMEs and the messaging guide have a table of which agent and surface can receive a board message, built from each receiver's own record; a surface shows Verified only with a live run behind it (#720, #802).
+
+- Setup: the Codex doctor and the trust step find a working install when asked in another language than it was installed in (#807, #811).
+
 ## 0.24.1 — 2026-11-03
 
 - Setup / Windows: the README's board commands and `--codex-trust` with the Codex that npm installed work on Windows PowerShell 5.1, and each setup and doctor error now says what went wrong and what to do next instead of asking for `--json` (#779).
