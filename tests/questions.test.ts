@@ -228,6 +228,19 @@ test('a resolved record with no full id is no answer for a peer sharing its alia
   const cycled = pass(pass(pass(pass(opened, noPeer, NOW + 5), withPeer, NOW + 6), noPeer, NOW + 7), withPeer, NOW + 8)
   expect(openIds(cycled)).toEqual(firstOpen)
   expect(shown(cycled, withPeer, NOW + 8).filter(text => text === 'Dead?')).toEqual(['Dead?'])
+  // With no peer, only a record showing the same copies counts as that open record.
+  const lone = block('a1b2c3d4-person-b', 'Alpha', 'Dead?')
+  const returned = pass(pass(asked, '', NOW + 1), block(null, 'Alpha', 'Dead?'), NOW + 2)
+  const latest = returned.records.at(-1)!
+  const answered = resolveQuestion(returned, latest.id, NOW + 3)
+  expect(shown(pass(pass(answered, lone, NOW + 4), lone, NOW + 5), lone, NOW + 5)).toEqual(['Dead?'])
+  const dup = block(null, 'Alpha', 'Dup?')
+  const dupAsked = pass(emptyQuestions(), dup, NOW)
+  const dupClosed = resolveQuestion(dupAsked, dupAsked.records[0]!.id, NOW + 1)
+  const oneCopy = block('a1b2c3d4-person-b', 'Alpha', 'Dup?')
+  const twoCopies = block('a1b2c3d4-person-b', 'Alpha', 'Dup?\n- [?] Dup?')
+  const copied = pass(pass(pass(dupClosed, oneCopy, NOW + 2), twoCopies, NOW + 3), oneCopy, NOW + 4)
+  expect(shown(copied, oneCopy, NOW + 4)).toEqual(['Dup?', 'Dup?'])
   // A block that still has no full id is the same block, whoever else shares the alias.
   const others = block('a1b2c3d4-person-b', 'Bravo', 'B open?') + block('a1b2c3d4-person-c', 'Gamma', 'C open?')
   const still = block(null, 'Alpha', 'Dead?') + others

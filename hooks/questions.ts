@@ -666,7 +666,7 @@ export const observeQuestions = (
   const isAnotherOwners = (record: QuestionRecord, row: Observation): boolean => {
     const asker = record.source === undefined || record.source.kind === 'inbox' ? undefined : sourceOwner(record.source)
     const owner = sourceOwner(row.source)
-    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && ((owners.get(record.scope)?.size ?? 0) > 1 || records.some(other => other.isUnresolved && other.scope === record.scope && other.words === record.words && other.occurrence === record.occurrence))
+    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && ((owners.get(record.scope)?.size ?? 0) > 1 || records.some(other => other.isUnresolved && other.isPresent && other.scope === record.scope && other.words === record.words && other.occurrence === record.occurrence && other.copies === record.copies))
   }
   const resolved = seen.flatMap(row => {
     if (!row.isWaiting) return []
