@@ -125,6 +125,7 @@ ${first}`), null, [], NOW - 2000, true, 's1').ledger
       expect(out).toContain(`▸ ${active} ${s.countActive}`)
       expect(out).not.toContain(`${s.pgNeeds}: `)
     }
+    expect(view.groups[0]!.summary).toBe(`${s.groupCount(2)} · ${s.groupWorking(active)}`)
   }
 })
 

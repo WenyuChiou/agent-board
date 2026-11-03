@@ -1,14 +1,13 @@
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { lastQuestionInProse, normalizeReply } from './digest'
-import { identity } from './grouping'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
 import { DARK, LIGHT } from './palette'
 import type { Tone } from './palette'
 import { sha256 } from './sha256'
 import { agentLabel } from './strings'
-import { isSameName, relativeTime, replyHint, rowNeedsYou } from './view'
+import { isSameName, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
 
@@ -221,16 +220,7 @@ const stepLine = (step: ViewStep): string => `${MARK[step.status] ?? '○'} ${st
 // with no agent is Claude Code's.
 const agentOf = (agent: string, isAgent: boolean, s: Strings): string => (agent !== '' ? agentLabel(agent, s) : isAgent ? agentLabel('claude', s) : '')
 
-// Whether this row needs the person on this board. A question counts while it has its card, by
-// the page's own match: copies of one question merge into one card and a later answer can cover
-// an earlier copy, so a row's own question may have no card left.
-const boardNeeds = (view: View, row: TaskRow, isShelved = false): ReturnType<typeof rowNeedsYou> => {
-  const needs = rowNeedsYou(row, isShelved)
-  if (needs?.kind !== 'question') return needs
-  const own = identity(row.agent, false, row.project, row.title, row.dir)
-
-  return view.waiting.some(item => identity(item.agent, false, item.project, item.task, item.dir) === own) ? needs : null
-}
+const boardNeeds = (view: View, row: TaskRow, isShelved = false): ReturnType<typeof rowNeedsYou> => rowNeedsNow(row, view.waiting, isShelved)
 
 // How a row that needs the person says so. Its question is already on the board's list above, so
 // it is not worded a second time; a blocked step has no other line.
