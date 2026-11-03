@@ -113,10 +113,15 @@ const note = name => { if (isNoting) return; isNoting = true; append(log, name +
 const watch = (owner, label, names) => { for (const name of names) { const real = owner[name]; if (typeof real === 'function') owner[name] = function (...args) { note(label + '.' + name); return real.apply(this, args) } } }
 watch(require('node:child_process'), 'child_process', ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'])
 watch(require('node:net'), 'net', ['connect', 'createConnection', 'createServer'])
+watch(require('node:net').Socket.prototype, 'socket', ['connect'])
+watch(require('node:tls'), 'tls', ['connect'])
+watch(require('node:dgram'), 'dgram', ['createSocket'])
+watch(require('node:timers'), 'timers', ['setTimeout', 'setInterval', 'setImmediate'])
 watch(require('node:http'), 'http', ['request', 'get', 'createServer'])
 watch(require('node:https'), 'https', ['request', 'get'])
-watch(fs, 'fs', ['writeFileSync', 'renameSync', 'unlinkSync', 'rmSync', 'mkdirSync', 'watch'])
-watch(globalThis, 'global', ['fetch', 'setInterval', 'setTimeout', 'WebSocket'])
+watch(fs, 'fs', ['writeFile', 'writeFileSync', 'appendFile', 'createWriteStream', 'copyFile', 'copyFileSync', 'writeSync', 'write', 'renameSync', 'unlinkSync', 'rmSync', 'mkdirSync', 'watch'])
+watch(require('node:fs/promises'), 'fs/promises', ['writeFile', 'appendFile', 'open', 'copyFile', 'rename', 'rm', 'mkdir'])
+watch(globalThis, 'global', ['fetch', 'setInterval', 'setTimeout', 'setImmediate'])
 syncBuiltinESMExports()
 `
 
@@ -137,9 +142,9 @@ test('scanning receiver records starts no process, connection, timer or file wri
   assert.deepEqual(real.seen, [])
 
   // The watch itself works: a record module that starts something is seen.
-  writeFileSync(join(directory, 'scripts/noisy-receiver.mjs'), "import { spawnSync } from 'node:child_process'\nspawnSync(process.execPath, ['--version'])\nsetTimeout(() => {}, 1)\nexport const messagingReceiver = { host: 'Noisy', tier: 4, primitive: '[P5]', isImplemented: false, surfaces: [{ name: 'CLI', evidence: null }] }\n")
+  writeFileSync(join(directory, 'scripts/noisy-receiver.mjs'), "import { spawnSync } from 'node:child_process'\nimport { writeFileSync } from 'node:fs'\nimport { connect } from 'node:net'\nspawnSync(process.execPath, ['--version'])\nsetTimeout(() => {}, 1)\nwriteFileSync(process.env.MATRIX_WATCH_LOG + '.noise', '')\nconnect(1, '127.0.0.1').on('error', () => {})\nexport const messagingReceiver = { host: 'Noisy', tier: 4, primitive: '[P5]', isImplemented: false, surfaces: [{ name: 'CLI', evidence: null }] }\n")
   const noisy = scan(directory)
-  assert.deepEqual(noisy.seen.filter(name => !name.startsWith('fs.')), ['child_process.spawnSync', 'global.setTimeout'], JSON.stringify(noisy))
+  for (const name of ['child_process.spawnSync', 'global.setTimeout', 'fs.writeFileSync', 'net.connect']) assert.ok(noisy.seen.includes(name), name + ': ' + JSON.stringify(noisy))
 }))
 
 test('a receiver record marks a surface Verified only when it names a live-run file that exists', () => fixture(directory => {
