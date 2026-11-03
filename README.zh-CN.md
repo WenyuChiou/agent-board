@@ -111,10 +111,10 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 
 | 在哪里 | 命令 |
 |---|---|
-| 任何终端 | `node ~/.agent-board/agent-board.mjs --watch`（`--html` 在浏览器打开） |
-| 浏览器 | `node ~/.agent-board/agent-board.mjs --serve` |
-| 聊天软件（通过 Hermes Agent 或 OpenClaw） | `node ~/.agent-board/agent-board.mjs --chat` |
-| 检查某个 agent 的设置 | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
+| 任何终端 | `node "$HOME/.agent-board/agent-board.mjs" --watch`（`--html` 在浏览器打开） |
+| 浏览器 | `node "$HOME/.agent-board/agent-board.mjs" --serve` |
+| 聊天软件（通过 Hermes Agent 或 OpenClaw） | `node "$HOME/.agent-board/agent-board.mjs" --chat` |
+| 检查某个 agent 的设置 | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 
 **在聊天软件里，** `--chat` 把看板打印成纯文本，缩到一条消息放得下，没有网页也没有链接。它会把你的主目录显示成 `~`，并遮掉它认得的凭证形式，例如 `token=...`；其他形式的机密它识别不出来，所以别把机密写进看板。
 
@@ -197,7 +197,7 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 ### 看板的网页
 
-上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `node ~/.agent-board/agent-board.mjs --serve` 也一样，再运行一次就会重新打开网页。在网页上可以：
+上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `node "$HOME/.agent-board/agent-board.mjs" --serve` 也一样，再运行一次就会重新打开网页。在网页上可以：
 
 - **回复**问题：开启消息功能、对话也连上时就**发送**，否则**复制**回复。LAN 网页没有消息功能。
 - **勾掉**下一步、**归档**一件工作，或点**现在归档**收走所有做完的。
@@ -224,7 +224,7 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 先运行 doctor。它检查安装器替某个 agent 写了什么，不会改任何东西：
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 ```
 
 `--agent` 后面换成那个 agent 的名字（doctor 对每个 agent 都沿用这个旧名称）。`installed` 表示文件都在，`ready` 表示这个 agent 有报告状态的 adapter。`connected` 一律是 `unverified`：只有新开的对话真的出现在看板上，才算证明接通了。

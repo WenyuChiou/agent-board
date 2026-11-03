@@ -111,10 +111,10 @@ CLI、桌面 App、IDE 的實際 hook 事件分開驗收；安裝了檔案、傳
 
 | 在哪裡 | 指令 |
 |---|---|
-| 任何終端機 | `node ~/.agent-board/agent-board.mjs --watch`（`--html` 在瀏覽器開） |
-| 瀏覽器 | `node ~/.agent-board/agent-board.mjs --serve` |
-| 聊天軟體（透過 Hermes Agent 或 OpenClaw） | `node ~/.agent-board/agent-board.mjs --chat` |
-| 檢查某個 agent 的設定 | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
+| 任何終端機 | `node "$HOME/.agent-board/agent-board.mjs" --watch`（`--html` 在瀏覽器開） |
+| 瀏覽器 | `node "$HOME/.agent-board/agent-board.mjs" --serve` |
+| 聊天軟體（透過 Hermes Agent 或 OpenClaw） | `node "$HOME/.agent-board/agent-board.mjs" --chat` |
+| 檢查某個 agent 的設定 | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 
 **在聊天軟體裡，** `--chat` 把看板印成純文字，縮到一則訊息放得下，沒有網頁也沒有連結。它會把你的家目錄顯示成 `~`，並遮掉它認得的憑證形式，例如 `token=...`；其他形式的機密它辨識不出來，所以別把機密寫進看板。
 
@@ -197,7 +197,7 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 ### 看板的網頁
 
-上面的看板指令會在瀏覽器打開看板網頁（在聊天軟體裡則只印出純文字，沒有連結）。在任何終端機跑 `node ~/.agent-board/agent-board.mjs --serve` 也一樣，再跑一次就會重新打開網頁。在網頁上可以：
+上面的看板指令會在瀏覽器打開看板網頁（在聊天軟體裡則只印出純文字，沒有連結）。在任何終端機跑 `node "$HOME/.agent-board/agent-board.mjs" --serve` 也一樣，再跑一次就會重新打開網頁。在網頁上可以：
 
 - **回覆**問題：開了訊息功能、對話也連上時就**傳送**，否則**複製**回覆。LAN 網頁沒有訊息功能。
 - **勾掉**下一步、**封存**一件工作，或按**現在封存**收走所有做完的。
@@ -224,7 +224,7 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 先跑 doctor。它檢查安裝器替某個 agent 寫了什麼，不會改任何東西：
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 ```
 
 `--agent` 後面換成那個 agent 的名字（doctor 對每個 agent 都沿用這個舊名稱）。`installed` 表示檔案都在，`ready` 表示這個 agent 有回報狀態的 adapter。`connected` 一律是 `unverified`：只有新開的對話真的出現在看板上，才算證明接通了。
