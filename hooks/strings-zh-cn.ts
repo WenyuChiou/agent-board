@@ -35,6 +35,7 @@ export const ZH_CN: Strings = {
   codexTrustNone: 'Codex：看板的 hooks 已受信任。开始新的 Codex 会话。',
   codexPrivacy: '只保留 session、turn、状态及明确报告的任务摘要；不读对话记录，不保存 hook 的 prompt、工具输入或回复，不发送给其他模型。',
   codexDoctor: '检查文件、hook 定义与 hook 信任状态，不能证明实际触发；仍须在 CLI 和桌面版分别验收。',
+  setupAlreadyGone: (files: string): string => `已不存在：${files}。`,
   setupSummary: {
     "preview": "将更新 {count} 个设置文件",
     "applied": "已更新 {count} 个设置文件",
@@ -43,6 +44,7 @@ export const ZH_CN: Strings = {
     "retry": "修复冲突的文件后重试：{command}",
     "skillOnly": "仅提供看板技能；暂无自动报告功能",
     "claude": "通过插件接上看板",
+    "connector": "由 Claude Code 插件的连接器管理；保留看板 {progress}",
     "next": "接下来：",
     "apply": "应用这些更改：{command}",
     "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。然后开始新的会话。",
@@ -55,6 +57,7 @@ export const ZH_CN: Strings = {
   setupErrorMissingValue: 'agent-board：setup 有个选项后面没有接值。--agent、--home、--data-dir 这类选项都要接一个值；请在选项后面补上，再运行一次 setup。',
   setupErrorConfig: (host: string): string => `agent-board：setup 读不懂或无法安全更新 ${host} 的设置，所以保持原样。请修正或移开该 agent 的配置文件，再运行一次 setup。`,
   setupErrorRecord: (file: string): string => `agent-board：setup 读不懂自己先前留下的安装记录 ${file}，所以保持原样。请把这个文件从 setup 存放数据的文件夹移到别处，再运行一次 setup。`,
+  setupErrorConnectRecord: 'agent-board：setup 读不懂 ~/.agent-board/legacy-connect.json，没有改动任何内容。请把这个文件和 ~/.agent-board/legacy-connect-authority（如有）移出 ~/.agent-board，再到 Claude Code 运行 /progress connect。',
   setupErrorConflict: (host: string): string => `agent-board：setup 无法安全更新 ${host} 的部分文件，所以没有改动任何内容。请不加 --apply 再运行一次 setup，查看「conflicts」列出的文件，再修正或移开它们。`,
   setupErrorUnsafePath: 'agent-board：setup 需要的某个路径含有引号、反引号、$ 或 % 字符，无法写入它的 hook 命令。请用 --data-dir 把 setup 存放数据的文件夹改到别处，再运行一次 setup。',
   setupErrorBoardPath: 'agent-board：另一个 agent 设置时用了不同的进度文件，而 setup 只维护一个共用看板，所以没有改动任何内容。请在 --progress-file 填入其他 agent 正在用的进度文件，再运行一次 setup。',
