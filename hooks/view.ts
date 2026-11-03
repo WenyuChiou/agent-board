@@ -193,12 +193,14 @@ export const rowNeedsYou = (row: TaskRow, isShelved = false): { kind: 'stuck' | 
 
 // Whether a row needs the person now. A question counts while it has its card, by the page's own
 // match: copies of one question merge into one card and a later answer can cover an earlier copy,
-// so a row's own question may have no card left.
-export const rowNeedsNow = (row: TaskRow, cards: readonly WaitingItem[], isShelved = false): ReturnType<typeof rowNeedsYou> => {
+// so a row's own question may have no card left. `cardIds`, when given, is the cards' identities
+// worked out once by the caller, so checking every row does not rematch every card (#192).
+export const rowNeedsNow = (row: TaskRow, cards: readonly WaitingItem[], isShelved = false, cardIds?: ReadonlySet<string>): ReturnType<typeof rowNeedsYou> => {
   const needs = rowNeedsYou(row, isShelved)
   if (needs?.kind !== 'question') return needs
   const own = identity(row.agent, false, row.project, row.title, row.dir)
 
+  if (cardIds !== undefined) return cardIds.has(own) ? needs : null
   return cards.some(item => identity(item.agent, false, item.project, item.task, item.dir) === own) ? needs : null
 }
 
@@ -826,6 +828,15 @@ export const buildView = (
   const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const recordsById = new Map((observed?.ledger.records ?? []).map(record => [record.id, record]))
+  // The frozen-scope lookup, built once: filtering the whole ledger for every frozen task
+  // rescanned the ledger once per task (#192). Scope, like the other record keys, never
+  // changes during a view build, so the lists stay correct for the whole call.
+  const recordsByScope = frozen.size === 0 ? null : new Map<string, QuestionRecord[]>()
+  if (recordsByScope !== null) for (const record of observed?.ledger.records ?? []) {
+    const list = recordsByScope.get(record.scope)
+    if (list === undefined) recordsByScope.set(record.scope, [record])
+    else list.push(record)
+  }
   const waiting: WaitingItem[] = []
   const inactiveHidden: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
@@ -909,7 +920,7 @@ export const buildView = (
       // shown by that saved question in the loop over the ledger below, or not at all once it is
       // answered or hidden. Any other [?] step asks as written, with no question id, as before the
       // ledger first sees it.
-      const scopeRecords = isFrozen ? (observed?.ledger.records.filter(record => record.scope === scope) ?? []) : []
+      const scopeRecords = isFrozen ? (recordsByScope?.get(scope) ?? []) : []
       // A question that should show but does not is worse than one shown twice. Only one saved
       // candidate covers a step, and an answer needs the same token or saved source revisions.
       const savedFor = (index: number) => {
@@ -930,11 +941,11 @@ export const buildView = (
           const saved = savedFor(index)
           return saved === undefined ? true : saved.isUnresolved === true && saved.source !== undefined && !marked.has(saved.id)
         }
-        return !marked.has(keys[index] ?? '') && observed?.ledger.records.find(record => record.id === keys[index])?.isUnresolved !== false
+        return !marked.has(keys[index] ?? '') && recordsById.get(keys[index] ?? '')?.isUnresolved !== false
       }
       const stageOf = (index: number) => {
         const id = observed?.keys[questionSlot(scope, index)]
-        return questionAge(observed?.ledger.records.find(record => record.id === id)?.firstObserved ?? 0, now).stage
+        return questionAge(recordsById.get(id ?? '')?.firstObserved ?? 0, now).stage
       }
       const isPrompt = (index: number): boolean => isFrozen ? savedFor(index) === undefined && isAsked(index) && stageOf(index) === 'pending' : isAsked(index) && stageOf(index) === 'pending'
 
@@ -970,8 +981,8 @@ export const buildView = (
           ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         })
       })
-      const unresolved = taskQuestions.filter(item => !marked.has(item.hideKey) && observed?.ledger.records.find(record => record.id === item.questionId)?.isUnresolved !== false)
-      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => marked.has(item.hideKey) && observed?.ledger.records.find(record => record.id === item.questionId)?.isUnresolved !== false))
+      const unresolved = taskQuestions.filter(item => !marked.has(item.hideKey) && recordsById.get(item.questionId ?? '')?.isUnresolved !== false)
+      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => marked.has(item.hideKey) && recordsById.get(item.questionId ?? '')?.isUnresolved !== false))
       if (!isInactive) waiting.push(...taskQuestions)
 
       let completion: DoneItem & { at: number } | null = null
@@ -1244,6 +1255,8 @@ export const buildView = (
   // question list, and the row keeps its own.
   const merged = mergeCopies([...all.filter(item => !isMarked(item)), ...retained, ...onRows].map(item => ({ item, ...seenAs(item), isStopped: item.questionId !== undefined && stoppedQuestions.has(item.questionId) })), closedCopies(observed?.ledger.records ?? [], marked))
   const asks: WaitingItem[] = merged.filter(item => item.ageStage === 'pending')
+  // The pending cards' identities, worked out once for every row's needs check below (#192).
+  const askIds = new Set(asks.map(item => identity(item.agent, false, item.project, item.task, item.dir)))
   for (const group of groups) {
     const count = (test: (row: TaskRow) => boolean, word: (n: number) => string): string => {
       const n = group.rows.filter(test).length
@@ -1253,7 +1266,7 @@ export const buildView = (
       s.groupCount(group.rows.length),
       count(row => row.tone === 'warn', s.groupWaiting),
       count(row => row.tone === 'alert', s.groupStuck),
-      count(row => row.auto === 'working' && rowNeedsNow(row, asks) === null, s.groupWorking),
+      count(row => row.auto === 'working' && rowNeedsNow(row, asks, false, askIds) === null, s.groupWorking),
     ]
       .filter(part => part !== '')
       .join(' · ')

@@ -12,8 +12,10 @@ const K = [
 
 const rotate = (x: number, n: number): number => (x >>> n) | (x << (32 - n))
 
+const encoder = new TextEncoder()
+
 export const sha256 = (text: string): string => {
-  const bytes = new TextEncoder().encode(text)
+  const bytes = encoder.encode(text)
   const length = bytes.length
   // The message, a 1 bit, zeros, and its length in bits, in 512-bit blocks of 16 words.
   const words = new Uint32Array(((length + 8) >> 6) * 16 + 16)

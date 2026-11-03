@@ -84,15 +84,30 @@ const scopeTables = (projects: readonly ProgressProject[], mine: ProgressMirror 
   }
   return {
     owners,
-    scopeOf: (project: string, agent: string, session: string, resume?: string | null): string => {
-      const scope = questionScope(project, agent, session)
-      if (resume == null) return scope
-      const own = questionScope(project, agent, resume)
-      if (saved.has(own)) return own
-      const held = holders.get(scope)
-      if (held !== undefined) return held.has(resume) ? scope : own
-      return (owners.get(scope)?.size ?? 0) > 1 ? own : scope
-    },
+    // The same scope is asked for again and again within one view (once per task here, once
+    // per task in the view), so it is worked out once per call rather than once per ask (#192).
+    // The tables above are fixed by the time this closure runs, so the memo stays correct.
+    scopeOf: ((): QuestionScopeOf => {
+      const memo = new Map<string, string>()
+      return (project: string, agent: string, session: string, resume?: string | null): string => {
+        const key = JSON.stringify([project, agent, session, resume ?? null])
+        const held = memo.get(key)
+        if (held !== undefined) return held
+        const scope = questionScope(project, agent, session)
+        let resolved = scope
+        if (resume != null) {
+          const own = questionScope(project, agent, resume)
+          if (saved.has(own)) resolved = own
+          else {
+            const holdersForScope = holders.get(scope)
+            if (holdersForScope !== undefined) resolved = holdersForScope.has(resume) ? scope : own
+            else if ((owners.get(scope)?.size ?? 0) > 1) resolved = own
+          }
+        }
+        memo.set(key, resolved)
+        return resolved
+      }
+    })(),
   }
 }
 export const questionScopes = (projects: readonly ProgressProject[], mine: ProgressMirror | null, ledger?: QuestionLedger): QuestionScopeOf => scopeTables(projects, mine, ledger).scopeOf
@@ -519,14 +534,17 @@ export const questionFilesKey = (
   return files.some(([, , mtimeMs]) => now - mtimeMs < freshMs) ? null : files
 }
 
-type Observation = { scope: string; session: string; index: number | string; text: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
+type Observation = { scope: string; session: string; index: number | string; text: string; words: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
 const ownObservations = (mine: ProgressMirror, scopeOf: QuestionScopeOf = questionScope): Observation[] => {
   if (mine.isRun === true) return []
   const own = shortId(mine.sessionId)
   const auto = mirrorOwner(mine)
   const scope = scopeOf(mine.project, auto.agent, own, auto.resume)
-  return mine.tasks.map((task, index) => ({ scope, session: own, index, text: stepWords(task).trim(), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text: stepWords(task).trim(), agent: auto.agent, session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume }) } }))
+  return mine.tasks.map((task, index) => {
+    const text = stepWords(task).trim()
+    return { scope, session: own, index, text, words: questionWords(text), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text, agent: auto.agent, session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume }) } }
+  })
 }
 
 // All a question pass reads from this session's own list: whose it is and the rows it gives.
@@ -558,7 +576,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       // are worked out once per task rather than once per step (#371).
       const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? (task.auto === null ? task.notes.join('\n') : '')
       const data = sourceData(task)
-      task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
+      task.steps.forEach((step, index) => rows.push({ scope, session: task.auto?.session ?? '', index, text: step.text, words: questionWords(step.text), isWaiting: step.status === 'waiting', producer: step.questionToken ?? '', source: { kind: task.auto === null ? 'manual' : 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto?.agent ?? '', session: task.auto?.session ?? '', data } }))
     }
   }
   if (mine !== null) rows.push(...ownObservations(mine, scopeOf))
@@ -569,14 +587,15 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
     // A turn saved with no full session could be any holder's. While its alias has two, it stays
     // held: matching words on one of them do not show that one asked it.
     if (turn.session === undefined && (holders.get(JSON.stringify([turn.project, turn.agent || 'claude', turn.id]))?.size ?? 0) > 1) continue
-    const matching = rows.filter(row => row.isWaiting && row.session === turn.id && row.source.project === turn.project && (row.source.agent || 'claude') === (turn.agent || 'claude') && questionWords(row.text) === questionWords(turn.text) && isOwnerOf(row.source, turn.session))
+    const turnWords = questionWords(turn.text)
+    const matching = rows.filter(row => row.isWaiting && row.session === turn.id && row.source.project === turn.project && (row.source.agent || 'claude') === (turn.agent || 'claude') && row.words === turnWords && isOwnerOf(row.source, turn.session))
     if (matching.length === 1 && matching[0] !== undefined) {
       const row = matching[0]
       row.producerRevisions = [...new Set([...(row.producerRevisions ?? []), ...(turn.sourceRevisions ?? [])])]
       row.producerSources = [...(row.producerSources ?? []), JSON.stringify(turn)]
       continue
     }
-    rows.push({ scope, session: turn.id, index: `inbox:${questionWords(turn.text)}`, text: turn.text, isWaiting: true, producer: '', producerRevisions: turn.sourceRevisions, producerSources: [JSON.stringify(turn)], source: { kind: 'inbox', project: turn.project, task: '', context: '', text: turn.text, agent: turn.agent, session: turn.id, data: JSON.stringify(turn) } })
+    rows.push({ scope, session: turn.id, index: `inbox:${turnWords}`, text: turn.text, words: turnWords, isWaiting: true, producer: '', producerRevisions: turn.sourceRevisions, producerSources: [JSON.stringify(turn)], source: { kind: 'inbox', project: turn.project, task: '', context: '', text: turn.text, agent: turn.agent, session: turn.id, data: JSON.stringify(turn) } })
   }
   const tokens = new Map<string, number>()
   for (const row of rows) {
@@ -598,7 +617,7 @@ export const resolvedQuestionsToRetire = (ledger: QuestionLedger, projects: read
     ...(mine === null ? [] : [scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mirrorOwner(mine).resume)]),
     ...seen.map(row => row.scope),
   ])
-  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !isFrozenQuestion(record, frozen) && !seen.some(row => row.scope === record.scope && row.isWaiting && questionWords(row.text) === record.words)).map(record => record.id)
+  return ledger.records.filter(record => record.resolvedAt !== undefined && scopes.has(record.scope) && !isFrozenQuestion(record, frozen) && !seen.some(row => row.scope === record.scope && row.isWaiting && row.words === record.words)).map(record => record.id)
 }
 
 // Words identify candidates, not questions. A durable sequence identifies each incarnation;
@@ -634,9 +653,31 @@ export const observeQuestions = (
   // Producer receipts and an explicit resolution suppress only the resolved incarnation.
   // A new file/content revision can still prove a fresh ask without changing its words.
   const seen = observations(projects, mine, pending, frozen, scopeOf)
+  // Record lookups, keyed exactly as the scans below match them, so a lookup returns the same
+  // records, in the same order, as the scan it replaces (#192). The lists hold the record
+  // references, so flag checks still read the live record and mutations during the pass stay
+  // visible; a record's scope, words and producer never change after it is indexed, and every
+  // record pushed during the pass is indexed by indexRecord, so the indexes stay complete.
+  const byScopeWords = new Map<string, QuestionRecord[]>()
+  const byScopeWordsProducer = new Map<string, QuestionRecord[]>()
+  const byScope = new Map<string, QuestionRecord[]>()
+  const indexRecord = (record: QuestionRecord): void => {
+    const wordsKey = JSON.stringify([record.scope, record.words])
+    const wordsList = byScopeWords.get(wordsKey)
+    if (wordsList === undefined) byScopeWords.set(wordsKey, [record])
+    else wordsList.push(record)
+    const producerKey = JSON.stringify([record.scope, record.words, record.producer ?? ''])
+    const producerList = byScopeWordsProducer.get(producerKey)
+    if (producerList === undefined) byScopeWordsProducer.set(producerKey, [record])
+    else producerList.push(record)
+    const scopeList = byScope.get(record.scope)
+    if (scopeList === undefined) byScope.set(record.scope, [record])
+    else scopeList.push(record)
+  }
+  for (const record of records) indexRecord(record)
   // Each row's copies (the rows of its scope with the same words, in order), indexed once:
   // comparing every row with every other took seconds on a board of a few thousand steps (#371).
-  const copyKey = (row: Observation): string => JSON.stringify([row.scope, questionWords(row.text)])
+  const copyKey = (row: Observation): string => JSON.stringify([row.scope, row.words])
   const copyIndex = new Map<string, Observation[]>()
   for (const row of seen) {
     const key = copyKey(row)
@@ -648,7 +689,7 @@ export const observeQuestions = (
   // between the rows of a group, so they are read only.
   const copiesOf = (row: Observation): readonly Observation[] => copyIndex.get(copyKey(row)) ?? []
   const hasNewRevision = (row: Observation, record: QuestionRecord): boolean =>
-    [row, ...records.filter(other => other.scope === row.scope && other.words === record.words && other.isPresent && other.isUnresolved)]
+    [row, ...(byScopeWords.get(JSON.stringify([row.scope, record.words])) ?? []).filter(other => other.isPresent && other.isUnresolved)]
       .some(other => other.producerRevisions?.some(revision => !record.producerRevisions?.includes(revision)))
   // Each row's words, each record's hash and the retired set are worked out once a pass, not once
   // for every pair of row and record (#416).
@@ -666,13 +707,13 @@ export const observeQuestions = (
   const isAnotherOwners = (record: QuestionRecord, row: Observation): boolean => {
     const asker = record.source === undefined || record.source.kind === 'inbox' ? undefined : sourceOwner(record.source)
     const owner = sourceOwner(row.source)
-    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && ((owners.get(record.scope)?.size ?? 0) > 1 || records.some(other => other.isUnresolved && other.isPresent && other.scope === record.scope && other.words === record.words && other.occurrence === record.occurrence && other.copies === record.copies))
+    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && ((owners.get(record.scope)?.size ?? 0) > 1 || (byScopeWords.get(JSON.stringify([record.scope, record.words])) ?? []).some(other => other.isUnresolved && other.isPresent && other.occurrence === record.occurrence && other.copies === record.copies))
   }
   const resolved = seen.flatMap(row => {
     if (!row.isWaiting) return []
     const copies = copiesOf(row)
-    const words = questionWords(row.text)
-    const record = records.find(record => record.scope === row.scope && (record.producer ?? '') === row.producer && record.words === words && record.isUnresolved === false && !isAnotherOwners(record, row) && (row.producer !== '' || (record.resolvedAt !== undefined && (record.source?.task === row.source.task || isSameAsker(record.source, row.source)) && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
+    const words = row.words
+    const record = (byScopeWordsProducer.get(JSON.stringify([row.scope, words, row.producer])) ?? []).find(record => record.isUnresolved === false && !isAnotherOwners(record, row) && (row.producer !== '' || (record.resolvedAt !== undefined && (record.source?.task === row.source.task || isSameAsker(record.source, row.source)) && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
     return record === undefined ? [] : [{ row, record }]
   })
   const resolvedRows = new Set(resolved.map(item => item.row))
@@ -691,7 +732,7 @@ export const observeQuestions = (
   const assigned = new Set<string>()
   const groups = new Map<string, Observation[]>()
   for (const row of rows) {
-    const group = JSON.stringify([row.scope, questionWords(row.text)])
+    const group = JSON.stringify([row.scope, row.words])
     groups.set(group, [...(groups.get(group) ?? []), row])
   }
   // If the ledger was removed, never reuse an id still held by an acknowledgement.
@@ -700,8 +741,8 @@ export const observeQuestions = (
   for (const alike of groups.values()) {
     const first = alike[0]
     if (first === undefined) continue
-    const words = questionWords(first.text)
-    const candidates = records.filter(row => row.scope === first.scope && row.words === words && row.isPresent)
+    const words = first.words
+    const candidates = (byScopeWords.get(JSON.stringify([first.scope, words])) ?? []).filter(candidate => candidate.isPresent)
     const copies = copiesOf(first)
     const isAmbiguous = candidates.some(row => !row.producer && row.copies !== copies.length)
     if (isAmbiguous) for (const old of candidates.filter(record => !record.producer)) {
@@ -712,7 +753,7 @@ export const observeQuestions = (
       const occurrence = copies.indexOf(row) + 1
       if (row.producer !== '') {
         const owner = row.producer.split(':')[0]
-        for (const old of records) {
+        for (const old of byScope.get(row.scope) ?? []) {
           if (old.scope === row.scope && old.producer?.split(':')[0] === owner && (old.producer !== row.producer || old.words !== words)) {
             old.isPresent = false
             old.isWaiting = false
@@ -733,6 +774,7 @@ export const observeQuestions = (
         const binding = sha256(JSON.stringify([row.scope, words, occurrence, copies.length, incarnation]))
         record = { id: `question:${binding}:${next++}`, scope: row.scope, words, occurrence, copies: copies.length, isWaiting: true, isPresent: true, firstObserved: Number.isFinite(now) && now > 0 ? now : 0, incarnation, producer: row.producer }
         records.push(record)
+        indexRecord(record)
       }
       if (record === undefined) return
       record.isWaiting = row.isWaiting
@@ -790,7 +832,7 @@ export const observeQuestions = (
     const match = /^(\S+) (\d+) ([\s\S]*)$/.exec(key)
     if (match === null) continue
     const [, session, , text = ''] = match
-    const candidates = rows.filter(row => row.session === session && row.isWaiting && questionWords(row.text) === questionWords(text))
+    const candidates = rows.filter(row => row.session === session && row.isWaiting && row.words === questionWords(text))
     const picked = candidates.length === 1 ? candidates[0] : undefined
     if (picked !== undefined) legacy[key] = keys[questionSlot(picked.scope, picked.index)] ?? ''
     else if (isSettled && rows.some(row => row.session === session)) legacy[key] = ''
