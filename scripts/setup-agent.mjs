@@ -226,9 +226,9 @@ const main = () => {
     const path = relative(resolve(home), file)
     return path === '' ? '~' : path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path) ? join('~', path) : file
   }
-  // Applying also rewrites the record of an installed agent that was not selected when it holds a
-  // shared file that changes, so the preview names that record too.
-  const records = plan => targets.filter(other => !selected.includes(other)).map(other => join(plan.data, `install-${other}.json`)).filter(file => {
+  // Applying also rewrites the record of an installed agent that is not being set up, unselected or
+  // skipped for a conflict, when it holds a shared file that changes, so the preview names it too.
+  const records = plan => targets.filter(other => !available.includes(other)).map(other => join(plan.data, `install-${other}.json`)).filter(file => {
     try {
       const held = JSON.parse(readFileSync(file, 'utf8')).files ?? {}
       return plan.changes.some(change => Object.hasOwn(held, change.file))

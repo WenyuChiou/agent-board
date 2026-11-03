@@ -476,13 +476,23 @@ test('setup preview names the record of another installed agent that apply would
   const before = homeSnapshot(f.home)
   const preview = run('--agent', 'codex', '--lang', 'zh-TW')
   assert.equal(preview.status, 0, preview.stderr)
-  const listed = preview.stdout.split(/\r?\n/).filter(line => line.startsWith('  ~')).map(line => join(f.home, line.slice(3))).sort()
+  const listedIn = out => [...new Set(out.split(/\r?\n/).filter(line => line.startsWith('  ~')).map(line => join(f.home, line.slice(3))))].sort()
+  const changedSince = earlier => {
+    const after = homeSnapshot(f.home)
+    return Object.keys(after).filter(path => after[path] !== 'directory' && JSON.stringify(earlier[path]) !== JSON.stringify(after[path])).map(path => `${f.home}${path}`).sort()
+  }
+  const listed = listedIn(preview.stdout)
   assert.ok(listed.includes(join(f.root, 'install-cursor.json')), preview.stdout)
   assert.deepEqual(homeSnapshot(f.home), before)
   assert.equal(run('--agent', 'codex', '--lang', 'zh-TW', '--apply').status, 0)
-  const after = homeSnapshot(f.home)
-  const changed = Object.keys(after).filter(path => after[path] !== 'directory' && JSON.stringify(before[path]) !== JSON.stringify(after[path])).map(path => `${f.home}${path}`).sort()
-  assert.deepEqual(changed, listed)
+  assert.deepEqual(changedSince(before), listed)
+  // An agent selected but skipped for a conflict changes no file of its own, yet its record still changes.
+  f.save(join(f.home, '.cursor', 'hooks.json'), '{not json')
+  const skipped = homeSnapshot(f.home)
+  const mixed = run('--agent', 'codex,cursor', '--lang', 'en')
+  assert.ok(listedIn(mixed.stdout).includes(join(f.root, 'install-cursor.json')), mixed.stdout)
+  run('--agent', 'codex,cursor', '--lang', 'en', '--apply')
+  assert.deepEqual(changedSince(skipped), listedIn(mixed.stdout))
 }))
 
 test('setup preview groups files per agent and shortens only paths inside the selected home', () => fixture(f => {
