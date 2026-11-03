@@ -5,6 +5,121 @@ What changed for the person using Agent Board, one line per change, newest versi
 ## Unreleased
 
 - A fix or feature pull request writes no changelog entry: the release writes each CHANGELOG line from the pull request title (#718). Tests: `the fold writes a CHANGELOG line from each fix and feature title that brought no entry of its own`, `pr-check keeps the fragment of a pull request opened before the change and asks a fix or feature for no entry`.
+- Tests / native hooks: native Antigravity checks observe the recorded event after a hook safely queues it for automatic recovery (#706).
+- Antigravity / Windows fallback: long Windows installation paths no longer repeat shared directories in an oversized PowerShell fallback command (#705).
+- Page / message receipts: a card's durable message receipt replaces its earlier Queued hint, so Replied no longer appears beside stale enqueue feedback (#701).
+- Codex / reporting: withdrawing an agent-started Codex run no longer removes a block whose full session id contradicts its owner; the board file stays exactly as it was, as it does for an explicit report (#682).
+- Codex / reporting: independent local sessions sharing a short report id keep saving their own progress without overwriting each other (#677).
+- CI / Merged pull request updates: updating evidence on an already merged pull request no longer rejects issues closed by that merge (#673).
+- Contributing / Review queue: a merge notice is cancelled while a `Review: REQUEST CHANGES` for the head stands unresolved (#660).
+- Tests / Preflight: preflight test runs for one account now share a lock across different temporary directories, and unfamiliar lock-folder entries are left alone without blocking tests (#645).
+- Contributing / Review queue: `node scripts/review-queue.mjs` shows what Codex and Greptile said about each Ready pull request's head and where its merge notice stands, then lists who is away and which claims ran out (#642).
+- Contributing / Review queue: `node scripts/review-queue.mjs` suggests a reviewer for each waiting pull request from `docs/dev/reviewers.json`, never the author's own agent (#642).
+- CI / Preflight: a failed touched Node check now names up to three failing cases while keeping paths and tokens redacted, so its diagnostic identifies the useful failure without exposing the raw test log (#639).
+- Page / Polling: an unchanged page poll now returns an empty response and keeps the current view (#635).
+- Questions / Quoted choices: answer buttons no longer keep quote marks or brackets that wrap a choice question, including questions extracted from an agent's reply, in every language (#634).
+- Tests / Windows pane checks: pane checks keep automatic setup in the cases that exercise it and run in three files, with every existing assertion retained (#630).
+- Tests / Windows recovery evidence: a concurrent-writer recovery failure includes helper, lock and pending-event timestamps in its assertion message, while successful runs stay quiet (#626).
+- Codex / Windows hooks: the Codex hook command works for a Node path with a space and no 8.3 name, and a home folder with `’` no longer skips the hook (#625).
+- Codex / Windows hooks: on Windows, Codex 0.164 runs its hooks through PowerShell, and the hook command setup wrote, every word in double quotes, failed there, so the board got no Codex events (#623).
+- CI / Plugin on Windows: a pull request that changes what the plugin loads also runs the plugin check on Windows (#613).
+- Page / Working now: with no agent at work, Working now no longer says that no agent did anything when one waits on you (it points to Needs you) or stopped in the last 30 minutes (it names the agent and how long ago) (#612).
+- Codex / Trusting hooks: approving the board's Codex hooks prints one short line saying what happened and what to do next, instead of about 40 lines of JSON with paths and hashes; `--json` still prints the full details (#611).
+- Tests / Preflight: preflight now reports completed checks as they finish, names each touched Node test before starting it, and prevents cooperating local runs from testing at the same time (#605).
+- Tests / Hook load: hook-load reports no longer accept the closed #241 timing exception: failed or missing measurements now fail the run, without claiming the measured latency was fixed (#604).
+- Questions / Moving a project: moving the same live agent block to another project heading removes its former question from Waiting on you while retaining its original record and evidence (#602).
+- Codex / Doctor: running `--codex-doctor --agent codex` without `--codex-bin` auto-discovers the installed Codex binary or inspects `config.toml` to surface missing hook trust or unverified state instead of unconditional unknown (#601).
+- Antigravity / Resumed conversations: resumed Antigravity conversations receive their bound report instructions on the first observed turn, and local agents without a session flag match their active working folder automatically (#600).
+- Setup / Multi-agent upgrades: updating or connecting one local agent keeps shared setup records in sync across every installed agent on the machine, so later upgrades or removals do not report false conflicts (#599).
+- Terminal board / Steps written as records: a step written as a JSON record shows its own text instead of the raw JSON and the session id inside it (#598).
+- Tests / Hourly sweep: the damaged seen-file check no longer exposes an empty file while replacing its test data, avoiding an intermittent false failure (#595).
+- Page / Windows start: the first page start on Windows runs one PowerShell instead of four (#591).
+- Reporters / Pending event time: events queued by a late-starting hook worker now retain the same UTC event time as other pending events (#590).
+- Docs / Team routine: the review queue now also lists every lane worktree older than 2 hours that has no open or draft pull request, one line each with its branch and age (#583).
+- Plugin / Windows: the plugin loads again from a Windows git checkout: the board bundle keeps LF line endings, so it stays under the 1 MiB that Claude Code reads from one module (#582).
+- Claude Code / Plugin loads on every checkout: no module goes over Claude Code's 1 MiB limit, also on a checkout with CRLF line endings (#582).
+- Terminal board / Stop and SSH access: the stop command now says when a busy page could not close, and the SSH link opens the page (#580).
+- Contributing / Reviews: the maintainer offers its own pull requests to the collaborators first; a code-review subagent or Codex reviews one only when no collaborator has commented `Reviewing:` within four hours of Ready (#577).
+- Contributing / Review queue and flaky tests: `node scripts/review-queue.mjs` lists the pull requests waiting on a reviewer, smallest first, with the hours each has waited (#577).
+- Tests / Messaging: the sender-receiver matrix runs one test per sender and receiver pair, each with its own time limit (#575).
+- Contributing / Fewer merge conflicts: the generated board bundle is now stored one line per line, so two pull requests that change different code merge without a conflict, and the pull request keeps getting its CI run (#573).
+- Pane / Large progress files: a large `progress.md` with a very long line no longer makes the pane slow to update (#569).
+- Codex / Start note: a new Codex session you start in a project is told, before its first turn, what the other sessions there still have open or left unfinished in the last 7 days, the same note a Claude Code session already gets (#564).
+- Docs / CHANGELOG: CHANGELOG entries now say what changed for you in a sentence or three, and the test titles stay in the pull request (#563).
+- Pane / Archive: a done task archived on the same day as an identical archived one is kept as a second entry (#560).
+- Setup speaks to the person (#553).
+- Board tests avoid a sweep setup race and retry Windows cleanup (#552).
+- Page / A logo of its own: the board's mark is now Bubble a: a lowercase a whose foot turns into a speech-bubble tail, in one amber colour, in the page header and the browser tab (#551).
+- Page / Needs you first, then what is moving: the page opens on what needs you, then what is working now, then your projects, with a closed shelf of finished work at the end (#546).
+- Page / Sidebar on wide screens: from a narrow docked window up, a sidebar lists the views, the agents and the projects with their counts; it folds to a rail of icons and back, and a project and an agent filter work together (#546).
+- Page / Calmer colours and a simpler footer: actions are ink and only what needs you is amber; green means alive and red means something is wrong (#546).
+- Terminal board: it looks like the page, with the same colours and order, no flicker, and one-key answers to yes/no and two-option questions (#545).
+- One command opens the board where you are (#544).
+- Core / Runs: prevent session ID truncation and prefix collisions across concurrent subagents and multi-agent runs, using full canonical identifiers and composite keys for block matching, parent scoping, and observation caches (#539).
+- Docs / README key points: each README now sums the board up in three points (one Markdown file, every agent on one board, questions first) and links to the page on how the board works beside memory tools, in all three languages (#534).
+- Page / Stopped after a set time: configurable session inactivity staleness allows the board to mark quiet sessions stopped at a requested duration, enabling prompt completion and archive without waiting twelve hours (#532).
+- Docs / The board beside memory tools: a new page, `docs/dev/architecture-positioning.md`, explains how Agent Board differs from memory tools and how the two work together (#530).
+- The archive journey waits for its question ledger (#519).
+- A hand edit to progress.md made while the board writes its block is kept (#506).
+- Keep strongly identified agent runs out of the board (#501).
+- Tests / Pasted block clock: the test for a pasted block with a weeks-old clock places it an hour past 21 days, so a small clock step on the test machine no longer fails it (#493).
+- Pull requests from outside the team get their own caps and claim rules, and a small docs fix needs no issue (#482).
+- A new look and the board's own logo (#478).
+- The page picks an agent first and opens on Needs you (#477).
+- Tasks and questions grouped by agent (#476).
+- The background `--serve` test waits for the page to exit before removing its folder (#471).
+- Page / Windows start: the page start on Windows runs one PowerShell with 30 s, so a slow first start no longer ends with no page (#468).
+- The README opens with what Agent Board does, the phone route and a start for each main agent (#467).
+- Every agent the README lists is walked from setup to a card on the board in a synthetic home, and the README says which were not run live (#466).
+- Setup guides a Claude-only computer, reports every error as one sentence with its next step, and reads a byte-order mark in every JSON host config (#465).
+- Clean up archives the finished hand-kept tasks its count shows (#464).
+- A card on the serve page shows each step and each note as one line (#463).
+- One question asked in several places is one card (#463).
+- The HTML board shows a question that is in an agent block and in the inbox once (#463).
+- The read-only-file journey finds a long step's Done button by its title (#463).
+- The four-day stopped-task journey finds a step by its visible line (#463).
+- A turn that comes back as JSON no longer becomes a question (#462).
+- Every card names its agent by brand, a noted choice question keeps its options, and Reply comes first with at most three buttons (#461).
+- A synthetic big board for the tests (#460).
+- The messaging tests start their page in the order `--serve` does on Windows (#458).
+- Common setup accepts a UTF-8 BOM in existing Codex hook JSON (#451).
+- The sender matrix keeps its own test watchdog (#447).
+- Antigravity now shows its official SVG mark, DeepSeek Harness its official whale, and Muse Code the blue Muse brand mark (#442).
+- One new answer alone wakes the question pass (#440).
+- The README cover uses the approved preview target (#438).
+- L2 working-day batches use explicit ordered update times, so rapid same-millisecond writes cannot make the latest-agent check depend on a recency tie (#434).
+- A session that asks and stays silent for seven days is archived, and its question is kept under Older unanswered questions (#400).
+- Waiting shows one line for the questions of stopped sessions, and Older lists each with its age (#400).
+- Only a conversation a person started is a row; a run an agent started for itself joins its parent's row (#399).
+- The first /progress can wait up to five seconds for the existing startup upgrade before retrying the current installed live-board script (#393).
+- A Windows lock creation that ends its bounded wait with EPERM and no lock file reports a permission failure instead of a busy lock (#392).
+- Every line of the terminal board fits the terminal's width (#383).
+- Agent blocks dated more than five minutes ahead show a future-time marker (#382).
+- Hooks / Dropped queued events: a queued hook event dropped on replay leaves one line in `~/.agent-board/hook-errors.log` naming the agent, the event and the reason (#375).
+- On Windows, the board page keeps its address and token in a dedicated runtime folder with an explicit, non-inherited grant for the current account only (#340).
+- CI runs only the groups a pull request's changed paths affect, and the final gate fails when a selected check did not succeed (#339).
+- A pull request runs each Node line and each system once (#339).
+- Test-only CI stays narrow beside release notes (#339).
+- Reporters / Matching cut-tail detection: native reporters detect cut tails with the same UTF-8 rules as the board, including headings with non-breaking spaces (#298).
+- Progress / Hidden cut markers: a cut report marker now warns when it hides task headings inside a comment, while ordinary comments and fenced examples remain quiet (#297).
+- A Claude `/agent-board` command opens the live board page (#294).
+- The Claude desktop app's footer names the command that opens the board (#286).
+- Page / Memory on Linux: the background page no longer grows by about 50 MB outside its JavaScript memory over a long session (#266).
+- The parity matrix separates each agent's app and CLI (#252).
+- Queued lifecycle events recover without another prompt (#241).
+- Legacy hook regressions distinguish PATH selection from input deadlines (#241).
+- Concurrent hook acceptance observes bounded recovery (#241).
+- The generated Antigravity and Codex hook commands are now tested to reach Node without PowerShell on Windows (#241).
+- Observe L5 queued hooks through bounded autonomous recovery (#241).
+- Delayed hook events preserve their source time and cannot replace newer work (#241).
+- A busy board lock on Windows is no longer reported as "access denied", so a hook no longer drops its event (#241).
+- A hook run whose reporter fails saves its event, and a failed recovery frees its claim (#241).
+- Confirmed product workflows run in a real browser (#241).
+- Reporters / Windows input: on a busy Windows computer, an agent's event is no longer dropped while PowerShell starts (#241).
+- Antigravity's Windows hooks avoid a PowerShell startup when Node is verified (#241).
+- Make the L5 writer journeys prove contention and the rename retry (#241).
+- Archive now counts and keeps every task it archived, also two that share a title (#231).
+- Confirm done works on every marker shape FORMAT.md accepts, and is not offered on a step-less hand-kept task (#142).
 
 ## 0.24.0 — 2026-10-25
 
