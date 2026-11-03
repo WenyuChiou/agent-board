@@ -227,6 +227,23 @@ test('a reviewer already holding two open reviews is not suggested', () => {
   assert.equal(free.needsReviewer[0].suggested, 'bot-one')
 })
 
+test('a Reviewing comment with no verdict lapses after four hours and frees its reviewer', () => {
+  const comments = {
+    1: [ready(head, '2026-10-20T06:00:00Z'), taking('bot-two', '2026-10-20T07:00:00Z')],
+    2: [taking('bot-one', '2026-10-20T07:00:00Z')], 3: [taking('bot-one', '2026-10-20T07:00:00Z')],
+    4: [ready(head, '2026-10-20T10:00:00Z')],
+  }
+  const prs = [byAgent('claude'), pull(2), pull(3), pull(4, { body: 'Author: codex, branch' })]
+  const held = classify(prs, comments, '2026-10-20T10:59:00Z', team)
+  assert.deepEqual([held.needsReviewer[0].takenBy, held.needsReviewer[0].lapsedBy], ['bot-two', null])
+  // bot-one holds two reviews, so the fresh pull request goes to bot-two.
+  assert.equal(held.needsReviewer[1].suggested, 'bot-two')
+  const lapsed = classify(prs, comments, '2026-10-20T11:01:00Z', team)
+  assert.deepEqual([lapsed.needsReviewer[0].takenBy, lapsed.needsReviewer[0].lapsedBy], [null, 'bot-two'])
+  assert.equal(lapsed.needsReviewer[1].suggested, 'bot-one')
+  assert.match(formatQueue(lapsed), /#1 .*review by bot-two lapsed/)
+})
+
 test('a pull request Ready for more than four hours suggests the next reviewer and says it escalated', () => {
   const prs = [byAgent('codex'), pull(2, { body: 'Author: codex, branch', additions: 20 })]
   const comments = { 1: [ready(head, '2026-10-20T07:00:00Z')], 2: [ready(head, '2026-10-20T09:00:00Z')] }
@@ -572,7 +589,7 @@ test('away notices and expired claims print after the queue and appear in the JS
   const lines = run(['--repo', 'owner1/board']).split('\n')
   assert.deepEqual(lines.slice(lines.indexOf('Drafts: 0') + 1), ['Away: Bob until 2026-10-22', 'claim expired: #10 carol — relabel to ready (CONTRIBUTING rule 3)'])
   // The owner does not count as a collaborator, so Bob being away leaves nobody besides the author and a notice is allowed.
-  assert.ok(lines.includes('    notice allowed if only a collaborator or the owner may approve it (team-process, From claim to merge)'))
+  assert.ok(lines.includes('    notice allowed outside the governance files (team-process, From claim to merge)'))
   const queue = JSON.parse(run(['--repo', 'owner1/board', '--json']))
   assert.deepEqual(queue.away, [{ login: 'Bob', until: '2026-10-22' }])
   assert.deepEqual(queue.expiredClaims, [{ number: 10, login: 'carol' }])
@@ -611,7 +628,16 @@ test('a Ready pull request that nobody has taken for more than 24 hours may merg
   assert.equal(noticeOf([comment('Reviewing: bob', '2026-10-20T08:00:00Z', 2)], { readyAt: '2026-10-19T11:00:00Z' }), null)
   assert.deepEqual(noticeOf([comment('Reviewing: bob', '2026-10-19T10:00:00Z', 0)], { readyAt: '2026-10-19T11:00:00Z' }), { state: 'allowed', at: null })
   const text = formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T11:00:00Z')] }, now))
-  assert.match(text, /\n {4}notice allowed if only a collaborator or the owner may approve it \(team-process, From claim to merge\)\n/)
+  assert.match(text, /\n {4}notice allowed outside the governance files \(team-process, From claim to merge\)\n/)
+})
+
+test('a lapsed Reviewing comment still closes the notice path, so the queue never offers a notice its own check cancels', () => {
+  const taken = [comment('Reviewing: bob (desktop)', '2026-10-19T10:00:00Z', 2)]
+  // Past 24 hours of Ready, with the Reviewing long lapsed, no notice is offered.
+  assert.equal(noticeOf(taken, { current: '2026-10-20T10:00:00Z' }), null)
+  // A notice posted anyway is cancelled by that same Reviewing comment.
+  const posted = notice('2026-10-22 12:00 UTC', head, '2026-10-20T10:05:00Z', 3)
+  assert.equal(noticeOf([...taken, posted], { current: '2026-10-20T10:10:00Z' }).state, 'cancelled')
 })
 
 test('a notice is also allowed when every collaborator other than the author is away', () => {
@@ -897,7 +923,7 @@ test('a push drops the old notice and a new Ready that nobody takes for 24 hours
   // The old notice names the old head, so the new head has none yet.
   assert.equal(noticeOf(items, { fields }), null)
   assert.deepEqual(noticeOf(items, { fields, current: '2026-10-21T12:00:00Z' }), { state: 'allowed', at: null })
-  assert.match(formatQueue(classify([pull(1, fields)], { 1: [ready(head), ...items] }, '2026-10-21T12:00:00Z')), /\n {4}notice allowed if only a collaborator or the owner may approve it /)
+  assert.match(formatQueue(classify([pull(1, fields)], { 1: [ready(head), ...items] }, '2026-10-21T12:00:00Z')), /\n {4}notice allowed outside the governance files /)
   // A notice for the new head is read as usual.
   const again = notice('2026-10-24 12:00 UTC', other, '2026-10-21T12:00:00Z', 7)
   assert.deepEqual(noticeOf([...items, again], { fields, current: '2026-10-21T13:00:00Z' }), { state: 'waiting', at: '2026-10-24T12:00:00.000Z' })
