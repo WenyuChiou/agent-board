@@ -253,6 +253,19 @@ test('pr-check validates that a release pull request CHANGELOG section includes 
   // 3. Section for version is missing altogether when releaseNumbers exist: FAIL
   const noSection = checkPr({ ...baseData, changelogText: '# Changelog\n\n## 1.0.0 — 2026-01-01\n', releaseNumbers: [101] })
   assert.ok(noSection.problems.some(p => p.check === 'changelog' && /has no section for version 1\.1\.0/.test(p.message)))
+
+  // 4. A pull request that wrote its own line naming issue #101 (for PR #102) passes when releaseNumbers includes only title-only PR #100
+  const customEntryData = {
+    ...baseData,
+    changelogText: '# Changelog\n\n## 1.1.0 — 2026-02-01\n\n- Fix something (#100).\n- Custom entry for issue (#101).\n\n## 1.0.0 — 2026-01-01\n',
+    releaseNumbers: [100],
+  }
+  const customOk = checkPr(customEntryData)
+  assert.deepEqual(customOk.problems.filter(p => p.check === 'changelog'), [])
+
+  // Missing title-only PR #99 fails
+  const missingTitleOnly = checkPr({ ...customEntryData, releaseNumbers: [100, 99] })
+  assert.ok(missingTitleOnly.problems.some(p => p.check === 'changelog' && /is missing pull request #99/.test(p.message)))
 })
 
 test('pr-check fails a body without a Fixes or Part of line and says how to add it', () => {

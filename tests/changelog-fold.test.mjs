@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ambitionQuestions, commitEntries, foldText, fragmentIssue, orderFragments, parseArgs, parseFragment, readCommits, runFold, stripTests, unreadableMerges } from '../scripts/changelog-fold.mjs'
+import { ambitionQuestions, commitEntries, foldText, fragmentIssue, orderFragments, parseArgs, parseFragment, readCommits, runFold, stripTests, titleCommitNumbers, unreadableMerges } from '../scripts/changelog-fold.mjs'
 
 const script = fileURLToPath(new URL('../scripts/changelog-fold.mjs', import.meta.url))
 const summary = issue => `- **Synthetic entry (#${issue}).** A synthetic result.`
@@ -288,20 +288,37 @@ test('the fold prints how many fix- or feature-looking merges it could not read,
   assert.match(lines.join('\n'), /Unreadable fix or feature merges: 2 \(fix: an unreadable fix without pr number, #596\)/)
 })
 
-test('the fold updates an existing version heading when run a second time after a late merge', () => {
+test('the fold updates an existing version heading when run a second time after a late merge and folds late fragments', () => {
   const initialCommits = [{ subject: 'fix: first fix (#1)', paths: ['src/a.ts'] }]
   const folded = foldText({ text: '# Changelog\n\n## Unreleased\n\n- Existing unreleased (#0).\n', commits: initialCommits, version: '1.1.0', date: '2026-02-01' })
   assert.match(folded.text, /## 1\.1\.0 — 2026-02-01/)
   assert.match(folded.text, /- First fix \(#1\)\./)
 
-  // Late merge arrives: #2
+  // Late merge arrives: fix #2 (title) and late fragment for #388
   const lateCommits = [
     { subject: 'fix: first fix (#1)', paths: ['src/a.ts'] },
     { subject: 'fix: second late fix (#2)', paths: ['src/b.ts'] },
+    { subject: 'feat: grandfathered fragment feat (#388)', paths: ['changelog.d/388-hub-safe.md'] },
   ]
-  assert.throws(() => foldText({ text: folded.text, commits: lateCommits, version: '1.1.0', date: '2026-02-01' }), /already has a heading.*--into-existing/)
-  const updated = foldText({ text: folded.text, commits: lateCommits, version: '1.1.0', date: '2026-02-01', intoExisting: true })
+  const lateFragments = [
+    { path: 'changelog.d/388-hub-safe.md', text: '- **Safe messaging (#388).** Default hub safe.\n  Tests: `messaging hub starts cleanly`.\n' },
+  ]
+  assert.throws(() => foldText({ text: folded.text, commits: lateCommits, fragments: lateFragments, version: '1.1.0', date: '2026-02-01' }), /already has a heading.*--into-existing/)
+  const updated = foldText({ text: folded.text, commits: lateCommits, fragments: lateFragments, version: '1.1.0', date: '2026-02-01', intoExisting: true })
   assert.equal(updated.titleCount, 1)
+  assert.deepEqual(updated.fragments, ['changelog.d/388-hub-safe.md'])
   assert.match(updated.text, /- First fix \(#1\)\./)
   assert.match(updated.text, /- Second late fix \(#2\)\./)
+  assert.match(updated.text, /- \*\*Safe messaging \(#388\)\.\*\* Default hub safe\./)
+})
+
+test('titleCommitNumbers extracts numbers only from commits that do not change CHANGELOG or fragments', () => {
+  const commits = [
+    { subject: 'fix: a title-only fix (#101)', paths: ['src/a.ts'] },
+    { subject: 'fix: an unreleased fix (#102)', paths: ['CHANGELOG.md'] },
+    { subject: 'feat: a fragment feat (#103)', paths: ['changelog.d/103-x.md'] },
+    { subject: 'fix: another title-only (#104)', paths: ['hooks/x.ts'] },
+    { subject: 'docs: a doc change (#105)', paths: ['docs/x.md'] },
+  ]
+  assert.deepEqual(titleCommitNumbers(commits), [101, 104])
 })

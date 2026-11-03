@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
+import { fragmentIssue, isFragmentPath, titleCommitNumbers } from './changelog-fold.mjs'
 import { bundleFiles, isBundleFile } from './bundle-text.mjs'
 
 // Pull requests from outside the team (CONTRIBUTING.md, Outside contributors; #482): two open per GitHub login and
@@ -885,15 +885,13 @@ export const main = async (argv = process.argv.slice(2)) => {
       const tagCheck = spawnSync('git', ['describe', '--tags', '--abbrev=0', '--match', 'agent-board--v*'], { cwd, encoding: 'utf8', maxBuffer })
       const lastTag = tagCheck.status === 0 ? tagCheck.stdout.trim() : null
       if (lastTag) {
-        const logCheck = spawnSync('git', ['log', `${lastTag}..${base}`, '--format=%s'], { cwd, encoding: 'utf8', maxBuffer })
+        const logCheck = spawnSync('git', ['log', `${lastTag}..${base}`, '--format=%x1e%s', '--name-only'], { cwd, encoding: 'utf8', maxBuffer })
         if (logCheck.status === 0) {
-          const commitSubject = /^(?:fix|feat)(?:\([^)]*\))?!?:\s*(.+?)\s*\(#([1-9]\d*)\)\s*$/
-          const numbers = []
-          for (const line of linesOf(logCheck.stdout)) {
-            const match = line.match(commitSubject)
-            if (match) numbers.push(Number(match[2]))
-          }
-          data.releaseNumbers = [...new Set(numbers)]
+          const commits = logCheck.stdout.split('\x1e').filter(item => item.trim()).map(item => {
+            const [subject, ...paths] = item.split(/\r?\n/)
+            return { subject: subject.trim(), paths: paths.map(path => path.trim()).filter(Boolean) }
+          })
+          data.releaseNumbers = titleCommitNumbers(commits)
         }
       }
     }

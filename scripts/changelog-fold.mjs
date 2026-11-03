@@ -63,18 +63,32 @@ export const stripTests = text => {
 // A squash merge's subject is its pull request title and number. A fix or feature gets its CHANGELOG line from that
 // title, unless it added a fragment or wrote its own line in CHANGELOG.md, which already holds its entry.
 const commitSubject = /^(?:fix|feat)(?:\([^)]*\))?!?:\s*(.+?)\s*\(#([1-9]\d*)\)\s*$/
+
+export const isTitleOnlyCommit = ({ subject = '', paths = [] } = {}) => {
+  const match = subject.match(commitSubject)
+  if (!match || paths.some(path => path === 'CHANGELOG.md' || isFragmentPath(path))) return null
+  return { summary: match[1], number: Number(match[2]), prNumber: match[2] }
+}
+
+export const titleCommitNumbers = (commits = []) => {
+  const numbers = []
+  for (const commit of commits) {
+    const info = isTitleOnlyCommit(commit)
+    if (info) numbers.push(info.number)
+  }
+  return [...new Set(numbers)]
+}
+
 export const commitEntries = (commits = []) => {
   const seenNumbers = new Set()
   const entries = []
-  for (const { subject = '', paths = [] } of commits) {
-    const match = subject.match(commitSubject)
-    if (!match || paths.some(path => path === 'CHANGELOG.md' || isFragmentPath(path))) continue
-    const prNumber = match[2]
-    if (seenNumbers.has(prNumber)) continue
-    seenNumbers.add(prNumber)
+  for (const commit of commits) {
+    const info = isTitleOnlyCommit(commit)
+    if (!info || seenNumbers.has(info.prNumber)) continue
+    seenNumbers.add(info.prNumber)
     // A title that already ends in its issue number, as in 'fix: x (#560) (#579)', keeps only the pull request's.
-    const summary = match[1].replace(/(?:\s*\(#\d+\))+$/, '').replace(/[.\s]+$/, '')
-    entries.push(`- ${summary.charAt(0).toUpperCase()}${summary.slice(1)} (#${prNumber}).`)
+    const summary = info.summary.replace(/(?:\s*\(#\d+\))+$/, '').replace(/[.\s]+$/, '')
+    entries.push(`- ${summary.charAt(0).toUpperCase()}${summary.slice(1)} (#${info.prNumber}).`)
   }
   return entries
 }
@@ -126,6 +140,17 @@ export const foldText = ({ text, fragments = [], commits = [], version, date, in
     const existingSection = text.slice(headingStart, headingEnd)
     const existingNumbers = new Set([...existingSection.matchAll(/#([1-9]\d*)\b/g)].map(m => m[1]))
 
+    const eol = text.includes('\r\n') ? '\r\n' : '\n'
+    const ordered = orderFragments(fragments.filter(item => item.path !== 'changelog.d/README.md').map(parseFragment))
+    const fragmentEntries = ordered.map(item => stripTests(item.text).trim().replace(/\r?\n/g, eol))
+    const newFragmentEntries = []
+    const foldedFragmentPaths = ordered.map(item => item.path)
+    for (let i = 0; i < ordered.length; i++) {
+      if (!existingNumbers.has(ordered[i].issue)) {
+        newFragmentEntries.push(fragmentEntries[i])
+      }
+    }
+
     const fromTitles = commitEntries(commits)
     const newFromTitles = fromTitles.filter(entry => {
       const m = entry.match(/#([1-9]\d*)\)\.$/)
@@ -137,10 +162,9 @@ export const foldText = ({ text, fragments = [], commits = [], version, date, in
     const unreleasedEnd = unreleasedHeading ? headings[unreleasedStart + 1]?.index ?? text.length : 0
     const unreleased = unreleasedHeading ? stripTests(text.slice(unreleasedHeading.index + unreleasedHeading[0].length, unreleasedEnd)).trim() : ''
 
-    const eol = text.includes('\r\n') ? '\r\n' : '\n'
-    const newEntries = [...newFromTitles, ...(unreleased ? [unreleased] : [])]
+    const newEntries = [...newFragmentEntries, ...newFromTitles, ...(unreleased ? [unreleased] : [])]
 
-    if (!newEntries.length) {
+    if (!newEntries.length && !foldedFragmentPaths.length) {
       return {
         text,
         heading: existingMatch[0].trim(),
@@ -153,7 +177,7 @@ export const foldText = ({ text, fragments = [], commits = [], version, date, in
     }
 
     const trimmedSection = existingSection.trimEnd()
-    const updatedSection = trimmedSection + eol + eol + newEntries.join(eol + eol) + eol
+    const updatedSection = (newEntries.length ? trimmedSection + eol + eol + newEntries.join(eol + eol) : trimmedSection) + eol
     const suffix = text.slice(headingEnd)
     let newText = text.slice(0, headingStart) + updatedSection + (suffix ? (suffix.startsWith(eol) ? '' : eol) + suffix : '')
     if (unreleasedHeading) {
@@ -170,7 +194,7 @@ export const foldText = ({ text, fragments = [], commits = [], version, date, in
     return {
       text: newText,
       heading: existingMatch[0].trim(),
-      fragments: [],
+      fragments: foldedFragmentPaths,
       unreleasedCount: (unreleased.match(/^- /gm) ?? []).length,
       titleCount: newFromTitles.length,
       unreadableCount: unreadable.length,
