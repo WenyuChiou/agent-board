@@ -288,7 +288,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) |
 | Antigravity | IDE | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Claude Code | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
@@ -404,6 +404,55 @@ before `begin()` reports `rejected`; a failure after it reports `uncertain` with
 Calling `accepted()` also marks delivery as begun. Safe uppercase error codes are retained;
 other exception text is not stored. Adapters with fewer than three declared parameters
 keep the older behavior: entering `deliver` already counts as beginning delivery.
+
+## Claude Code session receiver
+
+A Claude Code session started in a terminal receives board messages by itself (#316); there is
+nothing to set up. `hooks/receiver.ts` holds the logic and `hooks/register.tsx` connects it.
+
+- **Finding the board.** Every 2 s the session looks for the address file the running page left
+  for its `progress.md`, in the folder `--serve` uses. It reads the file only when it can show the
+  file is this account's: on POSIX through a check of the owner and mode; on Windows it uses only
+  the folder under the home directory, and a set `XDG_RUNTIME_DIR` means no connection. The address
+  must name this board and `127.0.0.1`. Anything else leaves the card on Copy.
+- **Binding.** It registers as `agent: claude` with the session's full id, `scope: session`,
+  `turn: session`. That id is the `resume=` in its progress block, which is how the card finds it. A
+  reload presents the old connection, so it does not contest itself. A `-p` run and the SDK, which
+  includes the Desktop app today, do not register, and their cards stay on Copy.
+- **Taking a message.** It polls with `receive: true` only while no turn is running, it holds no
+  message and it has not been stopped. It sends the `accepted` receipt before the prompt reaches the
+  engine. A refused receipt, such as a message taken back, means it never does; one that gets no
+  answer is asked again, as nothing has reached Claude yet.
+- **Delivery.** `$.prompt.submit({ text })` with the hub's framed text, never `asUser`, so Claude
+  reads it as a plugin's message.
+- **Outcome.**
+
+| What happened | Receipt | Error | Card |
+| --- | --- | --- | --- |
+| A step of the delivery turn starts with its ACK | `acknowledged` | | Claude replied: ... (what follows the ACK), or Claude got this. |
+| The turn ended with no step starting with its ACK | `uncertain` | `ACK_MISSING` | Sent, but Claude hasn't confirmed. |
+| The person stopped the delivery turn | `uncertain` | `TURN_ABORTED` | Sent, but Claude hasn't confirmed. |
+| The engine dropped the prompt, as the person pressed Esc | `rejected` | `STOPPED` | Stopped in Claude. Not delivered. |
+| The submit failed, or no turn came of it within 30 s of idle time | `uncertain` | `DELIVERY_UNCERTAIN` | Sent, but Claude hasn't confirmed. |
+
+After a drop it takes nothing more until the person starts a turn. Nothing is ever submitted twice.
+
+**What stays out of the board.** A delivery turn's words and answer do not reach `progress.md`,
+the journal, the question list or the step summary. Only the ACK line goes back, and only what
+follows the ACK is shown; the rest of the reply stays in Claude's window.
+
+**Take back and Dismiss** both call `/api/messages/dismiss`, which also frees the session for the
+next message. Take back is offered while a message waits, and keeps it from Claude. Once it is
+delivered the card offers Dismiss, which only clears the card: it stops no turn and recalls no
+prompt the engine already holds.
+
+**Contested.** Polling keeps a connection's lease, so a receiver contested by a lost self would stay
+so. The poll answer says `contested`; the receiver then registers again with its own credentials,
+at most every 16 s. A lost self's lease has run out by then. Another live window keeps it contested,
+and the card stays on Copy.
+
+After a `/clear` or a resume the same process goes on under another id, with no `session.start`:
+the receiver ends the old connection and registers the new id.
 
 ## Codex existing-owner adapter
 
