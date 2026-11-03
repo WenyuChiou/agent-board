@@ -9,22 +9,36 @@ const LIMIT = 1024
 const blocked = (): Error => new Error('MESSAGE_STORE_CLAIM_BLOCKED')
 const canonical = (path: string): string => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path)
 
+// While its owner removes it, another board's claim can still have its name on Windows and yet
+// show no link (nlink 0). Looked at again after a wait, it is gone; this is not a broken claim.
+const removing = (): Error => Object.assign(new Error('MESSAGE_STORE_CLAIM_REMOVING'), { code: 'EAGAIN' })
+
 // Another board's claim (`isOther`) whose owner released it during this read has no name left
 // (nlink 0): that claim is gone, not broken. A board's own claim never goes that way.
 const readClaimOnce = (file: string, isOther: boolean): string => {
   const before = lstatSync(file)
+  if (isOther && before.isFile() && !before.isSymbolicLink() && before.nlink === 0) throw removing()
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 512) throw blocked()
   const fd = openSync(file, 'r')
   try {
     const opened = fstatSync(fd)
     if (isOther && opened.nlink === 0 && opened.dev === before.dev && opened.ino === before.ino) {
-      // Gone only if nothing has taken its name since.
-      try { lstatSync(file) } catch (error) { if (['ENOENT', 'EPERM', 'EBUSY', 'EAGAIN'].includes(String((error as NodeJS.ErrnoException).code))) throw error }
+      // Gone only if nothing has taken its name since: a name still on this same file is a
+      // removal not finished yet, and a name on another file blocks.
+      const now = (() => {
+        try { return lstatSync(file) } catch (error) {
+          if (['ENOENT', 'EPERM', 'EBUSY', 'EAGAIN'].includes(String((error as NodeJS.ErrnoException).code))) throw error
+          throw blocked()
+        }
+      })()
+      if (now.dev === opened.dev && now.ino === opened.ino) throw removing()
       throw blocked()
     }
     if (opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1 || opened.size > 512) throw blocked()
     const buffer = Buffer.alloc(513)
     const count = readSync(fd, buffer, 0, buffer.length, 0)
+    // A claim is never published empty, so another board's that reads empty is being removed.
+    if (count === 0 && isOther) throw removing()
     if (count === 0 || count > 512) throw blocked()
     return buffer.subarray(0, count).toString('utf8')
   } finally { closeSync(fd) }

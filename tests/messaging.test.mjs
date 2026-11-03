@@ -2659,6 +2659,111 @@ test('a claim refused while it is looked up again after its release is looked at
   }
 })
 
+// What Windows can show for a file another process is removing: its name, and no link.
+const unlinked = stat => Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { nlink: 0 })
+
+test('a claim that shows no link while its owner removes it is looked at again and counts as gone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-no-link-'))
+  const lstat = fs.lstatSync
+  const nonce = '9'.repeat(32), name = claimName(process.ppid, nonce)
+  let tries = 0
+  let claim
+  try {
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
+    fs.lstatSync = (file, ...args) => {
+      if (basename(String(file)) !== name || tries++ > 0) return lstat(file, ...args)
+      const stat = lstat(file, ...args)
+      unlinkSync(file)
+      return unlinked(stat)
+    }
+    syncBuiltinESMExports()
+    claim = claimMessageStore(dir)
+  } finally {
+    fs.lstatSync = lstat
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(tries, 2)
+    assert.equal(storeClaims(dir).length, 1)
+    assert.equal(existsSync(join(dir, name)), false)
+  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a claim opened with no link while its name is still on it is looked at again and counts as gone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-name-left-'))
+  const open = fs.openSync, fstat = fs.fstatSync, lstat = fs.lstatSync
+  const nonce = '8'.repeat(32), name = claimName(process.ppid, nonce)
+  let claimFd, looks = 0
+  let claim
+  try {
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
+    fs.openSync = (file, ...args) => {
+      const fd = open(file, ...args)
+      if (basename(String(file)) === name && claimFd === undefined) claimFd = fd
+      return fd
+    }
+    // Once only: a later file can get the same descriptor number.
+    fs.fstatSync = (fd, ...args) => {
+      if (fd !== claimFd) return fstat(fd, ...args)
+      claimFd = null
+      return unlinked(fstat(fd, ...args))
+    }
+    // The name is looked up again while the removal is still under way, then the file is gone.
+    fs.lstatSync = (file, ...args) => {
+      if (basename(String(file)) !== name || ++looks !== 2) return lstat(file, ...args)
+      const stat = lstat(file, ...args)
+      unlinkSync(file)
+      return stat
+    }
+    syncBuiltinESMExports()
+    claim = claimMessageStore(dir)
+  } finally {
+    fs.openSync = open
+    fs.fstatSync = fstat
+    fs.lstatSync = lstat
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(looks, 3)
+    assert.equal(storeClaims(dir).length, 1)
+    assert.equal(existsSync(join(dir, name)), false)
+  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a claim that reads empty while its owner removes it is looked at again and counts as gone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-message-reads-empty-'))
+  const open = fs.openSync, read = fs.readSync
+  const nonce = '7'.repeat(32), name = claimName(process.ppid, nonce)
+  let claimFd, reads = 0
+  let claim
+  try {
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, pid: process.ppid, nonce }) + '\n')
+    fs.openSync = (file, ...args) => {
+      const fd = open(file, ...args)
+      if (basename(String(file)) === name && claimFd === undefined) claimFd = fd
+      return fd
+    }
+    fs.readSync = (fd, ...args) => {
+      if (fd !== claimFd) return read(fd, ...args)
+      claimFd = null
+      reads++
+      unlinkSync(join(dir, name))
+      return 0
+    }
+    syncBuiltinESMExports()
+    claim = claimMessageStore(dir)
+  } finally {
+    fs.openSync = open
+    fs.readSync = read
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(reads, 1)
+    assert.equal(storeClaims(dir).length, 1)
+    assert.equal(existsSync(join(dir, name)), false)
+  } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('a claim written again under its name while another start reads it blocks the start and stays', () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-message-renamed-claim-'))
   const open = fs.openSync
