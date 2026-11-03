@@ -155,3 +155,91 @@ test('three real hub starts never leave two live owners of one message store', {
   }
   if (failure) throw failure
 })
+
+test('three real --serve starts on the default store collide and every start prints its URL', { timeout: 240_000 }, async () => {
+  const world = makeWorld()
+  try {
+    const root = world.root
+    const control = join(root, 'serve-barrier-control')
+    mkdirSync(control, { recursive: true })
+    const barrier = join(control, 'claim-barrier.cjs')
+    writeFileSync(barrier, [
+      "const fs = require('node:fs')",
+      "const path = require('node:path')",
+      "const origWrite = fs.writeFileSync",
+      "fs.writeFileSync = function(file, data, options) {",
+      "  const res = origWrite.apply(this, arguments)",
+      "  const roundDir = process.env.ROUND_CONTROL_DIR",
+      "  if (roundDir && typeof file === 'string' && path.basename(file).startsWith('.message-claim-')) {",
+      "    try {",
+      "      origWrite.call(fs, path.join(roundDir, 'ready-' + process.pid), '')",
+      "      const end = Date.now() + 5000",
+      "      while (Date.now() < end) {",
+      "        const files = fs.readdirSync(roundDir).filter(f => f.startsWith('ready-'))",
+      "        if (files.length >= 3) break",
+      "        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)",
+      "      }",
+      "    } catch {}",
+      "  }",
+      "  return res",
+      "}",
+      "require('node:module').syncBuiltinESMExports()",
+    ].join('\n'))
+
+    const home = join(root, 'serve-home')
+    mkdirSync(home, { recursive: true })
+    const progress = join(home, 'progress.md')
+    const script = join(home, 'agent-board.mjs')
+    writeFileSync(progress, '# Synthetic serve collision test\n')
+    writeFileSync(script, 'globalThis.AGENT_BOARD = ' + JSON.stringify({ path: progress, lang: 'en' }) + '\n' + BOARD_SCRIPT)
+
+    const runOne = (roundDir) => {
+      const env = { ...world.env, CLAUDE_PROGRESS_FILE: progress, E2E_BOARD_PATH: progress, NODE_OPTIONS: `--require ${JSON.stringify(barrier)}`, ROUND_CONTROL_DIR: roundDir }
+      const child = spawnIsolated(process.execPath, [script, '--serve', '--no-open', '--quiet-board'], { cwd: home, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      let stdout = '', stderr = ''
+      child.stdout.on('data', chunk => { stdout += chunk })
+      child.stderr.on('data', chunk => { stderr += chunk })
+      return new Promise((done) => {
+        child.once('exit', (code, signal) => done({ code, signal, stdout, stderr }))
+      })
+    }
+
+    const rounds = 20
+    for (let r = 0; r < rounds; r++) {
+      const roundDir = join(control, `round-${r}`)
+      mkdirSync(roundDir, { recursive: true })
+      const outcomes = await Promise.all([runOne(roundDir), runOne(roundDir), runOne(roundDir)])
+      for (let i = 0; i < 3; i++) {
+        assert.equal(outcomes[i].code, 0, `Round ${r} start ${i} failed (code ${outcomes[i].code}): stderr=${outcomes[i].stderr}`)
+      }
+      const urls = outcomes.map(o => {
+        const match = /(http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/.exec(o.stdout)
+        return match?.[1]
+      })
+      for (let i = 0; i < 3; i++) {
+        assert.ok(urls[i], `Round ${r} start ${i} printed no URL: stdout=${outcomes[i].stdout}`)
+      }
+      assert.equal(urls[0], urls[1], `Round ${r} starts 0 and 1 printed different URLs`)
+      assert.equal(urls[1], urls[2], `Round ${r} starts 1 and 2 printed different URLs`)
+
+      // Close the running server before the next round
+      const uri = new URL(urls[0])
+      try {
+        await fetch(new URL('/api/close', uri), { method: 'POST', headers: { 'x-board-token': uri.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) })
+      } catch {}
+      const closeDeadline = Date.now() + 5000
+      while (Date.now() < closeDeadline) {
+        try {
+          await fetch(new URL('/api/ping', uri), { signal: AbortSignal.timeout(200) })
+          await wait(50)
+        } catch {
+          break
+        }
+      }
+      await wait(150)
+    }
+  } finally {
+    await wait(300)
+    await world.close()
+  }
+})

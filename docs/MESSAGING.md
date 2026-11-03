@@ -110,8 +110,8 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 | State | Evidence |
 | --- | --- |
 | queued | Stored locally; no external delivery yet |
-| uncertain | Claimed durably before delivery, or a disconnect/timeout after claiming |
-| accepted | Adapter reports transport acceptance; no session ACK yet |
+| uncertain | Claimed durably before delivery, or a disconnect/timeout after claiming (unless accepted) |
+| accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is never sent again |
 | acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
 | rejected | Refused before claiming, or adapter reports a clean rejection |
 
@@ -226,7 +226,7 @@ receipt, so reconnecting the original receiver after a board restart may report 
 with a new connection id or turn, provided that connection is not contested. Board JSON
 omits nonces; only the receiver's claimed delivery supplies one. Receipts cannot set the
 hub's reserved `EXPIRED` or `DISMISSED` errors. Send and claim still require the current turn.
-Restart keeps claimed messages uncertain and never redelivers them; repeated restarts
+Restart keeps claimed messages uncertain (an accepted message stays accepted, marked disconnected) and never redelivers them; repeated restarts
 and disconnects do not reset their age limit. Expiry or dismissal lets the card send again.
 Stores are saved as version 2, which earlier releases cannot read: before going back to one,
 move both `messages.json` and `server.lock` out of the folder, since 0.24.0 and earlier take

@@ -53,6 +53,7 @@ export const ZH_TW = {
   messagesUncertain: "尚未確認回覆，請檢查原對話",
   messagesTimeout: "等候回覆逾時，請先檢查原對話",
   messagesAccepted: "等候回覆",
+  messagesAcceptedDisconnected: "連線中斷。結果未確認；等候回覆。",
   messagesAcknowledged: "已回覆",
   messagesRejected: '已拒絕／未送出',
   messagesFailed: '未能送出；目標可能已離線或綁定已變更。',

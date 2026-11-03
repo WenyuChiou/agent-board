@@ -1520,7 +1520,8 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
   const isTaken = (lock: string, held: string): boolean => {
     try { return readFileSync(lock, 'utf8') !== held } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' }
   }
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const deadline = performance.now() + 20_000
+  while (performance.now() < deadline) {
     const { url, stderr, readyBy } = await startPage()
     if (url !== null) return { url, port: Number(new URL(url).port), isKept: false, isNew: true }
     // Another `--serve` started at the same moment may have written its address first: this
@@ -1530,21 +1531,21 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
     const storeCode = /^MESSAGE_STORE_FAILED ([A-Z][A-Z0-9_]{0,63})\r?$/m.exec(stderr)?.[1]
     const lock = join(messagesDirectory(), 'server.lock')
     let held = ''
-    if (attempt === 0 && storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
+    if (storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
       try {
         held = readFileSync(lock, 'utf8')
       } catch { held = '' }
     }
-    const until = storeCode === 'MESSAGE_STORE_IN_USE' ? performance.now() + 10_000 : readyBy
+    const until = storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
     for (;;) {
       const other = await runningPage(true)
       if (other !== null) return { url: other.page.url, port: other.page.port, isKept: other.isKept, isNew: false, idleMs: other.idleMs }
       if (performance.now() >= until) break
       // A protected Windows address may still be publishing within this launch deadline.
       if (storeCode !== 'MESSAGE_STORE_IN_USE' && (process.platform !== 'win32' || !existsSync(file))) break
-      await new Promise(done => setTimeout(done, storeCode === 'MESSAGE_STORE_IN_USE' ? 200 : 50))
+      await new Promise(done => setTimeout(done, storeCode === 'MESSAGE_STORE_IN_USE' ? 100 : 50))
     }
-    if (held === '' && attempt === 0 && storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
+    if (held === '' && storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
       try { held = readFileSync(lock, 'utf8') } catch { held = '' }
     }
     // A hub killed without stopping leaves its pid, and after a restart that number can belong to
@@ -1572,11 +1573,12 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
       // It may be gone because its hub stopped meanwhile; another --serve's page may still be starting.
       // The next try waits for that page; the same pid (put back, or never moved) is not tried again.
       if (isMoved || isTaken(lock, held)) continue
-    } else if (attempt === 0 && storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
-      if (!existsSync(lock) && !hasLiveClaims(messagesDirectory())) {
-        await new Promise(done => setTimeout(done, Math.floor(Math.random() * 150) + 50))
-        continue
-      }
+    } else if (storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
+      // Collision in claims or another start is in flight: back off with randomized jitter, then retry or wait for its page
+      await new Promise(done => setTimeout(done, Math.floor(Math.random() * 150) + 50))
+      const afterWait = await runningPage(true)
+      if (afterWait !== null) return { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs }
+      if (performance.now() < deadline) continue
     }
     if (failure !== undefined && storeCode !== undefined) failure.storeCode = storeCode
     return null

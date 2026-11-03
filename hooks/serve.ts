@@ -663,7 +663,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
-  'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1289,7 +1289,12 @@ const PAGE_SCRIPT = String.raw`
     var ack = 'ACK ' + receipt.id;
     if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
     var isFailed = receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error);
-    var line = el('p', 'receipt' + (isFailed ? ' t-alert' : ''), w(receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error) ? 'messagesTimeout' : labels[receipt.status]) + (reply ? ' · ' + reply : ''));
+    var labelKey = receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error)
+      ? 'messagesTimeout'
+      : receipt.status === 'accepted' && receipt.error === 'DISCONNECTED'
+        ? 'messagesAcceptedDisconnected'
+        : labels[receipt.status];
+    var line = el('p', 'receipt' + (isFailed ? ' t-alert' : ''), w(labelKey) + (reply ? ' · ' + reply : ''));
     line.setAttribute('role', isFailed ? 'alert' : 'status');
     var last = key && sentLast[key];
     if (!isFailed || !last) return line;

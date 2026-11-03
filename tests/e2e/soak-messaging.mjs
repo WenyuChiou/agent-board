@@ -544,8 +544,9 @@ const soak = async ({ minutes, out }) => {
       if (hold.isActive && outcome === 'hold') {
         // Claimed and not answered: the hub is killed with this in flight. Every third one reports
         // that the transport accepted it, so accepted messages are in flight too.
-        hold.held.set(message.id, { session: session.number, nonce: message.nonce })
-        if (hold.held.size % 3 === 0) await receipt(session, conn, message, { status: 'accepted' })
+        const wasAccepted = hold.held.size % 3 === 0
+        hold.held.set(message.id, { session: session.number, nonce: message.nonce, wasAccepted })
+        if (wasAccepted) await receipt(session, conn, message, { status: 'accepted' })
         return
       }
       if (session.dropOnClaim || outcome === 'drop') {
@@ -963,8 +964,11 @@ const soak = async ({ minutes, out }) => {
       const messages = after.json.messaging?.messages ?? []
       const byId = new Map(messages.map(one => [one.id, one]))
       if ((after.json.messaging?.connections ?? []).length !== 0) crash.problems.push('the new hub holds connections it never took')
-      const notUncertain = [...claimedBefore.keys()].filter(id => byId.get(id)?.status !== 'uncertain')
-      if (notUncertain.length > 0) crash.problems.push(`${notUncertain.length} of ${claimedBefore.size} claimed messages did not come back uncertain`)
+      const notExpectedStatus = [...claimedBefore.entries()].filter(([id, claim]) => {
+        const expected = claim.wasAccepted ? 'accepted' : 'uncertain'
+        return byId.get(id)?.status !== expected
+      })
+      if (notExpectedStatus.length > 0) crash.problems.push(`${notExpectedStatus.length} of ${claimedBefore.size} claimed messages did not come back with their expected status (accepted or uncertain)`)
       // The restart is what ended their receivers' connections, and the board says so in the error. These
       // messages stay open, which is why the polls below hand out nothing until they are settled.
       const notDisconnected = [...claimedBefore.keys()].filter(id => byId.get(id)?.error !== 'DISCONNECTED')
@@ -1038,7 +1042,7 @@ const soak = async ({ minutes, out }) => {
       }
     } else crash.problems.push(wasKilled ? 'the hub did not start again' : 'the hub could not be ended')
     crash.line = crash.problems.length === 0
-      ? `${crash.held} claimed messages in flight (some accepted) when the hub was killed; it started again after ${crash.restartMs} ms, recovering the stale lock; all of them came back uncertain with the error DISCONNECTED, ${crash.handedOut} were handed out again, and ${crash.settled} receipts with the original nonce were accepted; once those were settled, a fresh message was the only one its receiver's next poll returned; ${crash.finishedOverCap ?? 0} of the oldest finished messages went past the cap of ${count(FINISHED_CAP)} as the restart ended the open ones.`
+      ? `${crash.held} claimed messages in flight (some accepted) when the hub was killed; it started again after ${crash.restartMs} ms, recovering the stale lock; all of them came back with the error DISCONNECTED (accepted preserved, rest uncertain), ${crash.handedOut} were handed out again, and ${crash.settled} receipts with the original nonce were accepted; once those were settled, a fresh message was the only one its receiver's next poll returned; ${crash.finishedOverCap ?? 0} of the oldest finished messages went past the cap of ${count(FINISHED_CAP)} as the restart ended the open ones.`
       : `${crash.problems.join('; ')}.`
     report.crash = crash
     pager.isStopped = false

@@ -215,6 +215,11 @@ test('L5 hub killed mid-delivery: the restarted --serve recovers the stale lock,
     const nonce = claimed[0].nonce
     assert.match(nonce, /^[0-9a-f]{6}$/)
 
+    // Transport acceptance before the kill
+    const accepted = await call(first, 'receipt', { connection: before.id, secret: before.secret, id, nonce, status: 'accepted' })
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body))
+    world.write('progress.md', `## Synthetic\n<!-- auto session=${receiver.session} agent=${receiver.agent} state=waiting updated=${new Date().toISOString()} -->\n### Task\n- [?] Continue, OK?\n<!-- /auto session=${receiver.session} -->\n`)
+
     // The hub dies before its receiver has answered; it cannot remove its lock.
     assert.equal(await killServe(first), true, 'The first hub was not ended')
     assert.equal(readFileSync(lock, 'utf8'), String(first.pid))
@@ -225,9 +230,11 @@ test('L5 hub killed mid-delivery: the restarted --serve recovers the stale lock,
     const board = (await second.get('/api/board')).json()
     assert.deepEqual(board.messaging.connections, [])
     const restored = board.messaging.messages.find(one => one.id === id)
-    assert.equal(restored?.status, 'uncertain')
+    assert.equal(restored?.status, 'accepted')
     assert.equal(restored.error, 'DISCONNECTED')
     assert.ok(!('nonce' in restored), 'The board shows the nonce')
+    const pageText = await second.page()
+    assert.ok(pageText.includes(EN.messagesAcceptedDisconnected), `The page does not show the disconnected accepted label: ${pageText}`)
 
     // The receiver registers again as the same session. The message was bound to its old connection
     // and is not handed out again, however often it asks.
