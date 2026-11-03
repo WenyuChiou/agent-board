@@ -78,7 +78,7 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
 
   test('messages: Codex to a Claude session is delivered natively or the card names the copy fallback in words', { timeout: 20000 }, async () => withHub([
     { agent: 'codex' }, { agent: 'claude' },
-  ], async hub => { await nativeOrFallback(hub, hub.actors[0], hub.actors[1], 58) }))
+  ], async hub => { await nativeOrFallback(hub, hub.actors[0], hub.actors[1], GAPS.claude) }))
 
   test('messages: Antigravity to a Hermes session is delivered natively or the card names the copy fallback in words', { timeout: 20000 }, async () => withHub([
     { agent: 'antigravity' }, { agent: 'hermes' },

@@ -2,7 +2,8 @@ import { BOARD_SCRIPT } from './board-script'
 import { connectRecordPath, hasOwnConnectData, recoveryUnreadableCode } from './connect-pure'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
-import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE } from './ledger-move'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
+import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } from 'claude-code'
@@ -46,6 +47,9 @@ import {
   parseJournal,
   previousMonth,
   progressReport,
+  nextPendingArchive,
+  parsePendingArchive,
+  pendingArchivePath,
   unwrittenEntries,
 } from './journal'
 import type { JournalEntry } from './journal'
@@ -2957,9 +2961,11 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   let pendingEntries: string[] = []
   let pendingKeys: string[] = []
   let pendingMoved: Array<{ session: string, text: string }> = []
+  let currentBoardHash = ''
   // The blocks that ask which a try has archived, by session, with the lines they had then.
   const moved = new Map<string, string>()
   const wrote = await rewrite($, path, async (text, isLast) => {
+    currentBoardHash = sha256(text)
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // The ledger is settled once for all of them. Another agent's write meanwhile (a new `[?]`
     // step) must not be written over with a result made from the older text: start again from it.
@@ -2995,7 +3001,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   }, undefined, async (path, text) => {
     // Made again after another session's write, the same blocks are not archived twice.
     const fresh = unwrittenEntries(pendingEntries, archived)
-    await appendArchive($, archivePath(path, at), fresh, s)
+    await appendArchive($, path, archivePath(path, at), fresh, s, archived, currentBoardHash)
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
@@ -3010,6 +3016,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     await poll($)
     return 0
   }
+  await removePendingArchiveNote($, path, s)
   if (keys.size > 0) {
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([key]) => !keys.has(key))))
     await saveDoneSeen($, at, kept => Object.fromEntries(Object.entries(kept).filter(([key]) => !keys.has(key))))
@@ -3021,6 +3028,30 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   await poll($)
 
   return [...removed.values()].reduce((sum, one) => sum + one, 0)
+}
+
+const removePendingArchiveNote = async ($: EngineInterface, path: string, s: Strings): Promise<void> => {
+  const pendingFile = pendingArchivePath(path)
+  if (!(await $.fs.exists(pendingFile))) return
+  const parentDir = pendingFile.replace(/[\\/][^\\/]*$/, '')
+  const name = baseName(pendingFile)
+  const list = await $.fs.list(parentDir).catch(() => [])
+  const found = list.find(entry => entry.name === name)
+  if (found && found.kind !== 'file') return
+  const isWin = await isWindows($, path)
+  if (await removeFiles($, [pendingFile], isWin)) {
+    await update($, answer, current =>
+      current !== null && Object.values(STRINGS).some(words => current.text === words.pendingNoteRemoveFailed(name))
+        ? null
+        : current,
+    ).catch(() => undefined)
+    return
+  }
+  await update($, answer, current =>
+    current?.isAsking || current?.copied !== undefined
+      ? current
+      : { question: s.archiveTitle, text: s.pendingNoteRemoveFailed(name), isAsking: false },
+  ).catch(() => undefined)
 }
 
 // What the explicit archive checks before it takes a block that asks (#174): the ledger settled
@@ -3040,12 +3071,77 @@ const keepAskedQuestions = async ($: EngineInterface, path: string, projects: re
 }
 
 // Entries added at the end of a month's archive file, after what it holds.
-const appendArchive = async ($: EngineInterface, month: string, entries: readonly string[], s: Strings): Promise<void> => {
-  if (entries.length === 0) return
-  const archive = await partFor($, month)
+const appendArchive = async (
+  $: EngineInterface,
+  progressFile: string,
+  month: string,
+  entries: readonly string[],
+  s: Strings,
+  written: ReadonlyMap<string, number> = new Map(),
+  currentBoardHash?: string,
+): Promise<void> => {
+  if (entries.length === 0 && written.size === 0) return
+  const pendingFile = pendingArchivePath(progressFile)
+  const parentDir = pendingFile.replace(/[\\/][^\\/]*$/, '')
+  const pendingBase = baseName(pendingFile)
+  let pendingText = ''
+  try {
+    const list = await $.fs.list(parentDir).catch(() => [])
+    const found = list.find(entry => entry.name === pendingBase)
+    if (found?.kind === 'file') {
+      pendingText = await readText($, pendingFile)
+    }
+  } catch {}
+  const pending = parsePendingArchive(pendingText)
+  const sizes = await readMonthParts(month, async path => (await $.fs.stat(path).catch(() => undefined))?.size ?? null)
+  const archive = currentPart(month, path => sizes.get(path) ?? null)
+  const earlierPaths = monthParts(month, path => (sizes.get(path) ?? null) !== null).filter(one => one !== archive)
   const past = await readText($, archive)
-  const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
-  await $.fs.write(archive, head + entries.join('\n\n') + '\n')
+  const earlier = earlierPaths.length === 0 ? [] : await Promise.all(earlierPaths.map(one => readText($, one).catch(() => '')))
+  const planned = nextPendingArchive([past, ...earlier], entries, written, pending, currentBoardHash)
+  if (planned.missing.length === 0 && written.size === 0) return
+  const list = await $.fs.list(parentDir).catch(() => [])
+  const existing = list.find(entry => entry.name === pendingBase)
+  if (existing && existing.kind !== 'file') {
+    throw new Error('PENDING_NOTE_NOT_REGULAR_FILE')
+  }
+  const payload = JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n'
+  const stagedRun = await $.process.run(['node', '-e', PENDING_STAGE, '--', pendingFile], { timeoutMs: 10000 }).catch(() => null)
+  if (stagedRun === null || stagedRun.exitCode === 127) {
+    // Computers without Node still need a complete recovery note before the archive changes.
+    const isWin = await isWindows($, progressFile)
+    const suffix = Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
+    const temporary = `${pendingFile}.${suffix}.tmp`
+    try {
+      await $.fs.write(temporary, payload)
+      if (!(await replaceFile($, temporary, pendingFile, isWin))) throw new Error('PENDING_NOTE_WRITE_FAILED')
+    } catch {
+      await removeFiles($, [temporary], isWin).catch(() => false)
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+  } else {
+    let stage: PendingStage | null = null
+    if (stagedRun.exitCode === 0 && !stagedRun.isStdoutTruncated) {
+      try {
+        stage = pendingStage(JSON.parse(stagedRun.stdout))
+      } catch {}
+    }
+    if (stage === null) throw new Error('PENDING_NOTE_WRITE_FAILED')
+    try {
+      await $.fs.write(stage.file, payload)
+    } catch {
+      await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, ''], { timeoutMs: 10000 }).catch(() => null)
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+    const committed = await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, sha256(payload)], { timeoutMs: 10000 }).catch(() => null)
+    if (committed === null || committed.exitCode !== 0) {
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+  }
+  if (planned.missing.length > 0) {
+    const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
+    await $.fs.write(archive, head + planned.missing.join('\n\n') + '\n')
+  }
 }
 
 // One task to the archive at the person's word, written the way archiveOld writes. False when
@@ -3054,10 +3150,12 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const path = await progressPath($)
   const at = await $.clock.now()
   const s = await wordsOf($)
-  const archived = new Set<string>()
+  const archived = new Map<string, number>()
   const observed = await read($, firstSeen)
   let pendingEntries: string[] = []
+  let currentBoardHash = ''
   const wrote = await rewrite($, path, async text => {
+    currentBoardHash = sha256(text)
     const projects = parseProgress(text)
     const hasQuestions = refTasks(projects, ref).some(task => task.steps.some(step => step.status === 'waiting'))
     if (hasQuestions) {
@@ -3070,11 +3168,13 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
     pendingEntries = taken.entries
     return taken.text
   }, undefined, async (path, text) => {
-    await appendArchive($, archivePath(path, at), pendingEntries.filter(entry => !archived.has(entry)), s)
-    for (const entry of pendingEntries) archived.add(entry)
+    const fresh = unwrittenEntries(pendingEntries, archived)
+    await appendArchive($, path, archivePath(path, at), fresh, s, archived, currentBoardHash)
+    for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     await $.fs.write(path, text)
   })
   if (wrote === null) return false
+  await removePendingArchiveNote($, path, s)
   if (ref.session === null) {
     const key = doneKey(ref.project, ref.title)
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([one]) => one !== key)))

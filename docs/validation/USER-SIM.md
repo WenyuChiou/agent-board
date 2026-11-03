@@ -6,7 +6,7 @@ Any agent (Claude Code, Codex, Antigravity, Cursor, a cloud agent) or person may
 
 ## Before you start
 
-1. **The exact package.** On the release commit, run `npm pack --pack-destination <a folder outside the checkout>`. That file holds the same bytes npm will get. Wherever the README says `npx @wenyuchiou/agent-board`, run `npx --package <folder>/wenyuchiou-agent-board-X.Y.Z.tgz agent-board` instead, with the same arguments. Never run the steps from a checkout.
+1. **The exact package.** On the release pull request's head, run `npm pack --pack-destination <a folder outside the checkout>`. That file holds the same bytes npm will get. Wherever the README says `npx @wenyuchiou/agent-board`, run `npx --package <folder>/wenyuchiou-agent-board-X.Y.Z.tgz agent-board` instead, with the same arguments. Never run the steps from a checkout.
 2. **A clean home.** Use a new, empty folder for each persona, and point every home and agent folder at it before you install, apply or start any agent: `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `XDG_CONFIG_HOME`, and the agents' own overrides `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `HERMES_HOME`, `GROK_HOME`, `OPENCLAW_STATE_DIR`, `DSH_HOME` and `CLAUDE_PROGRESS_FILE`. An override left set still points setup at that folder, even with the home moved. The `iso` function in [CONTRIBUTOR-PATH.md, step 4](../CONTRIBUTOR-PATH.md#4-run-the-checks) sets them all; on Windows, set the same names in the PowerShell session. Remove the folder afterwards. Never run in your own home: setup changes agent settings.
 3. **Two systems.** One run on Windows (PowerShell), one on macOS or Linux (bash or zsh). Node 22 or newer, as the README asks.
 4. **Agents.** Use real agents where they are installed, with no model turns needed. Where one is not, make a synthetic session the way `tests/e2e/` does, and write `synthetic` in that step's row.
@@ -90,7 +90,7 @@ Paste this into any agent, with the version filled in:
 
 ```text
 Run the simulated-user check in docs/validation/USER-SIM.md for Agent Board X.Y.Z, on this computer.
-Install only from the npm pack file of the release commit, in a new empty home folder, never my own.
+Install only from the npm pack file of the release pull request's head, in a new empty home folder, never my own.
 Play each persona the page names for this system. Read only the README's Quick start and what the tool shows.
 Do not read the source or fix anything. Mark every step PASS, FRICTION or FAIL by the page's criteria, with times.
 Write the record in the page's format with no user names, email addresses, machine names or home-folder paths in it, open a usersim issue for each FRICTION and FAIL, and remove the temporary home folder.
