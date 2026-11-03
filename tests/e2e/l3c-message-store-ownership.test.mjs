@@ -197,7 +197,7 @@ test('three real --serve starts on the default store collide and every start pri
     writeFileSync(script, 'globalThis.AGENT_BOARD = ' + JSON.stringify({ path: progress, lang: 'en' }) + '\n' + BOARD_SCRIPT)
 
     const runOne = (roundDir) => {
-      const env = { ...world.env, CLAUDE_PROGRESS_FILE: progress, E2E_BOARD_PATH: progress, NODE_OPTIONS: `--require ${JSON.stringify(barrier)}`, ROUND_CONTROL_DIR: roundDir }
+      const env = { ...world.env, CLAUDE_PROGRESS_FILE: progress, E2E_BOARD_PATH: progress, NODE_OPTIONS: `--require ${JSON.stringify(barrier)}`, ROUND_CONTROL_DIR: roundDir, AGENT_BOARD_CLAIM_DEBUG: join(control, 'claim-debug.txt') }
       const child = spawnIsolated(process.execPath, [script, '--serve', '--no-open', '--quiet-board'], { cwd: home, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
       let stdout = '', stderr = ''
       child.stdout.on('data', chunk => { stdout += chunk })
@@ -279,6 +279,14 @@ test('three real --serve starts on the default store collide and every start pri
     // Listing processes takes seconds on Windows, so the search for a page no start printed runs once, at the end.
     assert.deepEqual((await pagesLeft()).map(one => one.pid), [], 'a page process of this board is still running after the last round')
   } finally {
+    // DIAGNOSTIC ONLY (#795 CI): never merged.
+    try {
+      const lines = readFileSync(join(world.root, 'serve-barrier-control', 'claim-debug.txt'), 'utf8').split(/\r?\n/).filter(Boolean)
+      const counts = {}
+      for (const line of lines) { const key = line.replace(/^\d+ /, ''); counts[key] = (counts[key] ?? 0) + 1 }
+      console.log('CLAIM-DEBUG counts ' + JSON.stringify(counts))
+      console.log('CLAIM-DEBUG lines ' + JSON.stringify(lines.filter(line => !line.endsWith('OUTER MESSAGE_STORE_IN_USE')).slice(0, 150)))
+    } catch (error) { console.log('CLAIM-DEBUG none ' + error.code) }
     // A failed round leaves its page running; stop it so cleanup reports the round's failure, not a locked folder.
     if (running !== undefined && closePage !== undefined) await closePage(running).catch(() => {})
     for (const one of await (pagesLeft ?? (async () => []))().catch(() => [])) try { process.kill(one.pid) } catch {}

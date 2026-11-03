@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isFinished, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, shownMessage, textHash } from '../hooks/messaging'
 import type { Connection, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { privateFolder } from './private-folder'
-import { claimMessageStore } from './message-store-claim'
+import { claimDebug, claimMessageStore } from './message-store-claim'
 import type { MessageStoreClaim } from './message-store-claim'
 
 const LEASE_MS = 15_000
@@ -64,6 +64,7 @@ const openMessaging = (directory: string, isDefault = false) => {
     }
     const claim = claimMessageStore(root)
     try { return openClaimedMessaging(root, claim, isFreshDefault) } catch (error) {
+      claimDebug('OPEN-FAILED ' + String((error as NodeJS.ErrnoException)?.code ?? (error as Error)?.message))
       try { claim.release() } catch (cleanup) { throw new AggregateError([error, cleanup], 'MESSAGE_STORE_CLAIM_BLOCKED') }
       throw error
     }
