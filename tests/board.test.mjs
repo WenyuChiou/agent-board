@@ -8637,6 +8637,37 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   assert.deepEqual(descendants(line.parentNode).filter(node => node.tag === 'button').map(node => node.textContent), [EN.serveRetry, EN.serveCopyMessage])
 })
 
+test("a Claude card's line and buttons follow its message, and Take back and Dismiss end it", async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const ask = { ...model.asks[0], key: 'ask-claude', agent: 'claude', send: 'connected', delivery: { id: 'c1', turn: 'session', agent: 'claude' }, session: 'session1' }
+  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', error: '', text: 'the words', when: '2 min ago', ...receipt } }]; return next }
+  const dom = await pageDom(html, withReceipt({ status: 'accepted' }), { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  const box = () => dom.node('needs').querySelectorAll('[data-ref-key]')[0]
+  const receipt = () => descendants(box()).find(node => (node.className || '').split(' ').includes('receipt'))
+  const buttons = () => descendants(receipt().parentNode).filter(node => node.tag === 'button').map(node => node.textContent)
+  assert.equal(receipt().textContent, `${EN.claudeDelivered} · 2 min ago`)
+  assert.deepEqual(buttons(), [EN.messageTakeBack])
+  descendants(receipt().parentNode).find(node => node.textContent === EN.messageTakeBack && node.tag === 'button').click()
+  await dom.settle()
+  assert.deepEqual(dom.requests.at(-1).body, { id: 'm1' })
+  await dom.redraw(withReceipt({ status: 'queued' }))
+  assert.equal(receipt().textContent, EN.claudeSendWorking)
+  assert.deepEqual(buttons(), [EN.messageTakeBack])
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'ACK_MISSING' }))
+  assert.equal(receipt().textContent, EN.claudeUnconfirmed)
+  assert.deepEqual(buttons(), [EN.serveCopyMessage, EN.messageDismiss])
+  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED' }))
+  assert.equal(receipt().textContent, EN.claudeStopped)
+  assert.ok(buttons().includes(EN.serveCopyMessage))
+  await dom.redraw(withReceipt({ status: 'acknowledged', reply: 'on it' }))
+  assert.equal(receipt().textContent, EN.claudeReplied('on it'))
+  await dom.redraw(withReceipt({ status: 'acknowledged' }))
+  assert.equal(receipt().textContent, EN.claudeGotIt)
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'DISMISSED' }))
+  assert.equal(receipt(), undefined)
+})
+
 test('an agent with no open session shows as offline and its answers copy', async () => {
   const model = redesignModel()
   // Gemini has one question and one stopped task whose session ended; nothing of it is open.
