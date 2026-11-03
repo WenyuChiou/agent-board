@@ -379,6 +379,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // A check must not fail on the words of its next step: an argument a shell would expand or eat goes through boardRun's code points.
   const nextCommand = (nextMode: string, extra: string[] = []): string => {
     const rest = [nextMode, ...args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json' && arg !== '--plain'), ...extra]
+      // A Codex path a person can read: Windows takes forward slashes, and they need no code points.
+      .map((arg, index, all) => process.platform === 'win32' && all[index - 1] === '--codex-bin' ? arg.replaceAll('\\', '/') : arg)
     if (rest.some(arg => /["`$%!\\\r\n]/.test(arg))) return boardRun(process.argv[1]!, rest)
     return `${boardRun(process.argv[1]!)} ${rest.map(arg => /^[\w.:=/-]+$/.test(arg) ? arg : quote(arg)).join(' ')}`
   }

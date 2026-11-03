@@ -8453,7 +8453,7 @@ export const LINES = [
 "  const skill = join7(home, \".agents\", \"skills\", \"agent-board\", \"SKILL.md\");",
 "  const manifest = { files: object2(loaded.files ?? {}), groups: object2(loaded.groups ?? {}), foreignGroups: object2(loaded.foreignGroups ?? {}) };",
 "  const nextCommand = (nextMode, extra = []) => {",
-"    const rest = [nextMode, ...args.filter((arg) => arg !== mode && arg !== \"--apply\" && arg !== \"--json\" && arg !== \"--plain\"), ...extra];",
+"    const rest = [nextMode, ...args.filter((arg) => arg !== mode && arg !== \"--apply\" && arg !== \"--json\" && arg !== \"--plain\"), ...extra].map((arg, index, all) => process.platform === \"win32\" && all[index - 1] === \"--codex-bin\" ? arg.replaceAll(\"\\\\\", \"/\") : arg);",
 "    if (rest.some((arg) => /[\"`$%!\\\\\\r\\n]/.test(arg)))",
 "      return boardRun(process.argv[1], rest);",
 "    return `${boardRun(process.argv[1])} ${rest.map((arg) => /^[\\w.:=/-]+$/.test(arg) ? arg : quote(arg)).join(\" \")}`;",

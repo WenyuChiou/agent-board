@@ -3158,7 +3158,10 @@ test('a doctor that reached Codex prints a trust step that runs', () => fixture(
   assert.equal(doctor.status, 0, doctor.stderr)
   assert.ok(doctor.stdout.includes('Codex hooks are not all trusted.'), doctor.stdout)
   const step = /^Next: preview the hook trust change: (.+)$/m.exec(doctor.stdout)?.[1]
-  assert.ok(step, doctor.stdout)
+  // This home's --home holds a backslash, so the step goes through code points; read what they say.
+  const decoded = step.replace(/String\.fromCodePoint\(([\d,]+)\)/g, (_, points) => String.fromCodePoint(...points.split(',').map(Number)))
+  assert.ok(decoded.includes('--codex-trust'), decoded)
+  assert.ok(decoded.includes(process.platform === 'win32' ? executable.replaceAll('\\', '/') : executable), decoded)
   const preview = spawnSync(step, { shell: true, cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
   assert.equal(preview.status, 0, preview.stderr)
   assert.ok(preview.stdout.includes('would trust'), preview.stdout)
