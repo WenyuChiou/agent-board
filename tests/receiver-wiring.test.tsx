@@ -77,6 +77,48 @@ test('an address folder this account cannot show is its own gives no connection'
   expect(sent.length).toBe(0)
 })
 
+test('the ACK of a main step counts when the turn ends on other words, and a subagent step does not', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { sent } = hub(on, world)
+  on('turn.step', async function* (_, e) {
+    return { turnId: e.turnId, index: e.index, answer: `ACK ${NONCE}`, toolUses: [], stopReason: 'tool_use', usage: null } as never
+  })
+  const step = async (agentId?: string): Promise<void> => {
+    const stream = $.turn.step({ turnId: 'd1', index: 0, model: 'm', messageCount: 1, ...(agentId === undefined ? {} : { agentId }) })
+    while (!(await stream.next()).done);
+  }
+  await start($, 'first task')
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2100)
+  await $.turn.start({ text: PROMPT, turnId: 'd1' })
+  await step('a subagent')
+  await step()
+  await $.turn.complete({ answer: 'All the tests pass.', durationMs: 1, isAborted: false, turnId: 'd1', reason: 'answer' })
+  await clock.advance(10)
+  expect(sent.find(one => one.body.status === 'acknowledged')?.body.reply).toBe(`ACK ${NONCE}`)
+})
+
+test('a subagent step alone does not acknowledge a delivery', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { sent } = hub(on, world)
+  on('turn.step', async function* (_, e) {
+    return { turnId: e.turnId, index: e.index, answer: `ACK ${NONCE}`, toolUses: [], stopReason: 'tool_use', usage: null } as never
+  })
+  await start($, 'first task')
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2100)
+  await $.turn.start({ text: PROMPT, turnId: 'd1' })
+  const stream = $.turn.step({ turnId: 'd1', index: 0, model: 'm', messageCount: 1, agentId: 'a subagent' })
+  while (!(await stream.next()).done);
+  await $.turn.complete({ answer: 'All the tests pass.', durationMs: 1, isAborted: false, turnId: 'd1', reason: 'answer' })
+  await clock.advance(10)
+  expect(sent.find(one => one.body.status === 'uncertain')?.body.error).toBe('ACK_MISSING')
+})
+
 test('after a /clear the session goes on receiving, and after an exit it does not', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: false }
   const clock = engineBeneath(on, world)

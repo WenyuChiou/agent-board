@@ -149,9 +149,9 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
     const accepted = await receipt(pending, 'accepted')
     if (accepted === 'refused') return finish()
     if (accepted === 'unreached') return
+    const submittedAt = await deps.now()
     // A /clear during that receipt ended this message's session: it stays out of the next one.
     if ((await state()).pending?.id !== pending.id) return
-    const submittedAt = await deps.now()
     await set({ pending: { ...pending, phase: 'submitted', submittedAt } })
     isSubmitting = true
     deps.submit(pending.prompt).then(async entered => {
