@@ -691,7 +691,7 @@ export const LINES = [
 "  const isAnotherOwners = (record, row) => {",
 "    const asker = record.source === undefined || record.source.kind === \"inbox\" ? undefined : sourceOwner(record.source);",
 "    const owner = sourceOwner(row.source);",
-"    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && (owners.get(record.scope)?.size ?? 0) > 1;",
+"    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && ((owners.get(record.scope)?.size ?? 0) > 1 || records.some((other) => other.isUnresolved && other.scope === record.scope && other.words === record.words && other.occurrence === record.occurrence));",
 "  };",
 "  const resolved = seen.flatMap((row) => {",
 "    if (!row.isWaiting)",

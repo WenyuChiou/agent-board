@@ -182,6 +182,19 @@ test('an own question saved before same-prefix identity keeps its record when a 
   const beside = observeQuestions(resolved, withQuiet, mine, [], NOW + 2, true).ledger
   expect(beside.records.map(record => [record.words, record.isUnresolved])).toEqual([['Alpha question?', false], ['Alpha question?', true]])
   expect(beside.records[0]!.id).toBe(saved.records[0]!.id)
+
+  // Another open question of the session doesn't reopen this one, whatever its words.
+  for (const second of ['Second question?', 'Alpha question?']) {
+    const two = { ...applyTaskCreate(mine, { subject: second, metadata: { waiting: 'you' } }, '2', NOW), title: 'Alpha work' }
+    const twoFile = `## demo\n${renderAutoBlock(two).join('\n')}\n`
+    const first = observeQuestions(emptyQuestions(), parseProgress(twoFile), two, [], NOW, true).ledger
+    const stripped = { ...first, records: first.records.map(record => {
+      const { task, title, context } = JSON.parse(record.source!.data) as Record<string, unknown>
+      return { ...record, source: { ...record.source!, data: JSON.stringify({ task, title, context }) } }
+    }) }
+    const after = observeQuestions(resolveQuestion(stripped, first.records[0]!.id, NOW + 1), parseProgress(twoFile), two, [], NOW + 2, true).ledger
+    expect(after.records.map(record => [record.id, record.isUnresolved])).toEqual([[first.records[0]!.id, false], [first.records[1]!.id, true]])
+  }
 })
 
 test('a resolved record with no full id is no answer for a peer sharing its alias', () => {
@@ -199,9 +212,22 @@ test('a resolved record with no full id is no answer for a peer sharing its alia
   expect(shown(met, both, NOW + 5)).toEqual(expect.arrayContaining(['A ask?', 'Dead?']))
   expect(met.records.find(record => record.id === asked.records[0]!.id)!.isUnresolved).toBe(false)
   expect(met.records.filter(record => record.words === 'Dead?' && record.isUnresolved).map(record => record.scope)).toEqual([questionScope('demo', 'codex', 'a1b2c3d4')])
-  // The peer that left still counts, so the question doesn't go back to hidden.
+  // The second owner may have left long ago, with its questions closed: the alias still had two.
+  const askers = pass(holding, block('a1b2c3d4-person-a', 'Beta', 'A ask?') + block('a1b2c3d4-person-b', 'Bravo', 'B open?'), NOW + 4)
+  const quietened = askers.records.filter(record => record.isUnresolved && record.words !== 'Dead?').reduce((ledger, record) => resolveQuestion(ledger, record.id, NOW + 5), askers)
   const left = block('a1b2c3d4-person-b', 'Alpha', 'Dead?')
-  expect(shown(pass(met, left, NOW + 6), left, NOW + 6)).toContain('Dead?')
+  expect(Object.values(see(quietened, left, NOW + 6).keys)).not.toContain(asked.records[0]!.id)
+  expect(shown(pass(quietened, left, NOW + 6), left, NOW + 6)).toContain('Dead?')
+  // A peer with nothing saved can come and go: the question stays on the one open record.
+  const noPeer = block('a1b2c3d4-person-b', 'Alpha', 'Dead?')
+  const withPeer = `${noPeer}<!-- auto session=a1b2c3d4 agent=codex state=working updated=${new Date(NOW).toISOString()} resume=a1b2c3d4-person-a -->\n### Quiet\n- [ ] A quiet step\n<!-- /auto session=a1b2c3d4 -->\n`
+  const opened = pass(holding, withPeer, NOW + 4)
+  const openIds = (ledger: QuestionLedger) => ledger.records.filter(record => record.words === 'Dead?' && record.isUnresolved).map(record => record.id)
+  const firstOpen = openIds(opened)
+  expect(firstOpen.length).toBe(1)
+  const cycled = pass(pass(pass(pass(opened, noPeer, NOW + 5), withPeer, NOW + 6), noPeer, NOW + 7), withPeer, NOW + 8)
+  expect(openIds(cycled)).toEqual(firstOpen)
+  expect(shown(cycled, withPeer, NOW + 8).filter(text => text === 'Dead?')).toEqual(['Dead?'])
   // A block that still has no full id is the same block, whoever else shares the alias.
   const others = block('a1b2c3d4-person-b', 'Bravo', 'B open?') + block('a1b2c3d4-person-c', 'Gamma', 'C open?')
   const still = block(null, 'Alpha', 'Dead?') + others

@@ -661,11 +661,12 @@ export const observeQuestions = (
     return retired.has(hash)
   }
   // Holding the alias says where a session's records go, not that it asked each older one. Saved with
-  // no full id, an answer can't be told from another session's once the alias has two: it shows again.
+  // no full id, an answer can't be told from another session's once the alias has two: it shows again,
+  // and stays on that open record after a peer with nothing saved leaves.
   const isAnotherOwners = (record: QuestionRecord, row: Observation): boolean => {
     const asker = record.source === undefined || record.source.kind === 'inbox' ? undefined : sourceOwner(record.source)
     const owner = sourceOwner(row.source)
-    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && (owners.get(record.scope)?.size ?? 0) > 1
+    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && ((owners.get(record.scope)?.size ?? 0) > 1 || records.some(other => other.isUnresolved && other.scope === record.scope && other.words === record.words && other.occurrence === record.occurrence))
   }
   const resolved = seen.flatMap(row => {
     if (!row.isWaiting) return []
