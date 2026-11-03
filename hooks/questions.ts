@@ -57,24 +57,25 @@ export const questionScopes = (projects: readonly ProgressProject[], mine: Progr
     const source = record.source
     if (source === undefined) continue
     const auto = sourceOwner(source)
-    const canonical = auto === null ? null : canonicalOf(auto)
-    if (auto === null || canonical === null) {
-      // A copy saved before it held the session id is known only by its alias and title. A block's
-      // title can move to a peer, so that keeps an open question's id but doesn't carry an answer.
-      const ids = source.kind === 'own' || (auto !== null && record.isUnresolved) ? titled.get(JSON.stringify([record.scope, source.task])) : undefined
+    if (auto === null) {
+      // An own copy saved before it held the session id is known only by its alias and title.
+      const ids = source.kind === 'own' ? titled.get(JSON.stringify([record.scope, source.task])) : undefined
       const only = ids?.size === 1 ? [...ids][0] : undefined
       if (only !== undefined) note(holders, record.scope, only)
       continue
     }
     add(source.project, auto)
+    const canonical = canonicalOf(auto)
+    if (canonical === null) continue
     if (record.scope === questionScope(source.project, auto.agent, auto.session)) note(holders, record.scope, canonical)
     else if (record.scope === questionScope(source.project, auto.agent, canonical)) saved.add(record.scope)
   }
-  // An inbox ask's block keeps the alias only while no other owner has it: moving a peer that
+  // An inbox ask's block keeps the alias only while no other question has it: moving a peer that
   // already holds it would take that peer's rows off their records.
+  const taken = new Set((ledger?.records ?? []).filter(record => record.source !== undefined && record.source.kind !== 'inbox').map(record => record.scope))
   const asks = (ledger?.records ?? []).flatMap(record => {
     const session = record.source?.kind === 'inbox' ? inboxSession(record.source) : undefined
-    return session === undefined || session.length <= 8 ? [] : [{ scope: record.scope, session }]
+    return session === undefined || session.length <= 8 || taken.has(record.scope) ? [] : [{ scope: record.scope, session }]
   })
   // An asker whose block is here comes first: one resolved and gone must not keep it from its block.
   for (const { scope, session } of [...asks.filter(ask => inBlocks.get(ask.scope)?.has(ask.session)), ...asks]) {
