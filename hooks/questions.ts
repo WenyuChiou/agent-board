@@ -72,11 +72,14 @@ export const questionScopes = (projects: readonly ProgressProject[], mine: Progr
   // An inbox ask's block keeps the alias only while no other question has it: moving a peer that
   // already holds it would take that peer's rows off their records.
   const taken = new Set((ledger?.records ?? []).filter(record => record.source !== undefined && record.source.kind !== 'inbox').map(record => record.scope))
-  for (const record of ledger?.records ?? []) {
+  const asks = (ledger?.records ?? []).flatMap(record => {
     const session = record.source?.kind === 'inbox' ? inboxSession(record.source) : undefined
-    if (session === undefined || session.length <= 8 || taken.has(record.scope)) continue
-    const held = holders.get(record.scope)
-    if (held === undefined || held.has(session)) note(holders, record.scope, session)
+    return session === undefined || session.length <= 8 || taken.has(record.scope) ? [] : [{ scope: record.scope, session }]
+  })
+  // An asker whose block is here comes first: one resolved and gone must not keep it from its block.
+  for (const { scope, session } of [...asks.filter(ask => owners.get(ask.scope)?.has(ask.session)), ...asks]) {
+    const held = holders.get(scope)
+    if (held === undefined || held.has(session)) note(holders, scope, session)
   }
   return (project: string, agent: string, session: string, resume?: string | null): string => {
     const scope = questionScope(project, agent, session)

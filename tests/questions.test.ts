@@ -286,6 +286,17 @@ test('a saved inbox question keeps its id when its block appears beside a same-p
   const first = pass(emptyQuestions(), unnamed, [], NOW)
   const later = pass(pass(first, unnamed, [ask], NOW + 1), beta, [], NOW + 2)
   expect(later.records.filter(record => record.words === 'Beta ask?').map(record => record.id)).toEqual([first.records[0]!.id])
+  // An earlier asker with no block, resolved or open, does not keep a later asker from its own block.
+  const bravo = { ...turn, session: 'a1b2c3d4-person-b', text: 'Bravo ask?', sourceRevisions: ['b'.repeat(64)] } as PendingTurn
+  const bravoFile = block('a1b2c3d4-person-b', 'Beta work', 'Bravo ask?')
+  for (const [earlier, rows] of [[resolveQuestion(saved, id, NOW + 1), 1], [saved, 2]] as const) {
+    const both = pass(earlier, '', [bravo], NOW + 2)
+    const bravoId = both.records.find(record => record.words === 'Bravo ask?')!.id
+    const rejoined = pass(both, bravoFile, [], NOW + 3)
+    expect(rejoined.records.length).toBe(2)
+    expect(view(rejoined, `## demo\n${bravoFile}`).waiting.filter(item => item.text === 'Bravo ask?').map(item => item.questionId)).toEqual([bravoId])
+    expect(view(rejoined, `## demo\n${bravoFile}`).waiting.length).toBe(rows)
+  }
   // Two inbox asks then both blocks with new words: each new ask gets a record of its own.
   const twoAsks = pass(emptyQuestions(), '', [turn, { ...turn, session: 'a1b2c3d4-person-b', text: 'Bravo ask?', sourceRevisions: ['b'.repeat(64)] } as PendingTurn], NOW)
   const fresh = block('a1b2c3d4-person-a', 'Alpha work', 'New A?') + block('a1b2c3d4-person-b', 'Beta work', 'New B?')
