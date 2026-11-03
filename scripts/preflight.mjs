@@ -454,6 +454,13 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     else add('PASS', 'board bundle and its sources changed together or are unchanged.')
   })
 
+  await check('messaging matrix check', () => {
+    if (!existsSync(join(cwd, 'scripts/messaging-matrix.mjs'))) { add('PASS', 'no messaging matrix in this tree.'); return }
+    const checked = command(process.execPath, ['scripts/messaging-matrix.mjs', '--check'])
+    if (!checked.error && checked.status === 0) add('PASS', 'messaging matrix is up to date.')
+    else add('FAIL', `messaging matrix: ${checked.stderr?.split(/\r?\n/)[0] || 'the check could not finish'}`)
+  })
+
   await check('engine helper scan', () => {
     const problems = changed.has('hooks/register.tsx') ? engineProblems(read(join(cwd, 'hooks/register.tsx'))) : []
     if (!problems.length) add('PASS', 'engine helper declarations have no detected problem.')

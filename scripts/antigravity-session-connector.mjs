@@ -1,5 +1,14 @@
 import { boardClient, deliveryPrompt } from './message-client.mjs'
 
+/** @type {import('./message-client.mjs').MessagingReceiverRecord} */
+export const messagingReceiver = {
+  host: 'Antigravity',
+  surfaces: [{ name: 'Exclusive-owner Stream CLI (stdin)', evidence: null, earlier: 'docs/validation/2026-10-19-native-hooks.md' }],
+  tier: 1,
+  primitive: 'unknown',
+  isImplemented: true,
+}
+
 // The host already owns one initialized CLI stream. No process, login, saved
 // conversation, editor connection or model call is created by attaching.
 export const attachAntigravitySession = async ({ boardUrl, transport, session, state, verifyOwner, surface = 'Antigravity owned CLI stream', onError }) => {

@@ -157,6 +157,52 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 
 Hooks say whether a session is working or waiting; its steps and when it is done come from the agent's own reports. Gemini CLI is still a target (`--agent gemini`) for paid and enterprise use: see [setup](docs/SETUP.md#legacy-gemini-cli-compatibility).
 
+### Connected-session messaging
+
+<!-- messaging-matrix:start -->
+
+Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.
+
+| Host | Surface | Tier | Primitive | Status | Live run | Receiver |
+| --- | --- | --- | --- | --- | --- | --- |
+| Antigravity | 2.0 Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
+| Antigravity | IDE | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
+| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
+| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Implemented | Not tested | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
+| Cursor | cursor-agent CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Cursor | IDE (Composer) | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini CLI | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Muse Code | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+
+<!-- messaging-matrix:end -->
+
 <details>
 <summary><b>How each agent was checked</b></summary>
 
