@@ -247,8 +247,10 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     // What the review bots and the merge-after-notice say about the head. A missing bot review never moves a pull request between groups.
     const extras = {
       bots: { codex: codexStateOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
+      // A lapse frees the reviewer slot and the suggestion only: any Reviewing after the Ready still closes the notice path, as it
+      // still cancels a notice (team-process, From claim to merge).
       notice: noticeFor({
-        comments, head, ready, takenBy, nowMs,
+        comments, head, ready, takenBy: taking?.name ?? null, nowMs,
         readyHours: ready && Number.isFinite(ready.time) ? Math.max(0, nowMs - ready.time) / hour : null,
         isInQueue: Boolean(ready && !reviewAfterReady),
         isAllAway: isEveryOtherAway(collaborators, awayLogins, author), hasBackSince, author,
@@ -470,7 +472,7 @@ const codexText = {
 }
 const botText = bots => [codexText[bots?.codex], bots?.greptile ? 'greptile: reviewed' : ''].filter(Boolean).join('  ')
 const noticeText = notice => {
-  if (notice.state === 'allowed') return 'notice allowed if only a collaborator or the owner may approve it (team-process, From claim to merge)'
+  if (notice.state === 'allowed') return 'notice allowed outside the governance files (team-process, From claim to merge)'
   if (notice.state === 'waiting') return `notice: merges after ${formatUtc(Date.parse(notice.at))}`
   if (notice.state === 'due') return 'notice due: merge if checks are green and the author\'s code-review subagent approved this head and no bot P0/P1 is open'
   if (notice.state === 'not-allowed') return 'no notice: governance, workflow or release pull requests merge only with an approval (CONTRIBUTING rules 8 and 12)'
