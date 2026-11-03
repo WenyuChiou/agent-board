@@ -18,6 +18,7 @@ Each rule and each process step is written in one file, listed here. Another pag
 | [docs/dev/CI.md](dev/CI.md) | Which CI jobs run for which change. | non-author |
 | [.github/](../.github) | CI workflows, and the issue and pull request templates. | workflows: owner, each file on its own. Templates: non-author |
 | [scripts/pr-check.mjs](../scripts/pr-check.mjs), [scripts/review-queue.mjs](../scripts/review-queue.mjs) | The rules a machine checks (R5). | non-author |
+| [scripts/review-queue-post.mjs](../scripts/review-queue-post.mjs) | Posts the review queue every hour and takes `claimed` off claims that ran out, from `.github/workflows/review-queue.yml`. | non-author (the workflow: owner) |
 
 ## Releases
 
