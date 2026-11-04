@@ -379,6 +379,8 @@ export const ZH_CN: Strings = {
   setupStatusTitle: 'Agent Board 各 agent 的状态（上次接上时检查的）：',
   setupAgent: (label: string, parts: string[]): string => `${label}：${parts.join('；')}`,
   setupHookConfigured: '汇报 hook 已接上',
+  setupManaged: '由 setup 管理',
+  setupPluginManaged: (labels: string[]): string => `由插件连接：${labels.join('、')}`,
   setupHookFailed: '汇报 hook 没接上，原因在下面',
   setupSkillOnly: '只有 skill，没有汇报 hook',
   setupHookUnreadable: '配置文件读不懂，没有接',

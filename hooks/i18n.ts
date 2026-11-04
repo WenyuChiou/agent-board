@@ -418,6 +418,8 @@ export const ZH_TW = {
   setupStatusTitle: 'Agent Board 各 agent 的狀態（上次接上時檢查的）：',
   setupAgent: (label: string, parts: string[]): string => `${label}：${parts.join('；')}`,
   setupHookConfigured: '回報 hook 已接上',
+  setupManaged: '由 setup 管理',
+  setupPluginManaged: (labels: string[]): string => `由外掛連接：${labels.join('、')}`,
   setupHookFailed: '回報 hook 沒接上，原因在下面',
   setupSkillOnly: '只有 skill，沒有回報 hook',
   setupHookUnreadable: '設定檔讀不懂，沒有接',
