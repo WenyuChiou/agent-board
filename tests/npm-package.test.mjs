@@ -95,6 +95,25 @@ test('npm pack publishes only the files package.json lists', () => {
   assert.deepEqual(pack(), [...manifest.files, 'package.json', 'README.md', 'README.zh-CN.md', 'README.zh-TW.md', 'LICENSE'].sort())
 })
 
+test('the README footer names the latest stable version, not the package version', () => {
+  // A pre-release package keeps the last stable version in its README footer (#813), so the
+  // footer must say that is what the version is, in every language, and all three must agree.
+  const footers = [
+    ['README.md', /<sub>Latest stable version: (\d+\.\d+\.\d+) ·/, /<sub>Version \d/],
+    ['README.zh-CN.md', /<sub>最新稳定版本 (\d+\.\d+\.\d+) ·/, /<sub>版本 \d/],
+    ['README.zh-TW.md', /<sub>最新穩定版本 (\d+\.\d+\.\d+) ·/, /<sub>版本 \d/],
+  ]
+  const versions = new Set()
+  for (const [path, labelled, bare] of footers) {
+    const text = readFileSync(join(repo, path), 'utf8')
+    const match = text.match(labelled)
+    assert.ok(match, `${path} names the latest stable version in its footer`)
+    versions.add(match[1])
+    assert.equal(bare.test(text), false, `${path} footer reads as the package's own version`)
+  }
+  assert.equal(versions.size, 1, `the three README footers name one stable version: ${[...versions].join(', ')}`)
+})
+
 test('the npm package lists every bundle part and the reader, and the installed command reads them', () => fixture(f => {
   const files = bundleFiles(repo)
   assert.ok(files.length >= 3, 'the bundle is kept in its entry and at least two parts')

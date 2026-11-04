@@ -10,7 +10,9 @@ The maintainer session, or a collaborator when the maintainer is away, prepares 
 |---|---|---|
 | GitHub release | marked Latest | marked Pre-release |
 | npm dist-tag | `latest`, which `npx @wenyuchiou/agent-board` installs | `next`: `npx @wenyuchiou/agent-board@next` |
-| README version line | updated | unchanged |
+| README version line | `Latest stable version: X.Y.Z` | `Latest stable version: <last stable>`, unchanged |
+
+The README line names the latest stable version in every package, so a pre-release package never reads as though the last stable version were its own version.
 
 The release gate, checked on the exact tagged commit:
 
@@ -50,7 +52,7 @@ npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
    gh release create agent-board--vX.Y.Z --verify-tag --title "Agent Board X.Y.Z" --notes-file notes.md --prerelease --latest=false
    ```
 9. **npm.** The owner publishes; see below.
-10. **Close.** Close the milestone. For a stable release, update the README version line.
+10. **Close.** Close the milestone. For a stable release, update the README line to the new stable version.
 
 ## Publish to npm (owner only)
 
