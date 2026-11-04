@@ -1,7 +1,8 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -65,6 +66,19 @@ const fixture = t => {
 }
 
 const has = (checks, state, text) => checks.some(item => item.state === state && item.message.includes(text))
+
+const startUnrelatedProcess = async () => {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  await once(child, 'spawn')
+  return child
+}
+
+const stopUnrelatedProcess = async child => {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = once(child, 'exit')
+  child.kill()
+  await exited
+}
 
 test('preflight passes when the branch contains the base and no files changed', async t => {
   const f = fixture(t)
@@ -174,6 +188,11 @@ test('preflight refuses a second live local test run without starting another te
   }
   const checks = await f.check({ run })
   assert.ok(has(checks, 'FAIL', 'another preflight test run is already active'))
+  const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
+  assert.match(failure.message, new RegExp(`process ${process.pid}\\b`))
+  assert.match(failure.message, /started \d+ minutes? ago/)
+  assert.match(failure.message, /delete its \.lock file/)
+  assert.equal(failure.message.includes(f.root), false)
   assert.equal(hasStarted, false)
 })
 
@@ -195,6 +214,92 @@ test('preflight recovers a stale test lock and releases its own lock after a fai
     : f.run(program, args, options)
   assert.ok(has(await f.check({ run }), 'FAIL', 'tests/stale.test.mjs: 1 tests, 1 failed'))
   assert.deepEqual(readdirSync(f.lockPath), [])
+})
+
+test('a preflight marker is live only while its process and timestamps agree', async () => {
+  const { isLiveMarker, TEST_LOCK_MAX_AGE_MS } = await import('../scripts/preflight.mjs')
+  assert.equal(TEST_LOCK_MAX_AGE_MS, 3 * 60 * 60 * 1000)
+  const marker = { pid: 1234, markerMs: 20_000_000, now: 20_060_000, isAlive: true, startedMs: 19_999_000 }
+  assert.equal(isLiveMarker(marker), true)
+  assert.equal(isLiveMarker({ ...marker, isAlive: false }), false)
+  assert.equal(isLiveMarker({ ...marker, now: marker.markerMs + TEST_LOCK_MAX_AGE_MS }), false)
+  assert.equal(isLiveMarker({ ...marker, now: marker.markerMs + TEST_LOCK_MAX_AGE_MS + 1 }), false)
+  assert.equal(isLiveMarker({ ...marker, startedMs: marker.markerMs + 5000 }), true)
+  assert.equal(isLiveMarker({ ...marker, startedMs: marker.markerMs + 5001 }), false)
+  assert.equal(isLiveMarker({ ...marker, startedMs: null }), true)
+})
+
+test('preflight removes an expired marker even when an unrelated process has its PID', async t => {
+  const child = await startUnrelatedProcess()
+  try {
+    const f = fixture(t)
+    f.write('tests/reused-pid.test.mjs', '')
+    mkdirSync(f.lockPath)
+    const marker = join(f.lockPath, `${child.pid}-00000000-0000-4000-8000-000000000011.lock`)
+    writeFileSync(marker, '')
+    const old = new Date(Date.now() - 3 * 60 * 60 * 1000 - 60_000)
+    utimesSync(marker, old, old)
+    const checks = await f.check()
+    assert.ok(has(checks, 'PASS', 'tests/reused-pid.test.mjs: 1 tests, 0 failed'))
+    assert.equal(existsSync(marker), false)
+  } finally {
+    await stopUnrelatedProcess(child)
+  }
+})
+
+test('preflight removes a marker older than its live process on Linux', { skip: process.platform !== 'linux' ? 'process start times are available from /proc only on Linux' : false }, async t => {
+  const child = await startUnrelatedProcess()
+  try {
+    const f = fixture(t)
+    f.write('tests/reused-start.test.mjs', '')
+    mkdirSync(f.lockPath)
+    const marker = join(f.lockPath, `${child.pid}-00000000-0000-4000-8000-000000000012.lock`)
+    writeFileSync(marker, '')
+    let startedMs
+    try { startedMs = statSync(`/proc/${child.pid}`).ctimeMs } catch { return t.skip('/proc process timestamps are unavailable') }
+    const beforeProcess = new Date(startedMs - 10_000)
+    utimesSync(marker, beforeProcess, beforeProcess)
+    const checks = await f.check()
+    assert.ok(has(checks, 'PASS', 'tests/reused-start.test.mjs: 1 tests, 0 failed'))
+    assert.equal(existsSync(marker), false)
+  } finally {
+    await stopUnrelatedProcess(child)
+  }
+})
+
+test('preflight leaves an expired marker in a watched folder and still runs', async t => {
+  const f = fixture(t)
+  f.write('tests/watched-expired.test.mjs', '')
+  const fallbackLockPath = join(f.root, 'watched-lock')
+  mkdirSync(fallbackLockPath, { mode: 0o700 })
+  const marker = join(fallbackLockPath, `${process.pid}-00000000-0000-4000-8000-000000000013.lock`)
+  writeFileSync(marker, '')
+  const old = new Date(Date.now() - 3 * 60 * 60 * 1000 - 60_000)
+  utimesSync(marker, old, old)
+  const checks = await f.check({ fallbackLockPath })
+  assert.ok(has(checks, 'PASS', 'tests/watched-expired.test.mjs: 1 tests, 0 failed'))
+  assert.equal(existsSync(marker), true)
+  assert.deepEqual(readdirSync(f.lockPath), [])
+})
+
+test('preflight reports the newest live marker across its own and watched folders', async t => {
+  const f = fixture(t)
+  f.write('tests/newest-lock.test.mjs', '')
+  mkdirSync(f.lockPath)
+  const fallbackLockPath = join(f.root, 'watched-lock')
+  mkdirSync(fallbackLockPath, { mode: 0o700 })
+  const older = join(f.lockPath, `${process.pid}-00000000-0000-4000-8000-000000000014.lock`)
+  const newer = join(fallbackLockPath, `${process.ppid}-00000000-0000-4000-8000-000000000015.lock`)
+  writeFileSync(older, '')
+  writeFileSync(newer, '')
+  const future = new Date(Date.now() + 60_000)
+  utimesSync(newer, future, future)
+  const checks = await f.check({ fallbackLockPath, onProgress: () => assert.fail('tests must not start') })
+  const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
+  assert.ok(failure)
+  assert.match(failure.message, new RegExp(`process ${process.ppid}\\b`))
+  assert.equal(existsSync(older), true)
+  assert.equal(existsSync(newer), true)
 })
 
 test('preflight does not remove a lock acquired by a replacement owner', async t => {
