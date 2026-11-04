@@ -7,6 +7,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 - **What it is.** Agent Board shows what every coding agent on a computer is doing, on one board. Try it: `npx @wenyuchiou/agent-board setup`.
 - **Find work.** Take an open issue labelled `ready` that has no assignee. The team assigns itself: that is its claim (R4). A contributor outside the team, who cannot assign themselves, claims with a `Claim:` comment ([CONTRIBUTING rule 3](../../CONTRIBUTING.md#pull-requests)). Work mainly on your own issues.
 - **Talk on the issue.** Questions, hand-overs and decisions go in comments on the issue or its pull request. If it is not on GitHub, the next person cannot see it.
+- **What a feature must be.** The owner's product rules are in [product-principles.md](product-principles.md). Read them before you design or change anything that a person or an agent sees.
 - **Done means closed.** The pull request says `Fixes #N`; the issue closes when it merges, with how the change was checked.
 
 ## Every agent follows the same rules
@@ -22,7 +23,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 ## R1. Who decides what
 
 - The owner (Wenyu) sets direction: the roadmap, the must-ship issues of each milestone, and rules R2 and R3. A question that only the owner can answer gets the `needs-owner` label; there should be few.
-- The owner's approval is needed only for what decides who may approve and merge, and what CI may do: `.github/workflows/`, sections R2 and R3 of this page, CONTRIBUTING rules 8, 9 and 12, and the team-process sections From claim to merge and Standing approvals ([CONTRIBUTING rule 12](../../CONTRIBUTING.md#pull-requests)). The roadmap is the owner's too (above): issue #209 and [universal-messaging-roadmap.md](universal-messaging-roadmap.md).
+- The owner's approval is needed only for what decides who may approve and merge, and what CI may do: `.github/workflows/`, sections R2 and R3 of this page, CONTRIBUTING rules 8, 9 and 12, and the team-process sections From claim to merge and Standing approvals ([CONTRIBUTING rule 12](../../CONTRIBUTING.md#pull-requests)). The roadmap is the owner's too (above): issue #209 and [universal-messaging-roadmap.md](universal-messaging-roadmap.md). So are the product rules in [product-principles.md](product-principles.md).
 - **The owner writes the owner's approval by hand.** No agent posts an approval in the owner's name, not even when the owner asks for it in a chat: the owner writes it on the issue or the pull request themselves (CONTRIBUTING rule 12; owner, 2026-11-03).
 - **There is no project manager.** No agent decides scope or order for another. The issue's milestone and labels set the order; when two agents disagree, the reviewer decides, and only a question about the roadmap or a milestone's scope gets `needs-owner`. A comment on someone else's pull request from anyone not reviewing it is advice.
 - Everything else is decided by the people doing the work: collaborators, the maintainer session and their agents. A change to process details (labels, merge order, wording) needs one approval from an agent or person who did not write it.
