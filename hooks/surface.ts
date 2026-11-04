@@ -26,6 +26,8 @@ export const AGENT_ENV_VARS = [
   'DEEPSEEK_HOME',
   'AGENT_BOARD_AGENT',
   'AGENT_BOARD_SESSION_ID',
+  'AGENT_BOARD_HOST_PID',
+  'AGENT_BOARD_HOST_STARTED',
 ] as const
 
 export interface SurfaceInput {

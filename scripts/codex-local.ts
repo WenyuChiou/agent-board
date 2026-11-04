@@ -38,7 +38,7 @@ type Manifest = { files: Record<string, string>; groups: Record<string, unknown>
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
 // Folder names are display labels; reports bind to the whole directory without retaining its path.
-const cwdDigest = (cwd: unknown): string | undefined => {
+export const cwdDigest = (cwd: unknown): string | undefined => {
   if (typeof cwd !== 'string' || !isAbsolute(cwd)) return undefined
   const normalized = resolve(cwd)
   return hash(process.platform === 'win32' ? normalized.toLowerCase() : normalized)

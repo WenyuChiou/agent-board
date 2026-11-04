@@ -78,7 +78,7 @@ const isNewerVersion = (candidate: string, current: string): boolean => {
   }
   return false
 }
-const boardVersion = RELEASED.reduce((highest, release) => {
+export const boardVersion = RELEASED.reduce((highest, release) => {
   return isNewerVersion(release.version, highest) ? release.version : highest
 }, '0.0.0')
 const packageVersionValue = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''

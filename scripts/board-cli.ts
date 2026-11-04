@@ -16,14 +16,14 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
-import { startServer } from './board-serve'
+import { boardVersion, startServer } from './board-serve'
 import { moveLockAside } from './board-messaging'
 import { claimMessageStore, hasLiveClaims } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
+import { defaultMessagesDirectory, isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
@@ -45,6 +45,7 @@ import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } 
 import { sha256 } from '../hooks/sha256'
 import { codexSignal, isStrongRun, runLookupId } from '../hooks/runs'
 import { findSessionFile, readSessionMeta } from './codex-history'
+import { runMcp } from './board-mcp'
 
 // The line `/progress connect` puts above the bundle sets it.
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
@@ -1264,7 +1265,7 @@ const serveFile = (): string => {
   const name = addressFileName(board(path))
   return (served = join(runFolder(name), name))
 }
-const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? serveFile().replace(/\.json$/, '-messages'))
+const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? (args.includes('--mcp') ? defaultMessagesDirectory(path, homedir(), process.env, process.platform) : serveFile().replace(/\.json$/, '-messages')))
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
@@ -1789,6 +1790,10 @@ const runWatchTerminal = async (): Promise<void> => {
 }
 
 const run = async (): Promise<void> => {
+  if (args.includes('--mcp')) {
+    await runMcp({ directory: messagesDirectory(), progress: path, cwd: process.cwd(), version: boardVersion, s })
+    return
+  }
   if (args.includes('--status')) {
     process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs())}\n`)
     return
@@ -1883,7 +1888,10 @@ const run = async (): Promise<void> => {
 try {
   await run()
 } catch (error) {
-  if (error instanceof RuntimeFolderError) {
+  if (args.includes('--mcp')) {
+    process.exitCode = 1
+    process.stderr.write('MCP_START_FAILED\n')
+  } else if (error instanceof RuntimeFolderError) {
     process.exitCode = 1
     const output = args.includes('--serve-child') ? process.stderr : process.stdout
     output.write(`${s.serveRuntimePrivate}\n`)
