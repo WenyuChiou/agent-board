@@ -434,34 +434,38 @@ for (const isWatched of [false, true]) {
     if (isWatched) assert.deepEqual(readdirSync(f.lockPath), [])
   })
 
-  test(`preflight warns when a macOS identity has second precision in its ${folder} folder`, async t => {
-    const { processStartIdentity } = await import('../scripts/preflight.mjs')
-    const f = fixture(t)
-    f.write('tests/mac-precision.test.mjs', '')
-    const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
-    mkdirSync(directory, { mode: 0o700 })
-    const name = `${process.pid}-00000000-0000-4000-8000-000000000032.lock`
-    const marker = join(directory, name)
-    const start = '2024-11-04T05:06:07.000Z'
-    writeFileSync(`${marker}.start`, JSON.stringify(`darwin-second:${start}`))
-    writeFileSync(marker, '')
-    let runs = 0
-    const checks = await f.check({
-      fallbackLockPath: isWatched ? directory : null,
-      readProcessIdentity: () => processStartIdentity(process.pid, { platform: 'darwin', run: () => ({ status: 0, stdout: 'Mon Nov  4 05:06:07 2024\n' }) }),
-      onProgress: () => { runs++ },
+  for (const isTagged of [false, true]) {
+    // An untagged record is what this pull request's c3247d6 wrote on macOS; it must still count as the same owner.
+    test(`preflight warns when a macOS identity has second precision in its ${folder} folder with a ${isTagged ? 'tagged' : 'untagged'} record`, async t => {
+      const { processStartIdentity } = await import('../scripts/preflight.mjs')
+      const f = fixture(t)
+      f.write('tests/mac-precision.test.mjs', '')
+      const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
+      mkdirSync(directory, { mode: 0o700 })
+      const name = `${process.pid}-00000000-0000-4000-8000-000000000032.lock`
+      const marker = join(directory, name)
+      const start = '2024-11-04T05:06:07.000Z'
+      const record = isTagged ? `darwin-second:${start}` : start
+      writeFileSync(`${marker}.start`, JSON.stringify(record))
+      writeFileSync(marker, '')
+      let runs = 0
+      const checks = await f.check({
+        fallbackLockPath: isWatched ? directory : null,
+        readProcessIdentity: () => processStartIdentity(process.pid, { platform: 'darwin', run: () => ({ status: 0, stdout: 'Mon Nov  4 05:06:07 2024\n' }) }),
+        onProgress: () => { runs++ },
+      })
+      const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
+      assert.ok(failure)
+      assert.match(failure.message, /second/)
+      assert.match(failure.message, /reused process ID/)
+      assert.match(failure.message, /if no preflight is running/)
+      assert.ok(failure.message.includes(name))
+      assert.equal(runs, 0)
+      assert.equal(existsSync(marker), true)
+      assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), record)
+      if (isWatched) assert.deepEqual(readdirSync(f.lockPath), [])
     })
-    const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
-    assert.ok(failure)
-    assert.match(failure.message, /second/)
-    assert.match(failure.message, /reused process ID/)
-    assert.match(failure.message, /if no preflight is running/)
-    assert.ok(failure.message.includes(name))
-    assert.equal(runs, 0)
-    assert.equal(existsSync(marker), true)
-    assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), `darwin-second:${start}`)
-    if (isWatched) assert.deepEqual(readdirSync(f.lockPath), [])
-  })
+  }
 
   test(`preflight keeps a matching Linux identity in its ${folder} folder after a forward clock step`, async t => {
     const { processStartedMs, processStartIdentity } = await import('../scripts/preflight.mjs')
@@ -554,6 +558,28 @@ for (const identity of ['linux:00000000-0000-4000-8000-000000000001:12345', '202
     assert.equal(existsSync(marker), true)
   })
 }
+
+test('preflight names the exact .lock file even when the account name appears inside it', async t => {
+  const f = fixture(t)
+  f.write('tests/exact-name.test.mjs', '')
+  mkdirSync(f.lockPath)
+  const name = `${process.pid}-00000000-0000-4000-8000-00000000abc1.lock`
+  writeFileSync(join(f.lockPath, `${name}.start`), 'null')
+  writeFileSync(join(f.lockPath, name), '')
+  const saved = { USERNAME: process.env.USERNAME, USER: process.env.USER }
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+  process.env.USERNAME = 'abc'
+  process.env.USER = 'abc'
+  const checks = await f.check({ onProgress: () => assert.fail('tests must not start') })
+  const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
+  assert.ok(failure)
+  assert.ok(failure.message.includes(name), failure.message)
+})
 
 test('preflight keeps an identity marker when its recorded identity is unknown or malformed', async t => {
   const f = fixture(t)

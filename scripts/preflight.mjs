@@ -238,6 +238,8 @@ export const processStartIdentity = (pid, { platform = process.platform, readTex
 }
 
 const secondPrecisionPrefix = identity => ['darwin-second:', 'ps-second:'].find(prefix => identity?.startsWith(prefix))
+// Compared without the precision tag, so a record written before the tag existed (this pull request's c3247d6) still matches.
+const bareIdentity = identity => typeof identity === 'string' ? identity.slice(secondPrecisionPrefix(identity)?.length ?? 0) : identity
 
 const knownProcessIdentity = (pid, reader) => {
   try {
@@ -294,7 +296,9 @@ const newestLiveMarker = (directory, marker, isOwn, readProcessIdentity) => {
     const path = join(directory, name)
     const recordedIdentity = isAlive ? markerIdentity(path) : undefined
     const identity = isAlive && recordedIdentity !== undefined ? knownProcessIdentity(pid, readProcessIdentity) : null
-    if (isLiveMarker({ isAlive, recordedIdentity, identity })) {
+    // Linux and Windows matches count as confirmed: Linux hands out PIDs in turn up to pid_max, so the same PID cannot
+    // return within one clock tick, and Windows start times are kept to 100 ns. ps start times are only to the second.
+    if (isLiveMarker({ isAlive, recordedIdentity: bareIdentity(recordedIdentity), identity: bareIdentity(identity) })) {
       const uncertainty = recordedIdentity === undefined ? 'legacy'
         : recordedIdentity === null || identity === null ? 'unknown' : secondPrecisionPrefix(identity) ? 'second' : null
       if (!newest || stat.mtimeMs > newest.markerMs) newest = { pid, name, markerMs: stat.mtimeMs, uncertainty }
@@ -546,8 +550,9 @@ const parseArgs = argv => {
 
 export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessIdentity = processStartIdentity, onCheck, onProgress, onLockPublished } = {}) => {
   const checks = []
-  const add = (state, message) => {
-    const item = { state, message: safeLine(message) }
+  // `exact` replaces the \ue001 mark after redaction: a validated lock file name, which an account name must not alter.
+  const add = (state, message, exact = '') => {
+    const item = { state, message: safeLine(message).replace('\ue001', exact) }
     checks.push(item)
     onCheck?.(item)
   }
@@ -613,7 +618,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       const detail = uncertainty === 'legacy' ? ', owner could not be confirmed because no process identity was recorded'
         : uncertainty === 'unknown' ? ', process start time could not be read, so the owner could not be confirmed'
           : uncertainty === 'second' ? ', process identity is known only to the second; this may be a reused process ID' : ''
-      add('FAIL', `another preflight test run is already active on this computer (process ${pid}, started ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago${detail}); finish it, or if no preflight is running, delete its .lock file ${name} from this account's .agent-board-preflight-tests-* folder and run preflight again.`)
+      add('FAIL', `another preflight test run is already active on this computer (process ${pid}, started ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago${detail}); finish it, or if no preflight is running, delete its .lock file \ue001 from this account's .agent-board-preflight-tests-* folder and run preflight again.`, name)
     }
     if (owner?.isFallback) add('PASS', "the home folder cannot hold the test lock, so the test lock was this account's shared fallback folder, and any home lock folder was still read.")
     if (owner?.path) {
