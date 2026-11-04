@@ -90,6 +90,7 @@ serveWebSocketProxy({ onMessage: (value, emit) => {
   appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
   if (value.method === 'initialize') emit({ id: value.id, result: {} })
   if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(actor.session)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
   if (value.method === 'turn/steer') {
     emit({ id: value.id, result: { turnId: 'proxy-turn' } })
     const id = value.params.input[0].text.match(/Reply first with this line alone: ACK ([0-9a-f]{6})/)[1]

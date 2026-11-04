@@ -7,7 +7,7 @@ import { openWebSocketStdio } from './ws-stdio.mjs'
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
   host: 'Codex',
-  surfaces: [{ name: 'Existing-owner proxy (active turn only)', evidence: null }],
+  surfaces: [{ name: 'Existing-owner proxy (active turn only)', evidence: 'docs/validation/2026-11-04-codex-cli-proxy-live.md' }],
   tier: 2,
   primitive: 'unknown',
   isImplemented: true,
@@ -92,6 +92,12 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
     await websocket.ready
     await request('initialize', { clientInfo: { name: 'agent-board-message-connector', version: '1' } })
     websocket.send(JSON.stringify({ method: 'initialized', params: {} }))
+    // The daemon streams a thread's events only to connections subscribed to it, and
+    // resuming an already-loaded thread subscribes without starting a turn. Without it
+    // the steer lands but the ACK never reaches this connection. Resume only a thread
+    // that is already loaded, so a saved thread is never opened from disk.
+    if (!await verify()) throw new Error('TARGET_MISMATCH')
+    await request('thread/resume', { threadId: thread, excludeTurns: true })
     session = await boardClient(boardUrl).attach({
       agent: 'codex', session: thread, turn, surface, verify, onError,
       deliver: async (message, accepted, begin) => {

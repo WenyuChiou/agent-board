@@ -2304,6 +2304,7 @@ serveWebSocketProxy({ onMessage: (value, emit) => {
   appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
   if (value.method === 'initialize') emit({ id: value.id, result: {} })
   if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
   if (value.method === 'turn/steer') {
     emit({ id: value.id, result: { turnId: 'turn1' } })
     emit({ id: 999, method: 'item/commandExecution/requestApproval', params: {} })
@@ -2344,7 +2345,7 @@ test('the connector initializes, steers and reads the ACK through a WebSocket-on
 import { appendFileSync, writeFileSync } from 'node:fs'
 import { serveWebSocketProxy } from ${JSON.stringify(mock)}
 assert.deepEqual(process.argv.slice(2), ['app-server', 'proxy', '--sock', 'synthetic-owner'])
-let isInitialized = false
+let isInitialized = false, isListed = false, isSubscribed = false
 serveWebSocketProxy({
   onHandshake: request => writeFileSync(${JSON.stringify(handshake)}, request),
   onMessage: (value, emit) => {
@@ -2352,11 +2353,20 @@ serveWebSocketProxy({
     if (value.method === 'initialize') { emit({ id: value.id, result: {} }); return }
     if (value.method === 'initialized') { isInitialized = true; return }
     assert.ok(isInitialized)
-    if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } })
+    if (value.method === 'thread/loaded/list') { isListed = true; emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } }) }
+    if (value.method === 'thread/resume') {
+      // Like the daemon: never resume a thread before checking it is loaded.
+      assert.ok(isListed)
+      assert.deepEqual(value.params, { threadId: ${JSON.stringify(thread)}, excludeTurns: true })
+      isSubscribed = true
+      emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+    }
     if (value.method === 'turn/steer') {
       assert.equal(value.params.expectedTurnId, 'turn1')
       const nonce = value.params.input[0].text.match(/ACK ([0-9a-f]{6})/)[1]
       emit({ id: value.id, result: { turnId: 'turn1' } })
+      // Like the daemon: a connection that never subscribed receives none of the turn's events.
+      if (!isSubscribed) return
       const item = text => ({ type: 'agentMessage', text })
       emit({ method: 'item/completed', params: { threadId: 'foreign', turnId: 'turn1', item: item('ACK ' + nonce + ' wrong thread') } })
       emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'old-turn', item: item('ACK ' + nonce + ' wrong turn') } })
@@ -2377,9 +2387,28 @@ serveWebSocketProxy({
     assert.equal(receipt.reply, 'received')
     assert.ok(readFileSync(handshake, 'utf8').startsWith('GET / HTTP/1.1\r\n'))
     const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)
-    assert.deepEqual(calls.slice(0, 2).map(one => one.method), ['initialize', 'initialized'])
+    assert.deepEqual(calls.slice(0, 4).map(one => one.method), ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume'])
     assert.equal(calls.filter(one => one.method === 'turn/steer').length, 1)
   } finally { await connector.close() }
+}))
+
+test('the proxy connector never resumes a thread the running Codex has not loaded', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { appendFileSync } from 'node:fs'
+import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: ['99999999-2222-4333-8444-555555555555'], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+} })
+`)
+  await assert.rejects(connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1' }), { message: 'TARGET_MISMATCH' })
+  const methods = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line).method)
+  assert.deepEqual(methods, ['initialize', 'initialized', 'thread/loaded/list'])
+  assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
 }))
 
 test('an owned idle Codex session accepts only its actual new turn ACK and deduplicates self delivery', async () => fixture(async (board, dir) => {
