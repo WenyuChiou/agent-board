@@ -2085,7 +2085,7 @@ test('a handoff reads its current progress baseline without depending on the las
   assert.equal(row.status, 'reported')
 }))
 
-test('handoffs time out visibly until exact fresh progress appears, independently of a live receiver', async () => fixture(async (board, dir) => {
+const handoffDeadlineCase = async () => fixture(async (board, dir) => {
   const client = boardClient(board.address)
   const request = { id: 'link1', agent: 'antigravity', session: 'native1', surface: 'Synthetic CLI', timeoutMs: 1000 }
   const progress = updated => `## Synthetic\n<!-- auto session=12345678 agent=antigravity state=working updated=${new Date(updated).toISOString()} resume=native1 -->\n### Fixture\n- [~] Explicit report\n<!-- /auto session=12345678 -->\n`
@@ -2102,7 +2102,12 @@ test('handoffs time out visibly until exact fresh progress appears, independentl
   try {
     await client.send({ id: 'setup1', target: receiver.id, turn: 'session', text: 'Synthetic setup request' })
     await waitFor(async () => (await board.call('/api/board')).body.messaging.messages[0]?.status === 'acknowledged')
-    row = (await board.call('/api/board')).body.messaging.sessions[0]
+    // An ACK can arrive during the initial poll, before the deadline. Observe
+    // the board's timeout independently instead of treating ACK latency as time.
+    await waitFor(async () => {
+      row = (await board.call('/api/board')).body.messaging.sessions[0]
+      return row.status === 'timed_out'
+    })
     assert.equal(row.status, 'timed_out'); assert.equal(row.receiving, true)
     writeFileSync(join(dir, 'progress.md'), progress(Date.now()).replace('resume=native1', 'resume=native10'))
     assert.equal((await board.call('/api/board')).body.messaging.sessions[0].status, 'timed_out')
@@ -2116,7 +2121,14 @@ test('handoffs time out visibly until exact fresh progress appears, independentl
   // No expectation or live receiver survives a board restart as a false connection.
   await board.close(); Object.assign(board, await start(dir))
   assert.deepEqual((await board.call('/api/board')).body.messaging.sessions, [])
-}))
+})
+
+test('handoffs time out visibly until exact fresh progress appears, independently of a live receiver', handoffDeadlineCase)
+// #692 requires twenty independent Windows samples. Every fresh fixture must
+// pass; a failing sample is never retried or hidden by a later success.
+if (process.platform === 'win32') for (let sample = 2; sample <= 20; sample++) {
+  test(`handoff deadline Windows sample ${sample}`, handoffDeadlineCase)
+}
 
 test('a live receiver without a progress card is visible and disappears on disconnect', async () => fixture(async board => {
   const receiver = await boardClient(board.address).attach({ agent: 'antigravity', session: 'native1', surface: 'Synthetic owned stream', scope: 'session', turn: 'session', verify: async () => true, deliver: async () => '' })
