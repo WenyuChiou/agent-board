@@ -124,8 +124,7 @@ export const boardDocument = (
   const working = page.working.map(row)
   const waiting = [...page.all.open, ...page.own.open].filter(ref => !workingKeys.has(ref.key)).sort(byTime).map(row)
   const stopped = [...page.all.stopped, ...page.own.stopped].sort(byTime).map(row)
-  const recentKeys = new Set(grouped.recent.map(one => one.key))
-  const doneRecently = [...page.all.done, ...page.own.done].filter(ref => recentKeys.has(ref.key)).sort(byTime).map(ref => ({
+  const doneRecently = [...page.all.done, ...page.own.done].sort(byTime).map(ref => ({
     project: named(ref.repo || source(ref).project || ref.project),
     title: clean(source(ref).title || ''),
     agent: clean(ref.agent),

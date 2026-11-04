@@ -1217,7 +1217,16 @@ const syncPageState = async ($: EngineInterface, done?: Record<string, string>):
       if (!isInboxFile(name)) continue
       const text = JSON.stringify({ version: 1, name, stamp })
       const file = pageDonePath(path, sha256(text))
-      if (await readText($, file) !== text) await $.fs.write(file, text)
+      if (await readText($, file) !== text) {
+        const temporary = `${file}.tmp-${await $.session.id()}-${questionWrite++}`
+        const isWin = await isWindows($, path)
+        try {
+          await $.fs.write(temporary, text)
+          if (await $.fs.read(temporary) !== text || !(await replaceFile($, temporary, file, isWin))) throw new Error('PAGE_STATE_NOT_VERIFIED')
+        } finally {
+          if (await $.fs.exists(temporary)) await removeFiles($, [temporary], isWin)
+        }
+      }
       if (await $.fs.read(file) !== text) throw new Error('PAGE_STATE_NOT_VERIFIED')
     }
     const pruned = addPruned(await $.store.get('prunedCounts'), { agent: 0, mirror: 0 }, at)

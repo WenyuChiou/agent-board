@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { registerHooks, stripTypeScriptTypes } from 'node:module'
 import { spawnSync } from 'node:child_process'
@@ -23,6 +23,7 @@ const { turnsFor, redact } = await import('../hooks/board.ts')
 const { countManualDone, cutBlockLines } = await import('../hooks/blocks.ts')
 const { handKeptSeenAt } = await import('../hooks/view.ts')
 const { sha256 } = await import('../hooks/sha256.ts')
+const { psQuote } = await import('../hooks/connect.ts')
 const { EN } = await import('../hooks/strings-en.ts')
 const NOW = Date.parse('2026-11-04T12:00:00Z')
 const NAME = 'codex-turn-1793793600000-1.json'
@@ -38,9 +39,11 @@ const publisher = () => {
     return source.slice(start, stop)
   }
   const selected = [
-    'const REWRITE_TRIES = 3; const AGAIN = Symbol("again"); let measuredStore = 0; let measuredPruned = { agent: 0, mirror: 0, turns: 0 }; let pendingCache = null; let pageStateFailure = null;',
+    'const REWRITE_TRIES = 3; const AGAIN = Symbol("again"); let measuredStore = 0; let measuredPruned = { agent: 0, mirror: 0, turns: 0 }; let pendingCache = null; let pageStateFailure = null; let questionWrite = 0;',
     extract('const PRUNED_PER_SWEEP =', '\n'),
     extract('const readText =', '\n\n// Every write this session'),
+    extract('const removeFiles =', '\n\n// A rename either'),
+    extract('const replaceFile =', '\n\ntype Completion'),
     extract('const rewrite = async', "\n\n// This session's block"),
     extract('const readInboxRecord =', '\n\nconst writeInboxRecord ='),
     extract('const syncPageState =', '\n\n// The moment a view'),
@@ -49,8 +52,8 @@ const publisher = () => {
     extract('const inboxFailure =', '\n\n// A claim can expire'),
     extract('const stalePageDone =', '\n\n// When each inbox file'),
   ].join('\n')
-  return new Function('d', `const { pageStatePath, pageDonePath, pageDoneHash, readPageDone, readPageState, keepInboxDone, addPruned, progressPath, inboxPath, turnsFor, wordsOf, isInboxFile, sepOf, redact, isWindows, sha256, sizeWarnings, storageDetails, prunedNote, countManualDone, cutBlockLines, handKeptSeenAt, messageOf } = d;\n${stripTypeScriptTypes(selected)}\nreturn { syncPageState, pendingTurns, stalePageDone, warning: () => warningOf({ size: 0, projects: [] }, d.s, {}, d.at).warning }`)({
-    ...livePage, keepInboxDone, addPruned, turnsFor, redact, isInboxFile, sha256,
+  return new Function('d', `const { pageStatePath, pageDonePath, pageDoneHash, readPageDone, readPageState, keepInboxDone, addPruned, progressPath, inboxPath, turnsFor, wordsOf, isInboxFile, sepOf, redact, isWindows, sha256, psQuote, sizeWarnings, storageDetails, prunedNote, countManualDone, cutBlockLines, handKeptSeenAt, messageOf } = d;\n${stripTypeScriptTypes(selected)}\nreturn { syncPageState, pendingTurns, stalePageDone, warning: () => warningOf({ size: 0, projects: [] }, d.s, {}, d.at).warning }`)({
+    ...livePage, keepInboxDone, addPruned, turnsFor, redact, isInboxFile, sha256, psQuote,
     sizeWarnings, storageDetails, prunedNote, countManualDone, cutBlockLines, handKeptSeenAt,
     progressPath: async engine => engine.taskPath,
     inboxPath: path => join(dirname(path), 'progress-inbox'),
@@ -64,6 +67,11 @@ const publisher = () => {
 const publishingEngine = (f, { beforeWrite = async () => {}, isDenied = () => false } = {}) => ({
   taskPath: f.path,
   clock: { now: async () => NOW },
+  session: { id: async () => 'synthetic-publisher' },
+  process: { run: async (argv, options) => {
+    const ran = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: options.timeoutMs, windowsHide: true })
+    return { exitCode: ran.status, stdout: ran.stdout, stderr: ran.stderr }
+  } },
   env: { get: async name => ['USERPROFILE', 'HOME'].includes(name) ? '/home/demo' : undefined },
   store: { get: async () => ({}) },
   fs: {
@@ -107,6 +115,72 @@ test('a delayed page-state publisher cannot erase another session’s processed 
     await stale
     await f.close()
   }
+})
+
+test('a fresh page and JSON reader keep valid receipts beside a partial receipt and retry its validation', async () => {
+  const f = await fixture('', { [NAME]: turn('Publish the synthetic build?') })
+  const otherName = 'codex-turn-1793793600000-2.json'
+  const receipt = name => JSON.stringify({ version: 1, name, stamp: `synthetic:${NOW}` })
+  const valid = receipt(NAME)
+  const partial = receipt(otherName)
+  const partialFile = livePage.pageDonePath(f.path, sha256(partial))
+  try {
+    writeFileSync(livePage.pageDonePath(f.path, sha256(valid)), valid)
+    writeFileSync(partialFile, partial.slice(0, 20))
+    assert.equal((await f.api()).counts.waiting, 0)
+    writeFileSync(join(f.root, 'fresh-reader.mjs'), `globalThis.AGENT_BOARD = ${JSON.stringify({ path: f.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const fresh = spawnSync(process.execPath, [join(f.root, 'fresh-reader.mjs'), '--json'], { encoding: 'utf8', timeout: 10000 })
+    assert.equal(fresh.status, 0, fresh.stderr)
+    assert.equal(JSON.parse(fresh.stdout).counts.needs, 0)
+    writeFileSync(join(f.root, 'progress-inbox', otherName), turn('Publish the other synthetic build?'))
+    assert.equal((await f.api()).counts.waiting, 1)
+    writeFileSync(partialFile, partial)
+    assert.equal((await f.api()).counts.waiting, 0)
+  } finally { await f.close() }
+})
+
+test('page-state receipts become visible only after their temporary write is complete', async () => {
+  const f = await fixture('', { [NAME]: turn('Publish the synthetic build?') })
+  const text = JSON.stringify({ version: 1, name: NAME, stamp: `synthetic:${NOW}` })
+  const final = livePage.pageDonePath(f.path, sha256(text))
+  let temporary
+  try {
+    const production = publisher()
+    await production.syncPageState(publishingEngine(f, { beforeWrite: async (file, content) => {
+      if (content !== text) return
+      temporary = file
+      writeFileSync(file, content.slice(0, 20))
+      assert.equal(dirname(file), dirname(final))
+      assert.equal(existsSync(final), false, 'a partial receipt must stay outside its final path')
+      assert.equal((await f.api()).counts.waiting, 1)
+    } }), { [NAME]: `synthetic:${NOW}` })
+    assert.equal(production.warning(), undefined)
+    assert.ok(temporary && temporary !== final)
+    assert.equal(existsSync(temporary), false)
+    assert.equal(readFileSync(final, 'utf8'), text)
+    assert.equal((await f.api()).counts.waiting, 0)
+  } finally { await f.close() }
+})
+
+test('the page and JSON keep completions five minutes and two days old on the same Done shelf', async () => {
+  const block = (id, title, at) => `<!-- auto session=${id} agent=codex state=done updated=${new Date(at).toISOString()} -->\n### ${title}\n- [x] Checked the fixture\n<!-- /auto session=${id} -->\n`
+  const titles = ['Five minutes old', 'Two days old']
+  const f = await fixture(`## demo\n${block('a1000001', titles[0], NOW - 5 * 60000)}${block('a1000002', titles[1], NOW - 2 * 24 * 60 * 60000)}`)
+  try {
+    const model = await f.api()
+    const refs = [...model.view.all.done, ...model.view.own.done]
+    assert.equal(refs.length, 2)
+    assert.deepEqual(refs.map(ref => model.finished.find(one => one.key === ref.key).title).sort(), [...titles].sort())
+    const dom = await pageDom(f.runtime.servePage(EN, 'synthetic'), model)
+    for (const title of titles) assert.ok(dom.node('board').readText.includes(title))
+    writeFileSync(join(f.root, 'fresh-reader.mjs'), `globalThis.AGENT_BOARD = ${JSON.stringify({ path: f.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    writeFileSync(join(f.root, 'clock.cjs'), `Date.now = () => ${NOW}\n`)
+    const fresh = spawnSync(process.execPath, ['--require', join(f.root, 'clock.cjs'), join(f.root, 'fresh-reader.mjs'), '--json'], { encoding: 'utf8', timeout: 10000 })
+    assert.equal(fresh.status, 0, fresh.stderr)
+    const document = JSON.parse(fresh.stdout)
+    assert.equal(document.counts.doneRecently, 2)
+    assert.deepEqual(document.doneRecently.map(one => one.title), titles)
+  } finally { await f.close() }
 })
 
 test('a refused page-state publication still returns pending questions and reports a recoverable warning', async () => {

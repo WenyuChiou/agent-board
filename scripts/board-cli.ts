@@ -176,6 +176,8 @@ const pageDoneFiles = immutableQuestionFiles({
   isPersistent: args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg)),
   accepts: name => pageDoneHash(name) !== null,
   parse: (text, name) => readPageDone(text, pageDoneHash(name)!),
+  // A broken receipt cannot invalidate another session's processed question.
+  isValidationIndependent: true,
 })
 let pageDoneCache: Array<{ name: string; stamp: string }> = []
 // A poll can meet the plugin's verified write halfway through; retain its last complete record.
