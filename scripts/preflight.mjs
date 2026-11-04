@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
+import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir, userInfo } from 'node:os'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve, win32 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { addedLines, testTitles, titleKnown } from './pr-check.mjs'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
@@ -15,10 +15,11 @@ const read = path => readFileSync(path, 'utf8')
 const isTest = path => /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|ts|tsx)$/.test(path)
 const splitPaths = text => text.split('\0').filter(Boolean)
 
-// A run writes its marker after its process starts, so a process that started later only reuses the PID.
-// The 5 s covers clock and file-time rounding.
-export const isLiveMarker = ({ markerMs, isAlive, startedMs }) =>
-  isAlive && (startedMs === null || startedMs <= markerMs + 5000)
+// Recorded identities survive clock changes. Legacy markers use the time comparison, with 5 s for rounding.
+export const isLiveMarker = ({ markerMs, isAlive, startedMs, recordedIdentity, identity = null }) =>
+  isAlive && (recordedIdentity !== undefined
+    ? recordedIdentity === null || identity === null || recordedIdentity === identity
+    : startedMs === null || startedMs <= markerMs + 5000)
 
 export const accountTestLockPath = ({ platform = process.platform, account = userInfo() } = {}) => {
   const identity = platform === 'win32'
@@ -114,14 +115,14 @@ const lockDirectories = (directory, fallback) => {
 }
 
 // Read only after this run's marker exists, so a run that creates the folder a moment later still meets that marker.
-const watchedLiveMarker = ({ directory, isOptional }, marker, readProcessStart) => {
+const watchedLiveMarker = ({ directory, isOptional }, marker, readProcessStart, readProcessIdentity) => {
   try {
     if (!watchedLockDirectory(directory)) return null
   } catch (error) {
     if (isOptional) return null
     throw error
   }
-  return newestLiveMarker(directory, marker, false, readProcessStart)
+  return newestLiveMarker(directory, marker, false, readProcessStart, readProcessIdentity)
 }
 
 const isLiveProcess = pid => {
@@ -160,26 +161,50 @@ export const parsePsLstart = text => {
   const [, , dayText, hourText, minuteText, secondText, yearText] = match
   const [day, hour, minute, second, year] = [dayText, hourText, minuteText, secondText, yearText].map(Number)
   if (year < 100) return null
-  const date = new Date(year, month, day, hour, minute, second)
-  if (date.getFullYear() !== year || date.getMonth() !== month || date.getDate() !== day
-    || date.getHours() !== hour || date.getMinutes() !== minute || date.getSeconds() !== second) return null
+  const date = new Date(Date.UTC(year, month, day, hour, minute, second))
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day
+    || date.getUTCHours() !== hour || date.getUTCMinutes() !== minute || date.getUTCSeconds() !== second) return null
   return date.getTime()
 }
 
 let cachedClockTicks
-const clockTicksPerSecond = () => {
-  if (cachedClockTicks !== undefined) return cachedClockTicks
-  cachedClockTicks = null
+const clockTicksPerSecond = run => {
+  if (run === spawnSync && cachedClockTicks !== undefined) return cachedClockTicks
+  let frequency = null
   try {
-    const result = spawnSync('getconf', ['CLK_TCK'], { encoding: 'utf8', timeout: 2000, windowsHide: true })
+    const result = run('getconf', ['CLK_TCK'], { encoding: 'utf8', timeout: 2000, killSignal: 'SIGKILL', windowsHide: true })
     const output = result.stdout?.trim()
     const ticks = /^\d+$/.test(output ?? '') ? Number(output) : null
-    if (result.status === 0 && Number.isSafeInteger(ticks) && ticks > 0) cachedClockTicks = ticks
+    if (!result.error && !result.signal && result.status === 0 && Number.isSafeInteger(ticks) && ticks > 0) frequency = ticks
   } catch {}
-  return cachedClockTicks
+  if (run === spawnSync) cachedClockTicks = frequency
+  return frequency
 }
 
-export const processStartedMs = (pid, { platform = process.platform, readText = read, run = spawnSync, clockTicks = clockTicksPerSecond } = {}) => {
+const processStartTime = (pid, { platform = process.platform, run = spawnSync, env = process.env } = {}) => {
+  try {
+    if (platform === 'win32') {
+      const root = env.SystemRoot
+      if (typeof root !== 'string' || !win32.isAbsolute(root) || !win32.parse(root).root.replace(/[\\/]/g, '')) return null
+      const powershell = win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      const command = `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`
+      const result = run(powershell, ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', timeout: 3000, killSignal: 'SIGKILL', windowsHide: true })
+      const output = result.stdout?.trim() ?? ''
+      if (result.error || result.signal || result.status !== 0 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z$/.test(output)) return null
+      return Number.isFinite(Date.parse(output)) ? output : null
+    }
+    const result = run('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8', timeout: 3000, killSignal: 'SIGKILL', windowsHide: true, env: { ...env, LC_ALL: 'C', TZ: 'UTC' },
+    })
+    if (result.error || result.signal || result.status !== 0) return null
+    const started = parsePsLstart(result.stdout)
+    return started === null ? null : new Date(started).toISOString()
+  } catch {
+    return null
+  }
+}
+
+export const processStartedMs = (pid, { platform = process.platform, readText = read, run = spawnSync, clockTicks = () => clockTicksPerSecond(run), ...options } = {}) => {
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null
   try {
     if (platform === 'linux') {
@@ -190,24 +215,48 @@ export const processStartedMs = (pid, { platform = process.platform, readText = 
       const started = boot + ticks * 1000 / frequency
       return Number.isFinite(started) ? started : null
     }
-    if (platform === 'win32') {
-      const command = `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`
-      const result = run('powershell', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', timeout: 3000, windowsHide: true })
-      const output = result.stdout?.trim() ?? ''
-      if (result.status !== 0 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z$/.test(output)) return null
-      const started = Date.parse(output)
-      return Number.isFinite(started) ? started : null
-    }
-    const result = run('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      encoding: 'utf8', timeout: 3000, windowsHide: true, env: { ...process.env, LC_ALL: 'C' },
-    })
-    return result.status === 0 ? parsePsLstart(result.stdout) : null
+    const time = processStartTime(pid, { platform, run, ...options })
+    return time === null ? null : Date.parse(time)
   } catch {
     return null
   }
 }
 
-const releaseTestLock = path => {
+export const processStartIdentity = (pid, { platform = process.platform, readText = read, ...options } = {}) => {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null
+  try {
+    if (platform !== 'linux') return processStartTime(pid, { platform, ...options })
+    const ticks = parseProcStat(readText(pid === process.pid ? '/proc/self/stat' : `/proc/${pid}/stat`))
+    const boot = readText('/proc/sys/kernel/random/boot_id').trim()
+    if (ticks === null || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(boot)) return null
+    return `linux:${boot}:${ticks}`
+  } catch {
+    return null
+  }
+}
+
+const knownProcessIdentity = (pid, reader) => {
+  try {
+    const identity = reader(pid)
+    return typeof identity === 'string' && identity.length > 0 && identity.length <= 512 ? identity : null
+  } catch {
+    return null
+  }
+}
+
+// Old preflights recognize only empty .lock files. Companion metadata preserves that shared marker format.
+const markerIdentity = path => {
+  try {
+    const stat = lstatSync(`${path}.start`)
+    if (!stat.isFile() || stat.size > 1024) return null
+    const identity = JSON.parse(read(`${path}.start`))
+    return typeof identity === 'string' && identity.length > 0 && identity.length <= 512 ? identity : null
+  } catch (error) {
+    return error?.code === 'ENOENT' ? undefined : null
+  }
+}
+
+const removeLockFile = path => {
   try {
     unlinkSync(path)
   } catch (error) {
@@ -215,8 +264,13 @@ const releaseTestLock = path => {
   }
 }
 
+const releaseTestLock = path => {
+  removeLockFile(path)
+  removeLockFile(`${path}.start`)
+}
+
 // Stale markers are removed only from this run's own folder.
-const newestLiveMarker = (directory, marker, isOwn, readProcessStart) => {
+const newestLiveMarker = (directory, marker, isOwn, readProcessStart, readProcessIdentity) => {
   let newest = null
   for (const name of readdirSync(directory)) {
     if (name === marker) continue
@@ -233,29 +287,41 @@ const newestLiveMarker = (directory, marker, isOwn, readProcessStart) => {
     // Unfamiliar entries, including links and directories, never become stale markers.
     if (!stat.isFile() || stat.size !== 0) continue
     const isAlive = isLiveProcess(pid)
-    const start = isAlive ? readProcessStart(pid) : null
+    const path = join(directory, name)
+    const recordedIdentity = isAlive ? markerIdentity(path) : undefined
+    const identity = isAlive && recordedIdentity !== undefined ? knownProcessIdentity(pid, readProcessIdentity) : null
+    const start = isAlive && recordedIdentity === undefined ? readProcessStart(pid) : null
     const startedMs = Number.isFinite(start) ? start : null
-    if (isLiveMarker({ markerMs: stat.mtimeMs, isAlive, startedMs })) {
-      if (!newest || stat.mtimeMs > newest.markerMs) newest = { pid, markerMs: stat.mtimeMs, startedMs }
+    if (isLiveMarker({ markerMs: stat.mtimeMs, isAlive, startedMs, recordedIdentity, identity })) {
+      const isStartUnknown = recordedIdentity === undefined ? startedMs === null : recordedIdentity === null || identity === null
+      if (!newest || stat.mtimeMs > newest.markerMs) newest = { pid, markerMs: stat.mtimeMs, isStartUnknown }
       continue
     }
-    if (isOwn) releaseTestLock(join(directory, name))
+    if (isOwn) releaseTestLock(path)
   }
   return newest
 }
 
-const acquireTestLock = (directory, onPublished, fallback = null, readProcessStart = processStartedMs) => {
+const acquireTestLock = (directory, onPublished, fallback, readProcessStart, readProcessIdentity) => {
   const { own, watched, isFallback } = lockDirectories(directory, fallback)
   const marker = `${process.pid}-${randomUUID()}.lock`
   const path = join(own, marker)
   let isPublished = false
+  let isIdentityPublished = false
   try {
+    // Publish metadata first so every visible marker already has its identity, even during a clock change.
+    // An unreadable own identity publishes none: readers then fall back to start times, which can still prove PID reuse.
+    const ownIdentity = knownProcessIdentity(process.pid, readProcessIdentity)
+    if (ownIdentity !== null) {
+      writeFileSync(`${path}.start`, JSON.stringify(ownIdentity), { flag: 'wx', mode: 0o600 })
+      isIdentityPublished = true
+    }
     const file = openSync(path, 'wx', 0o600)
     isPublished = true
     closeSync(file)
     onPublished?.()
     // Every folder is read, even after a live marker is found, so this run's own stale markers are still cleaned.
-    const blockedBy = [newestLiveMarker(own, marker, true, readProcessStart), ...watched.map(other => watchedLiveMarker(other, marker, readProcessStart))]
+    const blockedBy = [newestLiveMarker(own, marker, true, readProcessStart, readProcessIdentity), ...watched.map(other => watchedLiveMarker(other, marker, readProcessStart, readProcessIdentity))]
       .filter(Boolean).sort((a, b) => b.markerMs - a.markerMs)[0]
     if (blockedBy) {
       releaseTestLock(path)
@@ -264,6 +330,7 @@ const acquireTestLock = (directory, onPublished, fallback = null, readProcessSta
     return { path, isFallback }
   } catch (error) {
     if (isPublished) releaseTestLock(path)
+    else if (isIdentityPublished) removeLockFile(`${path}.start`)
     throw error
   }
 }
@@ -477,7 +544,7 @@ const parseArgs = argv => {
   return options
 }
 
-export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessStart = processStartedMs, onCheck, onProgress, onLockPublished } = {}) => {
+export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessStart = processStartedMs, readProcessIdentity = processStartIdentity, onCheck, onProgress, onLockPublished } = {}) => {
   const checks = []
   const add = (state, message) => {
     const item = { state, message: safeLine(message) }
@@ -536,14 +603,14 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     const paths = [...changed].filter(path => isTest(path) && path.endsWith('.mjs') && existsSync(join(cwd, path)))
     if (!paths.length) add('PASS', 'no touched Node test files need running.')
     let owner = null
-    try { owner = paths.length ? acquireTestLock(lockPath, onLockPublished, fallbackLockPath, readProcessStart) : null } catch (error) {
+    try { owner = paths.length ? acquireTestLock(lockPath, onLockPublished, fallbackLockPath, readProcessStart, readProcessIdentity) : null } catch (error) {
       add('FAIL', error.message?.startsWith('test lock directory ') ? error.message : 'test lock directory could not be used; check account directory access.')
       return
     }
     if (owner?.blockedBy) {
-      const { pid, markerMs, startedMs } = owner.blockedBy
+      const { pid, markerMs, isStartUnknown } = owner.blockedBy
       const minutes = Math.floor(Math.max(0, Date.now() - markerMs) / 60_000)
-      const unknown = startedMs === null ? ', process start time could not be read' : ''
+      const unknown = isStartUnknown ? ', process start time could not be read' : ''
       add('FAIL', `another preflight test run is already active on this computer (process ${pid}, started ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago${unknown}); finish it, or if no preflight is running, delete its .lock file from this account's .agent-board-preflight-tests-* folder and run preflight again.`)
     }
     if (owner?.isFallback) add('PASS', "the home folder cannot hold the test lock, so the test lock was this account's shared fallback folder, and any home lock folder was still read.")

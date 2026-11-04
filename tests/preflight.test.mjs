@@ -61,7 +61,7 @@ const fixture = t => {
   // Module-only injection keeps CLI fixtures off the real account lock, even inside preflight.
   const cli = join(root, 'preflight-cli.mjs')
   writeFileSync(cli, `import { main } from ${JSON.stringify(pathToFileURL(script).href)}\nprocess.exitCode = await main(process.argv.slice(2), { lockPath: ${JSON.stringify(lockPath)}, fallbackLockPath: null })\n`)
-  const check = options => runPreflight({ cwd, isNoFetch: true, run, lockPath, fallbackLockPath: null, ...options })
+  const check = options => runPreflight({ cwd, isNoFetch: true, run, lockPath, fallbackLockPath: null, readProcessIdentity: pid => `synthetic:${pid}`, ...options })
   return { root, cwd, home, env, lockPath, cli, write, git, commit, check, run }
 }
 
@@ -216,7 +216,7 @@ test('preflight recovers a stale test lock and releases its own lock after a fai
   assert.deepEqual(readdirSync(f.lockPath), [])
 })
 
-test('a preflight marker is live only while its process and timestamps agree', async () => {
+test('a legacy preflight marker is live only while its process and timestamps agree', async () => {
   const { isLiveMarker } = await import('../scripts/preflight.mjs')
   const marker = { pid: 1234, markerMs: 20_000_000, now: 20_060_000, isAlive: true, startedMs: 19_999_000 }
   assert.equal(isLiveMarker(marker), true)
@@ -226,6 +226,18 @@ test('a preflight marker is live only while its process and timestamps agree', a
   assert.equal(isLiveMarker({ ...marker, startedMs: marker.markerMs + 5001 }), false)
   assert.equal(isLiveMarker({ ...marker, startedMs: marker.markerMs + 15_000 }), false)
   assert.equal(isLiveMarker({ ...marker, startedMs: null }), true)
+})
+
+test('recorded preflight identities use equality and keep unreadable live owners', async () => {
+  const { isLiveMarker } = await import('../scripts/preflight.mjs')
+  const original = 'linux:00000000-0000-4000-8000-000000000001:12345'
+  const marker = { markerMs: 1000, startedMs: 3_601_000, isAlive: true, recordedIdentity: original, identity: original }
+  assert.equal(isLiveMarker(marker), true)
+  assert.equal(isLiveMarker({ ...marker, identity: original.replace('12345', '12346') }), false)
+  assert.equal(isLiveMarker({ ...marker, identity: original.replace('000000000001', '000000000002') }), false)
+  assert.equal(isLiveMarker({ ...marker, identity: null }), true)
+  assert.equal(isLiveMarker({ ...marker, recordedIdentity: null }), true)
+  assert.equal(isLiveMarker({ ...marker, isAlive: false }), false)
 })
 
 test('preflight parses synthetic Linux process ticks and boot time', async () => {
@@ -239,7 +251,7 @@ test('preflight parses synthetic Linux process ticks and boot time', async () =>
 
 test('preflight parses synthetic ps start times and rejects malformed dates', async () => {
   const { parsePsLstart } = await import('../scripts/preflight.mjs')
-  assert.equal(parsePsLstart('Mon Nov  4 05:06:07 2024\n'), new Date(2024, 10, 4, 5, 6, 7).getTime())
+  assert.equal(parsePsLstart('Mon Nov  4 05:06:07 2024\n'), Date.UTC(2024, 10, 4, 5, 6, 7))
   for (const bad of ['', 'not a date', 'Mon Xxx 4 05:06:07 2024', 'Mon Feb 30 05:06:07 2024', 'Mon Nov 4 25:06:07 2024']) assert.equal(parsePsLstart(bad), null)
 })
 
@@ -259,19 +271,248 @@ test('preflight reads process starts through the platform-specific sources', asy
     invocations.push({ program, args, options })
     return { status: 0, stdout: program === 'ps' ? 'Mon Nov  4 05:06:07 2024\n' : '2024-11-04T05:06:07.1234567Z\n' }
   }
-  assert.equal(processStartedMs(42, { platform: 'darwin', run }), new Date(2024, 10, 4, 5, 6, 7).getTime())
+  assert.equal(processStartedMs(42, { platform: 'darwin', run }), Date.UTC(2024, 10, 4, 5, 6, 7))
   assert.deepEqual(invocations[0].args, ['-o', 'lstart=', '-p', '42'])
   assert.equal(invocations[0].options.env.LC_ALL, 'C')
+  assert.equal(invocations[0].options.env.TZ, 'UTC')
   assert.ok(invocations[0].options.timeout > 0)
-  assert.equal(processStartedMs(42, { platform: 'win32', run }), Date.parse('2024-11-04T05:06:07.123Z'))
-  assert.equal(invocations[1].program, 'powershell')
+  const env = { SystemRoot: 'C:\\Windows' }
+  assert.equal(processStartedMs(42, { platform: 'win32', run, env }), Date.parse('2024-11-04T05:06:07.123Z'))
+  assert.equal(invocations[1].program, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
   assert.ok(invocations[1].args.includes('-NonInteractive'))
   assert.ok(invocations[1].options.timeout > 0)
+  for (const { options } of invocations) assert.equal(options.killSignal, 'SIGKILL')
   assert.equal(processStartedMs(-1, { platform: 'win32', run: () => assert.fail('invalid PID reached PowerShell') }), null)
   for (const platform of ['darwin', 'win32']) {
     assert.equal(processStartedMs(42, { platform, run: () => ({ status: 1, stdout: '' }) }), null)
     assert.equal(processStartedMs(42, { platform, run: () => { throw new Error('unavailable') } }), null)
   }
+})
+
+test('preflight only reads Windows process starts with an absolute system PowerShell path', async () => {
+  const { processStartedMs } = await import('../scripts/preflight.mjs')
+  const calls = []
+  const run = (program, args, options) => {
+    calls.push({ program, args, options })
+    return { status: 0, stdout: '2024-11-04T05:06:07.1234567Z\n' }
+  }
+  assert.equal(processStartedMs(42, { platform: 'win32', env: { SystemRoot: 'D:\\Windows' }, run }), Date.parse('2024-11-04T05:06:07.123Z'))
+  assert.equal(calls[0].program, 'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+  for (const SystemRoot of [undefined, '', 'Windows', 'C:Windows', '\\Windows', '/Windows']) {
+    assert.equal(processStartedMs(42, { platform: 'win32', env: { SystemRoot }, run }), null)
+  }
+  assert.equal(calls.length, 1)
+})
+
+test('preflight reads ps starts in UTC through the repeated daylight-saving hour', async t => {
+  const { processStartedMs } = await import('../scripts/preflight.mjs')
+  const original = process.env.TZ
+  process.env.TZ = 'America/New_York'
+  t.after(() => {
+    if (original === undefined) delete process.env.TZ
+    else process.env.TZ = original
+  })
+  let calls = 0
+  const run = (program, args, options) => {
+    calls++
+    assert.equal(program, 'ps')
+    assert.equal(options.env.LC_ALL, 'C')
+    assert.equal(options.env.TZ, 'UTC')
+    return { status: 0, stdout: 'Sun Nov  3 06:30:00 2024\n' }
+  }
+  assert.equal(processStartedMs(42, { platform: 'darwin', run }), Date.UTC(2024, 10, 3, 6, 30))
+  assert.equal(calls, 1)
+})
+
+test('preflight reads stable process identities without Linux wall-clock data', async () => {
+  const { processStartIdentity } = await import('../scripts/preflight.mjs')
+  const boot = '00000000-0000-4000-8000-000000000001'
+  const stat = `42 (worker) ${['S', ...Array(18).fill('0'), '12345'].join(' ')}`
+  const paths = []
+  const readText = path => {
+    paths.push(path)
+    if (path === '/proc/42/stat' || path === '/proc/self/stat') return stat
+    assert.equal(path, '/proc/sys/kernel/random/boot_id')
+    return `${boot}\n`
+  }
+  const options = { platform: 'linux', readText, run: () => assert.fail('a stable Linux identity needs no subprocess') }
+  assert.equal(processStartIdentity(42, options), `linux:${boot}:12345`)
+  assert.deepEqual(paths, ['/proc/42/stat', '/proc/sys/kernel/random/boot_id'])
+  paths.length = 0
+  assert.equal(processStartIdentity(process.pid, options), `linux:${boot}:12345`)
+  assert.deepEqual(paths, ['/proc/self/stat', '/proc/sys/kernel/random/boot_id'])
+  assert.equal(processStartIdentity(42, { ...options, readText: () => 'unreadable' }), null)
+  assert.equal(processStartIdentity(42, { ...options, readText: () => { throw new Error('unavailable') } }), null)
+  assert.equal(processStartIdentity(-1, options), null)
+  assert.equal(processStartIdentity(42, { platform: 'win32', env: { SystemRoot: 'C:\\Windows' }, run: () => ({ status: 0, stdout: '2024-11-04T05:06:07.1234567Z\n' }) }), '2024-11-04T05:06:07.1234567Z')
+  assert.equal(processStartIdentity(42, { platform: 'darwin', run: () => ({ status: 0, stdout: 'Mon Nov  4 05:06:07 2024\n' }) }), '2024-11-04T05:06:07.000Z')
+})
+
+test('preflight process readers enforce hard deadlines and reject unsuccessful results', async () => {
+  const { processStartedMs, processStartIdentity } = await import('../scripts/preflight.mjs')
+  const timedOut = { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), signal: 'SIGKILL', status: null }
+  const linuxStat = `42 (worker) ${['S', ...Array(18).fill('0'), '12345'].join(' ')}`
+  for (const platform of ['linux', 'win32', 'darwin']) {
+    const calls = []
+    const options = {
+      platform,
+      env: { SystemRoot: 'C:\\Windows' },
+      readText: path => path === '/proc/42/stat' ? linuxStat : 'btime 1700000000\n',
+      run: (program, args, options) => { calls.push({ program, args, options }); return timedOut },
+    }
+    assert.equal(processStartedMs(42, options), null)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].options.killSignal, 'SIGKILL')
+    assert.ok(calls[0].options.timeout > 0)
+    if (platform === 'linux') assert.equal(calls[0].program, 'getconf')
+    else assert.equal(processStartIdentity(42, options), null)
+    for (const failure of [{ error: timedOut.error, status: 0 }, { signal: 'SIGKILL', status: 0 }, { status: 1 }]) {
+      const stdout = platform === 'linux' ? '100' : platform === 'win32' ? '2024-11-04T05:06:07.123Z' : 'Mon Nov  4 05:06:07 2024'
+      assert.equal(processStartedMs(42, { ...options, run: () => ({ ...failure, stdout }) }), null)
+    }
+  }
+})
+
+test('preflight publishes its identity beside an empty marker that legacy readers recognize', async t => {
+  const f = fixture(t)
+  f.write('tests/published-identity.test.mjs', '')
+  let hasPublished = false
+  const checks = await f.check({
+    onLockPublished: () => {
+      const names = readdirSync(f.lockPath)
+      const name = names.find(name => name.endsWith('.lock'))
+      assert.match(name, new RegExp(`^${process.pid}-[0-9a-f-]+\\.lock$`))
+      const marker = join(f.lockPath, name)
+      assert.equal(lstatSync(marker).size, 0)
+      assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), `synthetic:${process.pid}`)
+      assert.deepEqual(names.sort(), [name, `${name}.start`].sort())
+      hasPublished = true
+    },
+  })
+  assert.equal(hasPublished, true)
+  assert.ok(has(checks, 'PASS', 'tests/published-identity.test.mjs: 1 tests, 0 failed'))
+  assert.deepEqual(readdirSync(f.lockPath), [])
+})
+
+test('preflight publishes no identity file when its own identity is unreadable', async t => {
+  const f = fixture(t)
+  f.write('tests/unpublished-identity.test.mjs', '')
+  let names = null
+  const checks = await f.check({ readProcessIdentity: () => null, onLockPublished: () => { names = readdirSync(f.lockPath) } })
+  assert.equal(names.length, 1)
+  assert.match(names[0], new RegExp(`^${process.pid}-[0-9a-f-]+\\.lock$`))
+  assert.ok(has(checks, 'PASS', 'tests/unpublished-identity.test.mjs: 1 tests, 0 failed'))
+  assert.deepEqual(readdirSync(f.lockPath), [])
+})
+
+for (const isWatched of [false, true]) {
+  const folder = isWatched ? 'watched' : 'own'
+  test(`preflight keeps a matching Linux identity in its ${folder} folder after a forward clock step`, async t => {
+    const { processStartedMs, processStartIdentity } = await import('../scripts/preflight.mjs')
+    const f = fixture(t)
+    f.write('tests/clock-step.test.mjs', '')
+    const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
+    mkdirSync(directory, { mode: 0o700 })
+    const marker = join(directory, `${process.pid}-00000000-0000-4000-8000-000000000025.lock`)
+    let bootSeconds = Math.floor(Date.now() / 1000) - 1000
+    const readText = path => path === '/proc/stat' ? `btime ${bootSeconds}\n`
+      : path === '/proc/sys/kernel/random/boot_id' ? '00000000-0000-4000-8000-000000000001\n'
+        : `42 (worker) ${['S', ...Array(18).fill('0'), '12345'].join(' ')}`
+    const options = { platform: 'linux', readText, clockTicks: () => 100 }
+    const identity = processStartIdentity(process.pid, options)
+    assert.ok(identity)
+    writeFileSync(`${marker}.start`, JSON.stringify(identity))
+    writeFileSync(marker, '')
+    bootSeconds += 3600
+    assert.ok(processStartedMs(process.pid, options) > statSync(marker).mtimeMs + 5000)
+    let runs = 0
+    const checks = await f.check({
+      fallbackLockPath: isWatched ? directory : null,
+      readProcessIdentity: pid => processStartIdentity(pid, options),
+      readProcessStart: () => assert.fail('recorded identities must not use wall-clock comparisons'),
+      onProgress: () => { runs++ },
+    })
+    const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
+    assert.ok(failure)
+    assert.doesNotMatch(failure.message, /start time could not be read/)
+    assert.equal(runs, 0)
+    assert.equal(existsSync(marker), true)
+    assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), identity)
+    if (isWatched) assert.deepEqual(readdirSync(f.lockPath), [])
+  })
+
+  test(`preflight treats a different identity with the same live PID in its ${folder} folder as reused`, async t => {
+    const f = fixture(t)
+    f.write('tests/reused-identity.test.mjs', '')
+    const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
+    mkdirSync(directory, { mode: 0o700 })
+    const marker = join(directory, `${process.pid}-00000000-0000-4000-8000-000000000026.lock`)
+    writeFileSync(`${marker}.start`, JSON.stringify('linux:00000000-0000-4000-8000-000000000001:12345'))
+    writeFileSync(marker, '')
+    const checks = await f.check({
+      fallbackLockPath: isWatched ? directory : null,
+      readProcessIdentity: () => 'linux:00000000-0000-4000-8000-000000000001:12346',
+      readProcessStart: () => assert.fail('a different identity already proves PID reuse'),
+    })
+    assert.ok(has(checks, 'PASS', 'tests/reused-identity.test.mjs: 1 tests, 0 failed'))
+    assert.equal(existsSync(marker), isWatched)
+    assert.equal(existsSync(`${marker}.start`), isWatched)
+    assert.deepEqual(readdirSync(f.lockPath), [])
+  })
+
+  test(`preflight keeps an identity marker in its ${folder} folder when the current start is unreadable`, async t => {
+    const f = fixture(t)
+    f.write('tests/unknown-identity.test.mjs', '')
+    const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
+    mkdirSync(directory, { mode: 0o700 })
+    const marker = join(directory, `${process.pid}-00000000-0000-4000-8000-000000000027.lock`)
+    writeFileSync(`${marker}.start`, JSON.stringify('synthetic:original-start'))
+    writeFileSync(marker, '')
+    let runs = 0
+    const checks = await f.check({
+      fallbackLockPath: isWatched ? directory : null,
+      readProcessIdentity: () => null,
+      readProcessStart: () => statSync(marker).mtimeMs + 15_000,
+      onProgress: () => { runs++ },
+    })
+    assert.ok(has(checks, 'FAIL', 'process start time could not be read'))
+    assert.equal(runs, 0)
+    assert.equal(existsSync(marker), true)
+    assert.equal(existsSync(`${marker}.start`), true)
+    if (isWatched) assert.deepEqual(readdirSync(f.lockPath), [])
+  })
+}
+
+test('preflight keeps an identity marker when its recorded identity is unknown or malformed', async t => {
+  const f = fixture(t)
+  f.write('tests/unreadable-record.test.mjs', '')
+  mkdirSync(f.lockPath)
+  const marker = join(f.lockPath, `${process.pid}-00000000-0000-4000-8000-000000000028.lock`)
+  writeFileSync(marker, '')
+  for (const text of ['null', 'malformed']) {
+    writeFileSync(`${marker}.start`, text)
+    const checks = await f.check({ readProcessStart: () => statSync(marker).mtimeMs + 15_000 })
+    assert.ok(has(checks, 'FAIL', 'process start time could not be read'))
+    assert.equal(existsSync(marker), true)
+    assert.equal(readFileSync(`${marker}.start`, 'utf8'), text)
+  }
+})
+
+test('preflight reports an unreadable start when a process reader times out', async t => {
+  const { processStartedMs } = await import('../scripts/preflight.mjs')
+  const f = fixture(t)
+  f.write('tests/timeout-owner.test.mjs', '')
+  mkdirSync(f.lockPath)
+  const marker = join(f.lockPath, `${process.pid}-00000000-0000-4000-8000-000000000029.lock`)
+  writeFileSync(marker, '')
+  let runs = 0
+  const checks = await f.check({
+    readProcessStart: pid => processStartedMs(pid, { platform: 'darwin', run: () => ({ error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), signal: 'SIGKILL', status: null }) }),
+    onProgress: () => { runs++ },
+  })
+  assert.ok(has(checks, 'FAIL', 'process start time could not be read'))
+  assert.equal(runs, 0)
+  assert.equal(existsSync(marker), true)
 })
 
 test('preflight keeps and blocks on a long-running live owner in its own folder', async t => {
@@ -329,7 +570,25 @@ test('preflight says when a blocking owner has an unknown start time', async t =
   assert.equal(existsSync(marker), true)
 })
 
-test('preflight removes an expired marker even when an unrelated process has its PID', async t => {
+test('preflight keeps a watched marker and reports when its live owner has an unknown start time', async t => {
+  const f = fixture(t)
+  f.write('tests/watched-unknown-owner.test.mjs', '')
+  const fallbackLockPath = join(f.root, 'watched-lock')
+  mkdirSync(fallbackLockPath, { mode: 0o700 })
+  const marker = join(fallbackLockPath, `${process.pid}-00000000-0000-4000-8000-000000000030.lock`)
+  writeFileSync(marker, '')
+  let runs = 0
+  const checks = await f.check({ fallbackLockPath, readProcessStart: () => null, onProgress: () => { runs++ } })
+  const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
+  assert.ok(failure)
+  assert.match(failure.message, new RegExp(`process ${process.pid}\\b`))
+  assert.match(failure.message, /process start time could not be read/)
+  assert.equal(existsSync(marker), true)
+  assert.equal(runs, 0)
+  assert.deepEqual(readdirSync(f.lockPath), [])
+})
+
+test('preflight removes a marker when an unrelated live process reuses its PID', async t => {
   const child = await startUnrelatedProcess()
   try {
     const f = fixture(t)
@@ -339,7 +598,7 @@ test('preflight removes an expired marker even when an unrelated process has its
     writeFileSync(marker, '')
     const old = new Date(Date.now() - 3 * 60 * 60 * 1000 - 60_000)
     utimesSync(marker, old, old)
-    const checks = await f.check()
+    const checks = await f.check({ readProcessStart: pid => { assert.equal(pid, child.pid); return old.getTime() + 15_000 } })
     assert.ok(has(checks, 'PASS', 'tests/reused-pid.test.mjs: 1 tests, 0 failed'))
     assert.equal(existsSync(marker), false)
   } finally {
@@ -446,7 +705,9 @@ test('preflight recovers an interrupted owner record after its process has exite
   const f = fixture(t)
   f.write('tests/interrupted.test.mjs', '')
   mkdirSync(f.lockPath)
-  writeFileSync(join(f.lockPath, '2147483647-00000000-0000-4000-8000-000000000001.lock'), '')
+  const marker = join(f.lockPath, '2147483647-00000000-0000-4000-8000-000000000001.lock')
+  writeFileSync(`${marker}.start`, JSON.stringify('synthetic:interrupted-start'))
+  writeFileSync(marker, '')
   const checks = await f.check()
   assert.ok(checks.some(item => item.state === 'PASS' && item.message.startsWith('tests/interrupted.test.mjs:') && item.message.includes('0 failed')))
   assert.deepEqual(readdirSync(f.lockPath), [])
@@ -631,7 +892,15 @@ test('preflight accepts only a sticky or private parent for the shared fallback 
 test('preflight runs touched tests under the shared fallback lock when the home folder is read-only', { skip: restrictedSkip }, async t => {
   const f = restricted(t)
   f.write('tests/restricted.test.mjs', '')
-  const checks = await f.check()
+  let hasPublished = false
+  const checks = await f.check({ onLockPublished: () => {
+    const name = readdirSync(f.fallbackLockPath).find(name => name.endsWith('.lock'))
+    const marker = join(f.fallbackLockPath, name)
+    assert.equal(lstatSync(marker).size, 0)
+    assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), `synthetic:${process.pid}`)
+    hasPublished = true
+  } })
+  assert.equal(hasPublished, true)
   assert.ok(has(checks, 'PASS', 'tests/restricted.test.mjs: 1 tests, 0 failed'))
   assert.ok(has(checks, 'PASS', "this account's shared fallback folder"))
   assert.equal(existsSync(f.lockPath), false)
