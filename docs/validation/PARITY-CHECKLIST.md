@@ -2,7 +2,7 @@
 
 CI tests the code. It cannot show what a person sees inside each agent's own app or CLI. Before every stable release, open each installed mainstream agent and check the board from inside it. The owner's rule: every mainstream agent must work, in its UI and in its CLI, and each is opened for real, with a screenshot of the CLI.
 
-Write the result to `docs/validation/<date>-parity-<version>.md`, following `2026-10-20-parity-0.23.5.md`. No record, no claim: a surface without a row in that record ships as "untested" in the release notes.
+Write the result to `docs/validation/<date>-parity-<version>.md`, following `2026-10-20-parity-0.23.5.md`. No record, no claim: a surface without a row in that record ships as "untested" in the release notes. After an earlier record, a run may cover only what changed (see A run after a change).
 
 ## Rows
 
@@ -56,3 +56,43 @@ A cell may add a short note, and a `*` that points to a sentence under the table
 - **Spend paid quotas carefully:** at most two short turns per agent on a paid quota.
 - **Clean up after yourself:** afterwards, stop only the processes you started.
 - **Write down what the run left behind:** self-updates, history entries, private data that showed on screen or was sent to a model, rows on the real board, held inbox files, the clipboard and open tabs.
+
+## The kept test home
+
+Every isolated run (How to run it safely) uses one test home that is kept between releases, so the owner's one-time steps stay done (owner, 2026-11-03: 「在這樣測試以後每個版本都要嗎 這樣我還要操作太麻煩了」).
+
+- **One folder, kept.** It sits outside every repository and outside the real home's config folders. Every variable in the isolation list points into it. Do not empty it or start a new one between runs.
+- **The owner's steps there are done once.** The owner signs in, trusts the scratch project folder and approves hooks in that home. Later runs reuse what is there. A step comes back only when its screen comes back, for example an expired sign-in.
+- **Each run starts by installing the release in it.** Run setup with `--apply` against the test home, never the real one. Then read each host's hooks version there, as the first rule above asks.
+- **Nothing comes in from the real home:** no credentials, config, history or `progress.md`.
+- **It holds the owner's sign-ins, so it stays on the owner's computer.** It never goes into a repository, an issue, a pull request, a log or a screenshot, and the record does not name its path ([RULES.md, R8](../dev/RULES.md#r8-what-stays-off-github)).
+- **Replace it only on the owner's word, or when it is broken.** Move the old folder aside; do not delete it. A new home brings back the one-time steps.
+
+The app rows run on the owner's own install, which the owner keeps on the release. Every other row runs in the kept test home.
+
+## What the owner does, all at once
+
+- **Before the first check, one list.** The checker posts every screen it expects to need the owner, in the owner's language. That means each `needs owner` cell of the last record, plus any one-time step the kept home still lacks. Each item names the window, what to press and the words on the screen. The checker then waits for one answer.
+- **During the run, no questions.** A screen that needs the owner makes its cell `needs owner`, and the checker goes on with the other cells.
+- **At the end, one more list** of those screens. After the owner's answer, the checker re-runs only those cells.
+- So a run asks the owner at most twice, and not at all when the kept home already has everything it needs.
+
+## A run after a change
+
+A run may cover only what changed since the last parity record (the record's commit). The rows it does not cover keep their cells from that record.
+
+1. **Scope from the files.** Run `git diff --name-only <the record's commit>..<the release commit>`. The run covers what each changed file reaches. Tests, CI files and docs, the READMEs included, reach nothing. The generated `hooks/board-script*.ts` and `hooks/released.ts` reach what their changed sources reach.
+
+   | Changed file | Rows and checks |
+   |---|---|
+   | One agent's own files: `hooks/receivers/hook-mailbox-<agent>.ts`, `scripts/<agent>-*`, and for Codex also `hooks/codex*.ts` and `scripts/setup-codex.mjs` | that agent's rows, every check |
+   | `hooks/register.tsx`, `hooks/pane.tsx`, `.claude-plugin/` | the three Anthropic rows, every check |
+   | `hooks/connect*.ts`, `hooks/hook-*.ts`, `hooks/local-agents.ts`, `hooks/portable-agents.ts`, `scripts/legacy-connect.ts`, `scripts/connect-transaction.ts`, `scripts/setup-agent.mjs`, `scripts/setup.*`, `scripts/reporter-tail.ts` | checks a, b and e on every installed row |
+   | `hooks/messaging.ts`, `hooks/receiver*.ts`, `scripts/board-messaging.ts`, `scripts/board-serve.ts`, `scripts/message-*`, `scripts/server-runtime.ts` | checks c and e on every installed row |
+   | `hooks/serve.ts`, `hooks/board*.ts`, `hooks/view.ts`, `hooks/parse.ts`, `hooks/blocks.ts`, `hooks/dashboard.ts`, `scripts/board-cli.ts`, `hooks/i18n.ts`, `hooks/strings-*.ts` | checks c, d and f on the shared page and terminal board rows |
+   | Any other file the release ships | a full run |
+
+2. **Always in.** Every row whose host version changed since the last record, because a vendor's update can break a row with no change on our side. Every cell that was FAIL or `needs owner` in the last record. A row for a surface installed since then.
+3. **Before the run,** post the scope on the parity issue: the changed files, the rows and checks they reach, and what is left out and why.
+4. **Say how each cell ran.** A cell that was not run starts its note with `carried from <record>:`.
+5. **A full run** after two runs in a row that were not full.
