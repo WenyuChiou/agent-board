@@ -50,8 +50,12 @@ export const folderProject = (cwd: unknown): string => {
   return name.length > 500 ? '' : name
 }
 
-// This is the one place a new local session title comes from (#246).
-export const sessionTitle = (folder: string, fallback: string): string => line(folder || fallback)
+// This is the one place a new local session title comes from (#246). A session the
+// hook cannot file by folder still needs a title a person can tell from another
+// session's before either reports (#814): the fallback plus the short part of the
+// session the board already names it by, when the caller supplies one.
+export const sessionTitle = (folder: string, fallback: string, distinct = ''): string =>
+  line(folder || (distinct === '' ? fallback : `${fallback} · ${distinct}`))
 
 // The step a hook writes for a session that has reported none of its own (`codexLifecycle` here,
 // `localAgentLifecycle` in codex-local.ts). The view tells it from an agent's step by these words:

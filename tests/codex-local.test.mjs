@@ -2448,6 +2448,51 @@ test('an older live lifecycle event cannot replace a newer state or its update t
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).appliedAt, newer + 1)
 }))
 
+test('two Antigravity sessions in one folder show different titles before either reports (#814)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  // No folder reaches the board for Antigravity: its hook binds only the
+  // conversation id, so both sessions arrive with the same fixture folder.
+  const first = 'synthetic-first-antigravity-814'
+  const second = 'synthetic-second-antigravity-814'
+  const report = (conversationId, state, event) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId })
+  for (const conversationId of [first, second]) {
+    assert.equal(report(conversationId, 'waiting', 'SessionStart').status, 0)
+    assert.equal(report(conversationId, 'working', 'PreInvocation').status, 0)
+  }
+  const ownerOf = id => createHash('sha256').update(`antigravity:${id}`).digest('hex')
+  const firstRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(first)}.json`), 'utf8'))
+  const secondRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(second)}.json`), 'utf8'))
+  assert.notEqual(firstRecord.title, secondRecord.title)
+  assert.ok(firstRecord.title.endsWith(ownerOf(first).slice(0, 8)), firstRecord.title)
+  assert.ok(secondRecord.title.endsWith(ownerOf(second).slice(0, 8)), secondRecord.title)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.ok(text.includes(`### ${firstRecord.title}`), text)
+  assert.ok(text.includes(`### ${secondRecord.title}`), text)
+  // An explicit report still supplies its own title: distinct only until the agent reports.
+  const reported = f.command(['--codex-report', '--agent', 'antigravity', '--session', first], { title: 'Reported summary', project: 'antigravity', state: 'working', steps: ['- [~] Reported step'] })
+  assert.equal(reported.status, 0, reported.stderr)
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(first)}.json`), 'utf8')).title, 'Reported summary')
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(second)}.json`), 'utf8')).title, secondRecord.title)
+}))
+
+test('an Antigravity session created before the distinct title still gets one on its next event (#814)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const conversationId = 'synthetic-legacy-antigravity-814'
+  const report = (state, event) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId })
+  assert.equal(report('waiting', 'SessionStart').status, 0)
+  const owner = createHash('sha256').update(`antigravity:${conversationId}`).digest('hex')
+  const recordFile = join(f.root, 'sessions', `${owner}.json`)
+  const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+  // Rewrite the record and its block heading as the pre-fix shape: the generic title.
+  const before = readFileSync(f.progress, 'utf8')
+  writeFileSync(recordFile, `${JSON.stringify({ ...record, title: 'Local antigravity task' }, null, 2)}\n`)
+  writeFileSync(f.progress, before.replace(`### ${record.title}`, '### Local antigravity task'))
+  assert.equal(report('working', 'PreInvocation').status, 0)
+  const after = JSON.parse(readFileSync(recordFile, 'utf8'))
+  assert.equal(after.title, record.title)
+  assert.ok(readFileSync(f.progress, 'utf8').includes(`### ${record.title}`))
+}))
+
 test('a hook worker that starts after the host would stop it still reads its input and queues the event', () => fixture(f => {
   // A cold Windows PowerShell start can delay Antigravity's worker past its 3 s host limit (#241).
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
