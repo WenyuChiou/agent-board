@@ -458,3 +458,22 @@ test('every placeholder step a hook writes, in every language and as earlier rel
   expect(isLifecycleStep('Water the synthetic rows')).toBe(false)
   expect([...LIFECYCLE_STEPS].length).toBeGreaterThanOrEqual(9)
 })
+
+test('an Antigravity session stopped on a limit leaves the working list', () => {
+  const s = STRINGS.en
+  const file = `## scratch
+<!-- auto session=ab770010 agent=antigravity state=working updated=${at(58)} -->
+### Local antigravity task
+- [ ] ${s.localAgentLifecycle}
+<!-- /auto session=ab770010 -->
+`
+  const view = viewOf(file)
+  const model = serveModel(view, [], s, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } })
+  expect(model.view!.working).toEqual([])
+  expect(view.groups.length).toBe(0)
+  expect(view.stopped.length).toBe(1)
+  expect(view.stopped[0]!.title).toBe('Local antigravity task')
+  const text = boardText(view, [], s, { width: 100, isColor: false })
+  expect(text).not.toContain(s.agentWorking('Antigravity'))
+  expect(text).not.toContain(s.groupWorking(1))
+})

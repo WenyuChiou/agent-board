@@ -2877,6 +2877,7 @@ export const LINES = [
 "};",
 "var DEFAULT_STALE_MS = 12 * 60 * 60 * 1000;",
 "var STALE_MS = DEFAULT_STALE_MS;",
+"var WORKING_MS = 30 * 60 * 1000;",
 "var parseStaleMs = (value, fallback = DEFAULT_STALE_MS) => {",
 "  if (value === undefined || value === null)",
 "    return fallback;",
