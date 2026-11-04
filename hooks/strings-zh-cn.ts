@@ -72,6 +72,7 @@ export const ZH_CN: Strings = {
     updatedFile: (file: string): string => `已更新汇报配置：${file}`,
     updateFile: (file: string): string => `将更新汇报配置：${file}`,
     kept: (file: string): string => `保留进度与历史：${file}`,
+    keptShared: (file: string, users: string): string => `保留 ${file}；${users} 仍在使用`,
     restart: (host: string): string => `下一步：重新启动 ${host}，卸载已移除的汇报 hooks。`,
     apply: (command: string): string => `下一步：应用这次移除：${command}`,
     none: '下一步：不需要移除。',

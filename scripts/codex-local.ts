@@ -219,6 +219,9 @@ type LocalPlan = {
   changes: { file: string; action: string }[]
   conflicts: string[]
   alreadyGone: string[]
+  // Shared files this removal leaves alone, and the other agents still using each one.
+  // Only set on a removal preview/apply while another agent's install record remains.
+  keptShared?: { file: string; usedBy: string[] }[]
   applied?: boolean
 }
 
@@ -257,6 +260,7 @@ export const codexRemoveOutput = (result: LocalPlan, s: Strings, command: string
   for (const change of result.changes) lines.push(change.action === 'remove'
     ? result.applied ? words.removedFile(change.file) : words.removeFile(change.file)
     : result.applied ? words.updatedFile(change.file) : words.updateFile(change.file))
+  for (const kept of result.keptShared ?? []) lines.push(words.keptShared(kept.file, kept.usedBy.map(one => s.agentNames[one] ?? one).join(s.listSep)))
   for (const file of result.alreadyGone) lines.push(s.setupAlreadyGone(file))
   for (const file of result.conflicts) lines.push(words.conflict(file))
   lines.push(words.kept(result.progress))
@@ -356,7 +360,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const manifestFile = join(root, `install-${agent}.json`)
   const loaded = jsonInitial(manifestFile)
-  const otherManifests = localAgents.filter(one => one !== agent).map(one => jsonInitial(join(root, `install-${one}.json`)))
+  const otherAgents = localAgents.filter(one => one !== agent)
+  const otherManifests = otherAgents.map(one => jsonInitial(join(root, `install-${one}.json`)))
   const control = join(installControlRoot(home), 'legacy-connect.json')
   const authority = join(installControlRoot(home), 'legacy-connect-authority')
   let connection: ConnectTransaction['state'] | undefined
@@ -865,6 +870,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
   const changes: { file: string; action: string }[] = []
+  const keptShared: { file: string; usedBy: string[] }[] = []
   const alreadyGone: string[] = []
   let hasMissingGroup = false
   const nextHooks: Json = { ...hooks }
@@ -999,7 +1005,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
-    if (remove && shared && otherManifests.some(one => one.files !== undefined)) continue
+    if (remove && shared) {
+      // The same record that keeps a shared file out of this removal names the
+      // agents still using it, so the preview says why the file stays (#816).
+      const usedBy = otherAgents.filter((_, index) => otherManifests[index]?.files !== undefined)
+      if (usedBy.length) { keptShared.push({ file, usedBy }); continue }
+    }
     if (remove && existing === null && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
     const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing))))
     if (existing !== null && !owned && existing !== desired) conflicts.push(file)
@@ -1020,7 +1031,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.
