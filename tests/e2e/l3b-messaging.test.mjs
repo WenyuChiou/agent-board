@@ -117,7 +117,7 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     const [codex, antigravity] = hub.actors
     await nativeDelivery(hub, codex, antigravity, 'AB-outward')
     await nativeDelivery(hub, antigravity, codex, 'AB-return')
-  }))
+  }, { traceReceipt: true }))
 
   for (const agent of Object.keys(NATIVE_RECEIVERS)) test(`messages: a message typed on the serve page reaches ${NATIVE_RECEIVERS[agent].label} card's live session and the card shows the receipt`, { timeout: 20000 }, async () => withHub([
     { agent },
