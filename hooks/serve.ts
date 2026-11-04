@@ -2429,7 +2429,36 @@ const PAGE_SCRIPT = String.raw`
   }
   // Wider than the parser's start marker, so a block it would take is never dropped here.
   var blockStart = /\x3c!--\s*auto\s/;
-  var isImporting = false;
+  // The report on its way comes first. One at a time, so a question about one is answered before the next is sent.
+  var importQueue = [];
+  // What the reports of one run said, so a later one's result does not hide an earlier refusal.
+  var importLines = [];
+  var isImportRefused = false;
+  function importSaid(text, tone, key) {
+    if (importLines.indexOf(text) < 0) importLines.push(text);
+    if (tone === 'alert') isImportRefused = true;
+    say(importLines.join(' '), isImportRefused ? 'alert' : tone, key);
+    importQueue.shift();
+    if (importQueue.length) {
+      importNext();
+      return;
+    }
+    importLines = [];
+    isImportRefused = false;
+  }
+  function importNext() {
+    var text = importQueue[0].text;
+    var key = importQueue[0].key;
+    call('/api/paste', { text: text }).then(function (data) {
+      if (data.review && window.confirm(w('pasteReview', data.review.current, data.review.incoming))) {
+        return call('/api/paste', { text: text, reviewToken: data.review.token });
+      }
+      return data;
+    }).then(function (data) {
+      importSaid(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key);
+      refresh();
+    }, function () { importSaid(w('pressFailed'), 'alert', key); unreachable(); });
+  }
   // A paste may come with the footer off screen: its result goes in the sticky note line.
   function importBlock(text, isPaste) {
     var key = isPaste ? null : 'close';
@@ -2437,18 +2466,9 @@ const PAGE_SCRIPT = String.raw`
       say(w('importNoBlock'), 'alert', key);
       return;
     }
-    if (isImporting) return;
-    isImporting = true;
-    call('/api/paste', { text: text }).then(function (data) {
-      if (data.review && window.confirm(w('pasteReview', data.review.current, data.review.incoming))) {
-        return call('/api/paste', { text: text, reviewToken: data.review.token });
-      }
-      return data;
-    }).then(function (data) {
-      isImporting = false;
-      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key);
-      refresh();
-    }, function () { isImporting = false; say(w('pressFailed'), 'alert', key); unreachable(); });
+    if (importQueue.some(function (report) { return report.text === text; })) return;
+    importQueue.push({ text: text, key: key });
+    if (importQueue.length === 1) importNext();
   }
   if (typeof document.addEventListener === 'function') document.addEventListener('paste', function (event) {
     if (isUnreachable || isClosed) return;

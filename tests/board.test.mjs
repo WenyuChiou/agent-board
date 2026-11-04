@@ -8748,6 +8748,35 @@ test('a block the parser would read is posted once while it is on its way, and n
   assert.equal(closing.requests.length, before)
 })
 
+test('a different block pasted while one is on its way is posted after it, and a refusal stays in the note', async () => {
+  const html = await sourcePage()
+  const first = relayFragment(ago(60_000))
+  const second = first.replaceAll('c0ffee12', 'decade34').replace('Draft the launch post', 'Check the launch list')
+  const releases = []
+  const dom = await pageDom(html, redesignModel(), { post: () => new Promise(done => { releases.push(done) }) })
+  dom.paste(first)
+  dom.paste(second)
+  dom.paste(second)
+  await dom.flush()
+  assert.deepEqual(dom.requests.map(request => request.body.text), [first])
+  releases[0]({ ok: false, json: async () => ({ note: 'Synthetic clock refused' }) })
+  await dom.flush()
+  assert.deepEqual(dom.requests.map(request => request.body.text), [first, second])
+  releases[1]({ ok: true, json: async () => ({ ok: true, note: 'Synthetic added' }) })
+  await dom.flush()
+  assert.equal(dom.requests.length, 2)
+  await dom.settle()
+  assert.equal(dom.node('note').textContent, 'Synthetic clock refused Synthetic added')
+  assert.equal(dom.node('note').className, 'alert')
+  // That run is over: the next paste's result stands alone.
+  dom.paste(first)
+  await dom.flush()
+  releases[2]({ ok: true, json: async () => ({ ok: true, note: 'Synthetic again' }) })
+  await dom.settle()
+  assert.equal(dom.node('note').textContent, 'Synthetic again')
+  assert.equal(dom.node('note').className, 'done')
+})
+
 test('a refused block shows its reason, and one of unknown order asks before it replaces', async () => {
   const html = await sourcePage()
   const text = relayFragment(ago(60_000))
