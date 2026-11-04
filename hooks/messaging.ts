@@ -5,7 +5,7 @@ import { sha256 } from './sha256.ts'
 // a later bridge can add its own value without a new store version.
 export type Origin = 'local'
 // A connected session is a live lease from a host adapter, never a name in progress.md.
-export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session'; expires: number; contested?: boolean; origin?: Origin }
+export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin }
 export type Message = {
   id: string
   target: string
@@ -24,7 +24,9 @@ export type Message = {
   claimed: number
   nonce: string
 }
-export type MessageState = { messages: Message[] }
+export type MessageState = { messages: Message[]; mailboxes?: Connection[] }
+export const isMailboxTarget = (id: string): boolean => /^mailbox_[0-9a-f]{24}$/.test(id)
+const isHookDelivered = (one: Message): boolean => one.status === 'accepted' && isMailboxTarget(one.target)
 
 export const FINISHED_KEEP_MS = 24 * 60 * 60 * 1000
 export const OPEN_LIMIT_MS = 30 * 60 * 1000
@@ -81,7 +83,7 @@ export const pruneMessages = (state: MessageState, now: number): MessageState =>
     for (const one of old.sort((a, b) => Number(isInDoubt(a)) - Number(isInDoubt(b)) || a.updated - b.updated).slice(0, over)) dropped.add(one)
   }
   const messages = dropped.size === 0 ? kept : kept.filter(one => !dropped.has(one))
-  return messages.length === state.messages.length && messages.every((one, i) => one === state.messages[i]) ? state : { messages }
+  return messages.length === state.messages.length && messages.every((one, i) => one === state.messages[i]) ? state : { ...state, messages }
 }
 
 export const deliveryText = (message: Message, s: Strings = ZH_TW): string => [
@@ -127,7 +129,7 @@ export const dismissMessage = (state: MessageState, id: string, now: number): Me
   const one = state.messages.find(message => message.id === key)
   if (!one) throw new Error('NOT_FOUND')
   if (isFinished(one)) throw new Error('MESSAGE_FINISHED')
-  return { messages: state.messages.map(message => message === one ? settled({
+  return { ...state, messages: state.messages.map(message => message === one ? settled({
     ...one, status: one.status === 'queued' ? 'rejected' : 'uncertain', error: 'DISMISSED', updated: now,
   }) : message) }
 }
@@ -148,21 +150,21 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   const hops = 1 + (previous?.hops ?? 0)
   if (hops > HOP_LIMIT) throw new Error('HOP_LIMIT')
   const to = address(target.agent, target.session)
-  const open = state.messages.filter(one => one.to === to && isOpen(one))
+  const open = state.messages.filter(one => one.to === to && isOpen(one) && !isHookDelivered(one))
   if (open.length >= TARGET_OPEN_CAP) throw new Error('TARGET_BUSY')
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
   if (state.messages.filter(isOpen).length >= OPEN_CAP || state.messages.length >= OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('MESSAGE_LIMIT')
   const message: Message = { ...request, hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
-  return { state: { messages: [...state.messages, message] }, message }
+  return { state: { ...state, messages: [...state.messages, message] }, message }
 }
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string): { state: MessageState; messages: Message[] } => {
   if (target.contested || target.expires <= now) return { state, messages: [] }
-  const busy = state.messages.some(one => one.to === address(target.agent, target.session) && ['uncertain', 'accepted'].includes(one.status) && isOpen(one))
+  const busy = state.messages.some(one => one.to === address(target.agent, target.session) && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one))
   const messages = busy ? [] : state.messages.filter(one => one.target === target.id && one.turn === target.turn && one.status === 'queued').slice(0, 1)
   if (messages.length === 0) return { state, messages }
   const claimed = messages.map(one => ({ ...one, status: 'uncertain' as const, claimed: now, nonce, updated: now }))
-  return { state: { messages: state.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }
+  return { state: { ...state, messages: state.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }
 }
 export const messageReceipt = (state: MessageState, target: Connection, input: Record<string, unknown>, now: number): MessageState => {
   if (target.contested) throw new Error('CONTESTED')
@@ -187,9 +189,10 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
     return state
   }
   if (one.status === 'accepted' && status === 'accepted' && one.reply === reply) return state
-  return { messages: state.messages.map(message => message === one ? settled({ ...one, status, reply, error, updated: now }) : message) }
+  return { ...state, messages: state.messages.map(message => message === one ? settled({ ...one, status, reply, error, updated: now }) : message) }
 }
 export const disconnectMessages = (state: MessageState, target: string, now: number): MessageState => ({
+  ...state,
   messages: state.messages.map(one => one.target !== target || isFinished(one) ? one : settled({
     ...one, status: one.status === 'queued' ? 'rejected' : one.status === 'accepted' ? 'accepted' : 'uncertain', error: 'DISCONNECTED', updated: one.error === 'DISCONNECTED' || one.status === 'uncertain' ? one.updated : now,
   })),
