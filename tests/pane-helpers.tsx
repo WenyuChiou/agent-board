@@ -25,7 +25,7 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
-import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED } from '../hooks/ledger-move'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED, PENDING_COMMIT, PENDING_STAGE } from '../hooks/ledger-move'
 import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
 
@@ -65,6 +65,8 @@ const PROPS: RenderPropsOf['Pane'] = {
 }
 
 type World = {
+  // Whether the check a receiver runs on the board's address folder finds it this account's own.
+  isAddressOwn?: boolean
   files: Map<string, string>
   dirs?: Set<string>
   unlistable?: Set<string>
@@ -272,6 +274,9 @@ const engineBeneath = (on: On, world: World): MockClock => {
     value: world.hasTasks ? [{ name: 'TaskCreate', description: '', mcp: false }] : [{ name: 'Read', description: '', mcp: false }],
   }))
   on('process.run', async ($, e) => {
+    if (e.argv[0] === 'node' && e.argv[1] === '-e' && world.isAddressOwn !== undefined) {
+      return { value: { exitCode: world.isAddressOwn ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (world.browserExitCode !== undefined && e.argv.some(arg => /\.html$/.test(arg))) {
       world.ran?.push([...e.argv])
       return { value: { exitCode: world.browserExitCode, stdout: '', stderr: 'synthetic browser refusal', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -341,6 +346,29 @@ const engineBeneath = (on: On, world: World): MockClock => {
       } catch (error) {
         return { value: { exitCode: 1, stdout: '', stderr: String(error), isStdoutTruncated: false, isStderrTruncated: false } }
       }
+    }
+    if (e.argv[0] === 'node' && e.argv[2] === PENDING_STAGE && e.argv[3] === '--') {
+      world.ran?.push([...e.argv])
+      const target = posix(e.argv[4] ?? '')
+      if (world.node === null) return { value: { exitCode: 127, stdout: '', stderr: 'node: command not found', isStdoutTruncated: false, isStderrTruncated: false } }
+      if (world.dirs?.has(target)) return { value: { exitCode: 1, stdout: '', stderr: 'EISDIR', isStdoutTruncated: false, isStderrTruncated: false } }
+      const directory = `/tmp/agent-board-pending-${workerStageSequence += 1}`
+      return { value: { exitCode: 0, stdout: JSON.stringify({ protocol: 1, directory, file: `${directory}/pending.json`, token: 'b'.repeat(32) }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (e.argv[0] === 'node' && e.argv[2] === PENDING_COMMIT && e.argv[3] === '--') {
+      world.ran?.push([...e.argv])
+      const target = posix(e.argv[4] ?? '')
+      const directory = posix(e.argv[5] ?? '')
+      const digest = e.argv[7] ?? ''
+      const stagedFile = `${directory}/pending.json`
+      const text = world.files.get(stagedFile)
+      world.files.delete(stagedFile)
+      if (world.node === null) return { value: { exitCode: 127, stdout: '', stderr: 'node: command not found', isStdoutTruncated: false, isStderrTruncated: false } }
+      if (text === undefined || sha256(text) !== digest || world.dirs?.has(target) || world.isMoveRefused?.(stagedFile) === true || world.unwritable?.has(target) === true) {
+        return { value: { exitCode: 1, stdout: '', stderr: 'PENDING_COMMIT_FAILED', isStdoutTruncated: false, isStderrTruncated: false } }
+      }
+      world.files.set(target, text)
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv[0] === 'rmdir') {
       world.ran?.push([...e.argv])

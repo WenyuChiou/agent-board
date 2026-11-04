@@ -1,8 +1,11 @@
 import { BOARD_SCRIPT } from './board-script'
 import { connectRecordPath, hasOwnConnectData, recoveryUnreadableCode } from './connect-pure'
+import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiver, parseAddress, RECEIVER_MS } from './receiver'
+import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
-import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE } from './ledger-move'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
+import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } from 'claude-code'
@@ -46,6 +49,9 @@ import {
   parseJournal,
   previousMonth,
   progressReport,
+  nextPendingArchive,
+  parsePendingArchive,
+  pendingArchivePath,
   unwrittenEntries,
 } from './journal'
 import type { JournalEntry } from './journal'
@@ -133,7 +139,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -169,6 +175,7 @@ const pressResults = atom({ plugin: 'agent-board', key: 'pressResults' } as cons
 const answer = atom({ plugin: 'agent-board', key: 'answer' } as const, null as ProgressAnswer | null)
 const resolveResult = atom({ plugin: 'agent-board', key: 'resolveResult' } as const, null as ResolveResult | null)
 const isNotifyOn = atom({ plugin: 'agent-board', key: 'isNotifyOn' } as const, true)
+const receiverState = atom({ plugin: 'agent-board', key: 'receiver' } as const, emptyReceiver())
 // The person's /config theme, which picks the dark or light 和色 set.
 const theme = atom({ plugin: 'agent-board', key: 'theme' } as const, 'dark')
 // Steps finished today, from the journal.
@@ -197,6 +204,11 @@ const wordsOf = async ($: EngineInterface): Promise<Strings> => STRINGS[langOf(a
 // Module state: reset by a reload, which only happens between turns.
 let isPolling = false
 let isTurnRunning = false
+let receiver: Receiver | null = null
+let receiverTimer: { cancel: () => void } | null = null
+// A hub that does not answer within this holds no tick up: it is a poll that failed.
+const HUB_MS = 5000
+const RECEIVER_END_MS = 500
 let writes: Promise<unknown> = Promise.resolve()
 let questionTrims: Promise<void> = Promise.resolve()
 let settingSaves: Promise<unknown> = Promise.resolve()
@@ -415,9 +427,9 @@ let answersAdded = 0
 const rememberAnswered = (turns: readonly AgentTurn[]): void => {
   for (const turn of turns) {
     if ((turn.event !== 'prompt' && (turn.event !== 'turn' || turn.answer.trim() === '')) || turn.at === undefined || !Number.isFinite(turn.at)) continue
-    const key = JSON.stringify([turn.agent, turn.id])
+    const key = JSON.stringify([turn.agent, turn.id, turn.session])
     if ((answeredPending.get(key)?.at ?? -Infinity) >= turn.at) continue
-    answeredPending.set(key, { agent: turn.agent, id: turn.id, event: turn.event, at: turn.at })
+    answeredPending.set(key, { agent: turn.agent, id: turn.id, session: turn.session, event: turn.event, at: turn.at })
     answeredKeptSince.delete(key)
     answersAdded += 1
   }
@@ -831,7 +843,7 @@ const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects:
   rememberAnswered(evidence)
   if (evidence.length > 0 && questionsRunning !== null) return
   try {
-    const matches = (record: QuestionRecord, turn: QuestionAnswerEvidence): boolean => record.source?.kind === 'inbox' && record.source.agent === turn.agent && record.source.session === turn.id
+    const matches = isAnsweredBy
     const batch = [...answeredPending.entries()]
     // Counted with the batch, so an answer remembered while the key is read is not taken as carried.
     const added = answersAdded
@@ -2496,11 +2508,7 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
         // A turn the pass never records (not a question, or no session) goes as before. Only this
         // turn's own evidence counts: an earlier ask of the same words by the same session, answered
         // long ago, is not a record of this one.
-        const scope = !turn.isQuestion || turn.id === undefined ? null : questionScope(turn.project, turn.agent, turn.id)
-        const json = JSON.stringify(turn)
-        const revisions = turn.sourceRevisions ?? []
-        const isRecorded = scope === null || ledger.records.some(record => record.scope === scope && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
-        if (isRecorded) await discard(key)
+        if (isTurnRecorded(ledger, turn)) await discard(key)
         else {
           hasUnrecorded = true
           // Held like a cut-off block's turn: tried again once progress.md changes, not on every
@@ -2863,7 +2871,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
         if (unkept.length > 0) await holdBack(unkept, new Error('PENDING_QUESTION_NOT_KEPT'))
         // A question and its answer can arrive in one look: the answer was remembered before
         // the question was kept, so it settles now instead of at the next poll.
-        const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id])))
+        const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id, one.session])))
         // Its failure is made good at the next poll, so it sends back no run.
         if ([...answeredPending.keys()].some(key => asked.has(key))) await progressPath($).then(path => pollAnsweredQuestions($, path, undefined)).catch(() => undefined)
       } catch (error) {
@@ -2961,9 +2969,11 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   let pendingEntries: string[] = []
   let pendingKeys: string[] = []
   let pendingMoved: Array<{ session: string, text: string }> = []
+  let currentBoardHash = ''
   // The blocks that ask which a try has archived, by session, with the lines they had then.
   const moved = new Map<string, string>()
   const wrote = await rewrite($, path, async (text, isLast) => {
+    currentBoardHash = sha256(text)
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // The ledger is settled once for all of them. Another agent's write meanwhile (a new `[?]`
     // step) must not be written over with a result made from the older text: start again from it.
@@ -2999,7 +3009,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   }, undefined, async (path, text) => {
     // Made again after another session's write, the same blocks are not archived twice.
     const fresh = unwrittenEntries(pendingEntries, archived)
-    await appendArchive($, archivePath(path, at), fresh, s)
+    await appendArchive($, path, archivePath(path, at), fresh, s, archived, currentBoardHash)
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
@@ -3014,6 +3024,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     await poll($)
     return 0
   }
+  await removePendingArchiveNote($, path, s)
   if (keys.size > 0) {
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([key]) => !keys.has(key))))
     await saveDoneSeen($, at, kept => Object.fromEntries(Object.entries(kept).filter(([key]) => !keys.has(key))))
@@ -3027,6 +3038,30 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   return [...removed.values()].reduce((sum, one) => sum + one, 0)
 }
 
+const removePendingArchiveNote = async ($: EngineInterface, path: string, s: Strings): Promise<void> => {
+  const pendingFile = pendingArchivePath(path)
+  if (!(await $.fs.exists(pendingFile))) return
+  const parentDir = pendingFile.replace(/[\\/][^\\/]*$/, '')
+  const name = baseName(pendingFile)
+  const list = await $.fs.list(parentDir).catch(() => [])
+  const found = list.find(entry => entry.name === name)
+  if (found && found.kind !== 'file') return
+  const isWin = await isWindows($, path)
+  if (await removeFiles($, [pendingFile], isWin)) {
+    await update($, answer, current =>
+      current !== null && Object.values(STRINGS).some(words => current.text === words.pendingNoteRemoveFailed(name))
+        ? null
+        : current,
+    ).catch(() => undefined)
+    return
+  }
+  await update($, answer, current =>
+    current?.isAsking || current?.copied !== undefined
+      ? current
+      : { question: s.archiveTitle, text: s.pendingNoteRemoveFailed(name), isAsking: false },
+  ).catch(() => undefined)
+}
+
 // What the explicit archive checks before it takes a block that asks (#174): the ledger settled
 // against this text, every question of the block kept in it, and a durable 'archived' copy of each
 // one still open. False leaves the block where it is; a copy that cannot be written throws.
@@ -3035,20 +3070,86 @@ const keepAskedQuestions = async ($: EngineInterface, path: string, projects: re
   if (!isSettled && !(await pollQuestions($, path, projects, true))) return false
   const ledger = await read($, questionLedger)
   if (!archiveQuestionsKept(projects, ref, ledger)) return false
+  const task = refTasks(projects, ref)[0]
   for (const record of ledger.records) {
-    if (record.isUnresolved && isAskedBy(record, ref)) await keepQuestionCapture($, path, record, 'archived')
+    if (record.isUnresolved && isAskedBy(record, ref, task)) await keepQuestionCapture($, path, record, 'archived')
   }
 
   return true
 }
 
 // Entries added at the end of a month's archive file, after what it holds.
-const appendArchive = async ($: EngineInterface, month: string, entries: readonly string[], s: Strings): Promise<void> => {
-  if (entries.length === 0) return
-  const archive = await partFor($, month)
+const appendArchive = async (
+  $: EngineInterface,
+  progressFile: string,
+  month: string,
+  entries: readonly string[],
+  s: Strings,
+  written: ReadonlyMap<string, number> = new Map(),
+  currentBoardHash?: string,
+): Promise<void> => {
+  if (entries.length === 0 && written.size === 0) return
+  const pendingFile = pendingArchivePath(progressFile)
+  const parentDir = pendingFile.replace(/[\\/][^\\/]*$/, '')
+  const pendingBase = baseName(pendingFile)
+  let pendingText = ''
+  try {
+    const list = await $.fs.list(parentDir).catch(() => [])
+    const found = list.find(entry => entry.name === pendingBase)
+    if (found?.kind === 'file') {
+      pendingText = await readText($, pendingFile)
+    }
+  } catch {}
+  const pending = parsePendingArchive(pendingText)
+  const sizes = await readMonthParts(month, async path => (await $.fs.stat(path).catch(() => undefined))?.size ?? null)
+  const archive = currentPart(month, path => sizes.get(path) ?? null)
+  const earlierPaths = monthParts(month, path => (sizes.get(path) ?? null) !== null).filter(one => one !== archive)
   const past = await readText($, archive)
-  const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
-  await $.fs.write(archive, head + entries.join('\n\n') + '\n')
+  const earlier = earlierPaths.length === 0 ? [] : await Promise.all(earlierPaths.map(one => readText($, one).catch(() => '')))
+  const planned = nextPendingArchive([past, ...earlier], entries, written, pending, currentBoardHash)
+  if (planned.missing.length === 0 && written.size === 0) return
+  const list = await $.fs.list(parentDir).catch(() => [])
+  const existing = list.find(entry => entry.name === pendingBase)
+  if (existing && existing.kind !== 'file') {
+    throw new Error('PENDING_NOTE_NOT_REGULAR_FILE')
+  }
+  const payload = JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n'
+  const stagedRun = await $.process.run(['node', '-e', PENDING_STAGE, '--', pendingFile], { timeoutMs: 10000 }).catch(() => null)
+  if (stagedRun === null || stagedRun.exitCode === 127) {
+    // Computers without Node still need a complete recovery note before the archive changes.
+    const isWin = await isWindows($, progressFile)
+    const suffix = Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
+    const temporary = `${pendingFile}.${suffix}.tmp`
+    try {
+      await $.fs.write(temporary, payload)
+      if (!(await replaceFile($, temporary, pendingFile, isWin))) throw new Error('PENDING_NOTE_WRITE_FAILED')
+    } catch {
+      await removeFiles($, [temporary], isWin).catch(() => false)
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+  } else {
+    let stage: PendingStage | null = null
+    if (stagedRun.exitCode === 0 && !stagedRun.isStdoutTruncated) {
+      try {
+        stage = pendingStage(JSON.parse(stagedRun.stdout))
+      } catch {}
+    }
+    if (stage === null) throw new Error('PENDING_NOTE_WRITE_FAILED')
+    try {
+      await $.fs.write(stage.file, payload)
+    } catch {
+      await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, ''], { timeoutMs: 10000 }).catch(() => null)
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+    const committed = await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, sha256(payload)], { timeoutMs: 10000 }).catch(() => null)
+    if (committed === null || committed.exitCode !== 0) {
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+  }
+  if (planned.missing.length > 0) {
+    const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
+    await $.fs.write(archive, head + planned.missing.join('\n\n') + '\n')
+  }
 }
 
 // One task to the archive at the person's word, written the way archiveOld writes. False when
@@ -3057,12 +3158,14 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const path = await progressPath($)
   const at = await $.clock.now()
   const s = await wordsOf($)
-  const archived = new Set<string>()
+  const archived = new Map<string, number>()
   const observed = await read($, firstSeen)
   let pendingEntries: string[] = []
+  let currentBoardHash = ''
   const wrote = await rewrite($, path, async text => {
+    currentBoardHash = sha256(text)
     const projects = parseProgress(text)
-    const hasQuestions = projects.some(project => project.name === ref.project && project.tasks.some(task => (ref.session === null ? task.title === ref.title : task.auto?.session === ref.session) && task.steps.some(step => step.status === 'waiting')))
+    const hasQuestions = refTasks(projects, ref).some(task => task.steps.some(step => step.status === 'waiting'))
     if (hasQuestions) {
       if (!(await keepAskedQuestions($, path, projects, ref))) throw new Error('QUESTION_RETENTION_FAILED')
       // Another agent's write while the question check ran is not written over with the older text.
@@ -3073,11 +3176,13 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
     pendingEntries = taken.entries
     return taken.text
   }, undefined, async (path, text) => {
-    await appendArchive($, archivePath(path, at), pendingEntries.filter(entry => !archived.has(entry)), s)
-    for (const entry of pendingEntries) archived.add(entry)
+    const fresh = unwrittenEntries(pendingEntries, archived)
+    await appendArchive($, path, archivePath(path, at), fresh, s, archived, currentBoardHash)
+    for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     await $.fs.write(path, text)
   })
   if (wrote === null) return false
+  await removePendingArchiveNote($, path, s)
   if (ref.session === null) {
     const key = doneKey(ref.project, ref.title)
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([one]) => one !== key)))
@@ -3194,7 +3299,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
 const othersNoteFor = async ($: EngineInterface): Promise<string | null> => {
   const mirror = await read($, mine)
 
-  return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : shortId(mirror.sessionId), await $.clock.now(), await wordsOf($))
+  return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : { ...mirror, agent: mirror.agent || 'claude' }, await $.clock.now(), await wordsOf($))
 }
 
 // Keeps the store to what the board still needs (retention.ts, #373). A pass reads at most
@@ -3631,9 +3736,63 @@ const answerHere = async ($: EngineInterface): Promise<void> => {
   await settle($)
 }
 
+// POSIX only: a folder that only this account can reach, and in it, when named, a plain file of its own.
+const OWN_ADDRESS = "const fs=require('fs');const[d,f]=process.argv.slice(1);const a=fs.statSync(d),u=process.getuid();const b=f&&fs.lstatSync(f);process.exit(a.isDirectory()&&a.uid===u&&(a.mode&63)===0&&(!b||b.isFile()&&b.uid===u)?0:1)"
+const isOwnAddress = async ($: EngineInterface, ...paths: string[]): Promise<boolean> =>
+  (await $.process.run(['node', '-e', OWN_ADDRESS, '--', ...paths], { timeoutMs: 5000 }).catch(() => null))?.exitCode === 0
+
+// Where the running page left its address, or null: no page, or nothing this account can trust.
+const readAddress = async ($: EngineInterface): Promise<BoardAddress | null> => {
+  const path = await progressPath($)
+  const key = addressKey(path)
+  if (key === null) return null
+  const isWin = await isWindows($, path)
+  const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '')
+  const runtime = await $.env.get('XDG_RUNTIME_DIR')
+  const isRuntimeOwn = !isWin && runtime !== undefined && runtime !== '' && await isOwnAddress($, runtime)
+  const folder = addressFolder(isWin, home, runtime, isRuntimeOwn)
+  if (folder === null) return null
+  const file = [folder, addressFileName(key)].join(isWin ? '\\' : '/')
+  const found = await $.fs.stat(file).catch(() => undefined)
+  if (found === undefined || found.isLink || found.kind !== 'file') return null
+  if (!isWin && !(await isOwnAddress($, folder, file))) return null
+
+  return parseAddress(await $.fs.read(file), key)
+}
+
+const makeReceiver = ($: EngineInterface): Receiver => createReceiver({
+  session: () => $.session.id(),
+  address: () => readAddress($),
+  call: async (address, action, body) => {
+    const asked = $.http.fetch(`${address.origin}/api/messages/${action}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-board-token': address.token },
+      body: JSON.stringify(body),
+    })
+    const hung = $.clock.sleep(HUB_MS).then(() => { throw new Error('HUB_TIMEOUT') })
+    const { status, text } = await Promise.race([asked, hung])
+    return { status, json: JSON.parse(text) as unknown }
+  },
+  isBusy: () => isTurnRunning,
+  now: () => $.clock.now(),
+  submit: text => $.prompt.submit({ text }),
+  load: () => read($, receiverState),
+  save: state => update($, receiverState, () => state),
+})
+
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     isInteractiveSession = e.isInteractive !== false
+    // Started before anything is awaited: a slow start must not cost the session its address.
+    // Each tick looks for the page itself; none of it runs inside this hook's budget.
+    receiver = null
+    if (isInteractiveSession) {
+      const own = makeReceiver($)
+      receiver = own
+      receiverTimer = $.clock.every(RECEIVER_MS, () => {
+        own.tick().catch(() => undefined)
+      })
+    }
     pendingCache = null
     progressChangedAt = null
     heldInboxQuestions.clear()
@@ -3888,7 +4047,10 @@ export const register: Register = (on, options) => {
     hasTurnBackgroundLaunch = false
     turnBackgroundJobIds = new Set()
     turnBackgroundLaunchesWithoutId = 0
-    turnPrompt = e.text.trim()
+    // A board message's turn: neither what it said nor what Claude answered joins the board's
+    // own records. Only its ACK goes back, as the message's receipt.
+    const isDelivery = (await receiver?.turnStarted(e.text, e.turnId).catch(() => false)) === true
+    turnPrompt = isDelivery ? '' : e.text.trim()
     const isAnswer = isNextTurnAnswer && e.text.trim() !== ''
     isNextTurnAnswer = false
     const isNotification = nextTurnNotification
@@ -3905,7 +4067,7 @@ export const register: Register = (on, options) => {
       await saveBackground($, one => finishBackgroundJob(one, e.text, isNotification === true))
       mirror = await read($, mine)
     }
-    if (mirror !== null && mirror.firstPrompt === '' && e.text.trim() !== '') {
+    if (mirror !== null && !isDelivery && mirror.firstPrompt === '' && e.text.trim() !== '') {
       await saveMine($, one => ({ ...one, firstPrompt: promptKey(e.text) }))
     }
     // The person is answering: what waited on them from the last turn's question is settled.
@@ -3932,16 +4094,23 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    if (receiver !== null && e.agentId === undefined && result !== undefined) await receiver.stepAnswered(e.turnId, result.answer).catch(() => undefined)
+    return result
+  })
+
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     if (hasBackgroundActivity) await backgroundChanges
     isTurnRunning = false
+    const isDelivery = (await receiver?.turnEnded(e.turnId, e.answer, e.isAborted).catch(() => false)) === true
     const mirror = await read($, mine)
     const hasRunningTurnBackgroundJob = (mirror?.backgroundJobIds ?? []).some(id => turnBackgroundJobIds.has(id)) ||
       (turnBackgroundLaunchesWithoutId > 0 && (mirror?.backgroundJobs ?? 0) > (mirror?.backgroundJobIds?.length ?? 0))
     if ((mirror?.backgroundReleases?.length ?? 0) > 0 || (mirror?.backgroundReleaseCount ?? 0) > 0)
       await saveBackground($, one => ({ ...one, backgroundReleases: [], backgroundReleaseCount: 0 })).catch(() => undefined)
-    const question = e.isAborted ? null : lastQuestion(e.answer)
+    const question = e.isAborted || isDelivery ? null : lastQuestion(e.answer)
     if (mirror !== null && mirror.tasks.length > 0) {
       const branch = await branchName($)
       await saveMine($, one => ({ ...one, branch }))
@@ -3961,7 +4130,7 @@ export const register: Register = (on, options) => {
     if (mirror !== null && mirror.tasks.length === 0 && mirror.source === 'turns') await settle($)
     // No Task list: a turn that changed something, or any turn once the session is tracked,
     // is summed up into steps.
-    if (mirror !== null && !e.isAborted && (mirror.tasks.length === 0 || mirror.source === 'turns')) {
+    if (mirror !== null && !e.isAborted && !isDelivery && (mirror.tasks.length === 0 || mirror.source === 'turns')) {
       const hasWork = mirror.source === 'turns' || hasTurnBackgroundLaunch || isWork(turnTools(await $.session.messages().catch(() => [])))
       if (hasWork) {
         const prompt = turnPrompt
@@ -4088,6 +4257,13 @@ export const register: Register = (on, options) => {
       })
       await queueWrite($)
     }
+    // After a /clear or a resume the process goes on under another id, with no session.start: the
+    // timer goes on and registers that id. Last, and bounded: this hook's time is short, and a
+    // session that could not say goodbye is gone from the board when its lease ends.
+    const isGoingOn = e.reason === 'clear' || e.reason === 'resume'
+    if (!isGoingOn) receiverTimer?.cancel()
+    if (receiver !== null) await isDoneWithin($, receiver.end().catch(() => undefined), RECEIVER_END_MS)
+    if (!isGoingOn) receiver = null
 
     return next(e)
   })

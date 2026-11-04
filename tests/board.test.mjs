@@ -3,7 +3,7 @@
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -524,7 +524,9 @@ const run = (lang, args = [], beside = {}, source = FILE, code = BOARD_SCRIPT) =
     writeFileSync(join(dir, 'progress-inbox', 'gemini-turn-1-1.json'), JSON.stringify({ session_id: 'g1', cwd: join(dir, 'docs-site'), prompt_response: 'Fixed 12 broken links.' }))
     const script = join(dir, 'agent-board.mjs')
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${code}`)
-    const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
+    const runtime = join(dir, 'run')
+    mkdirSync(runtime, { mode: 0o700 })
+    const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, XDG_RUNTIME_DIR: runtime }
     return execFileSync(process.execPath, [script, ...args], { env, encoding: 'utf8' })
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
@@ -711,6 +713,17 @@ test('the HTML board shows only the agent and project for a pending turn without
   } })
   assert.ok(page.includes('api-gateway · codex') && page.includes('api-gateway · gemini'), page)
   assert.ok(!page.includes('Private prompt contents') && !page.includes('Private reply contents'), page)
+})
+
+test('the HTML board does not count pending turns that are not questions in Needs you', () => {
+  const page = htmlRun({ inbox: {
+    [HTML_TURN]: JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', prompt: 'Private prompt contents', last_assistant_message: '' }),
+  } })
+  assert.match(page, /id="needs-n">0<\/b>/)
+  assert.match(page, /id="needs-empty"(?! hidden)/)
+  assert.match(page, /<div class="ask" data-agent="codex"><div class="where">/)
+  assert.match(page, /class="turn"/)
+  assert.match(page, /item\.querySelector\('\.turn'\)/)
 })
 
 // `--chat` in a folder of its own, with the home folder, the temp folders and every XDG folder
@@ -1351,7 +1364,9 @@ test('CLI ticks rotate a full journal, chat reads the last part, and archive ret
   // Padding precedes the saved entry so its task still ends at the end of the file.
   const earlier = `${'x'.repeat(1048576 - Buffer.byteLength(entry) - 1)}\n${entry}`
   assert.equal(Buffer.byteLength(earlier), 1048576)
-  const retried = chatRun(['--keys', 'a'], { file: () => file, beside: { [archive]: earlier }, change, inspect })
+  const savedEntry = entry.split('\n\n').find(part => part.includes('### Synthetic work'))
+  const boardHash = createHash('sha256').update(file).digest('hex')
+  const retried = chatRun(['--keys', 'a'], { file: () => file, beside: { [archive]: earlier, 'progress-archive.pending': JSON.stringify({ version: 1, boardHash, entries: [{ entry: savedEntry, held: 0, boardHash }] }) + '\n' }, change, inspect })
   assert.equal(retried.status, 0, retried.stdout + retried.stderr)
   assert.equal(retried.files[archive], earlier)
   assert.ok(!retried.files['progress.md'].includes('### Synthetic work'))
@@ -1453,7 +1468,7 @@ syncBuiltinESMExports()
 // The real --watch key handler on a pretend terminal: the file is changed (or not) right after
 // the first screen is drawn, and the keys arrive before the next 2-second redraw, the way a press
 // does when an agent writes between a draw and a key.
-const watchPress = (initial, replacement, keys, args = []) => {
+const watchPress = (initial, replacement, keys, args = [], rows = 0) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-watch-'))
   try {
     const path = join(dir, 'progress.md')
@@ -1466,7 +1481,7 @@ Object.defineProperty(process.stdin, 'isTTY', { value: true })
 process.stdin.setRawMode = () => {}
 // The board draws only on a terminal; a pipe gets it once as plain text.
 Object.defineProperty(process.stdout, 'isTTY', { value: true })
-const write = process.stdout.write.bind(process.stdout)
+${rows > 0 ? `Object.defineProperty(process.stdout, 'rows', { value: ${rows} })\n` : ''}const write = process.stdout.write.bind(process.stdout)
 let drawn = false
 process.stdout.write = function (text, ...rest) {
   const result = write(text, ...rest)
@@ -1568,6 +1583,16 @@ test('the terminal board archives with a only the hand-kept task it drew: once t
   assert.ok(archived.after.includes('Call Bob'), archived.after)
 })
 
+test('the terminal board watch view scrolls to follow the selection', { timeout: 30_000 }, () => {
+  const tasks = Array.from({ length: 15 }, (_, i) => `### Task ${(i + 1).toString().padStart(2, '0')}\n- [ ] Step\n`).join('\n')
+  const initial = `# Progress\n\n## synthetic\n${tasks}`
+  const keys = Array.from({ length: 14 }, () => 'j')
+  const scrolled = watchPress(initial, initial, keys, [], 10)
+  const last = scrolled.out.split('\u001b[H').filter(Boolean).at(-1) ?? ''
+  assert.ok(last.includes('Task 15'), 'the selected task must be visible on screen')
+  assert.ok(!last.includes('Task 01'), 'earlier tasks must have scrolled off')
+})
+
 // The page's server, started the way `--serve` starts it in the background, on a synthetic
 // progress.md: a closed Grok session with a question, a hand-kept task one step from done and
 // a finished Gemini block. AGENT_BOARD_GROK stands in for Grok Build.
@@ -1626,7 +1651,7 @@ test('a served model failure reports its HTTP status and note before questions a
   }
 })
 
-const page = async (more = '', env = {}, serveArgs = [], now, source = BOARD_SCRIPT, setup) => {
+const page = async (more = '', env = {}, serveArgs = [], now, source = BOARD_SCRIPT, setup, cwd) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const work = join(dir, 'api-gateway')
   mkdirSync(work)
@@ -1664,7 +1689,8 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${now === undefined ? '' : `Date.now = () => ${now}\n`}${source}`)
   setup?.(dir, path)
   const child = spawn(process.execPath, [script, '--serve-child', ...serveArgs], {
-    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
+    cwd,
+    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, APPDATA: dir, LOCALAPPDATA: dir, NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let stderr = ''
@@ -1716,6 +1742,41 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   }
   return { dir, path, url, port, token, call, rows, rowOf, keyOf, close, exited, stderr: () => stderr, served: servedAt(run, path) }
 }
+
+test('the page archives an ended same-prefix peer and leaves the other session on the board', { timeout: 30_000 }, async () => {
+  const ended = (resume, title, step) => `<!-- auto session=a1b2c3d4 agent=codex state=ended updated=${ago(60000)} resume=${resume} -->\n### ${title}\n${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  for (const [peerStep, label] of [['- [?] Beta question?', 'asking'], ['- [ ] Beta step', 'quiet']]) {
+    const board = await page()
+    try {
+      writeFileSync(board.path, `# Progress\n\n## Synthetic\n${ended('a1b2c3d4-person-a', 'Alpha work', '- [?] Alpha question?')}\n${ended('a1b2c3d4-person-b', 'Beta work', peerStep)}`)
+      const model = (await board.call('GET', '/api/board')).json().model
+      const rows = [...model.groups.flatMap(group => group.rows), ...model.stopped]
+      const row = rows.find(one => one.title === 'Beta work')
+      assert.ok(row !== undefined && row.canArchive === true, `${label}: ${JSON.stringify(rows.map(one => [one.title, one.canArchive]))}`)
+      const reply = await board.call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: '', fp: row.fp } })
+      assert.equal(reply.status, 200, `${label}: ${reply.body}`)
+      const left = readFileSync(board.path, 'utf8')
+      assert.ok(left.includes('Alpha work') && left.includes('Alpha question?') && !left.includes('Beta work'), `${label}: ${left}`)
+    } finally { await board.close() }
+  }
+})
+
+test('the page keeps a source copy for the archived same-title peer alone', { timeout: 30_000 }, async () => {
+  const block = (state, updated, resume, step) => `<!-- auto session=a1b2c3d4 agent=codex state=${state} updated=${updated} resume=${resume} -->\n### Same work\n${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const board = await page()
+  try {
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${block('waiting', ago(1000), 'a1b2c3d4-person-a', '- [?] Alpha question?')}\n${block('ended', ago(60000), 'a1b2c3d4-person-b', '- [?] Beta question?')}`)
+    const model = (await board.call('GET', '/api/board')).json().model
+    const row = [...model.groups.flatMap(group => group.rows), ...model.stopped].find(one => one.canArchive === true)
+    assert.ok(row !== undefined, JSON.stringify(model))
+    const reply = await board.call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: '', fp: row.fp } })
+    assert.equal(reply.status, 200, reply.body)
+    const left = readFileSync(board.path, 'utf8')
+    assert.ok(left.includes('Alpha question?') && !left.includes('Beta question?'), left)
+    const archived = readdirSync(board.dir).filter(name => name.includes('-questions-source-')).map(name => JSON.parse(readFileSync(join(board.dir, name), 'utf8'))).filter(one => one.disposition === 'archived')
+    assert.deepEqual(archived.map(one => one.record.words), ['Beta question?'])
+  } finally { await board.close() }
+})
 
 test('live blocks of every agent refuse forged web archives without writes and terminal a and tidy preserve them', { timeout: 30_000 }, async () => {
   const agents = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek', 'custom-agent']
@@ -2174,6 +2235,49 @@ test('ticking and tidying from the page write progress.md the way the pane does,
 })
 
 const relayFragment = (at, state = 'waiting', step = '- [?] Ship it Friday, OK?') => `## launch\n<!-- auto session=c0ffee12 agent=muse state=${state} updated=${at} -->\n### Draft the launch post\n${step}\n<!-- /auto session=c0ffee12 -->`
+
+test('Connect a web chat copies the prompt in the guide, and a block filled in from it is accepted', { timeout: 30_000 }, async () => {
+  // Run the actual CLI sources in the scratch directory, before the maintainer rebuilds the bundle.
+  const root = new URL('../', import.meta.url).href
+  const source = `import { registerHooks, stripTypeScriptTypes } from 'node:module'
+import { readFileSync } from 'node:fs'
+registerHooks({ resolve(specifier, context, nextResolve) {
+  if (context.parentURL?.startsWith(${JSON.stringify(root)}) && /^\\.\\.?\\//.test(specifier) && !/\\.[a-z]+$/i.test(specifier)) return nextResolve(specifier + '.ts', context)
+  return nextResolve(specifier, context)
+}, load(url, context, nextLoad) {
+  if (url.startsWith(${JSON.stringify(root)}) && url.endsWith('.ts')) return { format: 'module', source: stripTypeScriptTypes(readFileSync(new URL(url), 'utf8'), { mode: 'transform' }), shortCircuit: true }
+  return nextLoad(url, context)
+} })
+await import(${JSON.stringify(new URL('../scripts/board-cli.ts', import.meta.url).href)})
+`
+  const board = await page('', {}, [], undefined, source, undefined, tmpdir())
+  try {
+    const home = await board.call('GET', `/?t=${board.token}`)
+    assert.equal(home.status, 200, home.body)
+    const guide = readFileSync(new URL('../docs/REMOTE_REPORTERS.md', import.meta.url), 'utf8').replaceAll('\r\n', '\n')
+    const prompt = guide.split('### Chat relay: a prompt to paste')[1].split('```text\n')[1].split('\n```')[0]
+    const encoded = home.body.match(/<script type="application\/json" id="relay-prompt">([\s\S]*?)<\/script>/)?.[1]
+    assert.ok(encoded)
+    assert.ok(!encoded.includes('<'))
+    assert.equal(JSON.parse(encoded), prompt)
+    const dom = await pageDom(home.body, redesignModel(), { clipboard: true })
+    dom.node('connect-web-chat').click()
+    await dom.settle()
+    assert.deepEqual(dom.copied, [prompt])
+    assert.ok(dom.node('.pfoot').textContent.includes(EN.webChatCopied))
+    const text = prompt.slice(prompt.indexOf('## <project>'), prompt.indexOf('<!-- /auto session=<ID> -->') + '<!-- /auto session=<ID> -->'.length)
+      .replaceAll('<project>', 'Synthetic relay').replaceAll('<ID>', 'a561cafe').replaceAll('<name>', 'muse')
+      .replace('<working|waiting|done|ended>', 'working').replace('<UTC time, like 2026-10-17T08:10:52Z>', new Date().toISOString())
+      .replace('<the outcome, in plain words>', 'Synthetic web chat report').replace('<one line on why this work exists>', 'Synthetic relay check')
+      .replace('<a finished step>', 'Synthetic finished').replace('<the step you are on>', 'Synthetic current')
+      .replace('<a step that needs me>', 'Synthetic question').replace('<one line saying what you need>', 'Choose a synthetic option')
+      .replace('<the next step>', 'Synthetic next')
+      .replace('<!-- /auto session=a561cafe -->', '- [>] Synthetic dependency\n- [!] Synthetic blocker\n- [-] Synthetic cancelled\n<!-- /auto session=a561cafe -->')
+    const result = await board.call('POST', '/api/paste', { body: { text } })
+    assert.equal(result.status, 200, result.body)
+    assert.ok(readFileSync(board.path, 'utf8').includes('### Synthetic web chat report'))
+  } finally { await board.close() }
+})
 
 test('the board script refuses a pasted working block with a weeks-old clock in every language and writes nothing', { timeout: 30_000 }, async () => {
   const notes = { en: /21 days behind.*nothing was written/i, 'zh-TW': /慢了 21 天.*未寫入/, 'zh-CN': /慢了 21 天.*未写入/ }
@@ -2664,7 +2768,7 @@ const viewed = model => {
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
 // `width`: the window's width in pixels (the page folds and moves its sidebar by it); `storage`: a Map behind localStorage;
 // `motion`: 'reduce' or 'full', what the person's system asks for (left out: the page never moves, as in the other tests).
-const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, width, storage, motion } = {}) => {
+const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -2682,6 +2786,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       nodes.set(value, this)
     }
     get id() { return this.attributes.id ?? '' }
+    get tagName() { return this.tag.toUpperCase() }
     set textContent(value) {
       this.textWrites += 1
       this.text = value
@@ -2750,6 +2855,13 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     return nodes.get(id)
   }
   get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
+  const relay = html.match(/<script[^>]*id="relay-prompt"[^>]*>([\s\S]*?)<\/script>/)
+  if (relay) get('relay-prompt').textContent = relay[1]
+  for (const id of ['connect-web-chat', 'import-clipboard']) {
+    if (!html.includes(`id="${id}"`)) continue
+    get(id).tag = 'button'
+    get('.pfoot').appendChild(get(id))
+  }
   get('.pfoot').appendChild(get('close'))
   for (const id of ['close']) get(id).tag = 'button'
   const matches = (node, selector) => {
@@ -2771,7 +2883,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   const copied = []
   const copies = []
   const document = {
-    getElementById: get,
+    getElementById: id => ['relay-prompt', 'connect-web-chat', 'import-clipboard'].includes(id) && !nodes.has(id) ? null : get(id),
     createElement: tag => new Element(tag),
     createTextNode: text => {
       const node = new Element('text')
@@ -2803,11 +2915,11 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     document,
     location: { search: '?t=x' },
     URLSearchParams,
-    navigator: clipboard ? { clipboard: { writeText: async text => { copied.push(text) } } } : {},
+    navigator: clipboard ? { clipboard: { writeText: async text => { copied.push(text) }, ...(readClipboard ? { readText: readClipboard } : {}) } } : {},
     window: win,
     ...(storage === undefined ? {} : { localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { storage.set(key, value) }, removeItem: key => { storage.delete(key) } } }),
     ...(motion === undefined ? {} : { requestAnimationFrame: run => { run(); return 1 } }),
-    crypto: { randomUUID: () => 'synthetic-offline-attempt' },
+    crypto: { randomUUID: () => `synthetic-offline-attempt-${requests.length}` },
     setTimeout: (run, delay) => {
       delays.push(delay)
       // Only the board's own poll (every 3 seconds) is the next redraw; the short waits of a moving page are not.
@@ -2851,6 +2963,11 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     allButtons: () => document.querySelectorAll('button'),
     query: selector => document.querySelectorAll(selector),
     node: get,
+    paste: (text, target = document.body) => {
+      let prevented = false
+      document.events.paste?.({ target, clipboardData: { getData: type => { assert.equal(type, 'text/plain'); return text } }, preventDefault: () => { prevented = true } })
+      return prevented
+    },
     key: event => {
       document.events.keydown?.(event)
       if (['Enter', ' '].includes(event.key) && document.activeElement?.tag === 'button') document.activeElement.click()
@@ -3456,15 +3573,16 @@ test('a refused close on the page says why next to the close button', async () =
       await dom.flush(); await dom.flush()
       const expected = isOffline ? words.serveOffline : 'A message is still on its way to an agent; close the board once it replies.'
       const footer = dom.node('.pfoot')
-      assert.equal(footer.childNodes[0], dom.node('close'))
-      assert.equal(footer.childNodes[1].textContent, expected)
+      const closeAt = footer.childNodes.indexOf(dom.node('close'))
+      assert.ok(closeAt >= 0)
+      assert.equal(footer.childNodes[closeAt + 1].textContent, expected)
       // A refusal is a failure: it is announced as an alert.
-      assert.equal(footer.childNodes[1].getAttribute('role'), 'alert')
+      assert.equal(footer.childNodes[closeAt + 1].getAttribute('role'), 'alert')
       assert.equal(dom.node('note').textContent, '')
       assert.ok(!dom.node('board').textContent.includes(expected))
       await dom.redraw({ ...model, counts: { ...model.counts, active: 9 } })
       // Once the server answers again, the offline advice gives way to a plain failure.
-      assert.equal(footer.childNodes[1].textContent, isOffline ? words.pressFailed : expected)
+      assert.equal(footer.childNodes[closeAt + 1].textContent, isOffline ? words.pressFailed : expected)
       assert.equal(dom.node('offline').textContent, '')
     }
   } finally { await board.close() }
@@ -3472,8 +3590,8 @@ test('a refused close on the page says why next to the close button', async () =
 
 test('unexpected server read and action errors return a reason and log their stacks', async () => {
   const source = BOARD_SCRIPT
-    .replace('\n    view: freshView,', '\n    view: () => { throw new TypeError("synthetic server read failure") },')
-    .replace('\n    tidy,\n    paste,', '\n    tidy: () => { throw new TypeError("synthetic server action failure") },\n    paste,')
+    .replace(/\n( +)view: freshView,/, '\n$1view: () => { throw new TypeError("synthetic server read failure") },')
+    .replace(/\n( +)tidy,\n( +)paste,/, '\n$1tidy: () => { throw new TypeError("synthetic server action failure") },\n$2paste,')
     .replace('clean: cleanUp,', 'clean: () => { throw new TypeError("synthetic server clean failure") },')
   assert.ok(source.includes('synthetic server read failure') && source.includes('synthetic server action failure') && source.includes('synthetic server clean failure'))
   const board = await page('', {}, [], undefined, source)
@@ -4202,7 +4320,7 @@ test('the page keeps actionable progress delays without connection inventory or 
         await dom.redraw({
           ...model,
           asks: [{ key: 'question', project: 'Synthetic', agent: 'codex', text: 'Review the route?', answers: [], canTick: true, receipt }],
-          stopped: [{ key: 'task', title: 'Review the route', status: '', steps: [], receipt }],
+          stopped: [{ key: 'task', agent: 'codex', title: 'Review the route', status: '', steps: [], receipt }],
         })
         const lines = []
         const collect = node => {
@@ -4620,7 +4738,7 @@ test('Windows page startup refuses an existing address file granted to another a
     execFileSync(icacls, [board.served, '/grant', '*S-1-1-0:R', '/L'], { windowsHide: true, stdio: 'pipe' })
     const again = await board.serve(['--quiet-board'])
     assert.ok(!again.includes(url), 'the widened address must not be used to contact or open the running page')
-    assert.equal(again.trim(), EN.serveFailed(EN.serveNotStarted))
+    assert.equal(again.trim(), EN.serveStoreFailed('MESSAGE_STORE_IN_USE', board.served.replace(/\.json$/, '-messages')))
   } finally {
     if (existsSync(board.served)) execFileSync(icacls, [board.served, '/remove', '*S-1-1-0', '/L'], { windowsHide: true, stdio: 'pipe' })
     await board.end([url])
@@ -4677,7 +4795,7 @@ require('node:module').syncBuiltinESMExports()
 test('Windows page startup without XDG runtime keeps the token under the isolated home', { skip: process.platform !== 'win32' && 'Windows runtime fallback only', timeout: 30_000 }, async () => {
   const board = await page('', { XDG_RUNTIME_DIR: '' })
   try {
-    const file = servedAt(join(process.env.USERPROFILE, '.cache'), board.path)
+    const file = servedAt(join(board.dir, '.cache'), board.path)
     assert.equal(JSON.parse(readFileSync(file, 'utf8')).url, board.url.href)
     const old = join(tmpdir(), file.split(/[\\/]/).at(-1))
     assert.ok(!existsSync(old), 'the shared temp root gets no address token')
@@ -5063,12 +5181,15 @@ require('node:module').syncBuiltinESMExports()
     assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
     const saves = readFileSync(log, 'utf8').split('\n').filter(Boolean)
     assert.ok(saves.length >= 2, `${saves.length} saves`)
+    const messages = basename(board.served).replace(/\.json$/, '-messages')
+    const prefixes = [folder, join(folder, messages)].map(dir => `${dir.toLowerCase()}${sep}.acl-`)
     for (const saved of saves) {
-      // %TEMP% grants modify to other accounts on this computer; the private folder does not.
-      assert.ok(saved.toLowerCase().startsWith(`${folder.toLowerCase()}${sep}.acl-`), saved)
+      // %TEMP% grants modify to other accounts on this computer; the private folders do not.
+      assert.ok(prefixes.some(prefix => saved.toLowerCase().startsWith(prefix)), saved)
       assert.ok(!saved.toLowerCase().startsWith(resolve(board.env.TEMP).toLowerCase()), saved)
     }
-    assert.deepEqual(readdirSync(folder), [basename(board.served)], 'no scratch folder is left behind')
+    assert.deepEqual(readdirSync(folder).sort(), [messages, basename(board.served)].sort(), 'no scratch folder is left behind')
+    assert.ok(!readdirSync(join(folder, messages)).some(name => name.startsWith('.acl-')), 'no message scratch file is left behind')
   } finally { await board.end([url]) }
 })
 
@@ -5264,9 +5385,11 @@ test('two --serve run at the same moment open one page between them, and a serve
     urls.push(...outs.map(board.urlOf))
     assert.ok(urls[0], outs[0])
     assert.equal(urls[1], urls[0], outs[1])
-    // It finds the address file taken: it prints no address, leaves the file as it was and stops.
-    const late = execFileSync(process.execPath, [board.script, '--serve-child'], { env: board.env, encoding: 'utf8', timeout: 10_000 })
-    assert.equal(late, '')
+    // The default hub refuses a second live owner before it can touch the address file.
+    const late = spawnSync(process.execPath, [board.script, '--serve-child'], { env: board.env, encoding: 'utf8', timeout: 10_000 })
+    assert.equal(late.status, 1)
+    assert.equal(late.stdout, '')
+    assert.match(late.stderr, /MESSAGE_STORE_IN_USE/)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, urls[0])
   } finally {
     await board.end(urls)
@@ -5478,7 +5601,9 @@ const timer = setInterval(() => {
   const agents = { AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand }
   const board = await page('', agents, ['--allow-resume'])
   const script = join(board.dir, 'agent-board.mjs')
-  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run'), ...agents }
+  // Every home and settings folder an agent or the board reads is the fixture's own.
+  const homes = ['HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'CLAUDE_CONFIG_DIR', 'HERMES_HOME', 'CODEX_HOME', 'GROK_HOME', 'OPENCLAW_STATE_DIR']
+  const env = { ...process.env, ...Object.fromEntries(homes.map(key => [key, board.dir])), CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run'), ...agents }
   const ran = () => (existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean) : [])
   // A condition, not a fixed number of sleeps, advances each phase. The test's existing
   // deadline still bounds a missing signal; cancellation also releases the stand-in below.
@@ -5887,9 +6012,426 @@ test('--tidy adds both of two same-title done blocks to an archive that already 
     // The two were saved to the archive but are back in the file, as after a process that stopped
     // before it removed them: they leave, and the archive keeps one copy of each.
     writeFileSync(f.path, two)
+    const archiveFile = readdirSync(f.dir).find(name => name.startsWith('progress-archive-'))
+    const archiveContent = readFileSync(join(f.dir, archiveFile), 'utf8')
+    const savedEntries = archiveContent.split('\n\n').filter(part => part.includes('### Local synthetic task')).slice(-2)
+    const boardHash = createHash('sha256').update(two).digest('hex')
+    writeFileSync(join(f.dir, 'progress-archive.pending'), JSON.stringify({ version: 1, boardHash, entries: savedEntries.map(entry => ({ entry, held: 1, boardHash })) }) + '\n')
     assert.equal(f.command(['--tidy', '--lang', 'en']).status, 0)
     assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
     assert.equal(copies(), 3)
+  })
+})
+
+test('--tidy twice on the same day with one same-title same-steps done block each time: the archive ends with two entries', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c316', 'Local synthetic task', 'done', 13)}`)
+    assert.equal(f.command(['--tidy', '--lang', 'en']).stdout, 'Archived 1 task.\n')
+    assert.equal(copies(), 1)
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c317', 'Local synthetic task', 'done', 13)}`)
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, 'Archived 1 task.\n')
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 2)
+  })
+})
+
+test('--tidy with archive saved and task not removed (simulated failure), then tidy again: one entry, not two', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    const one = `## Synthetic\n${f.block('a1b2c318', 'Local synthetic task', 'done', 13)}`
+    const pending = join(f.dir, 'progress-archive.pending')
+    writeFileSync(f.path, one)
+    assert.equal(f.command(['--tidy', '--lang', 'en']).stdout, 'Archived 1 task.\n')
+    assert.equal(copies(), 1)
+    writeFileSync(f.path, one)
+    const archiveFile = readdirSync(f.dir).find(name => name.startsWith('progress-archive-'))
+    const archiveContent = readFileSync(join(f.dir, archiveFile), 'utf8')
+    const savedEntry = archiveContent.split('\n\n').find(part => part.includes('### Local synthetic task'))
+    const boardHash = createHash('sha256').update(one).digest('hex')
+    writeFileSync(pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry: savedEntry, held: 0, boardHash }] }) + '\n')
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(result.status, 0, result.stderr)
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 1)
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy with archive holding X once, board holding new identical X, and note left over from failed removal: archive ends with two entries', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    const one = `## Synthetic\n${f.block('a1b2c319', 'Local synthetic task', 'done', 13)}`
+    const pending = join(f.dir, 'progress-archive.pending')
+    const failUnlink = join(f.dir, 'fail-unlink.cjs')
+    writeFileSync(failUnlink, `
+const fs = require('fs')
+const orig = fs.unlinkSync
+fs.unlinkSync = function(file, ...args) {
+  if (typeof file === 'string' && file.includes('progress-archive.pending')) {
+    const err = new Error('EBUSY: resource busy or locked, unlink ' + JSON.stringify(file))
+    err.code = 'EBUSY'
+    throw err
+  }
+  return orig.call(this, file, ...args)
+}
+`)
+    writeFileSync(f.path, one)
+    const first = f.command(['--tidy', '--lang', 'en'], failUnlink)
+    assert.equal(first.status, 0)
+    assert.ok(first.stderr.includes('Could not remove pending note progress-archive.pending (EBUSY).'), first.stderr)
+    assert.ok(!first.stderr.includes(f.dir), first.stderr)
+    assert.equal(copies(), 1)
+    assert.ok(existsSync(pending))
+    assert.ok(readFileSync(pending, 'utf8').includes('boardHash'))
+
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c320', 'Local synthetic task', 'done', 13)}`)
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(result.status, 0, result.stderr)
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 2)
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy does not restamp a leftover pending record onto a later twin when another task fails to clear', () => {
+  tidyFixture(f => {
+    const copies = task => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split(task).length - 1
+    const pending = join(f.dir, 'progress-archive.pending')
+    const t1 = Date.UTC(2026, 9, 17, 20)
+    const t2 = Date.UTC(2026, 9, 17, 23)
+    const blockAt = (session, title, updatedMs) =>
+      `<!-- auto session=${session} agent=codex state=done updated=${new Date(updatedMs).toISOString()} -->\n### ${title}\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+    const runAt = (ms, extraPreload = '') => {
+      const preload = join(f.dir, `clock-${ms}.cjs`)
+      writeFileSync(preload, `Object.defineProperty(Date, 'now', { get: () => () => ${ms}, set: () => {} });\n${extraPreload}`)
+      return f.command(['--tidy', '--lang', 'en'], preload)
+    }
+
+    writeFileSync(f.path, `## Synthetic\n${blockAt('a1b2c340', 'Twin X', t1 - 13 * 3600000)}`)
+    const first = runAt(t1, `
+const fs = require('fs')
+const origUnlink = fs.unlinkSync
+fs.unlinkSync = function(file, ...args) {
+  if (typeof file === 'string' && file.includes('progress-archive.pending')) {
+    const err = new Error('EBUSY')
+    err.code = 'EBUSY'
+    throw err
+  }
+  return origUnlink.call(this, file, ...args)
+}
+`)
+    assert.equal(first.status, 0)
+    assert.equal(copies('### Twin X'), 1)
+    assert.ok(existsSync(pending))
+
+    const secondBoard = `## Synthetic\n${blockAt('a1b2c341', 'Task Y', t1 - 13 * 3600000)}\n${blockAt('a1b2c342', 'Twin X', t1 - 10 * 3600000)}`
+    writeFileSync(f.path, secondBoard)
+    const second = runAt(t1, `
+const fs = require('fs')
+const origRename = fs.renameSync
+fs.renameSync = function(from, to, ...args) {
+  if (typeof to === 'string' && to.includes('progress.md')) {
+    throw new Error('SIMULATED_BOARD_RENAME_FAILURE')
+  }
+  return origRename.call(this, from, to, ...args)
+}
+`)
+    assert.notEqual(second.status, 0)
+    assert.equal(readFileSync(f.path, 'utf8'), secondBoard)
+    assert.equal(copies('### Task Y'), 1)
+    assert.equal(copies('### Twin X'), 1)
+
+    const third = runAt(t2)
+    assert.equal(third.status, 0, third.stderr)
+    assert.equal(third.stdout, 'Archived 2 tasks.\n')
+    assert.equal(copies('### Task Y'), 1)
+    assert.equal(copies('### Twin X'), 2)
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy removing nothing preserves an interrupted manual archive note', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Manual unfinished').length - 1
+    const pending = join(f.dir, 'progress-archive.pending')
+    writeFileSync(f.path, '## Synthetic\n### Manual unfinished\n- [ ] Still open\n')
+    const failBoard = join(f.dir, 'fail-manual-board.cjs')
+    writeFileSync(failBoard, `
+const fs = require('fs')
+const orig = fs.renameSync
+fs.renameSync = function(from, to, ...args) {
+  if (typeof to === 'string' && to.includes('progress.md')) {
+    throw new Error('SIMULATED_BOARD_RENAME_FAILURE')
+  }
+  return orig.call(this, from, to, ...args)
+}
+`)
+    const crashed = f.command(['--keys', 'a', '--lang', 'en'], failBoard)
+    assert.notEqual(crashed.status, 0)
+    assert.equal(copies(), 1)
+    assert.ok(existsSync(pending))
+
+    const noopTidy = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(noopTidy.status, 0, noopTidy.stderr)
+    assert.ok(existsSync(pending))
+
+    const retried = f.command(['--keys', 'a', '--lang', 'en'])
+    assert.equal(retried.status, 0, retried.stderr)
+    assert.equal(copies(), 1)
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Manual unfinished'))
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy keeps archive copy counts across multiple part rotations', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-') && name.endsWith('.md')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c350', 'Local synthetic task', 'done', 13)}`)
+    assert.equal(f.command(['--tidy', '--lang', 'en']).status, 0)
+    const part1 = join(f.dir, 'progress-archive-2026-10.md')
+    const part2 = join(f.dir, 'progress-archive-2026-10-2.md')
+    const pad = `\n\n## Padding · 2026-10-01\n### Filler\n- [x] ${'p'.repeat(1_048_600)}\n`
+    writeFileSync(part1, readFileSync(part1, 'utf8') + pad)
+    writeFileSync(part2, `# Archive\n\n## Padding · 2026-10-02\n### Filler\n- [x] ${'q'.repeat(1_048_500)}\n`)
+
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c351', 'Local synthetic task', 'done', 13)}`)
+    const failBoard = join(f.dir, 'fail-rot-board.cjs')
+    writeFileSync(failBoard, `
+const fs = require('fs')
+const orig = fs.renameSync
+fs.renameSync = function(from, to, ...args) {
+  if (typeof to === 'string' && to.includes('progress.md')) {
+    throw new Error('SIMULATED_BOARD_RENAME_FAILURE')
+  }
+  return orig.call(this, from, to, ...args)
+}
+`)
+    const crashed = f.command(['--tidy', '--lang', 'en'], failBoard)
+    assert.notEqual(crashed.status, 0)
+    assert.equal(copies(), 2)
+    assert.ok(statSync(part2).size >= 1_048_576)
+
+    const retry = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(retry.status, 0, retry.stderr)
+    assert.equal(copies(), 2)
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+  })
+})
+
+test('--tidy preserves recovery records when extending a pending archive with a new entry', () => {
+  tidyFixture(f => {
+    const copies = task => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split(task).length - 1
+    const taskX = '### Task X\n- [x] Finished'
+    const entryX = `## Synthetic · 2026-10-16\n${taskX}`
+    const blockX = f.block('a1b2c330', 'Task X', 'done', 13)
+    const blockY = f.block('a1b2c331', 'Task Y', 'done', 13)
+    const pending = join(f.dir, 'progress-archive.pending')
+    const boardPath = f.path
+
+    const archiveFile = join(f.dir, 'progress-archive-2026-10.md')
+    writeFileSync(archiveFile, `# Archive\n\n${entryX}\n`)
+    const initialBoard = `## Synthetic\n${blockX}\n${blockY}`
+    const initialBoardHash = createHash('sha256').update(initialBoard).digest('hex')
+    writeFileSync(boardPath, initialBoard)
+    writeFileSync(pending, JSON.stringify({ version: 1, boardHash: initialBoardHash, entries: [{ entry: entryX, held: 0, boardHash: initialBoardHash }] }) + '\n')
+
+    const failBoard = join(f.dir, 'fail-board.cjs')
+    writeFileSync(failBoard, `
+const fs = require('fs')
+const orig = fs.renameSync
+fs.renameSync = function(from, to, ...args) {
+  if (typeof to === 'string' && to.includes('progress.md')) {
+    throw new Error('SIMULATED_BOARD_RENAME_FAILURE')
+  }
+  return orig.call(this, from, to, ...args)
+}
+`)
+    const crashed = f.command(['--tidy', '--lang', 'en'], failBoard)
+    assert.notEqual(crashed.status, 0)
+    assert.ok(readFileSync(boardPath, 'utf8').includes('Task X'))
+    assert.ok(readFileSync(boardPath, 'utf8').includes('Task Y'))
+    assert.equal(copies('### Task X'), 1)
+    assert.equal(copies('### Task Y'), 1)
+    assert.ok(existsSync(pending))
+    const noteText = readFileSync(pending, 'utf8')
+    assert.ok(noteText.includes('Task X'))
+    assert.ok(noteText.includes('Task Y'))
+
+    const retry = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(retry.status, 0, retry.stderr)
+    assert.ok(!readFileSync(boardPath, 'utf8').includes('Task X'))
+    assert.ok(!readFileSync(boardPath, 'utf8').includes('Task Y'))
+    assert.equal(copies('### Task X'), 1)
+    assert.equal(copies('### Task Y'), 1)
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy when archive write fails after note is written: task stays in progress.md, and next tidy archives it once', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    const earlier = `## Synthetic\n${f.block('a1b2c320', 'Local synthetic task', 'done', 13)}`
+    writeFileSync(f.path, earlier)
+    assert.equal(f.command(['--tidy', '--lang', 'en']).stdout, 'Archived 1 task.\n')
+    assert.equal(copies(), 1)
+
+    const one = `## Synthetic\n${f.block('a1b2c321', 'Local synthetic task', 'done', 13)}`
+    const pending = join(f.dir, 'progress-archive.pending')
+    const failArchive = join(f.dir, 'fail-archive.cjs')
+    writeFileSync(failArchive, `
+const fs = require('fs')
+const orig = fs.writeFileSync
+fs.writeFileSync = function(file, data, ...args) {
+  if (typeof file === 'string' && file.includes('progress-archive-')) {
+    throw new Error('SIMULATED_ARCHIVE_WRITE_FAILURE')
+  }
+  return orig.call(this, file, data, ...args)
+}
+`)
+    writeFileSync(f.path, one)
+    const crashed = f.command(['--tidy', '--lang', 'en'], failArchive)
+    assert.notEqual(crashed.status, 0)
+    assert.ok(readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 1)
+    assert.ok(existsSync(pending))
+
+    const retry = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(retry.status, 0, retry.stderr)
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 2)
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy when note write fails: nothing is archived and board is unchanged', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    const one = `## Synthetic\n${f.block('a1b2c322', 'Local synthetic task', 'done', 13)}`
+    const pending = join(f.dir, 'progress-archive.pending')
+    const failPending = join(f.dir, 'fail-pending.cjs')
+    writeFileSync(failPending, `
+const fs = require('fs')
+const orig = fs.writeFileSync
+fs.writeFileSync = function(file, data, ...args) {
+  if (typeof file === 'string' && file.includes('progress-archive.pending')) {
+    throw new Error('SIMULATED_PENDING_WRITE_FAILURE')
+  }
+  return orig.call(this, file, data, ...args)
+}
+`)
+    writeFileSync(f.path, one)
+    const crashed = f.command(['--tidy', '--lang', 'en'], failPending)
+    assert.notEqual(crashed.status, 0)
+    assert.ok(readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 0)
+    assert.ok(!existsSync(pending))
+
+    const oldNote = JSON.stringify({ version: 1, boardHash: 'old-hash', entries: [{ entry: '## Old', held: 0, boardHash: 'old-hash' }] }) + '\n'
+    writeFileSync(pending, oldNote)
+    const crashedWithNote = f.command(['--tidy', '--lang', 'en'], failPending)
+    assert.notEqual(crashedWithNote.status, 0)
+    assert.ok(readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 0)
+    assert.equal(readFileSync(pending, 'utf8'), oldNote)
+  })
+})
+
+test('--tidy preserves pending recovery records across same-invocation board-rewrite retries when a twin arrives', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    const block1 = f.block('a1b2c360', 'Local synthetic task', 'done', 13)
+    const block2 = f.block('a1b2c361', 'Local synthetic task', 'done', 13)
+    const pending = join(f.dir, 'progress-archive.pending')
+    const hookScript = join(f.dir, 'hook-rename.cjs')
+    writeFileSync(hookScript, `
+const fs = require('fs')
+const origRename = fs.renameSync
+let injected = false
+fs.renameSync = function(from, to, ...args) {
+  if (typeof to === 'string' && to.includes('progress-archive-')) {
+    const result = origRename.call(this, from, to, ...args)
+    if (!injected) {
+      injected = true
+      fs.writeFileSync(${JSON.stringify(f.path)}, ${JSON.stringify(`## Synthetic\n`)} + ${JSON.stringify(block1 + '\n')} + ${JSON.stringify(block2)})
+    }
+    return result
+  }
+  if (typeof to === 'string' && to.includes('progress.md')) {
+    throw new Error('SIMULATED_BOARD_RENAME_FAILURE')
+  }
+  return origRename.call(this, from, to, ...args)
+}
+`)
+    writeFileSync(f.path, `## Synthetic\n${block1}`)
+    const first = f.command(['--tidy', '--lang', 'en'], hookScript)
+    assert.notEqual(first.status, 0)
+    const boardText = readFileSync(f.path, 'utf8')
+    assert.ok(boardText.includes('a1b2c360'))
+    assert.ok(boardText.includes('a1b2c361'))
+    assert.equal(copies(), 2)
+    assert.ok(existsSync(pending))
+    const parsed = JSON.parse(readFileSync(pending, 'utf8'))
+    assert.equal(parsed.entries.length, 2)
+
+    const retry = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(retry.status, 0, retry.stderr)
+    assert.equal(retry.stdout, 'Archived 2 tasks.\n')
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 2)
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy with corrupted held count (held: -1) in pending note archives 1 copy before removing task', () => {
+  tidyFixture(f => {
+    const copies = () => readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')).map(name => readFileSync(join(f.dir, name), 'utf8')).join('').split('### Local synthetic task').length - 1
+    const one = `## Synthetic\n${f.block('a1b2c323', 'Local synthetic task', 'done', 13)}`
+    const pending = join(f.dir, 'progress-archive.pending')
+    writeFileSync(f.path, one)
+    const boardHash = createHash('sha256').update(one).digest('hex')
+    const savedEntry = '## Synthetic · 2026-10-16\n### Local synthetic task\n- [x] Finished'
+    writeFileSync(pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry: savedEntry, held: -1, boardHash }] }) + '\n')
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, 'Archived 1 task.\n')
+    assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+    assert.equal(copies(), 1)
+    assert.ok(!existsSync(pending))
+  })
+})
+
+test('--tidy refuses pre-planted symlink pending note without truncating victim file', t => {
+  tidyFixture(f => {
+    const one = `## Synthetic\n${f.block('a1b2c324', 'Local synthetic task', 'done', 13)}`
+    writeFileSync(f.path, one)
+    const victim = join(f.dir, 'victim-file.txt')
+    writeFileSync(victim, 'important sensitive content')
+    const pending = join(f.dir, 'progress-archive.pending')
+    try {
+      symlinkSync(victim, pending)
+    } catch {
+      t.skip('symlink creation is unavailable on this environment')
+      return
+    }
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.notEqual(result.status, 0)
+    assert.equal(readFileSync(victim, 'utf8'), 'important sensitive content')
+    assert.ok(readFileSync(f.path, 'utf8').includes('Local synthetic task'))
+  })
+})
+
+test('--tidy refuses directory pending note without corrupting board', () => {
+  tidyFixture(f => {
+    const one = `## Synthetic\n${f.block('a1b2c325', 'Local synthetic task', 'done', 13)}`
+    writeFileSync(f.path, one)
+    const pending = join(f.dir, 'progress-archive.pending')
+    mkdirSync(pending)
+    const result = f.command(['--tidy', '--lang', 'en'])
+    assert.notEqual(result.status, 0)
+    assert.ok(readFileSync(f.path, 'utf8').includes('Local synthetic task'))
   })
 })
 
@@ -5954,6 +6496,36 @@ fs.openSync = (file, ...rest) => { if (rest[0] === 'wx' && String(file).includes
 
 const sha = body => createHash('sha256').update(body).digest('hex')
 const proofJson = (kind, hash) => `${JSON.stringify({ version: 1, kind, hash })}\n`
+
+test('a page consumes a legacy acknowledgement without hiding the question asked again', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const first = await board.call('GET', '/api/board')
+    assert.equal(first.status, 200, first.body)
+    const ledgerPath = board.path.replace(/\.md$/, '-questions.json')
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+    const old = ledger.records.find(record => record.words === 'Redis or Memcached?')
+    assert.ok(old)
+    const legacy = 'b2c3d4e5 2 Redis or Memcached?'
+    const resolved = { ...old, isUnresolved: false, isWaiting: false, isPresent: false, resolvedAt: Date.now() - 1000 }
+    writeFileSync(ledgerPath, `${JSON.stringify({ ...ledger, records: ledger.records.map(record => record.id === old.id ? resolved : record), legacy: { [legacy]: old.id } })}\n`)
+    for (const name of readdirSync(board.dir).filter(name => name.startsWith('progress-questions-source-'))) rmSync(join(board.dir, name))
+    const receipt = `${JSON.stringify({ version: 1, disposition: 'resolved', record: resolved })}\n`
+    writeFileSync(join(board.dir, `progress-questions-source-${sha(receipt)}.json`), receipt)
+    writeFileSync(board.path.replace(/\.md$/, '-answered.json'), `${JSON.stringify({ answered: [legacy] })}\n`)
+    writeFileSync(join(board.dir, `progress-questions-retired-${sha(old.id)}.json`), proofJson('retired', sha(old.id)))
+    await delay(1100)
+    const response = await board.call('GET', '/api/board')
+    assert.equal(response.status, 200, response.body)
+    assert.equal(readFileSync(join(board.dir, `progress-questions-consumed-${sha(legacy)}.json`), 'utf8'), proofJson('consumed', sha(legacy)))
+    const records = JSON.parse(readFileSync(ledgerPath, 'utf8')).records.filter(record => record.words === old.words)
+    assert.equal(records.length, 2)
+    assert.ok(records.some(record => record.id !== old.id && record.isUnresolved))
+    const model = response.json().model
+    assert.ok(model.stopped.some(row => row.title === 'Pick the cache' && row.question === 'Redis or Memcached?'), JSON.stringify(model))
+    assert.ok(!model.hidden.some(item => item.text === 'Redis or Memcached?'), JSON.stringify(model.hidden))
+  } finally { await board.close() }
+})
 
 test('--tidy keeps a block that asks again in the words of an answered question whose retirement was recorded, and takes it while the answer stands', () => {
   const board = askingBoard()
@@ -7365,6 +7937,23 @@ test('default web and API refuse closed Codex and Grok sessions without starting
   } finally { await board.close() }
 })
 
+test('a closed session keeps resume-Send under --allow-resume when the hub is on by default', async () => {
+  const board = await page('', {}, ['--allow-resume'])
+  try {
+    assert.ok((await board.call('GET', '/api/board')).json().messaging.enabled)
+    const row = await board.rowOf('Pick the cache')
+    assert.equal(row.send, 'send')
+    assert.equal(row.hasCopyBox, false)
+    const sent = await board.call('POST', '/api/act', { body: { key: row.key, type: 'send', text: 'Redis', session: row.session, asked: row.question, fp: row.fp } })
+    assert.equal(sent.status, 202, sent.body)
+    for (let tries = 0; tries < 50; tries++) {
+      if ((await board.call('GET', '/api/board')).json().replies.length) break
+      await new Promise(done => setTimeout(done, 100))
+    }
+    assert.ok(existsSync(join(board.dir, 'grok-ran.json')))
+  } finally { await board.close() }
+})
+
 test('reopening a board replaces an explicit resume opt-in when that flag is removed', { timeout: 60_000 }, async () => {
   const board = serveIn()
   const urls = []
@@ -8107,6 +8696,157 @@ test("the page's motion stops under reduced motion and every change still lands"
   }
 })
 
+test('a block pressed in with Ctrl+V on the page is posted, and text that is not a block is never sent', async () => {
+  const html = await sourcePage()
+  assert.ok(!html.includes('<!-- auto'))
+  const dom = await pageDom(html, redesignModel())
+  assert.equal(dom.paste('not a block'), false)
+  assert.equal(dom.requests.length, 0)
+  assert.equal(dom.node('.pfoot').textContent, '')
+  const text = relayFragment(ago(60_000))
+  assert.equal(dom.paste(text), true)
+  await dom.settle()
+  assert.deepEqual(dom.requests, [{ path: '/api/paste', body: { text } }])
+  const offline = await pageDom(html, redesignModel(), { getBoard: async () => { throw new Error('Synthetic offline') } })
+  await offline.settle()
+  assert.equal(offline.paste(text), false)
+  assert.equal(offline.requests.length, 0)
+})
+
+test('Ctrl+V in a text field pastes there and imports nothing', async () => {
+  const dom = await pageDom(await sourcePage(), redesignModel())
+  for (const target of [{ tagName: 'INPUT' }, { tagName: 'TEXTAREA' }, { tagName: 'DIV', isContentEditable: true }]) {
+    assert.equal(dom.paste(relayFragment(ago(60_000)), target), false)
+  }
+  await dom.settle()
+  assert.equal(dom.requests.length, 0)
+})
+
+test('Import from clipboard posts a block, says when there is none, and says to use Ctrl+V when the browser refuses', async () => {
+  let text = relayFragment(ago(60_000))
+  let isRefused = false
+  const html = await sourcePage()
+  const dom = await pageDom(html, redesignModel(), { clipboard: true, readClipboard: async () => {
+    if (isRefused) throw new Error('Synthetic refusal')
+    return text
+  } })
+  dom.node('import-clipboard').click()
+  await dom.settle()
+  assert.deepEqual(dom.requests, [{ path: '/api/paste', body: { text } }])
+  text = 'not a block'
+  dom.node('import-clipboard').click()
+  await dom.settle()
+  assert.ok(dom.node('.pfoot').textContent.includes(EN.importNoBlock))
+  assert.equal(dom.requests.length, 1)
+  isRefused = true
+  dom.node('import-clipboard').click()
+  await dom.settle()
+  assert.ok(dom.node('.pfoot').textContent.includes(EN.importUseKeys))
+  for (const clipboard of [false, true]) {
+    const missing = await pageDom(html, redesignModel(), { clipboard })
+    missing.node('import-clipboard').click()
+    await missing.settle()
+    assert.ok(missing.node('.pfoot').textContent.includes(EN.importUseKeys))
+    assert.equal(missing.requests.length, 0)
+  }
+})
+
+test('a block the parser would read is posted once while it is on its way, and not at all on a closed page', async () => {
+  const html = await sourcePage()
+  const text = relayFragment(ago(60_000)).replace('<!-- auto', '<!--auto')
+  let release
+  const dom = await pageDom(html, redesignModel(), { post: () => new Promise(done => { release = () => done({ ok: true, json: async () => ({ ok: true, note: 'Synthetic added' }) }) }) })
+  dom.paste(text)
+  dom.paste(text)
+  await dom.flush()
+  assert.deepEqual(dom.requests.map(request => request.body.text), [text])
+  release()
+  await dom.settle()
+  assert.ok(dom.node('note').textContent.includes('Synthetic added'))
+  // Done with the first, the page takes the next.
+  dom.paste(text)
+  await dom.flush()
+  assert.equal(dom.requests.length, 2)
+  release()
+  await dom.settle()
+  const closing = await pageDom(html, redesignModel(), { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  closing.node('close').click()
+  await closing.settle()
+  const before = closing.requests.length
+  assert.equal(closing.paste(text), false)
+  await closing.settle()
+  assert.equal(closing.requests.length, before)
+})
+
+test('a different block pasted while one is on its way is posted after it, and a refusal stays in the note', async () => {
+  const html = await sourcePage()
+  const first = relayFragment(ago(60_000))
+  const second = first.replaceAll('c0ffee12', 'decade34').replace('Draft the launch post', 'Check the launch list')
+  const releases = []
+  const dom = await pageDom(html, redesignModel(), { post: () => new Promise(done => { releases.push(done) }) })
+  dom.paste(first)
+  dom.paste(second)
+  dom.paste(second)
+  await dom.flush()
+  assert.deepEqual(dom.requests.map(request => request.body.text), [first])
+  releases[0]({ ok: false, json: async () => ({ note: 'Synthetic clock refused' }) })
+  await dom.flush()
+  assert.deepEqual(dom.requests.map(request => request.body.text), [first, second])
+  releases[1]({ ok: true, json: async () => ({ ok: true, note: 'Synthetic added' }) })
+  await dom.flush()
+  assert.equal(dom.requests.length, 2)
+  await dom.settle()
+  assert.equal(dom.node('note').textContent, 'Synthetic clock refused Synthetic added')
+  assert.equal(dom.node('note').className, 'alert')
+  // That run is over: the next paste's result stands alone.
+  dom.paste(first)
+  await dom.flush()
+  releases[2]({ ok: true, json: async () => ({ ok: true, note: 'Synthetic again' }) })
+  await dom.settle()
+  assert.equal(dom.node('note').textContent, 'Synthetic again')
+  assert.equal(dom.node('note').className, 'done')
+})
+
+test('a refused block shows its reason, and one of unknown order asks before it replaces', async () => {
+  const html = await sourcePage()
+  const text = relayFragment(ago(60_000))
+  const refused = await pageDom(html, redesignModel(), { post: async () => ({ ok: false, json: async () => ({ note: 'Synthetic clock refused' }) }) })
+  refused.paste(text)
+  await refused.settle()
+  assert.ok(refused.node('note').textContent.includes('Synthetic clock refused'))
+  for (const accept of [false, true]) {
+    const questions = []
+    const review = { token: 'synthetic-review', current: 'Synthetic current', incoming: 'Synthetic incoming' }
+    const dom = await pageDom(html, redesignModel(), {
+      confirm: question => { questions.push(question); return accept },
+      post: async request => request.body.reviewToken
+        ? { ok: true, json: async () => ({ ok: true, note: 'Synthetic replaced' }) }
+        : { ok: false, json: async () => ({ review, note: 'Synthetic compare first' }) },
+    })
+    dom.paste(text)
+    await dom.settle()
+    assert.deepEqual(questions, [EN.pasteReview(review.current, review.incoming)])
+    assert.deepEqual(dom.requests.map(request => request.body), [{ text }, ...(accept ? [{ text, reviewToken: review.token }] : [])])
+    assert.ok(dom.node('note').textContent.includes(accept ? 'Synthetic replaced' : 'Synthetic compare first'))
+  }
+  const failed = await pageDom(html, redesignModel(), { post: async () => { throw new Error('Synthetic offline') } })
+  failed.paste(text)
+  await failed.settle()
+  assert.ok(failed.node('note').textContent.includes(EN.pressFailed))
+  assert.equal(failed.paste(text), false)
+})
+
+test("the page's LAN form offers neither Connect a web chat nor Import from clipboard", async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic', true)
+  for (const id of ['connect-web-chat', 'import-clipboard', 'relay-prompt']) assert.ok(!html.includes(`id="${id}"`))
+  const dom = await pageDom(html, redesignModel())
+  const text = relayFragment(ago(60_000))
+  assert.equal(dom.paste(text), true)
+  await dom.settle()
+  assert.deepEqual(dom.requests, [{ path: '/api/paste', body: { text } }])
+})
+
 test('a sent message shows sending, then the reply or a failure with Send again', async () => {
   const model = redesignModel()
   model.asks = [{ key: 'ask-send', project: 'Alpha', agent: 'codex', task: 'Plan', text: 'Ship it?', answers: ['Yes', 'No'], kind: 'confirm', chip: 'Confirm', send: 'send', session: 'synthetic-session', fp: 'f1', where: 'in Codex', canHide: true }]
@@ -8146,6 +8886,69 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   assert.deepEqual(descendants(line.parentNode).filter(node => node.tag === 'button').map(node => node.textContent), [EN.serveRetry, EN.serveCopyMessage])
 })
 
+test('words sent again after a Claude message went nowhere are a new message, not the old one', async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const ask = { ...model.asks[0], key: 'ask-claude', agent: 'claude', answers: ['Yes'], kind: 'confirm', session: 'synthetic-session', fp: 'f1', send: 'connected', delivery: { id: 'c1', turn: 'session', agent: 'claude' } }
+  model.asks = [ask]
+  const dom = await pageDom(html, model, { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  const answer = ask.answers[0]
+  const press = () => dom.buttons().find(button => button.textContent === EN.pgSendReply(answer)).click()
+  const ids = []
+  for (const ending of [{ status: 'uncertain', error: 'DISMISSED' }, { status: 'uncertain', error: 'EXPIRED' }, { status: 'rejected', error: 'STOPPED' }, { status: 'acknowledged', error: '' }]) {
+    await dom.redraw(model)
+    press()
+    await dom.settle()
+    const { id } = dom.requests.at(-1).body
+    ids.push(id)
+    const ended = redesignModel()
+    ended.asks = [{ ...ask, receipt: { id, reply: '', text: answer, when: '', ...ending } }]
+    await dom.redraw(ended)
+  }
+  assert.equal(new Set(ids).size, 4, ids.join())
+})
+
+test("a Claude card's line and buttons follow its message, and Take back and Dismiss end it", async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const ask = { ...model.asks[0], key: 'ask-claude', agent: 'claude', send: 'connected', delivery: { id: 'c1', turn: 'session', agent: 'claude' }, session: 'session1' }
+  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', error: '', text: 'the words', when: '2 min ago', ...receipt } }]; return next }
+  const dom = await pageDom(html, withReceipt({ status: 'accepted' }), { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  const box = () => dom.node('needs').querySelectorAll('[data-ref-key]')[0]
+  const receipt = () => descendants(box()).find(node => (node.className || '').split(' ').includes('receipt'))
+  const buttons = () => descendants(receipt().parentNode).filter(node => node.tag === 'button').map(node => node.textContent)
+  assert.equal(receipt().textContent, `${EN.claudeDelivered} · 2 min ago`)
+  assert.deepEqual(buttons(), [EN.messageDismiss])
+  await dom.redraw(withReceipt({ status: 'queued' }))
+  assert.equal(receipt().textContent, EN.claudeSendWorking)
+  assert.deepEqual(buttons(), [EN.messageTakeBack])
+  descendants(receipt().parentNode).find(node => node.textContent === EN.messageTakeBack && node.tag === 'button').click()
+  await dom.settle()
+  assert.deepEqual(dom.requests.at(-1).body, { id: 'm1' })
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'ACK_MISSING' }))
+  assert.equal(receipt().textContent, EN.claudeUnconfirmed)
+  assert.deepEqual(buttons(), [EN.serveCopyMessage, EN.messageDismiss])
+  // A claim whose delivery never got going is not called delivered.
+  await dom.redraw(withReceipt({ status: 'uncertain' }))
+  assert.equal(receipt().textContent, EN.claudeUnconfirmed)
+  // The hub has let go of an expired message: no Dismiss that could only fail. No attempt id stays
+  // either, or the same words sent again would answer with this dead message.
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'EXPIRED' }))
+  assert.deepEqual(buttons(), [EN.serveCopyMessage])
+  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED' }))
+  assert.equal(receipt().textContent, EN.claudeStopped)
+  assert.ok(buttons().includes(EN.serveCopyMessage))
+  // The hub lets go of a finished message's words: with none to copy, no Copy button.
+  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED', text: '' }))
+  assert.ok(!buttons().includes(EN.serveCopyMessage))
+  await dom.redraw(withReceipt({ status: 'acknowledged', reply: 'on it' }))
+  assert.equal(receipt().textContent, EN.claudeReplied('on it'))
+  await dom.redraw(withReceipt({ status: 'acknowledged' }))
+  assert.equal(receipt().textContent, EN.claudeGotIt)
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'DISMISSED' }))
+  assert.equal(receipt(), undefined)
+})
+
 test('an agent with no open session shows as offline and its answers copy', async () => {
   const model = redesignModel()
   // Gemini has one question and one stopped task whose session ended; nothing of it is open.
@@ -8183,6 +8986,120 @@ test('an agent with no open session shows as offline and its answers copy', asyn
     }
     assert.equal(shownWords(sideAgent(dom, 'gemini')).includes(EN.pgOffline), presence === 'offline')
   }
+})
+
+test('an agent whose only session ended in the last 30 minutes shows as offline', async () => {
+  const model = viewed(redesignModel())
+  model.view.now = Date.UTC(2026, 9, 31, 12)
+  model.asks = []
+  model.working = []
+  model.stopped = [{
+    key: 'row:gemini:1',
+    agent: 'gemini',
+    project: 'demo',
+    title: 'Finished session',
+    steps: ['- [x] Done'],
+    at: model.view.now - 60_000,
+    isClosed: true,
+  }]
+  const agent = model.view.agents.find(one => one.agent === 'gemini')
+  if (agent) agent.last = model.view.now - 60_000
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  for (const node of [rowAgent(dom, 'gemini'), sideAgent(dom, 'gemini')]) {
+    assert.equal(node.getAttribute('data-presence'), 'offline')
+    assert.ok(node.getAttribute('aria-label').includes(EN.pgOffline), node.getAttribute('aria-label'))
+  }
+})
+
+test('an agent with a recently finished task and no closed session shows as open', async () => {
+  const base = redesignModel()
+  base.asks = []
+  base.working = []
+  base.stopped = []
+  base.groups = []
+  base.recent = [{
+    key: 'row:codex:1',
+    agent: 'codex',
+    project: 'api-gateway',
+    title: 'Review routes',
+    when: 'Just now',
+    questions: [],
+  }]
+  const model = viewed(base)
+  model.view.now = Date.UTC(2026, 9, 31, 12)
+  const agent = model.view.agents.find(one => one.agent === 'codex')
+  if (agent) agent.last = model.view.now - 60_000
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const node = rowAgent(dom, 'codex')
+  assert.equal(node.getAttribute('data-presence'), 'open')
+  assert.equal(node.getAttribute('aria-label'), 'Codex: No work yet')
+})
+
+test('the own tasks chip label shows open task counts instead of empty when to-dos are open', async () => {
+  const model = redesignModel()
+  // A hand-kept task with open steps (isOwn: true)
+  model.groups = [{
+    project: 'compost-rota',
+    rows: [
+      { key: 'row:own:1', project: 'compost-rota', title: 'Turn the compost heap', steps: ['- [ ] Water the heap'], isOwn: true },
+    ],
+  }]
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const ownNode = rowAgent(dom, 'own')
+  assert.ok(ownNode, 'own chip exists')
+  assert.equal(ownNode.getAttribute('aria-label'), 'Your own tasks: 1 open')
+  assert.equal(ownNode.getAttribute('title'), 'Your own tasks: 1 open')
+
+  // Multiple open tasks show the plural count
+  const multiModel = redesignModel()
+  multiModel.groups = [{
+    project: 'compost-rota',
+    rows: [
+      { key: 'row:own:1', project: 'compost-rota', title: 'Turn the compost heap', steps: ['- [ ] Water the heap'], isOwn: true },
+      { key: 'row:own:2', project: 'compost-rota', title: 'Check compost temperature', steps: ['- [ ] Measure temperature'], isOwn: true },
+    ],
+  }]
+  const multiDom = await pageDom(await sourcePage(), multiModel, { width: 1280 })
+  const multiOwn = rowAgent(multiDom, 'own')
+  assert.equal(multiOwn.getAttribute('aria-label'), 'Your own tasks: 2 open')
+  assert.equal(multiOwn.getAttribute('title'), 'Your own tasks: 2 open')
+
+  // A hand-kept task with a question shows needs you, not open count (finding 4: view.own.open.length avoids double-counting)
+  const questionModel = {
+    ...redesignModel(),
+    asks: [{
+      key: 'ask:own:1',
+      project: 'compost-rota',
+      task: 'Turn the compost heap',
+      text: 'Which bin, OK?',
+      isOwn: true,
+    }],
+    groups: [],
+    view: {
+      now: 0,
+      n: 1,
+      questions: 1,
+      stuck: 0,
+      versions: { board: '0.0.0', package: null },
+      agents: [],
+      needs: { n: 1, questions: 1, stuck: 0, cards: [{ key: 'ask:own:1', kind: 'question', agent: '', project: 'compost-rota', repo: 'compost-rota', at: 0 }], older: [] },
+      working: [],
+      all: { counts: { open: 1, needs: 1, stopped: 0, done: 0, older: 0 }, cards: [], open: [], stopped: [], done: [], older: [], isHidden: true },
+      own: {
+        counts: { open: 1, needs: 1, stopped: 0, done: 0, older: 0 },
+        cards: [{ key: 'ask:own:1', kind: 'question', agent: '', project: 'compost-rota', repo: 'compost-rota', at: 0 }],
+        open: [],
+        stopped: [],
+        done: [],
+        older: [],
+      },
+      projects: [],
+    },
+  }
+  const questionDom = await pageDom(await sourcePage(), questionModel, { width: 1280 })
+  const questionOwn = rowAgent(questionDom, 'own')
+  assert.equal(questionOwn.getAttribute('aria-label'), 'Your own tasks: 1 needs you')
+  assert.equal(questionOwn.getAttribute('title'), 'Your own tasks: 1 needs you')
 })
 
 test('on a wide screen the sidebar lists views, agents and projects', async () => {

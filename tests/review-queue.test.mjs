@@ -227,6 +227,23 @@ test('a reviewer already holding two open reviews is not suggested', () => {
   assert.equal(free.needsReviewer[0].suggested, 'bot-one')
 })
 
+test('a Reviewing comment with no verdict lapses after four hours and frees its reviewer', () => {
+  const comments = {
+    1: [ready(head, '2026-10-20T06:00:00Z'), taking('bot-two', '2026-10-20T07:00:00Z')],
+    2: [taking('bot-one', '2026-10-20T07:00:00Z')], 3: [taking('bot-one', '2026-10-20T07:00:00Z')],
+    4: [ready(head, '2026-10-20T10:00:00Z')],
+  }
+  const prs = [byAgent('claude'), pull(2), pull(3), pull(4, { body: 'Author: codex, branch' })]
+  const held = classify(prs, comments, '2026-10-20T10:59:00Z', team)
+  assert.deepEqual([held.needsReviewer[0].takenBy, held.needsReviewer[0].lapsedBy], ['bot-two', null])
+  // bot-one holds two reviews, so the fresh pull request goes to bot-two.
+  assert.equal(held.needsReviewer[1].suggested, 'bot-two')
+  const lapsed = classify(prs, comments, '2026-10-20T11:01:00Z', team)
+  assert.deepEqual([lapsed.needsReviewer[0].takenBy, lapsed.needsReviewer[0].lapsedBy], [null, 'bot-two'])
+  assert.equal(lapsed.needsReviewer[1].suggested, 'bot-one')
+  assert.match(formatQueue(lapsed), /#1 .*review by bot-two lapsed/)
+})
+
 test('a pull request Ready for more than four hours suggests the next reviewer and says it escalated', () => {
   const prs = [byAgent('codex'), pull(2, { body: 'Author: codex, branch', additions: 20 })]
   const comments = { 1: [ready(head, '2026-10-20T07:00:00Z')], 2: [ready(head, '2026-10-20T09:00:00Z')] }
@@ -403,6 +420,47 @@ test('a Codex state comment from someone else or with unreadable JSON is passed 
   }
 })
 
+// The same state comment carries Codex's security review, which fails on its own when the paying account is out of usage.
+const securityState = (sha, status, hasFindings, at, id) =>
+  by('chatgpt-codex-connector[bot]', comment(`<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { commit_sha: sha, has_unresolved_findings: false, status: 'completed' }, security_review: { commit_sha: sha, has_unresolved_findings: hasFindings, status } })} -->`, at, id))
+
+test('Codex security review shows as skipped when it did not complete on the head, and open when it left findings', () => {
+  const stateOf = (...items) => botsOf(items).codexSecurity
+  assert.equal(stateOf(), 'none')
+  assert.equal(stateOf(codexState(head, false, '2026-10-20T10:00:00Z', 2)), 'none')
+  // A failed run reports findings as well; it still counts as not run, since nothing was reviewed.
+  assert.equal(stateOf(securityState(head, 'failed', true, '2026-10-20T10:00:00Z', 2)), 'skipped')
+  assert.equal(stateOf(securityState(head, 'in_progress', null, '2026-10-20T10:00:00Z', 2)), 'skipped')
+  assert.equal(stateOf(securityState(head, 'completed', false, '2026-10-20T10:00:00Z', 2)), 'clean')
+  // A completed review that does not say false or true is unknown, never clean.
+  for (const findings of [null, undefined, 'true', 'false', 0, 1])
+    assert.equal(stateOf(securityState(head, 'completed', findings, '2026-10-20T10:00:00Z', 2)), 'unknown', String(findings))
+  assert.equal(stateOf(securityState(head.slice(0, 7), 'completed', true, '2026-10-20T10:00:00Z', 2)), 'open')
+  assert.equal(stateOf(securityState(oldHead, 'failed', true, '2026-10-20T10:00:00Z', 2)), 'stale')
+  assert.equal(stateOf(securityState(head, 'failed', true, '2026-10-20T09:00:00Z', 2), securityState(head, 'completed', false, '2026-10-20T10:00:00Z', 3)), 'clean')
+  assert.equal(stateOf(by('alice', comment(securityState(head, 'failed', true, '2026-10-20T10:00:00Z', 2).body, '2026-10-20T10:00:00Z', 2))), 'none')
+  // The code review keeps its own state beside it.
+  assert.equal(botsOf([securityState(head, 'failed', true, '2026-10-20T10:00:00Z', 2)]).codex, 'clean')
+})
+
+test('the queue names a security review that did not run or left findings, and nothing else about it', () => {
+  const prs = [pull(1), pull(2), pull(3), pull(4)]
+  const comments = {
+    1: [ready(), securityState(head, 'failed', true, '2026-10-20T10:00:00Z', 2)],
+    2: [ready(), securityState(head, 'completed', true, '2026-10-20T10:00:00Z', 2)],
+    3: [ready(), securityState(head, 'completed', false, '2026-10-20T10:00:00Z', 2)],
+    4: [ready(), securityState(head, 'completed', null, '2026-10-20T10:00:00Z', 2)],
+  }
+  const queue = classify(prs, comments, now)
+  assert.deepEqual(queue.needsReviewer.map(item => item.number), [1, 2, 3, 4])
+  assert.deepEqual(queue.needsReviewer.map(item => item.bots.codexSecurity), ['skipped', 'open', 'clean', 'unknown'])
+  const text = formatQueue(queue)
+  assert.match(text, /\n#1 .*\n {4}codex: no findings {2}codex security: did not run on this head \(usage limit or failure\); review security yourself\n/)
+  assert.match(text, /\n#2 .*\n {4}codex: no findings {2}codex security: findings open — answer each before approving\n/)
+  assert.match(text, /\n#3 .*\n {4}codex: no findings\n/)
+  assert.match(text, /\n#4 .*\n {4}codex: no findings\n/)
+})
+
 test('Greptile shows as reviewed only when a comment or review of its own mentions the head', () => {
   const said = (login, body) => by(login, comment(body, '2026-10-20T10:00:00Z', 2))
   const isReviewed = (items, reviews) => botsOf(items, { reviews }).greptile
@@ -429,7 +487,7 @@ test('a missing bot review leaves a pull request where it was and the text shows
   assert.deepEqual(queue.needsReviewer.map(item => item.number), [1, 3])
   assert.deepEqual(queue.approved.map(item => item.number), [2])
   assert.deepEqual(queue.waitingForAuthor.map(item => item.number), [4])
-  assert.deepEqual(queue.needsReviewer[0].bots, { codex: 'none', greptile: false })
+  assert.deepEqual(queue.needsReviewer[0].bots, { codex: 'none', codexSecurity: 'none', greptile: false })
   const text = formatQueue(queue)
   assert.match(text, /\n#1 .*\n {4}codex: not on this head \(ask @codex review\)\n#3 /)
   assert.match(text, /\n#3 .*\n {4}codex: no findings {2}greptile: reviewed\n/)
@@ -572,7 +630,7 @@ test('away notices and expired claims print after the queue and appear in the JS
   const lines = run(['--repo', 'owner1/board']).split('\n')
   assert.deepEqual(lines.slice(lines.indexOf('Drafts: 0') + 1), ['Away: Bob until 2026-10-22', 'claim expired: #10 carol — relabel to ready (CONTRIBUTING rule 3)'])
   // The owner does not count as a collaborator, so Bob being away leaves nobody besides the author and a notice is allowed.
-  assert.ok(lines.includes('    notice allowed if only a collaborator or the owner may approve it (team-process, From claim to merge)'))
+  assert.ok(lines.includes('    notice allowed outside the governance files (team-process, From claim to merge)'))
   const queue = JSON.parse(run(['--repo', 'owner1/board', '--json']))
   assert.deepEqual(queue.away, [{ login: 'Bob', until: '2026-10-22' }])
   assert.deepEqual(queue.expiredClaims, [{ number: 10, login: 'carol' }])
@@ -611,7 +669,16 @@ test('a Ready pull request that nobody has taken for more than 24 hours may merg
   assert.equal(noticeOf([comment('Reviewing: bob', '2026-10-20T08:00:00Z', 2)], { readyAt: '2026-10-19T11:00:00Z' }), null)
   assert.deepEqual(noticeOf([comment('Reviewing: bob', '2026-10-19T10:00:00Z', 0)], { readyAt: '2026-10-19T11:00:00Z' }), { state: 'allowed', at: null })
   const text = formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T11:00:00Z')] }, now))
-  assert.match(text, /\n {4}notice allowed if only a collaborator or the owner may approve it \(team-process, From claim to merge\)\n/)
+  assert.match(text, /\n {4}notice allowed outside the governance files \(team-process, From claim to merge\)\n/)
+})
+
+test('a lapsed Reviewing comment still closes the notice path, so the queue never offers a notice its own check cancels', () => {
+  const taken = [comment('Reviewing: bob (desktop)', '2026-10-19T10:00:00Z', 2)]
+  // Past 24 hours of Ready, with the Reviewing long lapsed, no notice is offered.
+  assert.equal(noticeOf(taken, { current: '2026-10-20T10:00:00Z' }), null)
+  // A notice posted anyway is cancelled by that same Reviewing comment.
+  const posted = notice('2026-10-22 12:00 UTC', head, '2026-10-20T10:05:00Z', 3)
+  assert.equal(noticeOf([...taken, posted], { current: '2026-10-20T10:10:00Z' }).state, 'cancelled')
 })
 
 test('a notice is also allowed when every collaborator other than the author is away', () => {
@@ -669,8 +736,8 @@ test('a Merging after notice for the current head waits until its time and is th
   assert.equal(noticeOf([posted], { current: '2026-10-22T12:00:00Z' }).state, 'due')
   assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted] }, now)), /\n {4}notice: merges after 2026-10-22 12:00 UTC\n/)
   const dueNow = '2026-10-23T08:00:00Z'
-  assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted] }, dueNow)), /\n {4}notice due: merge if checks are green and the author's code-review subagent approved this head and no bot P0\/P1 is open\n/)
-  // The author's own subagent approval moves the pull request to the approved group, and the notice still shows there.
+  assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted] }, dueNow)), /\n {4}notice due: merge if checks are green, someone other than the author approved this head and no bot P0\/P1 is open\n/)
+  // An approval moves the pull request to the approved group, and the notice still shows there.
   const approved = classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted, verdict('APPROVE', head, '2026-10-20T11:00:00Z', 3)] }, dueNow)
   assert.deepEqual([approved.needsReviewer.length, approved.approved.length, approved.approved[0].notice.state], [0, 1, 'due'])
   assert.match(formatQueue(approved), /One at a time.*\n#1 .*\n {4}codex: .*\n {4}notice due: /)
@@ -746,8 +813,8 @@ test('JSON lists the bots and the notice of each pull request', () => {
   })
   assert.equal(status, 0)
   const [first, second] = JSON.parse(output[0]).needsReviewer
-  assert.deepEqual([first.number, first.bots, first.notice], [1, { codex: 'clean', greptile: false }, { state: 'allowed', at: null }])
-  assert.deepEqual([second.number, second.bots, second.notice], [2, { codex: 'none', greptile: false }, null])
+  assert.deepEqual([first.number, first.bots, first.notice], [1, { codex: 'clean', codexSecurity: 'none', greptile: false }, { state: 'allowed', at: null }])
+  assert.deepEqual([second.number, second.bots, second.notice], [2, { codex: 'none', codexSecurity: 'none', greptile: false }, null])
 })
 
 test('a pull request touching a bundle source or the release table merges one at a time', () => {
@@ -874,9 +941,14 @@ test('a governance, workflow or release pull request shows that a notice is not 
   assert.deepEqual(due.needsReviewer[0].notice, refused)
   assert.ok(formatQueue(due).split('\n').includes(refusal))
   // The same with no notice at all, Ready for more than 24 hours, for each kind of file the rule names.
-  const governed = ['.github/workflows/test.yml', '.github/pull_request_template.md', 'AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/team-process.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json']
+  const governed = ['.github/workflows/test.yml', '.github/pull_request_template.md', 'AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/RULES.md', 'docs/dev/team-process.md', 'docs/dev/universal-messaging-roadmap.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json']
   for (const path of governed) {
     assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z', fields: touching('scripts/a.mjs', path) }), refused, path)
+  }
+  // Ordinary documentation remains eligible for the notice path when the other conditions hold.
+  const ordinaryDocs = ['SECURITY.md', 'docs/RELEASING.md', 'docs/GUIDE.md']
+  for (const path of ordinaryDocs) {
+    assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z', fields: touching(path) }), { state: 'allowed', at: null }, path)
   }
   const text = formatQueue(classify([pull(1, touching('CONTRIBUTING.md'))], { 1: [ready(head, '2026-10-19T11:00:00Z')] }, now))
   assert.ok(text.split('\n').includes(refusal))
@@ -897,7 +969,7 @@ test('a push drops the old notice and a new Ready that nobody takes for 24 hours
   // The old notice names the old head, so the new head has none yet.
   assert.equal(noticeOf(items, { fields }), null)
   assert.deepEqual(noticeOf(items, { fields, current: '2026-10-21T12:00:00Z' }), { state: 'allowed', at: null })
-  assert.match(formatQueue(classify([pull(1, fields)], { 1: [ready(head), ...items] }, '2026-10-21T12:00:00Z')), /\n {4}notice allowed if only a collaborator or the owner may approve it /)
+  assert.match(formatQueue(classify([pull(1, fields)], { 1: [ready(head), ...items] }, '2026-10-21T12:00:00Z')), /\n {4}notice allowed outside the governance files /)
   // A notice for the new head is read as usual.
   const again = notice('2026-10-24 12:00 UTC', other, '2026-10-21T12:00:00Z', 7)
   assert.deepEqual(noticeOf([...items, again], { fields, current: '2026-10-21T13:00:00Z' }), { state: 'waiting', at: '2026-10-24T12:00:00.000Z' })

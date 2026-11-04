@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 
@@ -92,6 +92,7 @@ The board:
   agent-board                  open the board where you are
   agent-board stop             stop the board's page
   agent-board --print          print the board as text
+  agent-board --status         one line for a status bar; reads only progress.md
   agent-board --watch          the board in this terminal, with keys
   agent-board --serve          the board's page in your browser
   agent-board --chat           the board as plain text, for a chat app
@@ -119,6 +120,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board                  在所在位置打開看板
   agent-board stop             停止看板網頁
   agent-board --print          印出純文字看板
+  agent-board --status         狀態列的一行摘要，只讀 progress.md
   agent-board --watch          在這個終端機開看板，可用按鍵操作
   agent-board --serve          在瀏覽器開看板網頁
   agent-board --chat           純文字看板，給聊天 app 用
@@ -146,6 +148,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board                  在所在位置打开看板
   agent-board stop             停止看板网页
   agent-board --print          打印纯文本看板
+  agent-board --status         状态栏的一行摘要，只读 progress.md
   agent-board --watch          在这个终端打开看板，可用按键操作
   agent-board --serve          在浏览器打开看板网页
   agent-board --chat           纯文本看板，给聊天 app 用
@@ -215,10 +218,17 @@ for (let i = 0; i < args.length; i++) {
   dataDir = value
 }
 const beside = path => join(dirname(resolve(path)), 'agent-board.mjs')
+const connectorProgress = (() => {
+  try {
+    const record = JSON.parse(readFileSync(join(home, '.agent-board', 'legacy-connect.json'), 'utf8'))
+    return record.version === 1 && record.disabled === false && typeof record.connectedProgress === 'string' && isAbsolute(record.connectedProgress) ? record.connectedProgress : undefined
+  } catch { return undefined }
+})()
 const candidates = [
   ...(flag('--progress-file') ? [beside(flag('--progress-file'))] : []),
   ...(dataDir ? [join(resolve(dataDir), 'agent-board.mjs')] : [
     ...(process.env.CLAUDE_PROGRESS_FILE ? [beside(process.env.CLAUDE_PROGRESS_FILE)] : []),
+    ...(connectorProgress ? [beside(connectorProgress)] : []),
     join(home, '.agent-board', 'agent-board.mjs'),
     join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'agent-board.mjs'),
   ]),
@@ -234,7 +244,7 @@ try { prelude = JSON.parse(readFileSync(installed, 'utf8').split('\n', 1)[0].rep
 language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? langOf(process.env.LANG) ?? 'en'
 // The first line holds account settings, so it must not affect build comparisons.
 const hash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
-if (!isChat) {
+if (!isChat && !args.includes('--status')) {
   try {
     // The bundle is kept in hooks/board-script.ts and its parts; the shared reader joins them.
     const bundled = bundleFromDir(pkg)

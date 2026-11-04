@@ -1,5 +1,14 @@
 import { boardClient, deliveryPrompt } from './message-client.mjs'
 
+/** @type {import('./message-client.mjs').MessagingReceiverRecord} */
+export const messagingReceiver = {
+  host: 'Codex',
+  surfaces: [{ name: 'Exclusive-owner app-server', evidence: null, earlier: 'docs/validation/2026-10-19-native-hooks.md' }],
+  tier: 1,
+  primitive: '[P1]',
+  isImplemented: true,
+}
+
 // For an application that already owns a loaded Codex session and its notifications.
 // No socket, thread or model is created by attaching this adapter. `session` scope
 // means the host can queue a new turn on its own idle session, not a fabricated turn id.
@@ -38,9 +47,9 @@ export const attachCodexSession = async ({ boardUrl, transport, thread, state, v
       return
     }
     if (value.method !== 'item/completed' || p.item?.type !== 'agentMessage') return
-    const line = String(p.item.text ?? '').split(/\r?\n/).find(line => line === 'ACK ' + pending.id || line.startsWith('ACK ' + pending.id + ' '))
+    const line = String(p.item.text ?? '').split(/\r?\n/).find(line => line === 'ACK ' + pending.nonce || line.startsWith('ACK ' + pending.nonce + ' '))
     if (!line) return
-    pending.observed = { turn: p.turnId, line: line.slice(0, 500) }
+    pending.observed = { turn: p.turnId, line: line.length > 200 ? 'ACK ' + pending.nonce : line }
     // Keep the owned turn pending through Stop hooks. ACK text may precede native
     // turn/completed; releasing early lets a poll mistake our own turn for a foreign one.
     settle()
@@ -49,16 +58,18 @@ export const attachCodexSession = async ({ boardUrl, transport, thread, state, v
   try { receiver = await boardClient(boardUrl).attach({
     agent: 'codex', session: thread, scope: 'session', turn: 'session', surface, verify, onError,
     canReceive: () => !pending && state().status === 'idle' && state().turn === null,
-    deliver: async (message, accepted) => {
+    deliver: async (message, accepted, begin) => {
       if (!await verify() || state().status !== 'idle' || state().turn !== null) throw new Error('SESSION_BUSY')
       let timer
       const answer = new Promise((done, reject) => {
         timer = setTimeout(() => reject(new Error('ACK_TIMEOUT')), 60000)
-        pending = { id: message.id, turn: null, done, reject, observed: null, finished: null }
+        pending = { nonce: message.nonce, turn: null, done, reject, observed: null, finished: null }
       })
       void answer.catch(() => undefined)
       try {
-        const result = await transport.request('turn/start', { threadId: thread, input: [{ type: 'text', text: deliveryPrompt(message), text_elements: [] }] })
+        const prompt = deliveryPrompt(message)
+        begin()
+        const result = await transport.request('turn/start', { threadId: thread, input: [{ type: 'text', text: prompt, text_elements: [] }] })
         if (!result.turn?.id) throw new Error('INVALID_TURN_RESPONSE')
         pending.turn = result.turn.id
         settle()

@@ -13,7 +13,7 @@ import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
-import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, parseJournal, progressReport, unwrittenEntries } from '../hooks/journal'
+import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, progressReport, unwrittenEntries } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
@@ -3305,6 +3305,9 @@ test('a press on the page is worked out from the file as it is now: a line that 
   expect(resumeAction(items, { key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked: 'Which port?' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   expect(resumeAction(items, { key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   expect(resumeAction(items, { key: 'row:gone', type: 'tick', text: '', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
+  // A stale send on a row where a receiver has connected is refused rather than launching a native process.
+  const grokConnected = [{ id: 'c1', agent: 'grok', session: GROK.resume, surface: 'Grok CLI', turn: 't1', expires: Date.now() + 60000 }]
+  expect(serveAction(items, { key: grok, type: 'send', text: 'Redis', session: 'b2c3d4e5', asked, fp: fpIn(items, grok) }, STRINGS.en, false, grokConnected, true, true)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   // An open Codex session is answered in its own window.
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
   expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('Codex') })
@@ -3560,7 +3563,7 @@ test("the page runs only its own script, and the chat prompt in it cannot close 
   // Words from the file are set as text by the page's script, never as HTML.
   expect(page).not.toContain('innerHTML')
   expect(page).not.toContain('insertAdjacentHTML')
-  // No comment marker reaches the page. The paste box and its chat prompt (which had one) are gone from it, and the words sit in a JSON block with no raw '<' to close the script with.
+  // No raw comment marker reaches the page: words and the separate chat prompt sit in JSON blocks with '<' escaped.
   expect(page).not.toContain('<!-- auto')
   expect(Object.hasOwn(pageWords(STRINGS.en), 'relayPrompt')).toBe(false)
   const block = page.split('<script type="application/json" id="words">')[1]!.split('</script>')[0]!
@@ -3904,7 +3907,7 @@ test('the terminal board, progress.html and the board page name the session that
   expect(html).toContain('到「Backfill the events」那個對話回覆，這裡回不了。')
   expect(html).not.toContain('到 data-pipeline 的對話')
   const page = serveModel(view, [], STRINGS['zh-CN']).asks.find(ask => ask.task === 'Backfill the events')
-  expect(page?.info).toBe('到“Backfill the events”那个对话回复，这里回不了。')
+  expect(page?.info).toBe('Claude 没有连上这个看板。请复制后粘贴到那边。')
 })
 
 test('a Claude Code block with no resume id offers its block id to copy only when it is a plain id', () => {
@@ -4563,10 +4566,10 @@ test('an ordinary board never resumes a closed session even without messaging en
   expect(row).toMatchObject({ send: 'open', hasCopyBox: true })
   const items = boardItems(serveView(), [])
   expect(serveAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.messagesFailed })
-  // An explicit legacy opt-in still cannot become fallback for an enabled message hub.
+  // An explicit legacy opt-in keeps resume-Send for a closed session while the hub runs.
   const hub = { connections: [], messages: [] }
-  expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).stopped.find(one => one.title === 'Pick the cache')?.send).toBe('open')
-  expect(resumeAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en, false, [], true).type).toBe('refuse')
+  expect(resumeModel(serveView(), [], STRINGS.en, new Set(), false, hub).stopped.find(one => one.title === 'Pick the cache')?.send).toBe('send')
+  expect(resumeAction(items, { key: row?.key ?? '', type: 'send', text: 'Redis', session: GROK.session, asked: 'Redis or Memcached?', fp: row?.fp }, STRINGS.en, false, [], true).type).toBe('send')
 })
 
 
@@ -4656,4 +4659,43 @@ test('archive entries are counted with their number: a new twin of an archived e
   expect(missingEntries(['', archive(3)], [entry, entry])).toEqual([])
   expect(missingEntries([archive(3)], [entry], new Map([[entry, 2]]))).toEqual([])
   expect(missingEntries([archive(2)], [entry], new Map([[entry, 2]]))).toEqual([entry])
+})
+
+test('a pending archive note distinguishes crash-recovery retries from distinct same-day twins', () => {
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const archive = `# Archive\n\n${entry}\n`
+  expect(pendingArchivePath('/work/progress.md')).toBe('/work/progress-archive.pending')
+  expect(parsePendingArchive('')).toEqual([])
+  expect(parsePendingArchive('broken')).toEqual([])
+  expect(parsePendingArchive(JSON.stringify({ entries: [entry] }))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify([entry]))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1 }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, boardHash: 'hash1', entries: [{ entry, held: 1 }] }))).toEqual([{ entry, held: 1, boardHash: 'hash1' }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1, boardHash: 'hash2' }] }))).toEqual([{ entry, held: 1, boardHash: 'hash2' }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: -1 }] }))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: -0 }] }))).toEqual([{ entry, held: 0 }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: 1.5 }] }))).toEqual([{ entry, held: NaN }])
+  expect(parsePendingArchive(JSON.stringify({ version: 1, entries: [{ entry, held: Infinity }] }))).toEqual([{ entry, held: NaN }])
+
+  // When pending recorded held = 0 and archive now holds 1: crash recovery skips re-adding.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0 }])).toEqual([])
+  // When boardHash matches: crash recovery skips re-adding.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0, boardHash: 'hash1' }], 'hash1')).toEqual([])
+  // When boardHash does not match: treated as not saved so a twin is kept.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 0, boardHash: 'hash1' }], 'hash2')).toEqual([entry])
+  // When pending recorded held = 1 and archive holds only 1: archive write failed, so missing.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: 1 }])).toEqual([entry])
+  // When pending has an invalid or negative held count: treated as unproven so an unsaved entry is never dropped.
+  expect(missingEntries([archive], [entry], new Map(), [{ entry, held: -1 }])).toEqual([entry])
+  // When pending has a legacy note without held: treated as not saved so twins are never dropped.
+  expect(missingEntries([archive], [entry], new Map(), [entry])).toEqual([entry])
+  // When pending does not hold the entry: a same-day twin is added even if archive already has one.
+  expect(missingEntries([archive], [entry], new Map(), [])).toEqual([entry])
+  expect(nextPendingArchive([archive], [entry], new Map([[entry, 1]]), [{ entry, held: 0, boardHash: 'hash1' }], 'hash2')).toEqual({
+    missing: [entry],
+    records: [
+      { entry, held: 0, boardHash: 'hash2' },
+      { entry, held: 0, boardHash: 'hash2' },
+    ],
+  })
 })

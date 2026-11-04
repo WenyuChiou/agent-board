@@ -2,10 +2,10 @@
 
 Codex brief authors and agents reading for-dot issues paste this checklist into every task brief to catch recurring review problems.
 
-1. Branch from current origin/main. Merge `origin/main` before Ready and after every review request. Never rebase or force-push.
+1. Branch from current origin/main. Merge `origin/main` only when GitHub reports a conflict (CONTRIBUTING rule 4), except in a release pull request, which needs current `main` ([RELEASING.md](../RELEASING.md), step 5). Never rebase or force-push.
 2. Keep engine calls in `hooks/register.tsx`; a helper receiving `$` is a top-level const there. Pure modules take `now`; use no semicolons, single quotes, named exports, and `is`/`has` booleans.
 3. Put each new user-visible string in `ZH_TW` (`hooks/i18n.ts`), `EN`, and `ZH_CN` at the same place, and nowhere else.
-4. Add one new `changelog.d/<issue>-<slug>.md` fragment (see `changelog.d/README.md`): name `#N`, claim only what the diff does, and end with `Tests:` and the exact test titles. The release pull request folds it into CHANGELOG.md.
+4. Write the pull request title as one plain sentence about what changed for the person (`fix(area): …`); the release writes the CHANGELOG line from it. Add no `changelog.d/` file and leave `CHANGELOG.md` alone (CONTRIBUTING rule 6).
 5. A test that starts an asynchronous process stops it in `finally` and waits for it to exit on every OS. Blocking `spawnSync`, `execSync`, and `execFileSync` already wait; Linux CI cannot see a Windows leak.
 6. When `hooks/parse.ts`, `blocks.ts`, or `view.ts` changes, keep `docs/FORMAT.md` and all three guides consistent with it.
 7. Never edit `hooks/board-script.ts` or its parts (`hooks/board-script-*.ts`) by hand: rebuild with Bun 1.4.2, or write "maintainer rebuilds at merge" under Checks.

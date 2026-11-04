@@ -58,12 +58,12 @@ export const deepseekPatch = (text: string, owned: unknown, plugin: string, remo
   const end = '# agent-board-local:end\n'
   const group = `${start}- insert:\n    - id: agent-board-local\n      name: ${JSON.stringify(plugin)}\n${end}`
   const old = typeof owned === 'string' ? owned : null
-  if (old !== null && (text.split(old).length !== 2 || !old.startsWith(start) || !old.endsWith(end))) return { text, conflict: true }
+  if (old !== null && (!old.startsWith(start) || !old.endsWith(end) || text.includes('agent-board-local') && text.split(old).length !== 2)) return { text, conflict: true }
   const stripped = old === null ? text : text.replace(old, '')
   if (stripped.includes('agent-board-local')) return { text, conflict: true }
   const empty = stripped.trim() === '[]'
   if (!empty && stripped.split(/\r?\n/).some(line => /\S/.test(line) && !/^\s|^#|^- /.test(line))) return { text, conflict: true }
   if (remove) return { text: stripped, conflict: false }
-  if (old !== null) return { text: text.replace(old, group), group, conflict: false }
+  if (old !== null && text.includes(old)) return { text: text.replace(old, group), group, conflict: false }
   return { text: `${empty ? '' : stripped}${stripped && !stripped.endsWith('\n') && !empty ? '\n' : ''}${group}`, group, conflict: false }
 }

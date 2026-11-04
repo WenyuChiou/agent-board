@@ -3,6 +3,24 @@ import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, ope
 import type { BigIntStats, Stats } from 'node:fs'
 import { hostname } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { sha256 } from '../hooks/sha256.ts'
+
+// A folder only this account can use: on a shared one, another account could take the file's
+// name first and keep every page from starting.
+export const isOwnFolder = (dir: string): boolean => {
+  try {
+    const found = lstatSync(dir)
+    return found.isDirectory() && (process.getuid === undefined || (found.uid === process.getuid() && (found.mode & 0o077) === 0))
+  } catch {
+    return false
+  }
+}
+
+export const defaultMessagesDirectory = (progress: string, home: string, env: Record<string, string | undefined>, platform: string): string => {
+  const runtime = env.XDG_RUNTIME_DIR
+  const folder = platform === 'win32' ? (runtime ? join(runtime, 'agent-board') : join(home, '.cache', 'agent-board')) : runtime && isOwnFolder(runtime) ? runtime : join(home, '.cache', 'agent-board')
+  return join(folder, `agent-board-${sha256(resolve(progress)).slice(0, 16)}-messages`)
+}
 
 export class RuntimeFolderError extends Error {
   constructor() { super('BOARD_RUNTIME_PRIVATE') }
