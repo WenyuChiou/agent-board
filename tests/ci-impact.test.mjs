@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { test } from 'node:test'
@@ -431,6 +431,60 @@ test('selected test execution refuses an empty or invalid file list', async () =
   assert.throws(() => runTestFiles(['tests/missing.test.mjs']))
 })
 
+test('a test part runs its share of the files in one Node run, and a bad part is refused before any test runs', async () => {
+  const { testArgs, testRuns, runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const files = ['tests/a.test.mjs', 'tests/b.test.mjs', 'tests/c.test.mjs']
+  assert.deepEqual(testArgs(files), ['--test', ...files])
+  assert.deepEqual(testArgs(files, { isSerial: true }), ['--test', '--test-concurrency=1', ...files])
+  assert.deepEqual(testRuns(files, { part: '1/2' }), [['--test', 'tests/a.test.mjs', 'tests/c.test.mjs']])
+  assert.deepEqual(testRuns(files, { part: '2/2' }), [['--test', 'tests/b.test.mjs']])
+  assert.deepEqual(testRuns(['tests/a.test.mjs'], { part: '2/2' }), [])
+  for (const part of ['0/2', '3/2', '1/0', 'x', '1/2 --inspect']) assert.throws(() => testRuns(files, { part }), /test part/, part)
+  assert.throws(() => runTestFiles(['tests/ci-impact.test.mjs'], '3/2'), /test part/)
+})
+
+test('a self-parted test file runs whole in every part and keeps its share, so the parts together run each of its tests once', async () => {
+  const { testRuns, partTest, selfPartedTests } = await import('../scripts/ci-impact.mjs')
+  const files = ['tests/a.test.mjs', 'tests/board.test.mjs', 'tests/b.test.mjs', 'tests/codex-local.test.mjs']
+  assert.deepEqual(testRuns(files), [['--test', ...files]])
+  assert.deepEqual(testRuns(files, { part: '1/1' }), [['--test', ...files]])
+  assert.deepEqual(testRuns(files, { part: '1/2' }), [['--test', 'tests/a.test.mjs', 'tests/board.test.mjs', 'tests/codex-local.test.mjs']])
+  assert.deepEqual(testRuns(files, { part: '2/2' }), [['--test', 'tests/b.test.mjs', 'tests/board.test.mjs', 'tests/codex-local.test.mjs']])
+  assert.deepEqual(testRuns(['tests/board.test.mjs'], { isSerial: true, part: '1/2' }), [['--test', '--test-concurrency=1', 'tests/board.test.mjs']])
+  const ran = part => {
+    const names = []
+    const test = partTest(name => names.push(name), part)
+    for (const name of ['t0', 't1', 't2', 't3', 't4']) test(name)
+    return names
+  }
+  assert.deepEqual(ran(''), ['t0', 't1', 't2', 't3', 't4'])
+  assert.deepEqual(ran('1/2'), ['t0', 't2', 't4'])
+  assert.deepEqual(ran('2/2'), ['t1', 't3'])
+  assert.deepEqual([...ran('1/3'), ...ran('2/3'), ...ran('3/3')].sort(), ['t0', 't1', 't2', 't3', 't4'])
+  assert.throws(() => partTest(() => {}, '2/1'), /test part/)
+  for (const path of selfPartedTests) assert.match(await readFile(path, 'utf8'), /^const test = partTest\(nodeTest\)$/m, path)
+})
+
+test('the part given to a run reaches its test processes, even when the environment names another part', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const saved = process.env.CI_TEST_PART
+  process.env.CI_TEST_PART = '2/2'
+  try {
+    const partsSeen = part => {
+      const seen = []
+      runTestFiles(['tests/board.test.mjs'], part, (command, args, options) => { seen.push(options.env.CI_TEST_PART); return { status: 0 } })
+      return seen
+    }
+    assert.deepEqual(partsSeen('1/1'), ['1/1'])
+    assert.deepEqual(partsSeen(''), [''])
+    assert.deepEqual(partsSeen('1/2'), ['1/2'])
+    assert.deepEqual(partsSeen(undefined), ['2/2'])
+  } finally {
+    if (saved === undefined) delete process.env.CI_TEST_PART
+    else process.env.CI_TEST_PART = saved
+  }
+})
+
 test('ci result validation rejects incomplete or non-boolean selection metadata', () => {
   const plan = makePlan([], options())
   const incomplete = structuredClone(plan)
@@ -540,10 +594,16 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   // On a pull request the planner picks the plugin systems; an empty planner output falls through to both.
   assert.ok(text.includes(`plugin_os: \${{ ${onPr} && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}`))
   assert.match(text, /plugin_os:'\["ubuntu-latest","windows-latest"\]'/)
+  // The board job takes the same pairs with the Windows set in two parts, so each keeps ten minutes (#899).
+  const twoParts = '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]'
+  const sixParts = '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/2"},{"os":"windows-latest","node":22,"part":"2/2"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]'
+  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '${twoParts}' || '${sixParts}' }}`))
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
     assert.ok(block, group)
-    assert.match(block, /include: \$\{\{ fromJSON\(needs\.impact\.outputs\.node_matrix\) \}\}/, group)
+    const matrix = group === 'board' ? 'board_matrix' : 'node_matrix'
+    assert.ok(block.includes(`include: \${{ fromJSON(needs.impact.outputs.${matrix}) }}`), group)
+    if (group === 'board') assert.ok(block.includes('CI_TEST_PART: ${{ matrix.part }}') && block.includes('timeout-minutes: 10'), group)
     assert.doesNotMatch(block, /node: \[/, group)
     assert.doesNotMatch(block, /^\s+os: \[/m, group)
     assert.match(block, /CI_TEST_FILES:/, group)
