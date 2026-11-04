@@ -3729,6 +3729,30 @@ test('a refusal on the page stays visible after its card is removed by a redraw'
   } finally { await board.close() }
 })
 
+test('a question shown again from the terminal drops the Hidden notice on the page', async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const text = 'Publish the gateway to staging, OK?'
+    const note = `Hidden: “${text}”; it comes back when the question changes.`
+    const ask = { key: 'ask-demo', task: 'Question card', project: 'Demo', text, kind: 'confirm', chip: 'Confirm', answers: ['Yes', 'No'], canTick: false, canHide: true, command: null, reopen: null, link: null, send: 'copy', fp: 'first' }
+    const base = { counts: { waiting: 1, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [ask] }
+    const hidden = { ...base, counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [{ key: 'hidden:demo', task: 'Question card', text, project: 'Demo' }] }
+    const dom = await pageDom(html, base, { post: async () => ({ ok: true, json: async () => ({ ok: true, note }) }) })
+    dom.buttons().find(button => button.textContent === words.answeredHide).click()
+    await dom.flush()
+    await dom.flush()
+    assert.ok(pageCardResults(dom, 'ask-demo').some(node => node.textContent === note))
+    // The terminal board shows the question again: the page next updates to the hidden
+    // shelf, then to the question back on its card, with no Hidden notice left on it.
+    await dom.redraw(hidden)
+    await dom.redraw(base)
+    assert.ok(!pageCardResults(dom, 'ask-demo').some(node => node.textContent.includes('Hidden:')))
+    assert.ok(!dom.node('board').textContent.includes('Hidden:'))
+  } finally { await board.close() }
+})
+
 test('pressing o on the keys board when the page cannot open says why', () => {
   const root = mkdtempSync(join(tmpdir(), 'board-opener-refused-'))
   try {
