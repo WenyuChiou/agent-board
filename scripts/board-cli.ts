@@ -9,6 +9,7 @@
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
 import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
+import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
 import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -25,10 +26,12 @@ import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
 import { addressFileName } from '../hooks/receiver'
-import { idleTimeout } from '../hooks/serve'
+import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
 import { boardStatus } from '../hooks/board-status'
-import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
+import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, clipped, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, plain, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
+import { BOARD_JSON_SCHEMA, boardDocument } from '../hooks/board-json'
+import { RELEASED } from '../hooks/released'
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
 import { dashboardHtml } from '../hooks/dashboard'
@@ -50,6 +53,7 @@ import { findSessionFile, readSessionMeta } from './codex-history'
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
 
 const args = process.argv.slice(2)
+const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust'].includes(arg))
 const flag = (name: string): string | undefined => {
   const at = args.indexOf(name)
   return at === -1 ? undefined : args[at + 1]
@@ -180,8 +184,8 @@ let lastStat = { stat: '', at: 0 }
 let lastQuestions = emptyQuestions()
 const questionWriter = randomUUID()
 let questionWrite = 0
-const isQuestionWriter = !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
-const isPersistentQuestions = !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
+const isQuestionWriter = !args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
+const isPersistentQuestions = !args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
 let isViewQuestionRead = false
 const inboxFiles = recentInboxFiles({
   directory: join(dirname(path), 'progress-inbox'),
@@ -399,8 +403,8 @@ const readBoardView = (source: string, now: number) => {
     const record = parseSeen(read(file), answeredAge(file))
     if (record !== null) {
       seen = record
-      // Chat wins over every other flag and must never write a sidecar.
-      if (!args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
+      // Read-only output must never write a sidecar, even beside interactive flags.
+      if (!args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
         let observed = withSeen(record, projects, now, {}, false, true)
         const wrote = rewrite(file, before => {
           const current = parseSeen(before, answeredAge(file))
@@ -1713,6 +1717,42 @@ const chat = (): void => {
   }
 }
 
+const jsonFailure = (error: unknown): void => {
+  process.exitCode = 1
+  const home = homeOrNone()
+  const isWin = process.platform === 'win32'
+  const code = (error as { code?: unknown } | null)?.code
+  const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0] || error.name : 'UNKNOWN'
+  const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
+  process.stdout.write(`${JSON.stringify({ schemaVersion: BOARD_JSON_SCHEMA, error: redact(clipped(plain(told), home, isWin), home, isWin) })}\n`)
+}
+
+const json = (): void => {
+  try {
+    const now = Date.now()
+    const home = homeOrNone()
+    const isWin = process.platform === 'win32'
+    const source = read(path)
+    const updates = pending(text => redact(text, home, isWin))
+    const current = view(source, now)
+    const board = RELEASED.reduce((held, release) => {
+      const next = release.version.split('.').map(Number)
+      const previous = held.split('.').map(Number)
+      for (let index = 0; index < 3; index += 1) {
+        if ((next[index] ?? 0) !== (previous[index] ?? 0)) return (next[index] ?? 0) > (previous[index] ?? 0) ? release.version : held
+      }
+      return held
+    }, '0.0.0')
+    const packageVersion = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
+    const group = {
+      now, repoOf: repoLookup(worktreeRepoName),
+      versions: { board, package: /^\d+\.\d+\.\d+$/.test(packageVersion) ? packageVersion : null },
+      unreadable: current.unreadable ?? [],
+    }
+    process.stdout.write(`${JSON.stringify(boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group))}\n`)
+  } catch (error) { jsonFailure(error) }
+}
+
 const runWatchTerminal = async (): Promise<void> => {
   let sshHint = ''
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) {
@@ -1796,6 +1836,11 @@ const runWatchTerminal = async (): Promise<void> => {
 }
 
 const run = async (): Promise<void> => {
+  // Setup keeps its own --json protocol; a board read wins over every action flag.
+  if (isJsonBoard) {
+    json()
+    return
+  }
   if (args.includes('--status')) {
     process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs())}\n`)
     return
@@ -1890,7 +1935,9 @@ const run = async (): Promise<void> => {
 try {
   await run()
 } catch (error) {
-  if (error instanceof RuntimeFolderError) {
+  if (isJsonBoard) {
+    jsonFailure(error)
+  } else if (error instanceof RuntimeFolderError) {
     process.exitCode = 1
     const output = args.includes('--serve-child') ? process.stderr : process.stdout
     output.write(`${s.serveRuntimePrivate}\n`)
