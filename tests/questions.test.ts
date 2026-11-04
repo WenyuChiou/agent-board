@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionWords, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
@@ -1295,4 +1295,12 @@ test('the own list\'s part of the idle question key moves with its questions, no
     null,
   ]
   for (const [index, one] of moved.entries()) expect([index, ownQuestionsKey(one) === key]).toEqual([index, false])
+})
+
+test('question words collapse only whitespace runs and keep single spaces as they are', () => {
+  expect(questionWords('Should we keep plan 12?')).toEqual('Should we keep plan 12?')
+  expect(questionWords('  Should we keep plan 12?  ')).toEqual('Should we keep plan 12?')
+  expect(questionWords('Should\twe\nkeep   plan 12?')).toEqual('Should we keep plan 12?')
+  expect(questionWords('Should we keep plan 12?')).toEqual('Should we keep plan 12?')
+  expect(questionWords('')).toEqual('')
 })

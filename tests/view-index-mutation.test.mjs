@@ -24,6 +24,8 @@ const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
 const { emptyQuestions, observeQuestions } = await import('../hooks/questions.ts')
 const { ZH_TW } = await import('../hooks/i18n.ts')
+const { confirmKey } = await import('../hooks/blocks.ts')
+const { sha256 } = await import('../hooks/sha256.ts')
 
 const NOW = Date.parse('2026-10-25T12:00:00Z')
 const file = (steps, project = 'demo', session = 'a1b2c3d4') =>
@@ -79,4 +81,44 @@ test('a record pushed for one group is visible to a later group in the same call
   assert.equal(alpha.isUnresolved, false)
   assert.equal(beta.isPresent, true)
   assert.equal(beta.isWaiting, true)
+})
+
+test('a hashed input that changes between calls hashes fresh, never from a stale entry', () => {
+  // sha256 memoizes by the exact input string, so the same string always returns
+  // its hash and a changed string never returns the old one (#192). The confirm
+  // key goes through the same cache keyed by the task's hashed text, so editing
+  // the task must change its key and restoring it must bring the key back.
+  assert.equal(sha256('abc'), sha256('abc'))
+  assert.notEqual(sha256('abc'), sha256('abd'))
+  assert.equal(sha256('abc'), sha256('abc'))
+  const long = 'x'.repeat(5000)
+  assert.equal(sha256(long), sha256(long))
+  assert.notEqual(sha256(long), sha256(`${long}y`))
+
+  const projects = parseProgress(file('- [ ] First step\n- [ ] Second step'))
+  const task = projects[0].tasks[0]
+  const before = confirmKey('demo', task, 0)
+  const raw = task.steps[0].raw
+  task.steps[0].raw = `${raw} (edited)`
+  const edited = confirmKey('demo', task, 0)
+  assert.notEqual(edited, before)
+  task.steps[0].raw = raw
+  assert.equal(confirmKey('demo', task, 0), before)
+})
+
+test('a reworded question binds a fresh id while the old wording keeps its own', () => {
+  const first = file('- [?] First question?')
+  const observed = observe(emptyQuestions(), first)
+  const oldRecord = observed.ledger.records.find(record => record.words === 'First question?')
+  assert.ok(oldRecord !== undefined)
+  // Re-observing the unchanged wording returns the same binding, not a new id.
+  const again = observe(observed.ledger, first)
+  assert.equal(again.ledger.records.find(record => record.words === 'First question?')?.id, oldRecord.id)
+  // The reworded ask binds a different id, and the old wording's record is untouched.
+  const second = file('- [?] First question, revised?')
+  const revised = observe(observed.ledger, second)
+  const revisedRecord = revised.ledger.records.find(record => record.words === 'First question, revised?')
+  assert.ok(revisedRecord !== undefined)
+  assert.notEqual(revisedRecord.id, oldRecord.id)
+  assert.equal(revised.ledger.records.find(record => record.words === 'First question?')?.id, oldRecord.id)
 })

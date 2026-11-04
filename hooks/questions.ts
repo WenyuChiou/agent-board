@@ -13,8 +13,26 @@ export type QuestionAnswerEvidence = Pick<AgentTurn, 'agent' | 'id'> & { session
 
 export const emptyQuestions = (): QuestionLedger => ({ version: 1, next: 1, records: [], legacy: {} })
 export const questionsPath = (path: string): string => `${path.replace(/\.md$/i, '')}-questions.json`
-export const questionWords = (text: string): string => text.trim().replace(/\s+/g, ' ')
+// Two adjacent whitespace characters, or one that is not a plain space.
+const NEEDS_COLLAPSE = /\s\s|[^\S ]/
+
+export const questionWords = (text: string): string => {
+  const trimmed = text.trim()
+  // Collapsing whitespace changes the text only when a run holds two spaces or a
+  // whitespace character other than a plain space; a trimmed text with neither
+  // keeps every single space as it is, so the replace below would be the identity.
+  return NEEDS_COLLAPSE.test(trimmed) ? trimmed.replace(/\s+/g, ' ') : trimmed
+}
 export const questionScope = (project: string, agent: string, session: string): string => JSON.stringify([project, agent || 'claude', session])
+
+// Keys for internal maps only: each part is length-prefixed, so the key is unambiguous
+// without quoting or escaping, and cheaper to build than JSON.stringify. A part list
+// parses back uniquely from the left (read the length, take that many characters), so
+// no two lists share a key. Never use these for anything shown, stored, or compared
+// outside the map that owns it — scopes, slots, hashes and ledger text keep their JSON
+// forms, and a part here must always be a string.
+export const partsKey2 = (a: string, b: string): string => `${a.length}:${a}${b.length}:${b}`
+export const partsKey3 = (a: string, b: string, c: string): string => `${a.length}:${a}${b.length}:${b}${c.length}:${c}`
 type QuestionOwner = Pick<ProgressAuto, 'session' | 'agent' | 'resume'>
 type QuestionScopeOf = (project: string, agent: string, session: string, resume?: string | null) => string
 const canonicalOf = (auto: QuestionOwner): string | null => auto.resume ?? (auto.session.length > 8 ? auto.session : null)
@@ -48,7 +66,7 @@ const scopeTables = (projects: readonly ProgressProject[], mine: ProgressMirror 
     if (canonical === null) return
     const scope = questionScope(project, auto.agent, auto.session)
     note(owners, scope, canonical)
-    if (title !== undefined) note(titled, JSON.stringify([scope, title]), canonical)
+    if (title !== undefined) note(titled, partsKey2(scope, title), canonical)
   }
   for (const project of projects) for (const task of project.tasks) if (task.auto !== null && task.auto.isRun !== true) add(project.name, task.auto, task.title)
   const inBlocks = new Map([...owners].map(([scope, ids]) => [scope, new Set(ids)]))
@@ -59,7 +77,7 @@ const scopeTables = (projects: readonly ProgressProject[], mine: ProgressMirror 
     const auto = sourceOwner(source)
     if (auto === null) {
       // An own copy saved before it held the session id is known only by its alias and title.
-      const ids = source.kind === 'own' ? titled.get(JSON.stringify([record.scope, source.task])) : undefined
+      const ids = source.kind === 'own' ? titled.get(partsKey2(record.scope, source.task)) : undefined
       const only = ids?.size === 1 ? [...ids][0] : undefined
       if (only !== undefined) note(holders, record.scope, only)
       continue
@@ -559,7 +577,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
   const ambiguous = new Set<string>()
   const holders = new Map<string, Set<string | null>>()
   const hold = (project: string, owner: QuestionOwner): void => {
-    const key = JSON.stringify([project, owner.agent || 'claude', owner.session])
+    const key = partsKey3(project, owner.agent || 'claude', owner.session)
     holders.set(key, (holders.get(key) ?? new Set()).add(canonicalOf(owner)))
   }
   if (mine !== null && mine.isRun !== true) hold(mine.project, mirrorOwner(mine))
@@ -586,7 +604,7 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
     if (frozen.has(scope)) continue
     // A turn saved with no full session could be any holder's. While its alias has two, it stays
     // held: matching words on one of them do not show that one asked it.
-    if (turn.session === undefined && (holders.get(JSON.stringify([turn.project, turn.agent || 'claude', turn.id]))?.size ?? 0) > 1) continue
+    if (turn.session === undefined && (holders.get(partsKey3(turn.project, turn.agent || 'claude', turn.id))?.size ?? 0) > 1) continue
     const turnWords = questionWords(turn.text)
     const matching = rows.filter(row => row.isWaiting && row.session === turn.id && row.source.project === turn.project && (row.source.agent || 'claude') === (turn.agent || 'claude') && row.words === turnWords && isOwnerOf(row.source, turn.session))
     if (matching.length === 1 && matching[0] !== undefined) {
@@ -600,11 +618,11 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
   const tokens = new Map<string, number>()
   for (const row of rows) {
     if (row.producer !== '') {
-      const key = JSON.stringify([row.scope, row.producer])
+      const key = partsKey2(row.scope, row.producer)
       tokens.set(key, (tokens.get(key) ?? 0) + 1)
     }
   }
-  return rows.filter(row => !ambiguous.has(row.scope) && (row.producer === '' || tokens.get(JSON.stringify([row.scope, row.producer])) === 1))
+  return rows.filter(row => !ambiguous.has(row.scope) && (row.producer === '' || tokens.get(partsKey2(row.scope, row.producer)) === 1))
 }
 
 // Seeing the source without its question ends a no-token resolution's lifetime.
@@ -662,11 +680,11 @@ export const observeQuestions = (
   const byScopeWordsProducer = new Map<string, QuestionRecord[]>()
   const byScope = new Map<string, QuestionRecord[]>()
   const indexRecord = (record: QuestionRecord): void => {
-    const wordsKey = JSON.stringify([record.scope, record.words])
+    const wordsKey = partsKey2(record.scope, record.words)
     const wordsList = byScopeWords.get(wordsKey)
     if (wordsList === undefined) byScopeWords.set(wordsKey, [record])
     else wordsList.push(record)
-    const producerKey = JSON.stringify([record.scope, record.words, record.producer ?? ''])
+    const producerKey = partsKey3(record.scope, record.words, record.producer ?? '')
     const producerList = byScopeWordsProducer.get(producerKey)
     if (producerList === undefined) byScopeWordsProducer.set(producerKey, [record])
     else producerList.push(record)
@@ -677,7 +695,7 @@ export const observeQuestions = (
   for (const record of records) indexRecord(record)
   // Each row's copies (the rows of its scope with the same words, in order), indexed once:
   // comparing every row with every other took seconds on a board of a few thousand steps (#371).
-  const copyKey = (row: Observation): string => JSON.stringify([row.scope, row.words])
+  const copyKey = (row: Observation): string => partsKey2(row.scope, row.words)
   const copyIndex = new Map<string, Observation[]>()
   for (const row of seen) {
     const key = copyKey(row)
@@ -689,7 +707,7 @@ export const observeQuestions = (
   // between the rows of a group, so they are read only.
   const copiesOf = (row: Observation): readonly Observation[] => copyIndex.get(copyKey(row)) ?? []
   const hasNewRevision = (row: Observation, record: QuestionRecord): boolean =>
-    [row, ...(byScopeWords.get(JSON.stringify([row.scope, record.words])) ?? []).filter(other => other.isPresent && other.isUnresolved)]
+    [row, ...(byScopeWords.get(partsKey2(row.scope, record.words)) ?? []).filter(other => other.isPresent && other.isUnresolved)]
       .some(other => other.producerRevisions?.some(revision => !record.producerRevisions?.includes(revision)))
   // Each row's words, each record's hash and the retired set are worked out once a pass, not once
   // for every pair of row and record (#416).
@@ -707,19 +725,19 @@ export const observeQuestions = (
   const isAnotherOwners = (record: QuestionRecord, row: Observation): boolean => {
     const asker = record.source === undefined || record.source.kind === 'inbox' ? undefined : sourceOwner(record.source)
     const owner = sourceOwner(row.source)
-    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && ((owners.get(record.scope)?.size ?? 0) > 1 || (byScopeWords.get(JSON.stringify([record.scope, record.words])) ?? []).some(other => other.isUnresolved && other.isPresent && other.occurrence === record.occurrence && other.copies === record.copies))
+    return asker !== undefined && (asker === null || canonicalOf(asker) === null) && owner !== null && canonicalOf(owner) !== null && ((owners.get(record.scope)?.size ?? 0) > 1 || (byScopeWords.get(partsKey2(record.scope, record.words)) ?? []).some(other => other.isUnresolved && other.isPresent && other.occurrence === record.occurrence && other.copies === record.copies))
   }
   const resolved = seen.flatMap(row => {
     if (!row.isWaiting) return []
     const copies = copiesOf(row)
     const words = row.words
-    const record = (byScopeWordsProducer.get(JSON.stringify([row.scope, words, row.producer])) ?? []).find(record => record.isUnresolved === false && !isAnotherOwners(record, row) && (row.producer !== '' || (record.resolvedAt !== undefined && (record.source?.task === row.source.task || isSameAsker(record.source, row.source)) && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
+    const record = (byScopeWordsProducer.get(partsKey3(row.scope, words, row.producer)) ?? []).find(record => record.isUnresolved === false && !isAnotherOwners(record, row) && (row.producer !== '' || (record.resolvedAt !== undefined && (record.source?.task === row.source.task || isSameAsker(record.source, row.source)) && !isRetired(record) && record.occurrence === copies.indexOf(row) + 1 && record.copies === copies.length && !hasNewRevision(row, record))))
     return record === undefined ? [] : [{ row, record }]
   })
   const resolvedRows = new Set(resolved.map(item => item.row))
   // The revisions a settled record of each scope already holds.
-  const settledRevisions = new Set(records.filter(record => record.isUnresolved === false).flatMap(record => (record.producerRevisions ?? []).map(revision => JSON.stringify([record.scope, revision]))))
-  const rows = seen.filter(row => !resolvedRows.has(row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => settledRevisions.has(JSON.stringify([row.scope, revision])))))
+  const settledRevisions = new Set(records.filter(record => record.isUnresolved === false).flatMap(record => (record.producerRevisions ?? []).map(revision => partsKey2(record.scope, revision))))
+  const rows = seen.filter(row => !resolvedRows.has(row) && (row.source.kind !== 'inbox' || row.producerRevisions === undefined || row.producerRevisions.length === 0 || !row.producerRevisions.every(revision => settledRevisions.has(partsKey2(row.scope, revision)))))
   for (const record of records) {
     if (isRetired(record)) {
       record.isPresent = false
@@ -732,7 +750,7 @@ export const observeQuestions = (
   const assigned = new Set<string>()
   const groups = new Map<string, Observation[]>()
   for (const row of rows) {
-    const group = JSON.stringify([row.scope, row.words])
+    const group = partsKey2(row.scope, row.words)
     groups.set(group, [...(groups.get(group) ?? []), row])
   }
   // If the ledger was removed, never reuse an id still held by an acknowledgement.
@@ -742,7 +760,7 @@ export const observeQuestions = (
     const first = alike[0]
     if (first === undefined) continue
     const words = first.words
-    const candidates = (byScopeWords.get(JSON.stringify([first.scope, words])) ?? []).filter(candidate => candidate.isPresent)
+    const candidates = (byScopeWords.get(partsKey2(first.scope, words)) ?? []).filter(candidate => candidate.isPresent)
     const copies = copiesOf(first)
     const isAmbiguous = candidates.some(row => !row.producer && row.copies !== copies.length)
     if (isAmbiguous) for (const old of candidates.filter(record => !record.producer)) {
