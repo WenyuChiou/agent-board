@@ -65,4 +65,3 @@ export const pageFixture = async (file = '', inbox = {}, state) => {
     rmSync(root, { recursive: true, force: true })
   } }
 }
-

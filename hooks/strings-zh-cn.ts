@@ -148,6 +148,7 @@ export const ZH_CN: Strings = {
 
   inboxTitle: '收件箱报告已保留',
   inboxHeld: (file: string, reason: string): string => `报告保留在 ${file}（${reason}）。标成 .failed 的报告会保留 7 天。请检查文件内容与来源 agent 的汇报 hook。`,
+  pageStateFailed: (reason: string): string => `看板网页无法更新共享状态（${reason}）。待答问题仍显示在此处，下次轮询会重试。`,
 
   // Time and dates
   justNow: '刚刚',

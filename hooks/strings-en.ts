@@ -148,6 +148,7 @@ export const EN: Strings = {
 
   inboxTitle: 'Inbox report retained',
   inboxHeld: (file: string, reason: string): string => `Report retained at ${file} (${reason}). A report set aside as .failed is kept for 7 days. Check its contents and the source agent's reporting hook.`,
+  pageStateFailed: (reason: string): string => `The board page could not update its shared state (${reason}). Pending questions are still shown here; the next poll will retry.`,
 
   // Time and dates
   justNow: 'just now',

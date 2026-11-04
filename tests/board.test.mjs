@@ -21,7 +21,7 @@ import { pickSurface, AGENT_ENV_VARS } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
-import { liveBoardScript } from '../hooks/live-page.ts'
+import { liveBoardScript, pageDonePath } from '../hooks/live-page.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
@@ -656,10 +656,27 @@ test('the JSON board preserves pending turn text and project names as data', () 
     [HTML_TURN]: JSON.stringify({ session_id: 'demo-1', cwd: '/work/<img "demo" &>', last_assistant_message: '<script>alert("demo")</script> & done?' }),
     'gemini-turn-1792152000-2.json': JSON.stringify({ session_id: 'demo-2', cwd: '/work/api-gateway', prompt_response: 'Use <demo> & "yes"?' }),
   } })
-  assert.deepEqual(document.needs.map(item => [item.text, item.project]), [
+  assert.deepEqual(document.needs.map(item => [item.text, item.project]).sort(([a], [b]) => a.localeCompare(b)), [
     ['<script>alert("demo")</script> & done?', '<img "demo" &>'],
     ['Use <demo> & "yes"?', 'api-gateway'],
-  ])
+  ].sort(([a], [b]) => a.localeCompare(b)))
+})
+
+test('the JSON board keeps a recent acknowledgement when an expired receipt names the same inbox file', () => {
+  const now = Date.parse('2026-11-04T12:00:00Z')
+  const receipt = (prefix, at) => {
+    const body = JSON.stringify({ version: 1, name: HTML_TURN, stamp: `${prefix}:${at}` })
+    const hash = createHash('sha256').update(body).digest('hex')
+    return { file: pageDonePath('progress.md', hash), body }
+  }
+  const ordered = (prefix, at) => Array.from({ length: 32 }, (_, i) => receipt(`${prefix}${i}`, at)).sort((a, b) => a.file.localeCompare(b.file))
+  const recent = ordered('recent', now)[0]
+  const expired = ordered('expired', now - 4 * 24 * 60 * 60 * 1000).at(-1)
+  // The old receipt sorts last, which would overwrite the recent stamp in a single map.
+  assert.ok(expired.file > recent.file)
+  const document = jsonRun({ inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) }, beside: { [recent.file]: recent.body, [expired.file]: expired.body }, now })
+  assert.equal(document.counts.needs, 0)
+  assert.deepEqual(document.needs, [])
 })
 
 // The CLI cannot read the plugin store's inboxDone; only a claimed file is excluded here.

@@ -354,8 +354,8 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       ask(world)
       const printed = await print(world)
       assert.match(printed, /Ship the gateway, OK\?/)
-      // The read-only print names the owning agent and session beside its ask.
-      assert.match(printed, /api-gateway · codex › Release the gateway/)
+      // The print uses the display name; --json keeps the agent's protocol name.
+      assert.match(printed, new RegExp(`api-gateway · ${EN.agentNames.codex} › Release the gateway`))
       await inspectSurfaces(world)
     } finally { await world.close() }
   })
@@ -377,7 +377,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
     }
   })
 
-  test('a working day: finished work appears on page and HTML, chat reads today’s journal, and hidden rows stay hidden', async () => {
+  test('a working day: finished work appears on the live page and print, and hidden rows stay hidden', async () => {
     const world = makeWorld()
     try {
       ask(world)

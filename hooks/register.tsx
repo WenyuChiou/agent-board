@@ -99,7 +99,7 @@ import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff
 import type { Digest } from './digest'
 import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
-import { liveBoardArgv, liveBoardPage, liveBoardScript, pageStatePath, readPageState } from './live-page'
+import { liveBoardArgv, liveBoardPage, liveBoardScript, pageDoneHash, pageDonePath, pageStatePath, readPageDone, readPageState } from './live-page'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -1164,6 +1164,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
 
 // Pending turns are optional: an unavailable inbox must not stop the board or its reminders.
 let pendingCache: TurnCache = null
+let pageStateFailure: string | null = null
 const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
   try {
     const path = await progressPath($)
@@ -1203,18 +1204,35 @@ let measuredStore = 0
 // What the board cleared in the last 7 days, read at the last sweep and after each prune (refreshPruned).
 let measuredPruned = { agent: 0, mirror: 0, turns: 0 }
 
-// The page runs outside the engine store. Publish only its measured size, daily counts and
-// processed filenames, merging concurrent readers' acknowledgements before verifying a write.
+// A stale counts snapshot cannot undo an acknowledgement: each is verified in its own immutable
+// file before the snapshot is published. The old snapshot's acknowledgements migrate the same way.
 const syncPageState = async ($: EngineInterface, done?: Record<string, string>): Promise<void> => {
-  const at = await $.clock.now()
-  const processed = done ?? await readInboxRecord($, 'inboxDone')
-  const pruned = addPruned(await $.store.get('prunedCounts'), { agent: 0, mirror: 0 }, at)
-  await rewrite($, pageStatePath(await progressPath($)), before => JSON.stringify({
-    version: 1,
-    inboxDone: keepInboxDone({ ...readPageState(before).inboxDone, ...processed }, at),
-    store: measuredStore,
-    pruned,
-  }))
+  try {
+    const at = await $.clock.now()
+    const path = await progressPath($)
+    const processed = done ?? await readInboxRecord($, 'inboxDone')
+    const previous = readPageState(await readText($, pageStatePath(path)))
+    const kept = keepInboxDone({ ...previous.inboxDone, ...processed }, at)
+    for (const [name, stamp] of Object.entries(kept)) {
+      if (!isInboxFile(name)) continue
+      const text = JSON.stringify({ version: 1, name, stamp })
+      const file = pageDonePath(path, sha256(text))
+      if (await readText($, file) !== text) await $.fs.write(file, text)
+      if (await $.fs.read(file) !== text) throw new Error('PAGE_STATE_NOT_VERIFIED')
+    }
+    const pruned = addPruned(await $.store.get('prunedCounts'), { agent: 0, mirror: 0 }, at)
+    await rewrite($, pageStatePath(path), before => JSON.stringify({
+      version: 1,
+      inboxDone: keepInboxDone({ ...readPageState(before).inboxDone, ...processed }, at),
+      store: measuredStore,
+      pruned,
+    }))
+    pageStateFailure = null
+  } catch (error) {
+    // Publication is retried at the next poll. Its warning must not replace the authoritative inbox.
+    const code = (error as { code?: unknown } | null)?.code
+    pageStateFailure = typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : inboxFailure(error)
+  }
 }
 
 // The moment a view is built for: the pane's, which the 30 s tick and each change of the file move.
@@ -1226,7 +1244,7 @@ const viewTime = async ($: EngineInterface): Promise<number> => (await read($, n
 const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; tornTail?: { tasks: number } | null; cutBlocks?: readonly CutBlock[] }, s: Strings, seen: Readonly<Record<string, number>>, at: number): { warning?: string; isLarge?: true; isCleanable?: true; details?: string; pruned?: string; health?: string[] } => {
   const sizes = { progress: snap.size, store: measuredStore }
   const large = sizeWarnings(sizes, s)
-  const lines = [...(snap.tornTail ? [s.progressIncomplete(snap.tornTail.tasks)] : []), ...large]
+  const lines = [...(snap.tornTail ? [s.progressIncomplete(snap.tornTail.tasks)] : []), ...(pageStateFailure === null ? [] : [s.pageStateFailed(pageStateFailure)]), ...large]
   const finished = countManualDone(snap.projects, at, (_key, project, task) => handKeptSeenAt(seen, project, task, at))
   const details = storageDetails(sizes, finished, s)
   const pruned = prunedNote(measuredPruned, s)
@@ -3502,6 +3520,7 @@ const sweepFiles = async ($: EngineInterface): Promise<void> => {
     ...staleStoreTemps(kept ?? [], at).map(name => `${store}${sepOf(store)}${name}`),
     ...swept.map(name => `${inbox}${sepOf(inbox)}${name}`),
     ...staleInboxTemps(failed ?? [], at).map(name => `${inbox}${sepOf(inbox)}${name}`),
+    ...await stalePageDone($, path, at),
   ]
   for (let from = 0; from < stale.length; from += 50) {
     await removeFiles($, stale.slice(from, from + 50), isWin)
@@ -3519,6 +3538,21 @@ const sweepFiles = async ($: EngineInterface): Promise<void> => {
     ...Object.fromEntries(Object.entries(current).filter(([name]) => !drop.has(name))),
     ...Object.fromEntries(unseen.filter(name => current[name] === undefined).map(name => [name, at])),
   })).catch(() => undefined)
+}
+
+// Immutable acknowledgements use the same three-day retention as inboxDone. A delayed writer
+// cannot change a file's meaning while a sweep checks it, since its name binds all its bytes.
+const stalePageDone = async ($: EngineInterface, path: string, at: number): Promise<string[]> => {
+  const dir = path.replace(/[\\/][^\\/]*$/, '')
+  const entries = await $.fs.list(dir).catch(() => [])
+  const stale: string[] = []
+  for (const entry of entries.filter(entry => entry.kind === 'file' && pageDoneHash(entry.name) !== null).sort((a, b) => a.mtimeMs - b.mtimeMs).slice(0, PRUNED_PER_SWEEP)) {
+    const file = `${dir}${sepOf(dir)}${entry.name}`
+    const body = await $.fs.read(file).catch(() => '')
+    const done = readPageDone(body, pageDoneHash(entry.name)!)
+    if (done !== null && keepInboxDone({ [done.name]: done.stamp }, at)[done.name] === undefined) stale.push(file)
+  }
+  return stale
 }
 
 // When each inbox file was set aside as `.failed`, by name: a rename keeps the file's own time.

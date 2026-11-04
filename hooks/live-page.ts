@@ -1,4 +1,5 @@
 import type { Strings } from './i18n'
+import { sha256 } from './sha256.ts'
 
 // A page /progress starts closes this long after its last open tab stops asking, so the link it
 // leaves in a transcript does not keep working until the computer restarts.
@@ -23,6 +24,18 @@ export const liveBoardArgv = (script: string, lang: string, isInteractive = fals
 
 // The plugin publishes only the counts and processed filenames its separate page process needs.
 export const pageStatePath = (progress: string): string => progress.replace(/[^\\/]*$/, 'progress-page-state.json')
+
+// Each processed filename has immutable evidence, independent of the mutable counts snapshot.
+export const pageDonePath = (progress: string, hash: string): string => pageStatePath(progress).replace(/\.json$/, `-done-${hash}.json`)
+export const pageDoneHash = (name: string): string | null => /^progress-page-state-done-([a-f0-9]{64})\.json$/.exec(name)?.[1] ?? null
+export const readPageDone = (text: string, hash: string): { name: string; stamp: string } | null => {
+  if (sha256(text) !== hash) return null
+  try {
+    const value = JSON.parse(text) as { version?: unknown; name?: unknown; stamp?: unknown }
+    if (value.version !== 1 || typeof value.name !== 'string' || !/^[^\\/]+\.json$/.test(value.name) || typeof value.stamp !== 'string' || !/^[^:]+:\d+$/.test(value.stamp)) return null
+    return { name: value.name, stamp: value.stamp }
+  } catch { return null }
+}
 
 type PageState = { inboxDone: Record<string, string>; store: number; pruned: unknown }
 

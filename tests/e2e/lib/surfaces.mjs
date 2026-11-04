@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnIsolated } from './spawn.mjs'
-import { readdirSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
@@ -110,6 +110,8 @@ export const terminal = {
   },
 }
 
+// A command that is not a board view, such as --serve, runs without --print.
+export const command = async (world, args = []) => successful(await run(world, args))
 export const print = async (world, args = []) => successful(await run(world, ['--print', ...args]))
 export const json = async (world, args = []) => JSON.parse(successful(await run(world, ['--json', ...args])))
 
@@ -215,9 +217,11 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
   get('words').textContent = source.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
   get('.pfoot').appendChild(get('close'))
   get('close').tag = 'button'
-  for (const found of source.matchAll(/<button\b([^>]*)>/g)) {
+  for (const found of source.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)) {
     const id = found[1].match(/id="([^"]+)"/)?.[1]
     if (!id) continue
+    // Static footer labels arrive in the HTML; the page script need not draw them again.
+    get(id).textContent = visibleHtml(found[2])
     for (const attr of ['data-local', 'data-static']) if (found[1].includes(attr)) get(id).setAttribute(attr, '')
   }
   let model = first, scheduled, pollMs
@@ -382,7 +386,7 @@ export const serve = {
     }
     world.cleanups.push(stop)
     try {
-      const output = await terminal.screen(world, ['--serve', '--no-open', '--idle-minutes', String(idleMinutes), ...args])
+      const output = await command(world, ['--serve', '--no-open', '--idle-minutes', String(idleMinutes), ...args])
       const match = output.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)
       assert.ok(match, output)
       url = new URL(match[0])

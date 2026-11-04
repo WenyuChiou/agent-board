@@ -28,13 +28,13 @@ import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPriva
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
-import { pageStatePath, readPageState } from '../hooks/live-page'
+import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
 import { boardStatus } from '../hooks/board-status'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, clipped, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, plain, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
 import { BOARD_JSON_SCHEMA, boardDocument } from '../hooks/board-json'
 import { RELEASED } from '../hooks/released'
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
-import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
+import { LOG_TAIL, isInboxFile, keepInboxDone } from '../hooks/inbox'
 import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import type { PendingArchiveRecord } from '../hooks/journal'
 import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, sizeWarnings, storageDetails } from '../hooks/retention'
@@ -171,10 +171,21 @@ const readLog = (file: string): string => {
 
 // `scrub` hides what must not be sent on, in a reply, before its question is picked and cut.
 let pageStateCache = readPageState('')
+const pageDoneFiles = immutableQuestionFiles({
+  directory: dirname(path),
+  isPersistent: args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg)),
+  accepts: name => pageDoneHash(name) !== null,
+  parse: (text, name) => readPageDone(text, pageDoneHash(name)!),
+})
+let pageDoneCache: Array<{ name: string; stamp: string }> = []
 // A poll can meet the plugin's verified write halfway through; retain its last complete record.
 const sharedPageState = () => {
   pageStateCache = readPageState(read(pageStatePath(path)), pageStateCache)
-  return pageStateCache
+  pageDoneCache = pageDoneFiles.read(!isViewQuestionRead) ?? pageDoneCache
+  const at = Date.now()
+  // An expired receipt for the same filename must not shadow another session's live receipt.
+  const kept = pageDoneCache.filter(done => keepInboxDone({ [done.name]: done.stamp }, at)[done.name] !== undefined)
+  return { ...pageStateCache, inboxDone: keepInboxDone({ ...pageStateCache.inboxDone, ...Object.fromEntries(kept.map(done => [done.name, done.stamp])) }, at) }
 }
 
 const pending = (scrub?: (text: string) => string, isFresh = !isViewQuestionRead) => {
@@ -1853,7 +1864,9 @@ const run = async (): Promise<void> => {
   } else if (args.includes('--html')) {
     await openPageSurface()
   } else if (args.includes('--print')) {
-    process.stdout.write(boardText(view(), pending(), s, options()))
+    // The explicit read-only print retains the questions and journal the old chat view showed.
+    const at = Date.now()
+    process.stdout.write(boardText(view(undefined, at), pending(), s, { ...options(), isQuestionsOpen: true }, doneToday(journalToday(at), at, s)))
   } else if (flag('--keys') !== undefined) {
     let state = emptyBoardState
     await refreshRoutes()

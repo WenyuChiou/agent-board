@@ -186,6 +186,7 @@ export const ZH_TW = {
 
   inboxTitle: '收件匣報告已保留',
   inboxHeld: (file: string, reason: string): string => `報告保留在 ${file}（${reason}）。標成 .failed 的報告會保留 7 天。請檢查檔案內容與來源 agent 的回報 hook。`,
+  pageStateFailed: (reason: string): string => `看板網頁無法更新共用狀態（${reason}）。待答問題仍顯示在此處，下次輪詢會重試。`,
 
   // Time and dates
   justNow: '剛剛',

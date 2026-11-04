@@ -122,7 +122,7 @@ describe('scenario runner', () => {
         assert.equal(modulePath([kept, ...leaks, shouted].join(';')), [kept, shouted].join(';'))
         if (modulePath()) assert.equal(a.env.PSModulePath, modulePath())
       }
-      assert.equal((a.read('agent-board.mjs').match(/\(\(target, done\) => done\(false\)\)\((?:html|url),/g) ?? []).length, 2)
+      assert.equal((a.read('agent-board.mjs').match(/\(\(target, done\) => done\(false\)\)\((?:address|url),/g) ?? []).length, 2)
       assert.doesNotMatch(a.read('agent-board.mjs'), /\bopenInBrowser\(/)
       assert.throws(() => a.write('../../../escaped', 'no'), /Outside world/)
       a.write('only-a', 'synthetic')
