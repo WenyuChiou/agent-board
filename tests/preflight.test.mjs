@@ -330,7 +330,7 @@ test('preflight reads stable process identities without Linux wall-clock data', 
     assert.equal(path, '/proc/sys/kernel/random/boot_id')
     return `${boot}\n`
   }
-  const options = { platform: 'linux', readText, readLink: path => path.endsWith('/time') ? 'time:[4026531834]' : 'pid:[4026531836]', run: () => assert.fail('a stable Linux identity needs no subprocess') }
+  const options = { platform: 'linux', readText, readLink: path => path === '/proc/self' ? String(process.pid) : path.endsWith('/time') ? 'time:[4026531834]' : 'pid:[4026531836]', run: () => assert.fail('a stable Linux identity needs no subprocess') }
   assert.equal(processStartIdentity(42, options), `linux:${boot}:12345:time:[4026531834]:pid:[4026531836]`)
   assert.deepEqual(paths, ['/proc/42/stat', '/proc/sys/kernel/random/boot_id'])
   paths.length = 0
@@ -477,7 +477,7 @@ for (const isWatched of [false, true]) {
     const readText = path => path === '/proc/stat' ? `btime ${bootSeconds}\n`
       : path === '/proc/sys/kernel/random/boot_id' ? '00000000-0000-4000-8000-000000000001\n'
         : `42 (worker) ${['S', ...Array(18).fill('0'), '12345'].join(' ')}`
-    const options = { platform: 'linux', readText, readLink: path => path.endsWith('/time') ? 'time:[4026531834]' : 'pid:[4026531836]', clockTicks: () => 100 }
+    const options = { platform: 'linux', readText, readLink: path => path === '/proc/self' ? String(process.pid) : path.endsWith('/time') ? 'time:[4026531834]' : 'pid:[4026531836]', clockTicks: () => 100 }
     const identity = processStartIdentity(process.pid, options)
     assert.ok(identity)
     writeFileSync(`${marker}.start`, JSON.stringify(identity))
@@ -567,10 +567,11 @@ test('preflight tags a Linux identity with the time and PID namespaces it was re
   const links = []
   const readLink = path => {
     links.push(path)
+    if (path === '/proc/self') return String(process.pid)
     return path.endsWith('/time') ? 'time:[4026531834]' : 'pid:[4026531836]'
   }
   assert.equal(processStartIdentity(42, { platform: 'linux', readText, readLink }), `linux:${boot}:12345:time:[4026531834]:pid:[4026531836]`)
-  assert.deepEqual(links, ['/proc/self/ns/time', '/proc/self/ns/pid'])
+  assert.deepEqual(links.filter(path => path !== '/proc/self'), ['/proc/self/ns/time', '/proc/self/ns/pid'])
 })
 
 test('preflight retains the time namespace when the PID namespace is unreadable or invalid', async () => {
@@ -580,6 +581,7 @@ test('preflight retains the time namespace when the PID namespace is unreadable 
   const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
   for (const invalid of [false, true]) {
     const readLink = path => {
+      if (path === '/proc/self') return String(process.pid)
       if (path.endsWith('/time')) return 'time:[4026531834]'
       if (invalid) return 'pid:[invalid]'
       throw new Error('no PID namespace')
@@ -595,6 +597,7 @@ test('preflight retains the PID namespace when the time namespace is unreadable 
   const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
   for (const invalid of [false, true]) {
     const readLink = path => {
+      if (path === '/proc/self') return String(process.pid)
       if (!path.endsWith('/time')) return 'pid:[4026531836]'
       if (invalid) return 'time:[invalid]'
       throw new Error('no time namespace')
@@ -608,9 +611,81 @@ test('preflight omits both Linux namespaces when neither can be read', async () 
   const boot = '00000000-0000-4000-8000-000000000001'
   const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 12345 0`
   const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
-  const readLink = path => { throw new Error(`unreadable ${path}`) }
+  const readLink = path => { if (path === '/proc/self') return String(process.pid); throw new Error(`unreadable ${path}`) }
   assert.equal(processStartIdentity(42, { platform: 'linux', readText, readLink }), `linux:${boot}:12345`)
 })
+
+for (const [scenario, procSelf] of [
+  ['names another PID', () => String(process.pid + 1)],
+  ['cannot be read', () => { throw new Error('unreadable /proc/self') }],
+  ['is not a decimal number', () => 'not-a-pid'],
+]) {
+  test(`preflight omits the PID namespace when /proc/self ${scenario}`, async () => {
+    const { processStartIdentity } = await import('../scripts/preflight.mjs')
+    const boot = '00000000-0000-4000-8000-000000000001'
+    const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 12345 0`
+    const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
+    const readLink = path => path === '/proc/self' ? procSelf() : path.endsWith('/time') ? 'time:[1]' : 'pid:[2]'
+    assert.equal(processStartIdentity(42, { platform: 'linux', readText, readLink }), `linux:${boot}:12345:time:[1]`)
+  })
+}
+
+for (const isWatched of [false, true]) {
+  const folder = isWatched ? 'watched' : 'own'
+  test(`preflight keeps a live Linux marker read through an inherited procfs mount in its ${folder} folder`, async t => {
+    const { processStartIdentity } = await import('../scripts/preflight.mjs')
+    const child = await startUnrelatedProcess()
+    try {
+      const f = fixture(t)
+      f.write('tests/inherited-proc.test.mjs', '')
+      const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
+      mkdirSync(directory, { mode: 0o700 })
+      const name = `${child.pid}-00000000-0000-4000-8000-000000000038.lock`
+      const marker = join(directory, name)
+      const boot = '00000000-0000-4000-8000-000000000001'
+      const recorded = `linux:${boot}:12345:time:[1]:pid:[2]`
+      writeFileSync(`${marker}.start`, JSON.stringify(recorded))
+      writeFileSync(marker, '')
+      const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 18345 0`
+      const paths = []
+      const readText = path => {
+        paths.push(path)
+        return path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
+      }
+      const readLink = path => path === '/proc/self' ? String(process.pid + 1) : path.endsWith('/time') ? 'time:[1]' : 'pid:[2]'
+      const identities = []
+      let testStarts = 0
+      const run = (program, args, options) => {
+        if (args.includes('--test')) {
+          testStarts++
+          return { status: 0, stdout: '# tests 1\n# fail 0\n', stderr: '' }
+        }
+        return f.run(program, args, options)
+      }
+      const checks = await f.check({
+        fallbackLockPath: isWatched ? directory : null,
+        readProcessIdentity: pid => {
+          const identity = processStartIdentity(pid, { platform: 'linux', readText, readLink })
+          identities.push([pid, identity])
+          return identity
+        },
+        run,
+      })
+      assert.equal(testStarts, 0)
+      const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
+      assert.ok(failure)
+      assert.ok(failure.message.includes(', its time or process ID namespace differs or could not be read, so the owner could not be confirmed'))
+      assert.ok(failure.message.includes(name))
+      assert.ok(paths.includes(`/proc/${child.pid}/stat`))
+      assert.ok(identities.some(([pid, identity]) => pid === child.pid && identity === `linux:${boot}:18345:time:[1]`))
+      assert.equal(existsSync(marker), true)
+      assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), recorded)
+      if (isWatched) assert.deepEqual(readdirSync(f.lockPath), [])
+    } finally {
+      await stopUnrelatedProcess(child)
+    }
+  })
+}
 
 for (const isWatched of [false, true]) {
   test(`preflight keeps a live Linux marker written under another time namespace in its ${isWatched ? 'watched' : 'own'} folder`, async t => {
@@ -679,6 +754,7 @@ for (const isWatched of [false, true]) {
       const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 18345 0`
       const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
       const readLink = path => {
+        if (path === '/proc/self') return String(process.pid)
         if (path.endsWith('/time')) return 'time:[1]'
         if (hasReaderPid) return 'pid:[2]'
         throw new Error('no PID namespace')
@@ -709,6 +785,7 @@ for (const isWatched of [false, true]) {
 }
 
 test('preflight still frees a reused Linux PID read through the same time and PID namespaces', async t => {
+  const { processStartIdentity } = await import('../scripts/preflight.mjs')
   const f = fixture(t)
   f.write('tests/same-namespace.test.mjs', '')
   mkdirSync(f.lockPath)
@@ -716,7 +793,10 @@ test('preflight still frees a reused Linux PID read through the same time and PI
   const boot = '00000000-0000-4000-8000-000000000001'
   writeFileSync(`${marker}.start`, JSON.stringify(`linux:${boot}:12345:time:[1]:pid:[2]`))
   writeFileSync(marker, '')
-  const checks = await f.check({ readProcessIdentity: () => `linux:${boot}:18345:time:[1]:pid:[2]` })
+  const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 18345 0`
+  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
+  const readLink = path => path === '/proc/self' ? String(process.pid) : path.endsWith('/time') ? 'time:[1]' : 'pid:[2]'
+  const checks = await f.check({ readProcessIdentity: pid => processStartIdentity(pid, { platform: 'linux', readText, readLink }) })
   assert.ok(has(checks, 'PASS', 'tests/same-namespace.test.mjs: 1 tests, 0 failed'))
   assert.equal(existsSync(marker), false)
 })
