@@ -33,13 +33,6 @@ export const langOf = (value: unknown): Lang | null => {
   return null
 }
 
-// Windows usually has no LANG, so independent commands also check the system locale.
-export const systemLang = (env: unknown): Lang | null => {
-  const language = langOf(env)
-  if (language !== null) return language
-  try { return langOf(Intl.DateTimeFormat().resolvedOptions().locale) } catch { return null }
-}
-
 // The language the person picked: the plugin's own setting (/config), else what
 // `/progress lang` stored. Both are the same in every session on the machine.
 export const chosenLang = (option: unknown, stored: unknown): Lang | null => (option === 'auto' ? null : langOf(option)) ?? langOf(stored)

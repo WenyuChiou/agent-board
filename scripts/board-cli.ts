@@ -37,7 +37,7 @@ import type { PendingArchiveRecord } from '../hooks/journal'
 import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
-import { agentLabel, langOf, plainReason, STRINGS, systemLang } from '../hooks/strings'
+import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
@@ -68,6 +68,13 @@ const progressFile = (): string => {
   const config = process.env.CLAUDE_CONFIG_DIR
 
   return localProgressPath(flag('--progress-file'), BAKED.path || join(config || join(homedir(), '.claude'), 'progress.md'))
+}
+
+// Windows usually has no LANG, so the board also checks the system locale.
+const systemLang = (env: unknown) => {
+  const language = langOf(env)
+  if (language !== null) return language
+  try { return langOf(Intl.DateTimeFormat().resolvedOptions().locale) } catch { return null }
 }
 
 const path = progressFile()
