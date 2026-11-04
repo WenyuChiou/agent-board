@@ -790,8 +790,11 @@ test('preflight removes a marker with a different identity for a live process on
     writeFileSync(marker, '')
     const { processStartIdentity } = await import('../scripts/preflight.mjs')
     const identity = processStartIdentity(child.pid)
-    if (identity === null) return t.skip('the Linux process identity is unavailable')
-    writeFileSync(`${marker}.start`, JSON.stringify(`${identity}:previous-owner`))
+    // Only an identity that names its time namespace can be compared; another test covers the one without.
+    const parts = /^(linux:[^:]+:)(\d+)(:time:\[\d+\])$/.exec(identity ?? '')
+    if (!parts) return t.skip('the Linux process identity or its time namespace is unavailable')
+    // Same boot and namespace, another start tick: the marker's owner was a different process.
+    writeFileSync(`${marker}.start`, JSON.stringify(`${parts[1]}${Number(parts[2]) + 1}${parts[3]}`))
     const checks = await f.check({ readProcessIdentity: processStartIdentity })
     assert.ok(has(checks, 'PASS', 'tests/reused-start.test.mjs: 1 tests, 0 failed'))
     assert.equal(existsSync(marker), false)
