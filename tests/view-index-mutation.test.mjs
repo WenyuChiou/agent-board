@@ -22,7 +22,7 @@ registerHooks({ resolve(specifier, context, next) {
 
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
-const { emptyQuestions, observeQuestions } = await import('../hooks/questions.ts')
+const { emptyQuestions, observeQuestions, questionScope } = await import('../hooks/questions.ts')
 const { ZH_TW } = await import('../hooks/i18n.ts')
 const { confirmKey } = await import('../hooks/blocks.ts')
 const { sha256 } = await import('../hooks/sha256.ts')
@@ -121,4 +121,40 @@ test('a reworded question binds a fresh id while the old wording keeps its own',
   assert.ok(revisedRecord !== undefined)
   assert.notEqual(revisedRecord.id, oldRecord.id)
   assert.equal(revised.ledger.records.find(record => record.words === 'First question?')?.id, oldRecord.id)
+})
+
+test('a frozen set that matches nothing leaves the view unchanged, and a matching freeze reroutes the question', () => {
+  // The frozen fast paths (no scope string built, no saved-record scan) must give
+  // the same view as the slow paths when nothing is frozen. When a scope is
+  // frozen, the live step is skipped and the saved question shows instead: the
+  // waiting list keeps one item, but it comes from the saved record rather than
+  // the live step, so it carries no live-session marker (#192).
+  const text = file('- [?] First question?\n- [x] Done step')
+  const fresh = () => observe(emptyQuestions(), text).ledger
+  const plain = viewOf(fresh(), text)
+  const unmatched = buildView(parseProgress(text), [], null, NOW, 0, {}, ZH_TW, [], {}, fresh(), { retired: [], consumed: [] }, [], new Set(['not-json']))
+  assert.deepEqual(unmatched, plain)
+  const frozen = buildView(parseProgress(text), [], null, NOW, 0, {}, ZH_TW, [], {}, fresh(), { retired: [], consumed: [] }, [], new Set([questionScope('demo', 'codex', 'a1b2c3d4')]))
+  assert.equal(frozen.waiting.length, 1)
+  assert.equal(frozen.waiting[0].text, 'First question?')
+  assert.ok(!('nativeSession' in frozen.waiting[0]))
+  assert.ok(plain.waiting.some(item => item.text === 'First question?' && 'nativeSession' in item))
+})
+
+test('rebuilding a view sees ledger edits, never a previous call', () => {
+  // The per-task memos in the view build live for one call only: a second build
+  // of the same inputs is identical, and a ledger edit between calls is seen.
+  const text = file('- [?] First question?\n- [?] Second question?')
+  const ledger = observe(emptyQuestions(), text).ledger
+  const first = viewOf(ledger, text)
+  assert.equal(first.waiting.length, 2)
+  assert.deepEqual(viewOf(ledger, text), first)
+  const record = ledger.records.find(record => record.words === 'First question?')
+  assert.ok(record !== undefined)
+  record.isUnresolved = false
+  record.isWaiting = false
+  record.resolvedAt = NOW
+  const third = viewOf(ledger, text)
+  assert.ok(!third.waiting.some(item => item.text === 'First question?'))
+  assert.ok(third.waiting.some(item => item.text === 'Second question?'))
 })

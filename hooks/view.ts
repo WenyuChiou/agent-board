@@ -900,7 +900,8 @@ export const buildView = (
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
       const isManual = task.auto === null
       const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
-      const isFrozen = frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))
+      // With nothing frozen, neither half can match, so the scope string is never built.
+      const isFrozen = frozen.size > 0 && (frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)))
       const lastActive = hasTime(updated) ? updated : seen[taskFingerprint(project.name, task)]
       const days = task.due === null ? null : dueDays(task.due, now)
       const isDue = task.due !== null && days !== null && days <= 14
@@ -912,9 +913,14 @@ export const buildView = (
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
       const taskQuestions: WaitingItem[] = []
+      // A step's slot string is built once per task and shared by the key list, the
+      // question id and the age lookup below, which each asked for it separately.
+      // Nothing they read changes during a view build, so sharing it stays correct.
+      const slots: (string | undefined)[] = []
+      const slotAt = (index: number): string => slots[index] ??= questionSlot(scope, index)
       const keys = task.auto === null || observed === null
         ? blockKeys(task)
-        : task.steps.map((step, index) => step.status === 'waiting' ? observed.keys[questionSlot(scope, index)] ?? '' : '')
+        : task.steps.map((step, index) => step.status === 'waiting' ? observed.keys[slotAt(index)] ?? '' : '')
       // A cut-off block's question records stay as they were, but its steps still show. A step a
       // saved question of its scope covers (the same words, or the start of them the cut left) is
       // shown by that saved question in the loop over the ledger below, or not at all once it is
@@ -936,22 +942,53 @@ export const buildView = (
         const candidates = same.length > 0 || words === '' || index !== task.steps.length - 1 ? same : covering.filter(record => record.words.startsWith(words))
         return candidates.length === 1 ? candidates[0] : undefined
       }
+      // A step's saved record, asked state, age stage and prompt state are asked for
+      // again and again within one row — the phrase, the question finder and the step
+      // list each scan the steps — so each is worked out once per task rather than
+      // once per scan. Nothing they read (the keys, the records, the answered marks,
+      // the frozen set) changes during a view build, so the memos stay correct.
+      const savedMemo = new Map<number, QuestionRecord | undefined>()
+      const savedAt = (index: number): QuestionRecord | undefined => {
+        if (savedMemo.has(index)) return savedMemo.get(index)
+        const saved = savedFor(index)
+        savedMemo.set(index, saved)
+        return saved
+      }
+      const askedMemo: (boolean | undefined)[] = []
       const isAsked = (index: number): boolean => {
+        const held = askedMemo[index]
+        if (held !== undefined) return held
+        let value: boolean
         if (isFrozen) {
-          const saved = savedFor(index)
-          return saved === undefined ? true : saved.isUnresolved === true && saved.source !== undefined && !marked.has(saved.id)
+          const saved = savedAt(index)
+          value = saved === undefined ? true : saved.isUnresolved === true && saved.source !== undefined && !marked.has(saved.id)
+        } else {
+          value = !marked.has(keys[index] ?? '') && recordsById.get(keys[index] ?? '')?.isUnresolved !== false
         }
-        return !marked.has(keys[index] ?? '') && recordsById.get(keys[index] ?? '')?.isUnresolved !== false
+        askedMemo[index] = value
+        return value
       }
+      const stageMemo: (ReturnType<typeof questionAge>['stage'] | undefined)[] = []
       const stageOf = (index: number) => {
-        const id = observed?.keys[questionSlot(scope, index)]
-        return questionAge(recordsById.get(id ?? '')?.firstObserved ?? 0, now).stage
+        const held = stageMemo[index]
+        if (held !== undefined) return held
+        const id = observed?.keys[slotAt(index)]
+        const stage = questionAge(recordsById.get(id ?? '')?.firstObserved ?? 0, now).stage
+        stageMemo[index] = stage
+        return stage
       }
-      const isPrompt = (index: number): boolean => isFrozen ? savedFor(index) === undefined && isAsked(index) && stageOf(index) === 'pending' : isAsked(index) && stageOf(index) === 'pending'
+      const promptMemo: (boolean | undefined)[] = []
+      const isPrompt = (index: number): boolean => {
+        const held = promptMemo[index]
+        if (held !== undefined) return held
+        const value = isFrozen ? savedAt(index) === undefined && isAsked(index) && stageOf(index) === 'pending' : isAsked(index) && stageOf(index) === 'pending'
+        promptMemo[index] = value
+        return value
+      }
 
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting') return
-        if (isFrozen && savedFor(index) !== undefined) return
+        if (isFrozen && savedAt(index) !== undefined) return
         const parts = splitNote(step.text)
         taskQuestions.push({
           key: `${key}::${index}`,
@@ -975,7 +1012,7 @@ export const buildView = (
           resumeVia: task.auto?.resume ? resumeVia(task.auto.agent) : null,
           reopen: task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
           hideKey: isFrozen ? '' : keys[index] ?? '',
-          questionId: isFrozen ? undefined : observed?.keys[questionSlot(scope, index)],
+          questionId: isFrozen ? undefined : observed?.keys[slotAt(index)],
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
           ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),

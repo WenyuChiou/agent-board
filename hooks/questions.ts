@@ -71,10 +71,22 @@ const scopeTables = (projects: readonly ProgressProject[], mine: ProgressMirror 
   for (const project of projects) for (const task of project.tasks) if (task.auto !== null && task.auto.isRun !== true) add(project.name, task.auto, task.title)
   const inBlocks = new Map([...owners].map(([scope, ids]) => [scope, new Set(ids)]))
   if (mine !== null && mine.isRun !== true) add(mine.project, mirrorOwner(mine), mine.title)
+  // A source's owner is worked out once per distinct data string within this call: several
+  // records of one block carry the same data, and parsing it again for each would repeat
+  // the same answer. The data strings are never changed during the call, so the memo
+  // stays correct, and it lives only for this call — nothing is shared between calls.
+  const ownerByData = new Map<string, QuestionOwner | null>()
+  const ownerOf = (source: QuestionSource): QuestionOwner | null => {
+    const held = ownerByData.get(source.data)
+    if (held !== undefined) return held
+    const auto = sourceOwner(source)
+    ownerByData.set(source.data, auto)
+    return auto
+  }
   for (const record of ledger?.records ?? []) {
     const source = record.source
     if (source === undefined) continue
-    const auto = sourceOwner(source)
+    const auto = ownerOf(source)
     if (auto === null) {
       // An own copy saved before it held the session id is known only by its alias and title.
       const ids = source.kind === 'own' ? titled.get(partsKey2(record.scope, source.task)) : undefined
@@ -89,10 +101,19 @@ const scopeTables = (projects: readonly ProgressProject[], mine: ProgressMirror 
     else if (record.scope === questionScope(source.project, auto.agent, canonical)) saved.add(record.scope)
   }
   // An inbox ask's block keeps the alias only while no other question has it: moving a peer that
-  // already holds it would take that peer's rows off their records.
-  const taken = new Set((ledger?.records ?? []).filter(record => record.source !== undefined && record.source.kind !== 'inbox').map(record => record.scope))
-  const asks = (ledger?.records ?? []).flatMap(record => {
-    const session = record.source?.kind === 'inbox' ? inboxSession(record.source) : undefined
+  // already holds it would take that peer's rows off their records. One pass collects both the
+  // taken scopes and the inbox candidates, so the records are not scanned twice.
+  const taken = new Set<string>()
+  const inboxCandidates: QuestionRecord[] = []
+  for (const record of ledger?.records ?? []) {
+    const source = record.source
+    if (source === undefined) continue
+    if (source.kind !== 'inbox') taken.add(record.scope)
+    else inboxCandidates.push(record)
+  }
+  const asks = inboxCandidates.flatMap(record => {
+    const source = record.source
+    const session = source?.kind === 'inbox' ? inboxSession(source) : undefined
     return session === undefined || session.length <= 8 || taken.has(record.scope) ? [] : [{ scope: record.scope, session }]
   })
   // An asker whose block is here comes first: one resolved and gone must not keep it from its block.
@@ -105,10 +126,14 @@ const scopeTables = (projects: readonly ProgressProject[], mine: ProgressMirror 
     // The same scope is asked for again and again within one view (once per task here, once
     // per task in the view), so it is worked out once per call rather than once per ask (#192).
     // The tables above are fixed by the time this closure runs, so the memo stays correct.
+    // The key is internal only: length-prefixed parts keep it unambiguous without quoting,
+    // and no resume is marked apart from an empty resume, which resolves differently.
     scopeOf: ((): QuestionScopeOf => {
       const memo = new Map<string, string>()
       return (project: string, agent: string, session: string, resume?: string | null): string => {
-        const key = JSON.stringify([project, agent, session, resume ?? null])
+        const key = resume == null
+          ? `${project.length}:${project}${agent.length}:${agent}${session.length}:${session}~`
+          : `${project.length}:${project}${agent.length}:${agent}${session.length}:${session}${resume.length}:${resume}`
         const held = memo.get(key)
         if (held !== undefined) return held
         const scope = questionScope(project, agent, session)
@@ -129,8 +154,11 @@ const scopeTables = (projects: readonly ProgressProject[], mine: ProgressMirror 
   }
 }
 export const questionScopes = (projects: readonly ProgressProject[], mine: ProgressMirror | null, ledger?: QuestionLedger): QuestionScopeOf => scopeTables(projects, mine, ledger).scopeOf
-const isFrozenQuestion = (record: QuestionRecord, frozen: ReadonlySet<string>): boolean =>
-  frozen.has(record.scope) || record.source !== undefined && frozen.has(questionScope(record.source.project, record.source.agent, record.source.session))
+const isFrozenQuestion = (record: QuestionRecord, frozen: ReadonlySet<string>): boolean => {
+  // With nothing frozen, neither half can match, so the scope string is never built.
+  if (frozen.size === 0) return false
+  return frozen.has(record.scope) || record.source !== undefined && frozen.has(questionScope(record.source.project, record.source.agent, record.source.session))
+}
 export const questionSlot = (scope: string, index: number | string): string => JSON.stringify([scope, index])
 export const pendingQuestionSlot = (scope: string, text: string): string => questionSlot(scope, `inbox:${questionWords(text)}`)
 export const migrationKey = (legacy: string): string => `question-migrated:${sha256(legacy)}`
@@ -587,7 +615,8 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       if (mine !== null && task.auto !== null && (task.auto.isRun === true ? task.auto.session === shortId(mine.sessionId) : matchesSpan(task.auto, { ...mine, agent: mine.agent || 'claude' }))) continue
       if (task.auto !== null) hold(project.name, task.auto)
       const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
-      if (frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))) continue
+      // With nothing frozen, neither half can match, so the scope string is never built.
+      if (frozen.size > 0 && (frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)))) continue
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
       // The task's background and its copy as data are the same for each of its steps, so they
@@ -751,7 +780,9 @@ export const observeQuestions = (
   const groups = new Map<string, Observation[]>()
   for (const row of rows) {
     const group = partsKey2(row.scope, row.words)
-    groups.set(group, [...(groups.get(group) ?? []), row])
+    const alike = groups.get(group)
+    if (alike === undefined) groups.set(group, [row])
+    else alike.push(row)
   }
   // If the ledger was removed, never reuse an id still held by an acknowledgement.
   const acknowledged = answered.filter(key => /^question:[a-f0-9]{64}:\d+$/.test(key)).map(key => Number(key.slice(key.lastIndexOf(':') + 1)) + 1).filter(Number.isSafeInteger)
@@ -812,7 +843,9 @@ export const observeQuestions = (
     const key = blockKey(task.auto)
     const places = locations.get(key) ?? []
     const scope = scopeOf(project.name, task.auto.agent, task.auto.session, task.auto.resume)
-    places.push({ project: project.name, scope, alias: questionScope(project.name, task.auto.agent, task.auto.session) })
+    // The alias is read only through a frozen lookup below, so with nothing frozen it is
+    // never built; an empty alias can never match a frozen scope.
+    places.push({ project: project.name, scope, alias: frozen.size === 0 ? '' : questionScope(project.name, task.auto.agent, task.auto.session) })
     locations.set(key, places)
     scopeCounts.set(scope, (scopeCounts.get(scope) ?? 0) + 1)
   }
