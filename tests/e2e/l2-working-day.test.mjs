@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { EN } from '../../hooks/strings-en.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block } from './lib/writers.mjs'
-import { inspectSurfaces, terminal, seenPageWithin, chat, serve, html, pageDom } from './lib/surfaces.mjs'
+import { inspectSurfaces, terminal, seenPageWithin, print, serve, pageDom } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
@@ -66,7 +66,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const screens = await inspectSurfaces(world, server)
       for (const [surface, text] of Object.entries(screens)) {
         await knownFailure('hold:all-agent-done-today', () => assert.match(text, /(?:3\s+done today|done today\s*3)/i, surface))
-        if (surface === 'page' || surface === 'html') for (const agent of agents) assert.ok(text.includes(`Finish ${agent} report`), surface)
+        if (surface === 'page') for (const agent of agents) assert.ok(text.includes(`Finish ${agent} report`), surface)
       }
     } finally { await world.close() }
   })
@@ -243,19 +243,18 @@ describe('L2 a working day', { concurrency: 2 }, () => {
     } finally { await world.close() }
   })
 
-  test('L2 chat: --chat shows stuck steps and done recently like the terminal board', async () => {
+  test('L2 print: --print shows stuck steps and done recently like the terminal board', async () => {
     const world = makeWorld()
     try {
       block(world, { title: 'Review stuck route', steps: ['- [!] Waiting for synthetic credentials'] })
       block(world, { session: 'd1000001', title: 'Finished route review', state: 'done', steps: ['- [x] Check routes'] })
       const terminalText = await terminal.screen(world, ['--all'])
-      const result = await chat(world)
-      assert.equal(result.status, 0, result.stderr)
+      const printed = await print(world)
       noMachineIds(terminalText, world)
-      noMachineIds(result.stdout, world)
+      noMachineIds(printed, world)
       assert.match(terminalText, /Waiting for synthetic credentials/)
-      assert.match(result.stdout, /Waiting for synthetic credentials/)
-      for (const [surface, text] of Object.entries({ terminal: terminalText, chat: result.stdout })) await knownFailure('hold:done-recently-summary', () => {
+      assert.match(printed, /Waiting for synthetic credentials/)
+      for (const [surface, text] of Object.entries({ terminal: terminalText, print: printed })) await knownFailure('hold:done-recently-summary', () => {
         assert.match(text, /Done recently/, surface)
         assert.match(text, /Finished route review/, surface)
       })
@@ -344,20 +343,19 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       assert.match(world.read('progress.md'), /\[\?\] Ship the gateway/)
       const screens = await inspectSurfaces(world)
       assert.match(screens.terminal, /\b0 waiting\b/)
-      assert.match(screens.chat, /\b0 waiting\b/)
+      assert.match(screens.print, /\b0 waiting\b/)
       assert.match(screens.page, /Nothing needs you/)
     } finally { await world.close() }
   })
 
-  test('a working day: --chat shows the ask and says where to answer it', async () => {
+  test('a working day: --print shows the ask and says where to answer it', async () => {
     const world = makeWorld()
     try {
       ask(world)
-      const result = await chat(world)
-      assert.equal(result.status, 0, result.stderr)
-      assert.match(result.stdout, /Ship the gateway, OK\?/)
-      // The read-only chat names the owning agent and session beside its ask.
-      assert.match(result.stdout, /api-gateway · codex › Release the gateway/)
+      const printed = await print(world)
+      assert.match(printed, /Ship the gateway, OK\?/)
+      // The read-only print names the owning agent and session beside its ask.
+      assert.match(printed, /api-gateway · codex › Release the gateway/)
       await inspectSurfaces(world)
     } finally { await world.close() }
   })
@@ -395,13 +393,10 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
       world.write(`progress-journal-${day.slice(0, 7)}.md`, `- ${day} ${pad(date.getHours())}:${pad(date.getMinutes())} · research-hub · Prepare research summary · Summarize findings\n`)
       const screens = await inspectSurfaces(world)
-      for (const surface of ['page', 'html']) {
-        assert.match(screens[surface], /Prepare research summary/, surface)
-        // The Done section replaced Done recently: the page counts the week's finished work, progress.html counts the shelf.
-        assert.ok(squash(screens[surface]).includes(surface === 'page' ? `${EN.pgDone} ${EN.pgDoneWeek(1)}` : `${EN.pgDone} 1`), screens[surface])
-      }
-      assert.match(screens.chat, /\b1 done today\b/)
-      assert.match(screens.chat, /Prepare research summary/)
+      assert.match(screens.page, /Prepare research summary/, 'page')
+      assert.ok(squash(screens.page).includes(`${EN.pgDone} ${EN.pgDoneWeek(1)}`), screens.page)
+      assert.match(screens.print, /\b1 done today\b/)
+      assert.match(screens.print, /Prepare research summary/)
       for (const [surface, text] of Object.entries(screens)) assert.match(text, /Nothing needs you|\b0 waiting\b/, surface)
       assert.match(world.read('progress.md'), /\[\?\] Ship the gateway/)
     } finally { await world.close() }
@@ -441,8 +436,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         // Identifiers belong behind Copy. All default surfaces still get the
         // strict assertion, independently of the allowed copied command.
         noMachineIds((await terminal.screen(world, ['--all'])), world)
-        const visible = (await html(world)).visible
-        noMachineIds(visible, world)
+        noMachineIds(await print(world), world)
       }
       await inspectSurfaces(world)
     } finally { await world.close() }

@@ -21,7 +21,7 @@ import {
   GROK_UPDATES,
   HERMES_TURN,
   INBOX,
-  INBOX_ASK,
+  LIVE_SCRIPT,
   JOBS,
   LEDGER_LINK,
   NEXT_TURN,
@@ -49,7 +49,8 @@ import {
   breakQuestionFile,
   buildView,
   confirmStep,
-  dashboardHtml,
+  serveModel,
+  pageModelText,
   doneKey,
   effectivePromptMirror,
   emptyMirror,
@@ -58,6 +59,7 @@ import {
   expect,
   expireTaken,
   inNeeds,
+  installedBoard,
   launchBackground,
   migrationKey,
   observeQuestions,
@@ -654,9 +656,9 @@ test('historical hide marks survive failed reads while an observed renewed quest
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   // The list is read before progress.md at the start: the page written then still holds the file.
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   expect(page).toContain('Backfill last year')
-  expect(page).toContain('已回覆、隱藏的 1 項')
+  expect(JSON.parse(page).hidden).toHaveLength(1)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   const item = "data-pipeline::Backfill last year's events::0"
   expect(await ui.find({ type: 'Button', key: `${item}::unhide` })).toBeDefined()
@@ -1348,23 +1350,32 @@ test('/progress lang switches the language and remembers it; auto goes back to t
   expect(ran.text).toBe('面板改用繁體中文。')
 })
 
-test('progress.html is written beside progress.md, and /progress open opens it in the browser', async ($, on) => {
-  const ran: string[][] = []
-  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, ran }
-  engineBeneath(on, world)
+test('nothing writes progress.html after a changed read or tick and the pane opens the live page', async ($, on) => {
+  const url = `http://127.0.0.1:34567/?t=${'a'.repeat(32)}`
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], liveOutput: `${ZH_TW.serveAt(url)}\n` }
+  const clock = engineBeneath(on, world)
   await start($, '幫我重做進度面板')
   await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain('<html lang="zh-Hant">')
-  expect(page).toContain('<title>Agent Board</title>')
+  expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
+  world.files.set(FILE, `${JOBS}\n## Synthetic\n### Changed report\n- [ ] Continue\n`)
+  world.mtime += 1
+  await clock.advance(30000)
+  expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
+  const page = await pageModelText($, world)
   expect(page).toContain('Google 暑期實習')
-
+  expect(page).toContain('Changed report')
   const result = await $.command.run({ ...TIDY, args: 'open' })
-  expect(ran.at(-1)).toEqual(['xdg-open', '/home/me/.claude/progress.html'])
-  expect(result.text).toBe(ZH_TW.windowOpened())
+  expect(result.text).toBe(`${ZH_TW.boardPageOpened}\n<${url}>`)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(await ui.find({ type: 'Button', key: 'page' })).toBeDefined()
+    await ui.press({ key: 'page' })
+    expect(world.ran?.at(-1)?.includes('--serve')).toBe(true)
+  } finally { await ui.unmount() }
+  expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
 })
 
-test('progress.html shows unprocessed inbox questions before a digest and drops the pending copy afterwards', async ($, on) => {
+test('the live page model shows unprocessed inbox questions before a digest and drops the pending copy afterwards', async ($, on) => {
   const question = 'Use 100 or 300 a minute?'
   const inbox = '/home/me/.claude/progress-inbox'
   const name = 'codex-turn-1792152000-1.json'
@@ -1381,23 +1392,23 @@ test('progress.html shows unprocessed inbox questions before a digest and drops 
   }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   expect(inNeeds(page, question)).toBe(true)
-  expect(page).toContain('<b id="needs-n">1</b>')
+  expect(JSON.parse(page).counts.waiting).toBe(1)
   expect(page).toContain('codex')
   expect(page).not.toContain('{ broken')
   await clock.advance(5000)
   await $.command.run({ ...TIDY, args: 'open' })
-  const digested = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const digested = await pageModelText($, world)
   expect(world.files.get(FILE)).toContain(question)
   expect(inNeeds(digested, question)).toBe(true)
   // The digest recorded the question, so the pending copy is gone: no inbox hint, no unprocessed ask.
   expect(digested).not.toContain(ZH_TW.dashInboxHint)
   expect(digested).not.toContain('this page cannot send replies.')
-  expect(digested).not.toMatch(INBOX_ASK)
+  expect(JSON.parse(digested).turns).toEqual([])
 })
 
-test('progress.html escapes inbox text and skips turns already recorded as processed', async ($, on) => {
+test('the live page model keeps inbox text as data and skips turns already recorded as processed', async ($, on) => {
   const inbox = '/home/me/.claude/progress-inbox'
   const name = 'codex-turn-1792152000-1.json'
   const world: World = {
@@ -1412,18 +1423,20 @@ test('progress.html escapes inbox text and skips turns already recorded as proce
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain('&lt;scriptalert(&quot;demo&quot;)&lt;/script &amp; done?')
-  expect(page).toContain('&lt;img &quot;demo&quot; &amp;&gt;')
+  const page = await pageModelText($, world)
+  const model = JSON.parse(page) as ReturnType<typeof serveModel>
+  const item = [...model.asks, ...model.turns].find(item => item.project === '<img "demo" &>')
+  expect(item?.text).toBe('<scriptalert("demo")</script & done?')
+  expect(item?.project).toBe('<img "demo" &>')
   expect(page).not.toContain('<script>alert')
   expect(page).not.toContain('Already processed')
 })
 
-test('progress.html is still written and reminders run when inboxDone is malformed', async ($, on) => {
+test('the live page model and reminders remain available when inboxDone is malformed', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', last_assistant_message: 'Ship the demo build, OK?' })]]), mtime: 1, hasTasks: true, store: { inboxDone: 'oops', autoConnectOff: true }, storeReads: [] }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   expect(page).toContain('Google 暑期實習')
   // With no readable record of processed turns, every inbox file counts as not processed yet.
   expect(inNeeds(page, 'Ship the demo build, OK?')).toBe(true)
@@ -1433,11 +1446,11 @@ test('progress.html is still written and reminders run when inboxDone is malform
   await ui.unmount()
 })
 
-test('progress.html is still written and reminders run when reading inboxDone is denied', async ($, on) => {
+test('the live page model and reminders remain available when reading inboxDone is denied', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', last_assistant_message: 'Ship the demo build, OK?' })]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, storeReads: [], failStore: (operation, key) => operation === 'get' && key === 'inboxDone' }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   expect(page).toContain('Google 暑期實習')
   // With no readable record of processed turns, every inbox file counts as not processed yet.
   expect(inNeeds(page, 'Ship the demo build, OK?')).toBe(true)
@@ -1447,7 +1460,7 @@ test('progress.html is still written and reminders run when reading inboxDone is
   await ui.unmount()
 })
 
-test('progress.html redacts home paths and credentials before clipping pending questions', async ($, on) => {
+test('the live page model redacts home paths and credentials before clipping pending questions', async ($, on) => {
   const secret = `sk-${'a'.repeat(40)}`
   const question = `Use /home/me/private with ${secret} or wait?`
   const world: World = {
@@ -1458,7 +1471,7 @@ test('progress.html redacts home paths and credentials before clipping pending q
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   expect(page).toContain('~/private')
   expect(page).toContain('•••')
   expect(page).not.toContain('/home/me/private')
@@ -1466,7 +1479,7 @@ test('progress.html redacts home paths and credentials before clipping pending q
   expect(page).toContain('or wait?')
 })
 
-test('progress.html shows only the agent and project for a pending turn without a question', async ($, on) => {
+test('the live page model shows only the agent and project for a pending turn without a question', async ($, on) => {
   const world: World = {
     files: new Map([[FILE, ''], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', prompt: 'Private prompt contents', last_assistant_message: '' })]]),
     mtime: 1,
@@ -1475,14 +1488,16 @@ test('progress.html shows only the agent and project for a pending turn without 
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(inNeeds(page, 'api-gateway · codex')).toBe(true)
-  expect(page).toMatch(INBOX_ASK)
-  expect(page).toContain(ZH_TW.dashInboxHint)
-  expect(page).not.toContain('Private prompt contents')
+  const page = await pageModelText($, world)
+  expect(JSON.parse(page).turns.some((turn: { project: string; agent: string; isQuestion: boolean }) => turn.project === 'api-gateway' && turn.agent === 'codex' && !turn.isQuestion)).toBe(true)
+  expect(JSON.parse(page).turns).toHaveLength(1)
+  expect(JSON.parse(page).counts.waiting).toBe(0)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try { expect(await ui.find({ type: 'Text', text: /Private prompt contents/ })).toBeUndefined() }
+  finally { await ui.unmount() }
 })
 
-test('progress.html reads only the newest thirty unprocessed inbox files', async ($, on) => {
+test('the live page model reads only the newest thirty unprocessed inbox files', async ($, on) => {
   const world: World = { files: new Map([[FILE, '']]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, reads: [], mtimes: {} }
   for (let i = 0; i < 35; i++) {
     const path = `${INBOX}/codex-turn-1792152000-${i}.json`
@@ -1492,7 +1507,7 @@ test('progress.html reads only the newest thirty unprocessed inbox files', async
   world.store!.inboxDone = { 'codex-turn-1792152000-34.json': 'deadbeef:1792152000000' }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   // The count file the inbox writers keep beside the turns (dropped.log) is read as well; it is not a turn.
   const reads = world.reads!.filter(path => path.startsWith(`${INBOX}/`) && !path.endsWith('/dropped.log'))
   expect(reads).toHaveLength(30)
@@ -1502,7 +1517,7 @@ test('progress.html reads only the newest thirty unprocessed inbox files', async
   expect(page).not.toContain('Use limit 34?')
 })
 
-test('progress.html shows pending questions without reading transcripts or starting an agent', async ($, on) => {
+test('the live page model shows pending questions without reading transcripts or starting an agent', async ($, on) => {
   const transcript = '/home/me/.codex/sessions/demo.jsonl'
   const body = JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', transcript_path: transcript, last_assistant_message: 'Use 100 or 300 a minute?' })
   const world: World = {
@@ -1515,7 +1530,7 @@ test('progress.html shows pending questions without reading transcripts or start
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  expect(world.files.get('/home/me/.claude/progress.html')).toContain('Use 100 or 300 a minute?')
+  expect(await pageModelText($, world)).toContain('Use 100 or 300 a minute?')
   expect(world.reads).not.toContain(transcript)
   expect(world.ran?.length).toBe(1)
   expect(world.ran?.[0]?.slice(0, 4)).toEqual(['node', '-e', LEDGER_LINK, '--'])
@@ -1523,7 +1538,7 @@ test('progress.html shows pending questions without reading transcripts or start
   expect(world.ran?.[0]?.[5]).toBe(QUESTIONS)
 })
 
-test('progress.html starts no process for a pending turn whose transcript path is a Node option', async ($, on) => {
+test('the live page model starts no process for a pending turn whose transcript path is a Node option', async ($, on) => {
   const transcript = '--require=/home/me/x.txt'
   const world: World = {
     files: new Map([[FILE, ''], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', transcript_path: transcript, last_assistant_message: 'Private reply contents.' })]]),
@@ -1535,19 +1550,21 @@ test('progress.html starts no process for a pending turn whose transcript path i
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(inNeeds(page, 'api-gateway · codex')).toBe(true)
-  expect(page).not.toContain('Private reply contents.')
+  const page = await pageModelText($, world)
+  expect(JSON.parse(page).turns.some((turn: { project: string; agent: string; isQuestion: boolean }) => turn.project === 'api-gateway' && turn.agent === 'codex' && !turn.isQuestion)).toBe(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try { expect(await ui.find({ type: 'Text', text: /Private reply contents/ })).toBeUndefined() }
+  finally { await ui.unmount() }
   expect(page).not.toContain(transcript)
   expect(world.reads).not.toContain(transcript)
   expect(world.ran).toEqual([])
 })
 
-test('the static dashboard clips each pending question to two hundred characters', () => {
-  const page = dashboardHtml(buildView([], [], null, 0), EN, '/work/progress.md', '', [{ agent: 'codex', project: 'api-gateway', text: `${'a'.repeat(200)}private tail?`, isQuestion: true, at: 0 }])
-  expect(page).toContain('a'.repeat(199))
-  expect(page).not.toContain('a'.repeat(201))
-  expect(page).not.toContain('private tail?')
+test('the live page model preserves a full pending question as data', () => {
+  const question = `${'a'.repeat(200)}private tail?`
+  const model = serveModel(buildView([], [], null, 0), [{ agent: 'codex', project: 'api-gateway', text: question, isQuestion: true, at: 0 }], EN)
+  expect(model.turns[0]?.text).toBe(question)
+  expect(model.counts.waiting).toBe(1)
 })
 
 test('on the phone (no input box) the pane still draws, focus first, with its buttons', async ($, on) => {

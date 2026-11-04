@@ -1,6 +1,6 @@
 // The Agent Board for any terminal and any agent, without Claude Code: `node agent-board.mjs`
 // prints the board once, `--watch` keeps it on screen and, on a terminal, lets you work in it
-// the way the pane does (arrows, Enter, x, a, c, digits), and `--html` writes progress.html
+// the way the pane does (arrows, Enter, x, a, c, digits); the browser key opens the live page
 // and opens it. `--serve` prints the board and opens the board's page in the browser, where it
 // can be clicked (board-serve.ts). `--chat` prints the board as plain text short enough for a
 // chat app, with no link and no secrets, for an agent that answers there. `/progress connect` writes the bundled copy of this file
@@ -34,7 +34,6 @@ import { BOARD_JSON_SCHEMA, boardDocument } from '../hooks/board-json'
 import { RELEASED } from '../hooks/released'
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
-import { dashboardHtml } from '../hooks/dashboard'
 import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import type { PendingArchiveRecord } from '../hooks/journal'
 import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
@@ -517,7 +516,6 @@ const freshView = () => {
   return shown
 }
 
-const pad = (n: number): string => String(n).padStart(2, '0')
 
 // The questions the running page can answer into their session, as it last said (`refreshRoutes`).
 let routes: Record<string, AnswerRoute> = {}
@@ -729,23 +727,6 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
   }
 
   tryCandidate(0)
-}
-
-const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
-  // Through Date.now, so a test clock reaches progress.html's Working now as it reaches the rest.
-  const now = new Date(Date.now())
-  const stamp = s.dashStamp(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`)
-  const html = path.replace(/\.md$/i, '') + '.html'
-  const home = homeOrNone()
-  const page = dashboardHtml(view(), s, path, stamp, pending(text => redact(text, home, process.platform === 'win32')), now.getTime())
-  // Named like any other file the board cannot write, so --watch reports it and runs on.
-  try {
-    writeFileSync(html, page)
-    writes += 1
-  } catch (error) {
-    throw fileError(html, error)
-  }
-  openInBrowser(html, isOpen => done(isOpen ? s.windowOpened() : s.windowFailed(basename(html), basename(path)), isOpen))
 }
 
 const isRegularFile = (file: string): boolean => {
@@ -1631,35 +1612,22 @@ const serveBoard = async (): Promise<void> => {
   await show(server.url, server.isKept, server.idleMs)
 }
 
-const openPageSurface = async (): Promise<void> => {
+const openPage = async (): Promise<{ note: string; isOpen: boolean }> => {
   const failure: { storeCode?: string } = {}
   const server = await ensureServer(failure)
   if (server === null) {
-    process.stdout.write(`${failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted)}\n`)
     process.exitCode = 1
-    return
+    return { note: failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted), isOpen: false }
   }
-  const v = view()
-  const waiting = v.overview.waiting
-  const urgent = v.overview.due
-  const whatNeedsYou = waiting > 0 ? (urgent > 0 ? `${s.statusWaiting(waiting)} · ${s.statusDue(urgent)}` : s.statusWaiting(waiting)) : (urgent > 0 ? s.statusDue(urgent) : s.pgNothing)
-  const howManyWorking = s.groupWorking(v.overview.active)
-
   const address = server.url
-  if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)) {
-    await new Promise<void>(done => openInBrowser(address, isOpen => {
-      if (!isOpen && !process.env.SSH_CONNECTION && !process.env.SSH_TTY) {
-        process.stdout.write(`${s.serveBrowserNone(address)}\n`)
-      }
-      done()
-    }, true))
-  }
+  const isOpen = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
+    ? await new Promise<boolean>(done => openInBrowser(address, done, true))
+    : false
+  return { note: isOpen ? s.boardPageWindowOpened(address) : s.boardPageLink(address), isOpen }
+}
 
-  if (server.isNew) {
-    process.stdout.write(`${whatNeedsYou}\n${howManyWorking}\n${s.serveAt(server.url)}\n`)
-  } else {
-    process.stdout.write(`${s.serveAlreadyRunning}\n${whatNeedsYou} · ${howManyWorking}\n${s.serveAt(server.url)}\n`)
-  }
+const openPageSurface = async (): Promise<void> => {
+  process.stdout.write(`${(await openPage()).note}\n`)
 }
 
 const stopBoard = async (): Promise<void> => {
@@ -1809,8 +1777,11 @@ const runWatchTerminal = async (): Promise<void> => {
         state = pressed.state
         if (pressed.isQuit) quit()
         if (pressed.isHtml) {
-          openHtml((note, isOpen) => {
+          void openPage().then(({ note, isOpen }) => {
             state = { ...state, note, tone: isOpen ? 'done' : 'alert', result: undefined }
+            draw()
+          }).catch(error => {
+            state = { ...state, note: failureNote(error), tone: 'alert', result: undefined }
             draw()
           })
         }
@@ -1868,7 +1839,7 @@ const run = async (): Promise<void> => {
   } else if (args.includes('--serve')) {
     await serveBoard()
   } else if (args.includes('--html')) {
-    openHtml(note => process.stdout.write(`${note}\n`))
+    await openPageSurface()
   } else if (args.includes('--print')) {
     process.stdout.write(boardText(view(), pending(), s, options()))
   } else if (flag('--keys') !== undefined) {
@@ -1884,10 +1855,10 @@ const run = async (): Promise<void> => {
         await refreshRoutes()
       }
       if (pressed.isHtml) {
-        await new Promise<void>(done => {
-          try { openHtml((note, isOpen) => { state = { ...state, note, tone: isOpen ? 'done' : 'alert' }; done() }) }
-          catch (error) { state = { ...state, note: failureNote(error), tone: 'alert' }; done() }
-        })
+        try {
+          const { note, isOpen } = await openPage()
+          state = { ...state, note, tone: isOpen ? 'done' : 'alert' }
+        } catch (error) { state = { ...state, note: failureNote(error), tone: 'alert' } }
       }
     }
     process.stdout.write(screen(pin(state)))

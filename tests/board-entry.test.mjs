@@ -1,0 +1,153 @@
+import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { request } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import test from 'node:test'
+import { registerHooks } from 'node:module'
+
+registerHooks({ resolve(specifier, context, next) {
+  try { return next(specifier, context) } catch (error) {
+    if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+    return next(`${specifier}.ts`, context)
+  }
+} })
+
+import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+const { BOARD_REQUEST_HINTS, LEGACY_BOARD_PROMPTS, boardRequestWords, geminiBoardCommand, isBoardRequest, opencodeBoardCommand } = await import('../hooks/board-commands.ts')
+const { isInstallerSkill } = await import('../hooks/connect-pure.ts')
+const { STRINGS } = await import('../hooks/strings.ts')
+
+const run = (file, args, env) => new Promise((done, fail) => {
+  execFile(process.execPath, [file, ...args], { env, encoding: 'utf8', timeout: 20_000, windowsHide: true }, (error, stdout, stderr) => {
+    if (error) fail(Object.assign(error, { stdout, stderr }))
+    else done({ stdout, stderr })
+  })
+})
+
+const closePage = url => new Promise(done => {
+  const address = new URL(url)
+  const req = request({ host: '127.0.0.1', port: address.port, method: 'POST', path: '/api/close', headers: { host: address.host, 'x-board-token': address.searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+  req.on('error', done)
+  req.end('{}')
+})
+
+test('agent-board with no flag inside an agent opens the page and prints one bare URL', { timeout: 30_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'board-entry-'))
+  const runtime = join(root, 'run')
+  const progress = join(root, 'progress.md')
+  const script = join(root, 'agent-board.mjs')
+  let url = ''
+  let pid = null
+  try {
+    mkdirSync(runtime, { mode: 0o700 })
+    writeFileSync(progress, '## Synthetic\n### Plan\n- [ ] Continue\n')
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const env = {
+      ...Object.fromEntries(['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
+      CI: '',
+      AGENT_BOARD_SESSION_ID: 'synthetic-entry-session',
+      CLAUDE_PROGRESS_FILE: '',
+      HOME: root,
+      USERPROFILE: root,
+      TEMP: root,
+      TMP: root,
+      TMPDIR: root,
+      XDG_RUNTIME_DIR: runtime,
+      NO_COLOR: '1',
+    }
+    const result = await run(script, ['--no-open'], env)
+    assert.equal(result.stderr, '')
+    const lines = result.stdout.trim().split(/\r?\n/)
+    assert.equal(lines.length, 1)
+    url = lines[0]
+    assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/)
+    const alias = await run(script, ['--html', '--no-open'], env)
+    assert.equal(alias.stderr, '')
+    assert.equal(alias.stdout.trim(), url)
+    assert.equal(existsSync(join(root, 'progress.html')), false)
+    const records = readdirSync(runtime, { recursive: true }).filter(name => String(name).endsWith('.json'))
+    const record = records.map(name => join(runtime, String(name))).find(name => {
+      try { return JSON.parse(readFileSync(name, 'utf8')).url === url } catch { return false }
+    })
+    assert.ok(record, 'the live page address is recorded under the scratch runtime folder')
+    pid = JSON.parse(readFileSync(record, 'utf8')).pid
+  } finally {
+    for (const name of (existsSync(runtime) ? readdirSync(runtime, { recursive: true }) : []).filter(name => String(name).endsWith('.json'))) {
+      try {
+        const record = JSON.parse(readFileSync(join(runtime, String(name)), 'utf8'))
+        if (record.path === progress && typeof record.pid === 'number' && typeof record.url === 'string') {
+          pid = record.pid
+          url = record.url
+        }
+      } catch {}
+    }
+    if (url) await closePage(url)
+    const alive = () => { try { process.kill(pid, 0); return true } catch { return false } }
+    if (typeof pid === 'number' && pid !== process.pid) {
+      for (let tries = 0; alive() && tries < 100; tries++) await new Promise(done => setTimeout(done, 50))
+      assert.equal(alive(), false, 'the page server exits before scratch cleanup')
+    }
+    assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep))
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('every current and legacy board prompt reads JSON without pasting it, and wrappers invoke the no-flag command', () => {
+  const command = 'node "/synthetic/agent-board.mjs"'
+  const words = boardRequestWords(Object.values(STRINGS))
+  assert.ok(BOARD_REQUEST_HINTS.includes('--json'))
+  assert.equal(LEGACY_BOARD_PROMPTS.length, 3)
+  for (const legacy of LEGACY_BOARD_PROMPTS) {
+    for (const prompt of [legacy.boardCommandPrompt, legacy.boardSkillPrompt(command), legacy.boardChatSkillPrompt(command)]) {
+      assert.equal(isBoardRequest({ prompt }, words), true)
+    }
+  }
+  for (const [lang, s] of Object.entries(STRINGS)) {
+    const current = [s.boardCommandPrompt, s.boardSkillPrompt(command), s.boardChatSkillPrompt(command)]
+    for (const prompt of current) {
+      assert.ok(prompt.includes('--json'), `${s.lang}: prompt reads JSON`)
+      assert.ok(!prompt.includes('--chat') && !prompt.includes('--serve'), `${s.lang}: prompt uses the current entry points`)
+      assert.ok(!prompt.includes('exactly as it is') && !prompt.includes('照樣貼上') && !prompt.includes('原样贴上'), `${s.lang}: prompt does not ask the model to paste command output`)
+      assert.equal(isBoardRequest({ prompt }, words), true)
+    }
+    assert.ok(s.boardSkillPrompt(command).includes(`\`${command}\``), `${lang}: skill invokes the board without a surface flag`)
+    assert.ok(s.boardChatSkillPrompt(command).includes(`${command} --json`))
+    assert.ok(s.localAgentSkill(command).includes(`${command} --json`))
+    assert.ok(!s.localAgentSkill(command).includes(`${command} --chat`) && !s.localAgentSkill(command).includes(`${command} --serve`))
+    assert.ok(!s.localAgentSkill(command).includes('exactly as it is') && !s.localAgentSkill(command).includes('照樣貼上') && !s.localAgentSkill(command).includes('原样贴上'))
+    assert.equal(isBoardRequest({ prompt: s.localAgentSkill(command) }, words), true, `${lang}: installer skill is classified as a board request`)
+    const installer = `---\nname: agent-board\ndescription: ${JSON.stringify(s.localAgentSkillDescription)}\n---\n\n${s.localAgentSkill(command)}\n`
+    assert.equal(isInstallerSkill(installer), true)
+    const gemini = JSON.parse(/^prompt = (.+)$/m.exec(geminiBoardCommand(s.boardCommandDescription, s.boardCommandPrompt, command))[1])
+    const opencode = opencodeBoardCommand(s.boardCommandDescription, s.boardCommandPrompt, command)
+    assert.ok(gemini.includes(`\`${command}\``) && gemini.includes(`!{${command}}`))
+    assert.ok(opencode.includes(`\`${command}\``) && opencode.includes(`!\`${command}\``))
+    assert.ok(!gemini.includes(`${command} --serve`) && !opencode.includes(`${command} --serve`))
+  }
+  assert.deepEqual(Object.fromEntries(Object.entries(STRINGS).map(([lang, s]) => [lang, s.localAgentSkillDescription])), {
+    en: 'Open the local interactive board and track real task progress for the currently connected session.',
+    'zh-TW': '開啟本機互動看板，追蹤目前已接線 session 的實際任務進度。',
+    'zh-CN': '打开本地交互看板，跟踪当前已接线 session 的实际任务进度。',
+  })
+  assert.deepEqual(Object.fromEntries(Object.entries(STRINGS).map(([lang, s]) => [lang, s.boardCommandDescription])), {
+    en: 'Agent Board: what every agent is doing, and what waits on you',
+    'zh-TW': 'Agent Board：每個 agent 在做什麼、什麼在等你',
+    'zh-CN': 'Agent Board：每个 agent 在做什么、什么在等你',
+  })
+})
+
+test('every launcher help lists the agent JSON read and leaves out the retired surfaces', async () => {
+  const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    for (const args of [['--help'], ['--help', 'all']]) {
+      const { stdout, stderr } = await run(launcher, [...args, '--lang', lang], process.env)
+      assert.equal(stderr, '')
+      assert.ok(stdout.includes('--json'), `${lang}: ${args.join(' ')} lists the JSON read`)
+      assert.ok(!stdout.includes('--html') && !stdout.includes('--chat'))
+      assert.ok(!stdout.includes('text for agents') && !stdout.includes('agent 印純文字') && !stdout.includes('agent 印纯文本'))
+    }
+  }
+})

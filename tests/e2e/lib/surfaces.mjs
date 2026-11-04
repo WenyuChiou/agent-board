@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnIsolated } from './spawn.mjs'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
@@ -49,7 +49,7 @@ export const plain = text => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
 export const visibleHtml = source => source.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<[^>]*>/g, ' ').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim()
 
 export const terminal = {
-  screen: async (world, args = []) => successful(await run(world, args)),
+  screen: async (world, args = []) => successful(await run(world, ['--print', ...args])),
   keys: async (world, keys, args = []) => successful(await run(world, ['--keys', keys, ...args])),
   watch: world => {
     const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
@@ -110,12 +110,12 @@ export const terminal = {
   },
 }
 
-export const chat = (world, args = []) => run(world, ['--chat', ...args])
-export const html = async world => {
-  successful(await run(world, ['--html']))
-  const text = world.read('progress.html')
-  return { text, visible: visibleHtml(text) }
-}
+export const print = async (world, args = []) => successful(await run(world, ['--print', ...args]))
+export const json = async (world, args = []) => JSON.parse(successful(await run(world, ['--json', ...args])))
+
+// Keep the fault and runner fixtures' reader names while they consume explicit text.
+export const chat = (world, args = []) => run(world, ['--print', ...args])
+export const html = async (world, args = []) => ({ visible: await print(world, args) })
 
 // The small DOM is copied from tests/board.test.mjs pageDom. The actual shipped
 // page script builds every card and performs every press; tests do not emulate actions.
@@ -459,10 +459,10 @@ export const inspectSurfaces = async (world, server, { allow = [] } = {}) => {
     // Startup includes loading Node and the bundle. Event timing starts only
     // after a ready frame, in the journeys that then write or answer a task.
     const frame = await watch.next(() => true, 10000)
-    const [terminalText, pageText, htmlText, chatResult] = await Promise.all([
-      terminal.screen(world), server.page(), html(world), chat(world),
+    const [terminalText, pageText, printText] = await Promise.all([
+      terminal.screen(world), server.page(), print(world),
     ])
-    const screens = { terminal: terminalText, watch: frame.text, page: pageText, html: htmlText.visible, chat: chatResult.stdout }
+    const screens = { terminal: terminalText, watch: frame.text, page: pageText, print: printText }
     for (const text of Object.values(screens)) noMachineIds(text, world, { allow })
     return screens
   } finally {

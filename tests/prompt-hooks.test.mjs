@@ -21,7 +21,7 @@ registerHooks({ resolve(specifier, context, next) {
   }
 } })
 
-const { boardPromptHelper, boardRequestWords, BOARD_REQUEST, BOARD_REQUEST_HINTS, boardPromptText, isBoardRequest, promptReceiptScript } = await import('../hooks/board-commands.ts')
+const { boardPromptHelper, boardRequestWords, BOARD_REQUEST, BOARD_REQUEST_HINTS, LEGACY_BOARD_PROMPTS, boardPromptText, isBoardRequest, promptReceiptScript } = await import('../hooks/board-commands.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
 const { legacyOpenClawPlugin, legacyOpenCodePlugin } = await import('../hooks/legacy-hook-plugins.ts')
 const { opencodePlugin, openclawPlugin } = await import('../hooks/connect-pure.ts')
@@ -85,7 +85,6 @@ test('a board-only reply restores an existing question on every board surface an
   const { parseProgress } = await import('../hooks/parse.ts')
   const { buildView } = await import('../hooks/view.ts')
   const { boardText, chatText } = await import('../hooks/board.ts')
-  const { dashboardHtml } = await import('../hooks/dashboard.ts')
   const { serveModel } = await import('../hooks/serve.ts')
   const { emptyQuestions, observeQuestions } = await import('../hooks/questions.ts')
   const { EN } = await import('../hooks/strings-en.ts')
@@ -115,7 +114,7 @@ test('a board-only reply restores an existing question on every board surface an
   ledger = observeQuestions(ledger, projects(restored), null, [], at + 2000).ledger
   assert.equal(ledger.records.filter(one => one.isUnresolved).length, 1)
   const view = buildView(projects(restored), [], null, at + 3000, 0, {}, EN, [], {}, ledger)
-  for (const text of [boardText(view, [], EN), chatText(view, [], [], EN, '/synthetic'), dashboardHtml(view, EN, '/synthetic/progress.md', ''), JSON.stringify(serveModel(view, [], EN))]) assert.ok(text.includes('100 or 300 a minute?'), text.slice(0, 500))
+  for (const text of [boardText(view, [], EN), chatText(view, [], [], EN, '/synthetic'), JSON.stringify(serveModel(view, [], EN))]) assert.ok(text.includes('100 or 300 a minute?'), text.slice(0, 500))
 })
 
 test('the native OpenCode prompt callback flags exact board commands without retaining their text', async t => {
@@ -175,15 +174,21 @@ test('pre-safety board-request plugins upgrade by exact bytes and preserve perso
   const { agentHooks, COLLISION } = await import('../hooks/connect-pure.ts')
   const hooks = agentHooks({ ...ctx, sep: '/', isWindows: false, script: '/synthetic/progress-report.sh', codexHome: '/synthetic/.codex', grokHome: '/synthetic/.grok', hermesHome: '/synthetic/.hermes', openclawHome: '/synthetic/.openclaw' })
   // Hashes come from main f864aae's generated plugins before this safety wrapper.
+  const words = LEGACY_BOARD_PROMPTS.flatMap(s => [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''))
+  const frozenWords = /^const BOARD_WORDS = \[.*\]$/m.exec(boardPromptHelper(words))?.[0]
+  assert.ok(frozenWords)
   for (const [agent, prior, current, hash] of [
     ['opencode', legacyOpenCodePlugin, opencodePlugin, '78d56525458590086447cac30700f5102795ba2a1c88d3ba60c42e4e2f01faf2'],
     ['openclaw', legacyOpenClawPlugin, openclawPlugin, '4b3126f741792fa08b5680f0d884f83e5159d86d885115294e84df7fd95d8d1a'],
   ]) {
-    const old = prior(ctx)
+    const old = prior(ctx).replace(/^const BOARD_WORDS = \[.*\]$/m, frozenWords)
     assert.equal(createHash('sha256').update(old).digest('hex'), hash)
     const hook = hooks.find(one => one.agent === agent && one.generated)
     assert.equal(hook.edit(old, false), current(ctx))
     assert.equal(hook.edit(old + '// personal edit\n', false), COLLISION)
+    const released = current(ctx).replace(/^const BOARD_WORDS = \[.*\]$/m, () => frozenWords)
+    assert.equal(hook.edit(released, false), current(ctx))
+    assert.equal(hook.edit(released + '// personal edit\n', false), COLLISION)
   }
 })
 

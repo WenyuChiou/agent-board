@@ -76,7 +76,7 @@ describe('L3 across agents and sessions', () => {
     } finally { await world.close() }
   })
 
-  test('across agents: an Antigravity ask answered from the terminal board leaves the page and --chat', async () => {
+  test('across agents: an Antigravity ask answered from the terminal board leaves the page and --print', async () => {
     const world = makeWorld()
     let server
     try {
@@ -88,7 +88,7 @@ describe('L3 across agents and sessions', () => {
       noSilentPress({ surface: 'terminal', card: 'Publish antigravity report', button: 'h', before, after })
       await seenPageWithin(server, text => text.includes('Nothing needs you'), PAGE_MS)
       const screens = await inspectSurfaces(world, server)
-      assert.match(screens.chat, /\b0 waiting\b/)
+      assert.match(screens.print, /\b0 waiting\b/)
       assert.match(screens.terminal, /\b0 waiting\b/)
       assert.match(screens.page, /Nothing needs you/)
     } finally {

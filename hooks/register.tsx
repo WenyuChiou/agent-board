@@ -84,7 +84,7 @@ import type { ListedTask } from './mirror'
 import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
 import { othersNote } from './others'
 import type { ProgressProject } from '../types'
-import { dashboardHtml } from './dashboard'
+import { boardRun } from './board-commands'
 import { peekInbox, redact, turnsFor } from './board'
 import type { PendingTurn, TurnCache } from './board'
 import { paletteFor } from './palette'
@@ -224,7 +224,6 @@ let isCheckingPr = false
 // gh is tried until it fails to start (not installed) or says it is signed out.
 let hasGh = true
 let countedDay = ''
-let lastDashboard = ''
 // Set once the questions and due dates already on file at the start are counted as told.
 let isReminderSeeded = false
 let isReminding = false
@@ -263,7 +262,6 @@ let pendingQuestionRetry: Promise<PendingTurn[]> | null = null
 let hasRestoredInboxQuestions = false
 const journalNoticesShown = new Set<string>()
 let journalNoticeKey = ''
-let dashboardAt = 0
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
 // when moved; otherwise ~/.claude/progress.md. USERPROFILE comes before HOME because that is
@@ -401,7 +399,7 @@ const pollAnswered = async ($: EngineInterface, path: string): Promise<void> => 
   // Before progress.md is first read the snapshot is empty; that first read draws both.
   if ((await read($, snapshot)).path !== path) return
   await refreshStatus($)
-  await writeDashboard($, true)
+
 }
 
 // Marks whose question has left the file go, so the same words asked again later show. Run once
@@ -929,7 +927,7 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
   if (list === null || list.includes(item.hideKey) !== isHidden) return { isDone: false, reason }
   await update($, hiddenAsks, () => list)
   await refreshStatus($)
-  await writeDashboard($, true)
+
   return { isDone: true }
 }
 
@@ -960,7 +958,7 @@ const pollSeen = async (
     // A changed progress.md redraws both after this; otherwise only the record moved.
     if (isChanged || (await read($, snapshot)).path !== path) return
     await refreshStatus($)
-    await writeDashboard($, true)
+
   }
   let at = 0
   let record: Record<string, number> | null = null
@@ -1022,7 +1020,7 @@ const pollSeen = async (
 // in total, then gives its own pass HUNG_MS. Giving up releases the caller and the write queue,
 // while the run keeps the gate until it settles. A run held for HUNG_MS shows the question-list
 // error; its finally clears it after success. Pending inbox questions stay saved until the
-// ledger records their source and words, while the status line and progress.html still draw.
+// ledger records their source and words, while the status line and pane still draw.
 const HUNG_MS = 15 * 1000
 let pollRun = 0
 let pollStartedAt = 0
@@ -1094,7 +1092,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
           if (JSON.stringify(cutBlocks) !== JSON.stringify(previous.cutBlocks ?? []) || JSON.stringify(cutSpans) !== JSON.stringify(previous.cutSpans ?? [])) {
             await update($, snapshot, snap => ({ ...snap, cutBlocks, cutSpans }))
             await refreshStatus($)
-            await writeDashboard($)
+
           }
         }
       }
@@ -1149,7 +1147,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       await noteDone($, projects, progressTail(source) === null)
       isPrunePending = true
       await refreshStatus($)
-      await writeDashboard($)
+
       await remind($)
     } catch (error) {
       if (!isCurrent()) return
@@ -1162,9 +1160,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
   }
 }
 
-const dashboardPath = (path: string): string => `${path.replace(/\.md$/i, '')}.html`
 
-const pad2 = (n: number): string => String(n).padStart(2, '0')
 
 // Pending turns are optional: an unavailable inbox must not stop the board or its reminders.
 let pendingCache: TurnCache = null
@@ -1223,61 +1219,7 @@ const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; t
   return { ...(lines.length === 0 ? {} : { warning: lines.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
-// progress.html beside progress.md: the file's view and pending turns, at most once a minute
-// and only when it changed.
-const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path: string; problem?: string }> => {
-  const snap = await read($, snapshot)
-  const at = await $.clock.now()
-  const path = dashboardPath(snap.path || (await progressPath($)))
-  if (!force && at - dashboardAt < 60 * 1000) return { path }
-  const s = await wordsOf($)
-  const currentAt = await viewTime($)
-  const seen = await read($, firstSeen)
-  const view = {
-    ...views.view(snap.projects, [], null, currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), seen, await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), cutOffScopes(snap.projects, snap.cutSpans ?? [])),
-    ...warningOf(snap, s, seen, currentAt),
-  }
-  await breathe($)
-  const pending = await pendingTurns($)
-  const date = new Date(at)
-  const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`), pending, at)
-  if (!force && html === lastDashboard) {
-    dashboardAt = at
-    return { path }
-  }
-  try {
-    await $.fs.write(path, html)
-    dashboardAt = at
-    lastDashboard = html
-    return { path }
-  } catch (error) {
-    const failure = error as { code?: string; message?: string } | null
-    const code = failure?.code ?? /\b(EACCES|EPERM|EROFS|EBUSY|EAGAIN|ENOSPC|EISDIR|ENOENT|ENOTDIR|EIO|EFBIG|EMFILE|ENFILE|ENAMETOOLONG)\b/.exec(failure?.message ?? String(error))?.[1]
-    return { path, problem: s.boardStorageFailed(s.fileNamed(path.split(/[\\/]/).pop() ?? ''), plainReason(s, code ?? '')) }
-  }
-}
-
 let isInteractiveSession = true
-
-// Opens progress.html in the default browser: a window of its own on the desktop.
-const openDashboard = async ($: EngineInterface, isInteractive: boolean): Promise<string> => {
-  const s = await wordsOf($)
-  const { path, problem } = await writeDashboard($, true)
-  if (problem !== undefined) return problem
-  if (!isInteractive) {
-    const file = (await read($, snapshot)).path || (await progressPath($))
-    return s.windowSaved(path.split(/[\\/]/).pop(), file.split(/[\\/]/).pop())
-  }
-  const argv = (await isWindows($, path))
-    ? ['cmd', '/c', 'start', '', path]
-    : (await $.env.get('HOME'))?.startsWith('/Users/')
-      ? ['open', path]
-      : ['xdg-open', path]
-  const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
-
-  const file = (await read($, snapshot)).path || (await progressPath($))
-  return ran !== null && ran.exitCode === 0 ? s.windowOpened() : s.windowFailed(path.split(/[\\/]/).pop(), file.split(/[\\/]/).pop())
-}
 
 const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Promise<{ page: { url: string; isKept: boolean } | null; needsInstall: boolean }> => {
   // Use the connector's installed file so sessions and agents share the same script
@@ -1288,7 +1230,7 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Prom
   try {
     // Worst case: 2 s for the 0.19.0 address check + 8.5 s of checks + 10 s child
     // wait + 8.5 s of checks = 29 s, plus Node start. Going over is safe: the
-    // read-only page opens, and a late child is reused next time.
+    // command reports the failure, and a late child is reused next time.
     const ran = await $.process.run(liveBoardArgv(script, s.lang), { timeoutMs: 35000 })
     if (ran.exitCode !== 0 || ran.isStdoutTruncated) return { page: null, needsInstall: false }
     return { page: liveBoardPage(ran.stdout, s), needsInstall: false }
@@ -1297,7 +1239,7 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Prom
   }
 }
 
-const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, headline: string, isInteractive: boolean): Promise<{ text: string }> => {
+const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, headline: string): Promise<{ text: string }> => {
   // Starting the page can take half a minute; the footer says it is on its way meanwhile.
   startingPages += 1
   try {
@@ -1311,8 +1253,7 @@ const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, h
     }
     const { page, needsInstall } = live
     if (page !== null) return { text: `${headline}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
-    // openDashboard already words the result, with the file names when the browser fails.
-    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($, isInteractive)}` }
+    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : `${s.serveFailed(s.serveNotStarted)}\n`}${s.livePageCommand(boardRun(liveBoardScript(progress)))}` }
   } finally {
     startingPages -= 1
     // A footer that cannot be redrawn must not take away the link the person waited for.
@@ -3865,7 +3806,7 @@ export const register: Register = (on, options) => {
           // A new day starts the count over.
           if (localDay(at) !== countedDay) await countToday($)
           await refreshStatus($)
-          await writeDashboard($)
+
           // A date turns due at midnight with nothing in the file changing.
           await remind($)
         })
@@ -3906,7 +3847,6 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'progress' }, async ($, e) => {
-    const isInteractive = isInteractiveSession
     const arg = e.args.trim()
     const language = /^(?:lang|language|語言|语言)\s*(\S*)$/i.exec(arg)
     if (language !== null) {
@@ -3941,7 +3881,8 @@ export const register: Register = (on, options) => {
       return { text: moved === 0 ? s.tidyNothing : s.tidyMoved(moved) }
     }
     if (/^(open|window|html|視窗|窗口|網頁|网页)$/i.test(arg)) {
-      return { text: await openDashboard($, isInteractive) }
+      const { path } = await read($, snapshot)
+      return showBoardPage($, path || (await progressPath($)), s, s.boardPageOpened)
     }
     if (/^(同步|sync)$/i.test(arg)) {
       await resync($)
@@ -4006,15 +3947,14 @@ export const register: Register = (on, options) => {
     // This open's own answer decides; the footer's flag may already follow a newer roster.
     if (!hasNoPaneSurfaceIn(opened)) return { text: s.paneNotOpened(opened.reason) }
     const progress = path || (await progressPath($))
-    return showBoardPage($, progress, s, s.livePageOpened, isInteractive)
+    return showBoardPage($, progress, s, s.livePageOpened)
   })
 
   on('command.run', { command: 'agent-board' }, async $ => {
-    const isInteractive = isInteractiveSession
     const s = await wordsOf($)
     const { path } = await read($, snapshot)
     const progress = path || (await progressPath($))
-    return showBoardPage($, progress, s, s.boardPageOpened, isInteractive)
+    return showBoardPage($, progress, s, s.boardPageOpened)
   })
 
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers
@@ -4530,6 +4470,10 @@ export const register: Register = (on, options) => {
       hide: item => hide(item, true),
       unhide: item => hide(item, false),
       revise: async item => { await update($, revising, open => open === reviseKey(item) ? '' : reviseKey(item)); return s.pressDone },
+      openPage: async () => {
+        const { path } = await read($, snapshot)
+        return (await showBoardPage($, path || (await progressPath($)), s, s.boardPageOpened)).text
+      },
       toggleLegend: async () => { await update($, isLegendOpen, open => !open); return s.pressDone },
       toggleNotify: async () => { await setNotify($); return s.pressDone },
     }
