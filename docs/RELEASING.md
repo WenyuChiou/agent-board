@@ -31,6 +31,11 @@ gh release edit agent-board--vX.Y.Z --prerelease=false --latest
 npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
 ```
 
+The owner runs the npm line. The same day, a promotion also does what a stable release does at steps 8 and 10 below:
+- **The release notes.** Their first line, "Pre-release: this version did not pass the release gate (docs/RELEASING.md).", becomes "Stable since YYYY-MM-DD: this version passed the release gate on its tagged commit", followed by its parity and live-run records. Edit it with `gh release edit agent-board--vX.Y.Z --notes-file notes.md`.
+- **The README line.** A pull request changes `Latest stable version:` to X.Y.Z in all three READMEs.
+- **The milestone.** It is closed.
+
 ## Checklist
 
 1. **Version.** Put the same `X.Y.Z` in `.claude-plugin/plugin.json` and `package.json`, the three README badges and the marketplace descriptions. `node --test tests/npm-package.test.mjs` fails when `package.json` and `plugin.json` disagree.
