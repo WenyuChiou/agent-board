@@ -957,7 +957,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
     try {
-      const kept = keptQuestionCount(view(), action.ref)
+      const kept = keptQuestionCount(view(), action.ref, s)
       return done(kept > 0 ? s.archivedKeptQuestions(action.title, kept) : s.archivedOne(action.title))
     } catch {
       return done(s.archivedOne(action.title))

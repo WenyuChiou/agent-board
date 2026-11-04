@@ -414,8 +414,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const before = await terminal.keys(world, 'i down')
       const after = await terminal.keys(world, 'i down a')
       noSilentPress({ surface: 'terminal', card: 'Publish the gateway', button: 'a', before, after })
-      assert.match(after, /Older unanswered questions/)
-      assert.match(after, /Archived/)
+      assert.match(squash(after), /Archived .* Its unanswered question stays under Older unanswered questions/)
       const kept = [world.read('progress.md'), ...world.files().filter(name => /progress-(archive-.*\.md|questions.*\.json)$/.test(name)).map(name => world.read(name))].join('\n')
       assert.match(kept, /Notify the team, OK\?/)
       assert.ok(!world.read('progress.md').includes('Publish the gateway'), `The live file still holds Publish the gateway.\n${after}`)
@@ -435,6 +434,54 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       assert.doesNotMatch(hidden, /unanswered in stopped sessions/)
       const server = await serve.start(world)
       assert.doesNotMatch(await server.page(), /older question still unanswered/)
+    } finally { await world.close() }
+  })
+
+  test('a working day: archiving says the question stays for a task under no heading, and not for a task that never asked', async () => {
+    const noHeading = makeWorld()
+    try {
+      noHeading.write('progress.md', `<!-- auto session=a1000001 agent=codex state=ended updated=${new Date(noHeading.now).toISOString()} -->
+### Unfiled release
+- [?] Notify the team, OK?
+<!-- /auto session=a1000001 -->
+`)
+      const after = await terminal.keys(noHeading, 'i a')
+      assert.ok(!noHeading.read('progress.md').includes('Unfiled release'), after)
+      assert.match(squash(after), /Its unanswered question stays under Older unanswered questions/)
+    } finally { await noHeading.close() }
+    const twins = makeWorld()
+    try {
+      block(twins, { state: 'ended', title: 'Deploy', steps: ['- [?] Notify the team, OK?'] })
+      await terminal.keys(twins, 'i a')
+      twins.write('progress.md', `${twins.read('progress.md').trimEnd()}
+
+## api-gateway
+
+### Deploy
+- [x] Build
+- [ ] Ship
+`)
+      const after = await terminal.keys(twins, 'i a')
+      assert.match(squash(after), /Archived .Deploy.\./)
+      assert.doesNotMatch(squash(after), /Its unanswered question stays/)
+    } finally { await twins.close() }
+  })
+
+  test('a working day: a done task that still asks stays selectable under Done recently, tells its results there and offers no Confirm done', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'done', title: 'Publish the gateway', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?', '- [?] Tag the release, OK?'] })
+      const selected = await terminal.keys(world, 'i down')
+      assert.match(selected, /› ✓ api-gateway › Publish the gateway/)
+      assert.match(selected, /a archive/)
+      assert.doesNotMatch(selected, /d confirm done/)
+      const opened = await terminal.keys(world, 'i down enter')
+      assert.equal(opened.split('Notify the team, OK?').length, 2, opened)
+      const hidOne = await terminal.keys(world, 'l h')
+      assert.match(squash(hidOne), /Hidden: /)
+      await terminal.keys(world, 'l h')
+      const archived = await terminal.keys(world, 'a')
+      assert.ok(!world.read('progress.md').includes('Publish the gateway'), archived)
     } finally { await world.close() }
   })
 

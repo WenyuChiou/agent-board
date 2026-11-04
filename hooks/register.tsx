@@ -4433,7 +4433,7 @@ export const register: Register = (on, options) => {
         const isTaken = await enqueue(() => archiveOne($, row.archive!))
         if (!isTaken) return failure(s.archiveGone)
         try {
-          const count = keptQuestionCount(await paneView(), row.archive)
+          const count = keptQuestionCount(await paneView(), row.archive, s)
           return count > 0 ? s.archivedKeptQuestions(row.title, count) : s.archivedOne(row.title)
         } catch {
           return s.archivedOne(row.title)

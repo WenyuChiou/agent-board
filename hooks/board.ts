@@ -994,9 +994,10 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const isHere = index >= 0 && index === at
       const from = lines.length
       lines.push(`${isHere ? c('accent', '›', true) : ' '} ${c('done', '✓')} ${titled(4, `${item.project} › ${item.title}`, item.when, isHere, 'quiet')}`)
-      if (selectable !== undefined && result?.key === selectable.key) resultLines('    ')
-      for (const question of item.questions ?? []) lines.push(`    ${cut(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
-      if (selectable?.type === 'row' && state.open === selectable.key) rowDetails(selectable.row)
+      if (selectable !== undefined && (result?.key === selectable.key || host === selectable.key)) resultLines('    ')
+      // Open, its steps say the question themselves.
+      if (selectable?.type === 'row' && state.open === selectable.key) rowDetails({ ...selectable.row, question: null })
+      else for (const question of item.questions ?? []) lines.push(`    ${cut(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
       if (isHere) focus = [from, lines.length - 1]
     }
   }
