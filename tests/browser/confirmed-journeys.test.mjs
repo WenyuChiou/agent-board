@@ -31,6 +31,31 @@ const assertNoIdentifiers = async (page, root, sessions) => {
 }
 
 describe('confirmed browser journeys', { concurrency: 1 }, () => {
+  test("a web chat's block pressed in with Ctrl+V shows as its own card", { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('web-chat-clipboard', async ({ page, startServer }) => {
+      const context = page.context()
+      await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      const requests = []
+      // Chromium on Windows hands the clipboard back with CRLF, which the merge accepts.
+      page.on('request', request => { if (new URL(request.url()).pathname === '/api/paste') requests.push(request.postDataJSON().text.replaceAll('\r\n', '\n')) })
+      const title = 'Synthetic Muse clipboard report'
+      const report = block('a561cafe', 'muse', 'working', 'Synthetic clipboard', title, ['- [~] Check synthetic relay'])
+      await page.evaluate(text => navigator.clipboard.writeText(text), report)
+      await page.locator('body').click({ position: { x: 2, y: 2 } })
+      await page.keyboard.press('ControlOrMeta+V')
+      await board.task(title).waitFor()
+      assert.deepEqual(requests, [report])
+      await page.evaluate(text => navigator.clipboard.writeText(text), 'not a block')
+      // Wait for the browser paste event itself, so the assertion does not race its delivery.
+      await page.evaluate(() => { window.syntheticPasteSeen = false; document.addEventListener('paste', () => { window.syntheticPasteSeen = true }, { once: true }) })
+      await page.keyboard.press('ControlOrMeta+V')
+      await page.waitForFunction(() => window.syntheticPasteSeen)
+      assert.deepEqual(requests, [report])
+    })
+  })
+
   test('on a 375 px phone every step and note is one line and opens to the whole text', { concurrency: false, timeout: 120_000 }, async () => {
     await browserFixture('phone-one-line', async ({ page, progress, startServer }) => {
       await page.setViewportSize({ width: 375, height: 812 })

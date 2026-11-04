@@ -23,7 +23,7 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
+import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
@@ -1360,17 +1360,6 @@ const paste = (text: string, reviewToken = '') => {
   }
   if (wrote === null || found === null) return { isAdded: false, note: s.boardWriteFailed }
   return { isAdded: true, note: found.isUnchanged ? s.pasteUnchanged : s.servePasted(found.title) }
-}
-
-// A folder only this account can use: on a shared one, another account could take the file's
-// name first and keep every page from starting.
-const isOwnFolder = (dir: string): boolean => {
-  try {
-    const found = lstatSync(dir)
-    return found.isDirectory() && (process.getuid === undefined || (found.uid === process.getuid() && (found.mode & 0o077) === 0))
-  } catch {
-    return false
-  }
 }
 
 // Windows temp folders can grant sandbox accounts access. Protect only our dedicated child,

@@ -28,6 +28,10 @@ import { windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
+import { deliveryText } from '../hooks/messaging'
+import { isSessionEnd, isTurnStart, turnStartEnvelope } from '../hooks/hook-messages'
+import { hookMailbox } from './board-messaging'
+import { defaultMessagesDirectory } from './runtime-folder'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -782,22 +786,45 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     const { session } = current
     if (mode !== '--codex-report' && args.includes('--hook-recovery-parent') && queuedFile !== undefined && existsSync(queuedFile)) process.stderr.write('AGENT_BOARD_HOOK_PENDING\n')
+    const event = String(agent === 'antigravity' ? current.event ?? '' : raw.hook_event_name ?? raw.hookEventName ?? '')
+    const isStart = current.event === 'SessionStart'
+    const isFirst = current.event === 'PreInvocation' && (raw.invocationNum === 0 || isFirstSessionEvent)
+    const base = agent === 'codex' ? codexStartNote(raw, current.run, session, progress, s) : agent === 'antigravity' && (isStart || isFirst) ? s.localAgentAntigravityContext(boardRun(process.argv[1] ?? script, [
+      '--codex-report', '--agent', 'antigravity', '--session', session,
+      '--progress-file', progress, '--home', home, '--data-dir', root,
+    ])) : null
+    // Only the live event has a host reading stdout. A queued event and recovery never claim.
+    if (mode !== '--codex-report' && report !== undefined && hookDeadline - Date.now() >= 300) {
+      let mailbox: ReturnType<typeof hookMailbox> | undefined
+      try { mailbox = hookMailbox(defaultMessagesDirectory(progress, home, process.env, process.platform), hookDeadline - Date.now()) } catch {}
+      if (isSessionEnd(agent, event)) {
+        try { await mailbox?.end(agent, session, Date.now()) } catch {}
+      } else if (isTurnStart(agent, event)) {
+        let message = null
+        try { message = await mailbox?.turn(agent, session, agent === 'cursor' ? 'IDE (Composer)' : agent === 'antigravity' ? 'IDE' : 'CLI', Date.now()) ?? null } catch {}
+        if (message !== null) {
+          let hasWritten = false
+          try {
+            const envelope = turnStartEnvelope(agent, event, deliveryText(message, s), base, session)
+            await new Promise<void>((done, fail) => process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`, error => error ? fail(error) : done()))
+            hasWritten = true
+          } catch {}
+          if (hasWritten) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
+          return true
+        }
+      }
+    }
     if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
     else if (agent === 'antigravity') {
       // The host supplies the binding; the agent supplies semantic summaries. A first
       // invocation also covers resumed conversations that have no SessionStart event.
-      const isStart = current.event === 'SessionStart'
-      const isFirst = current.event === 'PreInvocation' && (raw.invocationNum === 0 || isFirstSessionEvent)
       // Legacy connect runs a bundle beside its chosen progress file, outside root.
-      const context = isStart || isFirst ? s.localAgentAntigravityContext(boardRun(process.argv[1] ?? script, [
-        '--codex-report', '--agent', 'antigravity', '--session', session,
-        '--progress-file', progress, '--home', home, '--data-dir', root,
-      ])) : ''
+      const context = base ?? ''
       output(isStart ? { injectSteps: [{ systemMessage: { systemMessage: context } }] } : isFirst ? { injectSteps: [{ ephemeralMessage: context }] } : {})
     } else if (agent === 'gemini') output({})
     else if (agent === 'codex' && mode === '--codex-event') {
-      const note = codexStartNote(raw, current.run, session, progress, s)
+      const note = base
       // Codex adds `additionalContext` to the conversation as developer context.
       if (note !== null) output({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: note } })
     }

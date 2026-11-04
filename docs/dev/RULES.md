@@ -64,7 +64,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 Nobody gives a go-ahead for a release ([RELEASING.md](../RELEASING.md)). Every release, pre-releases included, needs:
 
 - the release pull request merged as R3 says, with the version agreed in `plugin.json`, `package.json`, the README badges and the marketplace text, the CHANGELOG folded and the generated files rebuilt;
-- **a simulated user.** An AI acting as a new user installs the release's package, sets up, opens the board and walks every journey, on Windows and on macOS or Linux, as [USER-SIM.md](../validation/USER-SIM.md) says. Its record is `docs/validation/<date>-usersim-<version>.md`. Any agent or person may run it. A FAIL, or a FRICTION step with no issue, stops the release.
+- **a simulated user.** An AI acting as a new user installs the release's package, sets up, opens the board and walks every journey, on Windows and on macOS or Linux, as [USER-SIM.md](../validation/USER-SIM.md) says. Its record is `docs/validation/<date>-usersim-<version>.md`. Any agent or person may run it. A FAIL, or a FRICTION step with no issue, stops the release. After a change to the release pull request's head, a run may cover only the journeys the change reaches; after two such runs in a row the next is full, and so is the run before a stable release. Once the run meant to be the last starts, nothing but the release pull request merges into `main` until the tag.
 
 It goes out as **stable** when the release gate also passes on the tagged commit, and as a **pre-release** otherwise:
 

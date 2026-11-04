@@ -3563,7 +3563,7 @@ test("the page runs only its own script, and the chat prompt in it cannot close 
   // Words from the file are set as text by the page's script, never as HTML.
   expect(page).not.toContain('innerHTML')
   expect(page).not.toContain('insertAdjacentHTML')
-  // No comment marker reaches the page. The paste box and its chat prompt (which had one) are gone from it, and the words sit in a JSON block with no raw '<' to close the script with.
+  // No raw comment marker reaches the page: words and the separate chat prompt sit in JSON blocks with '<' escaped.
   expect(page).not.toContain('<!-- auto')
   expect(Object.hasOwn(pageWords(STRINGS.en), 'relayPrompt')).toBe(false)
   const block = page.split('<script type="application/json" id="words">')[1]!.split('</script>')[0]!
