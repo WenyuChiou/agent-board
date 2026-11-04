@@ -1051,13 +1051,13 @@ export const buildView = (
         handoff: handoffOf(task),
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142).
-        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || auto === 'ended')
+        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || (auto === 'ended' && !isSilence))
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
-            : auto === 'ended' && task.auto !== null
+            : auto === 'ended' && !isSilence && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               : null,
         target: targetOf(task.auto),
