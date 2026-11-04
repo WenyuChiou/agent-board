@@ -431,23 +431,25 @@ test('selected test execution refuses an empty or invalid file list', async () =
   assert.throws(() => runTestFiles(['tests/missing.test.mjs']))
 })
 
-test('a test part runs its share of the files through Node, and a bad part is refused before any test runs', async () => {
-  const { testArgs, runTestFiles } = await import('../scripts/ci-impact.mjs')
-  const files = ['tests/a.test.mjs', 'tests/b.test.mjs']
+test('a test part runs its share of the files in one Node run, and a bad part is refused before any test runs', async () => {
+  const { testArgs, testRuns, runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const files = ['tests/a.test.mjs', 'tests/b.test.mjs', 'tests/c.test.mjs']
   assert.deepEqual(testArgs(files), ['--test', ...files])
-  assert.deepEqual(testArgs(files, { part: '1/1' }), ['--test', ...files])
-  assert.deepEqual(testArgs(files, { part: '2/2' }), ['--test', '--test-shard=2/2', ...files])
-  assert.deepEqual(testArgs(files, { isSerial: true, part: '1/2' }), ['--test', '--test-concurrency=1', '--test-shard=1/2', ...files])
-  for (const part of ['0/2', '3/2', '1/0', 'x', '1/2 --inspect']) assert.throws(() => testArgs(files, { part }), /test part/, part)
+  assert.deepEqual(testArgs(files, { isSerial: true }), ['--test', '--test-concurrency=1', ...files])
+  assert.deepEqual(testRuns(files, { part: '1/2' }), [['--test', 'tests/a.test.mjs', 'tests/c.test.mjs']])
+  assert.deepEqual(testRuns(files, { part: '2/2' }), [['--test', 'tests/b.test.mjs']])
+  assert.deepEqual(testRuns(['tests/a.test.mjs'], { part: '2/2' }), [])
+  for (const part of ['0/2', '3/2', '1/0', 'x', '1/2 --inspect']) assert.throws(() => testRuns(files, { part }), /test part/, part)
   assert.throws(() => runTestFiles(['tests/ci-impact.test.mjs'], '3/2'), /test part/)
 })
 
 test('a self-parted test file runs whole in every part and keeps its share, so the parts together run each of its tests once', async () => {
   const { testRuns, partTest, selfPartedTests } = await import('../scripts/ci-impact.mjs')
-  const files = ['tests/a.test.mjs', 'tests/board.test.mjs', 'tests/b.test.mjs']
+  const files = ['tests/a.test.mjs', 'tests/board.test.mjs', 'tests/b.test.mjs', 'tests/codex-local.test.mjs']
   assert.deepEqual(testRuns(files), [['--test', ...files]])
   assert.deepEqual(testRuns(files, { part: '1/1' }), [['--test', ...files]])
-  assert.deepEqual(testRuns(files, { part: '2/2' }), [['--test', '--test-shard=2/2', 'tests/a.test.mjs', 'tests/b.test.mjs'], ['--test', 'tests/board.test.mjs']])
+  assert.deepEqual(testRuns(files, { part: '1/2' }), [['--test', 'tests/a.test.mjs', 'tests/board.test.mjs', 'tests/codex-local.test.mjs']])
+  assert.deepEqual(testRuns(files, { part: '2/2' }), [['--test', 'tests/b.test.mjs', 'tests/board.test.mjs', 'tests/codex-local.test.mjs']])
   assert.deepEqual(testRuns(['tests/board.test.mjs'], { isSerial: true, part: '1/2' }), [['--test', '--test-concurrency=1', 'tests/board.test.mjs']])
   const ran = part => {
     const names = []

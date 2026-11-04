@@ -295,17 +295,18 @@ const emitPlan = plan => {
     '\n\nFull plan: ' + plan.full + '\n\nSoak recommended: ' + plan.soakRecommended + '\n\nChanged paths:\n' + plan.files.map(path => '- ' + path).join('\n') + '\n')
 }
 
-// A part such as 2/2 lets a long set fit two jobs (#899). Node's --test-shard runs every second file but
-// keeps each file whole, so a file far longer than the rest splits its own tests instead: part i of n
-// keeps every nth test, and the parts together run each test once.
+// A part such as 2/2 lets a long set fit two jobs (#899). A part takes every second file, but a file is
+// never split, so a file far longer than the rest splits its own tests instead: part i of n keeps every
+// nth test, and the parts together run each test once.
 const parsePart = part => {
   const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(part)
   if (part !== '' && (!match || Number(match[1]) > Number(match[2]))) throw new Error('test part must be <index>/<total>, such as 1/2')
   return match ? { index: Number(match[1]), total: Number(match[2]) } : { index: 1, total: 1 }
 }
 
-// The files that split their own tests with partTest.
-export const selfPartedTests = ['tests/board.test.mjs']
+// The files that split their own tests with partTest: on Windows codex-local took about 8 minutes and
+// board about 5, each far longer than any other file (#899).
+export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs']
 
 export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
   const { index, total } = parsePart(part)
@@ -313,17 +314,16 @@ export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
   return Object.assign((...args) => (ordinal++ % total === index - 1 ? test(...args) : undefined), { skip: test.skip, only: test.only, todo: test.todo })
 }
 
-export const testArgs = (files, { isSerial = false, part = '' } = {}) => {
-  const shard = parsePart(part).total > 1 ? ['--test-shard=' + part] : []
-  return ['--test', ...(isSerial ? ['--test-concurrency=1'] : []), ...shard, ...files]
-}
+export const testArgs = (files, { isSerial = false } = {}) => ['--test', ...(isSerial ? ['--test-concurrency=1'] : []), ...files]
 
-// The Node runs of one part: the other files are sharded, and a self-parted file runs in every part.
+// The Node run of one part: every nth of the other files, and every self-parted file, which keeps its own
+// share of tests. One run, so the files still run side by side as they do without parts.
 export const testRuns = (files, { isSerial = false, part = '' } = {}) => {
-  if (parsePart(part).total === 1) return [testArgs(files, { isSerial })]
-  const whole = files.filter(path => selfPartedTests.includes(path))
-  const rest = files.filter(path => !selfPartedTests.includes(path))
-  return [...(rest.length ? [testArgs(rest, { isSerial, part })] : []), ...(whole.length ? [testArgs(whole, { isSerial })] : [])]
+  const { index, total } = parsePart(part)
+  if (total === 1) return [testArgs(files, { isSerial })]
+  const rest = files.filter(path => !selfPartedTests.includes(path)).filter((path, ordinal) => ordinal % total === index - 1)
+  const share = [...rest, ...files.filter(path => selfPartedTests.includes(path))]
+  return share.length ? [testArgs(share, { isSerial })] : []
 }
 
 export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync) => {

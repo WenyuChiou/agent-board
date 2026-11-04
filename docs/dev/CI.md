@@ -49,9 +49,9 @@ run Node 22 and 24 on both systems and plugin on both. Browser checks use
 Node 24/Chromium on both systems. Plugin checks keep the pinned offline Claude
 runner. Legacy installers and the Python reporter run without installing Claude.
 Board and messaging have separate ten-minute jobs, and Windows runs the board set in
-two parts, since the whole set took 8 to 10 minutes there (#899). Each part runs every second file
-(`--test-shard`), and `tests/board.test.mjs`, which alone took most of that time, runs in both parts
-with each running every second test of it. No product dependency is
+two parts, since the whole set took 8 to 10 minutes there (#899). Each part runs every second file in
+one Node run, and `tests/codex-local.test.mjs` and `tests/board.test.mjs`, far longer than the rest
+(about 8 and 5 minutes there), run in both parts with each running every second test of them. No product dependency is
 added to the npm package.
 
 The always-run affected checks and CI validation jobs record the plan and require

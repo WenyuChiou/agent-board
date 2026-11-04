@@ -35,7 +35,7 @@ import { bigBoard, bigBoardNow } from './fixtures/big-board.mjs'
 import { neverShown } from './fixtures/never-shown.mjs'
 
 // The Windows board job runs this file in two parts, and each part runs its share of the tests: the
-// file alone took 8 to 9 minutes there against a ten-minute limit (#899).
+// file alone took about 5 minutes there, with a ten-minute limit for the whole set (#899).
 const test = partTest(nodeTest)
 
 const SWEEP_ARMED_KEY = createHash('sha256').update('hand-kept-sweep-armed').digest('hex')
