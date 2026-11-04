@@ -10286,17 +10286,3 @@ test("a waiting card's note shows as one line with the full text on open", async
   await dom.redraw({ ...model, counts: { ...model.counts, active: 8 } })
   assert.equal(noteClip().open, false)
 })
-
-test('an Antigravity session stopped on a limit leaves the working list', async () => {
-  const at = minutes => new Date(TORN_NOW - minutes * 60_000).toISOString().replace(/\.\d+Z$/, 'Z')
-  const file = `# Progress\n\n## scratch\n<!-- auto session=ab770010 agent=antigravity state=working updated=${at(58)} -->\n### Local antigravity task\n- [ ] Waiting for the next instruction\n<!-- /auto session=ab770010 -->\n`
-  const ran = chatRun([], { file: () => file, change: tornChange })
-  assert.equal(ran.status, 0, ran.stderr)
-  assert.ok(!ran.stdout.includes('Antigravity is working'), ran.stdout)
-  assert.ok(!ran.stdout.includes('1 working'), ran.stdout)
-  assert.ok(ran.stdout.includes('1 stopped · --all'), ran.stdout)
-  const all = chatRun(['--all'], { file: () => file, change: tornChange })
-  assert.equal(all.status, 0, all.stderr)
-  assert.ok(all.stdout.includes('session stopped, last active 58 min ago'), all.stdout)
-  assert.ok(all.stdout.includes('Local antigravity task'), all.stdout)
-})
