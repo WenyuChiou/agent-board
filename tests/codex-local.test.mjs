@@ -692,6 +692,49 @@ test('setup preserves malformed BOM-prefixed Codex hooks when it refuses install
 
 const setupAgent = (f, ...args) => observeSetupResult(() => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 }))
 
+const systemLanguageEnv = () => ({ LANG: '', NODE_OPTIONS: `--require ${JSON.stringify(resolve('tests/fixtures/system-lang-zh-tw.cjs'))}` })
+
+test('setup on a zh-TW system with no LANG previews in zh-TW and bakes zh-TW', () => fixture(f => {
+  const system = { ...f, env: { ...f.env, ...systemLanguageEnv() } }
+  const preview = setupAgent(system, '--agent', 'codex')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.match(preview.stdout, /將更新/)
+  assert.ok(!preview.stdout.includes('would update'))
+  const applied = setupAgent(system, '--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.match(readFileSync(f.script, 'utf8').split('\n')[0], /"lang":"zh-TW"/)
+  assert.match(readFileSync(f.skill, 'utf8'), /實際任務進度/)
+}))
+
+test('after setup on a zh-TW system a plain run and stop speak zh-TW with no flag', () => fixture(f => {
+  const applied = setupAgent({ ...f, env: { ...f.env, ...systemLanguageEnv() } }, '--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  for (const [args, expected] of [[[], /進度/], [['--stop'], /這個檔案沒有正在執行的看板網頁/]]) {
+    const result = spawnSync(process.execPath, [f.script, ...args], { cwd: f.home, env: { ...f.env, LANG: '', NODE_OPTIONS: '', XDG_RUNTIME_DIR: join(f.home, 'runtime') }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    assert.equal(result.status, 0, `${JSON.stringify(args)}\n${result.stderr}\n${result.stdout}`)
+    assert.match(result.stdout, expected)
+    assert.doesNotMatch(result.stdout, /Progress|Stopped the board page|No board page is running/)
+  }
+}))
+
+test('a hook on a zh-TW install writes its step in zh-TW', () => fixture(f => {
+  const applied = setupAgent({ ...f, env: { ...f.env, ...systemLanguageEnv() } }, '--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  const result = f.event('SessionStart', 'language-turn', {}, { LANG: '', NODE_OPTIONS: '' })
+  assert.equal(result.status, 0, result.stderr)
+  const progress = readFileSync(f.progress, 'utf8')
+  assert.match(progress, /等待下一個工作指令/)
+  assert.ok(!progress.includes('Waiting for the next instruction'))
+}))
+
+test('--lang and LANG still win over a zh-TW system', () => fixture(f => {
+  for (const [args, LANG, expected] of [[['--lang', 'en'], '', /would update/], [[], 'en_US.UTF-8', /would update/], [['--lang', 'zh-CN'], '', /将更新/]]) {
+    const result = setupAgent({ ...f, env: { ...f.env, ...systemLanguageEnv(), LANG } }, '--agent', 'codex', ...args)
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, expected, JSON.stringify({ args, LANG }))
+  }
+}))
+
 const homeSnapshot = home => Object.fromEntries(readdirSync(home, { recursive: true, withFileTypes: true }).map(entry => {
   const path = join(entry.parentPath, entry.name)
   return [path.slice(home.length), entry.isDirectory() ? 'directory' : { bytes: readFileSync(path).toString('base64'), mtimeMs: statSync(path).mtimeMs }]
@@ -928,7 +971,7 @@ test('a second setup says everything is already set up and writes nothing', () =
 
 test('setup on a computer with only Claude Code prints guidance and exits 0 without a stack trace', () => fixture(f => {
   mkdirSync(join(f.home, '.claude'))
-  const english = { ...f, env: { ...f.env, LANG: '' } }
+  const english = { ...f, env: { ...f.env, LANG: 'en' } }
   const guidance = setupAgent(english)
   assert.equal(guidance.status, 0, guidance.stderr)
   assert.equal(guidance.stderr, '')

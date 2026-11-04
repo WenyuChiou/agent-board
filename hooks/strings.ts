@@ -28,9 +28,16 @@ export const langOf = (value: unknown): Lang | null => {
   if (exact !== undefined) return exact
   if (/(zh[-_]?(tw|hk|mo|hant))|繁|traditional|taiwan|台灣|臺灣|香港/.test(text)) return 'zh-TW'
   if (/(zh[-_]?(cn|sg|hans))|简|simplified|chinese|中文|^zh\b/.test(text)) return 'zh-CN'
-  if (/^en\b|english|英文|英語|英语/.test(text)) return 'en'
+  if (/^en(?:\b|_)|english|英文|英語|英语/.test(text)) return 'en'
 
   return null
+}
+
+// Windows usually has no LANG, so independent commands also check the system locale.
+export const systemLang = (env: unknown): Lang | null => {
+  const language = langOf(env)
+  if (language !== null) return language
+  try { return langOf(Intl.DateTimeFormat().resolvedOptions().locale) } catch { return null }
 }
 
 // The language the person picked: the plugin's own setting (/config), else what

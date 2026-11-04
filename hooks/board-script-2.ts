@@ -6969,7 +6969,7 @@ export const LINES = [
 "  return localProgressPath(flag(\"--progress-file\"), BAKED.path || join16(config || join16(homedir4(), \".claude\"), \"progress.md\"));",
 "};",
 "var path = progressFile();",
-"var s = STRINGS[langOf(flag(\"--lang\")) ?? langOf(BAKED.lang) ?? langOf(process.env.LANG) ?? \"en\"];",
+"var s = STRINGS[langOf(flag(\"--lang\")) ?? langOf(BAKED.lang) ?? systemLang(process.env.LANG) ?? \"en\"];",
 "var writes = 0;",
 "",
 "class BoardFileError extends Error {",
