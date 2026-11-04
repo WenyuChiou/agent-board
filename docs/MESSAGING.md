@@ -278,7 +278,53 @@ restored on restart. They never send, retry, approve or create a progress block.
 
 ## Agent and surface support
 
-The progress support described in the README is separate from connected-session messaging:
+<!-- messaging-matrix:start -->
+
+Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.
+
+| Host | Surface | Tier | Primitive | Status | Live run | Receiver |
+| --- | --- | --- | --- | --- | --- | --- |
+| Antigravity | 2.0 Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) |
+| Antigravity | IDE | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) |
+| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) |
+| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Implemented | Not tested | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |
+| Cursor | cursor-agent CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Cursor | IDE (Composer) | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini CLI | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Muse Code | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+
+<!-- messaging-matrix:end -->
+
+### What earlier runs saw
+
+This table is written by hand and covers progress reporting too. Its runs have no `<date>-<host>-live.md` record, so none of them makes a surface Verified above; the notes for the Codex and Antigravity runs are in [2026-10-19-native-hooks.md](validation/2026-10-19-native-hooks.md).
 
 | Agent / surface | Progress integration in this repository | Connected-session messaging evidence |
 | --- | --- | --- |
@@ -291,6 +337,25 @@ The progress support described in the README is separate from connected-session 
 | Grok Build | Existing reporter hooks; optional legacy resume requires `--allow-resume` | No live receiving adapter acceptance |
 | DeepSeek Harness | Independent Cordis lifecycle plugin and native skill | Generic client contract checked; no DeepSeek-native receiver or model ACK acceptance |
 | dot / other UIs | Explicit progress relay where documented | No native receiving connector or real ACK established |
+
+To add a receiver, export `messagingReceiver` from its own import-safe `.mjs` or `.ts`
+module under `scripts/` or `hooks/`; no central receiver list or other receiver changes
+are needed. The `MessagingReceiverRecord` type is in `scripts/message-client.mjs`.
+Each surface names its own `docs/validation/<date>-<host>-live.md` file, or `null`; the host's
+name in lower case, with spaces and slashes as hyphens, starts the `<host>` part (`deepseek-harness`,
+`dot-web-chats`), and a surface may follow it. Importing a record module must start nothing;
+a test watches the scan for this. A dated note on a run
+that doesn't count goes in the optional `earlier`. A Copy-only tier 4 surface can be Verified
+with `isImplemented: false`, since it needs no receiver.
+Set `isImplemented` only for a merged receiver covered by synthetic tests; a proposed
+receiver stays `false`, even if a spike record exists. Tier and primitive follow the
+[roadmap](dev/universal-messaging-roadmap.md#4-five-delivery-primitives--four-honest-ui-tiers).
+An owned app-server or CLI stream is a separate surface from a CLI TTY, desktop app or
+IDE. Earlier transport spikes and progress-hook runs do not verify those surfaces.
+
+Run `node scripts/messaging-matrix.mjs --write` after changing a record or its evidence.
+`node scripts/messaging-matrix.mjs --check` checks all four copies without writing and
+exits non-zero when any is stale or has missing markers.
 
 One machine's installation does not automatically attach every already-running agent.
 Each host needs its own authorized session binding and supported transport. A native
@@ -339,6 +404,55 @@ before `begin()` reports `rejected`; a failure after it reports `uncertain` with
 Calling `accepted()` also marks delivery as begun. Safe uppercase error codes are retained;
 other exception text is not stored. Adapters with fewer than three declared parameters
 keep the older behavior: entering `deliver` already counts as beginning delivery.
+
+## Claude Code session receiver
+
+A Claude Code session started in a terminal receives board messages by itself (#316); there is
+nothing to set up. `hooks/receiver.ts` holds the logic and `hooks/register.tsx` connects it.
+
+- **Finding the board.** Every 2 s the session looks for the address file the running page left
+  for its `progress.md`, in the folder `--serve` uses. It reads the file only when it can show the
+  file is this account's: on POSIX through a check of the owner and mode; on Windows it uses only
+  the folder under the home directory, and a set `XDG_RUNTIME_DIR` means no connection. The address
+  must name this board and `127.0.0.1`. Anything else leaves the card on Copy.
+- **Binding.** It registers as `agent: claude` with the session's full id, `scope: session`,
+  `turn: session`. That id is the `resume=` in its progress block, which is how the card finds it. A
+  reload presents the old connection, so it does not contest itself. A `-p` run and the SDK, which
+  includes the Desktop app today, do not register, and their cards stay on Copy.
+- **Taking a message.** It polls with `receive: true` only while no turn is running, it holds no
+  message and it has not been stopped. It sends the `accepted` receipt before the prompt reaches the
+  engine. A refused receipt, such as a message taken back, means it never does; one that gets no
+  answer is asked again, as nothing has reached Claude yet.
+- **Delivery.** `$.prompt.submit({ text })` with the hub's framed text, never `asUser`, so Claude
+  reads it as a plugin's message.
+- **Outcome.**
+
+| What happened | Receipt | Error | Card |
+| --- | --- | --- | --- |
+| A step of the delivery turn starts with its ACK | `acknowledged` | | Claude replied: ... (what follows the ACK), or Claude got this. |
+| The turn ended with no step starting with its ACK | `uncertain` | `ACK_MISSING` | Sent, but Claude hasn't confirmed. |
+| The person stopped the delivery turn | `uncertain` | `TURN_ABORTED` | Sent, but Claude hasn't confirmed. |
+| The engine dropped the prompt, as the person pressed Esc | `rejected` | `STOPPED` | Stopped in Claude. Not delivered. |
+| The submit failed, or no turn came of it within 30 s of idle time | `uncertain` | `DELIVERY_UNCERTAIN` | Sent, but Claude hasn't confirmed. |
+
+After a drop it takes nothing more until the person starts a turn. Nothing is ever submitted twice.
+
+**What stays out of the board.** A delivery turn's words and answer do not reach `progress.md`,
+the journal, the question list or the step summary. Only the ACK line goes back, and only what
+follows the ACK is shown; the rest of the reply stays in Claude's window.
+
+**Take back and Dismiss** both call `/api/messages/dismiss`, which also frees the session for the
+next message. Take back is offered while a message waits, and keeps it from Claude. Once it is
+delivered the card offers Dismiss, which only clears the card: it stops no turn and recalls no
+prompt the engine already holds.
+
+**Contested.** Polling keeps a connection's lease, so a receiver contested by a lost self would stay
+so. The poll answer says `contested`; the receiver then registers again with its own credentials,
+at most every 16 s. A lost self's lease has run out by then. Another live window keeps it contested,
+and the card stays on Copy.
+
+After a `/clear` or a resume the same process goes on under another id, with no `session.start`:
+the receiver ends the old connection and registers the new id.
 
 ## Codex existing-owner adapter
 

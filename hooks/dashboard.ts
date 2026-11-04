@@ -199,7 +199,7 @@ export const dashboardHtml = (view: View, s: Strings, path: string, stamp: strin
   const names = Object.fromEntries(chips.map(chip => [chip.id, chip.name]))
   const inbox = pending.length === 0 ? '' : `<p class="quiet">${esc(s.dashInboxHint)}</p>` + pending.map(turn =>
     `<div class="ask" data-agent="${esc(idOf(turn.agent, false))}"><div class="where">${agentMark(turn.agent)}${esc([turn.project, turn.agent].filter(part => part !== '').join(' · '))}</div>` +
-    `<div><span style="color:var(--${turn.isQuestion ? 'waiting-text' : 'accent'})">${turn.isQuestion ? '●' : '◐'}</span> ${turn.isQuestion ? esc(clip(turn.text, 200)) : ''}</div></div>`,
+    `<div><span${turn.isQuestion ? '' : ' class="turn"'} style="color:var(--${turn.isQuestion ? 'waiting-text' : 'accent'})">${turn.isQuestion ? '●' : '◐'}</span> ${turn.isQuestion ? esc(clip(turn.text, 200)) : ''}</div></div>`,
   ).join('')
   const needsN = view.waiting.length + questions.length
   const older = (view.older ?? []).slice(0, OLDER_SHOWN).map(item => waitingItem(item, s)).join('') + ((view.older?.length ?? 0) > OLDER_SHOWN ? `<details class="more" data-key="older:more"><summary>${esc(s.showAllQuestions(view.older!.length))}</summary>${view.older!.slice(OLDER_SHOWN).map(item => waitingItem(item, s)).join('')}</details>` : '')
@@ -306,7 +306,7 @@ const DASH_SCRIPT = String.raw`
       var items = box.querySelectorAll('[data-agent]');
       box.hidden = !!filter && items.length > 0 && !Array.prototype.some.call(items, function (item) { return !item.hidden; });
     });
-    var asks = Array.prototype.filter.call(document.querySelectorAll('.sheet > .ask'), function (item) { return !item.hidden; });
+    var asks = Array.prototype.filter.call(document.querySelectorAll('.sheet > .ask'), function (item) { return !item.hidden && !item.querySelector('.turn'); });
     document.getElementById('needs-n').textContent = String(asks.length);
     var empty = document.getElementById('needs-empty');
     empty.hidden = asks.length > 0;

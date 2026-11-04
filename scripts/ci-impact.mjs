@@ -3,6 +3,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, appendF
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BUNDLE_ENTRY, bundleFiles, isBundleFile } from './bundle-text.mjs'
+import { hasReceiverRecord } from './messaging-matrix.mjs'
 
 export const GROUPS = ['board', 'messaging', 'tooling', 'npm', 'plugin', 'installers', 'remote', 'journeys', 'browser', 'generated']
 const systems = ['ubuntu-latest', 'windows-latest']
@@ -22,6 +23,13 @@ const groupForTest = path => {
   if (path === 'tests/npm-package.test.mjs') return 'npm'
   if (/^tests\/[^/]+\.test\.mjs$/.test(path)) return 'board'
   return null
+}
+
+const matrixTest = 'tests/messaging-matrix.test.mjs'
+const isMatrixDocument = path => /^(?:README(?:\.[\w-]+)?\.md|docs\/MESSAGING\.md|docs\/validation\/.+\.md)$/.test(path)
+const hasRecord = (root, path) => {
+  if (!/^(?:scripts|hooks)\/.+\.(?:mjs|tsx?)$/.test(path) || !existsSync(join(root, path))) return false
+  return hasReceiverRecord(readFileSync(join(root, path), 'utf8'))
 }
 
 export const makePlan = (files, options = {}) => {
@@ -52,6 +60,8 @@ export const makePlan = (files, options = {}) => {
       generated.bundle = true
       known = true
     }
+    // Selects without classifying: a new record file still goes full, for tests the walk can't see.
+    if (options.matrixInputs?.has(path)) select('board', path)
     if (['hooks/released.ts', 'tests/fixtures/released.ts', 'scripts/build-released.ts'].includes(path)) {
       generated.released = true
       select('generated', path)
@@ -235,7 +245,12 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
   // Removed tests inform impact, but only existing head tests may be executed.
   const head = roots.at(-1)
   for (const group of GROUPS) tests[group] = tests[group].filter(path => existsSync(join(head, path))).sort()
-  const plan = makePlan(files, { tests, deps, bundleSources, pluginRuntime, forceFull })
+  // The generated messaging table reads these without importing them, so the dependency walk can't see them.
+  const matrixInputs = new Set(tests.board.includes(matrixTest) ? files.filter(path => isMatrixDocument(path) || roots.some(root => hasRecord(root, path))) : [])
+  const plan = makePlan(files, { tests, deps, bundleSources, pluginRuntime, forceFull, matrixInputs })
+  if (!plan.full && plan.checks.board && plan.reasons.filter(reason => reason.group === 'board').every(reason => matrixInputs.has(reason.path) && !deps.board.has(reason.path))) {
+    plan.testFiles.board = [matrixTest]
+  }
   if (!plan.full && files.length && files.every(path => /^README(?:\.[\w-]+)?\.md$/.test(path))) {
     plan.testFiles.journeys = tests.journeys.filter(path => path === 'tests/e2e/l0-readme.test.mjs')
     if (plan.checks.journeys && !plan.testFiles.journeys.length) throw new Error('README contract test is missing')

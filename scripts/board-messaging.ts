@@ -306,7 +306,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       const claimed = one.contested || body.receive === false ? { state, messages: [] } : claimMessages(state, one, now, randomBytes(3).toString('hex'))
       // Claim reaches disk before a connector can perform any external delivery.
       save(claimed.state, now)
-      return { messages: claimed.messages.map(message => ({ ...message, prompt: deliveryText(message) })), leaseMs: LEASE_MS }
+      return { messages: claimed.messages.map(message => ({ ...message, prompt: deliveryText(message) })), leaseMs: LEASE_MS, contested: one.contested === true }
     },
   }
 }

@@ -157,6 +157,52 @@ CLI、桌面 App、IDE 的實際 hook 事件分開驗收；安裝了檔案、傳
 
 Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來自 agent 自己的回報。Gemini CLI 仍保留為付費與企業用的目標（`--agent gemini`），見[安裝指南](docs/SETUP.md#legacy-gemini-cli-compatibility)（英文）。
 
+### 已連線對話的訊息能力
+
+<!-- messaging-matrix:start -->
+
+由接收器紀錄產生：`node scripts/messaging-matrix.mjs --write`。進度回報與訊息接收分別驗證。Verified 需要該執行介面的 `<date>-<host>-live.md` 檔案；合成測試只能證明 Implemented。未連線的目標使用 Tier 4 / [P5] 複製備援，不代表已有原生接收器。「未知」表示路線圖沒有為該執行介面指定原語。
+
+| 宿主 | 執行介面 | 層級 | 原語 | 狀態 | 現場執行 | 接收器 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Antigravity | 2.0 Desktop App | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | 未知 | Implemented（已實作） | 早期執行（不計入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
+| Antigravity | IDE | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented（已實作） | 未測試 | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
+| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Codex | CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Codex | Daemon | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented（已實作） | 早期執行（不計入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
+| Codex | Existing-owner proxy (active turn only) | 2 | 未知 | Implemented（已實作） | 未測試 | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
+| Cursor | cursor-agent CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Cursor | IDE (Composer) | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Gemini | Web | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Gemini CLI | CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Muse Code | CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+
+<!-- messaging-matrix:end -->
+
 <details>
 <summary><b>各個 agent 是怎麼驗證的</b></summary>
 
