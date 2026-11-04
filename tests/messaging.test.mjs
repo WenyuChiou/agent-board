@@ -3437,3 +3437,127 @@ test('an owned Codex receiver catches up a poll tick held behind an empty respon
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('overlapping poll ticks coalesce once and never survive closure, ownership loss or expiry', async t => {
+  for (const state of ['live', 'closed', 'ownership-lost', 'expired']) await t.test(state, async t => {
+    let began, release, receiver, polls = 0, disconnects = 0, deliveries = 0, isOwned = true
+    const started = new Promise(done => { began = done })
+    const held = new Promise(done => { release = done })
+    const errors = []
+    t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1000 })
+    t.mock.method(globalThis, 'fetch', async (url) => {
+      const action = new URL(url).pathname.split('/').at(-1)
+      if (action === 'disconnect') disconnects++
+      const isFirstPoll = action === 'poll' && ++polls === 1
+      return { ok: true, json: async () => {
+        if (isFirstPoll) { began(); await held }
+        return action === 'register' ? { id: 'synthetic', secret: 'synthetic', expires: Date.now() + 15000 }
+          : action === 'poll' ? { messages: [], leaseMs: 15000 } : { ok: true }
+      } }
+    })
+    try {
+      receiver = await boardClient('http://127.0.0.1:12345/?t=synthetic').attach({
+        agent: 'codex', session: 'synthetic', surface: 'Synthetic overlap control', turn: 'turn1',
+        verify: async () => isOwned, deliver: async () => { deliveries++; return 'ACK synthetic' },
+        onError: error => errors.push(error.message),
+      })
+      await started
+      t.mock.timers.tick(state === 'expired' ? 16000 : 6000)
+      if (state === 'closed') await receiver.close()
+      if (state === 'ownership-lost') isOwned = false
+      release()
+      await new Promise(done => setImmediate(done))
+      assert.equal(polls, state === 'live' ? 2 : 1, 'many overdue ticks coalesce, and a terminal binding does not poll again')
+      assert.equal(disconnects, state === 'live' ? 0 : 1)
+      assert.equal(deliveries, 0)
+      assert.deepEqual(errors, state === 'expired' ? ['CONNECTION_EXPIRED'] : [])
+    } finally { release(); await receiver?.close() }
+  })
+})
+
+test('an overlapping poll leaves the page waiting for a reply at the deadline despite a completed native ACK', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-poll-overlap-'))
+  const store = createMessaging(dir)
+  const thread = '00000001-2222-4333-8444-555555555555'
+  let release, began, listener, receiver, polls = 0, received = 0
+  const held = new Promise(done => { release = done })
+  const started = new Promise(done => { began = done })
+  const errors = []
+  t.mock.timers.enable({ apis: ['Date', 'setInterval', 'setTimeout'], now: 1000 })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const action = new URL(url).pathname.split('/').at(-1)
+    const body = JSON.parse(options.body)
+    const result = store.act(action, body, Date.now())
+    const isFirstPoll = action === 'poll' && ++polls === 1
+    return { ok: true, json: async () => {
+      if (isFirstPoll) { began(); await held }
+      if (action === 'receipt' && body.status === 'accepted') await new Promise(done => setTimeout(done, 15))
+      return result
+    } }
+  })
+  const transport = {
+    listen: callback => { listener = callback; return () => { listener = null } },
+    request: async (method, params) => {
+      if (method === 'thread/loaded/list') return { data: [thread] }
+      assert.equal(method, 'turn/start')
+      assert.equal(params.threadId, thread)
+      received++
+      const nonce = nonceOf(params.input[0].text)
+      listener({ method: 'item/completed', params: { threadId: thread, turnId: 'owned-turn', item: { type: 'agentMessage', text: `ACK ${nonce} received` } } })
+      listener({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'owned-turn', status: 'completed' } } })
+      return { turn: { id: 'owned-turn' } }
+    },
+  }
+  try {
+    receiver = await attachCodexSession({ boardUrl: 'http://127.0.0.1:12345/?t=synthetic', transport, thread,
+      state: () => ({ thread, status: 'idle', turn: null }), verifyOwner: one => one === transport,
+      onError: error => errors.push(error.message) })
+    await started
+    t.mock.timers.tick(10)
+    const sentAt = Date.now()
+    store.act('send', { id: 'AB-overlap', target: receiver.id, turn: receiver.turn, text: 'Synthetic overlap control' }, Date.now())
+    // Queue just after the empty request. Its response crosses the next due
+    // tick but finishes with almost two seconds still left in the budget.
+    t.mock.timers.tick(1990)
+    release()
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(15)
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(1984)
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(1)
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(9)
+    await new Promise(done => setImmediate(done))
+    assert.equal(Date.now() - sentAt, 3999)
+    const snapshot = store.snapshot(Date.now())
+    const message = snapshot.messages.find(one => one.id === 'AB-overlap')
+    assert.equal(received, 1, 'the actual native turn and its correlated ACK already completed')
+    const { servePage } = await import('../hooks/serve.ts')
+    const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+    const file = `## Synthetic
+<!-- auto session=abcdef01 agent=codex resume=${thread} state=working updated=${new Date(Date.now()).toISOString()} -->
+### Poll overlap
+- [~] Review the synthetic control
+<!-- /auto session=abcdef01 -->
+`
+    const view = buildView(parseProgress(file), [], null, Date.now(), 0, {}, EN)
+    const model = serveModel(view, [], EN, new Set(), false, snapshot, false, { now: Date.now(), repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+    const page = await pageDom(servePage(EN, 'synthetic'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    // At the old next tick the native ACK is immediate, but even a 15 ms
+    // accepted-response round trip now pushes acknowledgment past the budget.
+    t.mock.timers.tick(6)
+    await new Promise(done => setImmediate(done))
+    assert.equal(store.snapshot(Date.now()).messages.find(one => one.id === 'AB-overlap').status, 'acknowledged')
+    assert.equal(message.status, 'acknowledged', `deadline page: ${page.text()}`)
+    assert.ok(page.text().includes('Replied'), page.text())
+    assert.equal(message.reply, 'received')
+    assert.deepEqual(errors, [])
+  } finally {
+    release()
+    await receiver?.close()
+    assert.equal(listener, null)
+    store.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
