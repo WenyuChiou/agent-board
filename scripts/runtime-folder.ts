@@ -247,6 +247,16 @@ export const privateRuntimeFolder = (dir: string, names: string[] = []): string 
   } catch { throw new RuntimeFolderError() }
 }
 
+// The same folder, resolved for reading only, when the folder could not be protected: a
+// process that cannot write (a read-only sandbox) may still reuse a page that is already
+// running, but it must never write through this path, so nothing is created or changed here
+// and every parent must already be a plain folder, never a link.
+export const unprotectedRuntimeFolder = (dir: string): string => {
+  const root = resolve(dir)
+  plainParents(root)
+  return root
+}
+
 // Check the existing file's owner and DACL before any token is read. The descriptor must
 // still name the same single-link plain file after the read, including at a legacy location.
 export const readPrivateRuntimeFile = (file: string): { text: string; stamp: Stats } | null => {

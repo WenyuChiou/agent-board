@@ -4708,6 +4708,29 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([]) }
 })
 
+test('the board command in a read-only sandbox reuses a running page\'s link', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'acl-denied.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+cp.execFileSync = (file, ...args) => { if (/icacls\\.exe$/i.test(String(file))) throw Object.assign(new Error('synthetic ACL denial'), { code: 'EACCES' }); return original(file, ...args) }
+require('node:module').syncBuiltinESMExports()
+`)
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    const before = JSON.parse(readFileSync(board.served, 'utf8'))
+    board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+    const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.ok(ran.stdout.includes(url), 'the sandboxed run prints the running page link')
+    assert.ok(!ran.stdout.includes(EN.serveRuntimePrivate), 'no address-file error is printed')
+    const after = JSON.parse(readFileSync(board.served, 'utf8'))
+    assert.equal(after.url, url)
+    assert.equal(after.pid, before.pid, 'no second page was started')
+  } finally { await board.end([url]) }
+})
+
 test('Windows page startup refuses a runtime junction without changing its destination', { skip: process.platform !== 'win32' && 'Windows junctions only', timeout: 30_000 }, async () => {
   for (const level of ['folder', 'parent']) {
     const board = serveIn()
