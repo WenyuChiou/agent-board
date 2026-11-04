@@ -38,7 +38,7 @@ Each cell is one of:
 - **PASS**
 - **FAIL**, with an issue number
 - **untested**, with the reason
-- **needs owner**, with the screen that stopped the check (sign-in, trust, consent, usage limit or config) and its words
+- **needs owner**, with the screen that stopped the check (sign-in, trust, consent, usage limit or config) and its words, with account names, emails and paths masked
 - **via the page**: checks c and d run once on the shared `--serve` page and terminal board, which get rows of their own; a host whose own turn did not reach the board is marked this way
 - **n/a**, with the reason: the check cannot apply, for example the agent has no connector or its service has ended
 
@@ -51,15 +51,20 @@ A cell may add a short note, and a `*` that points to a sentence under the table
 - **Work in a scratch project folder, with synthetic prompts only** ("Synthetic test: …"). Board checks c, d and f use a synthetic board through `CLAUDE_PROGRESS_FILE`.
 - **Never open an existing conversation or project.** If an app opens on one, start a new chat in the scratch folder at once.
 - **Screenshots:** at least one per surface, and one inside every CLI. Crop each to the scratch window, with no sidebar, history, account name or real path. Do not commit them. Keep them in a local folder, give the count in the record, and say in the PR body who holds them. Pictures in the repository follow CONTRIBUTING's image rules.
-- **Approvals:** you may approve a one-time or this-session prompt to run the board's own command (`--serve`, `--chat`) in the scratch folder, never an "always allow".
-- **Sign-ins stay with the person whose computer runs the check:** never type a password, a sign-in code or a token, and never create an account. Record "needs owner" and the words on the screen.
-- **Some prompts the checker may press after a yes** (owner, 2026-11-03: 「理論上你要用computer use幫我做才對」). Press only after the person says yes in chat to that item, through computer use or the browser tools:
+- **Approvals:** you may approve a one-time or this-session prompt to run the board's own command (`--serve`, `--chat`) in the scratch folder, never an "always allow". The one exception is the board's own hooks approval in the kept test home, pressed after a yes (below).
+- **Sign-ins stay with the person whose computer runs the check:** never type a password, a sign-in code or a token, and never create an account. Record "needs owner" and the words on the screen, masked as above.
+- **Some prompts the checker may press after a yes** (owner, 2026-11-03: 「理論上你要用computer use幫我做才對」). Press only after the person says yes in chat to that item, through computer use or the browser tools. The yes covers the items on this run's list and is given in this run. A blanket yes, or a yes from an earlier run, does not count.
   - a trust prompt for the scratch project folder;
-  - a hooks approval for the board's own hooks in the kept test home. It stays approved there, which the Approvals rule above allows only for this;
-  - a consent or terms screen of an agent being checked;
-  - the browser's Authorize button for a sign-in the person started.
-- **Everything else stays with the person.** That covers a key that must be typed into a terminal or an IDE (computer use can only click there), and any prompt about something outside the scratch project folder, the kept test home or the board's own hooks. Record it as "needs owner".
-- **The record names each prompt the checker pressed,** with the words on the screen, and says it was pressed after the person's yes.
+  - a hooks approval for the board's own hooks in the kept test home, which stays approved there (the Approvals exception);
+  - a consent or terms screen that an agent in this check shows in the kept test home or the scratch project folder;
+  - the browser's Authorize button for a sign-in the person started, to an agent in this check.
+- **Everything else stays with the person.** That covers:
+  - any other consent, terms or Authorize screen;
+  - a key that must be typed into a terminal or an IDE (computer use can only click there);
+  - any prompt about something outside the scratch project folder, the kept test home or the board's own hooks.
+
+  Record each of these as "needs owner".
+- **The record names each prompt the checker pressed,** with the words on the screen (account names, emails and paths masked), and says it was pressed after the person's yes.
 - **Spend paid quotas carefully:** at most two short turns per agent on a paid quota.
 - **Clean up after yourself:** afterwards, stop only the processes you started.
 - **Write down what the run left behind:** self-updates, history entries, private data that showed on screen or was sent to a model, rows on the real board, held inbox files, the clipboard and open tabs.
