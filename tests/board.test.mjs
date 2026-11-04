@@ -9403,6 +9403,18 @@ test('buttons keep desktop size in a narrow window with a mouse', async () => {
   assert.ok(narrow.includes('.col{padding-left') && !/\.btn|\.answers button/.test(narrow))
 })
 
+test('the actions at the foot of the sidebar look like buttons, not underlined links', () => {
+  const html = redesignPage()
+  // The owner's rule (product principles): an action is a button. Only GitHub stays a link.
+  const rules = [...html.matchAll(/([^{}]*\.side \.pfoot[^{}]*)\{([^}]*)\}/g)].map(found => ({ selector: found[1], body: found[2] }))
+  const actions = rules.filter(rule => /#close|\.btn\b/.test(rule.selector))
+  assert.ok(actions.length > 0)
+  for (const rule of actions) assert.doesNotMatch(rule.body, /underline|background:transparent|border-color:transparent/, rule.selector)
+  assert.match(html, /\.btn,[^{}]*\.pfoot #close[^{}]*\{[^}]*border:1px solid var\(--btn-line\)/)
+  const foot = html.match(/<footer class="pfoot"[\s\S]*?<\/footer>/)[0]
+  for (const id of ['connect-web-chat', 'import-clipboard', 'close']) assert.match(foot, new RegExp('<button type="button"[^>]*id="' + id + '"'))
+})
+
 test('the sidebar folds to a rail at the docked width', async () => {
   const html = await sourcePage()
   const { board, model } = await groupedPage()

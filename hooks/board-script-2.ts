@@ -3899,7 +3899,7 @@ export const LINES = [
 ".side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}",
 ".side .pfoot .set-row{order:-1;flex-basis:100%;margin-left:calc(var(--s2) * -1)}",
 ".side .pfoot .grow{display:none}",
-".side .pfoot #close,.side .pfoot .btn{min-height:32px;padding-inline:8px;border-color:transparent;background:transparent;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}",
+".side .pfoot #close,.side .pfoot .btn{min-height:32px;padding-inline:10px}",
 ".side .pfoot p{order:3;flex-basis:100%}",
 ".ver-link{display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-size:var(--text-xs);text-decoration:none;border-radius:var(--radius-s);white-space:nowrap}",
 ".ver-link:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}",
