@@ -165,20 +165,20 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 | 宿主 | 執行介面 | 層級 | 原語 | 狀態 | 現場執行 | 接收器 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Antigravity | 2.0 Desktop App | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
-| Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Antigravity | 2.0 Desktop App | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Antigravity | agy TUI | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
 | Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | 未知 | Implemented（已實作） | 早期執行（不計入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
-| Antigravity | IDE | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Antigravity | IDE | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
 | Claude Code | CLI | 1 | &#91;P1&#93; | Implemented（已實作） | 未測試 | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
-| Codex | CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Codex | CLI | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-codex.ts](hooks/receivers/hook-mailbox-codex.ts) |
 | Codex | Daemon | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented（已實作） | 早期執行（不計入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
 | Codex | Existing-owner proxy (active turn only) | 2 | 未知 | Implemented（已實作） | 未測試 | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
-| Cursor | cursor-agent CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
-| Cursor | IDE (Composer) | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Cursor | cursor-agent CLI | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
+| Cursor | IDE (Composer) | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
@@ -189,11 +189,11 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 | dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Gemini | Web | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
-| Gemini CLI | CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Gemini CLI | CLI | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-gemini.ts](hooks/receivers/hook-mailbox-gemini.ts) |
 | Grok Build | CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
-| Muse Code | CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Muse Code | CLI | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-muse.ts](hooks/receivers/hook-mailbox-muse.ts) |
 | OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
