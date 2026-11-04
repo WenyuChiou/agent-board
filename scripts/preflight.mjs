@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
+import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -23,6 +23,11 @@ export const accountTestLockPath = ({ platform = process.platform, account = use
   return join(account.homedir, `.agent-board-preflight-tests-${identity}`)
 }
 
+// A cloud machine can give an agent a read-only home. Every process of the account then shares this one folder,
+// named from the account's uid under the literal /tmp (never TMPDIR, which differs between processes). Windows has none.
+export const accountFallbackLockPath = ({ platform = process.platform, account = userInfo() } = {}) =>
+  platform === 'win32' ? null : `/tmp/.agent-board-preflight-tests-${String(account.uid)}`
+
 export const testLockDirectoryProblem = (stat, { platform = process.platform, uid = userInfo().uid } = {}) => {
   if (stat.isSymbolicLink()) return 'test lock directory is a symbolic link.'
   if (!stat.isDirectory()) return 'test lock directory is not a directory.'
@@ -33,9 +38,29 @@ export const testLockDirectoryProblem = (stat, { platform = process.platform, ui
   return null
 }
 
+// The parent of the shared fallback is writable by every account, so only a sticky one keeps others from renaming the folder.
+export const sharedParentProblem = (stat, { platform = process.platform } = {}) => {
+  if (platform === 'win32') return 'test lock directory has no shared fallback on Windows.'
+  if (!stat.isDirectory()) return 'test lock directory fallback parent is not a directory.'
+  if ((stat.mode & 0o002) && !(stat.mode & 0o1000)) return 'test lock directory fallback parent is writable by others without the sticky bit.'
+  return null
+}
+
+const unwritableCodes = new Set(['EROFS', 'EACCES', 'EPERM'])
+
+const isWritable = directory => {
+  try {
+    accessSync(directory, constants.W_OK | constants.X_OK)
+    return true
+  } catch (error) {
+    if (unwritableCodes.has(error?.code)) return false
+    throw new Error('test lock directory could not be inspected; check account directory access.')
+  }
+}
+
 const prepareTestLockDirectory = directory => {
   try { mkdirSync(directory, { mode: 0o700 }) } catch (error) {
-    if (error?.code !== 'EEXIST') throw new Error('test lock directory could not be created; check account directory access.')
+    if (error?.code !== 'EEXIST') throw new Error('test lock directory could not be created; check account directory access.', { cause: error })
   }
   let stat
   try { stat = lstatSync(directory) } catch {
@@ -43,6 +68,55 @@ const prepareTestLockDirectory = directory => {
   }
   const problem = testLockDirectoryProblem(stat)
   if (problem) throw new Error(problem)
+}
+
+// A folder another run may publish in, read but never created or cleaned here. Missing is fine; anything unsafe fails closed.
+const watchedLockDirectory = directory => {
+  let stat
+  try { stat = lstatSync(directory) } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw new Error('test lock directory could not be inspected; check account directory access.')
+  }
+  const problem = testLockDirectoryProblem(stat)
+  if (problem) throw new Error(problem)
+  return directory
+}
+
+// The account's lock folders this run publishes in and watches. The home folder comes first. When it cannot be written,
+// the fallback holds this run's marker and the home folder is still read, so a run there and a run here exclude each other.
+const lockDirectories = (directory, fallback) => {
+  let isHomeUsable = false
+  try {
+    prepareTestLockDirectory(directory)
+    // A lock folder left from before can sit on a home that is now read-only: it exists, but no marker can be added.
+    isHomeUsable = !fallback || isWritable(directory)
+  } catch (error) {
+    if (!fallback || !unwritableCodes.has(error.cause?.code)) throw error
+  }
+  if (!isHomeUsable) {
+    let parent
+    try { parent = statSync(dirname(fallback)) } catch {
+      throw new Error('test lock directory fallback parent could not be inspected.')
+    }
+    const problem = sharedParentProblem(parent)
+    if (problem) throw new Error(problem)
+    prepareTestLockDirectory(fallback)
+    return { own: fallback, watched: [{ directory, isOptional: false }], isFallback: true }
+  }
+  // A fallback folder that fails its checks is not this account's, so its markers cannot block this run; a restricted
+  // run of this account refuses that same folder and starts nothing.
+  return { own: directory, watched: fallback ? [{ directory: fallback, isOptional: true }] : [], isFallback: false }
+}
+
+// Read only after this run's marker exists, so a run that creates the folder a moment later still meets that marker.
+const watchedHasLiveMarker = ({ directory, isOptional }, marker) => {
+  try {
+    if (!watchedLockDirectory(directory)) return false
+  } catch (error) {
+    if (isOptional) return false
+    throw error
+  }
+  return hasLiveMarker(directory, marker, false)
 }
 
 const isLiveProcess = pid => {
@@ -63,42 +137,49 @@ const releaseTestLock = path => {
   }
 }
 
-const acquireTestLock = (directory, onPublished) => {
-  prepareTestLockDirectory(directory)
+// Whether another live run has a marker in the folder. Stale markers are removed only from this run's own folder.
+const hasLiveMarker = (directory, marker, isOwn) => {
+  let isBlocked = false
+  for (const name of readdirSync(directory)) {
+    if (name === marker) continue
+    const match = /^([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.lock$/i.exec(name)
+    if (!match) continue
+    const pid = Number(match[1])
+    // Node's process.kill accepts signed 32-bit PIDs; larger values are not usable owner markers.
+    if (!Number.isInteger(pid) || pid > 2147483647) continue
+    let stat
+    try { stat = lstatSync(join(directory, name)) } catch (error) {
+      if (error?.code === 'ENOENT') continue
+      throw error
+    }
+    // Unfamiliar entries, including links and directories, never become stale markers.
+    if (!stat.isFile() || stat.size !== 0) continue
+    if (isLiveProcess(pid)) {
+      isBlocked = true
+      continue
+    }
+    if (isOwn) releaseTestLock(join(directory, name))
+  }
+  return isBlocked
+}
+
+const acquireTestLock = (directory, onPublished, fallback = null) => {
+  const { own, watched, isFallback } = lockDirectories(directory, fallback)
   const marker = `${process.pid}-${randomUUID()}.lock`
-  const path = join(directory, marker)
+  const path = join(own, marker)
   let isPublished = false
   try {
     const file = openSync(path, 'wx', 0o600)
     isPublished = true
     closeSync(file)
     onPublished?.()
-    let isBlocked = false
-    for (const name of readdirSync(directory)) {
-      if (name === marker) continue
-      const match = /^([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.lock$/i.exec(name)
-      if (!match) continue
-      const pid = Number(match[1])
-      // Node's process.kill accepts signed 32-bit PIDs; larger values are not usable owner markers.
-      if (!Number.isInteger(pid) || pid > 2147483647) continue
-      let stat
-      try { stat = lstatSync(join(directory, name)) } catch (error) {
-        if (error?.code === 'ENOENT') continue
-        throw error
-      }
-      // Unfamiliar entries, including links and directories, never become stale markers.
-      if (!stat.isFile() || stat.size !== 0) continue
-      if (isLiveProcess(pid)) {
-        isBlocked = true
-        continue
-      }
-      releaseTestLock(join(directory, name))
-    }
-    if (isBlocked) {
+    // Every folder is read, even after a live marker is found, so this run's own stale markers are still cleaned.
+    const blocked = [hasLiveMarker(own, marker, true), ...watched.map(other => watchedHasLiveMarker(other, marker))]
+    if (blocked.some(Boolean)) {
       releaseTestLock(path)
       return null
     }
-    return { path }
+    return { path, isFallback }
   } catch (error) {
     if (isPublished) releaseTestLock(path)
     throw error
@@ -314,7 +395,7 @@ const parseArgs = argv => {
   return options
 }
 
-export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), onCheck, onProgress, onLockPublished } = {}) => {
+export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), onCheck, onProgress, onLockPublished } = {}) => {
   const checks = []
   const add = (state, message) => {
     const item = { state, message: safeLine(message) }
@@ -373,11 +454,12 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     const paths = [...changed].filter(path => isTest(path) && path.endsWith('.mjs') && existsSync(join(cwd, path)))
     if (!paths.length) add('PASS', 'no touched Node test files need running.')
     let owner = null
-    try { owner = paths.length ? acquireTestLock(lockPath, onLockPublished) : null } catch (error) {
+    try { owner = paths.length ? acquireTestLock(lockPath, onLockPublished, fallbackLockPath) : null } catch (error) {
       add('FAIL', error.message?.startsWith('test lock directory ') ? error.message : 'test lock directory could not be used; check account directory access.')
       return
     }
     if (paths.length && !owner) add('FAIL', 'another preflight test run is already active on this computer; finish it before running preflight again.')
+    if (owner?.isFallback) add('PASS', "the home folder cannot hold the test lock, so the test lock was this account's shared fallback folder, and any home lock folder was still read.")
     if (owner) {
       try {
         for (const path of paths) {
@@ -480,9 +562,21 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
 
   if (bodyFile && title) {
     await check('PR body check', () => {
-      const checked = command(process.execPath, ['scripts/pr-check.mjs', '--body-file', resolve(cwd, bodyFile), '--title', title, '--no-bundle', '--base', base])
-      const first = `${checked.stdout ?? ''}\n${checked.stderr ?? ''}`.split(/\r?\n/).find(line => /^FAIL |^pr-check:/.test(line) && !/^pr-check: new pull request/.test(line))
-      add(!checked.error && checked.status === 0 ? 'PASS' : 'FAIL', checked.status === 0 ? 'PR body passed pr-check.' : `PR body: ${first ?? 'pr-check could not finish.'}`)
+      const prCheck = extra => command(process.execPath, ['scripts/pr-check.mjs', '--body-file', resolve(cwd, bodyFile), '--title', title, '--no-bundle', '--base', base, ...extra])
+      const firstOf = checked => `${checked.stdout ?? ''}\n${checked.stderr ?? ''}`.split(/\r?\n/).find(line => /^FAIL |^pr-check:/.test(line) && !/^pr-check: new pull request/.test(line))
+      let checked = prCheck([])
+      let note = ''
+      // Without GitHub the body is still checked offline; the GitHub part is reported as not run, never as passed.
+      if (checked.status !== 0 && /network check failed/.test(firstOf(checked) ?? '')) {
+        const installed = command('gh', ['--version'])
+        const signedIn = installed.error || installed.status !== 0 ? null : command('gh', ['auth', 'status'])
+        const why = !signedIn ? 'the GitHub CLI is not installed' : signedIn.error || signedIn.status !== 0 ? 'the GitHub CLI is not signed in or cannot reach GitHub' : 'GitHub could not be reached'
+        add('WARN', `pr-check's GitHub checks (issue, claim, open pull request cap, review) did not run here, because ${why}; CI's pr-check runs them on the pull request.`)
+        checked = prCheck(['--offline'])
+        note = ' without GitHub (--offline)'
+      }
+      const first = firstOf(checked)
+      add(!checked.error && checked.status === 0 ? 'PASS' : 'FAIL', checked.status === 0 ? `PR body passed pr-check${note}.` : `PR body: ${first ?? 'pr-check could not finish.'}`)
     })
   } else add('PASS', 'PR body check skipped; supply --body-file and --title to include it.')
 
@@ -525,10 +619,10 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
 }
 
 // Module callers can isolate synthetic CLI fixtures without a command-line lock override.
-export const main = async (argv = process.argv.slice(2), { lockPath, onLockPublished } = {}) => {
+export const main = async (argv = process.argv.slice(2), { lockPath, fallbackLockPath, onLockPublished } = {}) => {
   let checks
   const print = item => console.log(`${item.state} ${item.message}`)
-  try { checks = await runPreflight({ ...parseArgs(argv), lockPath, onLockPublished, onCheck: print, onProgress: console.log }) } catch (error) {
+  try { checks = await runPreflight({ ...parseArgs(argv), lockPath, fallbackLockPath, onLockPublished, onCheck: print, onProgress: console.log }) } catch (error) {
     checks = [{ state: 'FAIL', message: safeLine(error.message) }]
     print(checks[0])
   }
