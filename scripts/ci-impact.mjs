@@ -295,9 +295,17 @@ const emitPlan = plan => {
     '\n\nFull plan: ' + plan.full + '\n\nSoak recommended: ' + plan.soakRecommended + '\n\nChanged paths:\n' + plan.files.map(path => '- ' + path).join('\n') + '\n')
 }
 
-export const runTestFiles = files => {
+// A part such as 2/2 runs every second file through Node's --test-shard, so a long set fits two jobs (#899).
+export const testArgs = (files, { isSerial = false, part = '' } = {}) => {
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(part)
+  if (part !== '' && (!match || Number(match[1]) > Number(match[2]))) throw new Error('test part must be <index>/<total>, such as 1/2')
+  const shard = match && match[2] !== '1' ? ['--test-shard=' + part] : []
+  return ['--test', ...(isSerial ? ['--test-concurrency=1'] : []), ...shard, ...files]
+}
+
+export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '') => {
   if (!Array.isArray(files) || !files.length || files.some(path => !/^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/.test(path) || !existsSync(path))) throw new Error('selected tests are empty, invalid or missing')
-  const result = spawnSync(process.execPath, ['--test', ...(process.env.CI_TEST_SERIAL === '1' ? ['--test-concurrency=1'] : []), ...files], { stdio: 'inherit' })
+  const result = spawnSync(process.execPath, testArgs(files, { isSerial: process.env.CI_TEST_SERIAL === '1', part }), { stdio: 'inherit' })
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error('selected tests failed: ' + (result.status ?? result.signal))
 }

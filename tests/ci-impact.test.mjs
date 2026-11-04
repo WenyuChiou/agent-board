@@ -431,6 +431,17 @@ test('selected test execution refuses an empty or invalid file list', async () =
   assert.throws(() => runTestFiles(['tests/missing.test.mjs']))
 })
 
+test('a test part runs its share of the files through Node, and a bad part is refused before any test runs', async () => {
+  const { testArgs, runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const files = ['tests/a.test.mjs', 'tests/b.test.mjs']
+  assert.deepEqual(testArgs(files), ['--test', ...files])
+  assert.deepEqual(testArgs(files, { part: '1/1' }), ['--test', ...files])
+  assert.deepEqual(testArgs(files, { part: '2/2' }), ['--test', '--test-shard=2/2', ...files])
+  assert.deepEqual(testArgs(files, { isSerial: true, part: '1/2' }), ['--test', '--test-concurrency=1', '--test-shard=1/2', ...files])
+  for (const part of ['0/2', '3/2', '1/0', 'x', '1/2 --inspect']) assert.throws(() => testArgs(files, { part }), /test part/, part)
+  assert.throws(() => runTestFiles(['tests/ci-impact.test.mjs'], '3/2'), /test part/)
+})
+
 test('ci result validation rejects incomplete or non-boolean selection metadata', () => {
   const plan = makePlan([], options())
   const incomplete = structuredClone(plan)
@@ -540,10 +551,16 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   // On a pull request the planner picks the plugin systems; an empty planner output falls through to both.
   assert.ok(text.includes(`plugin_os: \${{ ${onPr} && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}`))
   assert.match(text, /plugin_os:'\["ubuntu-latest","windows-latest"\]'/)
+  // The board job takes the same pairs with the Windows set in two parts, so each keeps ten minutes (#899).
+  const twoParts = '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]'
+  const sixParts = '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/2"},{"os":"windows-latest","node":22,"part":"2/2"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]'
+  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '${twoParts}' || '${sixParts}' }}`))
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
     assert.ok(block, group)
-    assert.match(block, /include: \$\{\{ fromJSON\(needs\.impact\.outputs\.node_matrix\) \}\}/, group)
+    const matrix = group === 'board' ? 'board_matrix' : 'node_matrix'
+    assert.ok(block.includes(`include: \${{ fromJSON(needs.impact.outputs.${matrix}) }}`), group)
+    if (group === 'board') assert.ok(block.includes('CI_TEST_PART: ${{ matrix.part }}') && block.includes('timeout-minutes: 10'), group)
     assert.doesNotMatch(block, /node: \[/, group)
     assert.doesNotMatch(block, /^\s+os: \[/m, group)
     assert.match(block, /CI_TEST_FILES:/, group)
