@@ -1165,12 +1165,15 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
 // Pending turns are optional: an unavailable inbox must not stop the board or its reminders.
 let pendingCache: TurnCache = null
 let pageStateFailure: string | null = null
+let publishedPageDone: string | null = null
+let publishedPageState: string | null = null
+const verifiedPageDone = new Set<string>()
 const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
   try {
     const path = await progressPath($)
     const dir = inboxPath(path)
     const done = await readInboxRecord($, 'inboxDone').catch(() => ({} as Record<string, string>))
-    await syncPageState($, done)
+    if (publishedPageDone !== JSON.stringify(done) || pageStateFailure !== null) await syncPageState($, done)
     const entries = (await $.fs.list(dir))
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
@@ -1211,13 +1214,26 @@ const syncPageState = async ($: EngineInterface, done?: Record<string, string>):
     const at = await $.clock.now()
     const path = await progressPath($)
     const processed = done ?? await readInboxRecord($, 'inboxDone')
+    const pruned = addPruned(await $.store.get('prunedCounts'), { agent: 0, mirror: 0 }, at)
+    const publication = JSON.stringify([path, keepInboxDone(processed, at), measuredStore, pruned])
+    if (pageStateFailure === null && publishedPageState === publication) return
     const previous = readPageState(await readText($, pageStatePath(path)))
     const kept = keepInboxDone({ ...previous.inboxDone, ...processed }, at)
-    for (const [name, stamp] of Object.entries(kept)) {
-      if (!isInboxFile(name)) continue
-      const text = JSON.stringify({ version: 1, name, stamp })
-      const file = pageDonePath(path, sha256(text))
-      if (await readText($, file) !== text) {
+    // The snapshot keeps the whole map while bounded batches migrate its newest receipts.
+    // Verified immutable files need no further read in this session.
+    const receipts = Object.entries(kept)
+      .filter(([name]) => isInboxFile(name))
+      .sort((a, b) => Number(b[1].split(':').at(-1)) - Number(a[1].split(':').at(-1)))
+      .map(([name, stamp]) => {
+        const text = JSON.stringify({ version: 1, name, stamp })
+        return { text, file: pageDonePath(path, sha256(text)) }
+      })
+      .filter(({ file }) => !verifiedPageDone.has(file))
+      .slice(0, 50)
+    const dir = path.replace(/[\\/][^\\/]*$/, '')
+    const existing = receipts.length === 0 ? new Set<string>() : new Set((await $.fs.list(dir)).filter(entry => entry.kind === 'file').map(entry => entry.name))
+    for (const { text, file } of receipts) {
+      if (!existing.has(file.replace(/^.*[\\/]/, '')) || await readText($, file) !== text) {
         const temporary = `${file}.tmp-${await $.session.id()}-${questionWrite++}`
         const isWin = await isWindows($, path)
         try {
@@ -1227,15 +1243,16 @@ const syncPageState = async ($: EngineInterface, done?: Record<string, string>):
           if (await $.fs.exists(temporary)) await removeFiles($, [temporary], isWin)
         }
       }
-      if (await $.fs.read(file) !== text) throw new Error('PAGE_STATE_NOT_VERIFIED')
+      verifiedPageDone.add(file)
     }
-    const pruned = addPruned(await $.store.get('prunedCounts'), { agent: 0, mirror: 0 }, at)
     await rewrite($, pageStatePath(path), before => JSON.stringify({
       version: 1,
-      inboxDone: keepInboxDone({ ...readPageState(before).inboxDone, ...processed }, at),
+      inboxDone: keepInboxDone({ ...readPageState(before).inboxDone, ...kept }, at),
       store: measuredStore,
       pruned,
     }))
+    publishedPageDone = JSON.stringify(processed)
+    publishedPageState = publication
     pageStateFailure = null
   } catch (error) {
     // Publication is retried at the next poll. Its warning must not replace the authoritative inbox.

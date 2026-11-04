@@ -1097,7 +1097,8 @@ test('a board with no ledger, two torn ledgers days old and a block cut off in t
   expect(await ui.find({ type: 'Text', text: notice })).toBeUndefined()
   await ui.press({ key: 'section::health' })
   expect(await ui.find({ type: 'Text', text: notice })).toBeDefined()
-  expect((world.files.get(FILE.replace('.md', '.html')) ?? '').split(notice).length - 1).toBe(1)
+  expect(visiblePaneText(await ui.drawn()).split(notice).length - 1).toBe(1)
+  expect(world.files.has(FILE.replace('.md', '.html'))).toBe(false)
   // The ledger is written, with the board's question and the inbox turn's, and the torn ledgers,
   // three days old, stay for the sweep.
   const words = ledgerRecords(world).map(record => record.words)
@@ -1374,10 +1375,7 @@ test('the pane shows a frozen question once in full without its cut-off prefix',
     expect(await ui.findAll({ type: 'Button', text: 'Paint it, OK?' })).toHaveLength(1)
     // The text match is a substring one, so the full question is the only button it may find.
     expect((await ui.findAll({ type: 'Button', text: 'Paint it, O' }) as Array<{ text?: string }>).map(node => node.text)).toEqual(['Paint it, OK?'])
-    await $.command.run({ ...TIDY, args: 'open' })
-    const html = world.files.get(FILE.replace(/\.md$/, '.html')) ?? ''
-    expect(html).toContain('Paint it, OK?')
-    expect(html).not.toContain('Paint it, O<')
+    expect(world.files.has(FILE.replace(/\.md$/, '.html'))).toBe(false)
   } finally {
     await ui.unmount()
   }

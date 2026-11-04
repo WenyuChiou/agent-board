@@ -337,7 +337,7 @@ test('L5 torn tail: an append by the Codex hook repairs the tail or reports why,
     assert.ok(!after.includes(cutStart), 'the cut marker is gone from the board')
     assert.equal(occurrences(after, 'resume=codex-torn-session-1 '), 1, 'the new report is written')
     assert.deepEqual(fragmentTexts(), [cutStart])
-    assert.doesNotMatch((await run(world, [])).stdout, /cut-off marker/)
+    assert.doesNotMatch((await run(world, ['--print'])).stdout, /cut-off marker/)
 
     // The cut is inside the end marker of an open block: the reporter writes the marker out in full.
     whole = start()
@@ -348,7 +348,7 @@ test('L5 torn tail: an append by the Codex hook repairs the tail or reports why,
     assert.ok(after.startsWith(whole), 'the end marker is whole again')
     assert.equal(occurrences(after, 'resume=codex-torn-session-2 '), 1, 'the new report is written')
     assert.deepEqual(fragmentTexts(), [cutEnd, cutStart].sort())
-    assert.doesNotMatch((await run(world, [])).stdout, /cut-off marker/)
+    assert.doesNotMatch((await run(world, ['--print'])).stdout, /cut-off marker/)
 
     // Text follows the cut: the reporter does not guess. It keeps every byte, adds its report
     // and the board goes on warning, so the damage stays in view.
@@ -362,7 +362,7 @@ test('L5 torn tail: an append by the Codex hook repairs the tail or reports why,
     assert.ok(after.startsWith(torn), 'every byte after the cut is kept')
     assert.equal(occurrences(after, 'resume=codex-torn-session-3 '), 1, 'the new report is written')
     assert.equal(fragments().length, saved, 'nothing is set aside when nothing is repaired')
-    assert.match((await run(world, [])).stdout, /cut-off marker line/)
+    assert.match((await run(world, ['--print'])).stdout, /cut-off marker line/)
 
     // The repair cannot be written: a one-line error, a failing exit, the board as it was and no
     // fragment left behind.
@@ -621,7 +621,7 @@ test('L5 OpenCode exit: a row whose end report missed the hook limit reads as st
     const title = 'Synthetic OpenCode exit card'
     block(world, { project: 'synthetic-project', agent: 'opencode', session: 'a1000002', resume: 'synthetic-opencode-exit', state: 'waiting', title, steps: ['- [ ] Synthetic next step'] })
     const server = await serve.start(world)
-    const rows = async () => ({ terminal: (await run(world, ['--all'])).stdout, page: await server.page() })
+    const rows = async () => ({ terminal: (await run(world, ['--print', '--all'])).stdout, page: await server.page() })
     for (const [surface, text] of Object.entries(await rows())) {
       const at = text.indexOf(title)
       assert.ok(at >= 0, `${surface} lost the row:\n${text}`)
@@ -660,7 +660,7 @@ test('L5 crashed agent: a working row with no event for the stale time of its ho
     world.jump(`${STALE_MS / 60000 + 1}m`)
     const server = await serve.start(world)
     const rows = {}
-    for (const [surface, text] of Object.entries({ terminal: (await run(world, ['--all'])).stdout, page: await server.page() })) {
+    for (const [surface, text] of Object.entries({ terminal: (await run(world, ['--print', '--all'])).stdout, page: await server.page() })) {
       const at = text.indexOf('Crashed agent card')
       assert.ok(at >= 0, `${surface} lost the row:\n${text}`)
       rows[surface] = text.slice(at, at + 300)

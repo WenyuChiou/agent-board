@@ -189,10 +189,12 @@ const sharedPageState = () => {
   const kept = pageDoneCache.filter(done => keepInboxDone({ [done.name]: done.stamp }, at)[done.name] !== undefined)
   return { ...pageStateCache, inboxDone: keepInboxDone({ ...pageStateCache.inboxDone, ...Object.fromEntries(kept.map(done => [done.name, done.stamp])) }, at) }
 }
+let viewPageState: ReturnType<typeof sharedPageState> | null = null
+let droppedLogCache: { at: number; text: string } | null = null
 
 const pending = (scrub?: (text: string) => string, isFresh = !isViewQuestionRead) => {
   const files = inboxFiles.read(isFresh)
-  const done = sharedPageState().inboxDone
+  const done = (viewPageState ?? sharedPageState()).inboxDone
   return peekInbox(files.filter(file => done[file.name] === undefined), readLog, scrub, s)
 }
 
@@ -391,6 +393,8 @@ let progressHealthCache: { source: string; isCutSettled: boolean; frozen: Readon
 const observeWriterQuestions = reusableQuestionObservation()
 const observeViewQuestions = reusableQuestionObservation()
 const readBoardView = (source: string, now: number) => {
+  const pageState = sharedPageState()
+  viewPageState = pageState
   for (const proof of [...pendingQuestionProofs.values()]) keepQuestionProof(proof.kind, proof.hash)
   if (progressProjectCache?.source !== source) progressProjectCache = { source, projects: parseProgress(source) }
   const projects = progressProjectCache.projects
@@ -516,14 +520,17 @@ const readBoardView = (source: string, now: number) => {
   questions ??= observeWriterQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', previewProofs ?? undefined, turns, [], frozen).ledger
   // A question marked answered in a pane on this machine is kept off the board too.
   const tail = progressHealthCache.tail
-  const pageState = sharedPageState()
   const sizes = { progress: Buffer.byteLength(source), store: pageState.store }
   const large = sizeWarnings(sizes, s)
   const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...large]
   const finished = countManualDone(projects, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now))
   const details = storageDetails(sizes, finished, s)
   const health = progressHealthCache.lines
-  const dropped = inboxDropped(read(join(dirname(path), 'progress-inbox', 'dropped.log')), prunedSince(now))
+  const droppedAt = Date.now()
+  if (droppedLogCache === null || droppedAt < droppedLogCache.at || droppedAt - droppedLogCache.at >= 60000) {
+    droppedLogCache = { at: droppedAt, text: read(join(dirname(path), 'progress-inbox', 'dropped.log')) }
+  }
+  const dropped = inboxDropped(droppedLogCache.text, prunedSince(now))
   const pruned = prunedNote({ ...prunedTotal(pageState.pruned, now), turns: dropped.age + dropped.cap }, s)
   // Proof writes above refresh this snapshot; drawing need not list the directory again.
   return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }

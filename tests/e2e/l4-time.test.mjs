@@ -230,8 +230,8 @@ describe('L4 time and scale', () => {
         const waiting = around(surface, text, task)
         assert.match(waiting, ageOf(EN.daysAgo(5)), `${surface}: the ask must say it is 5 days old`)
         assert.ok(text.includes(ask), `${surface} must show the ask:\n${text}`)
-        // Chat keeps the idle shelf to its count.
-        if (surface === 'chat') continue
+        // The plain print keeps the idle shelf to its count; --all opens it.
+        if (surface === 'print') continue
         const idle = around(surface, text, quiet)
         assert.ok(idle.includes(EN.sessionStopped(EN.daysAgo(7))), `${surface}: the idle task must say when it was last active: ${idle}`)
         assert.ok(!idle.includes(EN.justNow), `${surface} calls the idle task "just now": ${idle}`)

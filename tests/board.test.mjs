@@ -4441,7 +4441,7 @@ const serveIn = () => {
 }
 
 test('the board command picks text, the terminal board or the page from where it runs', () => {
-  assert.equal(pickSurface({ isTty: false }), 'page')
+  assert.equal(pickSurface({ isTty: false, env: {} }), 'page')
   assert.equal(pickSurface({ isTty: false, platform: 'win32', env: {} }), 'page')
   assert.equal(pickSurface({ isTty: false, platform: 'darwin', env: {} }), 'page')
   assert.equal(pickSurface({ isTty: false, platform: 'linux', env: { DISPLAY: ':0' } }), 'page')
@@ -7816,7 +7816,8 @@ test('the board script leaves idle tasks off the board, names how many, and list
   assert.equal(closed.status, 0, closed.stderr)
   assert.ok(closed.stdout.includes('2 idle 7+ days'), closed.stdout)
   assert.ok(closed.stdout.includes('● 0 waiting') && closed.stdout.includes('▸ 0 in progress'), closed.stdout)
-  assert.ok(!closed.stdout.includes('Quiet plan') && !closed.stdout.includes('Quiet block'), closed.stdout)
+  // --print keeps the older-questions shelf open while idle rows stay folded.
+  assert.ok(!closed.stdout.includes('Quiet block') && closed.stdout.includes('Publish, OK?'), closed.stdout)
   assert.deepEqual(closed.wrote, [])
   assert.deepEqual(closed.modified, [])
   const opened = idleRun(['--all'])
@@ -7846,8 +7847,9 @@ test('the CLI view ages manual completions from sidecar fingerprints without ren
   for (const held of [record, '{', JSON.stringify({ seen: {} })]) {
     const document = jsonRun({ file, beside: { 'progress-seen.json': held }, now: IDLE_NOW })
     const output = JSON.stringify(document.doneRecently)
-    assert.ok(!/Old completion|Unknown completion|Future completion|just now/.test(output), output)
+    assert.ok(!/Unknown completion|Future completion|just now/.test(output), output)
     assert.equal(output.includes('Fresh completion'), held === record, output)
+    assert.equal(output.includes('Old completion'), held === record, output)
   }
   // These surfaces currently omit recent completions; keep their existing output and
   // ensure chat never persists a new observation while constructing the shared view.

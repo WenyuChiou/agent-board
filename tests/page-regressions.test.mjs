@@ -31,7 +31,7 @@ const turn = answer => JSON.stringify({ session_id: 'synthetic-turn', cwd: '/wor
 
 // Execute the plugin's production functions in separate session contexts, without starting a host.
 const publisher = () => {
-  const source = readFileSync(new URL('../hooks/register.tsx', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../hooks/register.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const extract = (begin, end) => {
     const start = source.indexOf(begin)
     const stop = source.indexOf(end, start)
@@ -39,7 +39,7 @@ const publisher = () => {
     return source.slice(start, stop)
   }
   const selected = [
-    'const REWRITE_TRIES = 3; const AGAIN = Symbol("again"); let measuredStore = 0; let measuredPruned = { agent: 0, mirror: 0, turns: 0 }; let pendingCache = null; let pageStateFailure = null; let questionWrite = 0;',
+    'const REWRITE_TRIES = 3; const AGAIN = Symbol("again"); let measuredStore = 0; let measuredPruned = { agent: 0, mirror: 0, turns: 0 }; let pendingCache = null; let pageStateFailure = null; let publishedPageDone = null; let publishedPageState = null; const verifiedPageDone = new Set(); let questionWrite = 0;',
     extract('const PRUNED_PER_SWEEP =', '\n'),
     extract('const readText =', '\n\n// Every write this session'),
     extract('const removeFiles =', '\n\n// A rename either'),

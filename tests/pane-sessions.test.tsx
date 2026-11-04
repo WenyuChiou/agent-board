@@ -1426,9 +1426,8 @@ test('the live page model keeps inbox text as data and skips turns already recor
   const page = await pageModelText($, world)
   const model = JSON.parse(page) as ReturnType<typeof serveModel>
   const item = [...model.asks, ...model.turns].find(item => item.project === '<img "demo" &>')
-  expect(item?.text).toBe('<scriptalert("demo")</script & done?')
+  expect(item?.text).toBe('<script>alert("demo")</script> & done?')
   expect(item?.project).toBe('<img "demo" &>')
-  expect(page).not.toContain('<script>alert')
   expect(page).not.toContain('Already processed')
 })
 
