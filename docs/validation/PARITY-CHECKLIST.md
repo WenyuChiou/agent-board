@@ -38,7 +38,7 @@ Each cell is one of:
 - **PASS**
 - **FAIL**, with an issue number
 - **untested**, with the reason
-- **needs owner**, with the screen that stopped the check (sign-in, trust, consent, usage limit or config) and its words
+- **needs owner**, with the screen that stopped the check (sign-in, trust, consent, usage limit or config) and its words, with account names, emails and paths masked
 - **via the page**: checks c and d run once on the shared `--serve` page and terminal board, which get rows of their own; a host whose own turn did not reach the board is marked this way
 - **n/a**, with the reason: the check cannot apply, for example the agent has no connector or its service has ended
 
@@ -51,8 +51,20 @@ A cell may add a short note, and a `*` that points to a sentence under the table
 - **Work in a scratch project folder, with synthetic prompts only** ("Synthetic test: …"). Board checks c, d and f use a synthetic board through `CLAUDE_PROGRESS_FILE`.
 - **Never open an existing conversation or project.** If an app opens on one, start a new chat in the scratch folder at once.
 - **Screenshots:** at least one per surface, and one inside every CLI. Crop each to the scratch window, with no sidebar, history, account name or real path. Do not commit them. Keep them in a local folder, give the count in the record, and say in the PR body who holds them. Pictures in the repository follow CONTRIBUTING's image rules.
-- **Approvals:** you may approve a one-time or this-session prompt to run the board's own command (`--serve`, `--chat`) in the scratch folder, never an "always allow".
-- **Never act on the owner's behalf:** no signing in, typing a code, accepting terms, or approving a trust, hooks or consent prompt. Record "needs owner" and the words on the screen.
+- **Approvals:** you may approve a one-time or this-session prompt to run the board's own command (`--serve`, `--chat`) in the scratch folder, never an "always allow". The one exception is the board's own hooks approval in the kept test home, pressed after a yes (below).
+- **Sign-ins stay with the person whose computer runs the check:** never type a password, a sign-in code or a token, and never create an account. Record "needs owner" and the words on the screen, masked as above.
+- **Some prompts the checker may press after a yes** (owner, 2026-11-03: 「理論上你要用computer use幫我做才對」). Press only after the person says yes in chat to that item, through computer use or the browser tools. The yes covers the items on this run's list and is given in this run. A blanket yes, or a yes from an earlier run, does not count.
+  - a trust prompt for the scratch project folder;
+  - a hooks approval for the board's own hooks in the kept test home, which stays approved there (the Approvals exception);
+  - a consent or terms screen that an agent in this check shows in the kept test home or the scratch project folder;
+  - the browser's Authorize button for a sign-in the person started, to an agent in this check.
+- **Everything else stays with the person.** That covers:
+  - any other consent, terms or Authorize screen;
+  - a key that must be typed into a terminal or an IDE (computer use can only click there);
+  - any prompt about something outside the scratch project folder, the kept test home or the board's own hooks.
+
+  Record each of these as "needs owner".
+- **The record names each prompt the checker pressed,** with the words on the screen (account names, emails and paths masked), and says it was pressed after the person's yes.
 - **Spend paid quotas carefully:** at most two short turns per agent on a paid quota.
 - **Clean up after yourself:** afterwards, stop only the processes you started.
 - **Write down what the run left behind:** self-updates, history entries, private data that showed on screen or was sent to a model, rows on the real board, held inbox files, the clipboard and open tabs.
@@ -62,7 +74,7 @@ A cell may add a short note, and a `*` that points to a sentence under the table
 Every isolated run (How to run it safely) uses one test home that is kept between releases on the computer that runs the check, so its one-time steps stay done (owner, 2026-11-03: 「在這樣測試以後每個版本都要嗎 這樣我還要操作太麻煩了」). Any computer with the apps installed may run the check (RULES R7). Each computer keeps its own test home, and the person whose computer it is does that home's one-time steps with their own accounts. Below, "the person" means them.
 
 - **One folder, kept.** It sits outside every repository and outside the real home's config folders. Every variable in the isolation list points into it. The scratch project folder sits inside it too, because a trust is kept for that folder's path. Do not empty it or start a new one between runs.
-- **The person's steps there are done once.** The person signs in, trusts the scratch project folder and approves hooks in that home. Later runs reuse what is there. A step comes back only when its screen comes back, for example after an expired sign-in, or a hook approval after the release changed that hook.
+- **The person's steps there are done once.** The person signs in to each agent in that home. The trust prompt for the scratch project folder and the board's hooks approvals are either done by the person or pressed by the checker after the person's yes (How to run it safely). Later runs reuse what is there. A step comes back only when its screen comes back, for example after an expired sign-in, or a hook approval after the release changed that hook.
 - **Each run starts by installing the release in it.** Run setup with `--apply` against the test home, never the real one. Then read each host's hooks version there, as the first rule above asks.
 - **Nothing comes in from the real home:** no credentials, config, history or `progress.md`.
 - **Each check starts a new chat.** Earlier test chats build up in the kept home; none is reopened.
@@ -73,8 +85,8 @@ The app rows run on the person's own install, which they keep on the release. Ev
 
 ## What the person does, all at once
 
-- **Before the first check, one list.** The checker sends the person every screen it expects to need them. It writes in their language, in the chat where they talk with the checker, not on GitHub. That means each `needs owner` cell of the last record, plus any one-time step the kept home still lacks. Each item names the window, what to press and the words on the screen, with any account name or email masked. The checker then waits for one answer.
-- **During the run, no questions.** A screen that needs the person makes its cell `needs owner`, and the checker goes on with the other cells.
+- **Before the first check, one list.** The checker sends the person every screen it expects to need them. It writes in their language, in the chat where they talk with the checker, not on GitHub. That means each `needs owner` cell of the last record, plus any one-time step the kept home still lacks. Each item names the window, what to press and the words on the screen, with any account name or email masked. Each item also says who presses it: "I press it after your yes" for a prompt the checker may press (How to run it safely), or "you do it" for a sign-in or a key in a terminal. The checker then waits for one answer, which may say yes to each item it may press.
+- **During the run, no questions.** A screen that needs the person makes its cell `needs owner`, and the checker goes on with the other cells. The checker presses a prompt during the run only if the person already said yes to that item.
 - **At the end, one more list** of those screens. After the answer, the checker re-runs only those cells. A screen that appears in that re-run leaves its cell `needs owner` in this record and goes on the next run's first list.
 - So a run asks at most twice, and not at all when the kept home already has everything it needs.
 
