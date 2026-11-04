@@ -1229,16 +1229,16 @@ const syncPageState = async ($: EngineInterface, done?: Record<string, string>):
         return { text, file: pageDonePath(path, sha256(text)) }
       })
       .filter(({ file }) => !verifiedPageDone.has(file))
-      .slice(0, 50)
     const dir = path.replace(/[\\/][^\\/]*$/, '')
     const existing = receipts.length === 0 ? new Set<string>() : new Set((await $.fs.list(dir)).filter(entry => entry.kind === 'file').map(entry => entry.name))
-    for (const { text, file } of receipts) {
+    for (const { text, file } of receipts.slice(0, 50)) {
       if (!existing.has(file.replace(/^.*[\\/]/, '')) || await readText($, file) !== text) {
         const temporary = `${file}.tmp-${await $.session.id()}-${questionWrite++}`
         const isWin = await isWindows($, path)
         try {
           await $.fs.write(temporary, text)
           if (await $.fs.read(temporary) !== text || !(await replaceFile($, temporary, file, isWin))) throw new Error('PAGE_STATE_NOT_VERIFIED')
+          if (await $.fs.read(file).catch(() => null) !== text) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
         } finally {
           if (await $.fs.exists(temporary)) await removeFiles($, [temporary], isWin)
         }
@@ -1251,9 +1251,13 @@ const syncPageState = async ($: EngineInterface, done?: Record<string, string>):
       store: measuredStore,
       pruned,
     }))
+    const saved = readPageState(await readText($, pageStatePath(path)))
+    if (Object.entries(kept).some(([name, stamp]) => saved.inboxDone[name] !== stamp) || saved.store !== measuredStore || JSON.stringify(saved.pruned) !== JSON.stringify(pruned)) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
+    pageStateFailure = null
+    // More receipts wait: leave the publication unrecorded so the next poll writes the next batch.
+    if (receipts.length > 50) return
     publishedPageDone = JSON.stringify(processed)
     publishedPageState = publication
-    pageStateFailure = null
   } catch (error) {
     // Publication is retried at the next poll. Its warning must not replace the authoritative inbox.
     const code = (error as { code?: unknown } | null)?.code
