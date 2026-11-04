@@ -42,3 +42,15 @@ Owner, 2026-11-03: 「AI還能夠從agent-board了解其他AI的session的進度
 
 - **Source and age:** every status says where it comes from and how old it is, and it says "unsure" when it is stale (#209).
 - **Private data:** nothing private goes onto GitHub ([RULES.md, R8](RULES.md#r8-what-stays-off-github)). A shared row goes out redacted (#209, row C).
+
+## 7. Rules borrowed from good product design
+
+The owner chose these on 2026-11-04 from well-known product and design practice. Each one makes the person do one thing less, or never do a thing twice.
+
+- **It never breaks.** After any update the board still opens. When something fails, it falls back to a state that works and does not leave the person with nothing. Owner, 2026-10-22: 「不能像上次一次/progress直接不能用」 (#371).
+- **Show only what needs you.** The first screen shows what needs the person now. Old questions and finished work fold away and retire by themselves (owner: 「適度退休」; #790, #511).
+- **You can take it back.** The person can undo an archive or a "done" (#566), and stop a run that a press started (#565). This is "user control and freedom" in Jakob Nielsen's usability heuristics.
+- **The product carries the complexity.** Complexity does not disappear; someone carries it (Larry Tesler's law of conservation of complexity). Setup and the board carry it, so the person does not. For example, one-step install handles each agent's files (#868).
+- **Focus means saying no.** Each version does a few things well. A feature that goes against these rules needs the owner's word on its issue first (Steve Jobs on focus; Dieter Rams, "less, but better").
+- **Design is how it works.** What counts is that a thing works with one press, not only how it looks: an answer that arrives beats a nicer button (Steve Jobs: design is not just how it looks and feels, but how it works).
+- **The person decides.** An agent never makes a choice that is the person's. A message says who sent it, and a status the board is not sure of says "unsure" (Microsoft's Guidelines for Human-AI Interaction; Google's People + AI Guidebook).
