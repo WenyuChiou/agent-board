@@ -2473,7 +2473,7 @@ export const LINES = [
 "    return \"zh-TW\";",
 "  if (/(zh[-_]?(cn|sg|hans))|简|simplified|chinese|中文|^zh\\b/.test(text))",
 "    return \"zh-CN\";",
-"  if (/^en\\b|english|英文|英語|英语/.test(text))",
+"  if (/^en(?:\\b|_)|english|英文|英語|英语/.test(text))",
 "    return \"en\";",
 "  return null;",
 "};",

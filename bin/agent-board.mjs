@@ -19,10 +19,16 @@ const langOf = value => {
   if (exact !== undefined) return exact
   if (/(zh[-_]?(tw|hk|mo|hant))|繁|traditional|taiwan|台灣|臺灣|香港/.test(text)) return 'zh-TW'
   if (/(zh[-_]?(cn|sg|hans))|简|simplified|chinese|中文|^zh\b/.test(text)) return 'zh-CN'
-  if (/^en\b|english|英文|英語|英语/.test(text)) return 'en'
+  if (/^en(?:\b|_)|english|英文|英語|英语/.test(text)) return 'en'
   return null
 }
-let language = langOf(flag('--lang')) ?? langOf(process.env.LANG) ?? 'en'
+// Windows usually has no LANG, so independent commands also check the system locale.
+const systemLang = env => {
+  const language = langOf(env)
+  if (language !== null) return language
+  try { return langOf(Intl.DateTimeFormat().resolvedOptions().locale) } catch { return null }
+}
+let language = langOf(flag('--lang')) ?? systemLang(process.env.LANG) ?? 'en'
 const at = ['en', 'zh-TW', 'zh-CN'].indexOf(language)
 const usage = [
   `agent-board ${v}: a local board for coding agents.
@@ -241,7 +247,7 @@ if (!installed) {
 }
 let prelude = {}
 try { prelude = JSON.parse(readFileSync(installed, 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, '')) ?? {} } catch {}
-language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? langOf(process.env.LANG) ?? 'en'
+language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? systemLang(process.env.LANG) ?? 'en'
 // The first line holds account settings, so it must not affect build comparisons.
 const hash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
 if (!isChat && !args.includes('--status')) {

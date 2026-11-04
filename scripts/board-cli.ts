@@ -70,8 +70,15 @@ const progressFile = (): string => {
   return localProgressPath(flag('--progress-file'), BAKED.path || join(config || join(homedir(), '.claude'), 'progress.md'))
 }
 
+// Windows usually has no LANG, so the board also checks the system locale.
+const systemLang = (env: unknown) => {
+  const language = langOf(env)
+  if (language !== null) return language
+  try { return langOf(Intl.DateTimeFormat().resolvedOptions().locale) } catch { return null }
+}
+
 const path = progressFile()
-const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? langOf(process.env.LANG) ?? 'en']
+const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? systemLang(process.env.LANG) ?? 'en']
 
 // Files changed since the board last read progress.md in full. A read refused because another
 // program holds the file open can say that nothing was changed only while this is 0. It is

@@ -39,6 +39,8 @@ npx @wenyuchiou/agent-board
 
 The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board where you are: in its own window on a desktop, the live terminal board over SSH, or text for agents. In an agent's chat, `/agent-board` opens the same board. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. To remove it, see [Update and uninstall](docs/GUIDE.md#update-and-uninstall). More in the [setup guide](docs/SETUP.md#install-with-npm).
 
+The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise. To choose one, add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to both setup lines; the board, its page and `stop` then use it. An account connected through the Claude Code plugin uses `/progress lang` instead.
+
 Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
 
 Then:

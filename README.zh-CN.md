@@ -39,6 +39,8 @@ npx @wenyuchiou/agent-board
 
 第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，不写入任何东西；第二行才真正写入；第三行在所在位置打开看板：在桌面开窗口、SSH 开终端实时看板、agent 印纯文本。在 agent 对话中，输入 `/agent-board` 打开同一个看板。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要卸载，见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。
 
+看板语言跟随系统设置：系统是繁体或简体中文就用中文，其他用英文。要自己指定，在两行 setup 都加上 `--lang zh-CN`（或 `zh-TW`、`en`），之后看板、网页和 `stop` 都会用这个语言。通过 Claude Code 插件接上的账号，改用 `/progress lang`。
+
 用同一个 Wi-Fi 的手机，扫 `npx @wenyuchiou/agent-board --serve --lan` 印出的二维码。只在信得过的网络上用：这个链接没有加密，拿到的人都能打开网页。详情见[看板的网页](#看板的网页)。
 
 然后：
