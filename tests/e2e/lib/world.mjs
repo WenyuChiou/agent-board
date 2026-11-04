@@ -105,6 +105,14 @@ const original = cp.spawnSync
 cp.spawnSync = (file, args, options) => {
   if (/(?:^|[\\\\/])(?:clip(?:\\.exe)?|pbcopy|wl-copy|xclip|xsel)$/.test(String(file))) {
     writeFileSync(process.env.E2E_CLIPBOARD, options.input)
+    writeFileSync(process.env.E2E_CLIPBOARD + '.program', String(file))
+    return { status: 0, stdout: '', stderr: '' }
+  }
+  // On Windows, text outside ASCII goes to PowerShell's Set-Clipboard, as base64 in the command.
+  const encoded = /(?:^|[\\\\/])powershell\\.exe$/i.test(String(file)) && /FromBase64String\\('([A-Za-z0-9+/=]*)'\\)/.exec((args ?? []).join(' '))
+  if (encoded) {
+    writeFileSync(process.env.E2E_CLIPBOARD, Buffer.from(encoded[1], 'base64').toString('utf8'))
+    writeFileSync(process.env.E2E_CLIPBOARD + '.program', String(file))
     return { status: 0, stdout: '', stderr: '' }
   }
   return original(file, args, options)

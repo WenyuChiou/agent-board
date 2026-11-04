@@ -610,6 +610,18 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
 // Windows looks in the current folder first for a program started by name, and an agent's folder
 // can be a cloned repository: the system's own tools go by their full path, from the board's folder.
 const system32 = (name: string): string => join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', name)
+const powershell = (): string => system32('WindowsPowerShell\\v1.0\\powershell.exe')
+
+// clip.exe reads its input in the console's code page (950 on a Traditional Chinese Windows), so text
+// outside ASCII reached the clipboard garbled while the board said it was copied (#817). That text goes
+// to PowerShell's Set-Clipboard as base64, which no code page changes; PowerShell takes about a second
+// to start, so ASCII stays with clip.exe. A command line holds at most 32,767 characters; 30,000 leaves
+// room for the program's path and its flags.
+const windowsClipboard = (text: string): Array<[string, string[]]> => {
+  if (/^[\x00-\x7f]*$/.test(text)) return [[system32('clip.exe'), []]]
+  const command = `Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(text).toString('base64')}')))`
+  return command.length < 30000 ? [[powershell(), ['-NoProfile', '-NonInteractive', '-Command', command]]] : []
+}
 
 const copy = (text: string): boolean => {
   // OSC 52 asks the terminal itself to set the clipboard, which works over SSH too; the
@@ -618,9 +630,14 @@ const copy = (text: string): boolean => {
   const isOsc = process.stdout.isTTY === true
   if (isOsc) process.stdout.write(`\u001b]52;c;${Buffer.from(text).toString('base64')}\u0007`)
   const tools: Array<[string, string[]]> =
-    process.platform === 'darwin' ? [['pbcopy', []]] : process.platform === 'win32' ? [[system32('clip.exe'), []]] : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['-b', '-i']]]
-  // A clipboard tool that hangs (X forwarded over a slow link) must not freeze the board.
-  const isNative = tools.some(([tool, rest]) => spawnSync(tool, rest, { cwd: dirname(path), input: text, stdio: ['pipe', 'ignore', 'ignore'], timeout: 2000 }).status === 0)
+    process.platform === 'darwin' ? [['pbcopy', []]] : process.platform === 'win32' ? windowsClipboard(text) : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['-b', '-i']]]
+  // A clipboard tool that hangs (X forwarded over a slow link) must not freeze the board. PowerShell
+  // takes about a second to start, so it gets 5 s; it reads the text from its command, not its input,
+  // and runs hidden so no console window flashes.
+  const isNative = tools.some(([tool, rest]) => {
+    const isPowershell = tool === powershell()
+    return spawnSync(tool, rest, { cwd: dirname(path), input: isPowershell ? undefined : text, stdio: ['pipe', 'ignore', 'ignore'], timeout: isPowershell ? 5000 : 2000, windowsHide: isPowershell }).status === 0
+  })
   return isNative || isOsc
 }
 
