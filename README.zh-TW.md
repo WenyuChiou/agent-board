@@ -37,7 +37,9 @@ npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入，第三行在所在位置打開看板：在桌面開視窗、SSH 開終端機即時看板、agent 印純文字。在 agent 對話中，輸入 `/agent-board` 打開同一個看板。若要停止看板服務，執行 `npx @wenyuchiou/agent-board stop`。想用較短的 `agent-board` 指令，先執行一次 `npm install -g @wenyuchiou/agent-board`。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。
+第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入，第三行在所在位置打開看板：在桌面開視窗、SSH 開終端機即時看板、agent 印純文字。在 agent 對話中，輸入 `/agent-board` 打開同一個看板。若要停止看板服務，執行 `npx @wenyuchiou/agent-board stop`。想用較短的 `agent-board` 指令，先執行一次 `npm install -g @wenyuchiou/agent-board`。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`。若要移除，見[更新與移除](docs/GUIDE.zh-TW.md#更新與移除)。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。
+
+看板語言跟著系統設定：系統是繁體或簡體中文就用中文，其他用英文。要自己指定，在兩行 setup 都加上 `--lang zh-TW`（或 `zh-CN`、`en`），之後看板、網頁和 `stop` 都會用這個語言。透過 Claude Code 外掛接上的帳號，改用 `/progress lang`。
 
 用同一個 Wi-Fi 的手機，掃 `npx @wenyuchiou/agent-board --serve --lan` 印出的 QR 碼。只在信得過的網路上用：這個連結沒有加密，拿到的人都能打開網頁。細節見[看板的網頁](#看板的網頁)。
 
@@ -313,4 +315,4 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 
 [MIT](LICENSE)。agent 的圖示來自 [Simple Icons](https://simpleicons.org)（CC0）和 [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT），這些圖示屬於各自的擁有者；沒有圖示的 agent 以名字的第一個字母表示。
 
-<p align="center"><sub>版本 0.24.0 · <a href="CHANGELOG.md">更新紀錄</a></sub></p>
+<p align="center"><sub>最新穩定版本 0.24.2 · <a href="CHANGELOG.md">更新紀錄</a></sub></p>

@@ -10,7 +10,9 @@ The maintainer session, or a collaborator when the maintainer is away, prepares 
 |---|---|---|
 | GitHub release | marked Latest | marked Pre-release |
 | npm dist-tag | `latest`, which `npx @wenyuchiou/agent-board` installs | `next`: `npx @wenyuchiou/agent-board@next` |
-| README version line | updated | unchanged |
+| README version line | `Latest stable version: X.Y.Z` | `Latest stable version: <last stable>`, unchanged |
+
+The README line names the latest stable version in every package, so a pre-release package never reads as though the last stable version were its own version.
 
 The release gate, checked on the exact tagged commit:
 
@@ -28,6 +30,11 @@ A pre-release that passes the gate later is promoted in place, never re-tagged o
 gh release edit agent-board--vX.Y.Z --prerelease=false --latest
 npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
 ```
+
+The owner runs the npm line. The same day, a promotion also does what a stable release does at steps 8 and 10 below:
+- **The release notes.** Their first line, "Pre-release: this version did not pass the release gate (docs/RELEASING.md).", becomes "Stable since YYYY-MM-DD: this version passed the release gate on its tagged commit", followed by its parity and live-run records. Edit it with `gh release edit agent-board--vX.Y.Z --notes-file notes.md`.
+- **The README line.** A pull request changes `Latest stable version:` to X.Y.Z in all three READMEs.
+- **The milestone.** It is closed.
 
 ## Checklist
 
@@ -50,7 +57,7 @@ npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
    gh release create agent-board--vX.Y.Z --verify-tag --title "Agent Board X.Y.Z" --notes-file notes.md --prerelease --latest=false
    ```
 9. **npm.** The owner publishes; see below.
-10. **Close.** Close the milestone. For a stable release, update the README version line.
+10. **Close.** Close the milestone. For a stable release, update the README line to the new stable version.
 
 ## Publish to npm (owner only)
 

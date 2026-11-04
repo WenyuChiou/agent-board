@@ -23,6 +23,8 @@ line gives the `--agent <name>` command to retry after fixing its files. Setup e
 nonzero when every selected agent has a conflict. A second run with nothing to change
 says each agent is already set up and writes nothing.
 
+Without `--lang`, setup uses `LANG`, then the system language, else English, and writes that language into the files it installs.
+
 Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`),
 the next steps include both `claude plugin` commands to connect it, even alongside other
 agents. If only Claude Code is found, setup prints its plugin guidance and exits 0.

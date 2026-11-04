@@ -163,6 +163,25 @@ describe('L0 discover and install from the README', () => {
     }
   })
 
+  test('the Quick start links to the uninstall steps in the guide in every language', () => {
+    const links = {
+      en: 'docs/GUIDE.md#update-and-uninstall',
+      'zh-TW': 'docs/GUIDE.zh-TW.md#更新與移除',
+      'zh-CN': 'docs/GUIDE.zh-CN.md#更新和卸载',
+    }
+    const words = {
+      en: /\b(?:remove|uninstall)\b/i,
+      'zh-TW': /移除/,
+      'zh-CN': /卸载/,
+    }
+    for (const [name, lang] of READMES) {
+      const quick = section(read(name), SECTIONS[lang][0])
+      assert.ok(quick, `${name}: Quick start exists`)
+      const line = quick.split('\n').find(l => words[lang].test(l) && l.includes(links[lang]))
+      assert.ok(line, `${name}: Quick start has a line on how to remove it linking to ${links[lang]}`)
+    }
+  })
+
   test('L0 README: each README describes Send as docs/MESSAGING.md does and its cover alt text agrees', () => {
     // Match the relationships in each local statement, rather than technical implementation
     // vocabulary or isolated words that could appear in an unrelated paragraph.
