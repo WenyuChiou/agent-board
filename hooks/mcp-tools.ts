@@ -42,7 +42,7 @@ export const mcpRequest = (line: string, version: string, now: number): { now: n
   const params = request.params as Record<string, unknown> | undefined
   if (request.method === 'initialize') {
     const versions = ['2024-11-05', '2025-03-26', '2025-06-18']
-    return reply({ protocolVersion: versions.includes(String(params?.protocolVersion)) ? params!.protocolVersion : '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'agent-board', version } })
+    return reply({ protocolVersion: typeof params?.protocolVersion === 'string' && versions.includes(params.protocolVersion) ? params.protocolVersion : '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'agent-board', version } })
   }
   if (request.method === 'ping') return reply({})
   if (request.method === 'tools/list') return reply({ tools: MCP_TOOLS })

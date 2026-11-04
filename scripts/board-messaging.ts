@@ -19,7 +19,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     .map(one => ({ ...one, origin: one.origin ?? 'local', hash: one.hash ?? (typeof one.text === 'string' && one.text !== '' ? textHash(one.text) : '') }))
   for (const one of messages) {
     messageId(one.id)
-    if (one.framingNonce !== undefined && (typeof one.framingNonce !== 'string' || !/^[0-9a-f]{32}$/.test(one.framingNonce))) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.framingNonce !== undefined && (typeof one.framingNonce !== 'string' || !/^[0-9a-f]{32}$/.test(one.framingNonce)) || one.awaitsAck !== undefined && typeof one.awaitsAck !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
     messageId(one.turn)
     messageText(one.from, 300)
@@ -53,18 +53,19 @@ const mailboxAction = (state: MessageState, action: string, body: Record<string,
     return { state: next, result: { contested: next.mailboxes!.find(one => one.id === mailboxId(agent, session))!.contested === true } }
   }
   if (action === 'mailbox-turn') {
-    messageFields(body, ['agent', 'session', 'surface', 'before'])
+    messageFields(body, ['agent', 'session', 'surface', 'before', 'isRestricted'])
+    if (body.isRestricted === true && (state.mailboxes?.find(one => one.id === mailboxId(agent, session))?.mcpLeaseUntil ?? 0) > now) throw new Error('NO_LEASE')
     if (body.before !== undefined && (typeof body.before !== 'number' || now > body.before)) return { state, result: { message: null } }
     const next = takeMailboxMessage(state, agent, session, messageText(body.surface, 100), now, STALE_MS, randomBytes(3).toString('hex'))
     return { state: next.state, result: { message: next.message } }
   }
-  messageFields(body, action === 'mailbox-end' ? ['agent', 'session'] : action === 'mailbox-ack' ? ['agent', 'session', 'id', 'nonce', 'reply'] : ['agent', 'session', 'id', 'nonce'])
+  messageFields(body, action === 'mailbox-end' ? ['agent', 'session'] : action === 'mailbox-ack' ? ['agent', 'session', 'id', 'nonce', 'reply'] : ['agent', 'session', 'id', 'nonce', 'awaitsAck'])
   const target = state.mailboxes?.find(one => one.id === mailboxId(agent, session))
   if (action === 'mailbox-ack' && !target) throw new Error('OFFLINE')
   const next = action === 'mailbox-end' ? endMailbox(state, agent, session, now)
     : action === 'mailbox-ack' ? messageReceipt(state, target!, { id: body.id, nonce: body.nonce, reply: body.reply, status: 'acknowledged' }, now)
       : acceptMailboxMessage(state, agent, session, messageId(body.id), messageText(body.nonce, 6), now)
-  return { state: next, result: { ok: true } }
+  return { state: body.awaitsAck === true ? { ...next, messages: next.messages.map(one => one.id === body.id ? { ...one, awaitsAck: true } : one) } : next, result: { ok: true } }
 }
 
 const LEASE_MS = 15_000
@@ -423,7 +424,7 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
           const req = request(new URL(`/api/messages/${action}`, url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t')!, 'content-type': 'application/json' } }, res => {
             let text = ''
             res.setEncoding('utf8')
-            res.on('data', chunk => { text += chunk; if (text.length > 32_768) req.destroy() })
+            res.on('data', chunk => { text += chunk; if (text.length > 65_536) req.destroy() })
             res.on('end', () => {
               clearTimeout(timer)
               try {

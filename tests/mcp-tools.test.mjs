@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -367,4 +367,83 @@ test('a hub-less store is served and missing folders stay absent', async t => {
       assert.equal(JSON.parse(readFileSync(file)).messages[1].status, 'accepted')
     })
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a send refused for the target does not cost the sender its lease', async () => {
+  const root = temp()
+  let board
+  try {
+    prepare(root)
+    board = await hub(root)
+    const now = Date.now()
+    for (const owner of ['7:one', '8:two']) board.store.act('mcp-enroll', { agent: 'codex', session: 'beta', surface: 'mcp', owner, folderDigest: cwdDigest(realpathSync(root)), until: now + MCP_LEASE_MS }, now)
+    const server = createMcpServer(options(root))
+    assert.equal((await call(server, 'board_send', { agent: 'codex', session: 'beta', text: 'hello' }, now)).data.code, 'CONTESTED')
+    assert.equal((await call(server, 'board_status', {}, now)).data.level, 'leased')
+  } finally {
+    await board?.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a strange protocolVersion gets the default and keeps the stream alive', async () => {
+  const root = temp()
+  try {
+    prepare(root)
+    const seen = [], input = new Readable({ read() {} })
+    const output = new Writable({ write(chunk, _encoding, done) { seen.push(JSON.parse(String(chunk))); done() } })
+    input.push(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: { toString: 1 } } })}\n`)
+    input.push(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' })}\n`)
+    input.push(null)
+    await runMcp(options(root, { env: {} }), input, output)
+    assert.equal(seen[0].result.protocolVersion, '2025-06-18')
+    assert.deepEqual(seen[1].result, {})
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('only a message taken by a lease holder holds its session', async () => {
+  const root = temp()
+  let board
+  try {
+    prepare(root)
+    board = await hub(root)
+    const now = Date.now(), server = createMcpServer(options(root))
+    await server.start(now)
+    const target = board.store.snapshot(now).mailboxes[0].id
+    const page = id => board.store.act('send', { id, target, turn: 'session', text: 'hello' }, now)
+    page('by-hook')
+    const access = mcpMailbox(join(root, 'messages'))
+    const taken = (await access('mailbox-turn', { agent: 'codex', session: 'alpha', surface: 'hook' }, now)).message
+    await access('mailbox-accept', { agent: 'codex', session: 'alpha', id: taken.id, nonce: taken.nonce }, now)
+    page('by-mcp')
+    const inbox = await call(server, 'board_inbox', {}, now)
+    await inbox.accepted()
+    assert.equal(inbox.data.message.id, 'by-mcp')
+    assert.throws(() => page('next'), /PAIR_BUSY/)
+    assert.deepEqual((await call(server, 'board_inbox', {}, now)).data, { message: null })
+    await call(server, 'board_ack', { id: 'by-mcp', nonce: inbox.data.message.nonce }, now)
+    assert.equal(page('next').status, 'queued')
+  } finally {
+    await board?.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a process without the lease cannot take a lease holder\'s message, and an unverified message cannot be passed on', async () => {
+  const root = temp()
+  let board
+  try {
+    prepare(root)
+    board = await hub(root)
+    const now = Date.now(), holder = createMcpServer(options(root))
+    await holder.start(now)
+    const restricted = createMcpServer(options(root, { env: { AGENT_BOARD_AGENT: 'codex', AGENT_BOARD_SESSION_ID: 'alpha' } }))
+    board.store.act('send', { id: 'kept', target: board.store.snapshot(now).mailboxes[0].id, turn: 'session', text: 'hello' }, now)
+    assert.equal((await call(restricted, 'board_inbox', {}, now)).data.code, 'NO_LEASE')
+    assert.equal(board.store.snapshot(now).messages[0].status, 'queued')
+    assert.equal((await call(restricted, 'board_send', { agent: 'codex', session: 'alpha', text: 'hi', id: 'loose' }, now)).data.hops, 2)
+  } finally {
+    await board?.close()
+    rmSync(root, { recursive: true, force: true })
+  }
 })

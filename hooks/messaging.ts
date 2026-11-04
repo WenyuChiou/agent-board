@@ -24,10 +24,12 @@ export type Message = {
   claimed: number
   nonce: string
   framingNonce?: string
+  // Handed over to a caller that can acknowledge it, so it holds its target until it does (roadmap invariant 4).
+  awaitsAck?: boolean
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 export const isMailboxTarget = (id: string): boolean => /^mailbox_[0-9a-f]{24}$/.test(id)
-const isHookDelivered = (one: Message, state: MessageState): boolean => one.status === 'accepted' && isMailboxTarget(one.target) && !state.mailboxes?.find(target => target.id === one.target)?.mcpOwner
+const isHookDelivered = (one: Message): boolean => one.status === 'accepted' && isMailboxTarget(one.target) && !one.awaitsAck
 
 export const FINISHED_KEEP_MS = 24 * 60 * 60 * 1000
 export const OPEN_LIMIT_MS = 30 * 60 * 1000
@@ -164,10 +166,11 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   if (target.contested) throw new Error('CONTESTED')
   if (target.turn !== request.turn) throw new Error('STALE_TURN')
   const previous = from === 'board' ? undefined : state.messages.filter(one => one.to === from && one.claimed > 0).reduce<Message | undefined>((latest, one) => !latest || one.claimed >= latest.claimed ? one : latest, undefined)
-  const hops = 1 + (previous?.hops ?? 0)
+  // Nothing tells whose turn an unverified sender is in, so its message starts at the limit and cannot be passed on.
+  const hops = from === 'unverified' ? HOP_LIMIT : 1 + (previous?.hops ?? 0)
   if (hops > HOP_LIMIT) throw new Error('HOP_LIMIT')
   const to = address(target.agent, target.session)
-  const open = state.messages.filter(one => one.to === to && isOpen(one) && !isHookDelivered(one, state))
+  const open = state.messages.filter(one => one.to === to && isOpen(one) && !isHookDelivered(one))
   if (open.length >= TARGET_OPEN_CAP) throw new Error('TARGET_BUSY')
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
@@ -177,7 +180,7 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
 }
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string): { state: MessageState; messages: Message[] } => {
   if (target.contested || target.expires <= now) return { state, messages: [] }
-  const busy = state.messages.some(one => one.to === address(target.agent, target.session) && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one, state))
+  const busy = state.messages.some(one => one.to === address(target.agent, target.session) && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one))
   const messages = busy ? [] : state.messages.filter(one => one.target === target.id && one.turn === target.turn && one.status === 'queued').slice(0, 1)
   if (messages.length === 0) return { state, messages }
   const claimed = messages.map(one => ({ ...one, status: 'uncertain' as const, claimed: now, nonce, updated: now }))

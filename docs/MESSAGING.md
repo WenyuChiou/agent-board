@@ -632,6 +632,8 @@ An unbound caller can read status and send as unverified, but has no inbox.
 Acknowledgements require a lease (`NO_LEASE`); an unnamed inbox or ACK gets `NO_SESSION`.
 Sending requires the running board hub (`BOARD_NOT_RUNNING`) and a target enrolled by MCP
 in the same workspace (`WORKSPACE_UNKNOWN` or `WORKSPACE_MISMATCH` otherwise).
-Contested owners, peer pause, hop limit and pair budget can refuse delivery.
+Contested owners, peer pause, hop limit and pair budget can refuse delivery. Peer pause and pair budget
+also apply to a connected adapter's own sends. An unverified sender's message cannot be passed on.
+A message taken by a lease holder holds its session until `board_ack` or 30 minutes; a hook's does not.
 Inbox acceptance means the response write completed; ACK separately records acknowledgement.
 There is no parked wait, progress notification, host launcher or automatic MCP configuration yet.

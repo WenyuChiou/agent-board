@@ -56,11 +56,16 @@ export const createMcpServer = (o: Options) => {
       level = 'leased'
     }
     if (level === 'leased') {
-      until = now + MCP_LEASE_MS
-      const result = await access('mcp-enroll', { ...binding(), owner: `${parent}:${env.AGENT_BOARD_HOST_STARTED}`, folderDigest, until }, now)
-      if (result.contested) {
+      try {
+        const result = await access('mcp-enroll', { ...binding(), owner: `${parent}:${env.AGENT_BOARD_HOST_STARTED}`, folderDigest, until: now + MCP_LEASE_MS }, now)
+        until = now + MCP_LEASE_MS
+        if (result.contested) {
+          level = 'restricted'
+          isRevoked = true
+        }
+      } catch (error) {
         level = 'restricted'
-        isRevoked = true
+        throw error
       }
     }
   }
@@ -90,11 +95,11 @@ export const createMcpServer = (o: Options) => {
           if (level !== 'leased') throw new Error('NO_LEASE')
           return reply(toolResult(await access('mailbox-ack', { agent, session, id: args.id, nonce: args.nonce, reply: `ACK ${args.nonce}${args.summary ? ` ${args.summary}` : ''}` }, now)))
         }
-        const result = await access('mailbox-turn', binding(), now), message = result.message as Message | null
-        return reply(toolResult({ message: message ? { id: message.id, from: senderLabel(message.from), nonce: message.nonce, envelope: deliveryText(message, o.s) } : null }), message ? () => access('mailbox-accept', { agent, session, id: message.id, nonce: message.nonce }, now) : undefined)
+        const result = await access('mailbox-turn', { ...binding(), ...(level === 'leased' ? {} : { isRestricted: true }) }, now), message = result.message as Message | null
+        return reply(toolResult({ message: message ? { id: message.id, from: senderLabel(message.from), nonce: message.nonce, envelope: deliveryText(message, o.s) } : null }), message ? () => access('mailbox-accept', { agent, session, id: message.id, nonce: message.nonce, ...(level === 'leased' ? { awaitsAck: true } : {}) }, now) : undefined)
       } catch (error) {
         const code = error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING'
-        if (code === 'CONTESTED') {
+        if (code === 'CONTESTED' && name !== 'board_send') {
           level = 'restricted'
           isRevoked = true
         }
