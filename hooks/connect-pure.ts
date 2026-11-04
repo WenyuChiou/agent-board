@@ -1030,8 +1030,10 @@ export const setupOwnership = (hooks: readonly AgentHook[], home: string, sep: s
     if (hook.label === '' || !(hook.dirs ?? [hook.dir]).some(exists)) continue
     const roots = [hook.file, ...(hook.setupFile === undefined ? [] : [hook.setupFile])].flatMap(one => setupHookRoots(exists(one) ? read(one) ?? '' : ''))
     const named = roots.map(root => connectPath(root, isWindows))
-    const dirs = [hook.dir, ...(hook.dirs ?? []), hook.file.slice(0, hook.file.lastIndexOf(sep))].map(dir => connectPath(dir, isWindows))
-    for (const root of [[home, '.agent-board'].join(sep), ...roots]) {
+    const folders = [hook.dir, ...(hook.dirs ?? []), hook.file.slice(0, hook.file.lastIndexOf(sep))]
+    const dirs = folders.map(dir => connectPath(dir, isWindows))
+    // A data folder can be the host folder itself, and then a deleted hook file doesn't hide its record.
+    for (const root of [[home, '.agent-board'].join(sep), ...roots, ...folders]) {
       const file = [root, `install-${hook.agent}.json`].join(sep)
       if (!exists(file)) continue
       const paths = setupRecordPaths(read(file))

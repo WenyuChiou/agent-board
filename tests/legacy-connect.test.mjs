@@ -310,6 +310,25 @@ test('a setup hook still leads to the record in its data folder however its path
   }
 }, home => ['--data-dir', join(home, 'other', "it's data")]))
 
+for (const [agent, folder, parts, reporterParts] of [['codex', '.codex', ['hooks.json'], ['hooks.json']], ['grok', '.grok', ['hooks', 'agent-board-local.json'], ['hooks', 'agent-board.json']]]) {
+  test(`${agent} set up with its host folder as the data folder stays setup's with its hook deleted by hand`, () => withSetup(agent, ({ f, env, recordFile }) => {
+    const reporter = join(f.home, folder, ...reporterParts)
+    unlinkSync(join(f.home, folder, ...parts))
+    const row = request => {
+      const result = f.command(f.request('auto', request), { cwd: f.home, env })
+      assert.equal(result.status, 0, result.stderr + result.stdout)
+      return JSON.parse(result.stdout).state.setup.agents.find(one => one.agent === agent)
+    }
+    assert.equal(row({ dirs: { [agent]: join(f.home, folder) } }).hook, 'setup')
+    assert.equal(row({}).hook, 'setup')
+    assert.equal(existsSync(reporter), false)
+    // Control: the same record naming another folder says nothing about this one.
+    writeFileSync(recordFile, JSON.stringify({ config: join(f.home, 'other', 'hooks.json') }))
+    assert.notEqual(row({}).hook, 'setup')
+    assert.ok(existsSync(reporter))
+  }, home => ['--data-dir', join(home, folder)]))
+}
+
 const DATA_DIR_HOSTS = { codex: '.codex', cursor: '.cursor', gemini: '.gemini', muse: 'muse', grok: '.grok', opencode: 'opencode', openclaw: '.openclaw' }
 for (const [agent, folder] of Object.entries(DATA_DIR_HOSTS)) {
   test(`${agent} set up with its own data folder gets no second hook`, () => withSetup(agent, ({ f, run, before }) => {
