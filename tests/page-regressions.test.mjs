@@ -29,6 +29,9 @@ const NOW = Date.parse('2026-11-04T12:00:00Z')
 const NAME = 'codex-turn-1793793600000-1.json'
 const turn = answer => JSON.stringify({ session_id: 'synthetic-turn', cwd: '/work/demo', prompt: 'Private prompt contents /home/demo/private', last_assistant_message: answer })
 
+// A board script run here must read its fixture, not a progress file named by the caller's environment (preflight sets one).
+const readerEnv = () => Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== 'CLAUDE_PROGRESS_FILE'))
+
 // Execute the plugin's production functions in separate session contexts, without starting a host.
 const publisher = () => {
   const source = readFileSync(new URL('../hooks/register.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
@@ -107,7 +110,7 @@ test('a delayed page-state publisher cannot erase another session’s processed 
     assert.equal((await f.api()).counts.waiting, 0)
     assert.deepEqual(f.runtime.pending(), [])
     writeFileSync(join(f.root, 'fresh-reader.mjs'), `globalThis.AGENT_BOARD = ${JSON.stringify({ path: f.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
-    const fresh = spawnSync(process.execPath, [join(f.root, 'fresh-reader.mjs'), '--json'], { encoding: 'utf8', timeout: 10000 })
+    const fresh = spawnSync(process.execPath, [join(f.root, 'fresh-reader.mjs'), '--json'], { encoding: 'utf8', timeout: 10000, env: readerEnv() })
     assert.equal(fresh.status, 0, fresh.stderr)
     assert.equal(JSON.parse(fresh.stdout).counts.needs, 0)
   } finally {
@@ -129,7 +132,7 @@ test('a fresh page and JSON reader keep valid receipts beside a partial receipt 
     writeFileSync(partialFile, partial.slice(0, 20))
     assert.equal((await f.api()).counts.waiting, 0)
     writeFileSync(join(f.root, 'fresh-reader.mjs'), `globalThis.AGENT_BOARD = ${JSON.stringify({ path: f.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
-    const fresh = spawnSync(process.execPath, [join(f.root, 'fresh-reader.mjs'), '--json'], { encoding: 'utf8', timeout: 10000 })
+    const fresh = spawnSync(process.execPath, [join(f.root, 'fresh-reader.mjs'), '--json'], { encoding: 'utf8', timeout: 10000, env: readerEnv() })
     assert.equal(fresh.status, 0, fresh.stderr)
     assert.equal(JSON.parse(fresh.stdout).counts.needs, 0)
     writeFileSync(join(f.root, 'progress-inbox', otherName), turn('Publish the other synthetic build?'))
@@ -175,7 +178,7 @@ test('the page and JSON keep completions five minutes and two days old on the sa
     for (const title of titles) assert.ok(dom.node('board').readText.includes(title))
     writeFileSync(join(f.root, 'fresh-reader.mjs'), `globalThis.AGENT_BOARD = ${JSON.stringify({ path: f.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
     writeFileSync(join(f.root, 'clock.cjs'), `Date.now = () => ${NOW}\n`)
-    const fresh = spawnSync(process.execPath, ['--require', join(f.root, 'clock.cjs'), join(f.root, 'fresh-reader.mjs'), '--json'], { encoding: 'utf8', timeout: 10000 })
+    const fresh = spawnSync(process.execPath, ['--require', join(f.root, 'clock.cjs'), join(f.root, 'fresh-reader.mjs'), '--json'], { encoding: 'utf8', timeout: 10000, env: readerEnv() })
     assert.equal(fresh.status, 0, fresh.stderr)
     const document = JSON.parse(fresh.stdout)
     assert.equal(document.counts.doneRecently, 2)
@@ -277,7 +280,7 @@ test('JSON and print clip an untrusted field at six hundred characters', async (
   try {
     writeFileSync(join(f.root, 'cli.mjs'), `globalThis.AGENT_BOARD = ${JSON.stringify({ path: f.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
     for (const flag of ['--json', '--print']) {
-      const ran = spawnSync(process.execPath, [join(f.root, 'cli.mjs'), flag], { encoding: 'utf8', timeout: 10000 })
+      const ran = spawnSync(process.execPath, [join(f.root, 'cli.mjs'), flag], { encoding: 'utf8', timeout: 10000, env: readerEnv() })
       assert.equal(ran.status, 0, ran.stderr)
       assert.ok(ran.stdout.includes('Long synthetic field'))
       assert.ok(!ran.stdout.includes(title.slice(0, 601)))
