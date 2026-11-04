@@ -9,7 +9,7 @@ node scripts/setup-agent.mjs
 node scripts/setup-agent.mjs --apply
 ```
 
-Auto detection checks host-specific configuration paths, not conversations or credentials.
+Auto detection checks host-specific configuration paths and the programs installed on PATH, not conversations or credentials.
 It reports candidates, not active sessions or account access. A `.gemini` directory alone
 does not identify Gemini CLI: Antigravity uses that parent too. If the current host has
 not created its configuration yet, select its known target with `--agent <name>`.

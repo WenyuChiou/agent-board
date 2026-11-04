@@ -59,14 +59,19 @@ test('native cleanup diagnostics allowlist unknown fields and missing markers', 
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
-const withoutCodexOnPath = pathValue => {
+// A runner may have an agent program on PATH. Setup auto detection looks there
+// too, so strip any folder that holds one, or a "no agent" fixture would find
+// the runner's own agent. Antigravity has no PATH entry (it is an app).
+const withoutAgentsOnPath = pathValue => {
   if (!pathValue) return ''
+  const names = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'deepseek']
+  const exts = process.platform === 'win32' ? ['', '.exe', '.cmd', '.bat', '.com'] : ['']
   return pathValue
     .split(delimiter)
     .filter(dir => {
       if (!dir) return false
       try {
-        return !existsSync(join(dir, 'codex.exe')) && !existsSync(join(dir, 'codex')) && !existsSync(join(dir, 'codex.cmd'))
+        return !names.some(name => exts.some(ext => existsSync(join(dir, `${name}${ext}`))))
       } catch {
         return true
       }
@@ -78,7 +83,7 @@ const withoutCodexOnPath = pathValue => {
 const isolatedEnv = home => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
   const originalPath = process.env[pathKey] ?? ''
-  const cleanPath = withoutCodexOnPath(originalPath)
+  const cleanPath = withoutAgentsOnPath(originalPath)
   const env = {
     ...process.env,
     HOME: home, USERPROFILE: home,
@@ -1010,6 +1015,41 @@ test('setup on a computer with Claude Code and Codex previews Codex only', async
     assert.match(result.stderr, /found no agent/)
   })
 })
+
+test('a setup preview in a new home lists the agents installed on the PATH', () => fixture(f => {
+  const bin = join(f.home, 'synthetic bin')
+  mkdirSync(bin)
+  for (const name of ['codex', 'gemini', 'cursor']) {
+    writeFileSync(join(bin, process.platform === 'win32' ? `${name}.cmd` : name), 'synthetic agent', { mode: 0o755 })
+  }
+  const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  const pathEnv = { ...f, env: { ...f.env, [pathKey]: bin } }
+  const preview = setupAgent(pathEnv, '--lang', 'en')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.equal(preview.stderr, '')
+  assert.match(preview.stdout, /^Codex:/m)
+  assert.match(preview.stdout, /^Cursor:/m)
+  assert.match(preview.stdout, /^Gemini CLI:/m)
+  assert.equal(existsSync(f.root), false)
+  const json = setupAgent(pathEnv, '--lang', 'en', '--json')
+  assert.equal(json.status, 0, json.stderr)
+  assert.deepEqual(JSON.parse(json.stdout).targets, ['codex', 'cursor', 'gemini'])
+}))
+
+test('a repeat setup preview lists Antigravity after an all-agent apply', () => fixture(f => {
+  const run = (...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], {
+    cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 120000,
+  })
+  const applied = run('--lang', 'en', '--agent', 'all', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  const repeat = run('--lang', 'en')
+  assert.equal(repeat.status, 0, repeat.stderr)
+  assert.equal(repeat.stderr, '')
+  for (const name of ['Codex', 'Cursor', 'OpenCode', 'Gemini CLI', 'Grok Build', 'Muse Code', 'Hermes Agent', 'OpenClaw', 'Antigravity', 'DeepSeek']) {
+    assert.match(repeat.stdout, new RegExp(`^${name}:`, 'm'), repeat.stdout)
+  }
+  assert.match(repeat.stdout, /^Antigravity: already set up$/m)
+}))
 
 const setupErrorCases = async check => {
   for (const [args, code, cause] of [

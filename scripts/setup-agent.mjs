@@ -142,15 +142,14 @@ class SetupFailure extends Error {
 }
 const fail = (code, message, extra = {}) => { throw new SetupFailure(code, message, extra) }
 
-// Report a path the user can pass back without starting Codex during setup.
-const findCodex = () => {
+// A program on PATH, from absolute folders only: a relative entry could be a
+// repository's own script, and Windows looks in the working folder first.
+const findOnPath = candidates => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path')
-  const path = (pathKey ? process.env[pathKey] : '') || ''
-  const names = process.platform === 'win32' ? ['codex.exe', 'codex.cmd', 'codex.ps1'] : ['codex']
-  for (const entry of path.split(delimiter)) {
+  for (const entry of (pathKey ? process.env[pathKey] : '').split(delimiter)) {
     const directory = process.platform === 'win32' ? entry.replace(/^"(.*)"$/, '$1') : entry
     if (!isAbsolute(directory)) continue
-    for (const name of names) {
+    for (const name of candidates) {
       const file = resolve(directory, name)
       try {
         const stat = statSync(file)
@@ -158,7 +157,11 @@ const findCodex = () => {
       } catch {}
     }
   }
+  return undefined
 }
+
+// Report a path the user can pass back without starting Codex during setup.
+const findCodex = () => findOnPath(process.platform === 'win32' ? ['codex.exe', 'codex.cmd', 'codex.ps1'] : ['codex'])
 
 const main = () => {
   const at = args.indexOf('--agent')
@@ -167,10 +170,13 @@ const main = () => {
   const homeAt = args.indexOf('--home')
   const home = homeAt < 0 ? homedir() : args[homeAt + 1]
   if (!home || home.startsWith('--') || !selector || selector.startsWith('--')) fail('MISSING_ARGUMENT', missingValue)
+  // Antigravity's own hooks file is a sign too: setup writes it under .gemini/config,
+  // while the .gemini/antigravity folders only exist when the app made them, so a
+  // repeat preview after apply would otherwise miss an Antigravity it just set up.
   const signs = {
     codex: ['.codex'], cursor: ['.cursor'], opencode: ['.config/opencode'],
     gemini: ['.gemini/settings.json'], grok: ['.grok/config.toml', '.grok/sessions'], muse: ['.config/muse'],
-    hermes: ['.hermes'], openclaw: ['.openclaw'], antigravity: ['.gemini/antigravity-cli', '.gemini/antigravity', '.gemini/antigravity-ide'], deepseek: ['.dsh'],
+    hermes: ['.hermes'], openclaw: ['.openclaw'], antigravity: ['.gemini/antigravity-cli', '.gemini/antigravity', '.gemini/antigravity-ide', '.gemini/config/hooks.json'], deepseek: ['.dsh'],
   }
   const flag = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1] }
   const hostDirs = {
@@ -181,7 +187,17 @@ const main = () => {
     openclaw: flag('--openclaw-dir') || process.env.OPENCLAW_STATE_DIR,
     deepseek: flag('--deepseek-dir') || process.env.DSH_HOME,
   }
-  const selected = selector === 'all' ? targets : selector === 'auto' ? targets.filter(agent => hostDirs[agent] ? existsSync(hostDirs[agent]) : signs[agent].some(sign => existsSync(join(home, sign)))) : selector.split(',')
+  const hasConfig = agent => hostDirs[agent] ? existsSync(hostDirs[agent]) : signs[agent].some(sign => existsSync(join(home, sign)))
+  // A first run in a new home also finds agents that are installed but have no config
+  // folder yet: their program on PATH. Grok's own bin folder is not always on PATH.
+  // Antigravity is an app, not a program on PATH, so only its config folders find it.
+  const programOnPath = agent => {
+    if (agent === 'codex') return findCodex()
+    if (agent === 'antigravity') return undefined
+    return findOnPath(process.platform === 'win32' ? [agent, `${agent}.exe`, `${agent}.cmd`, `${agent}.bat`, `${agent}.com`] : [agent])
+  }
+  const grokBin = join(hostDirs.grok ?? join(home, '.grok'), 'bin', process.platform === 'win32' ? 'grok.exe' : 'grok')
+  const selected = selector === 'all' ? targets : selector === 'auto' ? targets.filter(agent => hasConfig(agent) || programOnPath(agent) !== undefined || (agent === 'grok' && existsSync(grokBin))) : selector.split(',')
   const hasClaude = existsSync(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'))
   if (selector === 'auto' && !selected.length && hasClaude) {
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : `Claude Code: ${words('claude')}\n\n${words('next')}\n1. ${words('plugin')}`}\n`)

@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +19,24 @@ const filesUnder = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entr
   const path = join(dir, entry.name)
   return entry.isDirectory() ? filesUnder(path) : [path]
 }).sort()
+// Setup auto detection also looks on PATH, so a "no agent found" fixture must
+// say so about PATH too, not only about config folders: strip any folder that
+// holds an agent program, mirroring the names setup-agent.mjs looks for.
+// Antigravity has no PATH entry (it is an app, not a program), so it is absent.
+const withoutAgentsOnPath = pathValue => {
+  if (!pathValue) return ''
+  const names = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'deepseek']
+  const exts = process.platform === 'win32' ? ['', '.exe', '.cmd', '.bat', '.com'] : ['']
+  return pathValue.split(delimiter).filter(dir => {
+    if (!dir) return false
+    try { return !names.some(name => exts.some(ext => existsSync(join(dir, `${name}${ext}`)))) }
+    catch { return true }
+  }).join(delimiter)
+}
+const noAgentEnv = () => {
+  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  return { [pathKey]: withoutAgentsOnPath(process.env[pathKey]) }
+}
 const fixture = fn => {
   const box = mkdtempSync(join(tmpdir(), 'agent-board npm-'))
   const home = join(box, 'home')
@@ -475,7 +493,7 @@ test('agent-board setup with no agent found says how to name one, without a stac
   const pkg = packed(f)
   for (const [lang, hint] of [['en', 'setup found no agent'], ['zh-TW', 'setup 在這台電腦找不到要設定的 agent'], ['zh-CN', 'setup 在这台电脑找不到要设置的 agent']]) {
     for (const extra of [[], ['--agent', 'unknown']]) {
-      const result = f.run(pkg, ['setup', '--home', f.home, '--lang', lang, ...extra])
+      const result = f.run(pkg, ['setup', '--home', f.home, '--lang', lang, ...extra], noAgentEnv())
       assert.ifError(result.error)
       assert.equal(result.status, 1)
       assert.equal(result.stdout, '')
@@ -548,7 +566,7 @@ test('npx guidance uses the package name while command examples keep the bin nam
     const missing = f.run(pkg, ['--lang', lang])
     assert.equal(missing.status, 1)
     assert.ok(missing.stderr.includes(`npx ${renamed.name} setup --apply`))
-    const setup = f.run(pkg, ['setup', '--home', f.home, '--lang', lang])
+    const setup = f.run(pkg, ['setup', '--home', f.home, '--lang', lang], noAgentEnv())
     assert.equal(setup.status, 1)
     assert.ok(setup.stderr.includes(`npx ${renamed.name} setup --agent codex`))
   }
