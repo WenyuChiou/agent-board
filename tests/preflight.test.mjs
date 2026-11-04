@@ -559,7 +559,54 @@ for (const identity of ['linux:00000000-0000-4000-8000-000000000001:12345', '202
   })
 }
 
-test('preflight names the exact .lock file even when the account name appears inside it', async t => {
+test('preflight tags a Linux identity with the time namespace it was read through', async () => {
+  const { processStartIdentity } = await import('../scripts/preflight.mjs')
+  const boot = '00000000-0000-4000-8000-000000000001'
+  const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 12345 0`
+  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}
+` : stat
+  assert.equal(processStartIdentity(42, { platform: 'linux', readText, readLink: () => 'time:[4026531834]' }), `linux:${boot}:12345:time:[4026531834]`)
+  assert.equal(processStartIdentity(42, { platform: 'linux', readText, readLink: () => { throw new Error('no time namespaces') } }), `linux:${boot}:12345`)
+})
+
+for (const isWatched of [false, true]) {
+  test(`preflight keeps a live Linux marker written under another time namespace in its ${isWatched ? 'watched' : 'own'} folder`, async t => {
+    const f = fixture(t)
+    f.write('tests/time-namespace.test.mjs', '')
+    const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
+    mkdirSync(directory, { mode: 0o700 })
+    const name = `${process.pid}-00000000-0000-4000-8000-000000000034.lock`
+    const marker = join(directory, name)
+    const boot = '00000000-0000-4000-8000-000000000001'
+    writeFileSync(`${marker}.start`, JSON.stringify(`linux:${boot}:12345:time:[1]`))
+    writeFileSync(marker, '')
+    const checks = await f.check({
+      fallbackLockPath: isWatched ? directory : null,
+      readProcessIdentity: () => `linux:${boot}:18345:time:[2]`,
+      onProgress: () => assert.fail('tests must not start'),
+    })
+    const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
+    assert.ok(failure)
+    assert.match(failure.message, /time namespace/)
+    assert.ok(failure.message.includes(name))
+    assert.equal(existsSync(marker), true)
+  })
+}
+
+test('preflight still frees a reused Linux PID read through the same time namespace', async t => {
+  const f = fixture(t)
+  f.write('tests/same-namespace.test.mjs', '')
+  mkdirSync(f.lockPath)
+  const marker = join(f.lockPath, `${process.pid}-00000000-0000-4000-8000-000000000035.lock`)
+  const boot = '00000000-0000-4000-8000-000000000001'
+  writeFileSync(`${marker}.start`, JSON.stringify(`linux:${boot}:12345:time:[1]`))
+  writeFileSync(marker, '')
+  const checks = await f.check({ readProcessIdentity: () => `linux:${boot}:18345:time:[1]` })
+  assert.ok(has(checks, 'PASS', 'tests/same-namespace.test.mjs: 1 tests, 0 failed'))
+  assert.equal(existsSync(marker), false)
+})
+
+for (const account of ['abc', 'agent']) test(`preflight names the exact .lock file and folder even when the account name ${account} appears inside them`, async t => {
   const f = fixture(t)
   f.write('tests/exact-name.test.mjs', '')
   mkdirSync(f.lockPath)
@@ -573,12 +620,13 @@ test('preflight names the exact .lock file even when the account name appears in
       else process.env[key] = value
     }
   })
-  process.env.USERNAME = 'abc'
-  process.env.USER = 'abc'
+  process.env.USERNAME = account
+  process.env.USER = account
   const checks = await f.check({ onProgress: () => assert.fail('tests must not start') })
   const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
   assert.ok(failure)
   assert.ok(failure.message.includes(name), failure.message)
+  assert.ok(failure.message.includes(".agent-board-preflight-tests-* folder"), failure.message)
 })
 
 test('preflight keeps an identity marker when its recorded identity is unknown or malformed', async t => {
