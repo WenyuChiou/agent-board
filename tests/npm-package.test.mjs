@@ -70,7 +70,7 @@ test('the launcher falls back to the system language before setup', () => fixtur
 
 test('every Quick start says how to choose the language', () => {
   for (const [file, heading, language] of [['README.md', 'Quick start', 'en'], ['README.zh-TW.md', '快速開始', 'zh-TW'], ['README.zh-CN.md', '快速开始', 'zh-CN']]) {
-    const section = readFileSync(join(repo, file), 'utf8').split(`## ${heading}\n`)[1]?.split('\n## ')[0]
+    const section = readFileSync(join(repo, file), 'utf8').split(`## ${heading}`)[1]?.split('\n## ')[0]
     assert.ok(section, `${file} has its Quick start section`)
     assert.ok(section.includes(`--lang ${language}`), `${file} explains its language flag`)
   }
