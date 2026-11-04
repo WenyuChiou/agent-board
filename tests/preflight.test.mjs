@@ -5,7 +5,7 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { accountTestLockPath, bundleSources, engineProblems, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
+import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
 
 const script = fileURLToPath(new URL('../scripts/preflight.mjs', import.meta.url))
 const currentRegister = readFileSync(new URL('../hooks/register.tsx', import.meta.url), 'utf8')
@@ -59,8 +59,8 @@ const fixture = t => {
   const lockPath = join(root, 'preflight.lock')
   // Module-only injection keeps CLI fixtures off the real account lock, even inside preflight.
   const cli = join(root, 'preflight-cli.mjs')
-  writeFileSync(cli, `import { main } from ${JSON.stringify(pathToFileURL(script).href)}\nprocess.exitCode = await main(process.argv.slice(2), { lockPath: ${JSON.stringify(lockPath)} })\n`)
-  const check = options => runPreflight({ cwd, isNoFetch: true, run, lockPath, ...options })
+  writeFileSync(cli, `import { main } from ${JSON.stringify(pathToFileURL(script).href)}\nprocess.exitCode = await main(process.argv.slice(2), { lockPath: ${JSON.stringify(lockPath)}, fallbackLockPath: null })\n`)
+  const check = options => runPreflight({ cwd, isNoFetch: true, run, lockPath, fallbackLockPath: null, ...options })
   return { root, cwd, home, env, lockPath, cli, write, git, commit, check, run }
 }
 
@@ -284,9 +284,9 @@ test('preflight CLI runs with different TEMP values still exclude each other', t
   const secondCli = join(f.root, 'second-cli.mjs')
   const firstCli = join(f.root, 'first-cli.mjs')
   const resultPath = join(f.root, 'second-result.json')
-  const header = `import { accountTestLockPath, main } from ${JSON.stringify(pathToFileURL(script).href)}\nconst lockPath = accountTestLockPath({ account: ${JSON.stringify(account)} })\n`
-  writeFileSync(secondCli, `${header}process.exitCode = await main(['--no-fetch'], { lockPath })\n`)
-  writeFileSync(firstCli, `${header}import { spawnSync } from 'node:child_process'\nimport { writeFileSync } from 'node:fs'\nprocess.exitCode = await main(['--no-fetch'], { lockPath, onLockPublished: () => {\n  const result = spawnSync(process.execPath, [${JSON.stringify(secondCli)}], { cwd: process.cwd(), env: { ...process.env, TEMP: ${JSON.stringify(secondTemp)}, TMP: ${JSON.stringify(secondTemp)}, TMPDIR: ${JSON.stringify(secondTemp)} }, encoding: 'utf8', timeout: 15000 })\n  writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ status: result.status, stdout: result.stdout, stderr: result.stderr, error: result.error?.message }))\n} })\n`)
+  const header = `import { accountTestLockPath, main } from ${JSON.stringify(pathToFileURL(script).href)}\nconst lockPath = accountTestLockPath({ account: ${JSON.stringify(account)} })\nconst fallbackLockPath = null\n`
+  writeFileSync(secondCli, `${header}process.exitCode = await main(['--no-fetch'], { lockPath, fallbackLockPath })\n`)
+  writeFileSync(firstCli, `${header}import { spawnSync } from 'node:child_process'\nimport { writeFileSync } from 'node:fs'\nprocess.exitCode = await main(['--no-fetch'], { lockPath, fallbackLockPath, onLockPublished: () => {\n  const result = spawnSync(process.execPath, [${JSON.stringify(secondCli)}], { cwd: process.cwd(), env: { ...process.env, TEMP: ${JSON.stringify(secondTemp)}, TMP: ${JSON.stringify(secondTemp)}, TMPDIR: ${JSON.stringify(secondTemp)} }, encoding: 'utf8', timeout: 15000 })\n  writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ status: result.status, stdout: result.stdout, stderr: result.stderr, error: result.error?.message }))\n} })\n`)
   const first = spawnSync(process.execPath, [firstCli], {
     cwd: f.cwd, env: { ...f.env, TEMP: firstTemp, TMP: firstTemp, TMPDIR: firstTemp }, encoding: 'utf8', timeout: 30000,
   })
@@ -377,6 +377,127 @@ test('preflight creates private Unix lock directories and refuses writable fixtu
     assert.equal(lstatSync(f.lockPath).mode & 0o777, mode)
     assert.deepEqual(readdirSync(f.lockPath), [])
   }
+})
+
+const restrictedSkip = process.platform === 'win32' ? 'the shared fallback lock is for Unix accounts only'
+  : process.getuid?.() === 0 ? 'root ignores the read-only folder this test needs' : false
+
+// A home folder this account cannot write, with the shared fallback's parent beside it.
+// The read-only folders live in their own root, so the fixture's cleanup never meets them before they are writable again.
+const restricted = (t, { parentMode = 0o1777, homeLock } = {}) => {
+  const f = fixture(t)
+  const outer = mkdtempSync(join(tmpdir(), 'preflight-restricted-'))
+  const readOnly = join(outer, 'read-only-home')
+  mkdirSync(readOnly)
+  if (homeLock) {
+    homeLock(join(readOnly, 'lock'))
+    chmodSync(join(readOnly, 'lock'), 0o500)
+  }
+  chmodSync(readOnly, 0o500)
+  t.after(() => {
+    chmodSync(readOnly, 0o700)
+    if (homeLock) chmodSync(join(readOnly, 'lock'), 0o700)
+    rmSync(outer, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  })
+  const shared = join(outer, 'shared')
+  mkdirSync(shared)
+  chmodSync(shared, parentMode)
+  const lockPath = join(readOnly, 'lock')
+  const fallbackLockPath = join(shared, 'lock')
+  return { ...f, lockPath, fallbackLockPath, check: options => f.check({ lockPath, fallbackLockPath, ...options }) }
+}
+
+test('preflight names the shared fallback lock from the account, not from TEMP, and has none on Windows', () => {
+  assert.equal(accountFallbackLockPath({ platform: 'linux', account: { uid: 1001, homedir: '/synthetic/one' } }), '/tmp/.agent-board-preflight-tests-1001')
+  assert.equal(accountFallbackLockPath({ platform: 'darwin', account: { uid: 501, homedir: '/synthetic/two' } }), '/tmp/.agent-board-preflight-tests-501')
+  assert.equal(accountFallbackLockPath({ platform: 'win32', account: { uid: -1, homedir: 'C:\\Users\\Synthetic' } }), null)
+})
+
+test('preflight accepts only a sticky or private parent for the shared fallback lock', async () => {
+  const { sharedParentProblem } = await import('../scripts/preflight.mjs')
+  const stat = mode => ({ isDirectory: () => true, mode })
+  assert.equal(sharedParentProblem(stat(0o41777), { platform: 'linux' }), null)
+  assert.equal(sharedParentProblem(stat(0o40755), { platform: 'linux' }), null)
+  assert.match(sharedParentProblem(stat(0o40777), { platform: 'linux' }), /writable by others without the sticky bit/)
+  assert.match(sharedParentProblem({ isDirectory: () => false, mode: 0o41777 }, { platform: 'linux' }), /not a directory/)
+  assert.match(sharedParentProblem(stat(0o41777), { platform: 'win32' }), /no shared fallback on Windows/)
+})
+
+test('preflight runs touched tests under the shared fallback lock when the home folder is read-only', { skip: restrictedSkip }, async t => {
+  const f = restricted(t)
+  f.write('tests/restricted.test.mjs', '')
+  const checks = await f.check()
+  assert.ok(has(checks, 'PASS', 'tests/restricted.test.mjs: 1 tests, 0 failed'))
+  assert.ok(has(checks, 'PASS', "this account's shared fallback folder"))
+  assert.equal(existsSync(f.lockPath), false)
+  assert.equal(lstatSync(f.fallbackLockPath).mode & 0o777, 0o700)
+  assert.deepEqual(readdirSync(f.fallbackLockPath), [])
+})
+
+test('a restricted preflight starts no test while a live run holds the read-only home lock', { skip: restrictedSkip }, async t => {
+  const live = `${process.pid}-00000000-0000-4000-8000-000000000005.lock`
+  const f = restricted(t, { homeLock: path => { mkdirSync(path, { mode: 0o700 }); writeFileSync(join(path, live), '') } })
+  f.write('tests/restricted-live.test.mjs', '')
+  const checks = await f.check({ onProgress: line => { if (line.startsWith('RUN ')) assert.fail('tests must not start') } })
+  assert.ok(has(checks, 'FAIL', 'another preflight test run is already active'))
+  assert.deepEqual(readdirSync(f.lockPath), [live])
+  assert.deepEqual(readdirSync(f.fallbackLockPath), [])
+})
+
+test('a preflight with a writable home starts no test while a restricted run holds the shared fallback lock', async t => {
+  const f = fixture(t)
+  f.write('tests/home-live.test.mjs', '')
+  const fallbackLockPath = join(f.root, 'shared-lock')
+  mkdirSync(fallbackLockPath, { mode: 0o700 })
+  const live = `${process.pid}-00000000-0000-4000-8000-000000000006.lock`
+  writeFileSync(join(fallbackLockPath, live), '')
+  const checks = await f.check({ fallbackLockPath, onProgress: line => { if (line.startsWith('RUN ')) assert.fail('tests must not start') } })
+  assert.ok(has(checks, 'FAIL', 'another preflight test run is already active'))
+  assert.deepEqual(readdirSync(fallbackLockPath), [live])
+  assert.deepEqual(readdirSync(f.lockPath), [])
+})
+
+test('a preflight with a writable home meets a restricted run whose fallback folder appears after its first look', async t => {
+  const f = fixture(t)
+  f.write('tests/late-fallback.test.mjs', '')
+  const fallbackLockPath = join(f.root, 'late-shared-lock')
+  const live = `${process.pid}-00000000-0000-4000-8000-000000000007.lock`
+  const checks = await f.check({
+    fallbackLockPath,
+    onLockPublished: () => { mkdirSync(fallbackLockPath, { mode: 0o700 }); writeFileSync(join(fallbackLockPath, live), '') },
+    onProgress: line => { if (line.startsWith('RUN ')) assert.fail('tests must not start') },
+  })
+  assert.ok(has(checks, 'FAIL', 'another preflight test run is already active'))
+  assert.deepEqual(readdirSync(fallbackLockPath), [live])
+  assert.deepEqual(readdirSync(f.lockPath), [])
+})
+
+test('a restricted preflight leaves a stale marker in the read-only home lock alone and still runs', { skip: restrictedSkip }, async t => {
+  const stale = '2147483647-00000000-0000-4000-8000-000000000008.lock'
+  const f = restricted(t, { homeLock: path => { mkdirSync(path, { mode: 0o700 }); writeFileSync(join(path, stale), '') } })
+  f.write('tests/restricted-stale.test.mjs', '')
+  const checks = await f.check()
+  assert.ok(has(checks, 'PASS', 'tests/restricted-stale.test.mjs: 1 tests, 0 failed'))
+  assert.deepEqual(readdirSync(f.lockPath), [stale])
+  assert.deepEqual(readdirSync(f.fallbackLockPath), [])
+})
+
+test('a restricted preflight refuses a shared parent that others can write without the sticky bit', { skip: restrictedSkip }, async t => {
+  const f = restricted(t, { parentMode: 0o777 })
+  f.write('tests/unprotected.test.mjs', '')
+  const checks = await f.check({ onProgress: line => { if (line.startsWith('RUN ')) assert.fail('tests must not start') }, onLockPublished: () => assert.fail('a marker must not be published') })
+  assert.ok(has(checks, 'FAIL', 'writable by others without the sticky bit'))
+  assert.equal(existsSync(f.fallbackLockPath), false)
+})
+
+test('preflight does not fall back when the home lock exists but is unsafe', async t => {
+  const f = fixture(t)
+  f.write('tests/unsafe-no-fallback.test.mjs', '')
+  writeFileSync(f.lockPath, 'synthetic sentinel')
+  const fallbackLockPath = join(f.root, 'unused-fallback')
+  const checks = await f.check({ fallbackLockPath, onLockPublished: () => assert.fail('a marker must not be published') })
+  assert.ok(has(checks, 'FAIL', 'test lock directory is not a directory'))
+  assert.equal(existsSync(fallbackLockPath), false)
 })
 
 test('preflight runs a touched nested e2e test', async t => {
@@ -719,6 +840,46 @@ test('preflight passes the PR body result through and hides private diagnostics'
   assert.ok(has(checks, 'FAIL', 'FAIL body: <path> is missing'))
   assert.equal(JSON.stringify(checks).includes('private-person'), false)
   assert.ok(calls.every(args => args.includes('--no-bundle') && args.includes('--title') && args.includes('--base')))
+})
+
+test('preflight checks the PR body offline and says why when GitHub cannot be reached, never calling that a pass', async t => {
+  const f = fixture(t)
+  for (const [gh, why] of [[{ version: 0, auth: 1 }, 'not signed in or cannot reach GitHub'], [{ version: null }, 'not installed']]) {
+    const calls = []
+    const run = (program, args, options) => {
+      if (program === 'gh') {
+        if (args[0] === '--version') return gh.version === null ? { error: Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }) } : { status: gh.version, stdout: '', stderr: '' }
+        return { status: gh.auth, stdout: '', stderr: '' }
+      }
+      if (args[0] === 'scripts/pr-check.mjs') {
+        calls.push(args)
+        return args.includes('--offline') ? { status: 0, stdout: 'pr-check: all checks passed\n', stderr: '' }
+          : { status: 1, stdout: '', stderr: 'pr-check: network check failed for repos/synthetic/issues/1; --offline skips those checks.\n' }
+      }
+      return f.run(program, args, options)
+    }
+    const checks = await f.check({ run, bodyFile: 'body.md', title: 'chore: synthetic' })
+    assert.ok(has(checks, 'WARN', `because the GitHub CLI is ${why}`), why)
+    assert.ok(has(checks, 'PASS', 'PR body passed pr-check without GitHub (--offline)'))
+    assert.equal(has(checks, 'PASS', 'PR body passed pr-check.'), false)
+    assert.deepEqual(calls.map(args => args.includes('--offline')), [false, true])
+  }
+})
+
+test('preflight keeps a PR body failure that is not about GitHub, with no offline retry', async t => {
+  const f = fixture(t)
+  const calls = []
+  const run = (program, args, options) => {
+    if (program === 'gh') assert.fail('the GitHub CLI is not asked about for a body failure')
+    if (args[0] === 'scripts/pr-check.mjs') {
+      calls.push(args)
+      return { status: 1, stdout: 'FAIL body: the Fixes line is missing\n', stderr: '' }
+    }
+    return f.run(program, args, options)
+  }
+  const checks = await f.check({ run, bodyFile: 'body.md', title: 'chore: synthetic' })
+  assert.ok(has(checks, 'FAIL', 'PR body: FAIL body: the Fixes line is missing'))
+  assert.equal(calls.length, 1)
 })
 
 test('preflight asks no CHANGELOG entry for a code change', async t => {
