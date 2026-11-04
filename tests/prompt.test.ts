@@ -158,3 +158,49 @@ test('exact pre-prompt Grok OpenCode and OpenClaw files upgrade and remove while
     expect(hook.edit(legacy, true)).toBe(DELETE)
   }
 })
+
+test('the Codex prompt hook writes its event within its timeout on Windows', async () => {
+  const { hookTimeout, hostHookTimeout } = await import('../hooks/hook-safety')
+  const { reporterPs1 } = await import('../hooks/connect')
+  const { spawnSync } = await import('node:child_process')
+  const { mkdtempSync, writeFileSync, rmSync, readdirSync, readFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  expect(hookTimeout('codex', 'UserPromptSubmit')).toBe(10000)
+  expect(hostHookTimeout('codex', 'UserPromptSubmit')).toBe(10)
+  expect(hookTimeout('codex', 'UserPromptSubmit')).toBe(hookTimeout('codex', 'Stop'))
+
+  const hook = agentHooks(CTX).find(one => one.agent === 'codex' && one.label !== '')!
+  const config = JSON.parse(String(hook.edit('{}', false)))
+  const promptGroup = config.hooks.UserPromptSubmit[0].hooks[0]
+  expect(promptGroup.timeout).toBe(10)
+
+  if (process.platform === 'win32') {
+    const temp = mkdtempSync(join(tmpdir(), 'codex-prompt-test-'))
+    try {
+      const script = join(temp, 'progress-report.ps1')
+      writeFileSync(script, reporterPs1())
+      const timeoutMs = hookTimeout('codex', 'UserPromptSubmit')
+      const start = Date.now()
+      const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'prompt'], {
+        input: JSON.stringify({ session_id: 'codex-windows-cold-start', hook_event_name: 'UserPromptSubmit', prompt: 'synthetic turn start' }),
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: timeoutMs,
+      })
+      const elapsed = Date.now() - start
+      expect(result.status).toBe(0)
+      expect(elapsed).toBeLessThan(timeoutMs)
+
+      const inbox = join(temp, 'progress-inbox')
+      const files = readdirSync(inbox)
+      expect(files.some(f => /^codex-prompt-/.test(f))).toBe(true)
+      const receiptFile = files.find(f => /^codex-prompt-/.test(f))!
+      const receipt = JSON.parse(readFileSync(join(inbox, receiptFile), 'utf8'))
+      expect(receipt.session_id).toBe('codex-windows-cold-start')
+    } finally {
+      rmSync(temp, { recursive: true, force: true })
+    }
+  }
+})
