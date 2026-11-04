@@ -4,7 +4,7 @@ import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
-import { beforeEach, test } from 'node:test'
+import { beforeEach, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
@@ -17,6 +17,11 @@ import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/nat
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
 import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { partTest } from '../scripts/ci-impact.mjs'
+
+// The Windows board job runs this file in two parts, and each part runs its share of the tests: the
+// file alone took about 8 minutes there against a ten-minute limit (#899).
+const test = partTest(nodeTest)
 
 test('native cleanup diagnostics keep watchdog failures bounded and private', () => {
   const error = Object.assign(new Error('PRIVATE_ERROR'), { code: 'ETIMEDOUT', path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] })
@@ -1236,6 +1241,52 @@ test('removal preview and apply print plain changes and one next step unless JSO
     assert.equal(result.applied, true)
     assert.equal(jsonApply.stdout, `${JSON.stringify(result, null, 2)}\n`)
     assert.equal(existsSync(join(f.root, 'install-antigravity.json')), false)
+  }
+}))
+
+test('a removal preview names the shared files it keeps while another agent uses them', () => fixture(f => {
+  const runner = join(f.home, 'kept-shared-cli.mjs')
+  f.save(runner, bundleFromDir(new URL('..', import.meta.url)))
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const shared = [f.script, worker, f.skill]
+  const remove = (agent, lang, ...args) => spawnSync(process.execPath, [runner, '--home', f.home, '--codex-remove', '--agent', agent, '--lang', lang, ...args], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  for (const [lang, removeWord, next] of [
+    ['en', 'Would remove: ', 'Next:'],
+    ['zh-TW', '將移除：', '下一步：'],
+    ['zh-CN', '将移除：', '下一步：'],
+  ]) {
+    assert.equal(f.install('--agent', 'codex', '--lang', lang, '--apply').status, 0)
+    assert.equal(f.install('--agent', 'antigravity', '--lang', lang, '--apply').status, 0)
+    const snapshot = homeSnapshot(f.home)
+    const preview = remove('antigravity', lang)
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.equal(preview.stdout.split(next).length - 1, 1, preview.stdout)
+    for (const file of shared) {
+      const keptLine = lang === 'en' ? `Keeps ${file}; still in use by Codex` : `保留 ${file}；Codex 仍在使用`
+      assert.ok(preview.stdout.includes(keptLine), preview.stdout)
+      assert.ok(!preview.stdout.includes(`${removeWord}${file}`), preview.stdout)
+    }
+    assert.deepEqual(homeSnapshot(f.home), snapshot)
+    const jsonPreview = remove('antigravity', lang, '--json')
+    assert.equal(jsonPreview.status, 0, jsonPreview.stderr)
+    const plan = JSON.parse(jsonPreview.stdout)
+    assert.equal(plan.mode, 'remove')
+    assert.equal(plan.applied, undefined)
+    assert.deepEqual(plan.keptShared, shared.map(file => ({ file, usedBy: ['codex'] })), jsonPreview.stdout)
+    assert.ok(!plan.changes.some(change => shared.includes(change.file)), jsonPreview.stdout)
+    // Applying the removal leaves the shared files for Codex.
+    const applied = remove('antigravity', lang, '--apply')
+    assert.equal(applied.status, 0, applied.stderr)
+    assert.equal(existsSync(join(f.root, 'install-antigravity.json')), false)
+    for (const file of shared) assert.equal(existsSync(file), true, file)
+    // Codex is now the last agent: its preview names the shared files as removed.
+    const lastPreview = remove('codex', lang)
+    assert.equal(lastPreview.status, 0, lastPreview.stderr)
+    for (const file of shared) assert.ok(lastPreview.stdout.includes(`${removeWord}${file}`), lastPreview.stdout)
+    const lastPlan = JSON.parse(remove('codex', lang, '--json').stdout)
+    assert.equal(lastPlan.keptShared, undefined)
+    assert.ok(shared.every(file => lastPlan.changes.some(change => change.file === file && change.action === 'remove')), JSON.stringify(lastPlan.changes))
+    assert.equal(remove('codex', lang, '--apply').status, 0)
   }
 }))
 

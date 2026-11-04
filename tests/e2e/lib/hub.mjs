@@ -82,22 +82,21 @@ const ownedAntigravity = async (hub, actor) => {
 // connector inherits its parent's environment when it starts the supplied proxy.
 const proxyCodex = async (hub, actor) => {
   const log = hub.world.write('proxy-rpc.jsonl', '')
-  const fake = hub.world.write('mock-proxy.mjs', `import { createInterface } from 'node:readline'
+  const mock = new URL('../../helpers/ws-proxy-mock.mjs', import.meta.url).href
+  const fake = hub.world.write('mock-proxy.mjs', `import { serveWebSocketProxy } from ${JSON.stringify(mock)}
 import { appendFileSync } from 'node:fs'
-const emit = value => console.log(JSON.stringify(value))
-process.stdin.once('end', () => process.exit(0))
 appendFileSync(${JSON.stringify(log)}, JSON.stringify({ pid: process.pid }) + '\\n')
-createInterface({ input: process.stdin }).on('line', line => {
-  const value = JSON.parse(line)
-  appendFileSync(${JSON.stringify(log)}, line + '\\n')
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
   if (value.method === 'initialize') emit({ id: value.id, result: {} })
   if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(actor.session)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
   if (value.method === 'turn/steer') {
     emit({ id: value.id, result: { turnId: 'proxy-turn' } })
     const id = value.params.input[0].text.match(/Reply first with this line alone: ACK ([0-9a-f]{6})/)[1]
     emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(actor.session)}, turnId: 'proxy-turn', item: { type: 'agentMessage', text: 'ACK ' + id } } })
   }
-})
+} })
 `)
   const module = new URL('../../../scripts/codex-message-connector.mjs', import.meta.url).href
   const runner = hub.world.write('proxy-owner.mjs', `import { connectCodexProxy } from ${JSON.stringify(module)}

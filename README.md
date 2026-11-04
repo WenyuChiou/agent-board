@@ -176,7 +176,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
-| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Implemented | Not tested | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
+| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
 | Cursor | cursor-agent CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
 | Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |

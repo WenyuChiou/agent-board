@@ -110,6 +110,7 @@ export const ZH_TW = {
     updatedFile: (file: string): string => `已更新回報設定：${file}`,
     updateFile: (file: string): string => `將更新回報設定：${file}`,
     kept: (file: string): string => `保留進度與歷史：${file}`,
+    keptShared: (file: string, users: string): string => `保留 ${file}；${users} 仍在使用`,
     restart: (host: string): string => `下一步：重新啟動 ${host}，卸載已移除的回報 hooks。`,
     apply: (command: string): string => `下一步：套用這次移除：${command}`,
     none: '下一步：不需要移除。',
