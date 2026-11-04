@@ -330,11 +330,11 @@ test('preflight reads stable process identities without Linux wall-clock data', 
     assert.equal(path, '/proc/sys/kernel/random/boot_id')
     return `${boot}\n`
   }
-  const options = { platform: 'linux', readText, run: () => assert.fail('a stable Linux identity needs no subprocess') }
-  assert.equal(processStartIdentity(42, options), `linux:${boot}:12345`)
+  const options = { platform: 'linux', readText, readLink: () => 'time:[4026531834]', run: () => assert.fail('a stable Linux identity needs no subprocess') }
+  assert.equal(processStartIdentity(42, options), `linux:${boot}:12345:time:[4026531834]`)
   assert.deepEqual(paths, ['/proc/42/stat', '/proc/sys/kernel/random/boot_id'])
   paths.length = 0
-  assert.equal(processStartIdentity(process.pid, options), `linux:${boot}:12345`)
+  assert.equal(processStartIdentity(process.pid, options), `linux:${boot}:12345:time:[4026531834]`)
   assert.deepEqual(paths, ['/proc/self/stat', '/proc/sys/kernel/random/boot_id'])
   assert.equal(processStartIdentity(42, { ...options, readText: () => 'unreadable' }), null)
   assert.equal(processStartIdentity(42, { ...options, readText: () => { throw new Error('unavailable') } }), null)
@@ -478,7 +478,7 @@ for (const isWatched of [false, true]) {
     const readText = path => path === '/proc/stat' ? `btime ${bootSeconds}\n`
       : path === '/proc/sys/kernel/random/boot_id' ? '00000000-0000-4000-8000-000000000001\n'
         : `42 (worker) ${['S', ...Array(18).fill('0'), '12345'].join(' ')}`
-    const options = { platform: 'linux', readText, clockTicks: () => 100 }
+    const options = { platform: 'linux', readText, readLink: () => 'time:[4026531834]', clockTicks: () => 100 }
     const identity = processStartIdentity(process.pid, options)
     assert.ok(identity)
     writeFileSync(`${marker}.start`, JSON.stringify(identity))
@@ -506,11 +506,11 @@ for (const isWatched of [false, true]) {
     const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
     mkdirSync(directory, { mode: 0o700 })
     const marker = join(directory, `${process.pid}-00000000-0000-4000-8000-000000000026.lock`)
-    writeFileSync(`${marker}.start`, JSON.stringify('linux:00000000-0000-4000-8000-000000000001:12345'))
+    writeFileSync(`${marker}.start`, JSON.stringify('linux:00000000-0000-4000-8000-000000000001:12345:time:[1]'))
     writeFileSync(marker, '')
     const checks = await f.check({
       fallbackLockPath: isWatched ? directory : null,
-      readProcessIdentity: () => 'linux:00000000-0000-4000-8000-000000000001:12346',
+      readProcessIdentity: () => 'linux:00000000-0000-4000-8000-000000000001:12346:time:[1]',
     })
     assert.ok(has(checks, 'PASS', 'tests/reused-identity.test.mjs: 1 tests, 0 failed'))
     assert.equal(existsSync(marker), isWatched)
@@ -540,7 +540,7 @@ for (const isWatched of [false, true]) {
   })
 }
 
-for (const identity of ['linux:00000000-0000-4000-8000-000000000001:12345', '2024-11-04T05:06:07.1234567Z']) {
+for (const identity of ['linux:00000000-0000-4000-8000-000000000001:12345:time:[1]', '2024-11-04T05:06:07.1234567Z']) {
   const platform = identity.startsWith('linux:') ? 'Linux' : 'Windows'
   test(`preflight treats exact ${platform} identities as confirmed without a second-precision warning`, async t => {
     const f = fixture(t)
@@ -591,6 +591,27 @@ for (const isWatched of [false, true]) {
     assert.ok(failure.message.includes(name))
     assert.equal(existsSync(marker), true)
   })
+}
+
+for (const isWatched of [false, true]) {
+  for (const [side, recorded, read] of [['record', 'linux:00000000-0000-4000-8000-000000000001:12345', 'linux:00000000-0000-4000-8000-000000000001:18345:time:[2]'], ['reader', 'linux:00000000-0000-4000-8000-000000000001:12345:time:[1]', 'linux:00000000-0000-4000-8000-000000000001:18345']]) {
+    test(`preflight keeps a live Linux marker when the ${side} has no time namespace in its ${isWatched ? 'watched' : 'own'} folder`, async t => {
+      const f = fixture(t)
+      f.write('tests/missing-namespace.test.mjs', '')
+      const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
+      mkdirSync(directory, { mode: 0o700 })
+      const name = `${process.pid}-00000000-0000-4000-8000-000000000036.lock`
+      const marker = join(directory, name)
+      writeFileSync(`${marker}.start`, JSON.stringify(recorded))
+      writeFileSync(marker, '')
+      const checks = await f.check({ fallbackLockPath: isWatched ? directory : null, readProcessIdentity: () => read, onProgress: () => assert.fail('tests must not start') })
+      const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
+      assert.ok(failure)
+      assert.match(failure.message, /time namespace differs or could not be read/)
+      assert.ok(failure.message.includes(name))
+      assert.equal(existsSync(marker), true)
+    })
+  }
 }
 
 test('preflight still frees a reused Linux PID read through the same time namespace', async t => {

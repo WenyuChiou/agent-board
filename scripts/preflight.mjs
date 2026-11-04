@@ -244,13 +244,13 @@ const secondPrecisionPrefix = identity => ['darwin-second:', 'ps-second:'].find(
 // Compared without the precision tag, so a record written before the tag existed (this pull request's c3247d6) still matches.
 const bareIdentity = identity => typeof identity === 'string' ? identity.slice(secondPrecisionPrefix(identity)?.length ?? 0) : identity
 const timeNamespace = identity => /^linux:[^:]+:\d+:(time:\[\d+\])$/.exec(identity ?? '')?.[1] ?? null
-// Ticks read through different time namespaces differ for the same process, so such a pair cannot be compared.
-// A record without a namespace (an earlier head of this pull request) is compared without one.
+// Ticks read through different time namespaces differ for the same process, so two Linux identities are compared only
+// when both name the same one; a missing namespace (unreadable, or a kernel without them) leaves the owner unconfirmed.
 const comparableIdentities = (recorded, read) => {
+  const isLinux = typeof recorded === 'string' && typeof read === 'string' && [recorded, read].some(identity => identity.startsWith('linux:'))
   const [a, b] = [timeNamespace(recorded), timeNamespace(read)]
-  if (a && b && a !== b) return { recorded, read: null, isOtherClock: true }
-  const strip = identity => typeof identity === 'string' ? bareIdentity(identity).replace(/:time:\[\d+\]$/, '') : identity
-  return { recorded: strip(recorded), read: strip(read), isOtherClock: false }
+  if (isLinux && (!a || !b || a !== b)) return { recorded, read: null, isOtherClock: true }
+  return { recorded: bareIdentity(recorded), read: bareIdentity(read), isOtherClock: false }
 }
 
 const knownProcessIdentity = (pid, reader) => {
@@ -631,7 +631,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       const detail = uncertainty === 'legacy' ? ', owner could not be confirmed because no process identity was recorded'
         : uncertainty === 'unknown' ? ', process start time could not be read, so the owner could not be confirmed'
           : uncertainty === 'second' ? ', process identity is known only to the second; this may be a reused process ID'
-            : uncertainty === 'namespace' ? ', it was recorded under another time namespace, so the owner could not be confirmed' : ''
+            : uncertainty === 'namespace' ? ', its time namespace differs or could not be read, so the owner could not be confirmed' : ''
       add('FAIL', `another preflight test run is already active on this computer (process ${pid}, started ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago${detail}); finish it, or if no preflight is running, delete its .lock file \ue001 and run preflight again.`, `${name} from this account's .agent-board-preflight-tests-* folder`)
     }
     if (owner?.isFallback) add('PASS', "the home folder cannot hold the test lock, so the test lock was this account's shared fallback folder, and any home lock folder was still read.")
