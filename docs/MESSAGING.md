@@ -474,7 +474,11 @@ the receiver ends the old connection and registers the new id.
 ## Codex existing-owner adapter
 
 `scripts/codex-message-connector.mjs` uses the installed Codex executable's existing
-`app-server proxy` control socket. It does not start a daemon or create/resume a thread.
+`app-server proxy` control socket. It speaks WebSocket through the proxy's byte stream:
+an HTTP upgrade with a checked `Sec-WebSocket-Accept`, then masked client text frames
+and one JSON-RPC message per text message. A failed upgrade reports
+`OWNER_HANDSHAKE_FAILED`; a silent owner still times out. It does not start a daemon
+or create/resume a thread.
 After a person approves the exact disposable server/thread/active-turn binding, give it
 JSON on stdin:
 
