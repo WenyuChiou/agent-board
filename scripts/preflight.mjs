@@ -231,10 +231,12 @@ export const processStartIdentity = (pid, { platform = process.platform, readTex
     const ticks = parseProcStat(readText(pid === process.pid ? '/proc/self/stat' : `/proc/${pid}/stat`))
     const boot = readText('/proc/sys/kernel/random/boot_id').trim()
     if (ticks === null || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(boot)) return null
-    // Field 22 is shifted by the reader's own time namespace, so the identity names it; a kernel without them has none.
-    let namespace = ''
-    try { namespace = /^time:\[\d+\]$/.exec(readLink('/proc/self/ns/time'))?.[0] ?? '' } catch {}
-    return `linux:${boot}:${ticks}${namespace ? `:${namespace}` : ''}`
+    // Start ticks depend on the reader's time namespace, and a PID identifies a process only in its PID namespace.
+    let time = ''
+    let pidNamespace = ''
+    try { time = /^time:\[\d+\]$/.exec(readLink('/proc/self/ns/time'))?.[0] ?? '' } catch {}
+    try { pidNamespace = /^pid:\[\d+\]$/.exec(readLink('/proc/self/ns/pid'))?.[0] ?? '' } catch {}
+    return `linux:${boot}:${ticks}${time ? `:${time}` : ''}${pidNamespace ? `:${pidNamespace}` : ''}`
   } catch {
     return null
   }
@@ -243,14 +245,14 @@ export const processStartIdentity = (pid, { platform = process.platform, readTex
 const secondPrecisionPrefix = identity => ['darwin-second:', 'ps-second:'].find(prefix => identity?.startsWith(prefix))
 // Compared without the precision tag, so a record written before the tag existed (this pull request's c3247d6) still matches.
 const bareIdentity = identity => typeof identity === 'string' ? identity.slice(secondPrecisionPrefix(identity)?.length ?? 0) : identity
-const timeNamespace = identity => /^linux:[^:]+:\d+:(time:\[\d+\])$/.exec(identity ?? '')?.[1] ?? null
-// Ticks read through different time namespaces differ for the same process, so two Linux identities are compared only
-// when both name the same one; a missing namespace (unreadable, or a kernel without them) leaves the owner unconfirmed.
+const linuxNamespaces = identity => /^linux:[^:]+:\d+:(time:\[\d+\]:pid:\[\d+\])$/.exec(identity ?? '')?.[1] ?? null
+// A PID identifies a process only in one PID namespace, and start ticks only in one time namespace. Compare Linux
+// identities only when both namespaces are readable and match; otherwise the owner is unconfirmed.
 const comparableIdentities = (recorded, read) => {
   const isLinux = typeof recorded === 'string' && typeof read === 'string' && [recorded, read].some(identity => identity.startsWith('linux:'))
-  const [a, b] = [timeNamespace(recorded), timeNamespace(read)]
-  if (isLinux && (!a || !b || a !== b)) return { recorded, read: null, isOtherClock: true }
-  return { recorded: bareIdentity(recorded), read: bareIdentity(read), isOtherClock: false }
+  const [a, b] = [linuxNamespaces(recorded), linuxNamespaces(read)]
+  if (isLinux && (!a || !b || a !== b)) return { recorded, read: null, isOtherNamespace: true }
+  return { recorded: bareIdentity(recorded), read: bareIdentity(read), isOtherNamespace: false }
 }
 
 const knownProcessIdentity = (pid, reader) => {
@@ -312,7 +314,7 @@ const newestLiveMarker = (directory, marker, isOwn, readProcessIdentity) => {
     // return within one clock tick, and Windows start times are kept to 100 ns. ps start times are only to the second.
     const compared = comparableIdentities(recordedIdentity, identity)
     if (isLiveMarker({ isAlive, recordedIdentity: compared.recorded, identity: compared.read })) {
-      const uncertainty = recordedIdentity === undefined ? 'legacy' : compared.isOtherClock ? 'namespace'
+      const uncertainty = recordedIdentity === undefined ? 'legacy' : compared.isOtherNamespace ? 'namespace'
         : recordedIdentity === null || identity === null ? 'unknown' : secondPrecisionPrefix(identity) ? 'second' : null
       if (!newest || stat.mtimeMs > newest.markerMs) newest = { pid, name, markerMs: stat.mtimeMs, uncertainty }
       continue
@@ -631,7 +633,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       const detail = uncertainty === 'legacy' ? ', owner could not be confirmed because no process identity was recorded'
         : uncertainty === 'unknown' ? ', process start time could not be read, so the owner could not be confirmed'
           : uncertainty === 'second' ? ', process identity is known only to the second; this may be a reused process ID'
-            : uncertainty === 'namespace' ? ', its time namespace differs or could not be read, so the owner could not be confirmed' : ''
+            : uncertainty === 'namespace' ? ', its time or process ID namespace differs or could not be read, so the owner could not be confirmed' : ''
       add('FAIL', `another preflight test run is already active on this computer (process ${pid}, started ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago${detail}); finish it, or if no preflight is running, delete its .lock file \ue001 and run preflight again.`, `${name} from this account's .agent-board-preflight-tests-* folder`)
     }
     if (owner?.isFallback) add('PASS', "the home folder cannot hold the test lock, so the test lock was this account's shared fallback folder, and any home lock folder was still read.")
