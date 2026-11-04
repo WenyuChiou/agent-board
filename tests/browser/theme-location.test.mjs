@@ -5,9 +5,9 @@ import { BoardPage } from './board-page.mjs'
 import { browserFixture, writeProgress } from './fixture.mjs'
 
 const readmeLocations = [
-  ['README.md', ['next to **Close the board**', 'bottom of the expanded sidebar', 'below the tasks on a narrow screen or when the sidebar is collapsed', 'In `progress.html`, it is at the top right.']],
-  ['README.zh-TW.md', ['**關閉看板**旁邊', '展開的側欄底部', '窄螢幕或側欄收起時，則在工作清單下方', '`progress.html` 的開關在右上角。']],
-  ['README.zh-CN.md', ['**关闭看板**旁边', '展开的侧栏底部', '窄屏幕或侧栏收起时，则在任务列表下方', '`progress.html` 的开关在右上角。']],
+  ['README.md', ['next to **Close the board**', 'bottom of the expanded sidebar', 'below the tasks on a narrow screen or when the sidebar is collapsed']],
+  ['README.zh-TW.md', ['**關閉看板**旁邊', '展開的側欄底部', '窄螢幕或側欄收起時，則在工作清單下方']],
+  ['README.zh-CN.md', ['**关闭看板**旁边', '展开的侧栏底部', '窄屏幕或侧栏收起时，则在任务列表下方']],
 ]
 
 test('at 375 px the theme switch is beside Close the board where the README says', { timeout: 60_000 }, async () => {
