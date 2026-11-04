@@ -477,3 +477,24 @@ test('tools/list describes each tool in the language the server runs in', async 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('peer-send refuses a malformed sender before it writes, and the store reopens', () => {
+  const root = temp()
+  let store
+  try {
+    prepare(root)
+    store = createMessaging(join(root, 'messages'))
+    const now = Date.now(), folderDigest = 'a'.repeat(64)
+    store.act('mcp-enroll', { agent: 'codex', session: 'beta', surface: 'mcp', owner: '7:one', folderDigest, until: now + MCP_LEASE_MS }, now)
+    const send = (id, from) => store.act('peer-send', { agent: 'codex', session: 'beta', text: 'hello', id, from, folderDigest }, now)
+    for (const from of ['codex:\nsource', 'codex:source\r', 'no-colon', ':source', 'codex:', 'board', '', 7, undefined, 'a b:source']) assert.throws(() => send('bad', from), /INVALID_SENDER/, String(from))
+    assert.equal(store.snapshot(now).messages.length, 0)
+    assert.equal(send('good', 'codex:alpha').from, 'codex:alpha')
+    store.close()
+    store = createMessaging(join(root, 'messages'))
+    assert.deepEqual(store.snapshot(now).messages.map(one => one.id), ['good'])
+  } finally {
+    store?.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})

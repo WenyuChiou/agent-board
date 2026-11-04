@@ -44,6 +44,18 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
   return pruneMessages({ messages, ...(saved.mailboxes === undefined ? {} : { mailboxes: saved.mailboxes }), ...(saved.pausePeerMessages === undefined ? {} : { pausePeerMessages: saved.pausePeerMessages }) }, now)
 }
 
+// A peer sender is 'unverified' or one session's address. Anything else is refused before it is saved,
+// because the store's own reader would refuse it on the next start.
+const peerSender = (from: unknown): string => {
+  if (from === 'unverified') return from
+  try {
+    if (typeof from !== 'string' || from.length > 300) throw new Error()
+    const split = from.indexOf(':')
+    if (split < 1 || address(messageId(from.slice(0, split)), messageId(from.slice(split + 1))) !== from) throw new Error()
+    return from
+  } catch { throw new Error('INVALID_SENDER') }
+}
+
 const mailboxAction = (state: MessageState, action: string, body: Record<string, unknown>, now: number) => {
   const agent = messageId(body.agent), session = messageId(body.session)
   if (action === 'mcp-enroll') {
@@ -285,7 +297,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       if (action === 'peer-send') {
         messageFields(body, ['agent', 'session', 'text', 'id', 'from', 'folderDigest'])
         const agent = messageId(body.agent), session = messageId(body.session)
-        if (body.from === 'board') throw new Error('INVALID_SENDER')
+        const from = peerSender(body.from)
         const target = state.mailboxes?.find(one => one.agent === agent && one.session === session)
         const existing = state.messages.find(one => one.id === body.id)
         if (existing && existing.to !== address(agent, session)) throw new Error('ID_CONFLICT')
@@ -293,7 +305,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
           if (!target?.folderDigest) throw new Error('WORKSPACE_UNKNOWN')
           if (target.folderDigest !== body.folderDigest) throw new Error('WORKSPACE_MISMATCH')
         }
-        const queued = queueMessage(state, { id: body.id, text: body.text, target: existing?.target ?? target?.id, turn: existing?.turn ?? target?.turn }, messageText(body.from, 300), target, now, 'local', randomBytes(16).toString('hex'))
+        const queued = queueMessage(state, { id: body.id, text: body.text, target: existing?.target ?? target?.id, turn: existing?.turn ?? target?.turn }, from, target, now, 'local', randomBytes(16).toString('hex'))
         save(queued.state, now)
         return shownMessage(queued.message)
       }
