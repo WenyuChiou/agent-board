@@ -36,6 +36,7 @@ Each rule and each process step is written in one file, listed here. Another pag
 |---|---|---|
 | [docs/dev/universal-messaging-roadmap.md](dev/universal-messaging-roadmap.md), roadmap issue #209 | Where the product is going, and in what order. | owner |
 | [docs/dev/product-principles.md](dev/product-principles.md) | The owner's product rules: what a feature must be, and how it is judged. | owner |
+| [docs/dev/plan-0.24.3.md](dev/plan-0.24.3.md) | What 0.24.3 holds, what moved to later versions, and why. | owner |
 | [docs/dev/architecture-positioning.md](dev/architecture-positioning.md) | What Agent Board is, and is not, next to other tools. | non-author |
 
 ## For everyone
