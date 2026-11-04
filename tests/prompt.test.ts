@@ -1,5 +1,10 @@
 import { expect, test } from 'claude-code/testing'
-import { agentHooks, COLLISION, DELETE, openclawPlugin, opencodePlugin } from '../hooks/connect'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { agentHooks, COLLISION, DELETE, openclawPlugin, opencodePlugin, reporterPs1 } from '../hooks/connect'
+import { hookTimeout, hostHookTimeout } from '../hooks/hook-safety'
 import { answerAgentPrompt, blockId, inboxOrder, normalizeTurnOrder, readTurn, turnOrder, turnsToDigest, withAgentPrompts } from '../hooks/inbox'
 import { emptyMirror, isStaleStoreKey } from '../hooks/mirror'
 import { answerTurns, applyDigest, markAsked } from '../hooks/digest'
@@ -159,14 +164,7 @@ test('exact pre-prompt Grok OpenCode and OpenClaw files upgrade and remove while
   }
 })
 
-test('the Codex prompt hook writes its event within its timeout on Windows', async () => {
-  const { hookTimeout, hostHookTimeout } = await import('../hooks/hook-safety')
-  const { reporterPs1 } = await import('../hooks/connect')
-  const { spawnSync } = await import('node:child_process')
-  const { mkdtempSync, writeFileSync, rmSync, readdirSync, readFileSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-
+test('the Codex prompt hook writes its event within its timeout on Windows', () => {
   expect(hookTimeout('codex', 'UserPromptSubmit')).toBe(10000)
   expect(hostHookTimeout('codex', 'UserPromptSubmit')).toBe(10)
   expect(hookTimeout('codex', 'UserPromptSubmit')).toBe(hookTimeout('codex', 'Stop'))
