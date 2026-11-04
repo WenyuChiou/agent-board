@@ -295,19 +295,49 @@ const emitPlan = plan => {
     '\n\nFull plan: ' + plan.full + '\n\nSoak recommended: ' + plan.soakRecommended + '\n\nChanged paths:\n' + plan.files.map(path => '- ' + path).join('\n') + '\n')
 }
 
-// A part such as 2/2 runs every second file through Node's --test-shard, so a long set fits two jobs (#899).
-export const testArgs = (files, { isSerial = false, part = '' } = {}) => {
+// A part such as 2/2 lets a long set fit two jobs (#899). Node's --test-shard runs every second file but
+// keeps each file whole, so a file far longer than the rest splits its own tests instead: part i of n
+// keeps every nth test, and the parts together run each test once.
+const parsePart = part => {
   const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(part)
   if (part !== '' && (!match || Number(match[1]) > Number(match[2]))) throw new Error('test part must be <index>/<total>, such as 1/2')
-  const shard = match && match[2] !== '1' ? ['--test-shard=' + part] : []
+  return match ? { index: Number(match[1]), total: Number(match[2]) } : { index: 1, total: 1 }
+}
+
+// The files that split their own tests with partTest.
+export const selfPartedTests = ['tests/board.test.mjs']
+
+export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
+  const { index, total } = parsePart(part)
+  let ordinal = 0
+  return Object.assign((...args) => (ordinal++ % total === index - 1 ? test(...args) : undefined), { skip: test.skip, only: test.only, todo: test.todo })
+}
+
+export const testArgs = (files, { isSerial = false, part = '' } = {}) => {
+  const shard = parsePart(part).total > 1 ? ['--test-shard=' + part] : []
   return ['--test', ...(isSerial ? ['--test-concurrency=1'] : []), ...shard, ...files]
 }
 
-export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '') => {
+// The Node runs of one part: the other files are sharded, and a self-parted file runs in every part.
+export const testRuns = (files, { isSerial = false, part = '' } = {}) => {
+  if (parsePart(part).total === 1) return [testArgs(files, { isSerial })]
+  const whole = files.filter(path => selfPartedTests.includes(path))
+  const rest = files.filter(path => !selfPartedTests.includes(path))
+  return [...(rest.length ? [testArgs(rest, { isSerial, part })] : []), ...(whole.length ? [testArgs(whole, { isSerial })] : [])]
+}
+
+export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync) => {
   if (!Array.isArray(files) || !files.length || files.some(path => !/^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/.test(path) || !existsSync(path))) throw new Error('selected tests are empty, invalid or missing')
-  const result = spawnSync(process.execPath, testArgs(files, { isSerial: process.env.CI_TEST_SERIAL === '1', part }), { stdio: 'inherit' })
-  if (result.error) throw result.error
-  if (result.status !== 0) throw new Error('selected tests failed: ' + (result.status ?? result.signal))
+  // A self-parted file reads its part from CI_TEST_PART, so the child gets the part this run was given,
+  // not whatever part the environment holds.
+  const env = { ...process.env, CI_TEST_PART: part }
+  // Every run goes ahead even when an earlier one failed, so one job shows all of its failures.
+  const failures = testRuns(files, { isSerial: process.env.CI_TEST_SERIAL === '1', part }).flatMap(args => {
+    const result = spawn(process.execPath, args, { stdio: 'inherit', env })
+    if (result.error) throw result.error
+    return result.status === 0 ? [] : [result.status ?? result.signal]
+  })
+  if (failures.length) throw new Error('selected tests failed: ' + failures.join(', '))
 }
 
 const main = async () => {

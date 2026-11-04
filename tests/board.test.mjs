@@ -11,7 +11,7 @@ import { registerHooks } from 'node:module'
 import { basename, join, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { test } from 'node:test'
+import { test as nodeTest } from 'node:test'
 import fs from 'node:fs'
 import childProcess from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
@@ -30,8 +30,13 @@ import { recentInboxFiles } from '../scripts/inbox-files.ts'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from '../scripts/server-runtime.ts'
 import { isPrivateRuntimeDacl, isPrivateRuntimeSddl, privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
 import { AGENT_ICONS } from '../hooks/agent-icons.ts'
+import { partTest } from '../scripts/ci-impact.mjs'
 import { bigBoard, bigBoardNow } from './fixtures/big-board.mjs'
 import { neverShown } from './fixtures/never-shown.mjs'
+
+// The Windows board job runs this file in two parts, and each part runs its share of the tests: the
+// file alone took 8 to 9 minutes there against a ten-minute limit (#899).
+const test = partTest(nodeTest)
 
 const SWEEP_ARMED_KEY = createHash('sha256').update('hand-kept-sweep-armed').digest('hex')
 
