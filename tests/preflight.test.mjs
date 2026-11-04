@@ -394,13 +394,18 @@ test('preflight publishes its identity beside an empty marker that legacy reader
   assert.deepEqual(readdirSync(f.lockPath), [])
 })
 
-test('preflight publishes no identity file when its own identity is unreadable', async t => {
+test('preflight publishes a null identity when its own identity is unreadable', async t => {
   const f = fixture(t)
   f.write('tests/unpublished-identity.test.mjs', '')
-  let names = null
-  const checks = await f.check({ readProcessIdentity: () => null, onLockPublished: () => { names = readdirSync(f.lockPath) } })
-  assert.equal(names.length, 1)
-  assert.match(names[0], new RegExp(`^${process.pid}-[0-9a-f-]+\\.lock$`))
+  let recorded
+  const checks = await f.check({
+    readProcessIdentity: () => null,
+    onLockPublished: () => {
+      const name = readdirSync(f.lockPath).find(name => name.endsWith('.lock'))
+      recorded = JSON.parse(readFileSync(join(f.lockPath, `${name}.start`), 'utf8'))
+    },
+  })
+  assert.equal(recorded, null)
   assert.ok(has(checks, 'PASS', 'tests/unpublished-identity.test.mjs: 1 tests, 0 failed'))
   assert.deepEqual(readdirSync(f.lockPath), [])
 })

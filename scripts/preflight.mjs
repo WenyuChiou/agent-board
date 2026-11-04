@@ -310,12 +310,11 @@ const acquireTestLock = (directory, onPublished, fallback, readProcessStart, rea
   let isIdentityPublished = false
   try {
     // Publish metadata first so every visible marker already has its identity, even during a clock change.
-    // An unreadable own identity publishes none: readers then fall back to start times, which can still prove PID reuse.
-    const ownIdentity = knownProcessIdentity(process.pid, readProcessIdentity)
-    if (ownIdentity !== null) {
-      writeFileSync(`${path}.start`, JSON.stringify(ownIdentity), { flag: 'wx', mode: 0o600 })
-      isIdentityPublished = true
-    }
+    // An unreadable own identity is published as null, so readers block on a live PID rather than fall back to
+    // wall-clock start times, which a clock step can make look like reuse. macOS gives start times to the second, so
+    // a PID reused within the same second also blocks; the failure message names the .lock file to delete.
+    writeFileSync(`${path}.start`, JSON.stringify(knownProcessIdentity(process.pid, readProcessIdentity)), { flag: 'wx', mode: 0o600 })
+    isIdentityPublished = true
     const file = openSync(path, 'wx', 0o600)
     isPublished = true
     closeSync(file)
