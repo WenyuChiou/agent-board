@@ -327,15 +327,16 @@ test('preflight reads stable process identities without Linux wall-clock data', 
   const readText = path => {
     paths.push(path)
     if (path === '/proc/42/stat' || path === '/proc/self/stat') return stat
+    if (path === '/proc/self/status') return `Name:\tnode\nNSpid:\t${process.pid}\n`
     assert.equal(path, '/proc/sys/kernel/random/boot_id')
     return `${boot}\n`
   }
-  const options = { platform: 'linux', readText, readLink: path => path === '/proc/self' ? String(process.pid) : path.endsWith('/time') ? 'time:[4026531834]' : 'pid:[4026531836]', run: () => assert.fail('a stable Linux identity needs no subprocess') }
+  const options = { platform: 'linux', readText, readLink: path => path.endsWith('/time') ? 'time:[4026531834]' : 'pid:[4026531836]', run: () => assert.fail('a stable Linux identity needs no subprocess') }
   assert.equal(processStartIdentity(42, options), `linux:${boot}:12345:time:[4026531834]:pid:[4026531836]`)
-  assert.deepEqual(paths, ['/proc/42/stat', '/proc/sys/kernel/random/boot_id'])
+  assert.deepEqual(paths, ['/proc/42/stat', '/proc/sys/kernel/random/boot_id', '/proc/self/status'])
   paths.length = 0
   assert.equal(processStartIdentity(process.pid, options), `linux:${boot}:12345:time:[4026531834]:pid:[4026531836]`)
-  assert.deepEqual(paths, ['/proc/self/stat', '/proc/sys/kernel/random/boot_id'])
+  assert.deepEqual(paths, ['/proc/self/stat', '/proc/sys/kernel/random/boot_id', '/proc/self/status'])
   assert.equal(processStartIdentity(42, { ...options, readText: () => 'unreadable' }), null)
   assert.equal(processStartIdentity(42, { ...options, readText: () => { throw new Error('unavailable') } }), null)
   assert.equal(processStartIdentity(-1, options), null)
@@ -476,8 +477,9 @@ for (const isWatched of [false, true]) {
     let bootSeconds = Math.floor(Date.now() / 1000) - 1000
     const readText = path => path === '/proc/stat' ? `btime ${bootSeconds}\n`
       : path === '/proc/sys/kernel/random/boot_id' ? '00000000-0000-4000-8000-000000000001\n'
-        : `42 (worker) ${['S', ...Array(18).fill('0'), '12345'].join(' ')}`
-    const options = { platform: 'linux', readText, readLink: path => path === '/proc/self' ? String(process.pid) : path.endsWith('/time') ? 'time:[4026531834]' : 'pid:[4026531836]', clockTicks: () => 100 }
+        : path === '/proc/self/status' ? `Name:\tnode\nNSpid:\t${process.pid}\n`
+          : `42 (worker) ${['S', ...Array(18).fill('0'), '12345'].join(' ')}`
+    const options = { platform: 'linux', readText, readLink: path => path.endsWith('/time') ? 'time:[4026531834]' : 'pid:[4026531836]', clockTicks: () => 100 }
     const identity = processStartIdentity(process.pid, options)
     assert.ok(identity)
     writeFileSync(`${marker}.start`, JSON.stringify(identity))
@@ -562,26 +564,25 @@ test('preflight tags a Linux identity with the time and PID namespaces it was re
   const { processStartIdentity } = await import('../scripts/preflight.mjs')
   const boot = '00000000-0000-4000-8000-000000000001'
   const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 12345 0`
-  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}
-` : stat
+  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n`
+    : path === '/proc/self/status' ? `Name:\tnode\nNSpid:\t${process.pid}\n` : stat
   const links = []
   const readLink = path => {
     links.push(path)
-    if (path === '/proc/self') return String(process.pid)
     return path.endsWith('/time') ? 'time:[4026531834]' : 'pid:[4026531836]'
   }
   assert.equal(processStartIdentity(42, { platform: 'linux', readText, readLink }), `linux:${boot}:12345:time:[4026531834]:pid:[4026531836]`)
-  assert.deepEqual(links.filter(path => path !== '/proc/self'), ['/proc/self/ns/time', '/proc/self/ns/pid'])
+  assert.deepEqual(links, ['/proc/self/ns/time', '/proc/self/ns/pid'])
 })
 
 test('preflight retains the time namespace when the PID namespace is unreadable or invalid', async () => {
   const { processStartIdentity } = await import('../scripts/preflight.mjs')
   const boot = '00000000-0000-4000-8000-000000000001'
   const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 12345 0`
-  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
+  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n`
+    : path === '/proc/self/status' ? `Name:\tnode\nNSpid:\t${process.pid}\n` : stat
   for (const invalid of [false, true]) {
     const readLink = path => {
-      if (path === '/proc/self') return String(process.pid)
       if (path.endsWith('/time')) return 'time:[4026531834]'
       if (invalid) return 'pid:[invalid]'
       throw new Error('no PID namespace')
@@ -594,10 +595,10 @@ test('preflight retains the PID namespace when the time namespace is unreadable 
   const { processStartIdentity } = await import('../scripts/preflight.mjs')
   const boot = '00000000-0000-4000-8000-000000000001'
   const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 12345 0`
-  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
+  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n`
+    : path === '/proc/self/status' ? `Name:\tnode\nNSpid:\t${process.pid}\n` : stat
   for (const invalid of [false, true]) {
     const readLink = path => {
-      if (path === '/proc/self') return String(process.pid)
       if (!path.endsWith('/time')) return 'pid:[4026531836]'
       if (invalid) return 'time:[invalid]'
       throw new Error('no time namespace')
@@ -610,29 +611,43 @@ test('preflight omits both Linux namespaces when neither can be read', async () 
   const { processStartIdentity } = await import('../scripts/preflight.mjs')
   const boot = '00000000-0000-4000-8000-000000000001'
   const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 12345 0`
-  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
-  const readLink = path => { if (path === '/proc/self') return String(process.pid); throw new Error(`unreadable ${path}`) }
+  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n`
+    : path === '/proc/self/status' ? `Name:\tnode\nNSpid:\t${process.pid}\n` : stat
+  const readLink = path => { throw new Error(`unreadable ${path}`) }
   assert.equal(processStartIdentity(42, { platform: 'linux', readText, readLink }), `linux:${boot}:12345`)
 })
 
-for (const [scenario, procSelf] of [
-  ['names another PID', () => String(process.pid + 1)],
-  ['cannot be read', () => { throw new Error('unreadable /proc/self') }],
-  ['is not a decimal number', () => 'not-a-pid'],
+for (const [scenario, status, readerPid] of [
+  ['has two equal PIDs', () => 'Name:\tnode\nNSpid:\t400\t400\n', 400],
+  ['has parent and child PIDs', () => `Name:\tnode\nNSpid:\t2400\t${process.pid}\n`],
+  ['is missing', () => 'Name:\tnode\n'],
+  ['cannot be read', () => { throw new Error('unreadable /proc/self/status') }],
+  ['has a different single PID', () => `Name:\tnode\nNSpid:\t${process.pid + 1}\n`],
+  ['has a nondecimal PID', () => 'Name:\tnode\nNSpid:\tnot-a-pid\n'],
+  ['has trailing data', () => `Name:\tnode\nNSpid:\t${process.pid} extra\n`],
+  ['is empty', () => 'Name:\tnode\nNSpid:\t\n'],
 ]) {
-  test(`preflight omits the PID namespace when /proc/self ${scenario}`, async () => {
+  test(`preflight omits the PID namespace when NSpid ${scenario}`, async () => {
     const { processStartIdentity } = await import('../scripts/preflight.mjs')
     const boot = '00000000-0000-4000-8000-000000000001'
     const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 12345 0`
-    const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
-    const readLink = path => path === '/proc/self' ? procSelf() : path.endsWith('/time') ? 'time:[1]' : 'pid:[2]'
-    assert.equal(processStartIdentity(42, { platform: 'linux', readText, readLink }), `linux:${boot}:12345:time:[1]`)
+    const originalPid = Object.getOwnPropertyDescriptor(process, 'pid')
+    if (readerPid !== undefined) Object.defineProperty(process, 'pid', { ...originalPid, value: readerPid })
+    try {
+      const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n`
+        : path === '/proc/self/status' ? status() : stat
+      // A legacy /proc/self lookup can resolve to the reader's PID even for an inherited mount.
+      const readLink = path => path.endsWith('/time') ? 'time:[1]' : path.endsWith('/pid') ? 'pid:[2]' : String(process.pid)
+      assert.equal(processStartIdentity(42, { platform: 'linux', readText, readLink }), `linux:${boot}:12345:time:[1]`)
+    } finally {
+      if (readerPid !== undefined) Object.defineProperty(process, 'pid', originalPid)
+    }
   })
 }
 
-for (const isWatched of [false, true]) {
+for (const [isWatched, isEqual] of [[false, false], [false, true], [true, false], [true, true]]) {
   const folder = isWatched ? 'watched' : 'own'
-  test(`preflight keeps a live Linux marker read through an inherited procfs mount in its ${folder} folder`, async t => {
+  test(`preflight keeps a live Linux marker read through an inherited procfs mount${isEqual ? ' with equal PIDs' : ''} in its ${folder} folder`, async t => {
     const { processStartIdentity } = await import('../scripts/preflight.mjs')
     const child = await startUnrelatedProcess()
     try {
@@ -647,12 +662,15 @@ for (const isWatched of [false, true]) {
       writeFileSync(`${marker}.start`, JSON.stringify(recorded))
       writeFileSync(marker, '')
       const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 18345 0`
+      const mountPid = isEqual ? process.pid : process.pid + 1
       const paths = []
       const readText = path => {
         paths.push(path)
-        return path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
+        return path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n`
+          : path === '/proc/self/status' ? `Name:\tnode\nNSpid:\t${mountPid}\t${process.pid}\n` : stat
       }
-      const readLink = path => path === '/proc/self' ? String(process.pid + 1) : path.endsWith('/time') ? 'time:[1]' : 'pid:[2]'
+      // A legacy /proc/self lookup resolves the PID in the procfs mount's namespace.
+      const readLink = path => path.endsWith('/time') ? 'time:[1]' : path.endsWith('/pid') ? 'pid:[2]' : String(mountPid)
       const identities = []
       let testStarts = 0
       const run = (program, args, options) => {
@@ -752,9 +770,9 @@ for (const isWatched of [false, true]) {
       writeFileSync(`${marker}.start`, JSON.stringify(recorded))
       writeFileSync(marker, '')
       const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 18345 0`
-      const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
+      const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n`
+        : path === '/proc/self/status' ? `Name:\tnode\nNSpid:\t${process.pid}\n` : stat
       const readLink = path => {
-        if (path === '/proc/self') return String(process.pid)
         if (path.endsWith('/time')) return 'time:[1]'
         if (hasReaderPid) return 'pid:[2]'
         throw new Error('no PID namespace')
@@ -794,8 +812,9 @@ test('preflight still frees a reused Linux PID read through the same time and PI
   writeFileSync(`${marker}.start`, JSON.stringify(`linux:${boot}:12345:time:[1]:pid:[2]`))
   writeFileSync(marker, '')
   const stat = `42 (node) S ${Array.from({ length: 18 }, () => '0').join(' ')} 18345 0`
-  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n` : stat
-  const readLink = path => path === '/proc/self' ? String(process.pid) : path.endsWith('/time') ? 'time:[1]' : 'pid:[2]'
+  const readText = path => path === '/proc/sys/kernel/random/boot_id' ? `${boot}\n`
+    : path === '/proc/self/status' ? `Name:\tnode\nNSpid:\t${process.pid}\n` : stat
+  const readLink = path => path.endsWith('/time') ? 'time:[1]' : 'pid:[2]'
   const checks = await f.check({ readProcessIdentity: pid => processStartIdentity(pid, { platform: 'linux', readText, readLink }) })
   assert.ok(has(checks, 'PASS', 'tests/same-namespace.test.mjs: 1 tests, 0 failed'))
   assert.equal(existsSync(marker), false)

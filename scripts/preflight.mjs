@@ -231,12 +231,15 @@ export const processStartIdentity = (pid, { platform = process.platform, readTex
     const ticks = parseProcStat(readText(pid === process.pid ? '/proc/self/stat' : `/proc/${pid}/stat`))
     const boot = readText('/proc/sys/kernel/random/boot_id').trim()
     if (ticks === null || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(boot)) return null
-    // Start ticks depend on the reader's time namespace. /proc/N uses the PID namespace of the procfs mount,
-    // which can be a parent namespace, so name the PID namespace only when /proc/self is this process.
+    // NSpid lists this process's PID from the procfs mount's PID namespace down to its own.
+    // One entry means /proc/N names processes in this PID namespace; equal numbers at two levels do not.
     let time = ''
     let pidNamespace = ''
     try { time = /^time:\[\d+\]$/.exec(readLink('/proc/self/ns/time'))?.[0] ?? '' } catch {}
-    try { if (readLink('/proc/self') === String(process.pid)) pidNamespace = /^pid:\[\d+\]$/.exec(readLink('/proc/self/ns/pid'))?.[0] ?? '' } catch {}
+    try {
+      const nspid = /^NSpid:[ \t]*(\d+)[ \t]*$/m.exec(readText('/proc/self/status'))?.[1]
+      if (nspid !== undefined && Number(nspid) === process.pid) pidNamespace = /^pid:\[\d+\]$/.exec(readLink('/proc/self/ns/pid'))?.[0] ?? ''
+    } catch {}
     return `linux:${boot}:${ticks}${time ? `:${time}` : ''}${pidNamespace ? `:${pidNamespace}` : ''}`
   } catch {
     return null
