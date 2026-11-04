@@ -45,7 +45,7 @@ The owner approved this order on 2026-11-04 ("Order is fine"). It simplifies the
 | gate | Acceptance before the release | #877's journey, and a sitting of about 2 hours with the owner if he agrees (decision 3 below) | The release gate |
 | release | The release steps, as every version takes them | The [RELEASING.md](../RELEASING.md) checklist:<br>• the CHANGELOG from `changelog-fold.mjs`, opening with **Major changes in 0.24.3** (#881)<br>• the GitHub release notes, written from it<br>• npm `next`, then `latest` once the gate passes; the owner runs npm<br>• the README stable line<br>• the milestone closed (#886 for a promotion) | The owner, 2026-11-04: 「另外別忘了更新changelog release 那些都是每次版本更新必做的事情吧」 |
 
-Until Codex has quota again on 11-07, three Claude lanes run: wave 1's page and skill work (#868, #865, #884, #859, #862), setup and upgrade (#854, #855, #877), and #557. Their files barely overlap. From 11-07, Codex takes the mechanical parts, such as skill text and string tables.
+Wave 1 runs in three lanes: the page and skill work (#868, #865, #884, #859, #862), setup and upgrade (#854, #855, #877), and #557. Their files barely overlap. Codex takes the mechanical parts, such as skill text and string tables.
 
 ## What moved, and why
 
