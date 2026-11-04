@@ -143,10 +143,10 @@ class SetupFailure extends Error {
 const fail = (code, message, extra = {}) => { throw new SetupFailure(code, message, extra) }
 
 // Detect installed commands without starting them during setup.
-const findOnPath = commands => {
+const findOnPath = (commands, extensions = ['.exe', '.cmd', '.ps1', '.bat']) => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path')
   const path = (pathKey ? process.env[pathKey] : '') || ''
-  const filenames = process.platform === 'win32' ? commands.flatMap(command => ['.exe', '.cmd', '.ps1', '.bat'].map(extension => `${command}${extension}`)) : commands
+  const filenames = process.platform === 'win32' ? commands.flatMap(command => extensions.map(extension => `${command}${extension}`)) : commands
   for (const entry of path.split(delimiter)) {
     const directory = process.platform === 'win32' ? entry.replace(/^"(.*)"$/, '$1') : entry
     if (!isAbsolute(directory)) continue
@@ -199,19 +199,23 @@ const main = () => {
     || (homeAt < 0 && (findOnPath(commands[agent]) || apps[agent]?.some(app => existsSync(app)))),
   ) : selector.split(',')
   const hasClaude = existsSync(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')) || (homeAt < 0 && !!findOnPath(['claude']))
+  const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
+  const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
+    ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
+  const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
+  const setupCommand = extra => [command || nodeCommand(fileURLToPath(import.meta.url)), ...common.map(quote), ...extra.map(quote)].join(' ')
   if (selector === 'auto' && !selected.length) {
-    const next = command || 'node scripts/setup-agent.mjs'
+    const next = setupCommand(['--agent', 'codex'])
     const noAgent = message(
-      `Setup found no agent on this computer. It looked for their folders in ${home}${homeAt < 0 ? ', their commands on the PATH and their apps' : ''}. Install an agent and run setup again, or name one: ${next} --agent codex (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).`,
-      `setup 在這台電腦沒有找到 agent。它找過 ${home} 裡的資料夾${homeAt < 0 ? '、PATH 上的命令和已安裝的應用程式' : ''}。請安裝一個 agent 再執行一次 setup，或指定一個：${next} --agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
-      `setup 在这台电脑没有找到 agent。它找过 ${home} 里的文件夹${homeAt < 0 ? '、PATH 上的命令和已安装的应用程序' : ''}。请安装一个 agent 再运行一次 setup，或指定一个：${next} --agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
+      `Setup found no agent on this computer. It looked for their folders in ${home}${homeAt < 0 ? ', their commands on the PATH and their apps' : ''}. Install an agent and run setup again, or name one: ${next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).`,
+      `setup 在這台電腦沒有找到 agent。它找過 ${home} 裡的資料夾${homeAt < 0 ? '、PATH 上的命令和已安裝的應用程式' : ''}。請安裝一個 agent 再執行一次 setup，或指定一個：${next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
+      `setup 在这台电脑没有找到 agent。它找过 ${home} 里的文件夹${homeAt < 0 ? '、PATH 上的命令和已安装的应用程序' : ''}。请安装一个 agent 再运行一次 setup，或指定一个：${next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
     )
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n1. ${words('plugin')}` : noAgent}\n`)
     return
   }
   if (!selected.length || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
   const apply = args.includes('--apply')
-  const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
   const script = fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
   const run = (agent, isApplying) => {
     const result = spawnSync(process.execPath, [script, ...common, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
@@ -246,10 +250,6 @@ const main = () => {
     process.stdout.write(`${JSON.stringify({ targets: selected, plans: results, applied: apply && available.length > 0 }, null, 2)}\n`)
     return
   }
-  const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
-    ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
-  const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
-  const setupCommand = extra => [command || nodeCommand(fileURLToPath(import.meta.url)), ...common.map(quote), ...extra.map(quote)].join(' ')
   const shortPath = file => {
     const path = relative(resolve(home), file)
     return path === '' ? '~' : path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path) ? join('~', path) : file
@@ -278,7 +278,7 @@ const main = () => {
   for (const agent of available) {
     const plan = results[selected.indexOf(agent)]
     if (plan.managedBy === 'connector') continue
-    const codex = agent === 'codex' ? findOnPath(['codex']) : undefined
+    const codex = agent === 'codex' ? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
     steps.push(words(agent === 'codex' ? codex ? 'codex' : 'codexMissing' : plan.capabilities.lifecycle === 'adapter-pending' ? 'skill' : 'reload', { host: names[agent], command: boardCommand, codex: codex ? quote(codex) : '' }))
   }
   for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))

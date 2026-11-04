@@ -750,7 +750,9 @@ test('a setup preview that finds no agent exits 0 and names the next command', (
     const result = f.run('--lang', lang)
     assert.equal(result.status, 0, result.stderr)
     assert.equal(result.stderr, '')
-    assert.match(result.stdout, /node scripts\/setup-agent.mjs --agent codex/)
+    // The run starts outside the checkout, so a relative command could not work from here.
+    assert.ok(result.stdout.includes(resolve('scripts/setup-agent.mjs')), result.stdout)
+    assert.ok(result.stdout.includes(`--lang ${lang} --agent codex`), result.stdout)
     assert.match(result.stdout, /PATH/)
     assert.ok(result.stdout.includes(hint), result.stdout)
     assert.ok(result.stdout.includes(f.home))

@@ -481,7 +481,7 @@ test('agent-board setup with no agent found says how to name one, without a stac
       assert.equal(extra.length ? result.stdout : result.stderr, '')
       const text = extra.length ? result.stderr : result.stdout
       assert.ok(text.includes(extra.length ? unknown : hint), text)
-      assert.ok(text.includes(`npx ${manifest.name} setup --agent codex`), text)
+      assert.ok(text.includes(`npx ${manifest.name} setup`) && text.includes('--agent codex'), text)
       assert.equal(text.includes('    at '), false)
       assert.equal(text.includes(pkg), false)
       assert.equal(text.trim().split('\n').length, 1)
@@ -550,8 +550,8 @@ test('npx guidance uses the package name while command examples keep the bin nam
     assert.equal(missing.status, 1)
     assert.ok(missing.stderr.includes(`npx ${renamed.name} setup --apply`))
     const setup = f.run(pkg, ['setup', '--home', f.home, '--lang', lang])
-    assert.equal(setup.status, 1)
-    assert.ok(setup.stderr.includes(`npx ${renamed.name} setup --agent codex`))
+    assert.equal(setup.status, 0)
+    assert.ok(setup.stdout.includes(`npx ${renamed.name} setup`) && setup.stdout.includes('--agent codex'), setup.stdout)
   }
   const text = `${prelude(f)}${fake.slice(fake.indexOf('\n') + 1)}`
   save(boardPath(f), text)

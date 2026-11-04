@@ -13,7 +13,7 @@ node scripts/setup-agent.mjs
 node scripts/setup-agent.mjs --apply
 ```
 
-自动检测识别 host 配置，不代表 session 在线。尚无配置的已知 host 可用 `--agent <name>`；`--agent all` 预览全部目标，不会安装 AI 应用。[安装说明](SETUP.md)列出路径与 adapter 范围。
+自动检测识别 host 配置、安装记录、PATH 上的命令和已安装的应用，不代表 session 在线。没检测到的已知 host 可用 `--agent <name>`；`--agent all` 预览全部目标，不会安装 AI 应用。[安装说明](SETUP.md)列出路径与 adapter 范围。
 
 新独立安装使用 `~/.agent-board/progress.md`，现有安装保留原文件；`--progress-file /absolute/path/progress.md` 可明确指定。普通本地安装不需选择另一台电脑的看板。
 
