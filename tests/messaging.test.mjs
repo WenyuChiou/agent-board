@@ -2297,14 +2297,21 @@ test('an adapter timeout becomes explicit uncertainty and never triggers another
 test('a mock Codex proxy keeps steering and native ACK separate and never answers approval RPCs', async () => fixture(async (board, dir) => {
   const thread = '11111111-2222-4333-8444-555555555555'
   const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log')
-  writeFileSync(fake, `import {createInterface} from 'node:readline';import{appendFileSync}from'node:fs';
-const emit=v=>console.log(JSON.stringify(v));
-createInterface({input:process.stdin}).on('line',line=>{const v=JSON.parse(line);appendFileSync(${JSON.stringify(log)},line+'\\n');
-if(v.method==='initialize')emit({id:v.id,result:{}});
-if(v.method==='thread/loaded/list')emit({id:v.id,result:{data:[${JSON.stringify(thread)}],nextCursor:null}});
-if(v.method==='turn/steer'){emit({id:v.id,result:{turnId:'turn1'}});emit({id:999,method:'item/commandExecution/requestApproval',params:{}});
-setTimeout(()=>emit({method:'item/completed',params:{threadId:${JSON.stringify(thread)},turnId:'turn1',item:{type:'agentMessage',text:'ACK '+v.params.input[0].text.match(/ACK ([0-9a-f]{6})/)[1]}}}),100);}
-});`)
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+import { appendFileSync } from 'node:fs'
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+  if (value.method === 'turn/steer') {
+    emit({ id: value.id, result: { turnId: 'turn1' } })
+    emit({ id: 999, method: 'item/commandExecution/requestApproval', params: {} })
+    setTimeout(() => emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'turn1', item: { type: 'agentMessage', text: 'ACK ' + value.params.input[0].text.match(/ACK ([0-9a-f]{6})/)[1] } } }), 100)
+  }
+} })
+`)
   const connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1', surface: 'Mock proxy' })
   try {
     await board.call('/api/messages/send', { ...input, target: connector.id })
@@ -2328,6 +2335,95 @@ setTimeout(()=>emit({method:'item/completed',params:{threadId:${JSON.stringify(t
     await pause(2200)
     assert.equal(readFileSync(log, 'utf8').split('"method":"turn/steer"').length - 1, 1)
   } finally { await connector.close() }
+}))
+
+test('the connector initializes, steers and reads the ACK through a WebSocket-only mock proxy', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log'), handshake = join(dir, 'handshake.txt')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import assert from 'node:assert/strict'
+import { appendFileSync, writeFileSync } from 'node:fs'
+import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+assert.deepEqual(process.argv.slice(2), ['app-server', 'proxy', '--sock', 'synthetic-owner'])
+let isInitialized = false, isListed = false, isSubscribed = false
+serveWebSocketProxy({
+  onHandshake: request => writeFileSync(${JSON.stringify(handshake)}, request),
+  onMessage: (value, emit) => {
+    appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
+    if (value.method === 'initialize') { emit({ id: value.id, result: {} }); return }
+    if (value.method === 'initialized') { isInitialized = true; return }
+    assert.ok(isInitialized)
+    if (value.method === 'thread/loaded/list') { isListed = true; emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } }) }
+    if (value.method === 'thread/resume') {
+      // Like the daemon: never resume a thread before checking it is loaded.
+      assert.ok(isListed)
+      assert.deepEqual(value.params, { threadId: ${JSON.stringify(thread)}, excludeTurns: true })
+      isSubscribed = true
+      emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+    }
+    if (value.method === 'turn/steer') {
+      assert.equal(value.params.expectedTurnId, 'turn1')
+      const nonce = value.params.input[0].text.match(/ACK ([0-9a-f]{6})/)[1]
+      emit({ id: value.id, result: { turnId: 'turn1' } })
+      // Like the daemon: a connection that never subscribed receives none of the turn's events.
+      if (!isSubscribed) return
+      const item = text => ({ type: 'agentMessage', text })
+      emit({ method: 'item/completed', params: { threadId: 'foreign', turnId: 'turn1', item: item('ACK ' + nonce + ' wrong thread') } })
+      emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'old-turn', item: item('ACK ' + nonce + ' wrong turn') } })
+      emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'turn1', item: item('ACK ' + nonce + ' received') } })
+      emit({ method: 'turn/completed', params: { threadId: ${JSON.stringify(thread)}, turn: { id: 'turn1' } } })
+    }
+  },
+})
+`)
+  const connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1', socket: 'synthetic-owner' })
+  try {
+    const sent = await board.call('/api/messages/send', { ...input, target: connector.id })
+    assert.equal(sent.status, 200)
+    const receipt = await waitFor(async () => {
+      const one = (await board.call('/api/board')).body.messaging.messages[0]
+      return one?.status === 'acknowledged' && one
+    })
+    assert.equal(receipt.reply, 'received')
+    assert.ok(readFileSync(handshake, 'utf8').startsWith('GET / HTTP/1.1\r\n'))
+    const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)
+    assert.deepEqual(calls.slice(0, 4).map(one => one.method), ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume'])
+    assert.equal(calls.filter(one => one.method === 'turn/steer').length, 1)
+  } finally { await connector.close() }
+}))
+
+test('the proxy connector never resumes a thread the running Codex has not loaded', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { appendFileSync } from 'node:fs'
+import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: ['99999999-2222-4333-8444-555555555555'], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+} })
+`)
+  await assert.rejects(connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1' }), { message: 'TARGET_MISMATCH' })
+  const methods = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line).method)
+  assert.deepEqual(methods, ['initialize', 'initialized', 'thread/loaded/list'])
+  assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
+}))
+
+test('the proxy connector does not attach when Codex refuses to subscribe it to the thread', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, error: { code: -32600, message: 'synthetic refusal' } })
+} })
+`)
+  await assert.rejects(connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1' }), { message: 'OWNER_REJECTED' })
+  assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
 }))
 
 test('an owned idle Codex session accepts only its actual new turn ACK and deduplicates self delivery', async () => fixture(async (board, dir) => {
