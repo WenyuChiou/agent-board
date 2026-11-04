@@ -4586,7 +4586,7 @@ export const LINES = [
 "var HOOK_WORKER_GRACE = 500;",
 "var HOOK_LATE_INPUT_GRACE = 500;",
 "var HOOK_TIMEOUTS = {",
-"  codex: { timeout: 3000, events: { Stop: 1e4 } },",
+"  codex: { timeout: 3000, events: { Stop: 1e4, UserPromptSubmit: 1e4 } },",
 "  cursor: { timeout: 3000 },",
 "  gemini: { timeout: 5000 },",
 "  grok: { timeout: 5000, events: { Stop: 1e4 } },",
