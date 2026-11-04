@@ -77,7 +77,7 @@ export const createMcpServer = (o: Options) => {
       level = level === 'unbound' ? level : 'restricted'
     },
     handle: async (line: string, now: number): Promise<{ frame?: unknown; accepted?: () => Promise<unknown> }> => {
-      const request = mcpRequest(line, o.version, now)
+      const request = mcpRequest(line, o.version, o.s, now)
       if (!request.tool) return { frame: request.frame }
       const { name, args } = request.tool
       const reply = (result: unknown, accepted?: () => Promise<unknown>) => ({ frame: { jsonrpc: '2.0', id: request.id, result }, accepted })

@@ -26,6 +26,8 @@ const { enrollMcp, takeMailboxMessage, mailboxId } = await import('../hooks/hook
 const { queueMessage, deliveryText, shownMessage } = await import('../hooks/messaging.ts')
 const { cwdDigest } = await import('../scripts/codex-local.ts')
 const { EN } = await import('../hooks/strings-en.ts')
+const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
+const { ZH_TW } = await import('../hooks/i18n.ts')
 const cli = fileURLToPath(new URL('../scripts/board-cli.ts', import.meta.url))
 const temp = () => mkdtempSync(join(tmpdir(), 'ab-mcp-'))
 const binding = { AGENT_BOARD_AGENT: 'codex', AGENT_BOARD_SESSION_ID: 'alpha', AGENT_BOARD_HOST_PID: '123', AGENT_BOARD_HOST_STARTED: 'start' }
@@ -444,6 +446,34 @@ test('a process without the lease cannot take a lease holder\'s message, and an 
     assert.equal((await call(restricted, 'board_send', { agent: 'codex', session: 'alpha', text: 'hi', id: 'loose' }, now)).data.hops, 2)
   } finally {
     await board?.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('tools/list describes each tool in the language the server runs in', async () => {
+  const root = temp()
+  let child
+  try {
+    prepare(root)
+    for (const s of [EN, ZH_TW, ZH_CN]) {
+      const { frame } = await createMcpServer(options(root, { s, env: {} })).handle(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }), 1000)
+      assert.deepEqual(frame.result.tools.map(tool => tool.description), [s.mcpToolStatus, s.mcpToolInbox, s.mcpToolAck, s.mcpToolSend])
+      assert.deepEqual(frame.result.tools.map(tool => tool.name), MCP_TOOLS.map(tool => tool.name))
+    }
+    assert.notEqual(ZH_TW.mcpToolSend, EN.mcpToolSend)
+    assert.notEqual(ZH_CN.mcpToolSend, EN.mcpToolSend)
+    // The real command line has to hand --lang on to the server.
+    writeFileSync(join(root, 'loader.mjs'), loader)
+    child = spawn(process.execPath, ['--experimental-transform-types', '--import', pathToFileURL(join(root, 'loader.mjs')).href, cli, '--mcp', '--lang', 'zh-TW', '--messages-dir', join(root, 'messages'), '--progress-file', join(root, 'progress.md')], { cwd: root, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true })
+    let out = ''
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', chunk => { out += chunk })
+    const exit = once(child, 'exit')
+    child.stdin.end(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n`)
+    await exit
+    assert.equal(JSON.parse(out).result.tools[3].description, ZH_TW.mcpToolSend)
+  } finally {
+    if (child && child.exitCode === null) { child.kill(); await once(child, 'exit') }
     rmSync(root, { recursive: true, force: true })
   }
 })
