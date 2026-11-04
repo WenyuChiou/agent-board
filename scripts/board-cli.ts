@@ -1451,6 +1451,17 @@ const stays = async (running: Running, file: string): Promise<boolean> => {
   return false
 }
 
+// A page already running, found without asking it to close and without touching its file. A
+// process that cannot start a replacement reuses the link as it is, even when the page would
+// not match a new start: closing it would leave no page and no link.
+const keptPage = async (file: string): Promise<Running | null> => {
+  const running = readRunning(file)
+  if (running === null) return null
+  const answer = await ping(running)
+  if (answer === 'silent' ? isRunning(running.pid) : answer !== null) return running
+  return null
+}
+
 // The running page of this copy for this file, or null. Any other page found in the file (one
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
@@ -1515,11 +1526,17 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
       if (!existsSync(file)) migratePrivateRuntimeFile(previous, file, text => parseRunning(text) !== null)
     }
   }
+  // A lookup that cannot start a replacement never asks a page to close: the page it finds
+  // is reused as it is, even when it would not match a new start.
+  if (runtimeUnprotected) {
+    const kept = (await keptPage(oldServeFile)) ?? (await keptPage(file))
+    if (kept !== null) return { url: kept.url, port: kept.port, isKept: true, isNew: false }
+    throw new RuntimeFolderError()
+  }
   const old = readRunning(oldServeFile)
   if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
   const found = await runningPage()
   if (found !== null) return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
-  if (runtimeUnprotected) throw new RuntimeFolderError()
   const rest = ['--lang', '--port', '--messages-dir', '--idle-minutes', '--stale-ms'].flatMap(name => {
     const value = flag(name)
     return value === undefined ? [] : [name, value]
