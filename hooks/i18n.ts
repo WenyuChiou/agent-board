@@ -543,6 +543,7 @@ export const ZH_TW = {
   boardKeyDone: 'd 確認完成',
   archiveLive: '仍在執行；停止後即可封存。',
   archivedOne: (title: string): string => `已封存「${title}」。`,
+  archivedKeptQuestions: (title: string, count: number): string => `已封存「${title}」。${count === 1 ? '它的未答問題' : `它的 ${count} 個未答問題`}仍保留在「更早、尚未回答的問題」；回覆後可在那裡按「已回覆，先隱藏」。`,
   archiveGone: '找不到這件工作，可能已經改過或封存了。',
   journalNoticeTitle: '完成紀錄沒有存成功',
   journalFailed: '步驟已完成，但工作日誌沒有存成功。待存的紀錄會在下次完成步驟或下一回合重試。',

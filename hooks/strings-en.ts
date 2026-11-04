@@ -500,6 +500,9 @@ export const EN: Strings = {
   boardKeyDone: 'd confirm done',
   archiveLive: 'Still running; archive after it stops.',
   archivedOne: (title: string): string => `Archived “${title}”.`,
+  archivedKeptQuestions: (title: string, count: number): string => count === 1
+    ? `Archived “${title}”. Its unanswered question stays under Older unanswered questions; hide it there once it is answered.`
+    : `Archived “${title}”. Its ${count} unanswered questions stay under Older unanswered questions; hide them there once they are answered.`,
   archiveGone: 'Could not find that task; it may have changed or been archived already.',
   journalNoticeTitle: 'Step history not saved',
   journalFailed: 'The steps are done, but their history was not saved. We’ll try again the next time a step finishes or when you send your next message.',

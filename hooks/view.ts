@@ -241,10 +241,14 @@ export type View = {
   active: TaskRow[]
   groups: RowGroup[]
   recent: DoneItem[]
+  recentAsking?: TaskRow[]
   finished?: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null }>
   unreadable?: string[]
   health?: string[]
 }
+
+export const keptQuestionCount = (view: View, ref: TaskRef): number =>
+  [...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.project === ref.project && item.task === ref.title && (ref.session === null || item.session === ref.session)).length
 
 const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
@@ -1307,6 +1311,7 @@ export const buildView = (
     active: rows,
     groups,
     recent: shownRecent.map(({ at: _at, ...item }) => item),
+    recentAsking: completed.filter(item => item.recent !== null && shownRecent.includes(item.recent) && (item.recent.questions?.length ?? 0) > 0 && item.row.archive !== null).map(item => item.row),
     finished,
     ...(unreadable.size === 0 ? {} : { unreadable: [...unreadable] }),
   }

@@ -414,13 +414,39 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const before = await terminal.keys(world, 'i down')
       const after = await terminal.keys(world, 'i down a')
       noSilentPress({ surface: 'terminal', card: 'Publish the gateway', button: 'a', before, after })
-      // The question is never lost, archived or not; only the archive itself is the known gap.
+      assert.match(after, /Older unanswered questions/)
+      assert.match(after, /Archived/)
       const kept = [world.read('progress.md'), ...world.files().filter(name => /progress-(archive-.*\.md|questions.*\.json)$/.test(name)).map(name => world.read(name))].join('\n')
       assert.match(kept, /Notify the team, OK\?/)
-      await knownFailure(754, () => {
-        assert.ok(!world.read('progress.md').includes('Publish the gateway'), `The live file still holds Publish the gateway.\n${after}`)
-      })
+      assert.ok(!world.read('progress.md').includes('Publish the gateway'), `The live file still holds Publish the gateway.\n${after}`)
       await inspectSurfaces(world)
+    } finally { await world.close() }
+  })
+
+  test('a working day: archiving a stopped session that asks says its question stays, and hiding it clears the count', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'ended', title: 'Stopped gateway release', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?'] })
+      const after = await terminal.keys(world, 'i a')
+      assert.ok(!world.read('progress.md').includes('Stopped gateway release'), after)
+      assert.match(squash(after), /Its unanswered question stays under Older unanswered questions/)
+      assert.match(after, /1 unanswered in stopped sessions/)
+      const hidden = await terminal.keys(world, 'l h')
+      assert.doesNotMatch(hidden, /unanswered in stopped sessions/)
+      const server = await serve.start(world)
+      assert.doesNotMatch(await server.page(), /older question still unanswered/)
+    } finally { await world.close() }
+  })
+
+  test("a working day: the page's archive result says a stopped session's question stays", async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'ended', title: 'Stopped gateway release', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?'] })
+      const server = await serve.start(world)
+      const pressed = await server.press('Stopped gateway release', 'Archive')
+      assert.ok(pressed.requests.some(request => request.path === '/api/act' && request.body.type === 'archive'))
+      assert.match(squash(await server.visible()), /Its unanswered question stays under Older unanswered questions/)
+      assert.ok(!world.read('progress.md').includes('Stopped gateway release'))
     } finally { await world.close() }
   })
 

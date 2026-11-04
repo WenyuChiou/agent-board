@@ -3252,7 +3252,7 @@ const pressKeysFor = item => item.type === 'ask'
   : item.type === 'row' ? ['enter', ...(item.row.next === null ? [] : ['x']), ...(item.row.archive === null ? [] : ['a']), ...(item.row.confirm == null ? [] : ['d']), ...(item.row.resume === null ? [] : ['c'])] : ['enter']
 const pressExpected = (runtime, action) => action.type === 'copy' ? runtime.s.copied
   : action.type === 'tick' ? runtime.s.boardTicked(action.ref.step)
-    : action.type === 'archive' ? runtime.s.archivedOne(action.title)
+    : action.type === 'archive' ? action.title.startsWith('hand-kept ') ? runtime.s.archivedKeptQuestions(action.title, 1) : runtime.s.archivedOne(action.title)
       : action.type === 'done' ? runtime.s.confirmedDone(action.title)
         : action.type === 'hide' ? runtime.s.boardHidden(action.text) : runtime.s.boardShown
 

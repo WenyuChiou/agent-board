@@ -499,6 +499,7 @@ export const ZH_CN: Strings = {
   boardKeyDone: 'd 确认完成',
   archiveLive: '仍在运行；停止后即可归档。',
   archivedOne: (title: string): string => `已归档「${title}」。`,
+  archivedKeptQuestions: (title: string, count: number): string => `已归档「${title}」。${count === 1 ? '它的未答问题' : `它的 ${count} 个未答问题`}仍保留在「更早、尚未回答的问题」；回复后可在那里按「已回复，先隐藏」。`,
   archiveGone: '找不到这件工作，可能已经改过或归档了。',
   journalNoticeTitle: '完成记录没有保存成功',
   journalFailed: '步骤已完成，但工作日志没有保存成功。待保存的记录会在下次完成步骤或下一回合重试。',
