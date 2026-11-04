@@ -48,7 +48,8 @@ does `installers_os`. Pushes to main, the weekly run, a manual run and a release
 run Node 22 and 24 on both systems and plugin on both. Browser checks use
 Node 24/Chromium on both systems. Plugin checks keep the pinned offline Claude
 runner. Legacy installers and the Python reporter run without installing Claude.
-Board and messaging have separate ten-minute jobs. No product dependency is
+Board and messaging have separate jobs: board fifteen minutes, since its full set
+takes 8 to 10 minutes on Windows (#899), and messaging ten. No product dependency is
 added to the npm package.
 
 The always-run affected checks and CI validation jobs record the plan and require

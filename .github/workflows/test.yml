@@ -125,8 +125,8 @@ jobs:
         # 22.18 and in 24. Both lines run so an import Node cannot load fails here.
         include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
-    # Split board and messaging so Windows keeps its existing ten-minute budget.
-    timeout-minutes: 10
+    # The full board set takes 8 to 10 minutes on Windows, so ten minutes cancelled passing runs (#899).
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
