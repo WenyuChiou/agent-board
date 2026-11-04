@@ -470,7 +470,7 @@ const withoutHomeStart = (text: string, home: string, isWindows: boolean): strin
   return text.slice(0, cut).replace(OTHER_HOME_START, '').trimEnd()
 }
 
-const clipped = (text: string, home: string, isWindows: boolean): string =>
+export const clipped = (text: string, home: string, isWindows: boolean): string =>
   text.length <= CHAT_CLIP ? text : withoutHomeStart(text.slice(0, CHAT_CLIP).replace(/\s*\S*$/, ''), home, isWindows)
 
 const chatLine = (text: string, indent: number, home: string, isWindows: boolean): string =>
