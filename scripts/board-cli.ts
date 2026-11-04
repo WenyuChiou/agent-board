@@ -956,8 +956,15 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
+    // Read, never written: view() may rewrite the question list, and a list another process holds
+    // for a moment must not change what is said about an archive that has already happened.
     try {
-      const kept = keptQuestionCount(view(), action.ref, s)
+      const source = read(path)
+      const after = parseProgress(source)
+      const latest = readQuestions(questionsPath(path))
+      const proofs = readQuestionProofs()
+      const frozen = cutOffScopes(after, cutOffSpans(source, isCutSettledAt(now)))
+      const kept = latest === null || proofs === null ? 0 : keptQuestionCount(buildView(after, [], null, now, 0, {}, s, parseAnswered(read(answeredPath(path))) ?? [], {}, latest, proofs, pending(), frozen, undefined, staleTimeoutMs()), action.ref, s)
       return done(kept > 0 ? s.archivedKeptQuestions(action.title, kept) : s.archivedOne(action.title))
     } catch {
       return done(s.archivedOne(action.title))
