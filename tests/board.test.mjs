@@ -1632,6 +1632,25 @@ const windowsAcl = (file, env) => {
 // so page tests that need a waiting question add this one.
 const LIVE_QUESTION = `\n## billing\n<!-- auto session=d4e5f6a7 agent=grok state=waiting updated=RECENT -->\n### Pick invoice format\n- [x] Read\n- [?] PDF or HTML?\n<!-- /auto session=d4e5f6a7 -->\n`
 
+const servedModel = response => {
+  const payload = response.json()
+  assert.equal(response.status, 200, JSON.stringify({ status: response.status, note: payload.note }))
+  return payload.model
+}
+
+test('a served model failure reports its HTTP status and note before questions are read', () => {
+  const model = { asks: [] }
+  assert.equal(servedModel({ status: 200, json: () => ({ model }) }), model)
+  for (const status of [409, 500]) {
+    const response = { status, json: () => ({ note: 'Synthetic ledger unavailable' }) }
+    assert.throws(() => servedModel(response).asks, error => {
+      assert.match(error.message, new RegExp(String(status)))
+      assert.match(error.message, /Synthetic ledger unavailable/)
+      return true
+    })
+  }
+})
+
 const page = async (more = '', env = {}, serveArgs = [], now, source = BOARD_SCRIPT, setup, cwd) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
   const work = join(dir, 'api-gateway')
@@ -1705,7 +1724,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
       req.end(body === undefined ? undefined : JSON.stringify(body))
     })
   const rows = async () => {
-    const model = (await call('GET', '/api/board')).json().model
+    const model = servedModel(await call('GET', '/api/board'))
     return [...model.groups.flatMap(group => group.rows), ...model.stopped]
   }
   const rowOf = async title => (await rows()).find(row => row.title === title)
@@ -2093,7 +2112,7 @@ test('the terminal board and the page retire a resolution once the agent ticks i
 test('a restarted served board applies immutable retirement evidence after stale active ledger replay', { timeout: 30_000 }, async () => {
   let board = await page(`\n## billing\n<!-- auto session=d4e5f6a7 agent=codex state=waiting updated=RECENT -->\n### Ship invoice\n- [?] Publish invoice?\n<!-- /auto session=d4e5f6a7 -->\n`)
   try {
-    const model = async () => (await board.call('GET', '/api/board')).json().model
+    const model = async () => servedModel(await board.call('GET', '/api/board'))
     const first = (await model()).asks.find(one => one.agent === 'codex')
     assert.equal((await board.call('POST', '/api/act', { body: { key: first.key, type: 'hide' } })).status, 200)
     const oldLedger = readFileSync(join(board.dir, 'progress-questions.json'), 'utf8')
