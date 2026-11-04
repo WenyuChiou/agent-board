@@ -4,6 +4,8 @@
 
 This page says what the pane's parser accepts and what the pane's writer produces. It is written from the code (`hooks/parse.ts`, `hooks/blocks.ts`, `hooks/mirror.ts`, `hooks/ask.ts`, `hooks/journal.ts`, `hooks/view.ts`, `hooks/register.tsx`, and the words the writer uses in `hooks/i18n.ts`). Where this page and the code disagree, the code wins and this page has a bug.
 
+For an agent reading the board, `agent-board --json` prints a read-only, redacted document. Its fields are specified in [Board JSON](BOARD-JSON.md).
+
 In this page "must" and "should" are meant as in RFC 2119, and "the pane" means the Agent Board plugin.
 
 Contents: [File](#file) · [Structure](#structure) · [Steps](#steps-and-marks) · [Tasks](#tasks) · [Agent blocks](#agent-blocks) · [Lifecycle](#lifecycle) · [Language](#language) · [Waiting steps](#waiting-steps-and-ask-kinds) · [Example](#worked-example) · [Checklist](#writing-a-block-from-another-agent) · [Versioning](#versioning)
