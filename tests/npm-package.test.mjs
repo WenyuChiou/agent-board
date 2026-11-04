@@ -473,17 +473,18 @@ test('the launcher tells the board script which package version it runs from', (
 
 test('agent-board setup with no agent found says how to name one, without a stack trace', () => fixture(f => {
   const pkg = packed(f)
-  for (const [lang, hint] of [['en', 'setup found no agent'], ['zh-TW', 'setup 在這台電腦找不到要設定的 agent'], ['zh-CN', 'setup 在这台电脑找不到要设置的 agent']]) {
+  for (const [lang, hint, unknown] of [['en', 'Setup found no agent', '--agent named an agent setup does not know'], ['zh-TW', 'setup 在這台電腦沒有找到 agent', '--agent 寫了 setup 不認得的 agent 名稱'], ['zh-CN', 'setup 在这台电脑没有找到 agent', '--agent 写了 setup 不认识的 agent 名称']]) {
     for (const extra of [[], ['--agent', 'unknown']]) {
       const result = f.run(pkg, ['setup', '--home', f.home, '--lang', lang, ...extra])
       assert.ifError(result.error)
-      assert.equal(result.status, 1)
-      assert.equal(result.stdout, '')
-      assert.ok(result.stderr.includes(hint), result.stderr)
-      assert.ok(result.stderr.includes(`npx ${manifest.name} setup --agent codex`), result.stderr)
-      assert.equal(result.stderr.includes('    at '), false)
-      assert.equal(result.stderr.includes(pkg), false)
-      assert.equal(result.stderr.trim().split('\n').length, 1)
+      assert.equal(result.status, extra.length ? 1 : 0)
+      assert.equal(extra.length ? result.stdout : result.stderr, '')
+      const text = extra.length ? result.stderr : result.stdout
+      assert.ok(text.includes(extra.length ? unknown : hint), text)
+      assert.ok(text.includes(`npx ${manifest.name} setup --agent codex`), text)
+      assert.equal(text.includes('    at '), false)
+      assert.equal(text.includes(pkg), false)
+      assert.equal(text.trim().split('\n').length, 1)
       assert.deepEqual(filesUnder(f.home), [])
     }
   }

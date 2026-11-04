@@ -98,9 +98,9 @@ const missingValue = message(
   'agent-board：setup 有个选项后面没有接值。--agent、--home、--data-dir 这类选项都要接一个值；请在选项后面补上，再运行一次 setup。',
 )
 const noTarget = message(
-  `agent-board: setup found no agent to set up on this computer, or --agent named one it does not know. Name one: ${command ? `${command} ` : ''}--agent codex (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).`,
-  `agent-board：setup 在這台電腦找不到要設定的 agent，或 --agent 寫了它不認得的名稱。指定一個：${command ? `${command} ` : ''}--agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
-  `agent-board：setup 在这台电脑找不到要设置的 agent，或 --agent 写了它不认识的名称。指定一个：${command ? `${command} ` : ''}--agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
+  `agent-board: --agent named an agent setup does not know. Name one: ${command ? `${command} ` : ''}--agent codex (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).`,
+  `agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：${command ? `${command} ` : ''}--agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
+  `agent-board：--agent 写了 setup 不认识的 agent 名称。指定一个：${command ? `${command} ` : ''}--agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
 )
 const childFailed = host => message(
   `agent-board: setup stopped while working on ${host}. Run it again with --json to see the reason.`,
@@ -142,15 +142,15 @@ class SetupFailure extends Error {
 }
 const fail = (code, message, extra = {}) => { throw new SetupFailure(code, message, extra) }
 
-// Report a path the user can pass back without starting Codex during setup.
-const findCodex = () => {
+// Detect installed commands without starting them during setup.
+const findOnPath = commands => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path')
   const path = (pathKey ? process.env[pathKey] : '') || ''
-  const names = process.platform === 'win32' ? ['codex.exe', 'codex.cmd', 'codex.ps1'] : ['codex']
+  const filenames = process.platform === 'win32' ? commands.flatMap(command => ['.exe', '.cmd', '.ps1', '.bat'].map(extension => `${command}${extension}`)) : commands
   for (const entry of path.split(delimiter)) {
     const directory = process.platform === 'win32' ? entry.replace(/^"(.*)"$/, '$1') : entry
     if (!isAbsolute(directory)) continue
-    for (const name of names) {
+    for (const name of filenames) {
       const file = resolve(directory, name)
       try {
         const stat = statSync(file)
@@ -172,6 +172,16 @@ const main = () => {
     gemini: ['.gemini/settings.json'], grok: ['.grok/config.toml', '.grok/sessions'], muse: ['.config/muse'],
     hermes: ['.hermes'], openclaw: ['.openclaw'], antigravity: ['.gemini/antigravity-cli', '.gemini/antigravity', '.gemini/antigravity-ide'], deepseek: ['.dsh'],
   }
+  const commands = {
+    codex: ['codex'], cursor: ['cursor-agent', 'cursor'], opencode: ['opencode'], gemini: ['gemini'],
+    grok: ['grok'], muse: ['muse'], hermes: ['hermes'], openclaw: ['openclaw'],
+    antigravity: ['agy', 'antigravity'], deepseek: ['dsh'],
+  }
+  const apps = process.platform === 'win32'
+    ? process.env.LOCALAPPDATA ? Object.fromEntries(Object.entries({ cursor: 'cursor', antigravity: 'Antigravity' }).map(([agent, folder]) => [agent, [join(process.env.LOCALAPPDATA, 'Programs', folder)]])) : {}
+    : process.platform === 'darwin'
+      ? Object.fromEntries(Object.entries({ codex: 'Codex', cursor: 'Cursor', antigravity: 'Antigravity' }).map(([agent, name]) => [agent, [join('/Applications', `${name}.app`), join(home, 'Applications', `${name}.app`)]]))
+      : {}
   const flag = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1] }
   const hostDirs = {
     codex: flag('--codex-dir') || process.env.CODEX_HOME,
@@ -181,10 +191,22 @@ const main = () => {
     openclaw: flag('--openclaw-dir') || process.env.OPENCLAW_STATE_DIR,
     deepseek: flag('--deepseek-dir') || process.env.DSH_HOME,
   }
-  const selected = selector === 'all' ? targets : selector === 'auto' ? targets.filter(agent => hostDirs[agent] ? existsSync(hostDirs[agent]) : signs[agent].some(sign => existsSync(join(home, sign)))) : selector.split(',')
-  const hasClaude = existsSync(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'))
-  if (selector === 'auto' && !selected.length && hasClaude) {
-    process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : `Claude Code: ${words('claude')}\n\n${words('next')}\n1. ${words('plugin')}`}\n`)
+  const data = flag('--data-dir') || join(home, '.agent-board')
+  // --home can name another account's home; PATH and apps belong to the running account.
+  const selected = selector === 'all' ? targets : selector === 'auto' ? targets.filter(agent =>
+    (hostDirs[agent] ? existsSync(hostDirs[agent]) : signs[agent].some(sign => existsSync(join(home, sign))))
+    || existsSync(join(data, `install-${agent}.json`))
+    || (homeAt < 0 && (findOnPath(commands[agent]) || apps[agent]?.some(app => existsSync(app)))),
+  ) : selector.split(',')
+  const hasClaude = existsSync(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')) || (homeAt < 0 && !!findOnPath(['claude']))
+  if (selector === 'auto' && !selected.length) {
+    const next = command || 'node scripts/setup-agent.mjs'
+    const noAgent = message(
+      `Setup found no agent on this computer. It looked for their folders in ${home}${homeAt < 0 ? ', their commands on the PATH and their apps' : ''}. Install an agent and run setup again, or name one: ${next} --agent codex (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).`,
+      `setup 在這台電腦沒有找到 agent。它找過 ${home} 裡的資料夾${homeAt < 0 ? '、PATH 上的命令和已安裝的應用程式' : ''}。請安裝一個 agent 再執行一次 setup，或指定一個：${next} --agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
+      `setup 在这台电脑没有找到 agent。它找过 ${home} 里的文件夹${homeAt < 0 ? '、PATH 上的命令和已安装的应用程序' : ''}。请安装一个 agent 再运行一次 setup，或指定一个：${next} --agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
+    )
+    process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n1. ${words('plugin')}` : noAgent}\n`)
     return
   }
   if (!selected.length || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
@@ -256,7 +278,7 @@ const main = () => {
   for (const agent of available) {
     const plan = results[selected.indexOf(agent)]
     if (plan.managedBy === 'connector') continue
-    const codex = agent === 'codex' ? findCodex() : undefined
+    const codex = agent === 'codex' ? findOnPath(['codex']) : undefined
     steps.push(words(agent === 'codex' ? codex ? 'codex' : 'codexMissing' : plan.capabilities.lifecycle === 'adapter-pending' ? 'skill' : 'reload', { host: names[agent], command: boardCommand, codex: codex ? quote(codex) : '' }))
   }
   for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))

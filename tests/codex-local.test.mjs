@@ -692,6 +692,127 @@ test('setup preserves malformed BOM-prefixed Codex hooks when it refuses install
 
 const setupAgent = (f, ...args) => observeSetupResult(() => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 }))
 
+const detectedSetupFixture = fn => fixture(f => {
+  const bin = mkdtempSync(join(tmpdir(), 'setup commands-'))
+  const env = {
+    ...f.env, HOME: f.home, USERPROFILE: f.home, CLAUDE_PROGRESS_FILE: '', LANG: 'en',
+    CODEX_HOME: join(f.home, '.codex'), GROK_HOME: join(f.home, '.grok'), HERMES_HOME: join(f.home, '.hermes'),
+    OPENCODE_CONFIG_DIR: join(f.home, '.config', 'opencode'), XDG_CONFIG_HOME: join(f.home, '.config'),
+    OPENCLAW_STATE_DIR: join(f.home, '.openclaw'), DSH_HOME: join(f.home, '.dsh'),
+    CLAUDE_CONFIG_DIR: join(f.home, '.claude'), LOCALAPPDATA: join(f.home, 'local-app-data'),
+  }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = bin
+  const fake = name => {
+    const file = join(bin, `${name}${process.platform === 'win32' ? '.cmd' : ''}`)
+    writeFileSync(file, process.platform === 'win32' ? '@exit /b 99\r\n' : '#!/bin/sh\nexit 99\n')
+    chmodSync(file, 0o755)
+  }
+  const run = (...args) => observeSetupResult(() => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), ...args], {
+    cwd: bin, env, encoding: 'utf8', windowsHide: true, timeout: 30000,
+  }))
+  try { return fn({ ...f, env, fake, run }) }
+  finally { rmSync(bin, { recursive: true, force: true }) }
+})
+
+test('a setup preview in a new home lists the agents installed on the PATH', () => detectedSetupFixture(f => {
+  f.fake('gemini')
+  f.fake('agy')
+  const preview = f.run()
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.equal(preview.stderr, '')
+  assert.match(preview.stdout, /^Gemini CLI:/m)
+  assert.match(preview.stdout, /^Antigravity:/m)
+  assert.doesNotMatch(preview.stdout, /^(Codex|Cursor|OpenCode|Grok Build|Muse Code|Hermes Agent|OpenClaw|DeepSeek):/m)
+  const json = f.run('--json')
+  assert.equal(json.status, 0, json.stderr)
+  assert.deepEqual(JSON.parse(json.stdout).targets, ['gemini', 'antigravity'])
+  f.fake('claude')
+  const claude = f.run()
+  assert.equal(claude.status, 0, claude.stderr)
+  assert.match(claude.stdout, /^Claude Code:/m)
+  assert.match(claude.stdout, /claude plugin install agent-board@agent-board/)
+  assert.deepEqual(readdirSync(f.home), [])
+}))
+
+test('a setup preview in a new home lists an agent whose app is installed', { skip: !['win32', 'darwin'].includes(process.platform) }, () => detectedSetupFixture(f => {
+  const app = process.platform === 'win32' ? join(f.env.LOCALAPPDATA, 'Programs', 'cursor') : join(f.home, 'Applications', 'Cursor.app')
+  mkdirSync(app, { recursive: true })
+  const preview = f.run()
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.match(preview.stdout, /^Cursor:/m)
+  assert.equal(existsSync(f.root), false)
+  assert.equal(existsSync(join(f.home, '.cursor')), false)
+}))
+
+test('a setup preview that finds no agent exits 0 and names the next command', () => detectedSetupFixture(f => {
+  for (const [lang, hint] of [['en', 'Setup found no agent'], ['zh-TW', 'setup 在這台電腦沒有找到 agent'], ['zh-CN', 'setup 在这台电脑没有找到 agent']]) {
+    const result = f.run('--lang', lang)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    assert.match(result.stdout, /node scripts\/setup-agent.mjs --agent codex/)
+    assert.match(result.stdout, /PATH/)
+    assert.ok(result.stdout.includes(hint), result.stdout)
+    assert.ok(result.stdout.includes(f.home))
+    assert.equal(result.stdout.trim().split('\n').length, 1)
+    assert.deepEqual(readdirSync(f.home), [])
+  }
+  const json = f.run('--json')
+  assert.equal(json.status, 0, json.stderr)
+  assert.equal(json.stderr, '')
+  assert.deepEqual(JSON.parse(json.stdout), { targets: [], plans: [], applied: false })
+  assert.deepEqual(readdirSync(f.home), [])
+}))
+
+test('setup with --home does not read the PATH or apps of the account running it', () => detectedSetupFixture(f => {
+  f.fake('gemini')
+  f.fake('claude')
+  if (process.platform === 'win32') mkdirSync(join(f.env.LOCALAPPDATA, 'Programs', 'cursor'), { recursive: true })
+  if (process.platform === 'darwin') mkdirSync(join(f.home, 'Applications', 'Cursor.app'), { recursive: true })
+  const home = join(f.home, 'other-home')
+  mkdirSync(home)
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const result = f.run('--home', home, '--lang', lang)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    assert.doesNotMatch(result.stdout, /Gemini CLI:|Cursor:|Claude Code:|PATH/)
+    assert.ok(result.stdout.includes(home))
+  }
+  assert.deepEqual(readdirSync(home), [])
+}))
+
+test('an unknown agent name still fails and says how to name one', () => detectedSetupFixture(f => {
+  const result = f.run('--agent', 'bogus')
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr.trim().split('\n').length, 1)
+  assert.match(result.stderr, /--agent named an agent setup does not know\. Name one: --agent codex/)
+  assert.deepEqual(readdirSync(f.home), [])
+}))
+
+test('a repeat setup preview lists Antigravity after an all-agent apply', () => fixture(f => {
+  const applied = setupAgent(f, '--lang', 'en', '--agent', 'all', '--apply', '--json')
+  assert.equal(applied.status, 0, applied.stderr)
+  const installed = JSON.parse(applied.stdout).targets
+  const result = setupAgent(f, '--lang', 'en')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stderr, '')
+  assert.match(result.stdout, /^Antigravity: already set up/m)
+  assert.equal(result.stdout.match(/^.+: already set up/gm)?.length, installed.length, result.stdout)
+}))
+
+test('a command on the PATH is listed once setup applies it, and again as already set up', () => detectedSetupFixture(f => {
+  f.fake('gemini')
+  const applied = f.run('--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.match(applied.stdout, /^Gemini CLI: updated/m)
+  assert.equal(existsSync(join(f.root, 'install-gemini.json')), true)
+  const second = f.run()
+  assert.equal(second.status, 0, second.stderr)
+  assert.equal(second.stderr, '')
+  assert.match(second.stdout, /^Gemini CLI: already set up/m)
+}))
+
 const systemLanguageEnv = () => ({ LANG: '', NODE_OPTIONS: `--require ${JSON.stringify(resolve('tests/fixtures/system-lang-zh-tw.cjs'))}` })
 
 test('setup on a zh-TW system with no LANG previews in zh-TW and bakes zh-TW', () => fixture(f => {
@@ -1004,16 +1125,15 @@ test('setup on a computer with Claude Code and Codex previews Codex only', async
   })
   await fixture(f => {
     const result = setupAgent(f, '--lang', 'en')
-    assert.equal(result.status, 1)
-    assert.equal(result.stdout, '')
-    assert.equal(result.stderr.trim().split('\n').length, 1)
-    assert.match(result.stderr, /found no agent/)
+    assert.equal(result.status, 0)
+    assert.equal(result.stderr, '')
+    assert.equal(result.stdout.trim().split('\n').length, 1)
+    assert.match(result.stdout, /found no agent/)
   })
 })
 
 const setupErrorCases = async check => {
   for (const [args, code, cause] of [
-    [[], 'INVALID_TARGETS'],
     [['--agent', 'bogus'], 'INVALID_TARGETS'],
     [['--agent'], 'MISSING_ARGUMENT'],
     [['--agent', 'codex', '--data-dir'], 'SETUP_FAILED', 'MISSING_ARGUMENT'],

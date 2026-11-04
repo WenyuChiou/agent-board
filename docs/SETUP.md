@@ -9,10 +9,15 @@ node scripts/setup-agent.mjs
 node scripts/setup-agent.mjs --apply
 ```
 
-Auto detection checks host-specific configuration paths, not conversations or credentials.
-It reports candidates, not active sessions or account access. A `.gemini` directory alone
-does not identify Gemini CLI: Antigravity uses that parent too. If the current host has
-not created its configuration yet, select its known target with `--agent <name>`.
+Auto detection checks four signs: host-specific configuration paths, an earlier setup's
+install record in the data folder (`--data-dir`, else `~/.agent-board`), commands on the
+PATH, and installed apps. With `--home`, it checks only configuration paths and install
+records, since commands and apps belong to the account running setup. It does not read
+conversations or credentials. A found command or app is a candidate, not an active
+session or account access; the preview lists its files before anything is written.
+A `.gemini` directory alone does not identify Gemini CLI: Antigravity uses that parent
+too. Finding nothing exits 0 without writing anything and names the next command to
+run. You can also select a known target with `--agent <name>`.
 `--agent all` previews all supported targets; it does not install the AI applications.
 
 Setup prints a short summary in the board's language (`--lang en`, `zh-TW` or `zh-CN`):
@@ -25,7 +30,8 @@ says each agent is already set up and writes nothing.
 
 Without `--lang`, setup uses `LANG`, then the system language, else English, and writes that language into the files it installs.
 
-Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`),
+Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`), or
+`claude` is on the PATH and `--home` was not given,
 the next steps include both `claude plugin` commands to connect it, even alongside other
 agents. If only Claude Code is found, setup prints its plugin guidance and exits 0.
 
