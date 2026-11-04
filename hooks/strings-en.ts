@@ -72,6 +72,7 @@ export const EN: Strings = {
     updatedFile: (file: string): string => `Updated reporting configuration: ${file}`,
     updateFile: (file: string): string => `Would update reporting configuration: ${file}`,
     kept: (file: string): string => `Keeps progress and history: ${file}`,
+    keptShared: (file: string, users: string): string => `Keeps ${file}; still in use by ${users}`,
     restart: (host: string): string => `Next: restart ${host} to unload its removed reporting hooks.`,
     apply: (command: string): string => `Next: apply this removal: ${command}`,
     none: 'Next: no removal is needed.',
