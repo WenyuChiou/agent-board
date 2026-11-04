@@ -15,6 +15,14 @@ const read = path => readFileSync(path, 'utf8')
 const isTest = path => /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|ts|tsx)$/.test(path)
 const splitPaths = text => text.split('\0').filter(Boolean)
 
+// No preflight test run lasts three hours, so an older marker is left over even if its PID is alive again.
+export const TEST_LOCK_MAX_AGE_MS = 3 * 60 * 60 * 1000
+
+// A run writes its marker after its process starts, so a process that started later only reuses the PID.
+// The 5 s covers clock and file-time rounding.
+export const isLiveMarker =({ markerMs, now, isAlive, startedMs }) =>
+  isAlive && now - markerMs < TEST_LOCK_MAX_AGE_MS && (startedMs === null || startedMs <= markerMs + 5000)
+
 export const accountTestLockPath = ({ platform = process.platform, account = userInfo() } = {}) => {
   const identity = platform === 'win32'
     ? createHash('sha256').update(String(account.homedir)).digest('hex')
@@ -109,14 +117,14 @@ const lockDirectories = (directory, fallback) => {
 }
 
 // Read only after this run's marker exists, so a run that creates the folder a moment later still meets that marker.
-const watchedHasLiveMarker = ({ directory, isOptional }, marker) => {
+const watchedLiveMarker = ({ directory, isOptional }, marker) => {
   try {
-    if (!watchedLockDirectory(directory)) return false
+    if (!watchedLockDirectory(directory)) return null
   } catch (error) {
-    if (isOptional) return false
+    if (isOptional) return null
     throw error
   }
-  return hasLiveMarker(directory, marker, false)
+  return newestLiveMarker(directory, marker, false)
 }
 
 const isLiveProcess = pid => {
@@ -129,6 +137,14 @@ const isLiveProcess = pid => {
   }
 }
 
+// On Linux, /proc/<pid> is created when the process starts. The kernel can recreate it later under memory
+// pressure; then a live run's marker reads as stale and a second run can start beside it. That is rare, and
+// it is better than a leftover marker blocking every run.
+const processStartedMs = pid => {
+  if (process.platform !== 'linux') return null
+  try { return statSync(`/proc/${pid}`).ctimeMs } catch { return null }
+}
+
 const releaseTestLock = path => {
   try {
     unlinkSync(path)
@@ -137,9 +153,10 @@ const releaseTestLock = path => {
   }
 }
 
-// Whether another live run has a marker in the folder. Stale markers are removed only from this run's own folder.
-const hasLiveMarker = (directory, marker, isOwn) => {
-  let isBlocked = false
+// Stale markers are removed only from this run's own folder.
+const newestLiveMarker = (directory, marker, isOwn) => {
+  let newest = null
+  const now = Date.now()
   for (const name of readdirSync(directory)) {
     if (name === marker) continue
     const match = /^([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.lock$/i.exec(name)
@@ -154,13 +171,14 @@ const hasLiveMarker = (directory, marker, isOwn) => {
     }
     // Unfamiliar entries, including links and directories, never become stale markers.
     if (!stat.isFile() || stat.size !== 0) continue
-    if (isLiveProcess(pid)) {
-      isBlocked = true
+    const isAlive = isLiveProcess(pid)
+    if (isLiveMarker({ markerMs: stat.mtimeMs, now, isAlive, startedMs: isAlive ? processStartedMs(pid) : null })) {
+      if (!newest || stat.mtimeMs > newest.markerMs) newest = { pid, markerMs: stat.mtimeMs }
       continue
     }
     if (isOwn) releaseTestLock(join(directory, name))
   }
-  return isBlocked
+  return newest
 }
 
 const acquireTestLock = (directory, onPublished, fallback = null) => {
@@ -174,10 +192,11 @@ const acquireTestLock = (directory, onPublished, fallback = null) => {
     closeSync(file)
     onPublished?.()
     // Every folder is read, even after a live marker is found, so this run's own stale markers are still cleaned.
-    const blocked = [hasLiveMarker(own, marker, true), ...watched.map(other => watchedHasLiveMarker(other, marker))]
-    if (blocked.some(Boolean)) {
+    const blockedBy = [newestLiveMarker(own, marker, true), ...watched.map(other => watchedLiveMarker(other, marker))]
+      .filter(Boolean).sort((a, b) => b.markerMs - a.markerMs)[0]
+    if (blockedBy) {
       releaseTestLock(path)
-      return null
+      return { blockedBy }
     }
     return { path, isFallback }
   } catch (error) {
@@ -458,9 +477,13 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       add('FAIL', error.message?.startsWith('test lock directory ') ? error.message : 'test lock directory could not be used; check account directory access.')
       return
     }
-    if (paths.length && !owner) add('FAIL', 'another preflight test run is already active on this computer; finish it before running preflight again.')
+    if (owner?.blockedBy) {
+      const { pid, markerMs } = owner.blockedBy
+      const minutes = Math.floor(Math.max(0, Date.now() - markerMs) / 60_000)
+      add('FAIL', `another preflight test run is already active on this computer (process ${pid}, started ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago); finish it, or if no preflight is running, delete its .lock file from this account's .agent-board-preflight-tests-* folder and run preflight again.`)
+    }
     if (owner?.isFallback) add('PASS', "the home folder cannot hold the test lock, so the test lock was this account's shared fallback folder, and any home lock folder was still read.")
-    if (owner) {
+    if (owner?.path) {
       try {
         for (const path of paths) {
           const temp = mkdtempSync(join(tmpdir(), 'agent-board-preflight-'))
