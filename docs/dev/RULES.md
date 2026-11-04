@@ -16,7 +16,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 - **Where an agent starts.** [AGENTS.md](../../AGENTS.md) is the entry point; it sends you here first. Codex, Antigravity and Cursor read `AGENTS.md` by themselves. Claude Code does not: the repository is also a Claude Code plugin, whose root `CLAUDE.md` is not loaded, so a Claude Code session is given this page's link in its first prompt, or its user adds `@AGENTS.md` to their own `CLAUDE.md`. The same goes for any other agent that reads neither.
 - **An agent works in the role of the person who runs it** (CONTRIBUTING, [Roles](../../CONTRIBUTING.md#roles)). An agent of the owner or of a collaborator may review and merge other authors' pull requests, as that person may.
 - **One GitHub account, many agents.** The owner runs many different agents from one GitHub account, and a collaborator may do the same from theirs, so GitHub cannot tell the agents apart and its own approval button is not used. The `Author: <agent>, <branch>` line of a pull request says who wrote it, and the `by <name>` of a `Review:` line says who reviewed it. Name the agent and where it runs, as in `claude (desktop)` or `codex (superd6)`. A person working by hand writes their own name, as in `Author: eric, <branch>` or `by eric`; when a person has an agent do the work, the agent's name goes there.
-- **Who counts as the author.** The agent named in the `Author:` line, every agent it dispatched, and every agent that wrote part of the pull request or its brief. Any other agent or session, of the same person or not, is not an author and may review and approve it (R2).
+- **Who counts as the author.** The agent named in the `Author:` line, every agent it dispatched, and every agent that wrote part of the pull request or its brief. Any other agent or session, of the same person or not, is not an author and may review and approve it (R2). R2 has one exception: on the maintainer lane's own pull requests, a read-only reviewer the maintainer starts may approve, although the maintainer dispatched it.
 - **One driver per pull request.** The agent in the `Author:` line drives its pull request to the merge. Another agent continues it only after a `Handover:` from that agent ([CONTRIBUTING rule 14](../../CONTRIBUTING.md#pull-requests)), or after 24 hours with no word from it, or as [team-process, From claim to merge](team-process.md#from-claim-to-merge) says after a `Review: REQUEST CHANGES`; it then adds its own name to the `Author:` line and says so in a comment. Two agents never push to one branch at the same time.
 - **Status goes in the body.** After a push, update the pull request body's Evidence for the new head instead of posting a status comment. Comments on a pull request are for `Ready for review`, `Reviewing:`, `Review:`, `Handover:` and `Question:` lines, and for answers to review findings.
 
@@ -30,16 +30,22 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 
 ## R2. Nobody approves their own work
 
-- The author never approves their own pull request. A review by the author's own agent, lane or subagent does not count.
+- The author never approves their own pull request. A review by the author's own agent, lane or subagent does not count, except on the maintainer lane's own pull requests (below).
 - A review bot (Codex Code Review, Greptile) can stop a merge with an unresolved P0 or P1, but never approves one.
 - The approval is the comment `Review: APPROVE <full head sha> by <name>`, where `<name>` is not an author of the pull request.
+- **The one exception: the maintainer lane's own pull requests** (owner, 2026-11-03 and 2026-11-04). It covers a pull request whose every author (above) is the maintainer lane, meaning the maintainer session and the agents it dispatched, with no part written by another agent or person and no handover from one. On such a pull request, the verdict of a reviewer the maintainer runs for that head counts. That reviewer is a read-only Codex run or a subagent, started new for this review: never a resumed session or agent that wrote or briefed any part of the pull request. It writes nothing, so the maintainer posts its verdict for it. Its verdict counts only when:
+  - the reviewer read the exact head the verdict names, in full;
+  - the reviewer approved. When the maintainer disagrees with one of its findings, the approval comes from a reviewer who is not an author, as usual;
+  - the maintainer posts it as `Review: APPROVE <full head sha> by <reviewer and model>, the maintainer's reviewer`, followed by every finding the reviewer reported, or "no findings", and what was done with each: applied in which commit, or not applied and why.
+
+  Everything else still applies: rule 9's conditions before a merge, rule 12's owner approval of governance files and workflows, and a bot's P0 or P1. It does not cover a release pull request, which keeps an approval from someone who did not write it ([RELEASING.md](../RELEASING.md)). Anyone may still review after the merge; a finding then becomes an issue. No other author's pull requests are covered.
 - **A review stays on the pull request's issue.** Each finding in a `Review: REQUEST CHANGES` names the rule it breaks or the steps that show the bug. A finding with neither is advice: welcome, but it does not hold the merge.
 - A later round checks the earlier findings and what the new push changed. Something new found in code that an earlier round already read becomes an issue of its own, unless it is a P0 or P1.
 - A review bot's P0 or P1 that arrives after Ready is fixed, or the author shows on the pull request, with evidence, why it does not apply; the reviewer decides.
 
 ## R3. Merging
 
-- A pull request merges once every required check is green on its current head and someone other than the author has approved that head (CONTRIBUTING rules 8 and 9). Then anyone with write access may merge it, the author included: any collaborator, the maintainer, the owner, or any of their agents. Nobody waits for a particular person.
+- A pull request merges once every required check is green on its current head and someone other than the author has approved that head (CONTRIBUTING rules 8 and 9), or, on the maintainer lane's own pull request, its reviewer has as R2 says. Then anyone with write access may merge it, the author included: any collaborator, the maintainer, the owner, or any of their agents. Nobody waits for a particular person.
 - A change to `.github/workflows/` also needs the owner's approval, because a workflow can widen what CI may do (CONTRIBUTING rule 12).
 
 ## R4. One issue, one owner
