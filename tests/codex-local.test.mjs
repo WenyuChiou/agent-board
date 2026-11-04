@@ -179,6 +179,107 @@ const hookLog = f => existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(
 
 const hookFailure = result => JSON.stringify({ status: result.status, signal: result.signal, error: result.error && { code: result.error.code, message: result.error.message }, termination: result.termination, stdout: result.stdout, stderr: result.stderr })
 
+const setupObservations = new WeakMap()
+const setupChildSummary = (result, elapsedMs) => ({
+  status: Number.isSafeInteger(result.status) ? result.status : 'none',
+  signal: result.signal == null ? 'none' : ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGSEGV'].includes(result.signal) ? result.signal : 'other',
+  code: result.error == null ? 'none' : ['ENOENT', 'EACCES', 'ETIMEDOUT', 'ENOBUFS', 'E2BIG'].includes(result.error.code) ? result.error.code : 'other',
+  elapsedMs: Number.isFinite(elapsedMs) && elapsedMs >= 0 ? Math.round(elapsedMs) : 'unknown',
+})
+const observeSetupResult = invoke => {
+  const started = performance.now()
+  const result = invoke()
+  setupObservations.set(result, setupChildSummary(result, performance.now() - started))
+  return result
+}
+// A null status cannot distinguish launch failure from a deadline or a signal.
+// Keep only fixed fields; raw child output may contain commands and paths.
+const assertSetupStatus = (result, expected) => assert.equal(result.status, expected,
+  result.status === expected ? undefined : 'setup child failed: ' + JSON.stringify(setupObservations.get(result) ?? setupChildSummary(result, NaN)))
+
+test('setup status failures distinguish launch errors signals and deadlines without private output', () => {
+  const failure = (code, signal = null) => ({ status: null, signal, error: Object.assign(new Error('PRIVATE_ERROR'), { code, path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] }), stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR', pid: 123456789 })
+  const cases = [
+    [failure('ETIMEDOUT', 'SIGTERM'), 'none', 'SIGTERM', 'ETIMEDOUT'],
+    ...['ENOENT', 'EACCES', 'ENOBUFS', 'E2BIG'].map(code => [failure(code), 'none', 'none', code]),
+    [{ status: null, signal: 'SIGKILL', stdout: 'PRIVATE_STDOUT' }, 'none', 'SIGKILL', 'none'],
+    [{ status: 7, signal: null, stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR' }, 7, 'none', 'none'],
+    [failure('PRIVATE_CODE', 'PRIVATE_SIGNAL'), 'none', 'other', 'other'],
+  ]
+  for (const [result, status, signal, code] of cases) {
+    const before = inspect(result)
+    assert.equal(observeSetupResult(() => result), result)
+    assert.equal(inspect(result), before)
+    assert.throws(() => assertSetupStatus(result, 0), error => {
+      assert.equal(error.code, 'ERR_ASSERTION')
+      const summary = JSON.parse(/^setup child failed: (\{.*\})/m.exec(error.message)?.[1] ?? 'null')
+      assert.notEqual(summary, null, 'the failed child needs an allowlisted summary')
+      assert.deepEqual(Object.keys(summary), ['status', 'signal', 'code', 'elapsedMs'])
+      assert.deepEqual({ status: summary.status, signal: summary.signal, code: summary.code }, { status, signal, code })
+      assert.ok(Number.isSafeInteger(summary.elapsedMs) && summary.elapsedMs >= 0)
+      assert.ok(!/PRIVATE_|123456789/.test(inspect(error)))
+      assert.ok(error.message.length < 512)
+      return true
+    })
+  }
+  for (const status of [0, 1]) {
+    const result = { status, signal: null, stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR' }
+    assert.equal(observeSetupResult(() => result), result)
+    assert.doesNotThrow(() => assertSetupStatus(result, status))
+  }
+  assert.throws(() => assertSetupStatus(failure('ETIMEDOUT'), 0), error => {
+    assert.match(error.message, /"elapsedMs":"unknown"/)
+    assert.ok(!/PRIVATE_|123456789/.test(inspect(error)))
+    return true
+  })
+})
+
+const nativeReportContext = (result, label, readLog = () => '') => {
+  const context = JSON.parse(result.stdout).injectSteps?.[0]?.systemMessage?.systemMessage
+  if (typeof context !== 'string') {
+    // Read only on failure, and keep fixed codes instead of commands or log text.
+    const known = new Set(['UNSUPPORTED_AGENT', 'HOOK_WORKER_UNAVAILABLE', 'REPORTER_UPGRADE_REQUIRED', 'REPORTER_TIMEOUT', 'INPUT_TOO_LARGE', 'INPUT_TIMEOUT', 'INCOMPLETE_INPUT', 'REPORTER_FAILED', 'REPORTER_QUEUED'])
+    let log = '', hasLog = true
+    try { log = readLog() } catch { hasLog = false }
+    const codes = log.split(/\r?\n/).flatMap(line => {
+      const code = /^\S+ antigravity ([A-Z][A-Z0-9_]*)(?: |$)/.exec(line)?.[1]
+      return known.has(code) ? [code] : []
+    }).slice(-4)
+    const status = Number.isInteger(result.status) ? result.status : 'unknown'
+    assert.equal(typeof context, 'string', `${label}: missing native report context; status=${status}; hook codes=${hasLog ? codes.join(',') || 'none' : 'unavailable'}`)
+  }
+  return context
+}
+
+test('native report context failures keep hook codes without exposing command output', () => {
+  const log = [
+    '2026-11-02T00:00:00Z antigravity REPORTER_TIMEOUT',
+    '2026-11-02T00:00:01Z antigravity REPORTER_QUEUED',
+    '2026-11-02T00:00:02Z antigravity PRIVATE_LOG',
+  ].join('\n')
+  const result = { status: 0, stdout: '{"unrelated":"PRIVATE_COMMAND"}', stderr: 'PRIVATE_STDERR', signal: 'PRIVATE_SIGNAL' }
+  assert.throws(() => nativeReportContext(result, 'setup zh-CN', () => log), error => {
+    assert.match(error.message, /REPORTER_TIMEOUT,REPORTER_QUEUED/)
+    assert.match(error.message, /status=0/)
+    assert.ok(!error.message.includes('PRIVATE_'))
+    return true
+  })
+  assert.throws(() => nativeReportContext(result, 'setup zh-CN', () => { throw Error('PRIVATE_READ') }), error => {
+    assert.match(error.message, /missing native report context.*hook codes=unavailable/)
+    assert.ok(!error.message.includes('PRIVATE_'))
+    return true
+  })
+  assert.throws(() => nativeReportContext({ ...result, stdout: '{}' }, 'setup en', () => '2026-11-03T00:00:00Z antigravity HOOK_WORKER_UNAVAILABLE PRIVATE_LOG'), error => {
+    assert.match(error.message, /status=0; hook codes=HOOK_WORKER_UNAVAILABLE/)
+    assert.ok(!error.message.includes('PRIVATE_'))
+    return true
+  })
+  let isLogRead = false
+  const started = { stdout: JSON.stringify({ injectSteps: [{ systemMessage: { systemMessage: 'Bound command' } }] }) }
+  assert.equal(nativeReportContext(started, 'setup en', () => { isLogRead = true; return log }), 'Bound command')
+  assert.equal(isLogRead, false)
+})
+
 // Windows soon hands a freed pid to another process, so a pid this test has seen
 // exit is never stopped by number afterwards. Tests in this file run one at a time.
 const exitedPids = new Set()
@@ -246,7 +347,7 @@ const fixture = async fn => {
   const hooks = join(home, '.codex', 'hooks.json')
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
   const env = { ...isolatedEnv(home), CODEX_THREAD_ID: session, NO_COLOR: '1' }
-  const run = (file, args, input, extraEnv = {}) => spawnSync(process.execPath, [file, ...args], { env: { ...env, ...extraEnv }, input: input === undefined ? undefined : JSON.stringify(input), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const run = (file, args, input, extraEnv = {}) => observeSetupResult(() => spawnSync(process.execPath, [file, ...args], { env: { ...env, ...extraEnv }, input: input === undefined ? undefined : JSON.stringify(input), encoding: 'utf8', windowsHide: true, timeout: 15000 }))
   const isolated = ['--home', home, '--codex-dir', join(home, '.codex'), '--grok-dir', join(home, '.grok'), '--hermes-dir', join(home, '.hermes')]
   const install = (...args) => run(setup, [...isolated, ...args])
   const command = (args, input, extraEnv = {}) => run(script, [...isolated, ...args], input, extraEnv)
@@ -425,7 +526,7 @@ test('setup preserves malformed BOM-prefixed Codex hooks when it refuses install
   assert.equal(existsSync(f.root), false)
 }))
 
-const setupAgent = (f, ...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+const setupAgent = (f, ...args) => observeSetupResult(() => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 }))
 
 const homeSnapshot = home => Object.fromEntries(readdirSync(home, { recursive: true, withFileTypes: true }).map(entry => {
   const path = join(entry.parentPath, entry.name)
@@ -1430,7 +1531,7 @@ test('setup still refuses a malformed host config that starts with a BOM', async
     const original = Buffer.from('\uFEFF{"hooks":\r\n')
     f.save(config, original)
     const preview = f.install('--agent', host)
-    assert.equal(preview.status, 0, preview.stderr)
+    assertSetupStatus(preview, 0)
     assert.ok(JSON.parse(preview.stdout).conflicts.includes(config))
     assert.deepEqual(readFileSync(config), original)
     const applied = f.install('--agent', host, '--apply')
@@ -1438,7 +1539,7 @@ test('setup still refuses a malformed host config that starts with a BOM', async
     assert.deepEqual(readFileSync(config), original)
     assert.equal(existsSync(f.root), false)
     const common = setupAgent(f, '--lang', 'en', '--agent', host, '--json')
-    assert.equal(common.status, 1)
+    assertSetupStatus(common, 1)
     assert.equal(common.stderr, '')
     assert.equal(JSON.parse(common.stdout).applied, false)
     assert.deepEqual(readFileSync(config), original)
@@ -1452,7 +1553,7 @@ test('setup names the host with an unreadable config and still previews the othe
     f.save(cursor, '\uFEFF{"hooks":\r\n')
     f.save(f.hooks, '{}')
     const result = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', '--json')
-    assert.equal(result.status, 0, result.stderr)
+    assertSetupStatus(result, 0)
     const preview = JSON.parse(result.stdout)
     assert.deepEqual(preview.targets, ['codex', 'cursor'])
     assert.equal(preview.applied, false)
@@ -1471,7 +1572,7 @@ test('setup names the host with an unreadable config and still previews the othe
     const config = join(f.home, relative)
     f.save(config, original)
     const result = setupAgent(f, '--lang', 'en', '--agent', `codex,${agent}`, '--json')
-    assert.equal(result.status, 0, result.stderr)
+    assertSetupStatus(result, 0)
     const preview = JSON.parse(result.stdout)
     assert.deepEqual(preview.targets, ['codex', agent])
     assert.equal(preview.applied, false)
@@ -6682,8 +6783,7 @@ test('Antigravity reports its own waiting question with the command bound by nat
     const fire = event => fireCommand(f, hooks[event][0].command, JSON.stringify(payload))
     const started = await fire('SessionStart')
     assert.equal(started.status, 0, hookFailure(started))
-    const context = JSON.parse(started.stdout).injectSteps?.[0]?.systemMessage?.systemMessage
-    assert.equal(typeof context, 'string', `${connector} ${lang}: missing native report context`)
+    const context = nativeReportContext(started, `${connector} ${lang}`, () => hookLog(f))
     assert.ok(!context.includes('PRIVATE_'))
     const command = context.match(/`(node [^`\r\n]+)`/)?.[1]
     assert.ok(command, context)

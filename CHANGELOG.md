@@ -2,9 +2,39 @@
 
 What changed for the person using Agent Board, one line per change, newest version first. How a change was built and tested is in its pull request. Entries up to 0.24.0 were shortened to this form on 2026-11-02; their full text is in `git show ddbef2a:CHANGELOG.md`.
 
-## Unreleased
+## 0.24.2 — 2026-11-03
 
-- Messaging: receiver records generate the per-surface support table in the messaging guide and all three READMEs, with live evidence required for Verified (#720). Tests: `the messaging matrix is generated from each receiver record and CI fails when it is stale`, `a receiver record marks a surface Verified only when it names a live-run file that exists`, `preflight fails when the messaging matrix is stale`, `a change the messaging table reads runs the matrix test and no other board test`, `scanning receiver records starts no process, connection, timer or file write`
+- Board: independent sessions with the same short ID stay apart, each with its own questions, and an ended one can be archived without touching the current session (#674, #678).
+
+- Messaging: the local message hub is safe to leave on, and `--serve` keeps it on by default: a private message store, old finished messages deleted, uncertain deliveries expired, queued messages and relay hops capped, and a stuck message can be dismissed so the next one goes (#163, #315, #388).
+
+- Messaging: two hubs can no longer both own one message folder; stop older boards before upgrading (#315, #388).
+
+- Messaging / Going back: earlier releases, 0.24.1 included, cannot read this store; before going back to one, move `messages.json` and `server.lock` out of the message folder (#388).
+
+- Messaging: several `--serve` started at the same moment all print the page's address instead of one stopping with `MESSAGE_STORE_CLAIM_BLOCKED` when it reads a claim another start is writing or removing (#800).
+
+- Setup: the doctor and the removal print plain lines in the board's language unless `--json` is asked for (#796).
+
+- Board: the terminal board shows Needs you for a blocked step, as the page does (#786).
+
+- Setup: the preview names each file it would change, under its agent (#787).
+
+- Board: the board script knows the files 0.24.1 wrote, so it tells them apart from files the person changed (#793).
+
+- Messaging: the READMEs and the messaging guide have a table of which agent and surface can receive a board message, built from each receiver's own record; a surface shows Verified only with a live run behind it (#720, #802).
+
+- Setup: the Codex doctor and the trust step find a working install when asked in another language than it was installed in (#807, #811).
+
+- Page: an agent whose sessions all ended in the last 30 minutes shows as offline, the Your own tasks chip counts open to-dos instead of saying No work yet, and the HTML board's Needs you no longer counts turns that are not questions (#616, #652).
+
+- Codex: start notes ignore an empty remote URL, strip quotes around one, and name a bare repository worktree by its folder (#615, #646).
+
+- Board: `agent-board --status` prints what needs you and what is working in one line, for a shell prompt or tmux, and writes nothing (#547, #663).
+
+- Messaging: a Claude Code session in a terminal takes board messages, so Send to Claude works from the page (#316, #805).
+
+- Board: on Windows, Copy on the terminal board puts text outside ASCII on the clipboard whole, on any code page, instead of garbled while it said it copied (#817, #821).
 
 ## 0.24.1 — 2026-11-03
 
