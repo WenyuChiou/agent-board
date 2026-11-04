@@ -2411,6 +2411,21 @@ serveWebSocketProxy({ onMessage: (value, emit) => {
   assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
 }))
 
+test('the proxy connector does not attach when Codex refuses to subscribe it to the thread', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, error: { code: -32600, message: 'synthetic refusal' } })
+} })
+`)
+  await assert.rejects(connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1' }), { message: 'OWNER_REJECTED' })
+  assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
+}))
+
 test('an owned idle Codex session accepts only its actual new turn ACK and deduplicates self delivery', async () => fixture(async (board, dir) => {
   const thread = '11111111-2222-4333-8444-555555555555'
   let current = { thread, status: 'idle', turn: null }, listener, starts = 0, nonce
