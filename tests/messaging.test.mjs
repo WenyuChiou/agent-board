@@ -3370,3 +3370,70 @@ test('a dead message claim changed during verification remains blocked and is no
     assert.equal(readFileSync(file, 'utf8'), 'changed')
   } finally { process.kill = probe; rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('an owned Codex receiver catches up a poll tick held behind an empty response, within the unchanged receipt budget', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-poll-overlap-'))
+  const store = createMessaging(dir)
+  const thread = '00000001-2222-4333-8444-555555555555'
+  let release, began, listener, receiver, polls = 0, received = 0
+  const held = new Promise(done => { release = done })
+  const started = new Promise(done => { began = done })
+  const errors = []
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1000 })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const action = new URL(url).pathname.split('/').at(-1)
+    const result = store.act(action, JSON.parse(options.body), Date.now())
+    const isFirstPoll = action === 'poll' && ++polls === 1
+    return { ok: true, json: async () => {
+      if (isFirstPoll) { began(); await held }
+      return result
+    } }
+  })
+  const transport = {
+    listen: callback => { listener = callback; return () => { listener = null } },
+    request: async (method, params) => {
+      if (method === 'thread/loaded/list') return { data: [thread] }
+      assert.equal(method, 'turn/start')
+      assert.equal(params.threadId, thread)
+      received++
+      const nonce = nonceOf(params.input[0].text)
+      listener({ method: 'item/completed', params: { threadId: thread, turnId: 'owned-turn', item: { type: 'agentMessage', text: `ACK ${nonce} received` } } })
+      listener({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'owned-turn', status: 'completed' } } })
+      return { turn: { id: 'owned-turn' } }
+    },
+  }
+  try {
+    receiver = await attachCodexSession({ boardUrl: 'http://127.0.0.1:12345/?t=synthetic', transport, thread,
+      state: () => ({ thread, status: 'idle', turn: null }), verifyOwner: one => one === transport,
+      onError: error => errors.push(error.message) })
+    await started
+    const sentAt = Date.now()
+    store.act('send', { id: 'AB-overlap', target: receiver.id, turn: receiver.turn, text: 'Synthetic overlap control' }, Date.now())
+    // The response was already empty before this send. A due tick must not vanish
+    // merely because that response has not finished arriving at the receiver.
+    t.mock.timers.tick(2000)
+    release()
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(1999)
+    await new Promise(done => setImmediate(done))
+    assert.equal(Date.now() - sentAt, 3999)
+    const message = store.snapshot(Date.now()).messages.find(one => one.id === 'AB-overlap')
+    const pollsBeforeDeadline = polls
+    // The old implementation does eventually deliver, at the next full period.
+    // Prove that the control's transport and exact native ACK both work then.
+    t.mock.timers.tick(1)
+    await new Promise(done => setImmediate(done))
+    assert.equal(store.snapshot(Date.now()).messages.find(one => one.id === 'AB-overlap').status, 'acknowledged')
+    assert.equal(message.status, 'acknowledged', 'the skipped 2000 ms tick must run before the next 4000 ms tick')
+    assert.equal(message.reply, 'received')
+    assert.equal(received, 1)
+    assert.equal(pollsBeforeDeadline, 2)
+    assert.deepEqual(errors, [])
+  } finally {
+    release()
+    await receiver?.close()
+    assert.equal(listener, null)
+    store.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
