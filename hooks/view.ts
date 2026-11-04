@@ -897,7 +897,7 @@ export const buildView = (
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now, updated, staleMs)
-      const isSilence = task.auto?.state === 'working' && hasTime(lastActive) && now - lastActive > WORKING_MS && !task.steps.some(step => step.status === 'doing')
+      const isSilence = task.auto?.state === 'working' && hasTime(lastActive) && now - lastActive > WORKING_MS && (task.steps.length === 0 || task.steps.every(step => isLifecycleStep(step.text)))
       const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
@@ -1254,7 +1254,7 @@ export const buildView = (
       s.groupCount(group.rows.length),
       count(row => row.tone === 'warn', s.groupWaiting),
       count(row => row.tone === 'alert', s.groupStuck),
-      count(row => row.auto === 'working' && (!hasTime(row.at) || now - row.at! <= WORKING_MS) && rowNeedsNow(row, asks) === null, s.groupWorking),
+      count(row => row.auto === 'working' && rowNeedsNow(row, asks) === null, s.groupWorking),
     ]
       .filter(part => part !== '')
       .join(' · ')
