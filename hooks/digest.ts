@@ -68,7 +68,8 @@ export const requestData = (text: string): string => text.slice(0, 1200).replace
 // token in a shape no pattern for tokens knows.
 const withoutEmphasis = (line: string): string =>
   line
-    .replace(/[*#>]+/g, '')
+    .replace(/[*#]+/g, '')
+    .replace(/^\s*>+\s?/, '')
     .replace(/_+/g, (run, at: number, whole: string) => (/[A-Za-z0-9]/.test(whole[at - 1] ?? '') && /[A-Za-z0-9]/.test(whole[at + run.length] ?? '') ? run : ''))
 
 // JSON objects and arrays are data, not prose. Only a top-level, nonempty string can

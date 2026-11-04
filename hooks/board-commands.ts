@@ -33,7 +33,7 @@ export const RECEIPT_SESSION_KEYS = ['session_id', 'sessionId', 'sessionID', 'th
 export const RECEIPT_FOLDER_KEYS = ['cwd', 'workspaceRoot', 'workspace', 'project_dir', 'directory'] as const
 export const RECEIPT_KEYS = [...RECEIPT_SESSION_KEYS, ...RECEIPT_FOLDER_KEYS, 'hook_event_name', 'hookEventName'] as const
 // Timeout receipts conservatively keep board requests from answering a question.
-export const BOARD_REQUEST_HINTS = ['board', '--chat', '--serve', '--json']
+export const BOARD_REQUEST_HINTS = ['board', '--chat', '--serve']
 
 // Keep the exact 0.24.2 prompts while installed commands and skills can still expand them.
 export const LEGACY_BOARD_PROMPTS = [

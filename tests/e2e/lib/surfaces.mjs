@@ -113,9 +113,7 @@ export const terminal = {
 export const print = async (world, args = []) => successful(await run(world, ['--print', ...args]))
 export const json = async (world, args = []) => JSON.parse(successful(await run(world, ['--json', ...args])))
 
-// Keep the fault and runner fixtures' reader names while they consume explicit text.
-export const chat = (world, args = []) => run(world, ['--print', ...args])
-export const html = async (world, args = []) => ({ visible: await print(world, args) })
+export const chat = (world, args = []) => run(world, ['--chat', ...args])
 
 // The small DOM is copied from tests/board.test.mjs pageDom. The actual shipped
 // page script builds every card and performs every press; tests do not emulate actions.
@@ -459,10 +457,10 @@ export const inspectSurfaces = async (world, server, { allow = [] } = {}) => {
     // Startup includes loading Node and the bundle. Event timing starts only
     // after a ready frame, in the journeys that then write or answer a task.
     const frame = await watch.next(() => true, 10000)
-    const [terminalText, pageText, printText] = await Promise.all([
-      terminal.screen(world), server.page(), print(world),
+    const [terminalText, pageText, printText, chatText] = await Promise.all([
+      terminal.screen(world), server.page(), print(world), chat(world).then(successful),
     ])
-    const screens = { terminal: terminalText, watch: frame.text, page: pageText, print: printText }
+    const screens = { terminal: terminalText, watch: frame.text, page: pageText, print: printText, chat: chatText }
     for (const text of Object.values(screens)) noMachineIds(text, world, { allow })
     return screens
   } finally {

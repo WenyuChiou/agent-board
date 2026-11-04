@@ -9,7 +9,7 @@ import { observeHookRecovery } from './lib/recovery-observation.mjs'
 import { seenWithin } from './lib/expect.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { formatWriters, holdNextRename, keptHookEvents, lockFile, storageFault, tear } from './lib/faults.mjs'
-import { chat, html, pageDom, run, serve } from './lib/surfaces.mjs'
+import { chat, json, pageDom, run, serve } from './lib/surfaces.mjs'
 import { killServe, readStore } from './lib/hub-wire.mjs'
 
 const journalText = world => world.files().filter(name => /^progress-journal-.*\.md$/.test(name)).map(name => world.read(name)).join('\n')
@@ -277,7 +277,7 @@ const whyFailed = result => {
   return /too long/i.test(said) ? `${said} (a long TEMP; keep it under about 84 characters)` : said
 }
 
-test('L5 torn tail: the terminal, --chat, html view and page each warn once and still show every complete block', async () => {
+test('L5 torn tail: the terminal, --chat, JSON and page each warn once and still show every complete block', async () => {
   // Two ways a write is cut off: in the middle of a new block's start marker, and in the middle of
   // the end marker of the last block. The blocks before the cut are complete in both.
   const cutOff = EN.progressIncomplete(1)
@@ -293,9 +293,9 @@ test('L5 torn tail: the terminal, --chat, html view and page each warn once and 
       block(world, { session: 'a1000003', agent: 'hermes', project: 'research-hub', title: 'Third complete card', steps: ['- [~] Summarise the synthetic notes'] })
       shape.cut(world)
       const server = await serve.start(world)
-      const terminal = await run(world, [])
+      const terminal = await run(world, ['--print'])
       assert.equal(terminal.status, 0, terminal.stderr)
-      const screens = { terminal: terminal.stdout, chat: (await chat(world)).stdout, html: (await html(world)).visible, page: await server.page() }
+      const screens = { terminal: terminal.stdout, chat: (await chat(world)).stdout, json: JSON.stringify(await json(world)), page: await server.page() }
       for (const [surface, text] of Object.entries(screens)) {
         const label = `${shape.name} on ${surface}`
         // Once, and whole: a warning cut over two lines or shown twice does not count.

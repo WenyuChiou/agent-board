@@ -922,6 +922,8 @@ test('the sh timeout receipt preserves ordered plain metadata and the session ga
   const quote = value => `'${value.replaceAll("'", "'\\''")}'`
   writeFileSync(script, `file=${quote(file)}\nlog_error() { printf '%s\\n' "$1" >&2; }\n${fallback}\nwrite_fallback\nexit 0\n`)
   const cases = [
+    [{ session_id: 'synthetic', cwd: '/work/demo', prompt: 'gh pr view 123 --json title' }, { session_id: 'synthetic', cwd: '/work/demo' }],
+    [{ session_id: 'synthetic', cwd: '/work/demo', prompt: 'agent-board --json' }, { session_id: 'synthetic', cwd: '/work/demo', board_request: true }],
     [{ extra: { cwd: 'a"b' }, session_id: 'synthetic', cwd: '/later plain *', workspaceRoot: '/中文', prompt: 'PRIVATE_RAW_PROMPT' }, { session_id: 'synthetic', cwd: '/later plain *', workspaceRoot: '' }],
     [{ directory: '/dir *', conversationId: 'conversation', sessionId: 'camel', session_id: 'synthetic', cwd: '', prompt: '/board' }, { session_id: 'synthetic', sessionId: 'camel', conversationId: 'conversation', cwd: '', directory: '/dir *', board_request: true }],
     [{ cwd: '/synthetic', prompt: 'PRIVATE_RAW_PROMPT' }, null],

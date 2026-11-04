@@ -99,7 +99,7 @@ import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff
 import type { Digest } from './digest'
 import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
-import { liveBoardArgv, liveBoardPage, liveBoardScript } from './live-page'
+import { liveBoardArgv, liveBoardPage, liveBoardScript, pageStatePath, readPageState } from './live-page'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -1169,6 +1169,7 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
     const path = await progressPath($)
     const dir = inboxPath(path)
     const done = await readInboxRecord($, 'inboxDone').catch(() => ({} as Record<string, string>))
+    await syncPageState($, done)
     const entries = (await $.fs.list(dir))
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
@@ -1202,6 +1203,20 @@ let measuredStore = 0
 // What the board cleared in the last 7 days, read at the last sweep and after each prune (refreshPruned).
 let measuredPruned = { agent: 0, mirror: 0, turns: 0 }
 
+// The page runs outside the engine store. Publish only its measured size, daily counts and
+// processed filenames, merging concurrent readers' acknowledgements before verifying a write.
+const syncPageState = async ($: EngineInterface, done?: Record<string, string>): Promise<void> => {
+  const at = await $.clock.now()
+  const processed = done ?? await readInboxRecord($, 'inboxDone')
+  const pruned = addPruned(await $.store.get('prunedCounts'), { agent: 0, mirror: 0 }, at)
+  await rewrite($, pageStatePath(await progressPath($)), before => JSON.stringify({
+    version: 1,
+    inboxDone: keepInboxDone({ ...readPageState(before).inboxDone, ...processed }, at),
+    store: measuredStore,
+    pruned,
+  }))
+}
+
 // The moment a view is built for: the pane's, which the 30 s tick and each change of the file move.
 const viewTime = async ($: EngineInterface): Promise<number> => (await read($, now)) || (await $.clock.now())
 
@@ -1221,7 +1236,7 @@ const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; t
 
 let isInteractiveSession = true
 
-const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Promise<{ page: { url: string; isKept: boolean } | null; needsInstall: boolean }> => {
+const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean } | null; needsInstall: boolean; reason?: string }> => {
   // Use the connector's installed file so sessions and agents share the same script
   // and the CLI's existing running-page check.
   const script = liveBoardScript(path)
@@ -1231,29 +1246,38 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Prom
     // Worst case: 2 s for the 0.19.0 address check + 8.5 s of checks + 10 s child
     // wait + 8.5 s of checks = 29 s, plus Node start. Going over is safe: the
     // command reports the failure, and a late child is reused next time.
-    const ran = await $.process.run(liveBoardArgv(script, s.lang), { timeoutMs: 35000 })
-    if (ran.exitCode !== 0 || ran.isStdoutTruncated) return { page: null, needsInstall: false }
-    return { page: liveBoardPage(ran.stdout, s), needsInstall: false }
-  } catch {
-    return { page: null, needsInstall: false }
+    const ran = await $.process.run(liveBoardArgv(script, s.lang, isInteractive), { timeoutMs: 35000 })
+    if (ran.isStdoutTruncated) return { page: null, needsInstall: false, reason: s.livePageTruncated }
+    if (ran.exitCode !== 0) {
+      const output = `${ran.stdout}\n${ran.stderr}`
+      const code = /\b(EACCES|EPERM|EROFS|ENOSPC|EBUSY|EAGAIN)\b/.exec(output)?.[1]
+      const reason = output.includes(s.serveRuntimePrivate) ? s.serveRuntimePrivate : code ? plainReason(s, code) : s.livePageExit(ran.exitCode)
+      return { page: null, needsInstall: false, reason }
+    }
+    const page = liveBoardPage(ran.stdout, s)
+    return { page, needsInstall: false, ...(page === null ? { reason: s.livePageNoAddress } : {}) }
+  } catch (error) {
+    const text = messageOf(error)
+    const code = /\b(EACCES|EPERM|EROFS|ENOSPC|EBUSY|EAGAIN)\b/.exec(text)?.[1]
+    return { page: null, needsInstall: false, reason: /ETIMEDOUT|timeout|timed out/i.test(text) ? s.livePageTimeout : code ? plainReason(s, code) : s.livePageRunFailed }
   }
 }
 
-const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, headline: string): Promise<{ text: string }> => {
+const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, headline: string, isInteractive = false): Promise<{ text: string }> => {
   // Starting the page can take half a minute; the footer says it is on its way meanwhile.
   startingPages += 1
   try {
     await refreshStatus($)
     const connecting = backgroundConnect
-    let live = await openLiveBoard($, progress, s)
+    let live = await openLiveBoard($, progress, s, isInteractive)
     if (live.needsInstall && connecting !== null) {
       // A first open can race the existing upgrade; never run the old file while waiting.
       await isDoneWithin($, connecting, 5000)
-      live = await openLiveBoard($, progress, s)
+      live = await openLiveBoard($, progress, s, isInteractive)
     }
-    const { page, needsInstall } = live
+    const { page, needsInstall, reason } = live
     if (page !== null) return { text: `${headline}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
-    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : `${s.serveFailed(s.serveNotStarted)}\n`}${s.livePageCommand(boardRun(liveBoardScript(progress)))}` }
+    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : `${s.serveFailed(reason ?? s.serveNotStarted)}\n`}${s.livePageCommand(boardRun(liveBoardScript(progress), ['--serve']))}` }
   } finally {
     startingPages -= 1
     // A footer that cannot be redrawn must not take away the link the person waited for.
@@ -2867,6 +2891,7 @@ const writeInboxRecord = async ($: EngineInterface, key: string, value: Record<s
   await $.store.set(key, value)
   const check = await readInboxRecord($, key)
   if (Object.keys(check).length !== Object.keys(value).length || Object.entries(value).some(([name, stamp]) => check[name] !== stamp)) throw new Error('INBOX_STORE_NOT_VERIFIED')
+  if (key === 'inboxDone') await syncPageState($, check)
 }
 
 // A compaction's summary made into one line for whoever takes over, kept in the block.
@@ -3438,6 +3463,7 @@ const refreshPruned = async ($: EngineInterface, at: number): Promise<void> => {
     const log = await $.fs.read(`${inbox}${sepOf(inbox)}${INBOX_DROPPED_FILE}`).catch(() => '')
     const turns = inboxDropped(log, prunedSince(at))
     measuredPruned = { ...records, turns: turns.age + turns.cap }
+    await syncPageState($)
   } catch {
     // The line keeps its last numbers.
   }
@@ -3882,7 +3908,7 @@ export const register: Register = (on, options) => {
     }
     if (/^(open|window|html|視窗|窗口|網頁|网页)$/i.test(arg)) {
       const { path } = await read($, snapshot)
-      return showBoardPage($, path || (await progressPath($)), s, s.boardPageOpened)
+      return showBoardPage($, path || (await progressPath($)), s, s.boardPageOpened, true)
     }
     if (/^(同步|sync)$/i.test(arg)) {
       await resync($)
@@ -3954,7 +3980,7 @@ export const register: Register = (on, options) => {
     const s = await wordsOf($)
     const { path } = await read($, snapshot)
     const progress = path || (await progressPath($))
-    return showBoardPage($, progress, s, s.boardPageOpened)
+    return showBoardPage($, progress, s, s.boardPageOpened, true)
   })
 
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers
@@ -4472,7 +4498,7 @@ export const register: Register = (on, options) => {
       revise: async item => { await update($, revising, open => open === reviseKey(item) ? '' : reviseKey(item)); return s.pressDone },
       openPage: async () => {
         const { path } = await read($, snapshot)
-        return (await showBoardPage($, path || (await progressPath($)), s, s.boardPageOpened)).text
+        return (await showBoardPage($, path || (await progressPath($)), s, s.boardPageOpened, true)).text
       },
       toggleLegend: async () => { await update($, isLegendOpen, open => !open); return s.pressDone },
       toggleNotify: async () => { await setNotify($); return s.pressDone },

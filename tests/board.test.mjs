@@ -657,7 +657,7 @@ test('the JSON board preserves pending turn text and project names as data', () 
     'gemini-turn-1792152000-2.json': JSON.stringify({ session_id: 'demo-2', cwd: '/work/api-gateway', prompt_response: 'Use <demo> & "yes"?' }),
   } })
   assert.deepEqual(document.needs.map(item => [item.text, item.project]), [
-    ['<scriptalert("demo")</script & done?', '<img "demo" &>'],
+    ['<script>alert("demo")</script> & done?', '<img "demo" &>'],
     ['Use <demo> & "yes"?', 'api-gateway'],
   ])
 })
@@ -1915,7 +1915,7 @@ test('the terminal and served boards show only the newest thirty inbox files', {
       const at = new Date(now - i * 1000)
       utimesSync(file, at, at)
     }
-    const terminal = execFileSync(process.execPath, [join(board.dir, 'agent-board.mjs')], {
+    const terminal = execFileSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--print'], {
       env: { ...process.env, CLAUDE_PROGRESS_FILE: board.path, NO_COLOR: '1' },
       encoding: 'utf8',
     })
@@ -2445,7 +2445,7 @@ require('node:module').syncBuiltinESMExports()
         assert.equal(far.json().note, note)
       }
       rmSync(lock)
-      const printed = spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs')], {
+      const printed = spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--print'], {
         env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, NO_COLOR: '1' },
         encoding: 'utf8', timeout: 5000,
       })

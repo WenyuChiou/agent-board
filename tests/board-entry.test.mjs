@@ -98,7 +98,8 @@ test('agent-board with no flag inside an agent opens the page and prints one bar
 test('every current and legacy board prompt reads JSON without pasting it, and wrappers invoke the no-flag command', () => {
   const command = 'node "/synthetic/agent-board.mjs"'
   const words = boardRequestWords(Object.values(STRINGS))
-  assert.ok(BOARD_REQUEST_HINTS.includes('--json'))
+  assert.ok(!BOARD_REQUEST_HINTS.includes('--json'))
+  for (const fragment of words) assert.ok(BOARD_REQUEST_HINTS.some(hint => fragment.toLowerCase().includes(hint)), fragment)
   assert.equal(LEGACY_BOARD_PROMPTS.length, 3)
   for (const legacy of LEGACY_BOARD_PROMPTS) {
     for (const prompt of [legacy.boardCommandPrompt, legacy.boardSkillPrompt(command), legacy.boardChatSkillPrompt(command)]) {

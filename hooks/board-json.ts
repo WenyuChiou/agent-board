@@ -124,7 +124,8 @@ export const boardDocument = (
   const working = page.working.map(row)
   const waiting = [...page.all.open, ...page.own.open].filter(ref => !workingKeys.has(ref.key)).sort(byTime).map(row)
   const stopped = [...page.all.stopped, ...page.own.stopped].sort(byTime).map(row)
-  const doneRecently = [...page.all.done, ...page.own.done].sort(byTime).map(ref => ({
+  const recentKeys = new Set(grouped.recent.map(one => one.key))
+  const doneRecently = [...page.all.done, ...page.own.done].filter(ref => recentKeys.has(ref.key)).sort(byTime).map(ref => ({
     project: named(ref.repo || source(ref).project || ref.project),
     title: clean(source(ref).title || ''),
     agent: clean(ref.agent),
@@ -150,6 +151,6 @@ export const boardDocument = (
     stopped,
     doneRecently,
     doneToday: done.map(clean),
-    notices: [model.warning, model.details].filter((line): line is string => !!line).map(clean),
+    notices: [model.warning, model.details, model.pruned, ...(model.health ?? [])].filter((line): line is string => !!line).map(clean),
   }
 }

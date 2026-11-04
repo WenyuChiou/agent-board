@@ -1144,7 +1144,7 @@ test('the board page shows the whole file: counts, questions, folded work, steps
   expect(model.asks[0]).toMatchObject({ agent: 'codex', project: 'AutoResearchAgent', task: 'Stage 2' })
   expect(view.due[0]).toMatchObject({ title: 'Google <script>alert(1)</script>' })
   expect(view.due[0]?.steps.map(step => step.text)).toEqual(['改履歷', '推薦信', '投遞'])
-  // Page content is inserted as text, so progress-file markup never becomes page markup.
+  // The shipped DOM's title safety is checked in page-titles.test.mjs, outside the SDK sandbox.
   expect(html).toContain('textContent')
   expect(html).not.toContain('<script>alert(1)')
   expect(html).toContain("call('/api/board')")
@@ -4423,6 +4423,7 @@ test('the board page shows stopped tasks in a closed shelf', () => {
   expect(boardScreen(view, [], emptyBoardState, STRINGS.en)).not.toContain(STRINGS.en.empty)
   // The page keeps them on a shelf that stays closed until it is opened, one row each, under the Stopped word.
   const page = servePage(STRINGS.en, 'nonce')
+  // page-titles.test.mjs checks this fixture's rendered title through the production page reader.
   expect(page).toContain("shelf('stopped', w('pgStopped')")
   expect(page).toContain("fold.inert = opened['shelf:' + name] !== true;")
   expect(page).toContain('var one = rowItem(ref, name, section, true);')

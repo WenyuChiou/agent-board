@@ -2350,8 +2350,21 @@ test('a page that needs installation names its command for the selected progress
   world.env!.CLAUDE_PROGRESS_FILE = '/home/me/elsewhere/other.md'
   const result = await $.command.run({ ...TIDY, args: 'open' })
   expect(result.text).toContain(EN.livePageNeedsInstall)
-  expect(result.text).toContain(EN.livePageCommand(boardRun('/home/me/private/agent-board.mjs')))
+  expect(result.text).toContain(EN.livePageCommand(boardRun('/home/me/private/agent-board.mjs', ['--serve'])))
   expect(world.files.has('/home/me/private/board.html')).toBe(false)
+})
+
+test('the plugin publishes processed filenames and daily cleared counts for its separate page reader', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const name = 'codex-turn-1792152000000-1.json'
+  const done = { [name]: `synthetic:${at}` }
+  const counts = { '2026-10-16': { agent: 2, mirror: 3 } }
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, at, hasTasks: true, store: { autoConnectOff: true, inboxDone: done, prunedCounts: counts } }
+  engineBeneath(on, world)
+  await start($, 'Publish the page state')
+  const state = JSON.parse(world.files.get('/home/me/.claude/progress-page-state.json') ?? '{}')
+  expect(state).toMatchObject({ version: 1, inboxDone: done, store: 0, pruned: counts })
+  expect(Object.keys(state).sort()).toEqual(['inboxDone', 'pruned', 'store', 'version'])
 })
 
 test('opening the board page reports a failed start and recovers without writing a static page', { options: { language: 'en' } }, async ($, on) => {
@@ -2363,9 +2376,13 @@ test('opening the board page reports a failed start and recovers without writing
   await start($, 'Open the board page')
   for (const failure of ['exit', 'timeout'] as const) {
     world.liveFailure = failure
+    world.liveOutput = `${EN.serveRuntimePrivate}\nPrivate startup text /home/me/private sk-${'a'.repeat(40)}\n`
     const failed = await $.command.run({ ...TIDY, args: 'open' })
-    expect(failed.text).toContain(EN.serveFailed(EN.serveNotStarted))
-    expect(failed.text).toContain(EN.livePageCommand(boardRun(script)))
+    if (failure === 'exit') expect(failed.text).toContain(EN.serveRuntimePrivate)
+    else expect(failed.text).toContain('timed out')
+    expect(failed.text).toContain(EN.livePageCommand(boardRun(script, ['--serve'])))
+    expect(failed.text).not.toContain('Private startup text')
+    expect(failed.text).not.toContain(`sk-${'a'.repeat(40)}`)
     expect(failed.text).not.toContain(EN.boardPageOpened)
     expect(world.files.has('/home/me/private/board.html')).toBe(false)
     expect(world.ran?.some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
@@ -2373,6 +2390,7 @@ test('opening the board page reports a failed start and recovers without writing
   world.liveFailure = undefined
   world.liveOutput = `${EN.serveAt(url)}\n`
   expect((await $.command.run({ ...TIDY, args: 'open' })).text).toBe(`${EN.boardPageOpened}\n<${url}>`)
+  expect(world.liveCalls?.at(-1)?.argv).not.toContain('--no-open')
 })
 
 test('an empty reply is answered in the alert colour', { options: { language: 'en' } }, async ($, on) => {
@@ -2660,7 +2678,7 @@ test('/progress reports why the live page cannot start regardless of browser ava
     const result = await $.command.run({ ...TIDY, args: '' })
     expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
     expect(world.ran?.some(argv => argv[0] === 'xdg-open')).toBe(false)
-    expect(result.text).toBe(`${EN.livePageFallback}\n${EN.serveFailed(EN.serveNotStarted)}\n${EN.livePageCommand(boardRun(LIVE_SCRIPT))}`)
+    expect(result.text).toBe(`${EN.livePageFallback}\n${EN.serveFailed(EN.livePageNoAddress)}\n${EN.livePageCommand(boardRun(LIVE_SCRIPT, ['--serve']))}`)
   }
   expect(world.ran?.filter(argv => argv.includes('--serve')).length).toBe(2)
 })
@@ -2746,7 +2764,7 @@ test('/progress bounds a pending upgrade connection and uses the read-only fallb
     expect(await Promise.race([timer.then(() => true), opening.then(() => false)])).toBe(true)
     await clock.advance(5000)
     const result = await opening
-    expect(result.text).toBe(`${EN.livePageFallback}\n${EN.livePageNeedsInstall}\n${EN.livePageCommand(boardRun(LIVE_SCRIPT))}`)
+    expect(result.text).toBe(`${EN.livePageFallback}\n${EN.livePageNeedsInstall}\n${EN.livePageCommand(boardRun(LIVE_SCRIPT, ['--serve']))}`)
     expect(world.files.get(LIVE_SCRIPT)).toBe(old)
     expect(world.liveCalls).toEqual([])
     release()
@@ -2774,7 +2792,7 @@ test('/progress in print mode gives the page command without opening a browser',
         const before = world.ran?.length ?? 0
         const result = await $.command.run({ ...TIDY, args })
         expect(world.ran?.slice(before).some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
-        expect(result.text).toContain(STRINGS[lang].livePageCommand(boardRun(LIVE_SCRIPT)))
+        expect(result.text).toContain(STRINGS[lang].livePageCommand(boardRun(LIVE_SCRIPT, ['--serve'])))
         expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
       }
     }
@@ -2818,7 +2836,8 @@ test('/progress gives the page command when the live page cannot start', async (
       const before = world.ran?.filter(argv => argv.includes('--serve')).length ?? 0
       const result = await $.command.run({ ...TIDY, args: '' })
       const s = STRINGS[lang]
-      expect(result.text).toBe(`${s.livePageFallback}\n${s.serveFailed(s.serveNotStarted)}\n${s.livePageCommand(boardRun(LIVE_SCRIPT))}`)
+      const reason = failure === 'exit' ? s.livePageExit(1) : failure === 'timeout' ? s.livePageTimeout : failure === 'truncated' ? s.livePageTruncated : s.livePageNoAddress
+      expect(result.text).toBe(`${s.livePageFallback}\n${s.serveFailed(reason)}\n${s.livePageCommand(boardRun(LIVE_SCRIPT, ['--serve']))}`)
       expect(result.text).not.toContain('SYNTHETIC_STARTUP_DETAIL')
       expect(result.text).not.toContain('BOOTSTRAP_FAILED')
       expect(result.text).not.toContain(url)
@@ -2852,7 +2871,7 @@ test('/progress runs the installed board script only when it is the same version
         expect(result.text).toBe(`${s.livePageOpened}\n<${url}>`)
       } else {
         expect(world.liveCalls?.length).toBe(before)
-        expect(result.text).toBe(`${s.livePageFallback}\n${s.livePageNeedsInstall}\n${s.livePageCommand(boardRun(LIVE_SCRIPT))}`)
+        expect(result.text).toBe(`${s.livePageFallback}\n${s.livePageNeedsInstall}\n${s.livePageCommand(boardRun(LIVE_SCRIPT, ['--serve']))}`)
       }
     }
   }
@@ -2874,7 +2893,7 @@ test('/progress refuses an installed board script whose first line was changed',
     const result = await $.command.run({ ...TIDY, args: '' })
     expect(world.liveCalls).toEqual([])
     expect(world.ran?.some(argv => argv.includes('--serve'))).toBe(false)
-    expect(result.text).toBe(`${EN.livePageFallback}\n${EN.livePageNeedsInstall}\n${EN.livePageCommand(boardRun(LIVE_SCRIPT))}`)
+    expect(result.text).toBe(`${EN.livePageFallback}\n${EN.livePageNeedsInstall}\n${EN.livePageCommand(boardRun(LIVE_SCRIPT, ['--serve']))}`)
   }
 })
 
@@ -2950,7 +2969,7 @@ test('/progress accepts only a local board page address from the board script', 
   ]) {
     world.liveOutput = `${EN.serveAt(address)}\n`
     const result = await $.command.run({ ...TIDY, args: '' })
-    expect(result.text).toBe(`${EN.livePageFallback}\n${EN.serveFailed(EN.serveNotStarted)}\n${EN.livePageCommand(boardRun(LIVE_SCRIPT))}`)
+    expect(result.text).toBe(`${EN.livePageFallback}\n${EN.serveFailed(EN.livePageNoAddress)}\n${EN.livePageCommand(boardRun(LIVE_SCRIPT, ['--serve']))}`)
     expect(result.text).not.toContain(token)
   }
   for (const output of [`${local}\n`, `${EN.serveAt(local)}\nStartup failed\n`, `Task text ${local}\n`]) {
@@ -3079,7 +3098,7 @@ test('with a pane surface, /agent-board starts the live board page and leaves th
     expect(world.paneOpenCalls).toBe(paneOpenCalls)
     expect(seen.status.at(-1)).toBe(status)
     expect(world.liveCalls?.at(-1)).toEqual({
-      argv: ['node', LIVE_SCRIPT, '--serve', '--no-open', '--quiet-board', '--idle-minutes', '30', '--lang', lang],
+      argv: ['node', LIVE_SCRIPT, '--serve', '--quiet-board', '--idle-minutes', '30', '--lang', lang],
       init: { timeoutMs: 35000 },
     })
   }
@@ -3102,7 +3121,7 @@ test('/agent-board gives the page command when the live page cannot start', asyn
   await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
   const board = await $.command.run({ ...TIDY, command: 'agent-board', args: '' })
   const progress = await $.command.run({ ...TIDY, args: '' })
-  const expected = `${EN.livePageFallback}\n${EN.serveFailed(EN.serveNotStarted)}\n${EN.livePageCommand(boardRun(LIVE_SCRIPT))}`
+  const expected = `${EN.livePageFallback}\n${EN.serveFailed(EN.livePageExit(1))}\n${EN.livePageCommand(boardRun(LIVE_SCRIPT, ['--serve']))}`
   expect(board.text).toBe(expected)
   expect(progress.text).toBe(expected)
   expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
