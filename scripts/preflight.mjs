@@ -15,13 +15,10 @@ const read = path => readFileSync(path, 'utf8')
 const isTest = path => /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|ts|tsx)$/.test(path)
 const splitPaths = text => text.split('\0').filter(Boolean)
 
-// No preflight test run lasts three hours, so an older marker is left over even if its PID is alive again.
-export const TEST_LOCK_MAX_AGE_MS = 3 * 60 * 60 * 1000
-
 // A run writes its marker after its process starts, so a process that started later only reuses the PID.
 // The 5 s covers clock and file-time rounding.
-export const isLiveMarker =({ markerMs, now, isAlive, startedMs }) =>
-  isAlive && now - markerMs < TEST_LOCK_MAX_AGE_MS && (startedMs === null || startedMs <= markerMs + 5000)
+export const isLiveMarker = ({ markerMs, isAlive, startedMs }) =>
+  isAlive && (startedMs === null || startedMs <= markerMs + 5000)
 
 export const accountTestLockPath = ({ platform = process.platform, account = userInfo() } = {}) => {
   const identity = platform === 'win32'
@@ -117,14 +114,14 @@ const lockDirectories = (directory, fallback) => {
 }
 
 // Read only after this run's marker exists, so a run that creates the folder a moment later still meets that marker.
-const watchedLiveMarker = ({ directory, isOptional }, marker) => {
+const watchedLiveMarker = ({ directory, isOptional }, marker, readProcessStart) => {
   try {
     if (!watchedLockDirectory(directory)) return null
   } catch (error) {
     if (isOptional) return null
     throw error
   }
-  return newestLiveMarker(directory, marker, false)
+  return newestLiveMarker(directory, marker, false, readProcessStart)
 }
 
 const isLiveProcess = pid => {
@@ -137,12 +134,77 @@ const isLiveProcess = pid => {
   }
 }
 
-// On Linux, /proc/<pid> is created when the process starts. The kernel can recreate it later under memory
-// pressure; then a live run's marker reads as stale and a second run can start beside it. That is rare, and
-// it is better than a leftover marker blocking every run.
-const processStartedMs = pid => {
-  if (process.platform !== 'linux') return null
-  try { return statSync(`/proc/${pid}`).ctimeMs } catch { return null }
+export const parseProcStat = text => {
+  if (typeof text !== 'string' || !/^\d+\s+\(/.test(text)) return null
+  const end = text.lastIndexOf(')')
+  if (end < 0 || !/^\s/.test(text.slice(end + 1))) return null
+  const fields = text.slice(end + 1).trim().split(/\s+/)
+  if (!/^[A-Za-z]$/.test(fields[0] ?? '') || !/^\d+$/.test(fields[19] ?? '')) return null
+  const ticks = Number(fields[19])
+  return Number.isSafeInteger(ticks) ? ticks : null
+}
+
+export const parseBootTime = text => {
+  if (typeof text !== 'string') return null
+  const match = /^btime\s+(\d+)\s*$/m.exec(text)
+  if (!match) return null
+  const milliseconds = Number(match[1]) * 1000
+  return Number.isSafeInteger(milliseconds) ? milliseconds : null
+}
+
+export const parsePsLstart = text => {
+  if (typeof text !== 'string') return null
+  const match = /^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/.exec(text.trim())
+  if (!match) return null
+  const month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].indexOf(match[1])
+  const [, , dayText, hourText, minuteText, secondText, yearText] = match
+  const [day, hour, minute, second, year] = [dayText, hourText, minuteText, secondText, yearText].map(Number)
+  if (year < 100) return null
+  const date = new Date(year, month, day, hour, minute, second)
+  if (date.getFullYear() !== year || date.getMonth() !== month || date.getDate() !== day
+    || date.getHours() !== hour || date.getMinutes() !== minute || date.getSeconds() !== second) return null
+  return date.getTime()
+}
+
+let cachedClockTicks
+const clockTicksPerSecond = () => {
+  if (cachedClockTicks !== undefined) return cachedClockTicks
+  cachedClockTicks = null
+  try {
+    const result = spawnSync('getconf', ['CLK_TCK'], { encoding: 'utf8', timeout: 2000, windowsHide: true })
+    const output = result.stdout?.trim()
+    const ticks = /^\d+$/.test(output ?? '') ? Number(output) : null
+    if (result.status === 0 && Number.isSafeInteger(ticks) && ticks > 0) cachedClockTicks = ticks
+  } catch {}
+  return cachedClockTicks
+}
+
+export const processStartedMs = (pid, { platform = process.platform, readText = read, run = spawnSync, clockTicks = clockTicksPerSecond } = {}) => {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null
+  try {
+    if (platform === 'linux') {
+      const ticks = parseProcStat(readText(`/proc/${pid}/stat`))
+      const boot = parseBootTime(readText('/proc/stat'))
+      const frequency = clockTicks()
+      if (ticks === null || boot === null || !Number.isSafeInteger(frequency) || frequency <= 0) return null
+      const started = boot + ticks * 1000 / frequency
+      return Number.isFinite(started) ? started : null
+    }
+    if (platform === 'win32') {
+      const command = `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`
+      const result = run('powershell', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', timeout: 3000, windowsHide: true })
+      const output = result.stdout?.trim() ?? ''
+      if (result.status !== 0 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z$/.test(output)) return null
+      const started = Date.parse(output)
+      return Number.isFinite(started) ? started : null
+    }
+    const result = run('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8', timeout: 3000, windowsHide: true, env: { ...process.env, LC_ALL: 'C' },
+    })
+    return result.status === 0 ? parsePsLstart(result.stdout) : null
+  } catch {
+    return null
+  }
 }
 
 const releaseTestLock = path => {
@@ -154,9 +216,8 @@ const releaseTestLock = path => {
 }
 
 // Stale markers are removed only from this run's own folder.
-const newestLiveMarker = (directory, marker, isOwn) => {
+const newestLiveMarker = (directory, marker, isOwn, readProcessStart) => {
   let newest = null
-  const now = Date.now()
   for (const name of readdirSync(directory)) {
     if (name === marker) continue
     const match = /^([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.lock$/i.exec(name)
@@ -172,8 +233,10 @@ const newestLiveMarker = (directory, marker, isOwn) => {
     // Unfamiliar entries, including links and directories, never become stale markers.
     if (!stat.isFile() || stat.size !== 0) continue
     const isAlive = isLiveProcess(pid)
-    if (isLiveMarker({ markerMs: stat.mtimeMs, now, isAlive, startedMs: isAlive ? processStartedMs(pid) : null })) {
-      if (!newest || stat.mtimeMs > newest.markerMs) newest = { pid, markerMs: stat.mtimeMs }
+    const start = isAlive ? readProcessStart(pid) : null
+    const startedMs = Number.isFinite(start) ? start : null
+    if (isLiveMarker({ markerMs: stat.mtimeMs, isAlive, startedMs })) {
+      if (!newest || stat.mtimeMs > newest.markerMs) newest = { pid, markerMs: stat.mtimeMs, startedMs }
       continue
     }
     if (isOwn) releaseTestLock(join(directory, name))
@@ -181,7 +244,7 @@ const newestLiveMarker = (directory, marker, isOwn) => {
   return newest
 }
 
-const acquireTestLock = (directory, onPublished, fallback = null) => {
+const acquireTestLock = (directory, onPublished, fallback = null, readProcessStart = processStartedMs) => {
   const { own, watched, isFallback } = lockDirectories(directory, fallback)
   const marker = `${process.pid}-${randomUUID()}.lock`
   const path = join(own, marker)
@@ -192,7 +255,7 @@ const acquireTestLock = (directory, onPublished, fallback = null) => {
     closeSync(file)
     onPublished?.()
     // Every folder is read, even after a live marker is found, so this run's own stale markers are still cleaned.
-    const blockedBy = [newestLiveMarker(own, marker, true), ...watched.map(other => watchedLiveMarker(other, marker))]
+    const blockedBy = [newestLiveMarker(own, marker, true, readProcessStart), ...watched.map(other => watchedLiveMarker(other, marker, readProcessStart))]
       .filter(Boolean).sort((a, b) => b.markerMs - a.markerMs)[0]
     if (blockedBy) {
       releaseTestLock(path)
@@ -414,7 +477,7 @@ const parseArgs = argv => {
   return options
 }
 
-export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), onCheck, onProgress, onLockPublished } = {}) => {
+export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessStart = processStartedMs, onCheck, onProgress, onLockPublished } = {}) => {
   const checks = []
   const add = (state, message) => {
     const item = { state, message: safeLine(message) }
@@ -473,14 +536,15 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     const paths = [...changed].filter(path => isTest(path) && path.endsWith('.mjs') && existsSync(join(cwd, path)))
     if (!paths.length) add('PASS', 'no touched Node test files need running.')
     let owner = null
-    try { owner = paths.length ? acquireTestLock(lockPath, onLockPublished, fallbackLockPath) : null } catch (error) {
+    try { owner = paths.length ? acquireTestLock(lockPath, onLockPublished, fallbackLockPath, readProcessStart) : null } catch (error) {
       add('FAIL', error.message?.startsWith('test lock directory ') ? error.message : 'test lock directory could not be used; check account directory access.')
       return
     }
     if (owner?.blockedBy) {
-      const { pid, markerMs } = owner.blockedBy
+      const { pid, markerMs, startedMs } = owner.blockedBy
       const minutes = Math.floor(Math.max(0, Date.now() - markerMs) / 60_000)
-      add('FAIL', `another preflight test run is already active on this computer (process ${pid}, started ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago); finish it, or if no preflight is running, delete its .lock file from this account's .agent-board-preflight-tests-* folder and run preflight again.`)
+      const unknown = startedMs === null ? ', process start time could not be read' : ''
+      add('FAIL', `another preflight test run is already active on this computer (process ${pid}, started ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago${unknown}); finish it, or if no preflight is running, delete its .lock file from this account's .agent-board-preflight-tests-* folder and run preflight again.`)
     }
     if (owner?.isFallback) add('PASS', "the home folder cannot hold the test lock, so the test lock was this account's shared fallback folder, and any home lock folder was still read.")
     if (owner?.path) {
