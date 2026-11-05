@@ -96,7 +96,7 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from './digest'
+import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
 import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
@@ -236,6 +236,7 @@ let isNextTurnAnswer = false
 // turn.start has no origin; undefined alone permits its legacy text fallback.
 let nextTurnNotification: boolean | undefined
 let hasTurnBackgroundLaunch = false
+let observedTurnTools: string[] = []
 let turnBackgroundJobIds = new Set<string>()
 let turnBackgroundLaunchesWithoutId = 0
 let hasBackgroundActivity = false
@@ -4134,6 +4135,7 @@ export const register: Register = (on, options) => {
     journal($).catch(() => undefined)
     isTurnRunning = true
     hasTurnBackgroundLaunch = false
+    observedTurnTools = []
     turnBackgroundJobIds = new Set()
     turnBackgroundLaunchesWithoutId = 0
     // A board message's turn: neither what it said nor what Claude answered joins the board's
@@ -4220,7 +4222,7 @@ export const register: Register = (on, options) => {
     // No Task list: a turn that changed something, or any turn once the session is tracked,
     // is summed up into steps.
     if (mirror !== null && !e.isAborted && !isDelivery && (mirror.tasks.length === 0 || mirror.source === 'turns')) {
-      const hasWork = mirror.source === 'turns' || hasTurnBackgroundLaunch || isWork(turnTools(await $.session.messages().catch(() => [])))
+      const hasWork = mirror.source === 'turns' || hasTurnBackgroundLaunch || isWork(observedTurnTools) || observedTurnTools.length >= 2 || isWork(turnTools(await $.session.messages().catch(() => [])))
       if (hasWork) {
         const prompt = turnPrompt
         $.clock.after(1, () => {
@@ -4247,14 +4249,32 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined || e.tool === 'Agent' || !('run_in_background' in e) || e.run_in_background !== true) return next(e)
+    if (e.agentId !== undefined) return next(e)
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError === true) return ran
+    if (e.tool !== 'AskUserQuestion' && e.tool !== 'TaskList') observedTurnTools.push(e.tool)
+    if (e.tool === 'Agent' || !('run_in_background' in e) || e.run_in_background !== true) return ran
     hasTurnBackgroundLaunch = true
     if (e.tool_use_id) turnBackgroundJobIds.add(e.tool_use_id)
     else turnBackgroundLaunchesWithoutId += 1
     // turn.complete drains the queue; the tool's result need not wait for pane reads.
     saveBackground($, one => startBackgroundJob(one, e.tool_use_id || undefined)).catch(() => undefined)
+    return ran
+  })
+
+  on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
+    if (e.agentId !== undefined || !('questions' in e)) return next(e)
+    const call = e.tool_use_id || 'current'
+    const at = await $.clock.now()
+    try {
+      await saveMine($, one => toolQuestions(one, e.questions, call, at))
+      await settle($)
+    } catch {}
+    const ran = await next(e)
+    // Answered, declined or failed: the native prompt is over, so its steps stop waiting. A Task
+    // list session would otherwise keep a step nothing ever completes.
+    await saveMine($, one => closeToolQuestions(one.tasks.some(task => task.id.startsWith(`ask:${call}:`)) ? markAnswered(one, one.tasks.filter(task => task.id.startsWith(`ask:${call}:`)).map(task => task.id)) : one, call)).catch(() => undefined)
+    await settle($).catch(() => undefined)
     return ran
   })
 

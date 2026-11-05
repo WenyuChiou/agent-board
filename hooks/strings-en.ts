@@ -501,9 +501,9 @@ export const EN: Strings = {
   nextStepLine: (text: string): string => `○ next: ${text}`,
   foldSteps: '▾ Hide steps',
   allSteps: (n: number): string => `▸ All ${n} ${n === 1 ? 'step' : 'steps'}`,
-  noTaskTools: "This session has no Task tools, so progress won't sync automatically.",
+  noTaskTools: 'This session has no Task tools; progress is summarized automatically when a work turn ends.',
   noTaskToolsHow:
-    'For claude started from a terminal: add CLAUDE_CODE_ENABLE_TODO_TOOLS=1 to your shell profile ($PROFILE in PowerShell; re-running the setup script adds it), then start it in a new window. Not in settings.json: its env also reaches the desktop app.',
+    'For optional Task-list updates during work, add CLAUDE_CODE_ENABLE_TODO_TOOLS=1 to your shell profile ($PROFILE in PowerShell), then start a new window.',
   noTaskToolsManual: 'Sessions without it, like the desktop app or git-bash, keep progress.md by hand.',
   empty: 'No work in progress right now.',
   emptyHow: 'Once Claude starts on a Task list, it shows up here. You can also type "+ project: thing to do" below to add one.',
