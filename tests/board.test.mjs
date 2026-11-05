@@ -8828,10 +8828,10 @@ test("the agent row shows each agent's counts and filters the page to that agent
   try {
     const dom = await pageDom(html, model)
     assert.deepEqual(dom.node('chips').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
-    // Each icon names its agent, how many questions wait and whether it is working; the badge carries the number.
-    assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label'), `${EN.agentNames.codex}: ${EN.pgTipNeedsOne}, ${EN.pgTipWorking}`)
-    // Gemini wrote its waiting block 3 minutes ago, so it is open and no word follows its name (not seen: the reply test).
-    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini}: ${EN.pgTipNeedsOne}`)
+    // Each icon names its agent, its state and how many questions wait; the badge carries the number.
+    assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label'), `${EN.agentNames.codex} · ${EN.pgTipWorking}: ${EN.pgTipNeedsOne}`)
+    // Gemini wrote its waiting block 3 minutes ago, so it is open (not heard from: the reply test).
+    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgStateOpen}: ${EN.pgTipNeedsOne}`)
     assert.equal(badgeOf(rowAgent(dom, 'codex')).textContent, '1')
     assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
     // Pressing Codex leaves its cards and rows and takes the other agents' away; the sidebar copy agrees.
@@ -8901,6 +8901,41 @@ test('a working Codex session with no block of its own names its project once an
   try {
     assert.ok(sectionWords(await pageDom(waiting.html, waiting.model), 'working').includes(EN.codexLifecycle))
   } finally { await waiting.board.close() }
+})
+
+test('an agent not heard from for 30 minutes keeps its icon colours, and its state is a mark and a word in every language', async () => {
+  // Gemini last wrote 45 minutes ago and nothing says its session ended; it still has a question.
+  const geminiBlock = minutes => groupedBlock('47700002', 'gemini', 'waiting', 'docs-repo', 'Choose the short guide', ['- [?] Short or detailed?', '- [ ] Edit'], minutes)
+  const { board, model, html } = await groupedPage(groupedSource().replace(geminiBlock(3), geminiBlock(45)))
+  try {
+    const dom = await pageDom(html, model, { width: 1280 })
+    for (const node of [rowAgent(dom, 'gemini'), sideAgent(dom, 'gemini')]) {
+      assert.equal(node.getAttribute('data-presence'), 'notseen')
+      assert.equal(node.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
+      assert.ok(shownWords(node).includes(EN.pgNotSeen), shownWords(node))
+    }
+    assert.equal(badgeOf(rowAgent(dom, 'gemini')).textContent, '1')
+    // No rule of the page repaints an icon for its state, at any width or in any theme: only the mark moves.
+    assert.doesNotMatch(html, /data-presence="[a-z]+"\] \.ag[,{]/)
+    assert.match(html, /\.s-agent\[data-presence="notseen"\] \.ag::after\{/)
+    assert.match(html, /\.chip\[data-presence="notseen"\]::after\{/)
+  } finally { await board.close() }
+  for (const table of [EN, ZH_TW, ZH_CN]) {
+    assert.match(table.pgNotSeen, /30/)
+    for (const word of [table.pgStateOpen, table.pgOffline, table.pgNotSeen, table.pgTipWorking]) assert.ok(word.length > 0)
+    assert.equal(new Set([table.pgStateOpen, table.pgOffline, table.pgNotSeen, table.pgTipWorking]).size, 4)
+  }
+})
+
+test('the agent list says closed for an agent whose sessions ended, with no question left', async () => {
+  const model = redesignModel()
+  model.stopped[0] = { ...model.stopped[0], isClosed: true }
+  model.asks = []
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const gemini = sideAgent(dom, 'gemini')
+  assert.equal(gemini.getAttribute('data-presence'), 'offline')
+  assert.equal(gemini.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgOffline}: ${EN.pgChipEmpty}`)
+  assert.ok(shownWords(gemini).includes(EN.pgOffline))
 })
 
 test('a reply button on an unconnected question says it copies and the card then says where to paste it', async () => {
@@ -9319,7 +9354,7 @@ test('an agent with a recently finished task and no closed session shows as open
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   const node = rowAgent(dom, 'codex')
   assert.equal(node.getAttribute('data-presence'), 'open')
-  assert.equal(node.getAttribute('aria-label'), 'Codex: No work yet')
+  assert.equal(node.getAttribute('aria-label'), `Codex · ${EN.pgStateOpen}: No work yet`)
 })
 
 test('the own tasks chip label shows open task counts instead of empty when to-dos are open', async () => {
@@ -9719,7 +9754,7 @@ test('the page uses ink for actions and amber only for what needs you', async ()
   assert.deepEqual(using('accent'), [], 'the blue accent is not on the live page')
   // Green is for what is alive, red for what is wrong, and a finished task is muted.
   assert.ok(html.includes('--alive:var(--done)'))
-  assert.deepEqual(using('alive'), ['.chip.working::after', '.s-agent.working .ag::after', '.s-running', '.v-working>svg.i'].sort())
+  assert.deepEqual(using('alive'), ['.chip.working::after', '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', '.s-agent.working .ag::after', '.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after', '.s-running', '.v-working>svg.i'].sort())
   for (const selector of ['#offline', '.t-alert', '.badge.bad', '.s-blocked']) assert.ok(using('alert').includes(selector), selector)
   assert.ok(rules.some(([selector, body]) => selector.includes('.s-done') && body.includes('var(--muted)')))
 })
