@@ -96,9 +96,9 @@ const withoutCodexOnPath = (pathValue, home) => {
 }
 // A runner may set XDG/host overrides. No synthetic home may inherit those and
 // write into another test or the account's actual native configuration.
-const isolatedEnv = home => {
+const isolatedEnv = (home, pathValue) => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
-  const originalPath = process.env[pathKey] ?? ''
+  const originalPath = pathValue ?? process.env[pathKey] ?? ''
   const cleanPath = withoutCodexOnPath(originalPath, home)
   const env = {
     ...process.env,
@@ -797,6 +797,16 @@ const homeSnapshot = home => Object.fromEntries(readdirSync(home, { recursive: t
   return [path.slice(home.length), entry.isDirectory() ? 'directory' : { bytes: readFileSync(path).toString('base64'), mtimeMs: statSync(path).mtimeMs }]
 }))
 
+const sharedRuntimePath = f => {
+  const shared = join(f.home, 'shared tools')
+  mkdirSync(shared)
+  const runtime = join(shared, process.platform === 'win32' ? 'node.exe' : 'node')
+  try { linkSync(process.execPath, runtime) } catch { copyFileSync(process.execPath, runtime) }
+  f.save(join(shared, 'codex.cmd'), 'synthetic host must stay undiscoverable')
+  const inherited = Object.entries(f.env).find(([key]) => key.toLowerCase() === 'path')?.[1] ?? ''
+  return [shared, inherited].filter(Boolean).join(delimiter)
+}
+
 test('setup preview lists every planned file under its agent and apply changes only those files', () => fixture(f => {
   f.save(f.hooks, '{"other":{"keep":true},"hooks":{}}\n')
   f.save(join(f.home, 'notes.txt'), 'Keep this file.\n')
@@ -864,8 +874,11 @@ test('setup preview groups files per agent and shortens only paths inside the se
   const home = join(f.home, 'home')
   const data = join(f.home, 'home-other')
   mkdirSync(home)
+  // Preparing this fixture's runtime is not a change made by preview. Do it
+  // before the no-write snapshot, even when Node and Codex share a PATH entry.
+  const env = isolatedEnv(home, sharedRuntimePath(f))
   const run = (...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', home, '--data-dir', data, '--agent', 'codex,hermes', ...args], {
-    cwd: f.home, env: isolatedEnv(home), encoding: 'utf8', windowsHide: true, timeout: 30000,
+    cwd: f.home, env, encoding: 'utf8', windowsHide: true, timeout: 30000,
   })
   const before = homeSnapshot(f.home)
   const json = run('--json')
@@ -1028,7 +1041,8 @@ test('a second setup says everything is already set up and writes nothing', () =
 
 test('setup on a computer with only Claude Code prints guidance and exits 0 without a stack trace', () => fixture(f => {
   mkdirSync(join(f.home, '.claude'))
-  const english = { ...f, env: { ...f.env, LANG: 'en' } }
+  const english = { ...f, env: { ...f.env, ...isolatedEnv(f.home, sharedRuntimePath(f)), LANG: 'en' } }
+  const before = homeSnapshot(f.home)
   const guidance = setupAgent(english)
   assert.equal(guidance.status, 0, guidance.stderr)
   assert.equal(guidance.stderr, '')
@@ -1046,7 +1060,7 @@ test('setup on a computer with only Claude Code prints guidance and exits 0 with
   assert.equal(traditional.status, 0, traditional.stderr)
   assert.equal(traditional.stderr, '')
   assert.ok(traditional.stdout.includes('claude plugin install agent-board@agent-board'))
-  assert.deepEqual(readdirSync(f.home), ['.claude'])
+  assert.deepEqual(homeSnapshot(f.home), before)
 }))
 
 test('setup on a computer with Claude Code and Codex previews Codex only', async () => {
