@@ -7,7 +7,7 @@ import { DARK, LIGHT } from './palette'
 import type { Tone } from './palette'
 import { sha256 } from './sha256'
 import { agentLabel } from './strings'
-import { isSameName, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
+import { isSameName, questionHead, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
 import type { TidyPreview } from './tidy'
@@ -300,7 +300,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     if (items.length === 0) continue
     const isOpen = o.isIdleOpen || o.isQuestionsOpen
     lines.push(`${title} (${items.length})${isOpen ? '' : ' · --all'}`)
-    if (isOpen) for (const item of items) lines.push(`  ${cut(`${item.project} › ${item.task} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
+    if (isOpen) for (const item of items) lines.push(`  ${cut(`${questionHead(item.project, item.task)} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
   }
   // Questions marked answered in a pane are left out, and counted so they are not lost.
   const hidden = view.hidden.length === 0 ? [] : [c('quiet', s.hiddenCount(view.hidden.length))]
@@ -529,7 +529,7 @@ export const chatText = (
   for (const [title, shelf] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, (view.older ?? []).filter(item => !item.key.startsWith('older::'))]] as const) {
     if (shelf.length === 0) continue
     items.push(`\n${title} (${shelf.length})`)
-    for (const item of shelf) items.push(line(`${named(item.project)} › ${item.task} · ${item.when}`, 2), line(`${item.text}${item.note ? ` — ${item.note}` : ''}`, 4))
+    for (const item of shelf) items.push(line(`${questionHead(named(item.project), item.task)} · ${item.when}`, 2), line(`${item.text}${item.note ? ` — ${item.note}` : ''}`, 4))
   }
   if (view.idle.length > 0) items.push(line(s.idleCount(view.idle.length)))
   if (view.stopped.length > 0) items.push(line(s.stoppedCount(view.stopped.length)))

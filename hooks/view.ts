@@ -77,6 +77,9 @@ const targetOf = (auto: ProgressAuto | null): AgentTarget | null =>
     ? null
     : { agent: auto.agent, session: auto.session, resume: auto.resume, dir: auto.dir, isClosed: auto.state === 'ended' }
 
+// A question from a turn with no task has no title to name: its own words, on the next line, say what it is.
+export const questionHead = (project: string, task: string): string => task === '' ? project : `${project} › ${task}`
+
 export type WaitingItem = {
   questionId?: string
   ageStage?: 'pending' | 'reminder' | 'older'
@@ -1349,7 +1352,7 @@ export const buildView = (
     }
   }
   // The same question asked in several blocks or captures is one card (#463): the newest copy that
-  // can be acted on, with the age of the oldest. The copies a stopped session's row lists under
+  // can be acted on, with its own time (#861). The copies a stopped session's row lists under
   // Older are in the mix, so a live card does not repeat them; the other copies stay in the
   // question list, and the row keeps its own.
   const merged = mergeCopies([...all.filter(item => !isMarked(item)), ...retained, ...onRows].map(item => ({ item, ...seenAs(item), isStopped: item.questionId !== undefined && stoppedQuestions.has(item.questionId) })), closedCopies(observed?.ledger.records ?? [], marked))
