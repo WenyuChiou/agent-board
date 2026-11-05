@@ -12,6 +12,11 @@ export const LIVE_SESSIONS = 100
 export const BLOCKS = 300
 export const LEDGER_RECORDS = 1000
 export const BUILD_VIEW_MS = 50
+// #192: the inbox drain scale target — 50 queued turns handled in one pure drain pass,
+// with no model call for the ones that are not questions. The engine's per-poll file cap
+// (hooks/register.tsx pendingTurns) is a separate, engine-owned limit; this number counts
+// the pure peekInbox pass only, which is what tests/performance-budgets.test.mjs measures.
+export const INBOX_DRAIN_TURNS = 50
 // The plan's budget for one hook run. It equals the host's limit for Antigravity and for Codex's
 // prompt hook (HOOK_TIMEOUTS in hooks/hook-safety.ts). tests/e2e/l4-time.test.mjs asserts that, so
 // a change to the host limit fails there. Codex waits 10 s for its Stop hook. A host that gives up
