@@ -25,7 +25,7 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
@@ -1199,12 +1199,22 @@ const screen = (state: BoardState): string => {
 const pin = (state: BoardState): BoardState => pinned(state, boardItems(view(), pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false))
 
 // The running page, found without making its folder: the terminal board only looks for one.
-const runningAddress = (): Running | null => {
+const runningAddress = async (): Promise<Running | null> => {
   const runtime = process.env.XDG_RUNTIME_DIR
   const folder = process.platform === 'win32' ? (runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board')) : runtime && isOwnFolder(runtime) ? runtime : join(homedir(), '.cache', 'agent-board')
   if (!existsSync(folder)) return null
   try {
-    return readRunning()
+    if (process.platform !== 'win32') return readRunning()
+    if (served === undefined) {
+      const name = addressFileName(board(path))
+      let root: string
+      try { root = await privateRuntimeFolderAsync(folder, [name]) }
+      catch (error) { root = readOnlyRunFolder(folder, error) }
+      served = join(root, name)
+    }
+    if (!isOwnAddressFile(served)) return null
+    const source = (await readPrivateRuntimeFileAsync(served))?.text
+    return source === undefined ? null : parseRunning(source)
   } catch {
     return null
   }
@@ -1212,8 +1222,15 @@ const runningAddress = (): Running | null => {
 
 // Which questions the running page answers into their session; true when that changed. With no
 // page, or none that answers, every answer key copies.
+let routeRefresh: Promise<boolean> | null = null
 const refreshRoutes = async (): Promise<boolean> => {
-  const running = runningAddress()
+  if (routeRefresh !== null) return false
+  routeRefresh = updateRoutes()
+  try { return await routeRefresh }
+  finally { routeRefresh = null }
+}
+const updateRoutes = async (): Promise<boolean> => {
+  const running = await runningAddress()
   let next: Record<string, AnswerRoute> = {}
   if (running !== null) {
     try {
@@ -1229,7 +1246,7 @@ const refreshRoutes = async (): Promise<boolean> => {
 // An answer key's answer, sent by the running page as its own button sends it: the page checks
 // the line, the question and the session again, and answers with what came of it.
 const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 'alert' }> => {
-  const running = runningAddress()
+  const running = await runningAddress()
   if (running === null) return { note: s.messagesFailed, tone: 'alert' }
   const { route } = action
   const body = route.mode === 'connected' && route.delivery !== undefined
@@ -1269,6 +1286,13 @@ const paste = (text: string, reviewToken = '') => {
 // never the caller's whole runtime directory, before a token can be written.
 // `name` is the address file: it is read in the same check as the folder when it is already there.
 let runtimeUnprotected = false
+const readOnlyRunFolder = (folder: string, error: unknown): string => {
+  if (!(error instanceof RuntimeFolderError)) throw error
+  // A process that cannot protect the folder may reuse a running page, but every later
+  // step must refuse to start one or write through this unprotected path.
+  runtimeUnprotected = true
+  return unprotectedRuntimeFolder(folder)
+}
 const runFolder = (name: string): string => {
   const runtime = process.env.XDG_RUNTIME_DIR
   if (process.platform === 'win32') {
@@ -1276,12 +1300,7 @@ const runFolder = (name: string): string => {
     try {
       return privateRuntimeFolder(folder, [name])
     } catch (error) {
-      if (!(error instanceof RuntimeFolderError)) throw error
-      // A process that cannot protect the folder (a read-only sandbox) may still read an
-      // address file a page started outside it left behind, and reuse that page. It must
-      // never start one: every later step checks this flag before writing anything.
-      runtimeUnprotected = true
-      return unprotectedRuntimeFolder(folder)
+      return readOnlyRunFolder(folder, error)
     }
   }
   if (runtime && isOwnFolder(runtime)) return runtime
@@ -1334,11 +1353,14 @@ const parseRunning = (text: string): Running | null => {
   } catch { return null }
 }
 
+const isOwnAddressFile = (file: string): boolean => {
+  const own = lstatSync(file)
+  return !own.isSymbolicLink() && (process.getuid === undefined || own.uid === process.getuid())
+}
 const readRunning = (file = serveFile()): Running | null => {
   try {
     // Only a file of this account's own, never a link to one somewhere else.
-    const own = lstatSync(file)
-    if (own.isSymbolicLink() || (process.getuid !== undefined && own.uid !== process.getuid())) return null
+    if (!isOwnAddressFile(file)) return null
     const source = process.platform === 'win32' ? readPrivateRuntimeFile(file)?.text : read(file)
     return source === undefined ? null : parseRunning(source)
   } catch {

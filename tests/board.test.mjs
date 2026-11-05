@@ -4665,6 +4665,24 @@ test('Windows trusted address fixtures replace unrelated explicit grants', { ski
   } finally { await fs.promises.rm(board.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
+test('the watch board keeps drawing while a three second runtime ACL check runs, and refreshes never overlap', () => {
+  const preload = readFileSync(new URL('./fixtures/slow-runtime-acl.cjs', import.meta.url), 'utf8')
+  const ran = chatRun(['--watch'], { preload })
+  assert.equal(ran.status, 0, ran.stderr)
+  const report = JSON.parse(ran.stderr.match(/ACL_SCHEDULE (.+)/)?.[1] ?? 'null')
+  assert.ok(report, ran.stderr)
+  assert.equal(report.sync, 0, 'no Windows ACL command may block the watch')
+  assert.ok(report.acl >= 2, 'the folder and address access list must both be checked')
+  assert.equal(report.maxActive, 1, 'a tick skips a route refresh that is still running')
+  // No wall-clock limit: a draw made while a three second ACL call is still running proves the
+  // check no longer blocks the draw loop, and slow Windows runners cannot make that flaky.
+  for (const title of ['First scheduled question', 'Second scheduled question']) {
+    const draw = report.draws.find(one => one.title === title)
+    assert.ok(draw, `${title}: ${JSON.stringify(report)}`)
+    assert.equal(draw.pending, true, `${title} drew at ${draw.ms} ms, event-loop delay ${report.delay} ms, while no ACL call ran`)
+  }
+})
+
 test('runtime ACL validation rejects other owners, other accounts, inherited folders and incomplete grants', () => {
   const sid = 'S-1-5-21-100-200-300-1001'
   const own = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`
