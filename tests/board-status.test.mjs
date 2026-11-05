@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict'
+import { registerHooks } from 'node:module'
 import { spawnSync } from 'node:child_process'
+
+registerHooks({ resolve(specifier, context, next) {
+  try { return next(specifier, context) } catch (error) {
+    if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+    return next(specifier + '.ts', context)
+  }
+} })
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,8 +29,9 @@ const FILE = '## Synthetic project\n' +
   block('bbbb0000', 'working', '- [~] Background child', 5, 'codex', 'origin=run parent=cccc3333') +
   '### Hand-kept plan\n- [ ] Review\n'
 
-// The guard runs before the installed bundle: reading a sidecar, writing, polling or
-// launching anything fails the command rather than merely being absent in a snapshot.
+// The guard runs before the installed bundle: reading anything beyond progress.md and
+// its two sidecars (answered, questions), writing, polling or launching anything fails
+// the command (#832).
 const guard = `import { createRequire as statusCreateRequire } from 'node:module'
 {
 const require = statusCreateRequire(import.meta.url)
@@ -32,16 +41,28 @@ const cp = require('node:child_process')
 const { syncBuiltinESMExports } = require('node:module')
 const { resolve } = require('node:path')
 const read = fs.readFileSync
-let reads = 0
+const progressFile = resolve(process.env.STATUS_PROGRESS)
+const answeredFile = resolve(process.env.STATUS_PROGRESS.replace(/\\.md$/i, '') + '-answered.json')
+const questionsFile = resolve(process.env.STATUS_PROGRESS.replace(/\\.md$/i, '') + '-questions.json')
+const reads = { progress: 0, answered: 0, questions: 0 }
 const violations = []
 fs.readFileSync = (file, ...args) => {
-  if (resolve(String(file)) !== resolve(process.env.STATUS_PROGRESS)) {
-    violations.push(String(file))
-    throw new Error('only progress.md is read')
+  const target = resolve(String(file))
+  if (target === progressFile) {
+    reads.progress++
+    if (process.env.STATUS_DENIED) throw Object.assign(new Error('denied'), { code: 'EACCES' })
+    return read(file, ...args)
   }
-  reads++
-  if (process.env.STATUS_DENIED) throw Object.assign(new Error('denied'), { code: 'EACCES' })
-  return read(file, ...args)
+  if (target === answeredFile) {
+    reads.answered++
+    return read(file, ...args)
+  }
+  if (target === questionsFile) {
+    reads.questions++
+    return read(file, ...args)
+  }
+  violations.push(String(file))
+  throw new Error('only progress.md and its sidecars may be read')
 }
 const refused = () => { violations.push(new Error().stack); throw new Error('status must not write, inspect other files, poll or start anything') }
 for (const name of ['writeFileSync', 'appendFileSync', 'mkdirSync', 'renameSync', 'unlinkSync', 'rmSync', 'openSync', 'statSync', 'readdirSync', 'watch', 'watchFile']) fs[name] = refused
@@ -52,16 +73,20 @@ Date.now = () => ${NOW}
 syncBuiltinESMExports()
 process.on('exit', () => {
   assert.deepEqual(violations, [], 'no forbidden operation was attempted, even if its error was caught')
-  assert.equal(reads, 1, 'progress.md is read exactly once')
+  assert.equal(reads.progress, 1, 'progress.md is read exactly once')
+  assert.ok(reads.answered <= 1, 'answered file is read at most once')
+  assert.ok(reads.questions <= 1, 'questions ledger is read at most once')
 })
 }
 `
 
-const run = (args = [], { file = FILE, lang = 'en', denied = false, launcher = false } = {}) => {
+const run = (args = [], { file = FILE, answered = null, questions = null, lang = 'en', denied = false, launcher = false } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'board-status-'))
   try {
     const path = join(root, 'progress.md')
     if (file !== null) writeFileSync(path, file)
+    if (answered !== null) writeFileSync(join(root, 'progress-answered.json'), typeof answered === 'string' ? answered : JSON.stringify(answered))
+    if (questions !== null) writeFileSync(join(root, 'progress-questions.json'), typeof questions === 'string' ? questions : JSON.stringify(questions))
     const script = join(root, 'agent-board.mjs')
     writeFileSync(script, `${guard}\nglobalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT}`)
     const before = readdirSync(root).sort()
@@ -130,4 +155,55 @@ test('the npm launcher forwards status without a build-comparison notice on ever
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.stdout, '2 need you · 3 working\n')
   assert.equal(result.stderr, '')
+})
+
+test('the status line leaves out hidden questions when answered or questions sidecars exist (#832)', () => {
+  // aaaa1111's question is hidden via answered sidecar; back in working
+  const answered = { answered: ['aaaa1111 1 First choice?'] }
+  const result = run([], { answered })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '1 need you · 4 working\n')
+  assert.equal(result.stderr, '')
+})
+
+test('the status line falls back to progress.md counts when sidecars cannot be read or are invalid (#832)', () => {
+  const result = run([], { answered: '{ broken json' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '2 need you · 3 working\n')
+  assert.equal(result.stderr, '')
+})
+
+test('one count across all three surfaces: page, terminal board and --status match exactly (#832)', async () => {
+  const answered = { answered: ['aaaa1111 1 First choice?'] }
+  const result = run([], { answered })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '1 need you · 4 working\n')
+
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { buildView, parseAnswered } = await import('../hooks/view.ts')
+  const { serveModel } = await import('../hooks/serve.ts')
+  const { boardText } = await import('../hooks/board.ts')
+  const { STRINGS } = await import('../hooks/strings.ts')
+  const s = STRINGS.en
+
+  const parsed = parseProgress(FILE)
+  const answeredList = parseAnswered(JSON.stringify(answered)) ?? []
+  const view = buildView(parsed, [], null, NOW, 0, {}, s, answeredList)
+
+  // 1. Page surface
+  const pageModel = serveModel(view, [], s, new Set(), false, undefined, false, {
+    now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [],
+  })
+  const pageNeeds = pageModel.view.n
+  const pageWorking = pageModel.view.working.length
+
+  // 2. Terminal board surface
+  const terminalText = boardText(view, [], s, { width: 100, isColor: false })
+  const countLine = terminalText.split('\n')[0]
+
+  // 3. Status surface (already verified 1 need you · 4 working)
+  assert.equal(pageNeeds, 1, 'page needs count matches')
+  assert.equal(pageWorking, 4, 'page working count matches')
+  assert.ok(countLine.includes('● 1 waiting'), `terminal waiting count line: ${countLine}`)
+  assert.ok(countLine.includes('▸ 4 in progress'), `terminal active count line: ${countLine}`)
 })

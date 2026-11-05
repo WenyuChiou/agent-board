@@ -38,7 +38,7 @@ import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile, keepInboxDone } from '../hooks/inbox'
 import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import type { PendingArchiveRecord } from '../hooks/journal'
-import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, sizeWarnings, storageDetails } from '../hooks/retention'
+import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, RETENTION, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
@@ -2091,7 +2091,17 @@ const run = async (): Promise<void> => {
     return
   }
   if (args.includes('--status')) {
-    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs())}\n`)
+    const safeSidecar = (file: string): string => {
+      try {
+        const text = readFileSync(file, 'utf8')
+        return text.length > RETENTION.progressSoftBytes ? text.slice(0, RETENTION.progressSoftBytes) : text
+      } catch {
+        return ''
+      }
+    }
+    const answeredText = safeSidecar(answeredPath(path))
+    const questionsText = safeSidecar(questionsPath(path))
+    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), answeredText, questionsText)}\n`)
     return
   }
   const request = flag('--legacy-connect-request')

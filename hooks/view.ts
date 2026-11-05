@@ -220,6 +220,7 @@ export type RowGroup = { project: string; isHere: boolean; rows: TaskRow[]; summ
 export type Overview = { waiting: number; active: number; due: number; today: number; idle: number; stopped: number }
 
 export type View = {
+  now?: number
   warning?: string
   // The size warning's numbers and finished hand-kept tasks Clean up can archive (#464).
   details?: string
@@ -1416,6 +1417,7 @@ export const buildView = (
     current.tone = 'quiet'
   }
   return {
+    now,
     current,
     pr: prView(mine, s),
     overview: { waiting: asks.length, active: rows.length + due.length, due: due.length, today, idle: idle.length, stopped: stopped.length },
