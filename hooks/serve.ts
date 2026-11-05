@@ -2012,11 +2012,11 @@ const PAGE_SCRIPT = String.raw`
     setText(pg.nodes.needsSub, pg.filter ? '' : w('pgNothingHint'));
     reveal(pg.nodes.needsEmpty, count.shown === 0);
     var isFiltered = !!(pg.filter || pg.project);
-    reveal(pg.nodes.needsClear, isFiltered);
+    if (pg.nodes.needsClear) pg.nodes.needsClear.hidden = !isFiltered;
     // The Other work view says so when it has nothing, here or on the Stopped shelf; Overview leaves the empty section out.
     setText(pg.nodes.othersText, isFiltered ? w('pgNoOthersFor', pg.filter ? nameOf(pg.filter) : pg.project) : w('pgNoOthers'));
     reveal(pg.nodes.othersEmpty, count.others === 0);
-    reveal(pg.nodes.othersClear, isFiltered);
+    if (pg.nodes.othersClear) pg.nodes.othersClear.hidden = !isFiltered;
     // The tab title counts what the page shows, so a filter that hides questions is not a count the page lacks.
     var waitingShown = isFiltered ? count.cards : pg.waitingNow;
     document.title = waitingShown ? w('pgTabTitle', waitingShown) : 'Agent Board';

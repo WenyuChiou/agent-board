@@ -9627,6 +9627,8 @@ test('the Other work view shows its rows or says there are none', async () => {
   assert.equal(dom.node('shell').getAttribute('data-view'), 'others')
   assert.equal(String(others().className).split(' ').includes('gone'), false)
   assert.ok(shownWords(others()).includes(EN.pgNoOthers), shownWords(others()))
+  // With no filter on, there is nothing to clear.
+  assert.ok(!shownWords(others()).includes(EN.clearFilters), shownWords(others()))
   // With rows, the view lists them and no empty line.
   const full = await pageDom(await sourcePage(), redesignModel(), { width: 1280 })
   full.node('view-others').click()
