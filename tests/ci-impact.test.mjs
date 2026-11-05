@@ -443,6 +443,28 @@ test('a test part runs its share of the files in one Node run, and a bad part is
   assert.throws(() => runTestFiles(['tests/ci-impact.test.mjs'], '3/2'), /test part/)
 })
 
+test('a Windows job runs at most two test files at once, and a serial job still one', async () => {
+  const { testArgs, testRuns, runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const files = ['tests/a.test.mjs', 'tests/b.test.mjs', 'tests/c.test.mjs']
+  assert.deepEqual(testArgs(files, { isWindows: true }), ['--test', '--test-concurrency=2', ...files])
+  assert.deepEqual(testArgs(files, { isWindows: true, isSerial: true }), ['--test', '--test-concurrency=1', ...files])
+  assert.deepEqual(testRuns(files, { isWindows: true, part: '2/2' }), [['--test', '--test-concurrency=2', 'tests/b.test.mjs']])
+  const serial = process.env.CI_TEST_SERIAL
+  delete process.env.CI_TEST_SERIAL
+  try {
+    const seen = platform => {
+      const runs = []
+      runTestFiles(['tests/ci-impact.test.mjs'], '', (command, args) => { runs.push(args); return { status: 0 } }, platform)
+      return runs
+    }
+    assert.deepEqual(seen('win32'), [['--test', '--test-concurrency=2', 'tests/ci-impact.test.mjs']])
+    assert.deepEqual(seen('linux'), [['--test', 'tests/ci-impact.test.mjs']])
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+  }
+})
+
 test('a self-parted test file runs whole in every part and keeps its share, so the parts together run each of its tests once', async () => {
   const { testRuns, partTest, selfPartedTests } = await import('../scripts/ci-impact.mjs')
   const files = ['tests/a.test.mjs', 'tests/board.test.mjs', 'tests/b.test.mjs', 'tests/codex-local.test.mjs']
