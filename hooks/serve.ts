@@ -387,6 +387,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     }
     if (item.type === 'row') {
       const { row } = item
+      if (view.recentAsking?.some(one => one.key === row.key)) continue
       const needs = rowNeedsYou(row, idleKeys.has(row.key) || stoppedKeys.has(row.key))
       const connection = isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)
       const isContested = !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (row.agent || 'claude') && one.session === row.nativeSession) ?? false)
@@ -717,6 +718,7 @@ const PAGE_WORDS = [
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
   'archiveNow', 'cleanUp', 'stoppedCount',
+  'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
@@ -1036,7 +1038,7 @@ ${PAGE_CSS}
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" class="btn" id="connect-web-chat" data-static>${esc(s.webChatConnect)}</button><button type="button" class="btn" id="import-clipboard" data-static>${esc(s.importClipboard)}</button>`}<button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
+<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" class="btn" id="connect-web-chat" data-static>${esc(s.webChatConnect)}</button><button type="button" class="btn" id="import-clipboard" data-static>${esc(s.importClipboard)}</button>`}<button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
@@ -1123,6 +1125,7 @@ const PAGE_SCRIPT = String.raw`
   var resultSlots = {};
   var lostResults = [];
   resultSlot(document.querySelector('.pfoot'), 'close', '', w('serveClose'));
+  resultSlot(document.getElementById('tidy-bulk'), 'tidy', '', w('tidyBulk'));
   function resultSlot(card, key, revision, label) {
     card.setAttribute('data-card-key', key);
     var previous = results[key];
@@ -1163,6 +1166,7 @@ const PAGE_SCRIPT = String.raw`
     }
   }
   function beginPress() {
+    resetTidy(false);
     note.textContent = '';
     note.className = '';
     lostResults.forEach(function (card) { card.remove(); });
@@ -1564,7 +1568,9 @@ const PAGE_SCRIPT = String.raw`
       var whole = step.note ? step.text + ' — ' + step.note : step.text;
       var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
       add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'), clipped(clean(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)));
-      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled') {
+      // The next step's Done button is the primary one in the actions row, so the step list
+      // does not tick it again: each step has exactly one Done button.
+      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && step.text !== row.next) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
         var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp); }, 'btn');
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
@@ -1738,7 +1744,10 @@ const PAGE_SCRIPT = String.raw`
     if (isExpandable) resultSlot(inner, key, row.fp, row.title || row.task);
     var current = steps.filter(function (one) { return one.isCurrent; })[0] || steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled'; })[0];
     var step = current ? clean(current.text) : '';
-    var detail = !step ? '' : section === 'working' ? step : section === 'others' ? w('pgLast', step) : section === 'stopped' ? w('pgStoppedAt', step) : '';
+    // "Last:" names the last finished step, not the next one: a task with nothing finished yet shows no Last: line.
+    var lastDone = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
+    var lastFinished = lastDone.length ? clean(lastDone[lastDone.length - 1].text) : '';
+    var detail = section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
     var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
     var project = showProject ? clean(ref.repo || row.project) : '';
@@ -2336,8 +2345,10 @@ const PAGE_SCRIPT = String.raw`
     pg.cardNodes = {};
     cardParts = {};
     var closeSlot = resultSlots.close;
+    var tidySlot = resultSlots.tidy;
     resultSlots = {};
     if (closeSlot) resultSlots.close = closeSlot;
+    if (tidySlot) resultSlots.tidy = tidySlot;
     agentPresence = presenceMap(view);
     drawChips(view);
     var parts = [];
@@ -2591,6 +2602,66 @@ const PAGE_SCRIPT = String.raw`
         refresh();
       }
     }, function () { say(w('serveOffline'), 'alert', 'close'); unreachable(); });
+  });
+  // A bulk archive previews first and archives only on a second, separate press. Any
+  // other press drops the preview; the token on the server then simply expires.
+  var tidyToken = '';
+  var tidyPreview = null;
+  var tidyBusy = false;
+  var tidyCommitting = false;
+  function resetTidy(cancel) {
+    if (tidyCommitting) return;
+    if (cancel && tidyToken) call('/api/tidy-bulk', { kind: 'cancel', token: tidyToken }).catch(function () {});
+    tidyToken = '';
+    tidyPreview = null;
+    var confirm = document.getElementById('tidy-confirm');
+    var cancelButton = document.getElementById('tidy-cancel');
+    if (confirm) confirm.disabled = true;
+    if (cancelButton) cancelButton.disabled = true;
+  }
+  function tidySelector() {
+    var kind = document.getElementById('tidy-kind').value;
+    if (kind === 'agent') return { kind: kind, value: document.getElementById('tidy-value').value.trim() };
+    if (kind === 'older') return { kind: kind, days: Number(document.getElementById('tidy-value').value.trim()) };
+    return { kind: 'stopped' };
+  }
+  document.getElementById('tidy-preview').addEventListener('click', function () {
+    if (isUnreachable || tidyBusy) return;
+    var selector = tidySelector();
+    if (selector.kind === 'agent' && !/^[a-z][a-z0-9-]{0,63}$/.test(selector.value || '')) { say(w('tidyInvalid'), 'alert', 'tidy'); return; }
+    if (selector.kind === 'older' && !(Number.isSafeInteger(selector.days) && selector.days >= 1 && selector.days <= 365000)) { say(w('tidyInvalid'), 'alert', 'tidy'); return; }
+    tidyBusy = true;
+    say(w('pressPending'), '', 'tidy');
+    call('/api/tidy-bulk', { kind: 'preview', selector: selector }).then(function (data) {
+      tidyBusy = false;
+      if (!data.token || !data.preview) { say(data.note || w('pressFailed'), 'alert', 'tidy'); return; }
+      tidyToken = data.token;
+      tidyPreview = data.preview;
+      document.getElementById('tidy-confirm').disabled = false;
+      document.getElementById('tidy-cancel').disabled = false;
+      say(data.note || '', 'quiet', 'tidy');
+    }, function () { tidyBusy = false; say(w('serveOffline'), 'alert', 'tidy'); unreachable(); });
+  });
+  document.getElementById('tidy-confirm').addEventListener('click', function () {
+    if (isUnreachable || tidyBusy || !tidyToken || !tidyPreview) return;
+    tidyBusy = true;
+    tidyCommitting = true;
+    say(w('pressPending'), '', 'tidy');
+    call('/api/tidy-bulk', { kind: 'confirm', token: tidyToken, preview: tidyPreview }).then(function (data) {
+      tidyBusy = false;
+      tidyCommitting = false;
+      tidyToken = '';
+      tidyPreview = null;
+      document.getElementById('tidy-confirm').disabled = true;
+      document.getElementById('tidy-cancel').disabled = true;
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'tidy');
+      refresh();
+    }, function () { tidyBusy = false; tidyCommitting = false; say(w('serveOffline'), 'alert', 'tidy'); unreachable(); });
+  });
+  document.getElementById('tidy-cancel').addEventListener('click', function () {
+    if (tidyBusy) return;
+    resetTidy(true);
+    say(w('tidyCancelled'), '', 'tidy');
   });
   refresh();
 })();

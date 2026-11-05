@@ -1,5 +1,5 @@
 import type { QuestionRecord } from '../types'
-import { questionWords, sourceSnapshot } from './questions'
+import { partsKey2, partsKey3, questionWords, sourceSnapshot } from './questions'
 import type { WaitingItem } from './view'
 
 // One question asked in several places shows once (#463). Two copies are the same question when
@@ -21,7 +21,7 @@ export const folderOf = (project: string): string => {
 }
 
 const copyKey = (agent: string, dir: string | null | undefined, words: string): string | null =>
-  dir === null || dir === undefined || dir.trim() === '' ? null : JSON.stringify([agent === '' ? 'claude' : agent.toLowerCase(), folderOf(dir), words])
+  dir === null || dir === undefined || dir.trim() === '' ? null : partsKey3(agent === '' ? 'claude' : agent.toLowerCase(), folderOf(dir), words)
 
 export const recordFolder = (record: QuestionRecord | undefined): string | null => {
   const source = record?.source
@@ -62,7 +62,7 @@ const isBefore = (a: Seen, b: Seen): boolean => a.at < b.at || (a.at === b.at &&
 // the session's next record asks the same words: a renewal closes the earlier record (same owner
 // token and no answer time) while the session still asks, and that is not an answer. Hide always counts.
 const ownerOf = (record: QuestionRecord): string => (record.producer ?? '').split(':')[0] ?? ''
-const ownerKey = (record: QuestionRecord): string => JSON.stringify([record.scope, ownerOf(record)])
+const ownerKey = (record: QuestionRecord): string => partsKey2(record.scope, ownerOf(record))
 
 export const closedCopies = (records: readonly QuestionRecord[], marked: ReadonlySet<string>): Map<string, Map<string, Seen>> => {
   const closed = new Map<string, Map<string, Seen>>()

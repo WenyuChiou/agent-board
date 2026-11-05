@@ -19,6 +19,10 @@ export type Ask = { kind: AskKind; options: string[]; command: string | null; li
 
 // The words are matched in Chinese (繁 and 简) and English alike, whichever the pane speaks.
 const CHOICE = /(.+?)\s*(?:還是|还是|或是|\bor\b)\s*(.+?)[？?]/i
+// Every CHOICE match contains one of these markers at a word boundary, so a text without
+// any of them cannot hold a choice and the lazy CHOICE scan is skipped. A text with a
+// marker still runs CHOICE, which decides; this test only ever skips a certain miss.
+const CHOICE_MARKER = /(?:還是|还是|或是|\bor\b)/i
 const CONFIRM =
   /(嗎|吗|可以嗎|可以吗|好嗎|好吗|要不要|可不可以|是否|\bok\?|\bokay\?)\s*[？?]?\s*$|^(可以|要不要|能不能)|^(shall i|should i|can i|may i|is it ok|ok to)\b/i
 const DO =
@@ -60,6 +64,7 @@ const questionWords = (text: string): string => {
 // Splits `0.6.0 還是 1.0.0？` or a list Claude gave into options. The first option is the
 // clause right before 還是 / or, so `先開旗標，還是全部開？` and `A first, or B?` read too.
 const optionsOf = (text: string): string[] => {
+  if (!CHOICE_MARKER.test(text)) return []
   const match = CHOICE.exec(text)
   if (match === null) return []
   const clauses = (match[1] ?? '')
@@ -75,9 +80,10 @@ const optionsOf = (text: string): string[] => {
 // find their word anywhere (`按照`, `runs`, `reviewers`) and would take a choice away from its question.
 const NOTE_LOOK = /^(請|请|please\s+)?\s*(看一下|看看|檢查|检查|確認一下|确认一下|過目|过目|review(?![\w-])|take a look|look at|check(?![\w-]))/i
 const NOTE_ACT = /^(請|请|please\s+)?\s*(在|到|去|幫我|帮我)?\s*(跑|執行|执行|按(?!照)|點|点|run(?![\w-])|install(?![\w-])|click(?![\w-])|open(?![\w-])|paste(?![\w-])|set up(?![\w-])|log ?in(?![\w-])|sign in(?![\w-]))/i
-// A note with its own reading decides the kind unless it holds a choice.
-const noteDecides = (note: string): boolean =>
-  note !== '' && optionsOf(note).length < 2 &&
+// A note with its own reading decides the kind unless it holds a choice. `fromNote` is the
+// options the note already yielded, so the choice scan is not run twice for one note.
+const noteDecides = (note: string, fromNote: string[]): boolean =>
+  note !== '' && fromNote.length < 2 &&
   (CONFIRM.test(note) || YES_NO.test(note) || URL.test(note) || CODE.test(note) || NOTE_LOOK.test(note) || NOTE_ACT.test(note))
 
 // The question is read before the note, and the first of them with two options is used; a lone
@@ -86,8 +92,8 @@ const noteDecides = (note: string): boolean =>
 // options are not used then.
 const optionsRead = (subject: string, note: string): string[] => {
   const fromQuestion = optionsOf(subject)
-  if (fromQuestion.length >= 2 && !noteDecides(note)) return fromQuestion
   const fromNote = optionsOf(note)
+  if (fromQuestion.length >= 2 && !noteDecides(note, fromNote)) return fromQuestion
 
   return fromNote.length >= 2 || note !== '' ? fromNote : fromQuestion
 }
@@ -107,8 +113,8 @@ export const askOf = (
   const options = Array.isArray(given.options)
     ? given.options.filter((one): one is string => typeof one === 'string' && one.trim() !== '').map(one => one.trim())
     : optionsRead(subjectWords, noteWords)
-  const command = typeof given.command === 'string' && given.command.trim() !== '' ? given.command.trim() : (CODE.exec(text)?.[1] ?? null)
-  const link = typeof given.link === 'string' && given.link.trim() !== '' ? given.link.trim() : (URL.exec(text)?.[0] ?? null)
+  const command = typeof given.command === 'string' && given.command.trim() !== '' ? given.command.trim() : (text.includes('`') ? CODE.exec(text)?.[1] ?? null : null)
+  const link = typeof given.link === 'string' && given.link.trim() !== '' ? given.link.trim() : (text.includes('http') ? URL.exec(text)?.[0] ?? null : null)
   const said = kindOf(given.ask)
   if (said !== null) return { kind: said, options, command, link }
 

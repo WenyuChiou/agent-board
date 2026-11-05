@@ -58,6 +58,8 @@ npx @wenyuchiou/agent-board
 - **我用 Antigravity：** `/agent-board`（在測試環境檢查過，還沒實機執行）
 - **我用 OpenCode：** `/board`
 
+要加自己的任務，在面板的輸入框打 `+ 專案：標題；步驟；步驟`，或在 agent 的對話裡打 `/progress add …`。
+
 <details>
 <summary><b>不用 npm：用 git clone 安裝</b></summary>
 
