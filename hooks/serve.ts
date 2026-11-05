@@ -2012,11 +2012,11 @@ const PAGE_SCRIPT = String.raw`
     setText(pg.nodes.needsSub, pg.filter ? '' : w('pgNothingHint'));
     reveal(pg.nodes.needsEmpty, count.shown === 0);
     var isFiltered = !!(pg.filter || pg.project);
-    if (pg.nodes.needsClear) pg.nodes.needsClear.hidden = !isFiltered;
+    pg.nodes.needsClear = clearFilters(pg.nodes.needsEmpty, pg.nodes.needsClear, isFiltered);
     // The Other work view says so when it has nothing, here or on the Stopped shelf; Overview leaves the empty section out.
     setText(pg.nodes.othersText, isFiltered ? w('pgNoOthersFor', pg.filter ? nameOf(pg.filter) : pg.project) : w('pgNoOthers'));
     reveal(pg.nodes.othersEmpty, count.others === 0);
-    if (pg.nodes.othersClear) pg.nodes.othersClear.hidden = !isFiltered;
+    pg.nodes.othersClear = clearFilters(pg.nodes.othersEmpty, pg.nodes.othersClear, isFiltered);
     // The tab title counts what the page shows, so a filter that hides questions is not a count the page lacks.
     var waitingShown = isFiltered ? count.cards : pg.waitingNow;
     document.title = waitingShown ? w('pgTabTitle', waitingShown) : 'Agent Board';
@@ -2066,12 +2066,23 @@ const PAGE_SCRIPT = String.raw`
     if (group) group.hidden = wanted.length === 0;
   }
   // Next to an empty list while a filter is on: a filter kept from an earlier visit is plain to see and one press clears it (#809).
-  function clearFiltersButton() {
+  // It exists only while a filter is on, so an unfiltered page offers the same buttons as before.
+  function clearFilters(holder, node, isFiltered) {
+    if (!holder) return null;
+    // The holder is fx's wrap: wrap > fx-in > the empty box the button goes in.
+    var box = holder.firstChild && holder.firstChild.firstChild || holder;
+    if (!isFiltered) {
+      if (node) node.remove();
+      return null;
+    }
+    if (node) return node;
     // Local, so it works without the server, but not a navigation button: those are the sheet's own See all and Show all.
-    return button(w('clearFilters'), function () {
+    var made = button(w('clearFilters'), function () {
       pg.project = '';
       setFilter('');
     }, 'btn', true, true);
+    add(box, made);
+    return made;
   }
   function setProject(name) {
     pg.project = pg.project === name ? '' : name;
@@ -2181,8 +2192,7 @@ const PAGE_SCRIPT = String.raw`
     });
     pg.nodes.needsText = el('p', '');
     pg.nodes.needsSub = el('p', 'sub');
-    pg.nodes.needsClear = clearFiltersButton();
-    pg.nodes.needsEmpty = fx(add(el('div', 'empty'), pg.nodes.needsText, pg.nodes.needsSub, pg.nodes.needsClear));
+    pg.nodes.needsEmpty = fx(add(el('div', 'empty'), pg.nodes.needsText, pg.nodes.needsSub));
     add(sheet, list, pg.nodes.needsEmpty);
     var foot = el('div', 'sheet-foot');
     var older = view.needs.older;
@@ -2260,8 +2270,7 @@ const PAGE_SCRIPT = String.raw`
     var sec = el('section', 'sec');
     add(sec, sectionHead(w('pgOthers'), 'others'));
     pg.nodes.othersText = el('p', '');
-    pg.nodes.othersClear = clearFiltersButton();
-    pg.nodes.othersEmpty = fx(add(el('div', 'empty'), pg.nodes.othersText, pg.nodes.othersClear));
+    pg.nodes.othersEmpty = fx(add(el('div', 'empty'), pg.nodes.othersText));
     order.forEach(function (name) {
       var list = el('ul', 'rows');
       var group = { ul: list, entries: [], block: null };
