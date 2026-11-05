@@ -800,6 +800,16 @@ const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 const runAgents = (group: RunGroup, s: Strings): string => group.agents.map(agent => s.agentNames[agent] ?? agentName(agent)).join(' / ')
 const runsText = (group: RunGroup, now: number, s: Strings): string => s.runsLine(group.count, runAgents(group, s), relativeTime(group.last, now, s))
 
+// What one view build saved by count, for the budget test: the per-view indexes
+// answer lookups with one hash probe each instead of rescanning the ledger, and
+// the per-task memos answer a repeated question once instead of once per scan.
+// Only filled when the caller asks for it; nothing else reads it.
+export type ViewIndexCounts = {
+  indexRecords: number
+  indexLookups: number
+  memoReused: number
+}
+
 export const buildView = (
   projects: readonly ProgressProject[],
   here: readonly string[],
@@ -820,6 +830,7 @@ export const buildView = (
   frozen: ReadonlySet<string> = new Set(),
   observe: typeof observeQuestions = observeQuestions,
   staleMs: number = STALE_MS,
+  counts?: ViewIndexCounts,
 ): View => {
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
   // pair is no second row. What is left is what the rows, the questions and the counts read.
@@ -827,16 +838,19 @@ export const buildView = (
   const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
-  const recordsById = new Map((observed?.ledger.records ?? []).map(record => [record.id, record]))
+  const records = observed?.ledger.records ?? []
+  const recordsById = new Map(records.map(record => [record.id, record]))
+  if (counts !== undefined) counts.indexRecords += records.length
   // The frozen-scope lookup, built once: filtering the whole ledger for every frozen task
   // rescanned the ledger once per task (#192). Scope, like the other record keys, never
   // changes during a view build, so the lists stay correct for the whole call.
   const recordsByScope = frozen.size === 0 ? null : new Map<string, QuestionRecord[]>()
-  if (recordsByScope !== null) for (const record of observed?.ledger.records ?? []) {
+  if (recordsByScope !== null) for (const record of records) {
     const list = recordsByScope.get(record.scope)
     if (list === undefined) recordsByScope.set(record.scope, [record])
     else list.push(record)
   }
+  if (counts !== undefined && recordsByScope !== null) counts.indexRecords += records.length
   const waiting: WaitingItem[] = []
   const inactiveHidden: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
@@ -917,7 +931,14 @@ export const buildView = (
       // question id and the age lookup below, which each asked for it separately.
       // Nothing they read changes during a view build, so sharing it stays correct.
       const slots: (string | undefined)[] = []
-      const slotAt = (index: number): string => slots[index] ??= questionSlot(scope, index)
+      const slotAt = (index: number): string => {
+        const held = slots[index]
+        if (held !== undefined) {
+          if (counts !== undefined) counts.memoReused += 1
+          return held
+        }
+        return slots[index] ??= questionSlot(scope, index)
+      }
       const keys = task.auto === null || observed === null
         ? blockKeys(task)
         : task.steps.map((step, index) => step.status === 'waiting' ? observed.keys[slotAt(index)] ?? '' : '')
@@ -926,6 +947,7 @@ export const buildView = (
       // shown by that saved question in the loop over the ledger below, or not at all once it is
       // answered or hidden. Any other [?] step asks as written, with no question id, as before the
       // ledger first sees it.
+      if (counts !== undefined && isFrozen) counts.indexLookups += 1
       const scopeRecords = isFrozen ? (recordsByScope?.get(scope) ?? []) : []
       // A question that should show but does not is worse than one shown twice. Only one saved
       // candidate covers a step, and an answer needs the same token or saved source revisions.
@@ -949,7 +971,10 @@ export const buildView = (
       // the frozen set) changes during a view build, so the memos stay correct.
       const savedMemo = new Map<number, QuestionRecord | undefined>()
       const savedAt = (index: number): QuestionRecord | undefined => {
-        if (savedMemo.has(index)) return savedMemo.get(index)
+        if (savedMemo.has(index)) {
+          if (counts !== undefined) counts.memoReused += 1
+          return savedMemo.get(index)
+        }
         const saved = savedFor(index)
         savedMemo.set(index, saved)
         return saved
@@ -957,13 +982,19 @@ export const buildView = (
       const askedMemo: (boolean | undefined)[] = []
       const isAsked = (index: number): boolean => {
         const held = askedMemo[index]
-        if (held !== undefined) return held
+        if (held !== undefined) {
+          if (counts !== undefined) counts.memoReused += 1
+          return held
+        }
         let value: boolean
         if (isFrozen) {
           const saved = savedAt(index)
           value = saved === undefined ? true : saved.isUnresolved === true && saved.source !== undefined && !marked.has(saved.id)
+        } else if (marked.has(keys[index] ?? '')) {
+          value = false
         } else {
-          value = !marked.has(keys[index] ?? '') && recordsById.get(keys[index] ?? '')?.isUnresolved !== false
+          if (counts !== undefined) counts.indexLookups += 1
+          value = recordsById.get(keys[index] ?? '')?.isUnresolved !== false
         }
         askedMemo[index] = value
         return value
@@ -971,8 +1002,12 @@ export const buildView = (
       const stageMemo: (ReturnType<typeof questionAge>['stage'] | undefined)[] = []
       const stageOf = (index: number) => {
         const held = stageMemo[index]
-        if (held !== undefined) return held
+        if (held !== undefined) {
+          if (counts !== undefined) counts.memoReused += 1
+          return held
+        }
         const id = observed?.keys[slotAt(index)]
+        if (counts !== undefined) counts.indexLookups += 1
         const stage = questionAge(recordsById.get(id ?? '')?.firstObserved ?? 0, now).stage
         stageMemo[index] = stage
         return stage
@@ -980,7 +1015,10 @@ export const buildView = (
       const promptMemo: (boolean | undefined)[] = []
       const isPrompt = (index: number): boolean => {
         const held = promptMemo[index]
-        if (held !== undefined) return held
+        if (held !== undefined) {
+          if (counts !== undefined) counts.memoReused += 1
+          return held
+        }
         const value = isFrozen ? savedAt(index) === undefined && isAsked(index) && stageOf(index) === 'pending' : isAsked(index) && stageOf(index) === 'pending'
         promptMemo[index] = value
         return value
@@ -1018,8 +1056,16 @@ export const buildView = (
           ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         })
       })
-      const unresolved = taskQuestions.filter(item => !marked.has(item.hideKey) && recordsById.get(item.questionId ?? '')?.isUnresolved !== false)
-      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => marked.has(item.hideKey) && recordsById.get(item.questionId ?? '')?.isUnresolved !== false))
+      const unresolved = taskQuestions.filter(item => {
+        if (marked.has(item.hideKey)) return false
+        if (counts !== undefined) counts.indexLookups += 1
+        return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
+      })
+      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => {
+        if (!marked.has(item.hideKey)) return false
+        if (counts !== undefined) counts.indexLookups += 1
+        return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
+      }))
       if (!isInactive) waiting.push(...taskQuestions)
 
       let completion: DoneItem & { at: number } | null = null
@@ -1276,6 +1322,7 @@ export const buildView = (
     for (const question of questions) {
       const id = question.questionId
       if (id === undefined || marked.has(id)) continue
+      if (counts !== undefined) counts.indexLookups += 1
       const record = recordsById.get(id)
       if (record?.isUnresolved === false) continue
       stoppedQuestions.add(id)
