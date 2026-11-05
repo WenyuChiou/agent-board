@@ -409,13 +409,99 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const before = await terminal.keys(world, 'i down')
       const after = await terminal.keys(world, 'i down a')
       noSilentPress({ surface: 'terminal', card: 'Publish the gateway', button: 'a', before, after })
-      // The question is never lost, archived or not; only the archive itself is the known gap.
+      assert.match(squash(after), /Archived .* Its unanswered question stays under Older unanswered questions/)
       const kept = [world.read('progress.md'), ...world.files().filter(name => /progress-(archive-.*\.md|questions.*\.json)$/.test(name)).map(name => world.read(name))].join('\n')
       assert.match(kept, /Notify the team, OK\?/)
-      await knownFailure(754, () => {
-        assert.ok(!world.read('progress.md').includes('Publish the gateway'), `The live file still holds Publish the gateway.\n${after}`)
-      })
+      assert.ok(!world.read('progress.md').includes('Publish the gateway'), `The live file still holds Publish the gateway.\n${after}`)
       await inspectSurfaces(world)
+    } finally { await world.close() }
+  })
+
+  test('a working day: archiving a stopped session that asks says its question stays, and hiding it clears the count', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'ended', title: 'Stopped gateway release', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?'] })
+      const after = await terminal.keys(world, 'i a')
+      assert.ok(!world.read('progress.md').includes('Stopped gateway release'), after)
+      assert.match(squash(after), /Its unanswered question stays under Older unanswered questions/)
+      assert.match(after, /1 unanswered in stopped sessions/)
+      const hidden = await terminal.keys(world, 'l h')
+      assert.doesNotMatch(hidden, /unanswered in stopped sessions/)
+      const server = await serve.start(world)
+      assert.doesNotMatch(await server.page(), /older question still unanswered/)
+    } finally { await world.close() }
+  })
+
+  test('a working day: archiving says the question stays for a task under no heading, and not for a task that never asked', async () => {
+    const noHeading = makeWorld()
+    try {
+      noHeading.write('progress.md', `<!-- auto session=a1000001 agent=codex state=ended updated=${new Date(noHeading.now).toISOString()} -->
+### Unfiled release
+- [?] Notify the team, OK?
+<!-- /auto session=a1000001 -->
+`)
+      const after = await terminal.keys(noHeading, 'i a')
+      assert.ok(!noHeading.read('progress.md').includes('Unfiled release'), after)
+      assert.match(squash(after), /Its unanswered question stays under Older unanswered questions/)
+    } finally { await noHeading.close() }
+    const twins = makeWorld()
+    try {
+      block(twins, { state: 'ended', title: 'Deploy', steps: ['- [?] Notify the team, OK?'] })
+      await terminal.keys(twins, 'i a')
+      twins.write('progress.md', `${twins.read('progress.md').trimEnd()}
+
+## api-gateway
+
+### Deploy
+- [x] Build
+- [ ] Ship
+`)
+      const after = await terminal.keys(twins, 'i a')
+      assert.match(squash(after), /Archived .Deploy.\./)
+      assert.doesNotMatch(squash(after), /Its unanswered question stays/)
+    } finally { await twins.close() }
+  })
+
+  test('a working day: a done task that still asks stays selectable under Done recently, tells its results there and offers no Confirm done', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'done', title: 'Publish the gateway', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?', '- [?] Tag the release, OK?'] })
+      const selected = await terminal.keys(world, 'i down')
+      assert.match(selected, /› ✓ api-gateway › Publish the gateway/)
+      assert.match(selected, /a archive/)
+      assert.doesNotMatch(selected, /d confirm done/)
+      const opened = await terminal.keys(world, 'i down enter')
+      assert.equal(opened.split('Notify the team, OK?').length, 2, opened)
+      const hidOne = await terminal.keys(world, 'l h')
+      assert.match(squash(hidOne), /Hidden: /)
+      await terminal.keys(world, 'l h')
+      const archived = await terminal.keys(world, 'a')
+      assert.ok(!world.read('progress.md').includes('Publish the gateway'), archived)
+    } finally { await world.close() }
+  })
+
+  test('a working day: the cursor walks finished tasks that still ask in the order the board draws them', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'done', session: 'a1000001', updated: new Date(world.now - 3_600_000).toISOString(), title: 'Older finished task', steps: ['- [?] Notify the team, OK?'] })
+      block(world, { state: 'done', session: 'a1000002', updated: new Date(world.now - 60_000).toISOString(), title: 'Newer finished task', steps: ['- [?] Tag the release, OK?'] })
+      const first = await terminal.keys(world, '')
+      assert.ok(first.indexOf('Newer finished task') < first.indexOf('Older finished task'), first)
+      assert.match(first, /› ✓ api-gateway › Newer finished task/)
+      assert.match(await terminal.keys(world, 'down'), /› ✓ api-gateway › Older finished task/)
+      assert.match(await terminal.keys(world, 'down up'), /› ✓ api-gateway › Newer finished task/)
+    } finally { await world.close() }
+  })
+
+  test("a working day: the page's archive result says a stopped session's question stays", async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'ended', title: 'Stopped gateway release', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?'] })
+      const server = await serve.start(world)
+      const pressed = await server.press('Stopped gateway release', 'Archive')
+      assert.ok(pressed.requests.some(request => request.path === '/api/act' && request.body.type === 'archive'))
+      assert.match(squash(await server.visible()), /Its unanswered question stays under Older unanswered questions/)
+      assert.ok(!world.read('progress.md').includes('Stopped gateway release'))
     } finally { await world.close() }
   })
 
