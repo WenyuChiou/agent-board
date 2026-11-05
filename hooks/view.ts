@@ -11,7 +11,7 @@ import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, WORKING_MS } from './parse'
 import { sha256 } from './sha256'
 import { observeQuestions, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
@@ -897,7 +897,8 @@ export const buildView = (
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now, updated, staleMs)
-      const isInactive = !isManual && (isComplete || stale || task.auto?.state === 'ended')
+      const isSilence = task.auto?.state === 'working' && hasTime(lastActive) && now - lastActive > WORKING_MS && (task.steps.length === 0 || task.steps.every(step => isLifecycleStep(step.text)))
+      const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
       const taskQuestions: WaitingItem[] = []
@@ -998,7 +999,7 @@ export const buildView = (
         if (!isInactive || (unresolved.length === 0 && !task.steps.some(step => step.status === 'waiting'))) continue
       }
 
-      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || stale ? 'ended' : task.auto.state
+      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || stale || isSilence ? 'ended' : task.auto.state
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
@@ -1012,7 +1013,7 @@ export const buildView = (
         auto === 'working'
           ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
           : auto === 'ended'
-            ? { status: stale ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
+            ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
             : task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
               ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
               : stepPhrase(task, s, isPrompt)
@@ -1050,13 +1051,13 @@ export const buildView = (
         handoff: handoffOf(task),
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142).
-        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || auto === 'ended')
+        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || (auto === 'ended' && !isSilence))
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
-            : auto === 'ended' && task.auto !== null
+            : auto === 'ended' && !isSilence && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               : null,
         target: targetOf(task.auto),

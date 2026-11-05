@@ -38,6 +38,6 @@ export const langOf = (value: unknown): Lang | null => {
 export const chosenLang = (option: unknown, stored: unknown): Lang | null => (option === 'auto' ? null : langOf(option)) ?? langOf(stored)
 
 // What the pane speaks, first answer wins: the language the person picked, Claude Code's
-// `language` setting, the system's LANG, English.
-export const resolveLang = (option: unknown, stored: unknown, setting: unknown, env: unknown): Lang =>
-  chosenLang(option, stored) ?? langOf(setting) ?? langOf(env) ?? 'en'
+// `language` setting, the system's LANG, the system locale, English.
+export const resolveLang = (option: unknown, stored: unknown, setting: unknown, env: unknown, locale?: unknown): Lang =>
+  chosenLang(option, stored) ?? langOf(setting) ?? langOf(env) ?? langOf(locale) ?? 'en'

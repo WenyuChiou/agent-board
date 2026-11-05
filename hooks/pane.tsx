@@ -72,6 +72,7 @@ export type PaneActions = {
   confirmRow: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
   report: (surface: RenderSurface) => PressOutcome | Promise<PressOutcome>
   toggleNotify: () => PressOutcome | Promise<PressOutcome>
+  openPage?: () => PressOutcome | Promise<PressOutcome>
   toggleLegend: () => PressOutcome | Promise<PressOutcome>
 }
 
@@ -99,6 +100,7 @@ export type PressResult = ProgressPressResult
 
 // Action keys use `${card.key}::verb`, so results follow a card through redraws.
 export const pressTarget = (view: View, button: string, s: Strings = ZH_TW): { key: string; revision: string; label: string } => {
+  if (button === 'page') return { key: button, revision: '', label: s.boardOpenPage }
   if (button === 'section::hidden') return { key: button, revision: '', label: s.hiddenCount(view.hidden.length) }
   if (button === 'section::idle') return { key: button, revision: '', label: s.idleCount(view.idle.length) }
   if (button === 'section::stopped') return { key: button, revision: '', label: s.stoppedCount(view.stopped.length) }
@@ -914,6 +916,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {cardResult('clear-answer')}
 
       <Box flexDirection="row" marginTop={1} gap={2}>
+        {actions.openPage !== undefined && <Button key="page" plain onPress={buttonPress('page', actions.openPage)}>{s.boardOpenPage}</Button>}
         <Button key="report" plain onPress={buttonPress('report', press => actions.report(press.surface))}>
           {s.report}
         </Button>
@@ -924,6 +927,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           {model.isLegendOpen ? s.legendClose : s.legend}
         </Button>
       </Box>
+      {cardResult('page')}
       {cardResult('report')}
       {cardResult('notify')}
       {cardResult('legend')}
