@@ -295,7 +295,7 @@ const emitPlan = plan => {
     '\n\nFull plan: ' + plan.full + '\n\nSoak recommended: ' + plan.soakRecommended + '\n\nChanged paths:\n' + plan.files.map(path => '- ' + path).join('\n') + '\n')
 }
 
-// A part such as 2/2 lets a long set fit two jobs (#899). A part takes every second file, but a file is
+// A part such as 2/4 lets a long set fit several jobs (#899, #910). Part i of n takes every nth file, but a file is
 // never split, so a file far longer than the rest splits its own tests instead: part i of n keeps every
 // nth test, and the parts together run each test once.
 const parsePart = part => {
@@ -319,7 +319,7 @@ export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
 export const testArgs = (files, { isSerial = false, isWindows = false } = {}) => ['--test', ...(isSerial ? ['--test-concurrency=1'] : isWindows ? ['--test-concurrency=2'] : []), ...files]
 
 // The Node run of one part: every nth of the other files, and every self-parted file, which keeps its own
-// share of tests. One run, so the files still run side by side as they do without parts.
+// share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
 export const testRuns = (files, { isSerial = false, isWindows = false, part = '' } = {}) => {
   const { index, total } = parsePart(part)
   if (total === 1) return [testArgs(files, { isSerial, isWindows })]
