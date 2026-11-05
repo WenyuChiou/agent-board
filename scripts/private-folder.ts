@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { lstatSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join, resolve } from 'node:path'
+import { patiently } from './message-store-claim'
 
 // This computer's NetBIOS name, which whoami prints as a local account's domain. A board started
 // with a trimmed environment has no COMPUTERNAME; Windows takes the name from the host name's
@@ -34,6 +35,16 @@ export const isPrivateDacl = (sddl: string, sid: string, aliases: Record<string,
   if (!/^S-\d+(?:-\d+)+$/.test(sid)) return false
   const trustee = /^D:P[A-Z]*\(A;OICI;FA;;;([^;()]+)\)$/.exec(sddl)?.[1]
   return trustee !== undefined && (trustee === sid || aliases[trustee] === sid)
+}
+
+// A virus scanner may still hold the access list icacls just saved, and then Windows refuses to
+// delete it for a moment (#799). The copy holds only this folder's own entries and sits inside the
+// private folder, so a copy still held after the waits is left behind rather than failing the
+// start, and one already gone (a delete that was pending finished) needs nothing.
+const unlinkSavedCopy = (file: string): void => {
+  try { patiently(() => unlinkSync(file)) } catch (error) {
+    if (!['EBUSY', 'EPERM', 'EAGAIN', 'ENOENT'].includes(String((error as NodeJS.ErrnoException).code))) throw error
+  }
 }
 
 const isPresent = (file: string): boolean => {
@@ -73,7 +84,7 @@ export const privateFolder = (dir: string): void => {
         const copy = lstatSync(saved)
         if (!copy.isFile() || copy.nlink !== 1) throw new Error('PRIVATE_FOLDER')
         return readFileSync(saved, 'utf16le').split(/\r?\n/).find(line => line.startsWith('D:')) ?? ''
-      } finally { unlinkSync(saved) }
+      } finally { unlinkSavedCopy(saved) }
     }
     // Grant replacement leaves other explicit entries in place. Remove those principals
     // without enabling inheritance or requiring the backup privileges of /restore.
@@ -93,5 +104,5 @@ export const privateFolder = (dir: string): void => {
       execFileSync(icacls, [root, '/remove', `*${other}`, '/L'], options)
     }
     if (!isPrivateDacl(readDacl(), sid, own) || lstatSync(root).isSymbolicLink()) throw new Error('PRIVATE_FOLDER')
-  } catch { throw new Error('PRIVATE_FOLDER') }
+  } catch (error) { throw new Error('PRIVATE_FOLDER', { cause: error }) }
 }

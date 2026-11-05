@@ -133,7 +133,7 @@ const openMessaging = (directory: string, isDefault = false) => {
     if (process.platform === 'win32' && (isCreated || isDefault)) {
       try {
         privateFolder(root)
-      } catch { throw new Error('MESSAGE_STORE_ACL') }
+      } catch (error) { throw new Error('MESSAGE_STORE_ACL', { cause: error }) }
     }
     const claim = claimMessageStore(root)
     try { return openClaimedMessaging(root, claim, isFreshDefault) } catch (error) {
