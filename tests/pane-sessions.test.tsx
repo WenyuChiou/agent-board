@@ -3554,9 +3554,9 @@ test('a model call that never answers gives up after 30 seconds, and later inbox
   await clock.advance(5000)
   expect(world.files.has(`${INBOX}/codex-turn-1792216390-2.json`)).toBe(false)
 
-  // Thirty seconds on, the hung call counts as no answer: the question the reply ends on is
-  // still caught, and the next turn is summed up after it.
-  await clock.advance(30000)
+  // The hung call started at the first five-second inbox look; reach its 30-second deadline
+  // without another five seconds of unrelated polls. Its question and the next turn still land.
+  await clock.advance(25000)
   const text = world.files.get(FILE) ?? ''
   expect(text).toContain('## api-gateway\n')
   expect(text).toContain('Should the limit be 100 or 300?')

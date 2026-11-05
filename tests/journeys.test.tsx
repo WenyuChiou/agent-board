@@ -38,6 +38,16 @@ const block = ({
 } = {}): string =>
   `## ${project}\n<!-- auto session=${session} agent=${agent} state=${state} updated=2026-10-16T12:00:00Z${resume === undefined ? '' : ` resume=${resume}`} -->\n### ${title}\n> Context: Synthetic journey data.\n${steps}\n<!-- /auto session=${session} -->\n`
 
+// Keep this first so module loading is paid by a session without pane or connection work.
+test('starting a session preserves a hand-kept open task', async ($, on) => {
+  const source = '## synthetic-project\n### Synthetic task\n- [ ] Next step\n'
+  const world = makeWorld([[FILE, source]])
+  world.env = english
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.get(FILE)).toBe(source)
+})
+
 describe('L1 first run', () => {
   test('L1 latency: a new ask is visible within 3 s on the pane', async ($, on) => {
     const world = makeWorld()
