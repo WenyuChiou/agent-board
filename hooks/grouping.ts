@@ -159,10 +159,10 @@ const ICONS: ReadonlyMap<string, string> = new Map(
   AGENT_ICONS.flatMap((icon): Array<[string, string]> => [[icon.file, icon.file], [icon.file.split('-')[0] ?? icon.file, icon.file]]),
 )
 
-const keyOf = (agent: string): string => agent.trim().toLowerCase() || 'claude'
+const keyOf = (agent: string | undefined): string => (agent ?? '').trim().toLowerCase() || 'claude'
 
-const iconOf = (agent: string): string => {
-  const first = agent.split(/\s+/)[0] ?? agent
+const iconOf = (agent: string | undefined): string => {
+  const first = (agent ?? '').split(/\s+/)[0] ?? 'claude'
 
   return ICONS.get(first) ?? `letter:${(Array.from(first)[0] ?? '?').toUpperCase()}`
 }
@@ -183,7 +183,7 @@ type Holder = { agent: string; isOwn: boolean; isRun: boolean; parent: string | 
 
 type Asker = { agent: string; isOwn?: true; isRun?: true; parent?: string }
 
-const holderOf = (item: Asker): Holder => ({ agent: item.agent, isOwn: item.isOwn === true, isRun: item.isRun === true, parent: item.parent })
+const holderOf = (item: Asker): Holder => ({ agent: item.agent ?? '', isOwn: item.isOwn === true, isRun: item.isRun === true, parent: item.parent })
 
 export const identity = (agent: string, isOwn: boolean, project: string, title: string, dir: string | null | undefined): string => JSON.stringify([isOwn ? '' : keyOf(agent), project, title, folderOf(dir ?? '')])
 
@@ -222,9 +222,9 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
   // Agents in the order the input first names them (questions, older questions, rows, finished
   // tasks, then the unreadable marks), with the way each was first written.
   const spelled = new Map<string, string>()
-  const note = (agent: string): string => {
+  const note = (agent: string | undefined): string => {
     const key = keyOf(agent)
-    if (!spelled.has(key)) spelled.set(key, agent.trim() || 'claude')
+    if (!spelled.has(key)) spelled.set(key, (agent ?? '').trim() || 'claude')
 
     return key
   }
@@ -426,7 +426,13 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
       older: sortedOlder,
     },
     // Rows that wait on the person are on the Needs you list, and a hand-kept task is not an agent at work.
-    working: sortedTasks.filter(task => task.shelf === 'open' && !task.hasCard && !task.isOwn && task.at > 0 && now - task.at <= WORKING_MS),
+    // A working row with a doing/running step remains counted even after 30 minutes.
+    working: sortedTasks.filter(task => {
+      if (task.shelf !== 'open' || task.hasCard || task.isOwn) return false
+      const source = task.source
+      const isDoing = typeof source === 'object' && source !== null && 'steps' in source && Array.isArray(source.steps) && source.steps.some(step => step.status === 'doing' || step.status === 'running')
+      return isDoing || (task.at > 0 && now - task.at <= WORKING_MS)
+    }),
     quiet: quietOf(cards, sortedTasks, now),
     all: { ...bucketOf(one => !one.isOwn), isHidden: agents.length < 2 },
     own: bucketOf(one => one.isOwn),
