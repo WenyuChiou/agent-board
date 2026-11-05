@@ -114,6 +114,62 @@ test('a different lane of the same base name is a different agent, not the autho
   assert.equal(taken.needsReviewer[0].takenBy, 'codex (e2e)')
 })
 
+for (const [description, author, reviewer, isSame] of [
+  ['the same multiword lane', 'Claude Code (desktop)', 'Claude Code (desktop)', true],
+  ['a different multiword lane', 'Claude Code (desktop)', 'Claude Code (cloud)', false],
+  ['a different multiword base', 'Claude Code (desktop)', 'Claude Review (desktop)', false],
+  ['a bare multiword reviewer', 'Claude Code (desktop)', 'Claude Code', true],
+  ['a bare multiword author', 'Claude Code', 'Claude Code (cloud)', true],
+  ['normalized case, backticks and spacing', '`Claude   Code ( Desktop )`', '`CLAUDE\tCode (desktop)`', true],
+  ['comma-separated reviewer context', 'Claude Code (desktop)', 'Claude Code (desktop), review context', true],
+  ['distinct dotted names', 'agent.one', 'agent.two', false],
+  ['the same dotted name', 'agent.one', 'AGENT.ONE', true],
+  ['distinct punctuation prefixes', '@agent', '+agent', false],
+  ['the same Unicode name', '小花', '小花', true],
+  ['distinct Unicode names', '小花', '小路', false],
+  ['the same Unicode lane', '小花 (桌面)', '小花 (桌面)', true],
+  ['a different Unicode lane', '小花 (桌面)', '小花 (雲端)', false],
+  ['a bare Unicode reviewer', '小花 (桌面)', '小花', true],
+  ['matching embedded parentheses', 'Agent (research) Code (desktop)', 'Agent (research) Code (desktop)', true],
+  ['a lane after embedded parentheses', 'Agent (research) Code (desktop)', 'Agent (research) Code (cloud)', false],
+  ['different text after embedded parentheses', 'Agent (research) One', 'Agent (research) Two', false],
+  ['embedded versus trailing parentheses', 'Agent (desktop) Code', 'Agent (desktop)', false],
+  ['a lane with no separating space', 'Agent.Code(desktop)', 'Agent.Code(cloud)', false],
+  ['an empty lane', 'Claude Code ()', 'Claude Code (cloud)', true],
+]) {
+  test(`approval and Reviewing compare ${description} using the complete agent identity`, () => {
+    const prs = [pull(1, { body: `Author: ${author}, branch`, files: [] })]
+    const start = ready(head, '2026-10-20T08:00:00Z')
+    const approval = classify(prs, { 1: [start, by('WenyuChiou', answered(reviewer))] }, now)
+    assert.deepEqual(approval.approved.map(item => item.number), isSame ? [] : [1])
+    assert.deepEqual(approval.approvedNow.map(item => item.number), isSame ? [] : [1])
+    assert.deepEqual(approval.waitingForAuthor.map(item => item.detail), isSame ? ['approval is by the author'] : [])
+    const reviewing = classify(prs, { 1: [start, by('WenyuChiou', taking(reviewer, '2026-10-20T09:00:00Z'))] }, now)
+    assert.equal(reviewing.needsReviewer[0].takenBy, isSame ? null : reviewer)
+    assert.equal(reviewing.needsReviewer[0].lapsedBy, null)
+  })
+}
+
+test('an absent or empty approval name keeps its legacy reading and an empty Reviewing claims nobody', () => {
+  const prs = [pull(1, { body: 'Author: Claude Code (desktop), branch', files: [] })]
+  for (const suffix of ['', ' by ', ' by ``', ' by , context']) {
+    const queue = classify(prs, { 1: [ready(), comment(`Review: APPROVE ${head}${suffix}`, '2026-10-20T10:00:00Z')] }, now)
+    assert.deepEqual(queue.approvedNow.map(item => item.number), [1])
+  }
+  const queue = classify(prs, { 1: [ready(), taking('  ', '2026-10-20T10:00:00Z')] }, now)
+  assert.equal(queue.needsReviewer[0].takenBy, null)
+  assert.equal(queue.needsReviewer[0].lapsedBy, null)
+})
+
+test('an empty Author line falls back to the complete GitHub login for self-review checks', () => {
+  for (const body of ['', 'Author:   , branch']) {
+    const prs = [pull(1, { body, author: { login: 'agent.one' }, files: [] })]
+    const queue = classify(prs, { 1: [ready(), answered('agent.one')] }, now)
+    assert.deepEqual(queue.approvedNow, [])
+    assert.equal(queue.waitingForAuthor[0].detail, 'approval is by the author')
+  }
+})
+
 test('drafts are counted, not listed', () => {
   const queue = classify([pull(1, { isDraft: true }), pull(2, { isDraft: true, mergeStateStatus: 'DIRTY' })], { 1: [ready()] }, now)
   assert.equal(queue.drafts, 2)
