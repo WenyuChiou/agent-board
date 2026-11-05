@@ -18,14 +18,14 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
-import { startServer } from './board-serve'
+import { boardVersion, startServer } from './board-serve'
 import { moveLockAside } from './board-messaging'
 import { claimMessageStore, hasLiveClaims } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { defaultMessagesDirectory, isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
@@ -50,6 +50,7 @@ import { sha256 } from '../hooks/sha256'
 import { currentTidyCandidate, previewTidy, tidySelector, type TidyCandidate, type TidyPreview, type TidySelector } from '../hooks/tidy'
 import { codexSignal, isStrongRun, runLookupId } from '../hooks/runs'
 import { findSessionFile, readSessionMeta } from './codex-history'
+import { runMcp } from './board-mcp'
 
 // The line `/progress connect` puts above the bundle sets it.
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
@@ -209,8 +210,8 @@ let lastStat = { stat: '', at: 0 }
 let lastQuestions = emptyQuestions()
 const questionWriter = randomUUID()
 let questionWrite = 0
-const isQuestionWriter = !args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
-const isPersistentQuestions = !args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
+const isQuestionWriter = !args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
+const isPersistentQuestions = !args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
 let isViewQuestionRead = false
 const inboxFiles = recentInboxFiles({
   directory: join(dirname(path), 'progress-inbox'),
@@ -431,7 +432,7 @@ const readBoardView = (source: string, now: number) => {
     if (record !== null) {
       seen = record
       // Read-only output must never write a sidecar, even beside interactive flags.
-      if (!args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
+      if (!args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
         let observed = withSeen(record, projects, now, {}, false, true)
         const wrote = rewrite(file, before => {
           const current = parseSeen(before, answeredAge(file))
@@ -1474,7 +1475,7 @@ const serveFile = (): string => {
   const name = addressFileName(board(path))
   return (served = join(runFolder(name), name))
 }
-const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? serveFile().replace(/\.json$/, '-messages'))
+const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? (args.includes('--mcp') ? defaultMessagesDirectory(path, homedir(), process.env, process.platform) : serveFile().replace(/\.json$/, '-messages')))
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
@@ -1947,40 +1948,51 @@ const chat = (): void => {
   }
 }
 
-const jsonFailure = (error: unknown): void => {
-  process.exitCode = 1
+const jsonFailureDocument = (error: unknown) => {
   const home = homeOrNone()
   const isWin = process.platform === 'win32'
   const code = (error as { code?: unknown } | null)?.code
   const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0] || error.name : 'UNKNOWN'
   const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
-  process.stdout.write(`${JSON.stringify({ schemaVersion: BOARD_JSON_SCHEMA, error: redact(clipped(plain(told), home, isWin), home, isWin) })}\n`)
+  return { schemaVersion: BOARD_JSON_SCHEMA, error: redact(clipped(plain(told), home, isWin), home, isWin) }
+}
+const jsonFailure = (error: unknown): void => {
+  process.exitCode = 1
+  process.stdout.write(`${JSON.stringify(jsonFailureDocument(error))}\n`)
 }
 
-const json = (): void => {
-  try {
-    const now = Date.now()
-    const home = homeOrNone()
-    const isWin = process.platform === 'win32'
-    const source = read(path)
-    const updates = pending(text => redact(text, home, isWin))
-    const current = view(source, now)
-    const board = RELEASED.reduce((held, release) => {
-      const next = release.version.split('.').map(Number)
-      const previous = held.split('.').map(Number)
-      for (let index = 0; index < 3; index += 1) {
-        if ((next[index] ?? 0) !== (previous[index] ?? 0)) return (next[index] ?? 0) > (previous[index] ?? 0) ? release.version : held
-      }
-      return held
-    }, '0.0.0')
-    const packageVersion = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
-    const group = {
-      now, repoOf: repoLookup(worktreeRepoName),
-      versions: { board, package: /^\d+\.\d+\.\d+$/.test(packageVersion) ? packageVersion : null },
-      unreadable: current.unreadable ?? [],
+// The one document for an agent's read: --json prints it and MCP's board_status returns it.
+const boardJson = () => {
+  // --mcp keeps running and --json does not: each read starts from what a new process would hold.
+  lastSeen = {}
+  lastStat = { stat: '', at: 0 }
+  lastQuestions = emptyQuestions()
+  droppedLogCache = null
+  const now = Date.now()
+  const home = homeOrNone()
+  const isWin = process.platform === 'win32'
+  const source = read(path)
+  // After the view, whose page state says which turns are already settled.
+  const current = view(source, now)
+  const updates = pending(text => redact(text, home, isWin))
+  const board = RELEASED.reduce((held, release) => {
+    const next = release.version.split('.').map(Number)
+    const previous = held.split('.').map(Number)
+    for (let index = 0; index < 3; index += 1) {
+      if ((next[index] ?? 0) !== (previous[index] ?? 0)) return (next[index] ?? 0) > (previous[index] ?? 0) ? release.version : held
     }
-    process.stdout.write(`${JSON.stringify(boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group))}\n`)
-  } catch (error) { jsonFailure(error) }
+    return held
+  }, '0.0.0')
+  const packageVersion = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
+  const group = {
+    now, repoOf: repoLookup(worktreeRepoName),
+    versions: { board, package: /^\d+\.\d+\.\d+$/.test(packageVersion) ? packageVersion : null },
+    unreadable: current.unreadable ?? [],
+  }
+  return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group)
+}
+const json = (): void => {
+  try { process.stdout.write(`${JSON.stringify(boardJson())}\n`) } catch (error) { jsonFailure(error) }
 }
 
 const runWatchTerminal = async (): Promise<void> => {
@@ -2072,6 +2084,10 @@ const run = async (): Promise<void> => {
   // Setup keeps its own --json protocol; a board read wins over every action flag.
   if (isJsonBoard) {
     json()
+    return
+  }
+  if (args.includes('--mcp')) {
+    await runMcp({ directory: messagesDirectory(), cwd: process.cwd(), version: boardVersion, s, document: () => { try { return boardJson() } catch (error) { return jsonFailureDocument(error) } } })
     return
   }
   if (args.includes('--status')) {
@@ -2172,6 +2188,9 @@ try {
 } catch (error) {
   if (isJsonBoard) {
     jsonFailure(error)
+  } else if (args.includes('--mcp')) {
+    process.exitCode = 1
+    process.stderr.write('MCP_START_FAILED\n')
   } else if (error instanceof RuntimeFolderError) {
     process.exitCode = 1
     const output = args.includes('--serve-child') ? process.stderr : process.stdout

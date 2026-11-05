@@ -40,16 +40,33 @@ const verdictName = body => nameOf((body ?? '').match(/^Review:[ \t]*(?:APPROVE|
 const fullName = text => (text ?? '').replace(/`/g, '').split(',')[0].replace(/\s+/g, ' ').trim().toLowerCase() || null
 const verdictFullName = body => fullName((body ?? '').match(/^Review:[ \t]*(?:APPROVE|REQUEST CHANGES)\b[^\r\n]*?\bby[ \t]+(\S[^\r\n]*)/m)?.[1])
 const identityOf = text => {
-  const match = (text ?? '').replace(/`/g, '').split(',')[0].replace(/\s+/g, ' ').trim().toLowerCase()
-    .match(/^([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s*\(([^)]*)\))?/)
-  return match ? { base: match[1], lane: (match[2] ?? '').trim() || null } : null
+  const name = fullName(text)
+  if (!name) return null
+  // Only a final parenthesized suffix is a lane; earlier parentheses and all other name characters stay in the base.
+  const match = name.match(/^(.+?)\s*\(([^()]*)\)$/)
+  return match ? { base: match[1].trim(), lane: match[2].trim() || null } : { base: name, lane: null }
 }
 // Two names are the same agent when the base name matches and the lanes do not disagree: a name with no
 // lane is read as the same agent, so a bare "codex" still counts as the author "codex (x)" — the
 // conservative reading for self-approval, which can only ask for another reviewer, never merge early.
-const sameAgent = (a, b) => {
-  const x = identityOf(a), y = identityOf(b)
-  return Boolean(x && y && x.base === y.base && (!x.lane || !y.lane || x.lane === y.lane))
+const sameAgent = (reviewer, author) => {
+  const own = identityOf(author), name = fullName(reviewer)
+  const matches = other => Boolean(other && own && other.base === own.base && (!other.lane || !own.lane || other.lane === own.lane))
+  if (matches(identityOf(name))) return true
+  if (!name || !own || !name.startsWith(own.base)) return false
+  // Review prose has a boundary, not a vocabulary. A space alone after a bare
+  // base is not one: "Claude" and "Claude Code" must remain distinct names.
+  const boundary = tail => /^(?:$|[.:;!?。！？：；](?:\s|$)|\s[-–—]\s)/.test(tail)
+  const tail = name.slice(own.base.length)
+  // Ambiguous punctuation prefixes ("Dr" / "Dr. Agent") deliberately refuse
+  // approval conservatively, as settled in the round-2 review of #952.
+  if (boundary(tail)) return true
+  const lane = tail.match(/^\s*\(([^()]*)\)(.*)$/)
+  if (!lane) return false
+  const reviewLane = lane[1].trim()
+  if (reviewLane && own.lane && reviewLane !== own.lane) return false
+  // After a complete matching lane, ordinary words may begin the review prose.
+  return /^\s/.test(lane[2]) || boundary(lane[2])
 }
 // The built bundle and the string tables change in almost every pull request, so approved ones that touch them merge one at a time.
 const sharedPath = /^hooks\/(?:board-script(?:-[^/]+)?\.ts|i18n\.ts|strings-en\.ts|strings-zh-cn\.ts)$/
