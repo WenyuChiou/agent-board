@@ -171,3 +171,30 @@ test('draining 50 queued turns takes one tick and no model call', async () => {
   assert.ok(cache !== null, 'a complete drain must fill the cache')
   console.log(`drain: peekInbox ${drainMs.toFixed(1)} ms for ${INBOX_DRAIN_TURNS} turns in one call (no time budget is stated for the drain)`)
 })
+
+const { serveModel, servePage } = await import('../hooks/serve.ts')
+const { STRINGS } = await import('../hooks/strings.ts')
+const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+const pressWalk = node => [node, ...node.childNodes.flatMap(pressWalk)]
+
+test('the page shows Needs you within 5 s on a 600 KB board (#862)', async () => {
+  const now = Date.parse('2026-11-05T12:00:00Z')
+  let content = `## Project\n<!-- auto session=urgent1 agent=codex state=waiting updated=${new Date(now).toISOString()} -->\n### Urgent question needing you\n- [?] Which database should we use?\n<!-- /auto session=urgent1 -->\n\n`
+  let n = 0
+  while (Buffer.byteLength(content, 'utf8') < 600 * 1024) {
+    n++
+    const time = new Date(now - n * 3600000).toISOString()
+    content += `<!-- auto session=done${n} agent=claude state=done updated=${time} -->\n### Historical Task ${n} with a fairly typical description\n- [x] Initial research for feature ${n}\n- [x] Implementation phase for feature ${n}\n- [x] Test coverage verification for feature ${n}\n- [x] Code review and merge\n<!-- /auto session=done${n} -->\n\n`
+  }
+  const started = performance.now()
+  const view = buildView(parseProgress(content), [], null, now, 0, {}, STRINGS.en)
+  const group = { now, repoOf: () => null, versions: { board: '1.0.0', package: null }, unreadable: [] }
+  const model = JSON.parse(JSON.stringify(serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, group)))
+  const html = servePage(STRINGS.en, 'synthetic')
+  const dom = await pageDom(html, model)
+  const elapsed = performance.now() - started
+  assert.ok(elapsed < 5000, `the page must show Needs you within 5 s on a 600 KB board (took ${elapsed.toFixed(1)} ms)`)
+  const cards = pressWalk(dom.node('board')).filter(node => node.tag === 'article' && String(node.className).split(' ').includes('card'))
+  assert.ok(cards.some(card => card.textContent.includes('Which database should we use?')), 'Needs you must show the waiting question')
+})
+
