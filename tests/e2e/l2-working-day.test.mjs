@@ -505,6 +505,29 @@ describe('L2 a working day', { concurrency: 2 }, () => {
     } finally { await world.close() }
   })
 
+  test('a working day: on the page, a state=done block with one [?] reported just now can be archived', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'done', title: 'Finished gateway release', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?'] })
+      const server = await serve.start(world)
+      const pressed = await server.press('Finished gateway release', 'Archive')
+      assert.ok(pressed.requests.some(request => request.path === '/api/act' && request.body.type === 'archive'))
+      assert.match(squash(await server.visible()), /Its unanswered question stays under Older unanswered questions/)
+      assert.ok(!world.read('progress.md').includes('Finished gateway release'))
+    } finally { await world.close() }
+  })
+
+  test('a working day: a state=done block on the Stopped shelf offers no d confirm done on the terminal board', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'done', title: 'Stopped done task', updated: new Date(world.now - 2 * 86_400_000).toISOString(), steps: ['- [x] Publish routes', '- [?] Notify the team, OK?'] })
+      const screen = await terminal.keys(world, 'i')
+      assert.match(screen, /Stopped done task/)
+      assert.match(screen, /a archive/)
+      assert.doesNotMatch(screen, /d confirm done/)
+    } finally { await world.close() }
+  })
+
   test("a working day: the copy-resume action gives each host's native resume command", async () => {
     const world = makeWorld()
     try {
