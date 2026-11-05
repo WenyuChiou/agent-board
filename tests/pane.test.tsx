@@ -3272,6 +3272,22 @@ test('question retention failure refuses explicit archive and preserves the orig
   await ui.unmount()
 })
 
+test('pressing Archive on a stopped task that asks says its question stays', async ($, on) => {
+  const board = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [x] Prepare\n- [?] Notify the team, OK?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::stopped' })
+    await ui.press({ key: 'demo::Stopped plan' })
+    await ui.press({ key: 'demo::Stopped plan::archive' })
+    expect(await ui.find({ type: 'Text', text: ZH_TW.archivedKeptQuestions('Stopped plan', 1) })).toBeDefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
 test('the pane keeps stopped tasks behind one toggle and shows their actions when opened', async ($, on) => {
   const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=claude state=ended updated=2026-10-16T11:00:00Z resume=stopped-session-123 -->\n### Stopped plan\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->'
   const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true }
