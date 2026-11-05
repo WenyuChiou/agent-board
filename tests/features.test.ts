@@ -4549,7 +4549,7 @@ test('the idle shelf keeps terminal and page row actions without putting its que
   expect(grouped?.needs.cards).toEqual([])
   const page = servePage(STRINGS.en, 'nonce')
   expect(page).toContain("shelf('stopped', w('pgStopped')")
-  expect(page).toContain("act(key, 'tick', row.next")
+  expect(page).toContain("act(key, 'tick', nextStep ? nextStep.text : row.next")
   expect(page).toContain("act(key, 'archive'")
 })
 
