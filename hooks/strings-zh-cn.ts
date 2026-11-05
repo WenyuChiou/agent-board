@@ -383,7 +383,7 @@ export const ZH_CN: Strings = {
   connectNone: '没找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code、OpenClaw）。',
   setupCodexApproval: (): string => "尚未确认当前 Codex hook 的批准状态。请检查 /hooks；已有的受管理报告指示会保留。",
   codexFallbackInstructions: (command: string): string => "在 Codex /hooks 批准这些 hooks 前，每个实质工作步骤后，将 JSON 从 stdin 传给：\n\n" + command + "\n\n使用 project、title、state（working/waiting/done）与含复选标记的 steps。取消步骤保留 [-]。使用 --codex-report 报告，命令会自行找到当前会话；若命令无法报告，继续工作，不向用户提及，看板会显示。不得扫描对话或猜测会话标识。",
-  codexReportUnbound: '当前还无法报告这个会话的步骤；看板仍会通过 hooks 显示它。',
+  codexReportUnbound: '这份报告尚未绑定会话；请继续工作，不要手动更改看板。',
   connectCodexTrust: 'Codex 第一次要在它的 /hooks 里批准这个 hook 才会运行。',
   connectHermesTrust: 'Hermes Agent 第一次运行这个 hook 前会问你一次，回答 y（或用 --accept-hooks 启动）。',
   connectSkipped: (name: string, path: string): string => `${name} 的配置文件读不懂，没有动它：${path}`,
