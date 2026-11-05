@@ -83,6 +83,7 @@ import {
   test,
   upsertAutoBlock,
   withSeen,
+  type Engine,
   type On,
   type PressNode,
   type ProgressMirror,
@@ -3796,4 +3797,57 @@ test('a Claude print-mode session writes no block and leaves its existing block 
   await clock.advance(5000)
   expect(world.files.get(FILE)).toBe('')
   expect(JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records).toEqual([])
+})
+
+// #857: on a first turn a host drew the count row as `0 g 0 n s 0 e n 0 e y`, likely at a near-zero
+// `bodyColumns`. The row wraps between counts, so it needs its widest count whole: `▸ 0 in progress`,
+// 15 columns, in English; `✓ 0 今天完成`, 13, in Chinese, where the board counts the glyphs two wide.
+const COUNT_GLYPHS = ['●', '▸', '⚑', '✓']
+const COUNT_KEYS = ['count::waiting', 'count::others', 'count::due', 'count::recent']
+const countWords = (s: typeof EN) => [s.countWaiting, s.countActive, s.countDue, s.countToday]
+const firstTurn = async ($: Engine, on: On, lang: 'en' | 'zh-TW') => {
+  const world: World = { files: new Map([[FILE, '# Progress\n']]), mtime: 1, hasTasks: false, store: { lang, autoConnectOff: true } }
+  engineBeneath(on, world)
+  await start($, 'First turn')
+  return (bodyColumns: number) => $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PROPS, placement: 'inline', bodyColumns } })
+}
+
+test('the pane line on a first turn renders whole words', async ($, on) => {
+  const mount = await firstTurn($, on, 'en')
+  for (const bodyColumns of [15, 40]) {
+    const ui = await mount(bodyColumns)
+    try {
+      for (const [index, word] of countWords(EN).entries()) {
+        expect(await ui.find({ type: 'Button', key: COUNT_KEYS[index]!, text: ` ${word}` })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: `${COUNT_GLYPHS[index]} 0` })).toBeDefined()
+      }
+    } finally { await ui.unmount() }
+  }
+})
+
+test('the pane draws no count row while it is narrower than the row', async ($, on) => {
+  const mount = await firstTurn($, on, 'en')
+  for (const bodyColumns of [0, 1, 14]) {
+    const ui = await mount(bodyColumns)
+    try {
+      for (const key of COUNT_KEYS) expect(await ui.find({ type: 'Button', key })).toBeUndefined()
+      for (const glyph of COUNT_GLYPHS) expect(await ui.find({ type: 'Text', text: `${glyph} 0` })).toBeUndefined()
+      const drawn = JSON.stringify(await ui.drawn())
+      for (const word of countWords(EN)) expect(drawn).not.toContain(` ${word}"`)
+      // Only that row goes; the rest of the pane is still drawn.
+      expect(await ui.find({ type: 'Text', text: EN.paneTitle })).toBeDefined()
+    } finally { await ui.unmount() }
+  }
+})
+
+test('the pane count row in Chinese waits for its own widest count, two columns per character', async ($, on) => {
+  const mount = await firstTurn($, on, 'zh-TW')
+  for (const [bodyColumns, isDrawn] of [[12, false], [13, true], [40, true]] as const) {
+    const ui = await mount(bodyColumns)
+    try {
+      for (const [index, word] of countWords(ZH_TW).entries()) {
+        expect(await ui.find({ type: 'Button', key: COUNT_KEYS[index]!, text: ` ${word}` }) !== undefined).toBe(isDrawn)
+      }
+    } finally { await ui.unmount() }
+  }
 })
