@@ -95,7 +95,16 @@ export const idleTimeout = (value: string | undefined): number => {
 // `line`, here and on the other texts below, is the text folded to one line (hooks/clip.ts) and
 // capped; it is absent when that is the text itself. The browser cuts the line to its width with an
 // ellipsis.
-export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean; line?: string }
+export type ServeStep = {
+  text: string
+  note: string
+  status: string
+  isCurrent: boolean
+  line?: string
+  // The file line the step came from, so a press can tick exactly the line it showed; absent
+  // on a folded summary line, which is no step. `line` above is the clipped text it shows.
+  fileLine?: number
+}
 
 export type ServeAsk = {
   at?: number
@@ -173,6 +182,8 @@ export type ServeRow = {
   next: string | null
   // The words of the Done button for `next`, clipped; `next` itself is what a press must send back.
   nextLabel?: string
+  // The file line `next` came from, so a press can tick exactly the line it showed.
+  nextFileLine?: number
   // A hand-kept task, the person's own (its agent is '', as Claude Code's is); absent otherwise.
   isOwn?: true
   canArchive: boolean
@@ -425,9 +436,10 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         total: row.total,
         due: row.due?.left ?? null,
         pr: row.pr,
-        steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent, ...lined(step.note ? `${step.text} — ${step.note}` : step.text) })),
+        steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent, ...lined(step.note ? `${step.text} — ${step.note}` : step.text), ...(step.line === null ? {} : { fileLine: step.line }) })),
         next: row.next?.step ?? null,
         ...(nextLabel === undefined ? {} : { nextLabel }),
+        ...(row.next === null ? {} : { nextFileLine: row.next.line }),
         canArchive: row.archive !== null,
         canConfirm: row.confirm != null,
         archiveNote: row.auto === 'working' || row.auto === 'waiting' ? s.archiveLive : '',
@@ -527,7 +539,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
 
 // `asked`: with a reply, the question the page showed it under ('' for none). `fp`: the line's
 // fingerprint as the page drew it; a tick, an archive and a reply need it, hide and unhide do not.
-export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string; fp?: string; connection?: string; turn?: string }
+// `line` is the file line the pressed step came from, so a tick can name the exact step
+// when two open steps share a text; absent on a press that names the next step by text.
+export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string; fp?: string; line?: number; connection?: string; turn?: string }
 
 export type ServeAction =
   | { type: 'tick'; ref: StepRef }
@@ -571,9 +585,28 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   const item = items.find(one => one.key === request.key)
   if (item === undefined) return { type: 'refuse', note: s.boardLineChanged }
   if (request.type === 'tick') {
-    const ref = item.type === 'ask' ? item.ask.step : item.type === 'row' ? item.row.next : null
+    if (item.type === 'ask') {
+      const ref = item.ask.step
+      return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
+    }
+    if (item.type !== 'row') return { type: 'refuse', note: s.boardTickGone }
+    // A press names the step it showed by its file line, so two open steps with the same
+    // text are told apart; a press without a line ticks the next step, as before.
+    if (request.line !== undefined) {
+      const step = item.row.steps.find(one => one.line === request.line)
+      if (step !== undefined && step.line !== null && request.text === step.text) {
+        return { type: 'tick', ref: { project: item.row.project, title: item.row.title, step: step.text, line: step.line, raw: step.raw } }
+      }
+      // The primary Done button still names the next step when the step list folded it
+      // out of view: the page then sends the next step's line and its full text, which
+      // the folded list does not hold, so the next step's own ref answers the press.
+      const next = item.row.next
+      if (next !== null && next.line === request.line && request.text === next.step) return { type: 'tick', ref: next }
+      return { type: 'refuse', note: s.boardLineChanged }
+    }
+    const ref = item.row.next
     // A task keeps its key while its next step moves on: only the step the page showed is ticked.
-    if (ref !== null && item.type === 'row' && request.text !== ref.step) return { type: 'refuse', note: s.boardLineChanged }
+    if (ref !== null && request.text !== ref.step) return { type: 'refuse', note: s.boardLineChanged }
     return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
   }
   // Marked answered sends nothing: only the hidden list is written.
@@ -1284,11 +1317,11 @@ const PAGE_SCRIPT = String.raw`
   }
   // fp: the fingerprint the line was drawn with, which the server checks before it writes. go: the button
   // that sent it. A failed send keeps the message for Send again and Copy message.
-  function act(key, type, text, waiting, session, asked, fp, go) {
+  function act(key, type, text, waiting, session, asked, fp, go, line) {
     if (isUnreachable) return Promise.resolve();
     busyOn(go);
     say(waiting || w('pressPending'), '', key);
-    return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '' }).then(function (data) {
+    return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '', ...(line === undefined ? {} : { line: line }) }).then(function (data) {
       say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok);
       busyOff(go, data.ok);
       return data.ok;
@@ -1569,10 +1602,13 @@ const PAGE_SCRIPT = String.raw`
       var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
       add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'), clipped(clean(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)));
       // The next step's Done button is the primary one in the actions row, so the step list
-      // does not tick it again: each step has exactly one Done button.
-      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && step.text !== row.next) {
+      // does not tick it again: each step has exactly one Done button. Steps are told apart
+      // by the file line they came from, so two open steps with the same text each keep one;
+      // a step with no line (a folded summary) falls back to its text.
+      var isNext = step.fileLine !== undefined ? step.fileLine === row.nextFileLine : step.text === row.next;
+      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && !isNext) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
-        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp); }, 'btn');
+        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp, undefined, step.fileLine); }, 'btn');
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
         tick.title = step.text;
         add(line, tick);
@@ -1727,7 +1763,11 @@ const PAGE_SCRIPT = String.raw`
       if (sends(row.send)) add(inner, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery));
       else if (row.hasCopyBox) add(inner, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, row.question));
       if (row.isOwn && section !== 'done' && row.next) {
-        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', row.next, '', '', '', row.fp); }, 'primary');
+        // The press names the next step by its file line and its shown text, the same way
+        // the step list names a step, so the server can tell it from a twin with the same text.
+        var nextStep = null;
+        for (var index = 0; index < row.steps.length; index += 1) if (row.nextFileLine !== undefined && row.steps[index].fileLine === row.nextFileLine) { nextStep = row.steps[index]; break; }
+        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.fp, undefined, row.nextFileLine); }, 'primary');
         // A long step is named by its first words; the whole step is its title (#463).
         if (row.nextLabel) tickNext.title = row.next;
         add(acts, tickNext);

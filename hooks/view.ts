@@ -28,7 +28,9 @@ import type { PendingTurn } from './board'
 export type { Tone }
 
 // `number` is the step's place in its list (1-based), null on a folded summary line; `note`
-// is what follows ` — ` in the step: what it waits on, why it is stuck.
+// is what follows ` — ` in the step: what it waits on, why it is stuck. `line` is the file
+// line the step came from and `raw` the exact line as read, so a press can tick exactly the
+// line it showed; both are empty on a folded summary line, which is no step.
 export type ViewStep = {
   text: string
   note: string
@@ -36,6 +38,8 @@ export type ViewStep = {
   depth: number
   isCurrent: boolean
   number: number | null
+  line: number | null
+  raw: string
 }
 
 export type CurrentView = {
@@ -388,9 +392,9 @@ export const foldSteps = (steps: readonly ViewStep[], room = 6, s: Strings = ZH_
   return [
     ...(done.length === 0
       ? []
-      : [{ text: s.foldedDone(done.length), note: '', status: 'done' as const, depth: 0, isCurrent: false, number: null }]),
+      : [{ text: s.foldedDone(done.length), note: '', status: 'done' as const, depth: 0, isCurrent: false, number: null, line: null, raw: '' }]),
     ...shown,
-    ...(rest === 0 ? [] : [{ text: s.foldedRest(rest), note: '', status: 'todo' as const, depth: 0, isCurrent: false, number: null }]),
+    ...(rest === 0 ? [] : [{ text: s.foldedRest(rest), note: '', status: 'todo' as const, depth: 0, isCurrent: false, number: null, line: null, raw: '' }]),
   ]
 }
 
@@ -431,6 +435,8 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
       depth: 0,
       isCurrent: task === doing,
       number: index + 1,
+      line: null,
+      raw: '',
     }
   })
 
@@ -560,6 +566,8 @@ const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
       depth: step.depth,
       isCurrent: index === current,
       number: index + 1,
+      line: step.line,
+      raw: step.raw,
     })),
     5,
     s,
