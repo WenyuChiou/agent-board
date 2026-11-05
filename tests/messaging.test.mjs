@@ -38,6 +38,22 @@ const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
 const { computerName, isPrivateDacl, localAliases, privateFolder, runningAccount, whoamiAccount } = await import('../scripts/private-folder.ts')
 
 const nonceOf = prompt => prompt.match(/Reply first with this line alone: ACK ([0-9a-f]{6})/)[1]
+
+test('repeated page messaging snapshots check the store without starting Windows ACL commands', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'message-snapshot-acl-'))
+  let hub
+  try {
+    hub = createMessaging(dir)
+    for (const name of ['execFileSync', 'execFile', 'spawnSync', 'spawn']) t.mock.method(childProcess, name, () => assert.fail(`snapshot started ${name}`))
+    syncBuiltinESMExports()
+    for (let index = 0; index < 3; index++) assert.equal(hub.snapshot(Date.now() + index).enabled, true)
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+    hub?.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 // The board shows a reply without the nonce its ACK line carries; the store keeps the line as it came.
 const storedReply = (dir, id) => JSON.parse(readFileSync(join(dir, 'messages', 'messages.json'), 'utf8')).messages.find(one => one.id === id)?.reply
 const pause = ms => new Promise(done => setTimeout(done, ms))
