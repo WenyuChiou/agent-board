@@ -13,10 +13,10 @@ export const boardRun = (path: string, args: string[] = []): string => {
 }
 
 export const geminiBoardCommand = (description: string, prompt: string, run: string): string =>
-  `# Written by the Agent Board plugin (/progress connect).\ndescription = ${JSON.stringify(description)}\nprompt = ${JSON.stringify(`${prompt}\n\n!{${run} --serve}\n`)}\n`
+  `# Written by the Agent Board plugin (/progress connect).\ndescription = ${JSON.stringify(description)}\nprompt = ${JSON.stringify(`${prompt}\n\n\`${run}\`\n\n!{${run}}\n`)}\n`
 
 export const opencodeBoardCommand = (description: string, prompt: string, run: string): string =>
-  `---\ndescription: ${JSON.stringify(description)}\n---\n\n${prompt}\n\n!\`${run} --serve\`\n`
+  `---\ndescription: ${JSON.stringify(description)}\n---\n\n${prompt}\n\n\`${run}\`\n\n!\`${run}\`\n`
 
 // Hash the same template on every host, including paths escaped by TOML's JSON
 // string syntax or encoded for the shell. The placeholder is internal hash data.
@@ -35,9 +35,26 @@ export const RECEIPT_KEYS = [...RECEIPT_SESSION_KEYS, ...RECEIPT_FOLDER_KEYS, 'h
 // Timeout receipts conservatively keep board requests from answering a question.
 export const BOARD_REQUEST_HINTS = ['board', '--chat', '--serve']
 
-// The skill names its command twice, for chat and the page. The words after
-// each include the sentence earlier releases wrote, so their skills stay known.
-export const boardRequestWords = (strings: readonly Strings[]): string[] => strings.flatMap(s =>
+// Keep the exact 0.24.2 prompts while installed commands and skills can still expand them.
+export const LEGACY_BOARD_PROMPTS = [
+  {
+    boardCommandPrompt: 'Show me the Agent Board below exactly as it is, in a code block, with the link to the board you can click from its last line. Then tell me in one sentence what needs me first. Do not change any file.',
+    boardSkillPrompt: (command: string): string => `If you are replying in a chat app, run \`${command} --chat\` and send what it prints exactly as it is, with no code block and no link. Otherwise run \`${command} --serve\` and show me the Agent Board it prints exactly as it is, in a code block, with the link to the board you can click from its last line. Then tell me in one sentence what needs me first. Do not change any file.`,
+    boardChatSkillPrompt: (command: string): string => `Run \`${command} --chat\` and send me what it prints exactly as it is, as plain text and nothing else. Do not add a link, do not open a page, and do not change any file.`,
+  },
+  {
+    boardCommandPrompt: '把下面的 Agent Board 原樣放在程式碼區塊裡給我看，附上最後一行可以點的看板網址，再用一句話說現在最需要我處理的是什麼。不要改任何檔案。',
+    boardSkillPrompt: (command: string): string => `如果你是在聊天軟體裡回覆，執行 \`${command} --chat\`，把它印出的內容原樣傳給我，不要用程式碼區塊，也不要附連結。否則執行 \`${command} --serve\`，把它印出的 Agent Board 原樣放在程式碼區塊裡給我看，附上最後一行可以點的看板網址，再用一句話說現在最需要我處理的是什麼。不要改任何檔案。`,
+    boardChatSkillPrompt: (command: string): string => `執行 \`${command} --chat\`，把它印出的內容原樣、只用純文字傳給我，不要加別的。不要加網址連結、不要開網頁、不要改任何檔案。`,
+  },
+  {
+    boardCommandPrompt: '把下面的 Agent Board 原样放在代码块里给我看，附上最后一行可以点的看板网址，再用一句话说现在最需要我处理的是什么。不要改任何文件。',
+    boardSkillPrompt: (command: string): string => `如果你是在聊天软件里回复，运行 \`${command} --chat\`，把它打印的内容原样发给我，不要用代码块，也不要附链接。否则运行 \`${command} --serve\`，把它打印的 Agent Board 原样放在代码块里给我看，附上最后一行可以点的看板网址，再用一句话说现在最需要我处理的是什么。不要改任何文件。`,
+    boardChatSkillPrompt: (command: string): string => `运行 \`${command} --chat\`，把它打印的内容原样、只用纯文本发给我，不要加别的。不要加网址链接、不要开网页、不要改任何文件。`,
+  },
+]
+
+export const boardRequestWords = (strings: readonly Strings[]): string[] => [...strings, ...LEGACY_BOARD_PROMPTS].flatMap(s =>
   [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''),
 )
 

@@ -248,6 +248,8 @@ export const worktreeRepoName = (dir: string, gitFile: string, commonDir: string
 export type ServeModel = {
   warning?: string
   details?: string
+  pruned?: string
+  health?: string[]
   isLarge?: true
   isCleanable?: true
   // Runs agents started for themselves that no session is known for, as one folded line (#399).
@@ -452,7 +454,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       key: item.key,
       project: turn.project,
       agent: turn.agent,
-      text: turn.text,
+      text: turn.isQuestion ? turn.text : '',
       isQuestion: turn.isQuestion,
       // Connection closure does not answer an unresolved inbox question.
       info: turn.isQuestion ? infoOf(SENDERS.has(turn.agent) ? 'open' : 'none', turn.agent, '', '', s) : '',
@@ -463,6 +465,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     counts: { ...view.overview, waiting: view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length },
     warning: view.warning,
     ...(view.details === undefined ? {} : { details: view.details }),
+    ...(view.pruned === undefined ? {} : { pruned: view.pruned }),
+    ...(view.health === undefined ? {} : { health: [...view.health] }),
     ...(view.isLarge ? { isLarge: true } : {}),
     ...(view.isCleanable ? { isCleanable: true } : {}),
     ...(view.background === undefined ? {} : { background: view.background }),
@@ -1559,7 +1563,7 @@ const PAGE_SCRIPT = String.raw`
       var line = el('li', step.isCurrent ? 'now' : '');
       var whole = step.note ? step.text + ' — ' + step.note : step.text;
       var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
-      add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '○'), clipped(clean(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)));
+      add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'), clipped(clean(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)));
       if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled') {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
         var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp); }, 'btn');
@@ -2358,6 +2362,8 @@ const PAGE_SCRIPT = String.raw`
     }
     var notices = el('div', 'notices');
     if (model.details) add(notices, el('p', 't-quiet', model.details));
+    if (model.pruned) add(notices, el('p', 't-quiet', model.pruned));
+    (model.health || []).forEach(function (line) { add(notices, el('p', 't-alert', line)); });
     if (model.background) add(notices, el('p', 't-quiet', model.background));
     if (model.isCleanable) {
       var cleanup = add(el('div', 'acts'), button(w('cleanUp'), function () { tidyBoard('cleanup', '/api/clean'); }));

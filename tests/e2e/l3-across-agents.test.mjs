@@ -2,7 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
-import { inspectSurfaces, terminal, seenPageWithin, serve, run } from './lib/surfaces.mjs'
+import { inspectSurfaces, terminal, seenPageWithin, serve, run, command } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
@@ -63,11 +63,12 @@ describe('L3 across agents and sessions', () => {
       // Observe browser requests at the world's existing launch seam; never open a real tab.
       const before = world.read('agent-board.mjs')
       const seam = '((target, done) => done(false))('
-      assert.equal(before.split(seam).length - 1, 3)
+      // Desktop opens now share the live-page launcher, so the static HTML seam is gone.
+      assert.equal(before.split(seam).length - 1, 2)
       world.write('agent-board.mjs', before.split(seam).join('((target, done) => { process.stdout.write("E2E_BROWSER_REQUEST\\n"); done(true) })('))
       const server = await serve.start(world)
       const outputs = []
-      for (let index = 0; index < 2; index++) outputs.push(await terminal.screen(world, ['--serve', '--idle-minutes', '1']))
+      for (let index = 0; index < 2; index++) outputs.push(await command(world, ['--serve', '--idle-minutes', '1']))
       for (const output of outputs) assert.ok(output.includes(server.url), 'The same isolated server address must be reused')
       assert.equal((await server.get('/api/board')).status, 200)
       assert.equal((outputs[0].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1)
@@ -76,7 +77,7 @@ describe('L3 across agents and sessions', () => {
     } finally { await world.close() }
   })
 
-  test('across agents: an Antigravity ask answered from the terminal board leaves the page and --chat', async () => {
+  test('across agents: an Antigravity ask answered from the terminal board leaves the page and --print', async () => {
     const world = makeWorld()
     let server
     try {
@@ -88,7 +89,7 @@ describe('L3 across agents and sessions', () => {
       noSilentPress({ surface: 'terminal', card: 'Publish antigravity report', button: 'h', before, after })
       await seenPageWithin(server, text => text.includes('Nothing needs you'), PAGE_MS)
       const screens = await inspectSurfaces(world, server)
-      assert.match(screens.chat, /\b0 waiting\b/)
+      assert.match(screens.print, /\b0 waiting\b/)
       assert.match(screens.terminal, /\b0 waiting\b/)
       assert.match(screens.page, /Nothing needs you/)
     } finally {

@@ -3,7 +3,6 @@ import type { ProgressMirror } from '../types'
 import { addManualTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, removeAutoBlock, scanBlocks, takeArchivable, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { boardScreen, boardText, chatText, mutedLine } from '../hooks/board'
 import type { PendingTurn } from '../hooks/board'
-import { dashboardHtml } from '../hooks/dashboard'
 import { localDay } from '../hooks/journal'
 import { parseProgress, progressTail } from '../hooks/parse'
 import { putCodexBlock } from '../hooks/codex'
@@ -11,6 +10,7 @@ import { cutOffScopes, emptyQuestions, isQuestionSnapshot, ledgerLeftovers, obse
 import { sha256 } from '../hooks/sha256'
 import { STRINGS } from '../hooks/strings'
 import { buildView, viewCache } from '../hooks/view'
+import { engineBeneath, FILE, makeWorld, PANE, PROPS, visiblePaneText } from './fixtures/pane-world'
 
 // A board with a block cut off in the middle (no end marker, more of the file after it), as a
 // write that never finished leaves it. All data is made up.
@@ -110,17 +110,25 @@ test('a cut-off block with no updated stamp is named without a day', () => {
   ])
 })
 
-test('progress.html lists a cut-off block in a details element at the end, not in the alert line', () => {
+test('the pane lists a cut-off block in a closed health shelf after the footer, not in its status line', { options: { autoConnect: false, language: 'en' } }, async ($, on) => {
   const day = localDay(Date.parse('2026-10-20T01:17:08.128Z')).slice(5)
-  const health = cutBlockLines(cutOffBlocks(BOARD), EN)
   const notice = EN.blockCutOff('Codex', day)
-  const view = { ...buildView(parseProgress(BOARD), [], null, NOW, 0, {}, EN), health }
-  const html = dashboardHtml(view, EN, '/home/me/.claude/progress.md', 'updated 12:00')
-  expect(html).toContain('<details class="section sec" data-key="section:health">')
-  expect(html).toContain(EN.sectionHealth)
-  expect(html).toContain(notice)
-  expect(html).not.toContain('role="status"')
-  expect(html.indexOf('data-key="section:health"')).toBeGreaterThan(html.indexOf('</footer>'))
+  const world = makeWorld([[FILE, BOARD]])
+  world.at = NOW
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  await clock.advance(CUT_SETTLE_MS + 2000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    const closed = visiblePaneText(await ui.drawn())
+    expect(closed).not.toContain(notice)
+    expect(closed).toContain(EN.sectionHealth)
+    await ui.press({ key: 'section::health' })
+    const shown = visiblePaneText(await ui.drawn())
+    expect(shown.split(notice).length - 1).toBe(1)
+    expect(shown.indexOf(notice)).toBeGreaterThan(shown.indexOf(EN.progressFileShown))
+    expect(shown).not.toContain(EN.progressIncomplete(1))
+  } finally { await ui.unmount() }
 })
 
 test('the text board lists a cut-off block on a muted line at the bottom', () => {

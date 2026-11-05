@@ -49,7 +49,7 @@ export const plain = text => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
 export const visibleHtml = source => source.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<[^>]*>/g, ' ').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim()
 
 export const terminal = {
-  screen: async (world, args = []) => successful(await run(world, args)),
+  screen: async (world, args = []) => successful(await run(world, ['--print', ...args])),
   keys: async (world, keys, args = []) => successful(await run(world, ['--keys', keys, ...args])),
   watch: world => {
     const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
@@ -110,12 +110,12 @@ export const terminal = {
   },
 }
 
+// A command that is not a board view, such as --serve, runs without --print.
+export const command = async (world, args = []) => successful(await run(world, args))
+export const print = async (world, args = []) => successful(await run(world, ['--print', ...args]))
+export const json = async (world, args = []) => JSON.parse(successful(await run(world, ['--json', ...args])))
+
 export const chat = (world, args = []) => run(world, ['--chat', ...args])
-export const html = async world => {
-  successful(await run(world, ['--html']))
-  const text = world.read('progress.html')
-  return { text, visible: visibleHtml(text) }
-}
 
 // The small DOM is copied from tests/board.test.mjs pageDom. The actual shipped
 // page script builds every card and performs every press; tests do not emulate actions.
@@ -217,9 +217,11 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
   get('words').textContent = source.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
   get('.pfoot').appendChild(get('close'))
   get('close').tag = 'button'
-  for (const found of source.matchAll(/<button\b([^>]*)>/g)) {
+  for (const found of source.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)) {
     const id = found[1].match(/id="([^"]+)"/)?.[1]
     if (!id) continue
+    // Static footer labels arrive in the HTML; the page script need not draw them again.
+    get(id).textContent = visibleHtml(found[2])
     for (const attr of ['data-local', 'data-static']) if (found[1].includes(attr)) get(id).setAttribute(attr, '')
   }
   let model = first, scheduled, pollMs
@@ -384,7 +386,7 @@ export const serve = {
     }
     world.cleanups.push(stop)
     try {
-      const output = await terminal.screen(world, ['--serve', '--no-open', '--idle-minutes', String(idleMinutes), ...args])
+      const output = await command(world, ['--serve', '--no-open', '--idle-minutes', String(idleMinutes), ...args])
       const match = output.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)
       assert.ok(match, output)
       url = new URL(match[0])
@@ -459,10 +461,10 @@ export const inspectSurfaces = async (world, server, { allow = [] } = {}) => {
     // Startup includes loading Node and the bundle. Event timing starts only
     // after a ready frame, in the journeys that then write or answer a task.
     const frame = await watch.next(() => true, 10000)
-    const [terminalText, pageText, htmlText, chatResult] = await Promise.all([
-      terminal.screen(world), server.page(), html(world), chat(world),
+    const [terminalText, pageText, printText, chatText] = await Promise.all([
+      terminal.screen(world), server.page(), print(world), chat(world).then(successful),
     ])
-    const screens = { terminal: terminalText, watch: frame.text, page: pageText, html: htmlText.visible, chat: chatResult.stdout }
+    const screens = { terminal: terminalText, watch: frame.text, page: pageText, print: printText, chat: chatText }
     for (const text of Object.values(screens)) noMachineIds(text, world, { allow })
     return screens
   } finally {

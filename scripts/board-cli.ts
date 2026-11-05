@@ -1,6 +1,6 @@
 // The Agent Board for any terminal and any agent, without Claude Code: `node agent-board.mjs`
 // prints the board once, `--watch` keeps it on screen and, on a terminal, lets you work in it
-// the way the pane does (arrows, Enter, x, a, c, digits), and `--html` writes progress.html
+// the way the pane does (arrows, Enter, x, a, c, digits); the browser key opens the live page
 // and opens it. `--serve` prints the board and opens the board's page in the browser, where it
 // can be clicked (board-serve.ts). `--chat` prints the board as plain text short enough for a
 // chat app, with no link and no secrets, for an agent that answers there. `/progress connect` writes the bundled copy of this file
@@ -8,6 +8,7 @@
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
@@ -28,16 +29,16 @@ import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPriva
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
+import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
 import { boardStatus } from '../hooks/board-status'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, clipped, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, plain, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
 import { BOARD_JSON_SCHEMA, boardDocument } from '../hooks/board-json'
 import { RELEASED } from '../hooks/released'
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
-import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
-import { dashboardHtml } from '../hooks/dashboard'
+import { LOG_TAIL, isInboxFile, keepInboxDone } from '../hooks/inbox'
 import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import type { PendingArchiveRecord } from '../hooks/journal'
-import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
+import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
@@ -170,9 +171,32 @@ const readLog = (file: string): string => {
 }
 
 // `scrub` hides what must not be sent on, in a reply, before its question is picked and cut.
+let pageStateCache = readPageState('')
+const pageDoneFiles = immutableQuestionFiles({
+  directory: dirname(path),
+  isPersistent: args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg)),
+  accepts: name => pageDoneHash(name) !== null,
+  parse: (text, name) => readPageDone(text, pageDoneHash(name)!),
+  // A broken receipt cannot invalidate another session's processed question.
+  isValidationIndependent: true,
+})
+let pageDoneCache: Array<{ name: string; stamp: string }> = []
+// A poll can meet the plugin's verified write halfway through; retain its last complete record.
+const sharedPageState = () => {
+  pageStateCache = readPageState(read(pageStatePath(path)), pageStateCache)
+  pageDoneCache = pageDoneFiles.read(!isViewQuestionRead) ?? pageDoneCache
+  const at = Date.now()
+  // An expired receipt for the same filename must not shadow another session's live receipt.
+  const kept = pageDoneCache.filter(done => keepInboxDone({ [done.name]: done.stamp }, at)[done.name] !== undefined)
+  return { ...pageStateCache, inboxDone: keepInboxDone({ ...pageStateCache.inboxDone, ...Object.fromEntries(kept.map(done => [done.name, done.stamp])) }, at) }
+}
+let viewPageState: ReturnType<typeof sharedPageState> | null = null
+let droppedLogCache: { at: number; text: string } | null = null
+
 const pending = (scrub?: (text: string) => string, isFresh = !isViewQuestionRead) => {
   const files = inboxFiles.read(isFresh)
-  return peekInbox(files, readLog, scrub, s)
+  const done = (viewPageState ?? sharedPageState()).inboxDone
+  return peekInbox(files.filter(file => done[file.name] === undefined), readLog, scrub, s)
 }
 
 // The record last read, kept when the next read catches it half-written, and progress.md's
@@ -370,6 +394,8 @@ let progressHealthCache: { source: string; isCutSettled: boolean; frozen: Readon
 const observeWriterQuestions = reusableQuestionObservation()
 const observeViewQuestions = reusableQuestionObservation()
 const readBoardView = (source: string, now: number) => {
+  const pageState = sharedPageState()
+  viewPageState = pageState
   for (const proof of [...pendingQuestionProofs.values()]) keepQuestionProof(proof.kind, proof.hash)
   if (progressProjectCache?.source !== source) progressProjectCache = { source, projects: parseProgress(source) }
   const projects = progressProjectCache.projects
@@ -495,14 +521,20 @@ const readBoardView = (source: string, now: number) => {
   questions ??= observeWriterQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', previewProofs ?? undefined, turns, [], frozen).ledger
   // A question marked answered in a pane on this machine is kept off the board too.
   const tail = progressHealthCache.tail
-  const sizes = { progress: Buffer.byteLength(source), store: 0 }
+  const sizes = { progress: Buffer.byteLength(source), store: pageState.store }
   const large = sizeWarnings(sizes, s)
   const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...large]
   const finished = countManualDone(projects, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now))
   const details = storageDetails(sizes, finished, s)
   const health = progressHealthCache.lines
+  const droppedAt = Date.now()
+  if (droppedLogCache === null || droppedAt < droppedLogCache.at || droppedAt - droppedLogCache.at >= 60000) {
+    droppedLogCache = { at: droppedAt, text: read(join(dirname(path), 'progress-inbox', 'dropped.log')) }
+  }
+  const dropped = inboxDropped(droppedLogCache.text, prunedSince(now))
+  const pruned = prunedNote({ ...prunedTotal(pageState.pruned, now), turns: dropped.age + dropped.cap }, s)
   // Proof writes above refresh this snapshot; drawing need not list the directory again.
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(health.length === 0 ? {} : { health }) }
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const view = (source = read(path), now = Date.now()) => {
@@ -517,7 +549,6 @@ const freshView = () => {
   return shown
 }
 
-const pad = (n: number): string => String(n).padStart(2, '0')
 
 // The questions the running page can answer into their session, as it last said (`refreshRoutes`).
 let routes: Record<string, AnswerRoute> = {}
@@ -651,19 +682,36 @@ const copy = (text: string): boolean => {
   return isNative || isOsc
 }
 
+// A browser that starts and then exits with an error at once (no display, no sandbox) opened no
+// window, so a launch counts only when it exits cleanly or is still running a moment later.
+const LAUNCH_GRACE_MS = 750
+const watchLaunch = (child: ChildProcess, onResult: (isOpen: boolean) => void): void => {
+  let isSettled = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const finish = (isOpen: boolean) => {
+    if (isSettled) return
+    isSettled = true
+    if (timer !== undefined) clearTimeout(timer)
+    onResult(isOpen)
+  }
+  child.once('error', () => finish(false))
+  child.once('exit', code => finish(code === 0))
+  child.once('spawn', () => {
+    child.unref()
+    timer = setTimeout(() => finish(true), LAUNCH_GRACE_MS)
+  })
+}
+
 // A file or a page's address in the browser. The page's address holds only letters, digits,
 // `:/?=._-`, so cmd's `start` reads it as one word.
 const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = false): void => {
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) return done(false)
   const fallback = () => {
     const opener = process.platform === 'win32' ? [system32('cmd.exe'), ['/c', 'start', '', target]] : process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]]
-    // Not waited on: with no desktop, xdg-open can run a text browser that never returns, and the
-    // agent's command would wait with it.
+    // Waited on only for the launch grace: with no desktop, xdg-open can run a text browser that
+    // never returns, and the agent's command would wait with it.
     try {
-      const child = spawn(opener[0] as string, opener[1] as string[], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: true })
-      child.once('error', () => done(false))
-      child.once('spawn', () => done(true))
-      child.unref()
+      watchLaunch(spawn(opener[0] as string, opener[1] as string[], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: true }), done)
     } catch {
       done(false)
     }
@@ -709,43 +757,13 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
         if (!existsSync(bin)) return tryCandidate(index + 1)
       }
       const child = spawn(bin, [`--app=${target}`], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: false })
-      let settled = false
-      const onSpawn = () => {
-        if (settled) return
-        settled = true
-        child.unref()
-        done(true)
-      }
-      const onError = () => {
-        if (settled) return
-        settled = true
-        tryCandidate(index + 1)
-      }
-      child.once('spawn', onSpawn)
-      child.once('error', onError)
+      watchLaunch(child, isOpen => isOpen ? done(true) : tryCandidate(index + 1))
     } catch {
       tryCandidate(index + 1)
     }
   }
 
   tryCandidate(0)
-}
-
-const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
-  // Through Date.now, so a test clock reaches progress.html's Working now as it reaches the rest.
-  const now = new Date(Date.now())
-  const stamp = s.dashStamp(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`)
-  const html = path.replace(/\.md$/i, '') + '.html'
-  const home = homeOrNone()
-  const page = dashboardHtml(view(), s, path, stamp, pending(text => redact(text, home, process.platform === 'win32')), now.getTime())
-  // Named like any other file the board cannot write, so --watch reports it and runs on.
-  try {
-    writeFileSync(html, page)
-    writes += 1
-  } catch (error) {
-    throw fileError(html, error)
-  }
-  openInBrowser(html, isOpen => done(isOpen ? s.windowOpened() : s.windowFailed(basename(html), basename(path)), isOpen))
 }
 
 const isRegularFile = (file: string): boolean => {
@@ -1667,35 +1685,22 @@ const serveBoard = async (): Promise<void> => {
   await show(server.url, server.isKept, server.idleMs)
 }
 
-const openPageSurface = async (): Promise<void> => {
+const openPage = async (): Promise<{ note: string; isOpen: boolean }> => {
   const failure: { storeCode?: string } = {}
   const server = await ensureServer(failure)
   if (server === null) {
-    process.stdout.write(`${failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted)}\n`)
     process.exitCode = 1
-    return
+    return { note: failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted), isOpen: false }
   }
-  const v = view()
-  const waiting = v.overview.waiting
-  const urgent = v.overview.due
-  const whatNeedsYou = waiting > 0 ? (urgent > 0 ? `${s.statusWaiting(waiting)} · ${s.statusDue(urgent)}` : s.statusWaiting(waiting)) : (urgent > 0 ? s.statusDue(urgent) : s.pgNothing)
-  const howManyWorking = s.groupWorking(v.overview.active)
-
   const address = server.url
-  if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)) {
-    await new Promise<void>(done => openInBrowser(address, isOpen => {
-      if (!isOpen && !process.env.SSH_CONNECTION && !process.env.SSH_TTY) {
-        process.stdout.write(`${s.serveBrowserNone(address)}\n`)
-      }
-      done()
-    }, true))
-  }
+  const isOpen = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
+    ? await new Promise<boolean>(done => openInBrowser(address, done, true))
+    : false
+  return { note: isOpen ? s.boardPageWindowOpened(address) : s.boardPageLink(address), isOpen }
+}
 
-  if (server.isNew) {
-    process.stdout.write(`${whatNeedsYou}\n${howManyWorking}\n${s.serveAt(server.url)}\n`)
-  } else {
-    process.stdout.write(`${s.serveAlreadyRunning}\n${whatNeedsYou} · ${howManyWorking}\n${s.serveAt(server.url)}\n`)
-  }
+const openPageSurface = async (): Promise<void> => {
+  process.stdout.write(`${(await openPage()).note}\n`)
 }
 
 const stopBoard = async (): Promise<void> => {
@@ -1845,8 +1850,11 @@ const runWatchTerminal = async (): Promise<void> => {
         state = pressed.state
         if (pressed.isQuit) quit()
         if (pressed.isHtml) {
-          openHtml((note, isOpen) => {
+          void openPage().then(({ note, isOpen }) => {
             state = { ...state, note, tone: isOpen ? 'done' : 'alert', result: undefined }
+            draw()
+          }).catch(error => {
+            state = { ...state, note: failureNote(error), tone: 'alert', result: undefined }
             draw()
           })
         }
@@ -1904,9 +1912,11 @@ const run = async (): Promise<void> => {
   } else if (args.includes('--serve')) {
     await serveBoard()
   } else if (args.includes('--html')) {
-    openHtml(note => process.stdout.write(`${note}\n`))
+    await openPageSurface()
   } else if (args.includes('--print')) {
-    process.stdout.write(boardText(view(), pending(), s, options()))
+    // The explicit read-only print retains the questions and journal the old chat view showed.
+    const at = Date.now()
+    process.stdout.write(boardText(view(undefined, at), pending(), s, { ...options(), isQuestionsOpen: true }, doneToday(journalToday(at), at, s)))
   } else if (flag('--keys') !== undefined) {
     let state = emptyBoardState
     await refreshRoutes()
@@ -1920,10 +1930,10 @@ const run = async (): Promise<void> => {
         await refreshRoutes()
       }
       if (pressed.isHtml) {
-        await new Promise<void>(done => {
-          try { openHtml((note, isOpen) => { state = { ...state, note, tone: isOpen ? 'done' : 'alert' }; done() }) }
-          catch (error) { state = { ...state, note: failureNote(error), tone: 'alert' }; done() }
-        })
+        try {
+          const { note, isOpen } = await openPage()
+          state = { ...state, note, tone: isOpen ? 'done' : 'alert' }
+        } catch (error) { state = { ...state, note: failureNote(error), tone: 'alert' } }
       }
     }
     process.stdout.write(screen(pin(state)))

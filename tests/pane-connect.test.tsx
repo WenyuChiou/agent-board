@@ -273,8 +273,10 @@ for (const isAuto of [true, false]) test(`OpenCode connect uses its effective co
   const command = `${root}/commands/board.md`
   const skill = '/home/me/.agents/skills/agent-board/SKILL.md'
   expect(world.files.get(plugin)).toContain('export const AgentBoard')
-  expect(world.files.get(command)).toContain('--serve')
-  expect(world.files.get(skill)).toContain('--serve')
+  expect(world.files.get(command)).toContain('!`node "/home/me/.claude/agent-board.mjs"`')
+  expect(world.files.get(command)).not.toContain('--serve')
+  expect(world.files.get(skill)).toContain('--json')
+  expect(world.files.get(skill)).not.toContain('--serve')
   expect(world.files.get(`${root}/AGENTS.md`)).toBe('# My rules\n')
   expect(world.files.get(`${defaultRoot}/plugin/agent-board.js`)).toBe(foreign)
   expect(world.files.get(`${defaultRoot}/AGENTS.md`)).toBe(instructions)
@@ -302,7 +304,8 @@ test('OpenCode explicit config root wins over XDG when using the Windows reporte
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
   expect(world.files.get(`${root}/plugin/agent-board.js`)).toContain('export const AgentBoard')
-  expect(world.files.get(`${root}/commands/board.md`)).toContain('--serve')
+  expect(world.files.get(`${root}/commands/board.md`)).toContain('--json')
+  expect(world.files.get(`${root}/commands/board.md`)).not.toContain('--serve')
   expect(world.files.has('/xdg/opencode/plugin/agent-board.js')).toBe(false)
   expect(world.files.has('/xdg/opencode/commands/board.md')).toBe(false)
   expect(world.files.get(`${root}/opencode.json`)).toBe('{}')
@@ -351,7 +354,7 @@ test('connecting writes the board script and each installed agent’s board comm
   const board = world.files.get('/home/me/.claude/agent-board.mjs') ?? ''
   expect(board.split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
   const geminiPrompt = /^prompt = (.*)$/m.exec(world.files.get('/home/me/.gemini/commands/board.toml') ?? '')?.[1] ?? 'null'
-  expect(JSON.parse(geminiPrompt)).toContain('!{node "/home/me/.claude/agent-board.mjs" --serve}')
+  expect(JSON.parse(geminiPrompt)).toContain('!{node "/home/me/.claude/agent-board.mjs"}')
   expect(world.files.get('/home/me/.agents/skills/agent-board/SKILL.md')).toContain('node "/home/me/.claude/agent-board.mjs"')
   expect(world.files.has('/home/me/.config/opencode/commands/board.md')).toBe(false)
 
@@ -1272,7 +1275,7 @@ test('automatic connection and removal preserve personal commands and skills, in
   await $.command.run({ ...TIDY, args: 'lang en' })
   await $.command.run({ ...TIDY, args: 'connect' })
   const gemini = files[0] ?? ''
-  expect(world.files.get(gemini)).toContain('Show me the Agent Board')
+  expect(world.files.get(gemini)).toContain('The command below opens Agent Board')
   const edited = `${world.files.get(gemini)}\n# my change\n`
   world.files.set(gemini, edited)
   await $.command.run({ ...TIDY, args: 'connect' })
@@ -1315,9 +1318,8 @@ test('a collision is announced even when all installed reporting hooks were alre
 })
 
 test('an installation from 0.20.5 with no record upgrades silently: its board script, every agent’s board command and skill, and its reporter, with no agent’s hook passed over', { options: { autoConnect: true } }, async ($, on) => {
-  // The reporter and OpenCode command remain unchanged. Gemini now escapes its TOML
-  // prompt; the skills gained chat-app guidance. Select the historical language by
-  // its description rather than assuming every command still matches byte for byte.
+  // Board commands now open the page and skills expose --json. Select the historical
+  // language by its description rather than requiring commands to match byte for byte.
   const { world, shared, written, notices } = await fromEarlierRelease($, on, (world, before) => {
     world.files.set(BOARD_SCRIPT_FILE, releasedBoard(RELEASE_0_20_5.board))
     world.files.set(REPORTER_FILE, here(RELEASE_0_20_5.reporterSh))
@@ -1325,9 +1327,9 @@ test('an installation from 0.20.5 with no record upgrades silently: its board sc
     for (const file of BOARD_FILES) {
       const kind = file.endsWith('.toml') ? 'gemini' : file.endsWith('board.md') ? 'opencode' : 'skill'
       const texts = RELEASE_0_20_5[kind].map(here)
-      const text = kind === 'opencode' ? texts.find(one => one === before.get(file)) : texts.find(one => one.includes(JSON.stringify(ZH_TW.boardCommandDescription)))
+      const text = texts.find(one => one.includes(JSON.stringify(ZH_TW.boardCommandDescription)))
       expect(text).toBeDefined()
-      if (kind !== 'opencode') expect(text).not.toBe(before.get(file))
+      expect(text).not.toBe(before.get(file))
       world.files.set(file, text ?? '')
     }
   })
@@ -1347,7 +1349,8 @@ test('board commands and skills written before --serve (0.17.1 to 0.18.1), with 
   })
   expect(notices).toEqual([])
   for (const file of BOARD_FILES) expect(world.files.get(file)).toBe(written.get(file))
-  expect(written.get('/home/me/.gemini/commands/board.toml')).toContain('--serve')
+  expect(written.get('/home/me/.gemini/commands/board.toml')).toContain('--json')
+  expect(written.get('/home/me/.gemini/commands/board.toml')).not.toContain('--serve')
 })
 
 test('a released file edited by hand, with no record, is still preserved byte for byte and named', { options: { autoConnect: true } }, async ($, on) => {

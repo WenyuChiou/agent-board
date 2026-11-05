@@ -80,7 +80,8 @@ test('the board document has a schema version, the questions that need the perso
     assert.equal(future.working[0].age, s.futureTimeUnknown)
     assert.equal(future.lang, s.lang)
     assert.ok(s.boardUsage.includes('--json') && s.boardUsageAll.includes('[--json]'))
-    assert.ok(s.boardUsage.includes('--chat') && s.boardUsageAll.includes('[--chat]'))
+    assert.ok(s.boardUsageAll.includes('[--print]'))
+    assert.ok(!s.boardUsage.includes('--chat') && !s.boardUsageAll.includes('--chat'))
   }
 })
 

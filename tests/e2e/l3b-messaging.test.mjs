@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks'
 import { CONNECTOR_POLL_MS, GAPS, NATIVE_RECEIVERS, RECEIVERS, SENDERS, openHub, receiptBudget, withHub } from './lib/hub.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { noMachineIds, noSilentPress, seenWithin } from './lib/expect.mjs'
-import { chat, pageDom, run, serve, terminal } from './lib/surfaces.mjs'
+import { pageDom, print, run, serve, terminal } from './lib/surfaces.mjs'
 import { makeWorld } from './lib/world.mjs'
 import { EN } from '../../hooks/strings-en.ts'
 import { BLOCKS, LIVE_SESSIONS, PAGE_MS } from './lib/budget.mjs'
@@ -151,9 +151,8 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
   ], async hub => {
     const [, receiver] = hub.actors
     await nativeDelivery(hub, hub.actors[0], receiver)
-    const surfaces = { terminal: (await terminal.screen(hub.world)), chat: (await chat(hub.world)) }
-    assert.equal(surfaces.chat.status, 0, surfaces.chat.stderr)
-    for (const [surface, output] of [['terminal', surfaces.terminal], ['--chat', surfaces.chat.stdout]]) {
+    const surfaces = { terminal: await terminal.screen(hub.world), print: await print(hub.world) }
+    for (const [surface, output] of Object.entries(surfaces)) {
       assert.ok(output.includes(receiver.title), `${surface}: receiver card missing`)
       noMachineIds(output, hub.world)
       await knownFailure(232, () => {
