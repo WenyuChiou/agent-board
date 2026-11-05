@@ -98,3 +98,31 @@ test('a Claude Code closing question survives an empty summary without Task tool
   visibleQuestion(world, 'Blue or green?')
   expect(world.messageReads ?? 0).toBe(0)
 })
+
+test('AskUserQuestion leaves a Task list session when the native tool returns, and its step finishes', async ($, on) => {
+  const world = { ...worldOf(), hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('tool.call', { tool: 'AskUserQuestion' }, () => ({ result: { answers: { 'Blue or green?': 'Blue' } } }))
+  await start($, 'Update colors')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check palette', description: '' })
+  await $.tool.call({ tool: 'AskUserQuestion', tool_use_id: 'synthetic-list', questions: [{ question: 'Blue or green?', header: 'Color', options: [{ label: 'Blue', description: 'Blue palette' }, { label: 'Green', description: 'Green palette' }] }] })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  await $.turn.complete({ answer: 'Updated colors.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  const written = world.files.get(FILE) ?? ''
+  expect(written).not.toContain('- [?]')
+  expect(written).not.toContain('- [ ]')
+  expect(written).toContain('state=done')
+})
+
+test('AskUserQuestion that fails does not leave its question waiting in Needs you', async ($, on) => {
+  const world = worldOf()
+  const clock = engineBeneath(on, world)
+  on('tool.call', { tool: 'AskUserQuestion' }, () => ({ isError: true, result: 'declined' }))
+  await start($, 'Choose the colors')
+  await $.tool.call({ tool: 'AskUserQuestion', tool_use_id: 'synthetic-fail', questions: [{ question: 'Blue or green?', header: 'Color', options: [{ label: 'Blue', description: 'Blue palette' }] }] })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+  const ledger = parseQuestions(world.files.get(FILE.replace('.md', '-questions.json')) ?? '')
+  expect(ledger?.records.some(record => record.isUnresolved) ?? false).toBe(false)
+})

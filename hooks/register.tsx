@@ -96,7 +96,7 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, toolQuestions, turnTools } from './digest'
+import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
 import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
@@ -4271,11 +4271,10 @@ export const register: Register = (on, options) => {
       await settle($)
     } catch {}
     const ran = await next(e)
-    if (ran.deny === undefined && ran.isError !== true) {
-      // The native tool completed; preserve a nonwaiting observation for the question ledger.
-      await saveMine($, one => markAnswered(one, one.tasks.filter(task => task.id.startsWith(`ask:${call}:`)).map(task => task.id))).catch(() => undefined)
-      await settle($).catch(() => undefined)
-    }
+    // Answered, declined or failed: the native prompt is over, so its steps stop waiting. A Task
+    // list session would otherwise keep a step nothing ever completes.
+    await saveMine($, one => closeToolQuestions(one.tasks.some(task => task.id.startsWith(`ask:${call}:`)) ? markAnswered(one, one.tasks.filter(task => task.id.startsWith(`ask:${call}:`)).map(task => task.id)) : one, call)).catch(() => undefined)
+    await settle($).catch(() => undefined)
     return ran
   })
 

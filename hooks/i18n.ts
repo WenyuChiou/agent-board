@@ -547,7 +547,7 @@ export const ZH_TW = {
   noTaskTools: '這個對話沒有 Task 工具；工作回合結束時會自動摘要進度。',
   noTaskToolsHow:
     '若想逐步同步 Task 清單，可把 CLAUDE_CODE_ENABLE_TODO_TOOLS=1 加進 shell 的 profile（PowerShell 是 $PROFILE），開新視窗再啟動。',
-  noTaskToolsManual: '桌面 app、git-bash 的工作回合也會自動摘要，不必手動記在 progress.md。',
+  noTaskToolsManual: '桌面 app、git-bash 這類沒有它的對話，照常手動記在 progress.md。',
   empty: '目前沒有進行中的工作。',
   emptyHow: 'Claude 用 Task 清單開工後，這裡會自動出現；也可以在下面打「+ 專案：要做的事」自己加。',
   sectionWaiting: '等你處理',

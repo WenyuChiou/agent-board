@@ -504,7 +504,7 @@ export const EN: Strings = {
   noTaskTools: 'This session has no Task tools; progress is summarized automatically when a work turn ends.',
   noTaskToolsHow:
     'For optional Task-list updates during work, add CLAUDE_CODE_ENABLE_TODO_TOOLS=1 to your shell profile ($PROFILE in PowerShell), then start a new window.',
-  noTaskToolsManual: 'Work turns in the desktop app and git-bash are summarized too; no hand edits to progress.md are needed.',
+  noTaskToolsManual: 'Sessions without it, like the desktop app or git-bash, keep progress.md by hand.',
   empty: 'No work in progress right now.',
   emptyHow: 'Once Claude starts on a Task list, it shows up here. You can also type "+ project: thing to do" below to add one.',
   sectionWaiting: 'Waiting on you',

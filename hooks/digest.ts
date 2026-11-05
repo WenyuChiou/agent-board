@@ -228,7 +228,7 @@ export const clearAsked = (mirror: ProgressMirror): ProgressMirror => {
   return {
     ...mirror,
     autoAsk: null,
-    tasks: mirror.tasks.map(one => one.id !== id || one.waiting !== 'you' ? one : id === 'auto-question' ? answeredStep(one) : { ...one, waiting: null, why: null }),
+    tasks: mirror.tasks.map(one => one.id !== id || one.waiting !== 'you' ? one : id === 'auto-question' ? { ...one, status: 'completed' as const, waiting: null, why: null } : { ...one, waiting: null, why: null }),
   }
 }
 
@@ -245,6 +245,12 @@ export const toolQuestions = (mirror: ProgressMirror, questions: unknown, call: 
     return { ...current, source: mirror.tasks.length === 0 ? 'turns' : mirror.source, tasks: [...current.tasks.filter(task => task.id !== one.id), renewed], questionSequence: renewed.questionRevision, updated: now }
   }, mirror)
 }
+
+// The native prompt for these questions ended: their steps are finished, so no list keeps one open.
+export const closeToolQuestions = (mirror: ProgressMirror, call: string): ProgressMirror => ({
+  ...mirror,
+  tasks: mirror.tasks.map(one => one.id.startsWith(`ask:${call}:`) ? { ...one, status: 'completed' as const, waiting: null, why: null } : one),
+})
 
 // Whether a session that keeps a Task list has a step waiting on the person.
 export const isAskingYou = (mirror: ProgressMirror): boolean => mirror.source === 'tasks' && mirror.tasks.some(one => waitsOnYou(mirror, one))
