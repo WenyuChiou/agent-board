@@ -9351,13 +9351,30 @@ test('a Claude Code block that recorded state=ended shows its chip as offline, t
       assert.equal(node.getAttribute('data-presence'), 'offline', `${minutesAgo} minutes after the end`)
       assert.ok(node.getAttribute('aria-label').includes(EN.pgOffline), node.getAttribute('aria-label'))
     }
+    // The rendered chip says what an ended Codex chip says: the same word, from the same branch.
+    assert.ok(shownWords(chip).includes(EN.pgOffline), shownWords(chip))
+    assert.ok(shownWords(side).includes(EN.pgOffline), shownWords(side))
   }
 })
 
-test('a Claude Code block that is only quiet is not shown as offline', async () => {
-  const { model, chip, side } = await claudeChip('waiting', 45)
-  assert.ok(![...model.stopped, ...model.idle, ...model.groups.flatMap(group => group.rows)].some(row => row.isClosed === true))
-  for (const node of [chip, side]) assert.notEqual(node.getAttribute('data-presence'), 'offline')
+test('a Claude Code block that is only quiet, for minutes or for hours, is not shown as offline', async () => {
+  for (const minutesAgo of [45, 600, 800]) {
+    const { model, chip, side } = await claudeChip('waiting', minutesAgo)
+    assert.ok(![...model.stopped, ...model.idle, ...model.groups.flatMap(group => group.rows)].some(row => row.isClosed === true), `${minutesAgo} minutes`)
+    for (const node of [chip, side]) {
+      assert.notEqual(node.getAttribute('data-presence'), 'offline', `${minutesAgo} minutes`)
+      assert.ok(!shownWords(node).includes(EN.pgOffline), shownWords(node))
+    }
+  }
+})
+
+test('a Claude Code block that wrote state=ended and then writes again shows open again', async () => {
+  const ended = await claudeChip('ended', 5)
+  assert.equal(ended.chip.getAttribute('data-presence'), 'offline')
+  // The same block, written again by a later turn: it is no longer recorded as ended.
+  const again = await claudeChip('working', 1)
+  assert.equal(again.chip.getAttribute('data-presence'), 'open')
+  assert.ok(!shownWords(again.chip).includes(EN.pgOffline), shownWords(again.chip))
 })
 
 test('a Claude Code block that is working keeps its chip open', async () => {
