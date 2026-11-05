@@ -355,6 +355,9 @@ export const createMessaging = (directory: string, isDefault = false) => {
 export const hookMailbox = (directory: string, budget: number) => {
   const root = resolve(directory)
   let hasDeferred = false
+  // A claim Windows would not let go of is still this hook's own, checked again before every write.
+  // The next call reuses it, so the accept for a message already handed out is not refused by it.
+  let held: MessageStoreClaim | null = null
   const livePid = (): number | null => {
     try {
       const raw = readFileSync(join(root, 'server.lock'), 'utf8')
@@ -406,7 +409,10 @@ export const hookMailbox = (directory: string, budget: number) => {
           req.end(JSON.stringify(action === 'mailbox-turn' ? { ...body, before: started + wait } : body))
         })
       }
-      const claim = claimMessageStore(root)
+      // A kept claim that is no longer on disk is gone, and a fresh one is taken.
+      const kept = held
+      held = null
+      const claim = kept !== null && (() => { try { kept.check(root); return true } catch { return false } })() ? kept : claimMessageStore(root)
       const file = join(root, 'messages.json'), temp = `${file}.${process.pid}.tmp`
       try {
         // An accept acknowledges output already written, so a slow claim must not discard it.
@@ -428,7 +434,7 @@ export const hookMailbox = (directory: string, budget: number) => {
       } finally {
         try { unlinkSync(temp) } catch {}
         // Cleanup cannot take back a saved delivery that the host still needs to read.
-        try { claim.release() } catch {}
+        try { claim.release() } catch { held = claim }
       }
     } catch { return null }
   }
