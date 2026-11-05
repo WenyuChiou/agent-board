@@ -1059,8 +1059,10 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
   const cursor = read(cursorPath).trim()
   const lookupKey = (id: string): string => sha256(`${codexHome}\0${id}`)
   let nextCursor = cursor
-  // The run questions the try that wrote closes; written only once that try's write has landed (#511).
+  // The run questions each try closes, and those of every try whose write landed: only a landed
+  // write closes them (#511), even when its read-back then fails and a later try finds no block.
   let closing: QuestionRecord[] = []
+  const landed = new Map<string, QuestionRecord>()
   const count = archiveOut((text, isLast) => {
     closing = []
     const lines = text.split(/\r?\n/)
@@ -1118,7 +1120,13 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
     // A verified run goes without keeping its questions, so they close with its block (#511); the
     // ledger would otherwise keep them open with no block left to hide them. A try that does not land
     // (another session's write, a retry) closes none.
-    const ledger = runs.size > 0 ? readQuestions(questionsPath(path)) : null
+    let ledger: QuestionLedger | null = null
+    try {
+      if (runs.size > 0) ledger = readQuestions(questionsPath(path))
+    } catch (error) {
+      // A ledger that cannot be read closes nothing; the run is archived as before.
+      if (!(error instanceof BoardFileError)) throw error
+    }
     if (ledger !== null) {
       const projects = parseProgress(text)
       for (const span of spans) {
@@ -1131,8 +1139,8 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
     }
     for (const { span, text: lines } of asking) if (kept.has(span.start)) moved.set(span.session, lines)
     return { text: manual.text, entries }
-  }, now)
-  if (count !== null && count > 0) for (const record of closing) keepQuestionCapture(record, 'resolved')
+  }, now, () => { for (const record of closing) landed.set(record.id, record) })
+  if (count !== null && count > 0) for (const record of landed.values()) keepQuestionCapture(record, 'resolved')
   if (nextCursor !== cursor) rewrite(cursorPath, () => `${nextCursor}\n`)
   return count
 }
