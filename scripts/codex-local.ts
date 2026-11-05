@@ -396,10 +396,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const config = configs[agent] ?? ''
   const script = join(root, 'agent-board.mjs')
-  // The doctor and the trust step only read the board's files, so they compare them with what an install in the
-  // board's own language wrote, which its first line holds: asked in another language, only the printed words change (#807).
+  // The doctor, trust step and plain setup compare or keep the board's files in what an install in the
+  // board's own language wrote, which its first line holds: asked in another language, or run on a system
+  // whose locale differs from the installed board, only the printed words change (#807, #879).
   const fileWords = ((): Strings => {
-    if (mode !== '--codex-doctor' && mode !== '--codex-trust') return s
+    if (mode === '--codex-setup' && flag('--lang') !== undefined) return s
     const head = /^globalThis\.AGENT_BOARD = (.*)$/.exec(readLocal(script)?.split('\n', 1)[0] ?? '')
     try {
       const lang = object(JSON.parse(head?.[1] ?? '')).lang
