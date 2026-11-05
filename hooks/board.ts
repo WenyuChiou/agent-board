@@ -10,6 +10,7 @@ import { agentLabel } from './strings'
 import { isSameName, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
+import type { TidyPreview } from './tidy'
 
 // The board as plain text, for agents other than Claude Code: the standalone script that
 // `/progress connect` writes beside progress.md prints it in a terminal (once, or live with
@@ -586,7 +587,7 @@ export type BoardItem =
 
 // `key` is the chosen line's, so the choice stays on it when lines above it come or go. `seen`
 // holds each line's fingerprint as the last draw showed it (null before the first draw).
-export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean }
+export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean; bulkTidy?: { token: string; preview: TidyPreview } }
 
 export type BoardAction =
   | { type: 'tick'; ref: StepRef }
@@ -1009,8 +1010,12 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
     lines.push(c('quiet', s.empty), ...muted(agents.length === 0 ? s.boardNoAgents : s.boardAgentsHere(agents.join(', ')), ''), ...muted(s.boardEmptyHow, ''))
   }
   // The line's own keys give way first, so the keys that move and quit always show.
+  // The bulk-archive key is not on that line: it would push the line's own keys off
+  // (the answer hints must stay complete), so it gets its own line, and only when the
+  // board has stopped rows to clean.
   const own = keysFor(items[at], s, routes).join(' · ')
   lines.push('', c('quiet', own === '' ? cut(s.boardKeysMove, o.width) : `${cut(own, o.width - cols(s.boardKeysMove) - cols(' · ') - 1)} · ${s.boardKeysMove}`))
+  if (view.stopped.length > 0) lines.push(c('quiet', s.boardKeyBulkArchive))
   if (result === undefined) resultLines('')
   for (const line of view.health ?? []) lines.push(...wrap(line, o.width - 2).map(part => c('quiet', part)))
 
