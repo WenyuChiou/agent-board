@@ -817,6 +817,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           if (hasWritten) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
           return true
         }
+        if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
       }
     }
     if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress })
