@@ -5,7 +5,7 @@
 // The loop keeps the running hash in locals (not a per-block array) and builds the hex
 // output from a byte lookup, because this runs once per question id, future-time key and
 // confirm key on the board path; the arithmetic is the same SHA-256, only the bookkeeping
-// is cheaper. Every index read below is in range, so no `?? 0` guard is needed.
+// is cheaper. Every index read below is in range, so the reads carry `!` instead of `?? 0` guards.
 
 const HEX: string[] = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, '0'))
 
@@ -26,8 +26,8 @@ const computeSha256 = (text: string): string => {
   const length = bytes.length
   // The message, a 1 bit, zeros, and its length in bits, in 512-bit blocks of 16 words.
   const words = new Uint32Array(((length + 8) >> 6) * 16 + 16)
-  for (let i = 0; i < length; i++) words[i >> 2] |= bytes[i] << (24 - (i % 4) * 8)
-  words[length >> 2] |= 0x80 << (24 - (length % 4) * 8)
+  for (let i = 0; i < length; i++) words[i >> 2] = words[i >> 2]! | (bytes[i]! << (24 - (i % 4) * 8))
+  words[length >> 2] = words[length >> 2]! | (0x80 << (24 - (length % 4) * 8))
   words[words.length - 2] = Math.floor(length / 0x20000000)
   words[words.length - 1] = length * 8
   let a = 0x6a09e667
@@ -40,13 +40,13 @@ const computeSha256 = (text: string): string => {
   let h = 0x5be0cd19
   const w = new Uint32Array(64)
   for (let block = 0; block < words.length; block += 16) {
-    for (let t = 0; t < 16; t++) w[t] = words[block + t]
+    for (let t = 0; t < 16; t++) w[t] = words[block + t]!
     for (let t = 16; t < 64; t++) {
-      const early = w[t - 15]
-      const late = w[t - 2]
+      const early = w[t - 15]!
+      const late = w[t - 2]!
       const s0 = rotate(early, 7) ^ rotate(early, 18) ^ (early >>> 3)
       const s1 = rotate(late, 17) ^ rotate(late, 19) ^ (late >>> 10)
-      w[t] = (w[t - 16] + s0 + w[t - 7] + s1) | 0
+      w[t] = (w[t - 16]! + s0 + w[t - 7]! + s1) | 0
     }
     let aa = a
     let bb = b
@@ -57,7 +57,7 @@ const computeSha256 = (text: string): string => {
     let gg = g
     let hh = h
     for (let t = 0; t < 64; t++) {
-      const t1 = (hh + (rotate(ee, 6) ^ rotate(ee, 11) ^ rotate(ee, 25)) + ((ee & ff) ^ (~ee & gg)) + K[t] + w[t]) | 0
+      const t1 = (hh + (rotate(ee, 6) ^ rotate(ee, 11) ^ rotate(ee, 25)) + ((ee & ff) ^ (~ee & gg)) + K[t]! + w[t]!) | 0
       const t2 = ((rotate(aa, 2) ^ rotate(aa, 13) ^ rotate(aa, 22)) + ((aa & bb) ^ (aa & cc) ^ (bb & cc))) | 0
       hh = gg
       gg = ff
@@ -81,7 +81,7 @@ const computeSha256 = (text: string): string => {
   let out = ''
   for (const word of [a, b, c, d, e, f, g, h]) {
     const unsigned = word >>> 0
-    out += HEX[(unsigned >>> 24) & 255] + HEX[(unsigned >>> 16) & 255] + HEX[(unsigned >>> 8) & 255] + HEX[unsigned & 255]
+    out += HEX[(unsigned >>> 24) & 255]! + HEX[(unsigned >>> 16) & 255]! + HEX[(unsigned >>> 8) & 255]! + HEX[unsigned & 255]!
   }
   return out
 }
