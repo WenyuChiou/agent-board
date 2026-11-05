@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, putCodexBlock, sessionTitle } from '../hooks/codex'
+import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, putCodexBlock, sessionTitle } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
@@ -32,6 +32,8 @@ import { deliveryText } from '../hooks/messaging'
 import { isSessionEnd, isTurnStart, turnStartEnvelope } from '../hooks/hook-messages'
 import { hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
+import { appendJournal, journalLine, journalPath } from '../hooks/journal'
+import { currentPart } from '../hooks/retention'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -339,6 +341,7 @@ const saveReporterTail = (progress: string, fragment: Buffer): string => {
 const filesByFolder = (mode: string, agent: string): boolean => mode === '--codex-event' || mode === '--agent-status' && agent === 'opencode'
 
 export const runCodexLocal = async (args: string[], boardPath: string, s: Strings): Promise<boolean> => {
+  args = args.map(arg => arg === '--report' ? '--codex-report' : arg)
   const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-event', '--agent-status'].find(one => args.includes(one))
   if (!mode) return false
   const flag = (name: string): string | undefined => {
@@ -349,8 +352,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     return value
   }
   const baked = (globalThis as { AGENT_BOARD?: { codexRoot?: string } }).AGENT_BOARD
+  // Reporting needs a known board name, while setup and lifecycle events need a native adapter.
   const agent = (flag('--agent') ?? 'codex') as LocalAgent
-  if (!localAgents.includes(agent)) throw new Error('UNSUPPORTED_AGENT')
+  if (!(mode === '--codex-report' ? Object.hasOwn(s.agentNames, agent) : localAgents.includes(agent))) throw new Error('UNSUPPORTED_AGENT')
   const home = resolve(flag('--home') ?? homedir())
   const root = resolve(flag('--data-dir') ?? baked?.codexRoot ?? join(home, '.agent-board'))
   const before = new Map<string, string | null>()
@@ -499,7 +503,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           ? (typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID)
           : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined)
         : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : (env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined) ?? reportSession())
-      if (session === undefined && mode === '--codex-report' && agent === 'codex') throw new Error('UNBOUND_REPORT')
+      if (session === undefined && mode === '--codex-report') throw new Error('UNBOUND_REPORT')
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
       const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
       if (mode === '--agent-status' && (agent === 'codex' || agent === 'cursor')) throw new Error('INVALID_EVENT')
@@ -578,6 +582,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (!next.equals(before)) atomic(progress, next, checkDeadline)
     }
     let isFirstSessionEvent = false
+    let reportCut = 0
     const apply = (entry: Pending): CodexReport => {
       const { mode, agent, session, now, at, status, event, folder = '', folderDigest, isBoardPrompt, payload, run } = entry
       const owner = hash(`${agent}:${session}`)
@@ -636,10 +641,29 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const directory = agent === 'codex' && mode === '--codex-event' && name !== ''
         ? { folder: name, folderDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest }
-      const report = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const { report, entries, cut } = limitReport(full)
+      if (entry === current) reportCut = cut
+      const saveFullText = (): void => {
+        if (entries.length === 0) return
+        const now = Date.parse(clock)
+        const journal = currentPart(journalPath(progress, now), file => {
+          try { return statSync(file).size } catch (error) {
+            if ((error as { code?: string }).code === 'ENOENT') return null
+            throw error
+          }
+        })
+        const past = readLocal(journal) ?? ''
+        // Overflow is evidence of the report, not a newly completed step.
+        const lines = entries.map(entry => `> ${journalLine(entry, now, s)}`).filter(line => !past.split(/\r?\n/).includes(line))
+        const next = appendJournal(past, lines, s)
+        if (next !== past) atomic(journal, next, checkDeadline)
+        if (readLocal(journal) !== next) throw new Error('JOURNAL_WRITE_CONFLICT')
+      }
       if (isRun) {
         // A lazy history file can prove that a block written from a hint is a run.
         // Once the record is strong, later reports still never read the board.
+        saveFullText()
         if (original !== null && !isStrongRun(original)) withdrawRunBlock(owner)
         atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`, checkDeadline, true)
         return report
@@ -655,6 +679,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
         ...report, title: encoded(report.title), project: encoded(report.project), steps: report.steps.map(encoded),
       }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project), 'latin1')
+      saveFullText()
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
       try { atomic(progress, next, checkDeadline) } catch (error) {
         if (aside !== null) {
@@ -844,7 +869,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
       }
     }
-    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress })
+    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress, cut: reportCut })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
     else if (agent === 'antigravity') {
       // The host supplies the binding; the agent supplies semantic summaries. A first

@@ -1,6 +1,6 @@
 # progress.md format, version 1
 
-`progress.md` is the shared storage read by the interactive board and optional Claude Code pane. A native reporter, explicit agent report, shell script or person can write a valid block. See [common setup](SETUP.md) for Codex, Antigravity CLI and other host adapters; this specification does not imply live receiving support.
+`progress.md` is the shared storage read by the interactive board and optional Claude Code pane. Agents report through the installed board's `--report --agent <name>` command, using the board path printed by setup and JSON on stdin. Agents may hand-edit their own block only when that command is missing; hand-kept tasks remain available to people. See [common setup](SETUP.md) for Codex, Antigravity CLI and other host adapters; this specification does not imply live receiving support.
 
 This page says what the pane's parser accepts and what the pane's writer produces. It is written from the code (`hooks/parse.ts`, `hooks/blocks.ts`, `hooks/mirror.ts`, `hooks/ask.ts`, `hooks/journal.ts`, `hooks/view.ts`, `hooks/register.tsx`, and the words the writer uses in `hooks/i18n.ts`). Where this page and the code disagree, the code wins and this page has a bug.
 
@@ -99,7 +99,7 @@ An agent may put `<!-- question=<64 lowercase hex characters>:<positive decimal 
 
 A task is a `###` heading with its notes and steps.
 
-**Hand-kept tasks** are tasks outside any agent block: the ones a person or an agent writes without markers, and the ones the pane's quick add writes (`+ project: title due 11-20; step; step` in the pane's box, or `/progress add …`; it adds a `###` task at the end of the project's section, with a due note and one `- [ ]` line per step). Their `>` notes are the task's background, with any due-date phrase removed, joined by ` · `. If one note starts with a background label (see below) that note alone is the background.
+**Hand-kept tasks** are tasks outside any agent block: the ones a person writes without markers, and the ones the pane's quick add writes (`+ project: title due 11-20; step; step` in the pane's box, or `/progress add …`; it adds a `###` task at the end of the project's section, with a due note and one `- [ ]` line per step). Agents use the report command for their work. Their `>` notes are the task's background, with any due-date phrase removed, joined by ` · `. If one note starts with a background label (see below) that note alone is the background.
 
 **Background line.** The background of an agent block is the first note that starts with a background label, followed by one line of text in any language. The label is `背景`, `Context` or `Background` (any letter case), then optionally spaces, then a `:` or `：`. Other `>` notes of a block are not shown by the pane, except the handoff line below; people reading the file see them. The pane's writer uses `背景：` in zh-TW and zh-CN and `Context:` in English (see [Language](#language)); a reader accepts all three.
 
@@ -132,7 +132,7 @@ Examples: `> due 10-31`, `> due: 2026-11-05`, `> 截止 11/20`. The pane's quick
 
 ## Agent blocks
 
-An agent block is the part of the file one session owns. The session writes it and rewrites it, and only it. The pane's Claude Code writer produces one per session. Other agents write theirs the same way.
+An agent block is the part of the file one session owns. The pane's Claude Code writer produces one per session. Other agents update theirs through `--report --agent <name>`; the writer preserves every other session's block. The manual syntax below describes the stored format and the fallback when the command is missing.
 
 ```
 <!-- auto session=2be48af2 agent=claude state=waiting updated=2026-10-16T14:32:05.123Z -->
@@ -201,6 +201,8 @@ Blocks with no steps are not worth writing. The pane's writer removes a session'
 Put the block under the `## project` heading of its repository, after what is already in that section, with a blank line before the start marker and after the end marker. If the heading is not in the file, add it at the end of the file first. The pane's writer does exactly this.
 
 ### Rules
+
+Agents use the report command; these write rules apply to writer implementations and to the manual fallback only when the command is missing.
 
 1. One block per session. Reuse the same `session` id for the whole session.
 2. Rewrite only between your own markers. Replace the whole block each time; it is derived state.
@@ -464,6 +466,24 @@ How the pane reads it:
 
 ## Writing a block from another agent
 
+Use the absolute board path printed by setup and send JSON on stdin:
+
+```sh
+node "/absolute/path/from/setup/agent-board.mjs" --report --agent codex
+```
+
+```json
+{"title":"Check the installer","project":"Example project","state":"working","steps":["- [x] Read setup","- [~] Run tests"]}
+```
+
+Use your own known agent name and the exact session binding provided by the host. `--codex-report` is the same command for existing integrations. See [report binding](CODEX.md#open-and-report); an unbound session must not fall back to hand edits while the command is available.
+
+Keep titles and steps to one line of at most 120 characters, linking to detail. Never extend a finished step; add new work as a new step. At write time the report command keeps the first 119 Unicode characters plus `…` when text exceeds 120; a step's `- [ ] ` marker is excluded from the count. The full title and affected steps are saved to this month's journal before the shortened block is written. Quoted overflow entries do not count as completed steps. JSON output adds `cut`, the number of shortened titles and steps. The command accepts 1–40 steps, with the existing 500-character input validation.
+
+### Manual fallback when the report command is missing
+
+Only when the command is missing:
+
 1. Read `progress.md`, or start an empty file. Read the file again right before every write.
 2. Make an 8-character id once per session, for example 8 hex characters from your random source. Keep it for the whole session.
 3. Find `## <repository name>`. If it is not there, add it at the end of the file.
@@ -476,7 +496,7 @@ How the pane reads it:
 10. When every step is `[x]` (or `[-]`), set `state=done` and update `updated=`.
 11. If you stop for good with steps left, set `state=ended`. If you cannot tell that a session ended, do nothing: after 12 hours without a write the pane shows the block as stopped.
 
-If you cannot write markers, write a plain hand-kept task (a `###` with steps) under your project. It shows in the pane, but it has no state and never shows as stopped. Once all its steps are `[x]` or `[-]`, it counts toward the archive after three days under the observation and upgrade rules above. In 0.24.1 scheduled sweeps only count it; explicit archive actions can move it at once.
+People may also write a plain hand-kept task (a `###` with steps) under a project. It shows in the pane, but it has no state and never shows as stopped. Once all its steps are `[x]` or `[-]`, it counts toward the archive after three days under the observation and upgrade rules above. In 0.24.1 scheduled sweeps only count it; explicit archive actions can move it at once.
 
 ## Versioning
 

@@ -405,7 +405,7 @@ export const ZH_TW = {
   connectNone: '沒找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code、OpenClaw）。',
   setupCodexApproval: (): string => "尚未確認目前 Codex hook 的核准狀態。請檢查 /hooks；已有的受管理回報指示會保留。",
   codexFallbackInstructions: (command: string): string => "在 Codex /hooks 核准這些 hooks 前，每個實質工作步驟後，將 JSON 由 stdin 傳給：\n\n" + command + "\n\n使用 project、title、state（working/waiting/done）與含核取標記的 steps。取消步驟保留 [-]。使用 --codex-report 回報，命令會自行找到目前工作階段；若命令無法回報，繼續工作，不向使用者提及，看板會顯示。不得掃描對話或猜測工作階段識別碼。",
-  codexReportUnbound: '目前還無法回報這個工作階段的步驟；看板仍會透過 hooks 顯示它。',
+  codexReportUnbound: '這份回報尚未綁定工作階段；請繼續工作，不要手動更改看板。',
   connectCodexTrust: 'Codex 第一次要在它的 /hooks 裡核准這個 hook 才會跑。',
   connectHermesTrust: 'Hermes Agent 第一次跑這個 hook 前會問你一次，回答 y（或用 --accept-hooks 啟動）。',
   connectSkipped: (name: string, path: string): string => `${name} 的設定檔讀不懂，沒有動它：${path}`,

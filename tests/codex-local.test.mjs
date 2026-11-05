@@ -3854,6 +3854,96 @@ test('Codex explicit reports bind the current thread and preserve other blocks b
   assert.match(readFileSync(f.progress, 'utf8'), /state=done updated=\d{4}-/)
 }))
 
+test('the same report from three agents gives three blocks of the same shape', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const payload = { title: 'Shared report', project: 'Synthetic project', state: 'working', steps: ['- [x] Read the task', '- [~] Check the result'] }
+  const shapes = []
+  for (const agent of ['codex', 'cursor', 'muse']) {
+    const id = `synthetic-report-${agent}`
+    const result = f.command(['--report', '--print', '--agent', agent, '--session', id], payload)
+    assert.equal(result.status, 0, result.stderr)
+    const text = readFileSync(f.progress, 'utf8')
+    const owner = createHash('sha256').update(`${agent}:${id}`).digest('hex').slice(0, 8)
+    const block = text.match(new RegExp(`<!-- auto session=${owner} [^\\n]*\\n[\\s\\S]*?<!-- /auto session=${owner} -->`))?.[0]
+    assert.ok(block, `${agent} has a bound block`)
+    assert.match(block, new RegExp(` agent=${agent} `))
+    shapes.push(block.replace(/owner=[a-f0-9]{64}/, 'owner=OWNER').replaceAll(owner, 'OWNER').replace(`agent=${agent}`, 'agent=AGENT').replace(`source=${agent}-local`, 'source=AGENT-local').replace(`resume=${id}`, 'resume=SESSION').replace(/updated=\S+/, 'updated=TIME'))
+    assert.equal(JSON.parse(result.stdout).cut, 0)
+  }
+  assert.equal((readFileSync(f.progress, 'utf8').match(/^<!-- auto /gm) ?? []).length, 3)
+  assert.equal(new Set(shapes).size, 1)
+}))
+
+test('a report step over 120 characters is cut on the board and kept in full in the journal', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const title = 'Synthetic title ' + 't'.repeat(130)
+  const long = 'Synthetic detail ' + 's'.repeat(130)
+  const exact = 'e'.repeat(120)
+  const unicode = '🧪'.repeat(121)
+  const result = f.command(['--codex-report'], { title, project: 'Synthetic project', state: 'working', steps: [`- [~] ${long}`, `- [ ] ${exact}`, `- [ ] ${unicode}`] })
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.cut, 3)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.ok(text.includes(`### ${title.slice(0, 119)}…\n`))
+  assert.ok(text.includes(`- [~] ${long.slice(0, 119)}…\n`))
+  assert.ok(text.includes(`- [ ] ${exact}\n`))
+  assert.ok(text.includes(`- [ ] ${'🧪'.repeat(119)}…\n`))
+  assert.ok(!text.includes(long))
+  const now = new Date(output.updated)
+  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+  const journal = readFileSync(join(f.root, `progress-journal-${month}.md`), 'utf8')
+  assert.ok(journal.includes(title))
+  assert.ok(journal.includes(long))
+  assert.ok(journal.includes(unicode))
+  const { countDay } = await importTs('../hooks/journal.ts')
+  assert.equal(countDay(journal, now.getTime()), 0)
+  const titleOnly = f.command(['--report'], { title, state: 'working', steps: ['- [~] Short step'] })
+  assert.equal(titleOnly.status, 0, titleOnly.stderr)
+  assert.equal(JSON.parse(titleOnly.stdout).cut, 1)
+  assert.ok(readFileSync(join(f.root, `progress-journal-${month}.md`), 'utf8').includes('Short step'))
+  const blockedProgress = join(f.root, 'blocked.md')
+  f.save(blockedProgress, '## Preserve this project\n')
+  mkdirSync(join(f.root, `blocked-journal-${month}.md`))
+  const blocked = f.command(['--report', '--progress-file', blockedProgress], { title: 'Blocked journal', state: 'working', steps: [`- [~] ${long}`] })
+  assert.notEqual(blocked.status, 0)
+  assert.equal(readFileSync(blockedProgress, 'utf8'), '## Preserve this project\n')
+}))
+
+test('--report and --codex-report write the same block', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const payload = { title: 'Alias report', project: 'Synthetic project', state: 'waiting', steps: ['- [?] Choose the next step', '- [ ] Continue'] }
+  const legacy = f.command(['--codex-report', '--print'], payload)
+  assert.equal(legacy.status, 0, legacy.stderr)
+  const normalize = text => text.replace(/updated=\S+/g, 'updated=TIME')
+  const before = normalize(readFileSync(f.progress, 'utf8'))
+  const alias = f.command(['--report', '--print'], payload)
+  assert.equal(alias.status, 0, alias.stderr)
+  assert.equal(normalize(readFileSync(f.progress, 'utf8')), before)
+  const { updated: legacyUpdated, ...legacyOutput } = JSON.parse(legacy.stdout)
+  const { updated: aliasUpdated, ...aliasOutput } = JSON.parse(alias.stdout)
+  assert.deepEqual(aliasOutput, legacyOutput)
+  assert.equal(aliasOutput.cut, 0)
+  for (const flag of ['--report', '--codex-report']) {
+    const rejected = f.command([flag, '--print'], payload, { CODEX_THREAD_ID: '' })
+    assert.notEqual(rejected.status, 0)
+    assert.equal(rejected.stderr.trim().split('\n').length, 1)
+    assert.equal(normalize(readFileSync(f.progress, 'utf8')), before)
+  }
+  // These are every named agent in the board's three language tables, including report-only hosts.
+  for (const agent of ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'dot', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek']) {
+    const id = `synthetic-alias-${agent}`
+    for (const flag of ['--report', '--codex-report']) {
+      const result = f.command([flag, '--agent', agent, '--session', id], payload)
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(JSON.parse(result.stdout).session, id)
+    }
+    const unbound = f.command(['--report', '--agent', agent], payload, { CODEX_THREAD_ID: '', AGENT_BOARD_AGENT: '', AGENT_BOARD_SESSION_ID: '' })
+    assert.notEqual(unbound.status, 0)
+    assert.equal(unbound.stderr.trim().split('\n').length, 1)
+  }
+}))
+
 test('Codex cannot mark unfinished work done or inject another Markdown block', () => fixture(f => {
   f.install('--apply')
   assert.notEqual(f.report('done').status, 0)
@@ -7934,7 +8024,7 @@ test("a report from a folder with the same name as a person's session in another
   const before = everyFile(f.root).map(file => [file, readFileSync(file)])
   const result = folderReport(f, otherFolder)
   assert.notEqual(result.status, 0)
-  assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+  assert.equal(result.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
   assert.equal(result.stdout, '')
   assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file)]), before)
   assert.equal(sessionRecord(f, session).folder, 'demo')
@@ -8137,7 +8227,7 @@ test('folder reporting rechecks an inferred session after a two-session backlog'
   }))
   const result = folderReport(f, cwd)
   assert.notEqual(result.status, 0)
-  assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+  assert.equal(result.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
   assert.equal(result.stdout, '')
   assert.ok(readFileSync(f.progress).includes(before))
   assert.deepEqual(sessionRecord(f, session), record)
@@ -8158,7 +8248,7 @@ test('folder reporting refuses ambiguous, stale, ended, old and strong-run recor
     const before = everyFile(f.root).map(file => [file, readFileSync(file, 'utf8')])
     const result = folderReport(f, cwd)
     assert.notEqual(result.status, 0)
-    assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+    assert.equal(result.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
     assert.equal(result.stdout, '')
     assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file, 'utf8')]), before)
   }
