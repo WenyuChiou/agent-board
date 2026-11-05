@@ -26,10 +26,21 @@ export type Message = {
   framingNonce?: string
   // Handed over to a caller that can acknowledge it, so it holds its target until it does (roadmap invariant 4).
   awaitsAck?: boolean
+  // The name a hook gave its claim, and how many times a claim nobody accepted was handed out again (#990).
+  ref?: string
+  redelivered?: number
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 export const isMailboxTarget = (id: string): boolean => /^mailbox_[0-9a-f]{24}$/.test(id)
 const isHookDelivered = (one: Message): boolean => one.status === 'accepted' && isMailboxTarget(one.target) && !one.awaitsAck
+// A hook can stop waiting after the board has claimed a message for it, and then nobody accepts it. A
+// claim a hook named is handed out again once the lease has passed, a few times at most, with the same
+// ACK code and a line saying it may be a repeat (#990). A claim with no name (board_inbox, a live
+// receiver) is handed over once.
+export const MAILBOX_LEASE_MS = 30_000
+export const MAILBOX_REDELIVERIES = 3
+const isLapsed = (one: Message, now: number): boolean => one.status === 'uncertain' && one.error === '' && one.ref !== undefined && isMailboxTarget(one.target)
+  && now - one.claimed >= MAILBOX_LEASE_MS && (one.redelivered ?? 0) < MAILBOX_REDELIVERIES
 
 export const FINISHED_KEEP_MS = 24 * 60 * 60 * 1000
 export const OPEN_LIMIT_MS = 30 * 60 * 1000
@@ -56,7 +67,7 @@ export const senderLabel = (from: string): string => {
 export const textHash = (text: string): string => sha256(JSON.stringify(text))
 // What anyone but the receiver is shown of a message: no nonce or hash, and a reply without the
 // nonce its ACK line carries.
-export const shownMessage = ({ nonce, hash: _hash, framingNonce: _framingNonce, ...one }: Message): Omit<Message, 'nonce' | 'hash' | 'framingNonce'> => ({
+export const shownMessage = ({ nonce, hash: _hash, framingNonce: _framingNonce, ref: _ref, ...one }: Message): Omit<Message, 'nonce' | 'hash' | 'framingNonce' | 'ref'> => ({
   ...one,
   reply: nonce !== '' && (one.reply === `ACK ${nonce}` || one.reply.startsWith(`ACK ${nonce} `)) ? one.reply.slice(`ACK ${nonce}`.length).trimStart() : one.reply,
 })
@@ -100,6 +111,7 @@ export const deliveryText = (message: Message, s: Strings = ZH_TW): string => [
     ? s.messagesDeliveryBoard
     : s.messagesDeliveryAgent(message.framingNonce ? senderLabel(message.from) : agentOf(message.from)),
   s.messagesDeliveryWarning,
+  ...(message.redelivered ? [s.messagesDeliveryRepeat] : []),
   s.messagesDeliveryAck(message.nonce),
   `<<<AB-${message.framingNonce ?? message.nonce}`,
   message.text,
@@ -178,12 +190,16 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   const message: Message = { ...request, ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
   return { state: { ...state, messages: [...state.messages, message] }, message }
 }
-export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string): { state: MessageState; messages: Message[] } => {
+export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string): { state: MessageState; messages: Message[] } => {
   if (target.contested || target.expires <= now) return { state, messages: [] }
-  const busy = state.messages.some(one => one.to === address(target.agent, target.session) && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one))
-  const messages = busy ? [] : state.messages.filter(one => one.target === target.id && one.turn === target.turn && one.status === 'queued').slice(0, 1)
+  const busy = state.messages.some(one => one.to === address(target.agent, target.session) && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isLapsed(one, now))
+  const messages = busy ? [] : state.messages.filter(one => one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))).slice(0, 1)
   if (messages.length === 0) return { state, messages }
-  const claimed = messages.map(one => ({ ...one, status: 'uncertain' as const, claimed: now, nonce, updated: now }))
+  // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.
+  const claimed = messages.map(({ ref: _ref, ...one }) => ({
+    ...one, status: 'uncertain' as const, claimed: now, nonce: one.nonce || nonce, updated: now,
+    ...(one.status === 'uncertain' ? { redelivered: (one.redelivered ?? 0) + 1 } : {}), ...(ref === undefined ? {} : { ref }),
+  }))
   return { state: { ...state, messages: state.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }
 }
 export const messageReceipt = (state: MessageState, target: Connection, input: Record<string, unknown>, now: number): MessageState => {

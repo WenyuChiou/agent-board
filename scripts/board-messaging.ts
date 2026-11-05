@@ -2,14 +2,16 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
-import { acceptMailboxMessage, endMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, takeMailboxMessage } from '../hooks/hook-messages'
-import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isFinished, isMailboxTarget, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, shownMessage, textHash } from '../hooks/messaging'
+import { acceptMailboxMessage, endMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
+import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isFinished, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, shownMessage, textHash } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
 import { privateFolder } from './private-folder'
 import { claimMessageStore } from './message-store-claim'
 import type { MessageStoreClaim } from './message-store-claim'
 
+// The name a hook gives its mailbox claim, so it can hand back a claim it stopped waiting for (#990).
+const isClaimRef = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{12}$/.test(value)
 export const parseMessageStore = (text: string, now: number): MessageState => {
   const saved = JSON.parse(text) as MessageState & { version: unknown }
   if (saved.pausePeerMessages !== undefined && typeof saved.pausePeerMessages !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
@@ -20,6 +22,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
   for (const one of messages) {
     messageId(one.id)
     if (one.framingNonce !== undefined && (typeof one.framingNonce !== 'string' || !/^[0-9a-f]{32}$/.test(one.framingNonce)) || one.awaitsAck !== undefined && typeof one.awaitsAck !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
+    if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
     messageId(one.turn)
     messageText(one.from, 300)
@@ -65,11 +68,17 @@ const mailboxAction = (state: MessageState, action: string, body: Record<string,
     return { state: next, result: { contested: next.mailboxes!.find(one => one.id === mailboxId(agent, session))!.contested === true } }
   }
   if (action === 'mailbox-turn') {
-    messageFields(body, ['agent', 'session', 'surface', 'before', 'isRestricted'])
+    messageFields(body, ['agent', 'session', 'surface', 'before', 'isRestricted', 'ref'])
+    if (body.ref !== undefined && !isClaimRef(body.ref)) throw new Error('INVALID_REF')
     if (body.isRestricted === true && (state.mailboxes?.find(one => one.id === mailboxId(agent, session))?.mcpLeaseUntil ?? 0) > now) throw new Error('NO_LEASE')
     if (body.before !== undefined && (typeof body.before !== 'number' || now > body.before)) return { state, result: { message: null } }
-    const next = takeMailboxMessage(state, agent, session, messageText(body.surface, 100), now, STALE_MS, randomBytes(3).toString('hex'))
+    const next = takeMailboxMessage(state, agent, session, messageText(body.surface, 100), now, STALE_MS, randomBytes(3).toString('hex'), body.ref)
     return { state: next.state, result: { message: next.message } }
+  }
+  if (action === 'mailbox-release') {
+    messageFields(body, ['agent', 'session', 'ref'])
+    if (!isClaimRef(body.ref)) throw new Error('INVALID_REF')
+    return { state: releaseMailboxMessage(state, agent, session, body.ref, now), result: { ok: true } }
   }
   messageFields(body, action === 'mailbox-end' ? ['agent', 'session'] : action === 'mailbox-ack' ? ['agent', 'session', 'id', 'nonce', 'reply'] : ['agent', 'session', 'id', 'nonce', 'awaitsAck'])
   const target = state.mailboxes?.find(one => one.id === mailboxId(agent, session))
@@ -363,7 +372,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         save(dismissMessage(state, messageId(body.id), now), now)
         return { ok: true }
       }
-      if (['mailbox-turn', 'mailbox-accept', 'mailbox-end', 'mailbox-ack', 'mcp-enroll'].includes(action)) {
+      if (['mailbox-turn', 'mailbox-release', 'mailbox-accept', 'mailbox-end', 'mailbox-ack', 'mcp-enroll'].includes(action)) {
         const next = mailboxAction(state, action, body, now)
         save(next.state, now)
         return next.result
@@ -461,7 +470,8 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
           req.end(JSON.stringify(action === 'mailbox-turn' ? { ...body, before: started + wait } : body))
         })
       }
-      if (action === 'peer-send') throw new Error('BOARD_NOT_RUNNING')
+      // Only a running board claims after the hook stopped waiting; the store is written by the hook itself.
+      if (action === 'peer-send' || action === 'mailbox-release') throw new Error('BOARD_NOT_RUNNING')
       // A kept claim that is no longer on disk is gone, and a fresh one is taken.
       const kept = held
       held = null
@@ -496,13 +506,28 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
 }
 export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(directory, budget).call
 export const hookMailbox = (directory: string, budget: number) => {
+  const deadline = Date.now() + budget
   const access = mailboxAccess(directory, Math.min(150, budget), Math.min(120, budget))
   const call = async (action: string, body: Record<string, string>, now: number): Promise<Message | null> => {
     try { return (await access.call(action, body, now)).message as Message ?? null } catch { return null }
   }
   return {
     get hasDeferred() { return access.isDeferred() },
-    turn: (agent: string, session: string, surface: string, now: number) => call('mailbox-turn', { agent, session, surface }, now),
+    turn: async (agent: string, session: string, surface: string, now: number): Promise<Message | null> => {
+      const ref = randomBytes(6).toString('hex')
+      try { return (await access.call('mailbox-turn', { agent, session, surface, ref }, now)).message as Message ?? null } catch (error) {
+        // A board started before claims had names refuses the field until it restarts: ask it as before.
+        if ((error as Error).message === 'UNKNOWN_FIELD') {
+          if (deadline - Date.now() < 150) return null
+          try { return (await access.call('mailbox-turn', { agent, session, surface }, Date.now())).message as Message ?? null } catch { return null }
+        }
+        // The board may have claimed a message after this hook stopped waiting: hand it back (#990).
+        // Its own budget is what the hook has left; a claim not handed back waits out the lease.
+        const left = deadline - Date.now()
+        if (access.isDeferred() && left > 0) try { await mailboxAccess(directory, Math.min(150, left)).call('mailbox-release', { agent, session, ref }, Date.now()) } catch {}
+        return null
+      }
+    },
     accept: (agent: string, session: string, id: string, nonce: string, now: number) => call('mailbox-accept', { agent, session, id, nonce }, now),
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
   }

@@ -30,8 +30,11 @@ remains available where the board already offered it.
 A turn-start hook enrolls its session when the default message store already exists.
 The page can queue a message for that exact session without waking it. Its next hook
 hands over one message, oldest first. `accepted` means the hook wrote it to the host;
-it does not prove the model read it, and no ACK is collected. Claimed messages never replay.
-An interrupted claim stays uncertain and blocks that target until the open-message limit.
+it does not prove the model read it, and no ACK is collected. A hook that stops waiting hands its
+claim back, so the next turn has the message. A claim the hook named and nobody accepted is handed
+out again after 30 seconds, at most three times, with the same ACK code and a line saying it may be
+a repeat; after that it stays uncertain and blocks that target until the open-message limit. A
+`board_inbox` claim is never handed out again.
 
 Mailboxes expire after 12 hours. Session end rejects queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create
@@ -149,8 +152,9 @@ error code (for example `ACK_TIMEOUT`); it does not stay indefinitely labelled a
   a send or the board returns is what follows `ACK <nonce>`, without that ACK line's prefix.
 - Reusing an id with a different text, source, binding or turn fails with `ID_CONFLICT`.
 
-IDs are scoped to this message store. A claim is never automatically replayed. Before each
-action or snapshot, finished messages older than 24 hours are deleted. Finished means
+IDs are scoped to this message store. A claim is never automatically replayed, except a hook's
+mailbox claim as above. Before each action or snapshot, finished messages older than 24 hours
+are deleted. Finished means
 acknowledged, rejected, or uncertain with error `EXPIRED` or `DISMISSED`. A message drops its
 text the moment it finishes and keeps only a SHA-256 hash of it (of the text as a JSON
 string), which is what an exact retry is compared with, and the first 200 characters of its

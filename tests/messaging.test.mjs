@@ -9,7 +9,7 @@ import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { turnOrDeferred } from './helpers/deferred-turn.mjs'
-import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging.ts'
+import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/message-client.mjs'
 import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
@@ -98,6 +98,107 @@ test('claimed mailbox messages transition to accepted after turn-start delivery 
     assert.equal(JSON.parse(readFileSync(join(dir, 'messages.json'), 'utf8')).messages[0].status, 'accepted')
     assert.equal(await mailbox.turn('codex', 'mailbox-session', 'CLI', Date.now()), null)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a mailbox message a hook claimed but never accepted is handed out again after the lease, with its ACK code and a repeat line, at most three times', () => {
+  const now = Date.now()
+  let state = mailboxQueue(mailboxQueue(mailboxSeed(now), 'mailbox-lapsed', 'board', now), 'mailbox-behind', 'gemini:sender-session', now)
+  const take = (at, nonce, ref = 'a1b2c3d4e5f6') => takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', at, 43_200_000, nonce, ref)
+  let taken = take(now, 'abcdef')
+  state = taken.state
+  assert.equal(taken.message.redelivered, undefined)
+  assert.doesNotMatch(deliveryText(taken.message), /Sent again/)
+  // Inside the lease the session waits, and the message behind it does too.
+  assert.equal(take(now + MAILBOX_LEASE_MS - 1, '111111').message, null)
+  for (let round = 1; round <= MAILBOX_REDELIVERIES; round++) {
+    taken = take(now + round * MAILBOX_LEASE_MS, '222222')
+    state = taken.state
+    assert.deepEqual([taken.message.id, taken.message.nonce, taken.message.redelivered], ['mailbox-lapsed', 'abcdef', round])
+    assert.match(deliveryText(taken.message), /\nSent again: [^\n]+\nReply first with this line alone: ACK abcdef\n/)
+  }
+  assert.equal(take(now + (MAILBOX_REDELIVERIES + 1) * MAILBOX_LEASE_MS, '333333').message, null)
+  const saved = parseMessageStore(JSON.stringify({ version: 2, ...state }), now)
+  assert.deepEqual([saved.messages[0].ref, saved.messages[0].redelivered], ['a1b2c3d4e5f6', MAILBOX_REDELIVERIES])
+  for (const bad of [{ ref: 'not-a-ref' }, { redelivered: 0 }, { redelivered: MAILBOX_REDELIVERIES + 1 }]) {
+    assert.throws(() => parseMessageStore(JSON.stringify({ version: 2, ...state, messages: [{ ...state.messages[0], ...bad }] }), now), /INVALID_MESSAGE_STORE/)
+  }
+  // The late accept still lands with the one ACK code, and the next message goes out.
+  state = acceptMailboxMessage(state, 'codex', 'mailbox-session', 'mailbox-lapsed', 'abcdef', now + 4 * MAILBOX_LEASE_MS)
+  assert.equal(take(now + 4 * MAILBOX_LEASE_MS, '444444').message.id, 'mailbox-behind')
+  // A claim no hook named (board_inbox) is handed over once.
+  const inbox = takeMailboxMessage(mailboxQueue(mailboxSeed(now), 'mailbox-once', 'board', now), 'codex', 'mailbox-session', 'CLI', now, 43_200_000, 'abcdef').state
+  assert.equal(takeMailboxMessage(inbox, 'codex', 'mailbox-session', 'CLI', now + 10 * MAILBOX_LEASE_MS, '555555', 'a1b2c3d4e5f6').message, null)
+})
+
+test('a hook that stops waiting after a running board claimed its message hands the claim back, so the message is not held', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-release-'))
+  let hub, server
+  try {
+    const now = Date.now()
+    hub = createMessaging(dir)
+    hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI' }, now)
+    hub.act('send', { id: 'mailbox-late', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'late reply' }, now)
+    assert.throws(() => hub.act('mailbox-release', { agent: 'codex', session: 'mailbox-session', ref: 'nope' }, now), /INVALID_REF/)
+    server = createServer(async (req, res) => {
+      const action = req.url.split('/').at(-1)
+      try {
+        let text = ''
+        for await (const chunk of req) text += chunk
+        const result = hub.act(action, JSON.parse(text), Date.now())
+        // The claim is saved, and the reply comes after the hook stopped waiting (#990).
+        if (action === 'mailbox-turn') await new Promise(done => setTimeout(done, 400))
+        res.end(JSON.stringify(result))
+      } catch (error) { if (!res.destroyed) { res.statusCode = 409; res.end(JSON.stringify({ error: error.message })) } }
+    })
+    await new Promise(done => server.listen(0, '127.0.0.1', done))
+    const url = `http://127.0.0.1:${server.address().port}`
+    hub.recordOwner(server.address().port, `${url}/?t=synthetic`)
+    const mailbox = hookMailbox(dir, 2000)
+    const started = Date.now()
+    assert.equal(await mailbox.turn('codex', 'mailbox-session', 'CLI', started), null)
+    const took = Date.now() - started
+    assert.equal(mailbox.hasDeferred, true)
+    const held = parseMessageStore(readFileSync(join(dir, 'messages.json'), 'utf8'), Date.now()).messages[0]
+    if (held.status === 'uncertain') {
+      // Only a machine that stalled past the hand-back's own 150 ms limit leaves the claim to the lease;
+      // a hook that skipped the hand-back returns after its first 150 ms.
+      assert.ok(took >= 250, `the claim was still held after ${took} ms`)
+      assert.match(held.ref, /^[0-9a-f]{12}$/)
+      assert.equal(hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI', ref: 'aaaaaaaaaaaa' }, Date.now() + MAILBOX_LEASE_MS).message.redelivered, 1)
+    } else {
+      assert.deepEqual([held.status, held.ref, held.claimed], ['queued', undefined, 0])
+      const next = hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI' }, Date.now()).message
+      // It was never shown, so it goes out with no repeat line, and a claimed one keeps its ACK code.
+      assert.deepEqual([next.id, next.redelivered], ['mailbox-late', undefined])
+      if (held.nonce !== '') assert.equal(next.nonce, held.nonce)
+    }
+  } finally { if (server) await new Promise(done => server.close(done)); hub?.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a hook still takes its mailbox message from a running board started before claims had names', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-old-board-'))
+  let hub, server
+  try {
+    const now = Date.now()
+    hub = createMessaging(dir)
+    hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI' }, now)
+    hub.act('send', { id: 'mailbox-old-board', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'old board' }, now)
+    server = createServer(async (req, res) => {
+      try {
+        let text = ''
+        for await (const chunk of req) text += chunk
+        const body = JSON.parse(text)
+        // A board from before #990 refuses the claim's name, as its field check does.
+        if (body.ref !== undefined) throw new Error('UNKNOWN_FIELD')
+        res.end(JSON.stringify(hub.act(req.url.split('/').at(-1), body, Date.now())))
+      } catch (error) { if (!res.destroyed) { res.statusCode = 409; res.end(JSON.stringify({ error: error.message })) } }
+    })
+    await new Promise(done => server.listen(0, '127.0.0.1', done))
+    const url = `http://127.0.0.1:${server.address().port}`
+    hub.recordOwner(server.address().port, `${url}/?t=synthetic`)
+    const message = await turnOrDeferred(hookMailbox(dir, 2000), ['codex', 'mailbox-session', 'CLI', Date.now()], () => hub.snapshot(Date.now()).messages[0].status)
+    assert.deepEqual([message.id, message.ref], ['mailbox-old-board', undefined])
+  } finally { if (server) await new Promise(done => server.close(done)); hub?.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('ending a session rejects queued mailbox messages with DISCONNECTED and frees the open cap', () => {
