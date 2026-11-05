@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { readdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { EN } from '../../hooks/strings-en.ts'
 import { STALE_MS } from '../../hooks/parse.ts'
 import { makeWorld } from './lib/world.mjs'
@@ -9,7 +9,8 @@ import { observeHookRecovery } from './lib/recovery-observation.mjs'
 import { seenWithin } from './lib/expect.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { formatWriters, holdNextRename, keptHookEvents, lockFile, storageFault, tear } from './lib/faults.mjs'
-import { chat, html, pageDom, run, serve } from './lib/surfaces.mjs'
+import { chat, json, pageDom, run, serve } from './lib/surfaces.mjs'
+import { killServe, readStore } from './lib/hub-wire.mjs'
 
 const journalText = world => world.files().filter(name => /^progress-journal-.*\.md$/.test(name)).map(name => world.read(name)).join('\n')
 const journalName = world => {
@@ -189,6 +190,83 @@ syncBuiltinESMExports()
   } finally { await world.close() }
 })
 
+test('L5 hub killed mid-delivery: the restarted --serve recovers the stale lock, the claimed message comes back uncertain, and nothing is delivered twice', { timeout: 40000 }, async () => {
+  const world = makeWorld()
+  try {
+    // Leases and message ages use the real clock in both the test and the server, as in the messaging journeys.
+    world.env.NODE_OPTIONS = world.env.NODE_OPTIONS.split(' ').filter(one => !one.includes('clock-preload')).join(' ')
+    const messages = dirname(world.write('messages/.keep', ''))
+    const lock = join(messages, 'server.lock')
+    const call = async (server, action, body) => {
+      const answer = await server.post(`/api/messages/${action}`, body)
+      return { status: answer.status, body: answer.json() }
+    }
+    const receiver = { agent: 'codex', session: '00000001-2222-4333-8444-555555555555', surface: 'Synthetic receiver', turn: 'turn-1' }
+    const first = await serve.start(world, ['--messages-dir', messages])
+    const before = (await call(first, 'register', receiver)).body
+    assert.equal(before.contested, false)
+    const id = 'AB-killed-mid-delivery'
+    const queued = await call(first, 'send', { id, target: before.id, turn: receiver.turn, text: 'Review route /health?mode=ready' })
+    assert.equal(queued.status, 200, JSON.stringify(queued.body))
+    assert.equal(queued.body.status, 'queued')
+    const claimed = (await call(first, 'poll', { connection: before.id, secret: before.secret, turn: receiver.turn })).body.messages
+    assert.equal(claimed.length, 1)
+    assert.equal(claimed[0].status, 'uncertain')
+    const nonce = claimed[0].nonce
+    assert.match(nonce, /^[0-9a-f]{6}$/)
+
+    // Transport acceptance before the kill
+    const accepted = await call(first, 'receipt', { connection: before.id, secret: before.secret, id, nonce, status: 'accepted' })
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body))
+    world.write('progress.md', `## Synthetic\n<!-- auto session=${receiver.session} agent=${receiver.agent} state=waiting updated=${new Date().toISOString()} -->\n### Task\n- [?] Continue, OK?\n<!-- /auto session=${receiver.session} -->\n`)
+
+    // The hub dies before its receiver has answered; it cannot remove its lock.
+    assert.equal(await killServe(first), true, 'The first hub was not ended')
+    assert.equal(readFileSync(lock, 'utf8'), String(first.pid))
+
+    const second = await serve.start(world, ['--messages-dir', messages])
+    assert.notEqual(second.pid, first.pid)
+    assert.equal(readFileSync(lock, 'utf8'), String(second.pid))
+    const board = (await second.get('/api/board')).json()
+    assert.deepEqual(board.messaging.connections, [])
+    const restored = board.messaging.messages.find(one => one.id === id)
+    assert.equal(restored?.status, 'accepted')
+    assert.equal(restored.error, 'DISCONNECTED')
+    assert.ok(!('nonce' in restored), 'The board shows the nonce')
+    const pageText = await second.page()
+    assert.ok(pageText.includes(EN.messagesAcceptedDisconnected), `The page does not show the disconnected accepted label: ${pageText}`)
+
+    // The receiver registers again as the same session. The message was bound to its old connection
+    // and is not handed out again, however often it asks.
+    const after = (await call(second, 'register', receiver)).body
+    assert.equal(after.contested, false)
+    for (let asks = 0; asks < 3; asks += 1) {
+      const poll = await call(second, 'poll', { connection: after.id, secret: after.secret, turn: receiver.turn })
+      assert.deepEqual(poll.body.messages, [])
+    }
+    // The nonce it was given before the kill still settles the message.
+    const receipt = await call(second, 'receipt', { connection: after.id, secret: after.secret, id, nonce, status: 'acknowledged', reply: `ACK ${nonce}` })
+    assert.equal(receipt.status, 200, JSON.stringify(receipt.body))
+    const finished = (await second.get('/api/board')).json().messaging.messages.find(one => one.id === id)
+    assert.equal(finished?.status, 'acknowledged')
+    assert.equal(finished.text, '')
+    const poll = await call(second, 'poll', { connection: after.id, secret: after.secret, turn: receiver.turn })
+    assert.deepEqual(poll.body.messages, [])
+    // The empty polls above show nothing unless a poll does hand a message out when one is there: the
+    // killed message was open until now, and an open message keeps the receiver from being given another.
+    // With it settled, a fresh message is the one thing the next poll returns.
+    const fresh = 'AB-fresh-after-restart'
+    const sent = await call(second, 'send', { id: fresh, target: after.id, turn: receiver.turn, text: 'Review route /ready?mode=fresh' })
+    assert.equal(sent.status, 200, JSON.stringify(sent.body))
+    const next = await call(second, 'poll', { connection: after.id, secret: after.secret, turn: receiver.turn })
+    assert.deepEqual(next.body.messages.map(one => one.id), [fresh])
+    const stored = readStore(messages)
+    assert.equal(stored.length, 2)
+    assert.equal(stored.find(one => one.id === id)?.claimed > 0, true)
+    assert.equal(stored.find(one => one.id === fresh)?.claimed > 0, true)
+  } finally { await world.close() }
+})
+
 // Step 3 of #222: more failures a person meets, each checked on what they would see or what stays on disk.
 const occurrences = (text, part) => text.split(part).length - 1
 // Why a hook run failed: stderr, else stdout. "The command line is too long" means a long %TEMP%:
@@ -199,7 +277,7 @@ const whyFailed = result => {
   return /too long/i.test(said) ? `${said} (a long TEMP; keep it under about 84 characters)` : said
 }
 
-test('L5 torn tail: the terminal, --chat, html view and page each warn once and still show every complete block', async () => {
+test('L5 torn tail: the terminal, --chat, JSON and page each warn once and still show every complete block', async () => {
   // Two ways a write is cut off: in the middle of a new block's start marker, and in the middle of
   // the end marker of the last block. The blocks before the cut are complete in both.
   const cutOff = EN.progressIncomplete(1)
@@ -215,9 +293,9 @@ test('L5 torn tail: the terminal, --chat, html view and page each warn once and 
       block(world, { session: 'a1000003', agent: 'hermes', project: 'research-hub', title: 'Third complete card', steps: ['- [~] Summarise the synthetic notes'] })
       shape.cut(world)
       const server = await serve.start(world)
-      const terminal = await run(world, [])
+      const terminal = await run(world, ['--print'])
       assert.equal(terminal.status, 0, terminal.stderr)
-      const screens = { terminal: terminal.stdout, chat: (await chat(world)).stdout, html: (await html(world)).visible, page: await server.page() }
+      const screens = { terminal: terminal.stdout, chat: (await chat(world)).stdout, json: JSON.stringify(await json(world)), page: await server.page() }
       for (const [surface, text] of Object.entries(screens)) {
         const label = `${shape.name} on ${surface}`
         // Once, and whole: a warning cut over two lines or shown twice does not count.
@@ -259,7 +337,7 @@ test('L5 torn tail: an append by the Codex hook repairs the tail or reports why,
     assert.ok(!after.includes(cutStart), 'the cut marker is gone from the board')
     assert.equal(occurrences(after, 'resume=codex-torn-session-1 '), 1, 'the new report is written')
     assert.deepEqual(fragmentTexts(), [cutStart])
-    assert.doesNotMatch((await run(world, [])).stdout, /cut-off marker/)
+    assert.doesNotMatch((await run(world, ['--print'])).stdout, /cut-off marker/)
 
     // The cut is inside the end marker of an open block: the reporter writes the marker out in full.
     whole = start()
@@ -270,7 +348,7 @@ test('L5 torn tail: an append by the Codex hook repairs the tail or reports why,
     assert.ok(after.startsWith(whole), 'the end marker is whole again')
     assert.equal(occurrences(after, 'resume=codex-torn-session-2 '), 1, 'the new report is written')
     assert.deepEqual(fragmentTexts(), [cutEnd, cutStart].sort())
-    assert.doesNotMatch((await run(world, [])).stdout, /cut-off marker/)
+    assert.doesNotMatch((await run(world, ['--print'])).stdout, /cut-off marker/)
 
     // Text follows the cut: the reporter does not guess. It keeps every byte, adds its report
     // and the board goes on warning, so the damage stays in view.
@@ -284,7 +362,7 @@ test('L5 torn tail: an append by the Codex hook repairs the tail or reports why,
     assert.ok(after.startsWith(torn), 'every byte after the cut is kept')
     assert.equal(occurrences(after, 'resume=codex-torn-session-3 '), 1, 'the new report is written')
     assert.equal(fragments().length, saved, 'nothing is set aside when nothing is repaired')
-    assert.match((await run(world, [])).stdout, /cut-off marker line/)
+    assert.match((await run(world, ['--print'])).stdout, /cut-off marker line/)
 
     // The repair cannot be written: a one-line error, a failing exit, the board as it was and no
     // fragment left behind.
@@ -543,7 +621,7 @@ test('L5 OpenCode exit: a row whose end report missed the hook limit reads as st
     const title = 'Synthetic OpenCode exit card'
     block(world, { project: 'synthetic-project', agent: 'opencode', session: 'a1000002', resume: 'synthetic-opencode-exit', state: 'waiting', title, steps: ['- [ ] Synthetic next step'] })
     const server = await serve.start(world)
-    const rows = async () => ({ terminal: (await run(world, ['--all'])).stdout, page: await server.page() })
+    const rows = async () => ({ terminal: (await run(world, ['--print', '--all'])).stdout, page: await server.page() })
     for (const [surface, text] of Object.entries(await rows())) {
       const at = text.indexOf(title)
       assert.ok(at >= 0, `${surface} lost the row:\n${text}`)
@@ -582,7 +660,7 @@ test('L5 crashed agent: a working row with no event for the stale time of its ho
     world.jump(`${STALE_MS / 60000 + 1}m`)
     const server = await serve.start(world)
     const rows = {}
-    for (const [surface, text] of Object.entries({ terminal: (await run(world, ['--all'])).stdout, page: await server.page() })) {
+    for (const [surface, text] of Object.entries({ terminal: (await run(world, ['--print', '--all'])).stdout, page: await server.page() })) {
       const at = text.indexOf('Crashed agent card')
       assert.ok(at >= 0, `${surface} lost the row:\n${text}`)
       rows[surface] = text.slice(at, at + 300)

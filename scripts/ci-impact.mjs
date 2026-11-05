@@ -3,10 +3,11 @@ import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, appendF
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BUNDLE_ENTRY, bundleFiles, isBundleFile } from './bundle-text.mjs'
+import { hasReceiverRecord } from './messaging-matrix.mjs'
 
 export const GROUPS = ['board', 'messaging', 'tooling', 'npm', 'plugin', 'installers', 'remote', 'journeys', 'browser', 'generated']
 const systems = ['ubuntu-latest', 'windows-latest']
-const toolingTests = ['pr-check', 'preflight', 'changelog-fold', 'team-stats', 'review-queue'].map(name => 'tests/' + name + '.test.mjs')
+const toolingTests = ['pr-check', 'preflight', 'changelog-fold', 'team-stats', 'review-queue', 'review-queue-post'].map(name => 'tests/' + name + '.test.mjs')
 const messagingTests = ['tests/exchange.test.mjs', 'tests/messaging.test.mjs']
 const safePath = value => {
   if (typeof value !== 'string' || !value || /[\0\r\n\\:]/.test(value) || isAbsolute(value) || value.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('invalid repository path')
@@ -22,6 +23,13 @@ const groupForTest = path => {
   if (path === 'tests/npm-package.test.mjs') return 'npm'
   if (/^tests\/[^/]+\.test\.mjs$/.test(path)) return 'board'
   return null
+}
+
+const matrixTest = 'tests/messaging-matrix.test.mjs'
+const isMatrixDocument = path => /^(?:README(?:\.[\w-]+)?\.md|docs\/MESSAGING\.md|docs\/validation\/.+\.md)$/.test(path)
+const hasRecord = (root, path) => {
+  if (!/^(?:scripts|hooks)\/.+\.(?:mjs|tsx?)$/.test(path) || !existsSync(join(root, path))) return false
+  return hasReceiverRecord(readFileSync(join(root, path), 'utf8'))
 }
 
 export const makePlan = (files, options = {}) => {
@@ -52,6 +60,8 @@ export const makePlan = (files, options = {}) => {
       generated.bundle = true
       known = true
     }
+    // Selects without classifying: a new record file still goes full, for tests the walk can't see.
+    if (options.matrixInputs?.has(path)) select('board', path)
     if (['hooks/released.ts', 'tests/fixtures/released.ts', 'scripts/build-released.ts'].includes(path)) {
       generated.released = true
       select('generated', path)
@@ -69,7 +79,7 @@ export const makePlan = (files, options = {}) => {
       known = true
     }
     if (path === 'bin/agent-board.mjs') { select('npm', path); known = true }
-    if (/^scripts\/(?:pr-check|preflight|changelog-fold|team-stats|review-queue)\.mjs$/.test(path)) { select('tooling', path); known = true }
+    if (/^scripts\/(?:pr-check|preflight|changelog-fold|team-stats|review-queue|review-queue-post)\.mjs$/.test(path)) { select('tooling', path); known = true }
     if (/^(?:scripts\/setup|tests\/setup\.check)\.(?:sh|ps1)$/.test(path)) {
       select('installers', path)
       installers.add(path.endsWith('.ps1') ? 'windows-latest' : 'ubuntu-latest')
@@ -235,7 +245,12 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
   // Removed tests inform impact, but only existing head tests may be executed.
   const head = roots.at(-1)
   for (const group of GROUPS) tests[group] = tests[group].filter(path => existsSync(join(head, path))).sort()
-  const plan = makePlan(files, { tests, deps, bundleSources, pluginRuntime, forceFull })
+  // The generated messaging table reads these without importing them, so the dependency walk can't see them.
+  const matrixInputs = new Set(tests.board.includes(matrixTest) ? files.filter(path => isMatrixDocument(path) || roots.some(root => hasRecord(root, path))) : [])
+  const plan = makePlan(files, { tests, deps, bundleSources, pluginRuntime, forceFull, matrixInputs })
+  if (!plan.full && plan.checks.board && plan.reasons.filter(reason => reason.group === 'board').every(reason => matrixInputs.has(reason.path) && !deps.board.has(reason.path))) {
+    plan.testFiles.board = [matrixTest]
+  }
   if (!plan.full && files.length && files.every(path => /^README(?:\.[\w-]+)?\.md$/.test(path))) {
     plan.testFiles.journeys = tests.journeys.filter(path => path === 'tests/e2e/l0-readme.test.mjs')
     if (plan.checks.journeys && !plan.testFiles.journeys.length) throw new Error('README contract test is missing')
@@ -280,11 +295,51 @@ const emitPlan = plan => {
     '\n\nFull plan: ' + plan.full + '\n\nSoak recommended: ' + plan.soakRecommended + '\n\nChanged paths:\n' + plan.files.map(path => '- ' + path).join('\n') + '\n')
 }
 
-export const runTestFiles = files => {
+// A part such as 2/4 lets a long set fit several jobs (#899, #910). Part i of n takes every nth file, but a file is
+// never split, so a file far longer than the rest splits its own tests instead: part i of n keeps every
+// nth test, and the parts together run each test once.
+const parsePart = part => {
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(part)
+  if (part !== '' && (!match || Number(match[1]) > Number(match[2]))) throw new Error('test part must be <index>/<total>, such as 1/2')
+  return match ? { index: Number(match[1]), total: Number(match[2]) } : { index: 1, total: 1 }
+}
+
+// The files that split their own tests with partTest: on Windows codex-local took about 8 minutes and
+// board about 5, each far longer than any other file (#899).
+export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs']
+
+export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
+  const { index, total } = parsePart(part)
+  let ordinal = 0
+  return Object.assign((...args) => (ordinal++ % total === index - 1 ? test(...args) : undefined), { skip: test.skip, only: test.only, todo: test.todo })
+}
+
+// A Windows job ran three spawn-heavy files at once on a 4-vCPU runner: every test slowed about 1.35x and the
+// tightest timing budgets failed in turn (#910). Two files at a time leaves them room; serial stays one.
+export const testArgs = (files, { isSerial = false, isWindows = false } = {}) => ['--test', ...(isSerial ? ['--test-concurrency=1'] : isWindows ? ['--test-concurrency=2'] : []), ...files]
+
+// The Node run of one part: every nth of the other files, and every self-parted file, which keeps its own
+// share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
+export const testRuns = (files, { isSerial = false, isWindows = false, part = '' } = {}) => {
+  const { index, total } = parsePart(part)
+  if (total === 1) return [testArgs(files, { isSerial, isWindows })]
+  const rest = files.filter(path => !selfPartedTests.includes(path)).filter((path, ordinal) => ordinal % total === index - 1)
+  const share = [...rest, ...files.filter(path => selfPartedTests.includes(path))]
+  return share.length ? [testArgs(share, { isSerial, isWindows })] : []
+}
+
+export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform) => {
   if (!Array.isArray(files) || !files.length || files.some(path => !/^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/.test(path) || !existsSync(path))) throw new Error('selected tests are empty, invalid or missing')
-  const result = spawnSync(process.execPath, ['--test', ...(process.env.CI_TEST_SERIAL === '1' ? ['--test-concurrency=1'] : []), ...files], { stdio: 'inherit' })
-  if (result.error) throw result.error
-  if (result.status !== 0) throw new Error('selected tests failed: ' + (result.status ?? result.signal))
+  // A self-parted file reads its part from CI_TEST_PART, so the child gets the part this run was given,
+  // not whatever part the environment holds.
+  const env = { ...process.env, CI_TEST_PART: part }
+  // Every run goes ahead even when an earlier one failed, so one job shows all of its failures.
+  const failures = testRuns(files, { isSerial: process.env.CI_TEST_SERIAL === '1', isWindows: platform === 'win32', part }).flatMap(args => {
+    const result = spawn(process.execPath, args, { stdio: 'inherit', env })
+    if (result.error) throw result.error
+    return result.status === 0 ? [] : [result.status ?? result.signal]
+  })
+  if (failures.length) throw new Error('selected tests failed: ' + failures.join(', '))
 }
 
 const main = async () => {

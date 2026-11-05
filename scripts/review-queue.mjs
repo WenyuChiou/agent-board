@@ -9,8 +9,6 @@ const maxBuffer = 64 * 1024 * 1024
 const hour = 60 * 60 * 1000
 const day = 24 * hour
 const laneLimitHours = 2
-const noticeWaitHours = 24
-const noticeGapHours = 48
 const awayLimitDays = 14
 const claimSlotDays = 7
 
@@ -52,7 +50,6 @@ const utcMs = (date, time = '00:00:00') => {
   const ms = Date.parse(`${date}T${time}Z`)
   return Number.isFinite(ms) && new Date(ms).toISOString().startsWith(`${date}T${time}`) ? ms : NaN
 }
-const formatUtc = ms => `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`
 
 const codexLogin = /^chatgpt-codex-connector(?:\[bot\])?$/i
 const codexMarker = /<!--\s*codex-review-state:v1\s+(\{[\s\S]*?\})\s*-->/
@@ -72,57 +69,31 @@ const codexStateOf = (comments, head) => {
   return 'none'
 }
 
+// Codex also runs a security review, reported in the same state comment. When the paying account is out of usage the code
+// review still completes but the security review fails, so a reviewer needs to see that it never ran on this head.
+const codexSecurityOf = (comments, head) => {
+  for (const { comment } of [...comments].reverse()) {
+    const json = codexLogin.test(comment.user?.login ?? '') ? (comment.body ?? '').match(codexMarker)?.[1] : null
+    if (!json) continue
+    let review
+    try { review = JSON.parse(json)?.security_review } catch { continue }
+    const sha = typeof review?.commit_sha === 'string' ? review.commit_sha.toLowerCase() : ''
+    if (!/^[0-9a-f]{7,40}$/.test(sha) || typeof review.status !== 'string') continue
+    if (!head.startsWith(sha)) return 'stale'
+    if (review.status !== 'completed') return 'skipped'
+    // Only an explicit answer says whether findings are open. Codex leaves the field null on most completed reviews, so an
+    // unknown one is kept apart from clean and, like clean, adds no line.
+    if (review.has_unresolved_findings === true) return 'open'
+    return review.has_unresolved_findings === false ? 'clean' : 'unknown'
+  }
+  return 'none'
+}
+
 // Greptile is often absent, so only its presence on the head is reported and its absence is not.
 const isGreptile = login => (login ?? '').toLowerCase().includes('greptile')
 const hasGreptileReview = (comments, reviews, head) =>
   comments.some(({ comment }) => isGreptile(comment.user?.login) && mentionsHead(head, comment.body))
   || (Array.isArray(reviews) ? reviews : []).some(review => isGreptile(review?.author?.login) && (mentionsHead(head, review.body) || mentionsHead(head, review.commit?.oid)))
-
-// A comment "Merging after <UTC time> unless someone objects" that also names a commit id (CONTRIBUTING rule 8).
-export const parseNotice = body => {
-  const named = (body ?? '').match(/^[ \t]*Merging after\b([^\r\n]*?)\bunless someone objects\b/mi)?.[1]
-  const parts = named?.match(/^\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::(\d{2}))?\s*(?:UTC|Z)?\s*$/i)
-  const at = parts ? utcMs(parts[1], `${parts[2]}:${parts[3] ?? '00'}`) : NaN
-  const shas = shaWords(body)
-  return Number.isFinite(at) && shas.length ? { at, shas } : null
-}
-
-// Governance files, workflows and the release files: a pull request touching one never merges after a notice (team-process, From claim to merge).
-const governedPaths = new Set(['AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/team-process.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json'])
-const isGovernedPath = path => governedPaths.has(path) || path.startsWith('.github/')
-
-// Where the merge-after-notice stands for a pull request (team-process, From claim to merge). Only the pull request's own author can
-// give a notice, and the latest one that names the current head is the one that counts: a push leaves the old notice behind, so the
-// check for a first notice starts over for the new head.
-const noticeFor = ({ comments, head, ready, readyHours, takenBy, nowMs, isInQueue, isAllAway, hasBackSince, isGoverned, author }) => {
-  const isByAuthor = comment => author !== '' && (comment.user?.login ?? '').toLowerCase() === author
-  const authorNotice = entry => isByAuthor(entry.comment) ? parseNotice(entry.comment.body) : null
-  const isAllowed = isInQueue && !takenBy && ((readyHours ?? 0) > noticeWaitHours || isAllAway)
-  if (isGoverned) return comments.some(authorNotice) || isAllowed ? { state: 'not-allowed', at: null } : null
-  const last = comments.findLastIndex(entry => authorNotice(entry)?.shas.some(word => head.startsWith(word)))
-  if (last < 0) return isAllowed ? { state: 'allowed', at: null } : null
-  const notice = authorNotice(comments[last])
-  const at = new Date(notice.at).toISOString()
-  // A notice must be posted while the notice path is open.
-  if (!ready || comments[last].time < ready.time) return { state: 'too-early', at }
-  const isTakenBeforeNotice = comments.slice(ready.order + 1, last).some(({ comment }) => /^Reviewing:[ \t]*\S/m.test(comment.body ?? '') && !isByAuthor(comment))
-  if (isTakenBeforeNotice) return { state: 'cancelled', at }
-  if (!(comments[last].time - ready.time > noticeWaitHours * hour || isAllAway)) return { state: 'too-early', at }
-  // The author's own Reviewing comment does not take the review, so it does not end the notice.
-  const isCancelled = comments.slice(last + 1).some(({ comment }) => (/^Reviewing:[ \t]*\S/m.test(comment.body ?? '') && !isByAuthor(comment))
-    || reviewOf(comment.body)?.kind === 'REQUEST CHANGES' || /^\s*Objection\b/i.test(comment.body ?? ''))
-  // A collaborator's Back on the roadmap issue after the notice ends it too (team-process, From claim to merge).
-  if (isCancelled || hasBackSince(comments[last].time)) return { state: 'cancelled', at }
-  const isTooEarly = notice.at - comments[last].time < noticeGapHours * hour || Boolean(ready && notice.at - ready.time < noticeGapHours * hour)
-  if (isTooEarly) return { state: 'too-early', at }
-  return { state: nowMs >= notice.at ? 'due' : 'waiting', at }
-}
-
-// Every collaborator except the pull request's own author is away. An unknown list, or nobody else, is not "everyone".
-const isEveryOtherAway = (collaborators, awayLogins, author) => {
-  const others = (collaborators ?? []).filter(login => login !== author)
-  return others.length > 0 && others.every(login => awayLogins.has(login))
-}
 
 const reviewerNote = 'docs/dev/reviewers.json could not be read, so no reviewer is suggested'
 const reviewersPath = fileURLToPath(new URL('../docs/dev/reviewers.json', import.meta.url))
@@ -145,15 +116,19 @@ export const loadReviewers = ({ read = readFileSync, path = reviewersPath } = {}
   try { return { map: parseReviewers(read(path, 'utf8')), note: null } } catch { return { map: null, note: reviewerNote } }
 }
 
+// A Reviewing comment with no verdict lapses after this many hours, and anyone else may take the review (team-process).
+const reviewingLapseHours = 4
+const isLapsed = (time, nowMs) => Number.isFinite(nowMs) && Number.isFinite(time) && nowMs - time > reviewingLapseHours * hour
+
 // Reviews taken and not yet answered, by reviewer, over every open pull request (drafts too): a Reviewing comment
-// counts until the same name posts a verdict later on that pull request.
-export const countOpenReviews = (prs, commentsByNumber) => {
+// counts until the same name posts a verdict later on that pull request, or until it lapses when nowMs is given.
+export const countOpenReviews = (prs, commentsByNumber, nowMs) => {
   const counts = new Map()
   for (const pr of prs) {
     const open = new Set()
-    for (const { comment } of entriesOf(commentsFor(commentsByNumber, pr.number))) {
+    for (const { comment, time } of entriesOf(commentsFor(commentsByNumber, pr.number))) {
       const taker = reviewingName(comment.body)
-      if (taker) open.add(taker)
+      if (taker && !isLapsed(time, nowMs)) open.add(taker)
       const giver = verdictName(comment.body)
       if (giver) open.delete(giver)
     }
@@ -171,17 +146,12 @@ export const suggestReviewer = (map, { author, isOverFourHours }, openCounts) =>
   return { suggested: eligible[isEscalated ? 1 : 0] ?? null, isEscalated }
 }
 
-// context: { collaborators, awayLogins, backs, bundleSources } from the GitHub lookups. Every part may be missing, and a missing part only
-// leaves its hint out: no collaborator list means no "everyone is away" notice, no bundle sources means only the generated files count.
-// With no collaborator list, a Back from anyone but the author cancels a notice, since the safe reading is that the notice no longer stands.
+// context: { bundleSources } from the GitHub lookups. Missing bundle sources means only the generated files count.
 export const classify = (prs, commentsByNumber, now, reviewers = null, context = {}) => {
   const result = { needsReviewer: [], needsMain: [], approved: [], approvedNow: [], approvedOneAtATime: [], waitingForAuthor: [], drafts: 0 }
   const nowMs = new Date(now).getTime()
   if (!Number.isFinite(nowMs)) throw new Error('invalid current time')
-  const openCounts = reviewers ? countOpenReviews(prs, commentsByNumber) : null
-  const collaborators = Array.isArray(context.collaborators) ? context.collaborators : null
-  const awayLogins = new Set(context.awayLogins ?? [])
-  const backs = context.backs ?? []
+  const openCounts = reviewers ? countOpenReviews(prs, commentsByNumber, nowMs) : null
   // The bundle's sources and the release table change the generated files, so a pull request touching one conflicts with the others that do.
   const isSharedPath = path => sharedPath.test(path) || path === 'hooks/released.ts' || Boolean(context.bundleSources?.has(path))
   for (const pr of prs) {
@@ -209,29 +179,22 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     const headVerdicts = verdicts.filter(entry => matchesHead(head, entry.verdict.sha))
     const latestHeadVerdict = headVerdicts.at(-1)
     const reviewAfterReady = ready && headVerdicts.some(entry => entry.order > ready.order)
-    const takenBy = ready ? comments.slice(ready.order + 1)
-      .map(entry => (entry.comment.body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1]?.trim())
-      .filter(Boolean).at(-1) ?? null : null
-    const author = (pr.author?.login ?? '').toLowerCase()
-    const hasBackSince = since => backs.some(back => back.time > since && back.login !== author && (!collaborators || collaborators.includes(back.login)))
-    // What the review bots and the merge-after-notice say about the head. A missing bot review never moves a pull request between groups.
+    const taking = ready ? comments.slice(ready.order + 1)
+      .map(entry => ({ name: (entry.comment.body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1]?.trim(), time: entry.time }))
+      .filter(entry => entry.name).at(-1) ?? null : null
+    // A Reviewing comment past its 4 hours no longer holds the review; the queue names who let it lapse.
+    const takenBy = taking && !isLapsed(taking.time, nowMs) ? taking.name : null
+    const lapsedBy = taking && !takenBy ? taking.name : null
+    // What the review bots say about the head. A missing bot review never moves a pull request between groups.
     const extras = {
-      bots: { codex: codexStateOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
-      notice: noticeFor({
-        comments, head, ready, takenBy, nowMs,
-        readyHours: ready && Number.isFinite(ready.time) ? Math.max(0, nowMs - ready.time) / hour : null,
-        isInQueue: Boolean(ready && !reviewAfterReady),
-        isAllAway: isEveryOtherAway(collaborators, awayLogins, author), hasBackSince, author,
-        // Without a file list a pull request cannot be shown to be clear of the governance files, but nothing is claimed about it either.
-        isGoverned: Array.isArray(pr.files) && pr.files.some(file => isGovernedPath(file?.path ?? '')),
-      }),
+      bots: { codex: codexStateOf(comments, head), codexSecurity: codexSecurityOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
     }
     if (ready && !reviewAfterReady) {
       if (!Number.isFinite(ready.time)) throw new Error('invalid Ready time')
       const hours = Math.max(0, nowMs - ready.time) / hour
       const isOverFourHours = hours > 4
       const suggestion = reviewers ? suggestReviewer(reviewers, { author: nameOf(item.author), isOverFourHours }, openCounts) : {}
-      result.needsReviewer.push({ ...item, readyAt: ready.comment.created_at, hours, isOverFourHours, takenBy, ...suggestion, ...extras })
+      result.needsReviewer.push({ ...item, readyAt: ready.comment.created_at, hours, isOverFourHours, takenBy, lapsedBy, ...suggestion, ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
       const isOneAtATime = !Array.isArray(pr.files) || pr.files.some(file => isSharedPath(file?.path ?? ''))
@@ -292,7 +255,7 @@ export const collaboratorLogins = (logins, repo) => {
 
 // "Away: until YYYY-MM-DD" as the first line of a comment on the roadmap issue sets that login away through that UTC date; a later
 // comment by the same login starting "Back" ends it. A date more than 14 days after the comment is ignored and noted.
-// backs lists every Back comment (lower case login, time in ms), since a notice to merge also ends when a collaborator is back.
+// backs lists every Back comment (lower case login, time in ms).
 export const readAway = (comments, now) => {
   const nowMs = new Date(now).getTime()
   const away = new Map()
@@ -438,16 +401,13 @@ const codexText = {
   clean: 'codex: no findings',
   open: 'codex: findings open — answer each P0/P1 before approving',
 }
-const botText = bots => [codexText[bots?.codex], bots?.greptile ? 'greptile: reviewed' : ''].filter(Boolean).join('  ')
-const noticeText = notice => {
-  if (notice.state === 'allowed') return 'notice allowed if only a collaborator or the owner may approve it (team-process, From claim to merge)'
-  if (notice.state === 'waiting') return `notice: merges after ${formatUtc(Date.parse(notice.at))}`
-  if (notice.state === 'due') return 'notice due: merge if checks are green and the author\'s code-review subagent approved this head and no bot P0/P1 is open'
-  if (notice.state === 'not-allowed') return 'no notice: governance, workflow or release pull requests merge only with an approval (CONTRIBUTING rules 8 and 12)'
-  if (notice.state === 'too-early') return `notice too early: post it once Ready is ${noticeWaitHours} hours old with nobody reviewing, or everyone else away, naming a time ${noticeGapHours} hours after the notice and after Ready`
-  return 'notice cancelled'
+// Only a security review that did not run, or left findings open, is named: a clean or missing one adds nothing to the code review line.
+const codexSecurityText = {
+  skipped: 'codex security: did not run on this head (usage limit or failure); review security yourself',
+  open: 'codex security: findings open — answer each before approving',
 }
-// The groups a reviewer or merger acts on show the bot state and the notice under each pull request.
+const botText = bots => [codexText[bots?.codex], codexSecurityText[bots?.codexSecurity], bots?.greptile ? 'greptile: reviewed' : ''].filter(Boolean).join('  ')
+// The groups a reviewer or merger acts on show the bot state under each pull request.
 const detailedGroups = new Set(['Needs a reviewer', 'Merge now, smallest first', 'One at a time, oldest Ready first'])
 
 export const formatQueue = queue => {
@@ -466,12 +426,11 @@ export const formatQueue = queue => {
     lines.push(`${heading} (${items.length})`)
     for (const item of items) {
       const detail = heading === 'Needs a reviewer'
-        ? `Ready ${item.hours.toFixed(1)} h${item.isOverFourHours ? ' over 4 h' : ''}${item.takenBy ? ` taken by ${item.takenBy}` : ''}${item.suggested === undefined ? '' : `  suggested: ${item.suggested ?? 'none'}${item.isEscalated ? ' escalated' : ''}`}`
+        ? `Ready ${item.hours.toFixed(1)} h${item.isOverFourHours ? ' over 4 h' : ''}${item.takenBy ? ` taken by ${item.takenBy}` : ''}${item.lapsedBy ? ` review by ${item.lapsedBy} lapsed` : ''}${item.suggested === undefined ? '' : `  suggested: ${item.suggested ?? 'none'}${item.isEscalated ? ' escalated' : ''}`}`
         : item.detail
       lines.push(`#${item.number}  ${item.size} lines  ${item.author}  ${item.title.slice(0, 70)}  ${detail}`)
       if (!detailedGroups.has(heading)) continue
       if (item.bots) lines.push(`    ${botText(item.bots)}`)
-      if (item.notice) lines.push(`    ${noticeText(item.notice)}`)
     }
   }
   lines.push(`Drafts: ${data.drafts}`)

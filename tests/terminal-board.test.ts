@@ -1,11 +1,14 @@
 import { expect, test } from 'claude-code/testing'
+import { confirmTask, takeTask } from '../hooks/blocks'
 import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, pinned, routesOf, terminalLook } from '../hooks/board'
 import type { AnswerRoute } from '../hooks/board'
 import { isLifecycleStep, LIFECYCLE_STEPS } from '../hooks/codex'
 import { DARK, LIGHT } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
+import { serveModel } from '../hooks/serve'
+import { emptyQuestions, observeQuestions, resolveQuestion } from '../hooks/questions'
 import { STRINGS } from '../hooks/strings'
-import { buildView } from '../hooks/view'
+import { buildView, rowNeedsYou } from '../hooks/view'
 
 // The terminal board (#545): the page's colours, order and keys. All data is made up.
 const NOW = Date.parse('2026-10-30T12:00:00Z')
@@ -35,6 +38,151 @@ const BOARD = `# Progress
 const viewOf = (file: string, lang: keyof typeof STRINGS = 'en') => buildView(parseProgress(file), [], null, NOW, 0, {}, STRINGS[lang])
 const ESC = '\u001b'
 const sgr = (hex: string): string => `38;5;${nearest256(hex)}`
+
+test('a blocked agent needs you on both the terminal board and the page', () => {
+  const file = `## sample-api
+<!-- auto session=ab770001 agent=antigravity state=working updated=${at(5)} -->
+### Ship the synthetic endpoint
+- [!] Supply the synthetic credential — Waiting for a test credential
+<!-- /auto session=ab770001 -->
+`
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+    for (const state of ['working', 'waiting']) {
+      const view = viewOf(file.replace('state=working', `state=${state}`), lang)
+      const model = serveModel(view, [], s, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } })
+      expect(model.view!.needs.stuck).toBe(1)
+      expect(model.view!.needs.cards[0]!.agent).toBe('antigravity')
+      expect(model.view!.working).toEqual([])
+      expect(model.groups[0]!.rows[0]!.stuck!.reason).toBe('Waiting for a test credential')
+      for (const out of [boardText(view, [], s), boardScreen(view, [], emptyBoardState, s, { width: 100, isColor: false })]) {
+        expect(out).toContain(s.pgNeeds)
+        expect(out).not.toContain(s.agentWorking('Antigravity'))
+        expect(out).not.toContain(s.nothingForYou)
+      }
+    }
+  }
+})
+
+test('a question on the terminal board is worded once, and a row that needs you does not count as in progress', () => {
+  const s = STRINGS.en
+  const question = 'Ship to staging, OK?'
+  const view = viewOf(`## sample-api
+<!-- auto session=ab770005 agent=antigravity state=working updated=${at(5)} -->
+### Check the synthetic release
+- [?] ${question}
+<!-- /auto session=ab770005 -->
+`)
+  const screen = boardScreen(view, [], emptyBoardState, s, { width: 100, isColor: false })
+  expect(screen.split(question).length - 1).toBe(1)
+  expect(screen).not.toContain(`● ${s.pgNeeds}`)
+  expect(screen).toContain(`▸ 0 ${s.countActive}`)
+  const text = boardText(view, [], s)
+  expect(text).not.toContain(s.pgNeedsWhy(question))
+  expect(text).toContain(`▸ 0 ${s.countActive}`)
+  expect(text).not.toContain(s.groupWorking(1))
+})
+
+test('a blocked row is counted once when it is both due and in its group, and not at all on a shelf', () => {
+  const s = STRINGS.en
+  const view = viewOf(`## sample-api
+<!-- auto session=ab770006 agent=antigravity state=working updated=${at(5)} -->
+### Need a synthetic key
+- [!] Supply the synthetic credential
+<!-- /auto session=ab770006 -->
+`)
+  const row = view.groups[0]!.rows[0]!
+  const count = (board: typeof view) => boardText(board, [], s).split('\n')[0]!
+  expect(count(view)).toContain(`● 1 ${s.countWaiting}`)
+  expect(count({ ...view, due: [row] })).toContain(`● 1 ${s.countWaiting}`)
+  expect(count({ ...view, idle: [row] })).toContain(`● 0 ${s.countWaiting}`)
+  expect(count({ ...view, stopped: [row] })).toContain(`● 0 ${s.countWaiting}`)
+})
+
+test('a row whose question merged into another card, or was covered by an answer, is in progress on the terminal board as on the page', () => {
+  const s = STRINGS.en
+  const page = (board: ReturnType<typeof viewOf>) => serveModel(board, [], s, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } }).view!
+  const block = (id: string, title: string): string => `<!-- auto session=${id} agent=antigravity state=working updated=${at(5)} dir=/synthetic/p -->
+### ${title}
+- [?] Ship it, OK?
+<!-- /auto session=${id} -->
+`
+  const first = block('ab770007', 'First copy')
+  const both = parseProgress(`## sample-api
+${first}${block('ab770008', 'Second copy')}`)
+  const seen = observeQuestions(emptyQuestions(), parseProgress(`## sample-api
+${first}`), null, [], NOW - 2000, true, 's1').ledger
+  const ledger = observeQuestions(seen, both, null, [], NOW - 1000, true, 's2').ledger
+  const later = ledger.records.find(record => record.scope.includes('ab770008'))!
+  for (const [view, waiting, active] of [
+    [buildView(both, [], null, NOW, 0, {}, s, [], {}, ledger), 1, 1],
+    [buildView(both, [], null, NOW, 0, {}, s, [later.id], {}, resolveQuestion(ledger, later.id, NOW)), 0, 2],
+  ] as const) {
+    const onPage = page(view)
+    expect(onPage.needs.n).toBe(waiting)
+    expect(onPage.working.length).toBe(active)
+    for (const out of [boardText(view, [], s, { width: 100, isColor: false }), boardScreen(view, [], emptyBoardState, s, { width: 100, isColor: false })]) {
+      expect(out).toContain(`● ${waiting} ${s.countWaiting}`)
+      expect(out).toContain(`▸ ${active} ${s.countActive}`)
+      expect(out).not.toContain(`${s.pgNeeds}: `)
+    }
+    expect(view.groups[0]!.summary).toBe(`${s.groupCount(2)} · ${s.groupWorking(active)}`)
+  }
+})
+
+test('the terminal board draws each heading once when a row that needs you sits among rows at work', () => {
+  const s = STRINGS.en
+  const row = (id: string, state: string, title: string, step: string): string => `<!-- auto session=${id} agent=antigravity state=${state} updated=${at(5)} -->
+### ${title}
+- ${step}
+<!-- /auto session=${id} -->
+`
+  const drawn = (rows: string): string => {
+    const view = viewOf(`## sample-api
+${rows}`)
+    return boardScreen(view, [], emptyBoardState, s, { width: 100, isColor: false })
+  }
+  const heads = (out: string, word: string): number => out.split('\n').filter(line => line.trim() === word).length
+  const stuck = drawn(`${row('ab770009', 'working', 'At work one', '[~] Write')}${row('ab77000a', 'working', 'Blocked', '[!] Supply the synthetic key')}${row('ab77000b', 'working', 'At work two', '[~] Test')}`)
+  expect(heads(stuck, `● ${s.pgNeeds}`)).toBe(1)
+  expect(heads(stuck, `▸ ${s.sectionActive}`)).toBe(1)
+  expect(stuck.indexOf('Blocked')).toBeLessThan(stuck.indexOf('At work one'))
+  const asking = drawn(`${row('ab77000c', 'working', 'At work one', '[~] Write')}${row('ab77000d', 'working', 'Asking', '[?] Ship it, OK?')}${row('ab77000e', 'working', 'At work two', '[~] Test')}`)
+  expect(heads(asking, `▸ ${s.sectionActive}`)).toBe(1)
+  const waiting = drawn(`${row('ab77000f', 'waiting', 'Paused one', '[ ] Write')}${row('ab770010', 'waiting', 'Blocked', '[!] Supply the synthetic key')}${row('ab770011', 'waiting', 'Paused two', '[ ] Test')}`)
+  expect(heads(waiting, `● ${s.pgNeeds}`)).toBe(1)
+  expect(heads(waiting, 'sample-api')).toBe(1)
+})
+
+test('terminal attention follows live questions and leaves stopped and hand-kept blockers on their shelves', () => {
+  const s = STRINGS.en
+  const file = `## sample-api
+<!-- auto session=ab770002 agent=antigravity state=working updated=${at(5)} -->
+### Check the synthetic release
+- [?] Ship to staging, OK?
+<!-- /auto session=ab770002 -->
+`
+  const view = viewOf(file)
+  const model = serveModel(view, [], s, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } })
+  expect(model.view!.needs.questions).toBe(1)
+  expect(model.view!.working).toEqual([])
+  const row = view.active[0]!
+  expect(rowNeedsYou(row)!.kind).toBe('question')
+  expect(rowNeedsYou(row, true)).toBeNull()
+  for (const out of [boardText(view, [], s), boardScreen(view, [], emptyBoardState, s, { width: 100, isColor: false })]) {
+    expect(out).toContain(s.pgNeeds)
+    expect(out).not.toContain(s.agentWorking('Antigravity'))
+  }
+  const blocked = file.replace('- [?] Ship to staging, OK?', '- [!] Supply the synthetic credential')
+  for (const source of [blocked.replace('state=working', 'state=ended'), blocked.replace(/<!--[^\n]*-->/g, '')]) {
+    const shelf = viewOf(source)
+    const page = serveModel(shelf, [], s, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } })
+    expect(page.view!.needs.n).toBe(0)
+    for (const out of [boardText(shelf, [], s, { width: 100, isColor: false, isIdleOpen: true }), boardScreen(shelf, [], { ...emptyBoardState, isIdleOpen: true }, s, { width: 100, isColor: false })]) {
+      expect(out).not.toContain(s.pgNeeds)
+    }
+  }
+})
 
 test('the terminal board paints with the page palette in 24-bit and 256 colours and never uses the terminal dim', () => {
   const s = STRINGS.en
@@ -311,3 +459,55 @@ test('every placeholder step a hook writes, in every language and as earlier rel
   expect(isLifecycleStep('Water the synthetic rows')).toBe(false)
   expect([...LIFECYCLE_STEPS].length).toBeGreaterThanOrEqual(9)
 })
+
+test('an Antigravity session stopped on a limit leaves the working list', () => {
+  const s = STRINGS.en
+  const file = `## scratch
+<!-- auto session=ab770010 agent=antigravity state=working updated=${at(58)} -->
+### Local antigravity task
+- [ ] ${s.localAgentLifecycle}
+<!-- /auto session=ab770010 -->
+`
+  const view = viewOf(file)
+  const model = serveModel(view, [], s, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } })
+  expect(model.view!.working).toEqual([])
+  expect(view.groups.length).toBe(0)
+  expect(view.stopped.length).toBe(1)
+  expect(view.stopped[0]!.title).toBe('Local antigravity task')
+  const text = boardText(view, [], s, { width: 100, isColor: false })
+  expect(text).not.toContain(s.agentWorking('Antigravity'))
+  expect(text).not.toContain(s.groupWorking(1))
+})
+
+test('a silence-classified row does not offer confirmation or archive that the write guard refuses', () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+    const file = `## scratch\n<!-- auto session=ab770010 agent=antigravity state=working updated=${at(58)} -->\n### Local antigravity task\n- [ ] ${s.localAgentLifecycle}\n<!-- /auto session=ab770010 -->\n`
+    const view = viewOf(file, lang)
+    expect(view.stopped.length).toBe(1)
+    const stoppedRow = view.stopped[0]!
+    expect(stoppedRow.confirm).toBeNull()
+    expect(stoppedRow.archive).toBeNull()
+    // The write guard refuses confirmation and archive for an active session under STALE_MS
+    const forgedConfirm = { project: 'scratch', title: 'Local antigravity task', line: 2, session: 'ab770010', expected: '' }
+    expect(confirmTask(file, forgedConfirm, NOW, s)).toBeNull()
+    const forgedArchive = { project: 'scratch', title: 'Local antigravity task', line: 2, session: 'ab770010' }
+    expect(takeTask(file, forgedArchive, NOW, s)).toBeNull()
+  }
+})
+
+test('a working row with a doing step remains counted after thirty minutes', () => {
+  for (const agent of ['antigravity', 'codex'] as const) {
+    for (const age of [5, 30, 31, 58]) {
+      const s = STRINGS.en
+      const file = `## demo\n<!-- auto session=11223344 agent=${agent} state=working updated=${at(age)} -->\n### Active task\n- [~] Compute the synthetic result\n<!-- /auto session=11223344 -->\n`
+      const view = viewOf(file, 'en')
+      expect(view.stopped.length).toBe(0)
+      expect(view.groups.length).toBe(1)
+      expect(view.groups[0]!.summary).toContain(s.groupWorking(1))
+      const text = boardText(view, [], s, { width: 100, isColor: false })
+      expect(text).toContain(s.agentWorking(agent === 'codex' ? 'Codex' : 'Antigravity'))
+    }
+  }
+})
+

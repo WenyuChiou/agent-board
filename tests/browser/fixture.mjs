@@ -258,7 +258,7 @@ export const browserFixture = async (name, run) => {
     assert.deepEqual(JSON.parse(readFileSync(hooks, 'utf8')).auth, foreignHooks.auth)
     assert.deepEqual(JSON.parse(readFileSync(hooks, 'utf8')).hooks.Stop[0], foreignHooks.hooks.Stop[0])
     assert.equal(readFileSync(auth, 'utf8'), foreignAuth)
-    const doctor = await nodeJson(evidence, 'doctor', installedScript, ['--codex-doctor', '--agent', 'codex', '--home', home, '--codex-dir', directories.codex, '--progress-file', progress, '--lang', 'en'], env)
+    const doctor = await nodeJson(evidence, 'doctor', installedScript, ['--codex-doctor', '--agent', 'codex', '--home', home, '--codex-dir', directories.codex, '--progress-file', progress, '--lang', 'en', '--json'], env)
     assert.equal(doctor.installed, true)
     assert.equal(doctor.connected, 'unverified')
     assert.equal(doctor.capabilities.liveReply, false)
@@ -267,8 +267,9 @@ export const browserFixture = async (name, run) => {
     context = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
     await context.tracing.start({ screenshots: true, snapshots: true, sources: true })
     page = await context.newPage()
-    const startServer = async () => {
-      const result = await commandEvidence(evidence, 'serve', installedScript, ['--serve', '--no-open', '--quiet-board', '--lang', 'en'], env, boardRoot)
+    const startServer = async ({ messages = false } = {}) => {
+      const args = ['--serve', '--no-open', '--quiet-board', '--lang', 'en', ...(messages ? ['--messages-dir', join(root, 'messages')] : [])]
+      const result = await commandEvidence(evidence, 'serve', installedScript, args, env, boardRoot)
       const url = result.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
       assert.ok(url, result.stdout)
       server = { url, record: findServerRecord(root, url) }

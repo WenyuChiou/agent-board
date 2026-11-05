@@ -7,7 +7,7 @@ import { DARK, LIGHT } from './palette'
 import type { Tone } from './palette'
 import { sha256 } from './sha256'
 import { agentLabel } from './strings'
-import { isSameName, relativeTime, replyHint } from './view'
+import { isSameName, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
 
@@ -17,7 +17,7 @@ import type { ConfirmRef } from './blocks'
 
 // A turn another agent's hook left that no Claude Code session has summed up yet. The
 // board only peeks at it: taking it is a Claude Code session's job, so the two never race.
-export type PendingTurn = { id?: string; dir?: string; fullText?: string; sources?: string[]; sourceRevisions?: string[]; isClosed?: boolean; agent: string; project: string; text: string; isQuestion: boolean; at: number; sourceAt?: number; hasSummary?: boolean }
+export type PendingTurn = { id?: string; session?: string; dir?: string; fullText?: string; sources?: string[]; sourceRevisions?: string[]; isClosed?: boolean; agent: string; project: string; text: string; isQuestion: boolean; at: number; sourceAt?: number; hasSummary?: boolean }
 
 // A reply's last line of prose, its code blocks left out: where a reply usually says what
 // came of the turn.
@@ -56,16 +56,16 @@ export const peekInbox = (
     if (question !== null) {
       // Words deduplicate retries, not independent ledger identities. An end or later
       // statement cannot prove a previous question answered before anyone captured it.
-      const key = JSON.stringify([turn.id, turn.project, question.replace(/\s+/g, ' ').trim()])
+      const key = JSON.stringify([turn.id, turn.session, turn.project, question.replace(/\s+/g, ' ').trim()])
       const previous = questions.get(key)
-      questions.set(key, { id: turn.id, fullText: prose!, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
+      questions.set(key, { id: turn.id, session: turn.session, fullText: prose!, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
       latest.delete(turn.id)
     } else if (turn.event !== 'end' && text !== '') {
       latest.set(turn.id, { id: turn.id, ...(prose === null ? {} : { fullText: prose }), agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: false, at: file.at, sourceAt: turn.at ?? file.at, hasSummary: summary !== undefined && summary !== null })
     }
     if (turn.event === 'end') {
       latest.delete(turn.id)
-      for (const [key, pending] of questions) if (pending.id === turn.id) questions.set(key, { ...pending, isClosed: true })
+      for (const [key, pending] of questions) if (pending.id === turn.id && pending.session === turn.session) questions.set(key, { ...pending, isClosed: true })
     }
   }
 
@@ -98,7 +98,7 @@ export type AnswerRoute = { mode: 'connected' | 'send'; agent: string; session: 
 // `depth` and `theme` pick the page's colours for a terminal; `routes` are the questions the
 // running page can answer into their session, by line key; `agents` the agents that reported to
 // this board, which an empty board names.
-export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; depth?: ColorDepth; theme?: Theme; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
+export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; isQuestionsOpen?: boolean; depth?: ColorDepth; theme?: Theme; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
 
 export const remainingInbox = (view: View, pending: readonly PendingTurn[]): readonly PendingTurn[] => view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
 
@@ -220,14 +220,22 @@ const stepLine = (step: ViewStep): string => `${MARK[step.status] ?? '○'} ${st
 // with no agent is Claude Code's.
 const agentOf = (agent: string, isAgent: boolean, s: Strings): string => (agent !== '' ? agentLabel(agent, s) : isAgent ? agentLabel('claude', s) : '')
 
-const rowLines = (row: TaskRow, s: Strings, o: BoardOptions): string[] => {
+const boardNeeds = (view: View, row: TaskRow, isShelved = false): ReturnType<typeof rowNeedsYou> => rowNeedsNow(row, view.waiting, isShelved)
+
+// How a row that needs the person says so. Its question is already on the board's list above, so
+// it is not worded a second time; a blocked step has no other line.
+const needsWords = (needs: { kind: 'stuck' | 'question'; reason: string }, s: Strings): string => (needs.kind === 'question' ? s.pgNeeds : s.pgNeedsWhy(needs.reason))
+
+const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelved = false): string[] => {
   const c = paint(o)
   const isWide = isWideLang(s)
   const cut = (raw: string, width: number): string => fit(raw, width, isWide)
   const name = agentOf(row.agent, row.auto !== null, s)
   const who = name === '' ? '' : ` · ${name}`
   const count = row.total > 0 ? `${row.done}/${row.total} ` : ''
-  const lines = [`  ${c('bold', cut(row.title, o.width - 4))}`, `    ${c('quiet', cut(`${count}${row.status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6))}`]
+  const needs = boardNeeds(view, row, isShelved)
+  const status = needs === null ? row.status : needsWords(needs, s)
+  const lines = [`  ${c('bold', cut(row.title, o.width - 4))}`, `    ${c('quiet', cut(`${count}${status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6))}`]
   if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
   if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
   for (const step of row.steps) {
@@ -242,11 +250,23 @@ const rowLines = (row: TaskRow, s: Strings, o: BoardOptions): string[] => {
 // The line of counts at the top of the board.
 // It is bold throughout, as the page's is.
 const countLine = (view: View, pending: readonly PendingTurn[], s: Strings, c: ReturnType<typeof paint>): string => {
-  const { active, due, today } = view.overview
-  const waiting = view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length
+  const { due, today } = view.overview
+  // A row that needs the person is counted as waiting, as the page does, and not as moving too.
+  const active = view.overview.active - liveRows(view).filter(row => boardNeeds(view, row) !== null).length
+  const waiting = view.overview.waiting + blockedRows(view).length + remainingInbox(view, pending).filter(turn => turn.isQuestion).length
 
   return `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`, true)}  ${c('accent', `▸ ${active} ${s.countActive}`, true)}  ${c('alert', `⚑ ${due} ${s.countDue}`, true)}  ${c('done', `✓ ${today} ${s.countToday}`, true)}`
 }
+
+// The rows still live, each once: a row can be both due and in its group, and one on the idle or
+// stopped shelf only keeps its last steps for reference.
+const liveRows = (view: View): TaskRow[] => {
+  const shelved = new Set([...view.idle, ...view.stopped].map(row => row.key))
+
+  return [...view.due, ...view.groups.flatMap(group => group.rows)].filter((row, index, all) => !shelved.has(row.key) && all.findIndex(one => one.key === row.key) === index)
+}
+
+const blockedRows = (view: View): TaskRow[] => liveRows(view).filter(row => rowNeedsYou(row)?.kind === 'stuck')
 
 // What waits on the person: the questions of the work on the board, then those in turns no
 // session has taken in yet. Questions marked answered are not in `view.waiting`. `named` says
@@ -258,9 +278,14 @@ const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: 
     task: item.task,
   })),
   ...remainingInbox(view, pending).filter(turn => turn.isQuestion).map(turn => ({ where: [named(turn.project), label(turn.agent)].filter(part => part !== '').join(' · '), text: turn.text, task: '' })),
+  ...blockedRows(view).map(row => ({
+    where: [named(row.project), label(row.agent)].filter(part => part !== '').join(' · '),
+    text: s.pgNeedsWhy(rowNeedsYou(row)!.reason),
+    task: row.title,
+  })),
 ]
 
-export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
+export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }, done: readonly string[] = []): string => {
   const c = paint(o)
   const isWide = isWideLang(s)
   const cut = (raw: string, width: number): string => fit(raw, width, isWide)
@@ -272,8 +297,9 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
   for (const [title, items] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
     if (items.length === 0) continue
-    lines.push(`${title} (${items.length}) · --all`)
-    if (o.isIdleOpen) for (const item of items) lines.push(`  ${cut(`${item.project} › ${item.task} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
+    const isOpen = o.isIdleOpen || o.isQuestionsOpen
+    lines.push(`${title} (${items.length})${isOpen ? '' : ' · --all'}`)
+    if (isOpen) for (const item of items) lines.push(`  ${cut(`${item.project} › ${item.task} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
   }
   // Questions marked answered in a pane are left out, and counted so they are not lost.
   const hidden = view.hidden.length === 0 ? [] : [c('quiet', s.hiddenCount(view.hidden.length))]
@@ -299,17 +325,16 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     if (group.rows.length === 0) continue
     const summary = cut(`  ${group.summary}`, Math.max(0, o.width - 3))
     lines.push(c('project', cut(`▸ ${group.project}`, o.width - displayColumns(summary, isWide)), true) + c('quiet', summary))
-    for (const row of group.rows) lines.push(...rowLines(row, s, o))
+    for (const row of group.rows) lines.push(...rowLines(view, row, s, o))
     lines.push('')
   }
 
   for (const [rows, count] of [[view.idle, s.idleCount], [view.stopped, s.stoppedCount]] as const) {
     if (rows.length === 0) continue
-    lines.push(c('quiet', o.isIdleOpen ? count(rows.length) : `${count(rows.length)} · --all`))
-    if (o.isIdleOpen) {
-      for (const row of rows) {
-        lines.push(`  ${c('project', cut(row.project, o.width - 4), true)}`, ...rowLines(row, s, o))
-      }
+    const shown = o.isIdleOpen ? rows : o.isQuestionsOpen ? rows.filter(row => (row.questions?.length ?? 0) > 0) : []
+    lines.push(c('quiet', shown.length === rows.length ? count(rows.length) : `${count(rows.length)} · --all`))
+    for (const row of shown) {
+      lines.push(`  ${c('project', cut(row.project, o.width - 4), true)}`, ...rowLines(view, row, s, o, true))
     }
     lines.push('')
   }
@@ -333,6 +358,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   // Runs agents started for themselves, with no session known: one folded line, never in the counts (#399).
   if (view.background) lines.push(c('quiet', cut(view.background, o.width)), '')
   for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2, isWide).map(part => c('quiet', part)))
+  if (done.length > 0) lines.push('', ...done.map(words => c('done', `✓ ${cut(words, o.width - 2)}`)))
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
 }
@@ -444,7 +470,7 @@ const withoutHomeStart = (text: string, home: string, isWindows: boolean): strin
   return text.slice(0, cut).replace(OTHER_HOME_START, '').trimEnd()
 }
 
-const clipped = (text: string, home: string, isWindows: boolean): string =>
+export const clipped = (text: string, home: string, isWindows: boolean): string =>
   text.length <= CHAT_CLIP ? text : withoutHomeStart(text.slice(0, CHAT_CLIP).replace(/\s*\S*$/, ''), home, isWindows)
 
 const chatLine = (text: string, indent: number, home: string, isWindows: boolean): string =>
@@ -597,13 +623,15 @@ export const olderKey = (ask: WaitingItem): string => `older:${ask.key}@${ask.qu
 // The full action catalog includes idle rows for the page server. Terminal callers pass
 // their shelf state so only rows the person can see are selectable.
 export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOpen = true, isOlderOpen = false): BoardItem[] => {
-  // The page's order: what is working now, then the rest by project, work due soon first; a row
-  // is listed once.
+  // The page's order: what is stuck, what is working now, then the rest by project, work due soon
+  // first; a row is listed once, and each heading the screen draws comes once.
   const shelved = new Set([...view.idle, ...view.stopped].map(row => row.key))
   const listed = [...view.due, ...view.groups.flatMap(group => group.rows), ...(isIdleOpen ? [...view.idle, ...view.stopped] : [])].filter((row, index, all) => all.findIndex(one => one.key === row.key) === index)
-  const isWorking = (row: TaskRow): boolean => row.auto === 'working' && !shelved.has(row.key)
-  const rest = listed.filter(row => !isWorking(row))
-  const rows = [...listed.filter(isWorking), ...[...new Set(rest.map(row => row.project))].flatMap(project => rest.filter(row => row.project === project))]
+  const needsOf = (row: TaskRow): ReturnType<typeof rowNeedsYou> => boardNeeds(view, row, shelved.has(row.key))
+  const isStuck = (row: TaskRow): boolean => needsOf(row)?.kind === 'stuck'
+  const isWorking = (row: TaskRow): boolean => row.auto === 'working' && !shelved.has(row.key) && needsOf(row) === null
+  const rest = listed.filter(row => !isStuck(row) && !isWorking(row))
+  const rows = [...listed.filter(isStuck), ...listed.filter(isWorking), ...[...new Set(rest.map(row => row.project))].flatMap(project => rest.filter(row => row.project === project))]
 
   return [
     // A question's key holds its words, so a press made while it showed one question is refused
@@ -681,6 +709,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   const moved = (selected: number): { state: BoardState; action: null } => ({ state: { ...state, selected, key: items[selected]?.key ?? null, note: '' }, action: null })
   if (key === 'up' || key === 'k') return moved(Math.max(0, at - 1))
   if (key === 'down' || key === 'j') return moved(Math.min(last, at + 1))
+  // The legacy action name now opens the same live page as the desktop command.
   if (key === 'o') return { state, action: { type: 'html' } }
   if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: state.isIdleOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
   if (key === 'l') return { state: { ...state, isOlderOpen: !state.isOlderOpen, selected: 0, key: null, open: null, note: state.isOlderOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
@@ -871,13 +900,16 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
     const isHere = index === at
     const isOpen = state.open === item.key
     const mark = isHere ? c('accent', '›', true) : ' '
-    const isWorking = item.type === 'row' && item.row.auto === 'working' && !shelved.has(item.row.key)
+    const needs = item.type === 'row' ? boardNeeds(view, item.row, shelved.has(item.row.key)) : null
+    const isWorking = item.type === 'row' && item.row.auto === 'working' && !shelved.has(item.row.key) && needs === null
+    // A question has its own line under Waiting on you, so its row stays with its project.
+    const isStuck = needs?.kind === 'stuck'
     const head =
-      item.type === 'ask' ? `● ${item.ask.ageStage === 'older' ? s.sectionOlderQuestions : item.ask.ageStage === 'reminder' ? s.sectionQuestionReminders : s.sectionWaiting}` : item.type === 'row' ? (isWorking ? `▸ ${s.sectionActive}` : item.row.project) : `◐ ${s.boardInbox}`
-    const headKey = item.type === 'row' && !isWorking ? `project:${head}` : head
+      item.type === 'ask' ? `● ${item.ask.ageStage === 'older' ? s.sectionOlderQuestions : item.ask.ageStage === 'reminder' ? s.sectionQuestionReminders : s.sectionWaiting}` : item.type === 'row' ? (isStuck ? `● ${s.pgNeeds}` : isWorking ? `▸ ${s.sectionActive}` : item.row.project) : `◐ ${s.boardInbox}`
+    const headKey = item.type === 'row' && !isWorking && !isStuck ? `project:${head}` : head
     if (headKey !== section) {
       if (section !== '') lines.push('')
-      lines.push(c(item.type === 'ask' ? 'waiting' : item.type === 'row' && !isWorking ? 'project' : 'accent', cut(head, o.width), true))
+      lines.push(c(item.type === 'ask' || isStuck ? 'waiting' : item.type === 'row' && !isWorking ? 'project' : 'accent', cut(head, o.width), true))
       section = headKey
     }
     if (item.type === 'ask') {
@@ -918,12 +950,12 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const badge = row.due ? `⚑ ${row.due.left}` : ''
       const reserve = badge === '' ? 0 : cols(badge) + 2
       // Under In progress a row also names its project, which has no heading there.
-      const lead = [isWorking && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
+      const lead = [(isWorking || isStuck) && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
       // The step it is on, in the accent colour, where its status only says that it works.
-      const step = row.tone === 'quiet' || row.tone === 'accent' ? row.steps.find(one => one.isCurrent && (one.status === 'doing' || one.status === 'todo')) : undefined
-      const status = cut(`${lead}${step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve)
+      const step = needs === null && (row.tone === 'quiet' || row.tone === 'accent') ? row.steps.find(one => one.isCurrent && (one.status === 'doing' || one.status === 'todo')) : undefined
+      const status = cut(`${lead}${needs !== null ? needsWords(needs, s) : step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve)
       const quiet = status.startsWith(lead) ? lead : ''
-      lines.push(`    ${c('quiet', quiet)}${c(toneInk(row.tone, step !== undefined), status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
+      lines.push(`    ${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
       if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
       if (isOpen) {
         if (row.question) lines.push(`    ${cut(row.question, o.width - 6)}`)

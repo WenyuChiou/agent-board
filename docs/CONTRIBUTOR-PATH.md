@@ -2,6 +2,8 @@
 
 This page is for a person or an agent working on Agent Board from another computer, with `git`, `gh` (logged in to GitHub) and Node 22.18+ or 24. It gives the commands for [CONTRIBUTING.md, Pull requests](../CONTRIBUTING.md#pull-requests); where the two disagree, CONTRIBUTING.md wins. Every command runs as written in bash on Linux and in Git Bash on Windows. On macOS, the `date` in step 2 is the one command known to differ; it falls back to macOS's own form (`-v`). macOS has not been tried. Nothing here needs Claude Code, files on the maintainer's computer or a chat: everything happens in the repository, its issues and its pull requests.
 
+The rules behind these steps fit on one page: [RULES.md](dev/RULES.md). Read it first.
+
 Below, `<agent>` is your name in lower case: your agent's name (`codex`, `dot`, `muse`, `cursor`), or your GitHub login if you work by hand. An agent working for someone outside the team adds that person's GitHub login in brackets (`claude (octocat)`). An agent that a coordinating session sent adds that session's lane in brackets (`codex (phase1)`). `<N>` is the issue (each issue, when your pull request names several), `<PR>` your pull request and `<branch>` your branch, named `<type>/<short-slug>` (`fix/question-ledger-write`).
 
 ## How a pull request moves
@@ -66,7 +68,7 @@ Your fork is then `origin` and this repository `upstream`. From then on:
 
 GitHub holds the PR check and CI on a pull request from a fork until a maintainer approves each run (step 6).
 
-Follow [AGENTS.md](../AGENTS.md), Working on this repository, for where code goes and how it is written. A change to `AGENTS.md`, `CONTRIBUTING.md` or anything under `.github/` needs the owner's written approval of its content, quoted in the pull request body ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 12). Use synthetic data only: made-up projects, sessions and paths.
+Follow [AGENTS.md](../AGENTS.md), Working on this repository, for where code goes and how it is written. A change to a governance file needs the owner's written approval of its content, quoted in the pull request body; [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rule 12 lists those files. Use synthetic data only: made-up projects, sessions and paths.
 
 ## 4. Run the checks
 
@@ -114,14 +116,15 @@ Known traps, all found on Windows in earlier pull requests:
 - Destroying a child process's stdio and calling `unref()` does not free its handles on Windows; a test that gives up on a child must end the run itself (#184).
 - Tests that start a board page or a host process can time out on a busy machine. Locally, rerun the one that failed on its own and report both runs; in CI, a timeout is a flaky test, as above.
 
-## 5. Write the CHANGELOG fragment
+## 5. Title it for the CHANGELOG
 
-A fix or feature pull request adds one new file for each issue it names, `changelog.d/<N>-<slug>.md` (three bug fixes add three files), holding that issue's entry exactly as it will read in `CHANGELOG.md` ([changelog.d/README.md](../changelog.d/README.md)). Do not edit `CHANGELOG.md` or another pull request's fragment. The slug uses lowercase letters, digits and single hyphens; if the issue already has a fragment from another pull request, pick a different slug.
+You normally write no CHANGELOG entry (to word the line yourself, see [rule 6](../CONTRIBUTING.md#pull-requests)). The release writes one line for each fix and feature from its squash-merge title, so the title says what changed for the person using agent-board, in one plain sentence:
 
-```markdown
-- **What changed, in plain words (#N).** What went wrong and what it does now.
-  Tests: `exact title one`, `exact title two`.
+```text
+fix(board): the column width stays the same after a restart
 ```
+
+Do not add a file to `changelog.d/` or edit `CHANGELOG.md` ([CONTRIBUTING.md rule 6](../CONTRIBUTING.md#pull-requests)).
 
 Copy each title exactly from its `test('…')` call. A change to documentation only writes `Tests: none (documentation only).`
 
@@ -148,7 +151,7 @@ If the PR check says you are over the open pull request limit for contributors f
 
 ## 7. Mark it ready
 
-Before you mark it ready, run the local preflight. It checks the branch against `main`, runs the Node test files you touched, the string tables, the language copies of the docs, the bundle, the fragment and the body:
+Before you mark it ready, run the local preflight. It checks the branch against `main`, runs the Node test files you touched, the string tables, the language copies of the docs, the bundle, the CHANGELOG and the body:
 
 ```sh
 node scripts/preflight.mjs --body-file ../pr-body.md --title "fix(cli): <summary>"
@@ -205,7 +208,7 @@ The rebuild also removes a part that `main` no longer has, and `add -A` stages t
 
 When `scripts/build-board.ts` says a bundle part is over 1,000,000 bytes, do not remove or shorten features to make it fit. Add a split point to `PART_STARTS` in `scripts/build-board.ts` and rebuild, or say so on your issue and the maintainer adds it.
 
-Fragments in `changelog.d/` do not conflict, since each pull request adds its own file. Run the checks again and push. Once the pull request is Ready, merge `main` only while answering `Review: REQUEST CHANGES` if a conflict needs it, or when GitHub reports a conflict ([docs/dev/team-process.md, Merge order](dev/team-process.md#merge-order)), not because `main` moved; after that push, comment `Ready for review <new full head sha>`. After `Review: APPROVE`, leave merging `main` to the reviewer.
+Since no pull request edits `CHANGELOG.md`, it never conflicts. Run the checks again and push. Once the pull request is Ready, merge `main` only while answering `Review: REQUEST CHANGES` if a conflict needs it, or when GitHub reports a conflict ([docs/dev/team-process.md, Merge order](dev/team-process.md#merge-order)), not because `main` moved; after that push, comment `Ready for review <new full head sha>`. After `Review: APPROVE`, leave merging `main` to the reviewer.
 
 ## 10. After the merge, or handing over
 
@@ -220,9 +223,9 @@ gh issue edit <N> -R WenyuChiou/agent-board --remove-label claimed   # if you cl
 
 ## 11. Review and merge someone else's pull request
 
-With write access to this repository you may also review and merge pull requests you did not write ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 8 and 9). If the owner names you in [Roles](../CONTRIBUTING.md#roles), a code-review subagent you run may also approve your own pull request, under the conditions in rule 8. In this step `<PR>` is the pull request you are reviewing, and `<N>` is each linked issue. Start every review block from the queue below, then take one marked `Ready for review <sha>` that nobody is reviewing, and say so first.
+With write access to this repository you may also review and merge pull requests you did not write ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 8 and 9). In this step `<PR>` is the pull request you are reviewing, and `<N>` is each linked issue. Start every review block from the queue below, then take one marked `Ready for review <sha>` that nobody is reviewing, and say so first.
 
-`node scripts/review-queue.mjs` is where a collaborator, the maintainer, a stand-in or the owner starts. It lists the pull requests waiting on a reviewer, smallest first, with how long each has waited since its `Ready for review <sha>` and a suggested reviewer; then those with a conflict with `main` (a conflicted one gets no CI until `main` is merged; one that is only behind `main` is queued like any other); the approved ones in merge order, where those that touch a source of the board bundle or the release table go one at a time; and those waiting on their author. Under a pull request it shows what Codex review said about the current head (a bot that has not reviewed a head never holds a pull request up) and, when one applies, where its merge-after-notice stands. After the queue come the collaborators who have posted `Away:` on the roadmap issue (`--roadmap N` names another issue) and the claims that have run out. Take the small ones first. The rules behind these lines are [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 3 and 8 and [team-process, From claim to merge](dev/team-process.md#from-claim-to-merge).
+`node scripts/review-queue.mjs` is where a collaborator, the maintainer, a stand-in or the owner starts. It lists the pull requests waiting on a reviewer, smallest first, with how long each has waited since its `Ready for review <sha>` and a suggested reviewer; then those with a conflict with `main` (a conflicted one gets no CI until `main` is merged; one that is only behind `main` is queued like any other); the approved ones in merge order, where those that touch a source of the board bundle or the release table go one at a time; and those waiting on their author. Under a pull request it shows what Codex review said about the current head (a bot that has not reviewed a head never holds a pull request up). After the queue come the collaborators who have posted `Away:` on the roadmap issue (`--roadmap N` names another issue) and the claims that have run out. Take the small ones first. The same list, without the lanes, is also a comment on the pinned issue "Review queue (updated hourly)": `.github/workflows/review-queue.yml` edits it every hour, and takes `claimed` off each claim that ran out with one comment on its issue. The rules behind these lines are [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) rules 3 and 8 and [team-process, From claim to merge](dev/team-process.md#from-claim-to-merge).
 
 ```sh
 node scripts/review-queue.mjs
@@ -236,7 +239,7 @@ gh api repos/WenyuChiou/agent-board/pulls/<PR>/comments --paginate
 gh pr checks <PR> -R WenyuChiou/agent-board
 ```
 
-Read the diff against the issues on the body's first lines, and each P0 or P1 finding from Greptile or Codex. If either bot did not review this head (a fork, a failed or stuck run), run a code review of the head yourself, such as a local Codex run or your agent's code-review subagent, and post its result on the pull request. Then post one verdict with all findings at once: `Review: APPROVE <full head sha> by <login>` with what you verified, or `Review: REQUEST CHANGES <full head sha> by <login>` with each finding by file and line. Your own agent, lane or subagent cannot approve your own pull request, except under rule 8's conditions for the maintainer and for every collaborator, among them that the checks rule 9 requires have passed on the current head and no P0 or P1 from a bot or the subagent stands unresolved. A bot can block a merge but never approves one.
+Read the diff against the issues on the body's first lines, and each P0 or P1 finding from Greptile or Codex. If either bot did not review this head (a fork, a failed or stuck run), run a code review of the head yourself, such as a local Codex run or your agent's code-review subagent, and post its result on the pull request. Then post one verdict with all findings at once: `Review: APPROVE <full head sha> by <login>` with what you verified, or `Review: REQUEST CHANGES <full head sha> by <login>` with each finding by file and line. Your own agent, lane or subagent cannot approve your own pull request, whoever you are ([RULES.md, R2](dev/RULES.md#r2-nobody-approves-their-own-work); its one exception is for a lane run by the owner or a collaborator with write access: a read-only reviewer that lane starts new for its own pull request, under R2's conditions). A bot can block a merge but never approves one.
 
 Merge only when the latest verdict is an approval satisfying rule 8 for the current head (or for a head the branch has since moved from only by a clean merge of `main`, without conflicts or anything else in the merge commit), and impact planning, CI validation, every selected CI job, every other applicable workflow in `.github/workflows/`, and the `Greptile Review` check have succeeded on the current head; when Greptile did not review that head, your own code review posted for it stands in for that check (rule 9). Skipped, neutral, cancelled or missing selected checks are not passes; only groups explicitly omitted as unaffected by the plan may be skipped (rule 9):
 
@@ -247,6 +250,6 @@ gh issue comment <N> -R WenyuChiou/agent-board --body "Fixed by #<PR>, merged as
 
 Don't sit and watch CI. Once you approve, start the wait in the background (`gh pr checks <PR> -R WenyuChiou/agent-board --watch`, then the merge above when every check passes) and take the next pull request in the queue.
 
-A pull request that changes the board page's messages, the setup output or the one-line row summaries also needs `Acceptance: PASS <full head sha>` from a collaborator or the owner who did not write it, after walking the steps in #572 on their own machine.
+A pull request that changes the board page's messages, the setup output or the one-line row summaries also runs the journeys it touches in [USER-SIM.md](validation/USER-SIM.md) on its head, with an AI playing the new user, and puts the PASS, FRICTION or FAIL rows under Checks.
 
-GitHub deletes a merged branch from this repository. A governance pull request also needs the owner's approval quoted in its body (rule 12), and a release pull request stays with the maintainer ([Releases](../CONTRIBUTING.md#releases)).
+GitHub deletes a merged branch from this repository. A governance pull request also needs the owner's approval quoted in its body (rule 12), and a release pull request follows [Releases](../CONTRIBUTING.md#releases): it merges like any other once approved ([RULES.md, R3](dev/RULES.md#r3-merging)), and the maintainer, or a collaborator when the maintainer is away, tags it.

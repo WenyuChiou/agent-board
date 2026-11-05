@@ -1,16 +1,63 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { after, before, describe, test } from 'node:test'
 import { performance } from 'node:perf_hooks'
 import { CONNECTOR_POLL_MS, GAPS, NATIVE_RECEIVERS, RECEIVERS, SENDERS, openHub, receiptBudget, withHub } from './lib/hub.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { noMachineIds, noSilentPress, seenWithin } from './lib/expect.mjs'
-import { chat, terminal } from './lib/surfaces.mjs'
-import { PAGE_MS } from './lib/budget.mjs'
+import { pageDom, print, run, serve, terminal } from './lib/surfaces.mjs'
+import { makeWorld } from './lib/world.mjs'
+import { EN } from '../../hooks/strings-en.ts'
+import { BLOCKS, LIVE_SESSIONS, PAGE_MS } from './lib/budget.mjs'
+import { block } from './lib/writers.mjs'
+import { finishedRecord, isFinishedRecord, readStore, seedStore } from './lib/hub-wire.mjs'
 
 const text = 'Review route /health?mode=ready — 測試 intact\nKeep both lines.'
-const nativeDelivery = async (hub, source, receiver, id = 'AB-synthetic-message') => {
+
+test('messages: a Codex session with no poller takes a page message on its next turn, and the card says next turn, not delivered', async () => {
+  const world = makeWorld()
+  world.env.NODE_OPTIONS = world.env.NODE_OPTIONS.split(' ').filter(one => !one.includes('clock-preload')).join(' ')
+  const session = '60300000-2222-4333-8444-555555555555'
+  try {
+    const server = await serve.start(world)
+    const hook = event => run(world, ['--codex-event', '--home', world.home, '--progress-file', world.path], { input: JSON.stringify({ session_id: session, hook_event_name: event, turn_id: 'next-turn' }) })
+    const enrolled = await hook('SessionStart')
+    assert.equal(enrolled.status, 0, enrolled.stderr)
+    let snapshot = (await server.get('/api/board')).json()
+    assert.equal(snapshot.messaging.connections.length, 0)
+    assert.equal(snapshot.messaging.mailboxes.length, 1)
+    snapshot = (await server.get('/api/board')).json()
+    const page = await pageDom((await server.get(new URL(server.url).pathname + new URL(server.url).search)).body, snapshot.model, async request => {
+      const response = await server.post(request.path, request.body)
+      return { ok: response.status < 400, json: async () => response.json() }
+    })
+    const card = page.cards().find(one => page.buttons(one).some(button => button.textContent.startsWith('Queue for Codex')))
+    assert.ok(card, page.text())
+    assert.ok(page.buttons(card).some(button => button.textContent === EN.pgCopyAnswer))
+    const queue = page.buttons(card).find(button => button.textContent.startsWith('Queue for Codex'))
+    assert.ok(page.reveal(queue))
+    page.inputs(card)[0].value = 'Synthetic next-turn mailbox message'
+    queue.click()
+    await page.flush()
+    snapshot = (await server.get('/api/board')).json()
+    assert.equal(snapshot.messaging.messages[0].status, 'queued')
+    const delivered = await hook('UserPromptSubmit')
+    assert.equal(delivered.status, 0, delivered.stderr)
+    assert.ok(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext.includes('Synthetic next-turn mailbox message'))
+    snapshot = (await server.get('/api/board')).json()
+    assert.equal(snapshot.messaging.messages[0].status, 'accepted')
+    await page.redraw(snapshot.model)
+    assert.ok(page.text().includes('Handed to the session at its turn start. No reply is confirmed.'))
+    assert.ok(!page.text().includes('Delivered'))
+    assert.ok(!page.text().includes('Waiting for a reply'))
+    const again = await hook('UserPromptSubmit')
+    assert.equal(again.status, 0, again.stderr)
+    assert.ok(!again.stdout.includes('Synthetic next-turn mailbox message'))
+  } finally { await world.close() }
+})
+const nativeDelivery = async (hub, source, receiver, id = 'AB-synthetic-message', options) => {
   const sent = await hub.send(source, receiver, text, id)
-  const result = await hub.receipt(receiver, sent)
+  const result = await hub.receipt(receiver, sent, options)
   await hub.cleanPage(sent)
   return { ...result, sent }
 }
@@ -25,6 +72,21 @@ const nativeOrFallback = async (hub, source, receiver, issue, id = 'AB-synthetic
     // This assertion becomes a real transport/ACK check when its table row lands.
     assert.ok(receiver.received.length > 0, 'Native receiver did not observe the message')
   })
+}
+
+// The board at its scale budget (BLOCKS tasks, LIVE_SESSIONS of them live, the receiver's among them)
+// and a message store that already holds the finished messages it keeps, as a long-running board would.
+const FINISHED_KEPT = 1000
+const PROJECTS = ['api-gateway', 'docs-site', 'research-hub', 'billing-core', 'mobile-app', 'infra-tools', 'data-pipeline', 'search-service']
+const atSizeCap = ({ world, messages }) => {
+  for (let number = 0; number < BLOCKS - 1; number += 1) {
+    const isLive = number < LIVE_SESSIONS - 1
+    block(world, {
+      project: PROJECTS[number % PROJECTS.length], agent: 'gemini', session: (0xb2000000 + number).toString(16), state: isLive ? 'working' : 'done',
+      title: `Scale task ${number + 1}`, steps: [isLive ? '- [~] Check the synthetic routes' : '- [x] Check the synthetic routes'],
+    })
+  }
+  seedStore(messages, Array.from({ length: FINISHED_KEPT }, (_, index) => finishedRecord(index, Date.now())))
 }
 
 describe('L3b messages between sessions and agents', { timeout: 90000, concurrency: 2 }, () => {
@@ -55,7 +117,7 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     const [codex, antigravity] = hub.actors
     await nativeDelivery(hub, codex, antigravity, 'AB-outward')
     await nativeDelivery(hub, antigravity, codex, 'AB-return')
-  }))
+  }, { traceReceipt: true }))
 
   for (const agent of Object.keys(NATIVE_RECEIVERS)) test(`messages: a message typed on the serve page reaches ${NATIVE_RECEIVERS[agent].label} card's live session and the card shows the receipt`, { timeout: 20000 }, async () => withHub([
     { agent },
@@ -78,7 +140,7 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
 
   test('messages: Codex to a Claude session is delivered natively or the card names the copy fallback in words', { timeout: 20000 }, async () => withHub([
     { agent: 'codex' }, { agent: 'claude' },
-  ], async hub => { await nativeOrFallback(hub, hub.actors[0], hub.actors[1], 58) }))
+  ], async hub => { await nativeOrFallback(hub, hub.actors[0], hub.actors[1], GAPS.claude) }))
 
   test('messages: Antigravity to a Hermes session is delivered natively or the card names the copy fallback in words', { timeout: 20000 }, async () => withHub([
     { agent: 'antigravity' }, { agent: 'hermes' },
@@ -89,9 +151,8 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
   ], async hub => {
     const [, receiver] = hub.actors
     await nativeDelivery(hub, hub.actors[0], receiver)
-    const surfaces = { terminal: (await terminal.screen(hub.world)), chat: (await chat(hub.world)) }
-    assert.equal(surfaces.chat.status, 0, surfaces.chat.stderr)
-    for (const [surface, output] of [['terminal', surfaces.terminal], ['--chat', surfaces.chat.stdout]]) {
+    const surfaces = { terminal: await terminal.screen(hub.world), print: await print(hub.world) }
+    for (const [surface, output] of Object.entries(surfaces)) {
       assert.ok(output.includes(receiver.title), `${surface}: receiver card missing`)
       noMachineIds(output, hub.world)
       await knownFailure(232, () => {
@@ -116,8 +177,42 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     assert.equal(receiver.received.length, 0)
     await hub.fallback(receiver, text)
     const card = (await hub.card(receiver)).textContent
-    assert.match(card, /Cannot send here|disconnected|offline|Could not send/i)
+    assert.match(card, /isn't connected|disconnected|offline|Could not send/i)
   }))
+
+  test('messages: a message typed on the page reaches a live session while the board is at its size cap', { timeout: 40000 }, async () => withHub([
+    { agent: 'codex' },
+  ], async hub => {
+    const receiver = hub.actors[0]
+    // The page leaves finished tasks out of its groups, so the file is where all of them are counted.
+    assert.equal((hub.world.read('progress.md').match(/^<!-- auto session=/gm) ?? []).length, BLOCKS)
+    const rows = (await hub.snapshot()).model.groups.flatMap(group => group.rows)
+    assert.ok(rows.length >= LIVE_SESSIONS, `The board shows ${rows.length} tasks, not the scale budget`)
+    assert.equal(readStore(hub.messages).filter(isFinishedRecord).length, FINISHED_KEPT)
+    assert.equal((await hub.snapshot()).messaging.messages.length, FINISHED_KEPT)
+    // A delivery needs a claim, a receipt and the page poll that reads it: each is a full-store request.
+    // Cap the allowance so a slowdown of every request still fails the budget.
+    const snapshotTimes = []
+    for (let index = 0; index < 3; index++) {
+      const started = performance.now()
+      await hub.snapshot()
+      snapshotTimes.push(performance.now() - started)
+    }
+    const slowest = Math.max(...snapshotTimes)
+    console.log(`size cap: ${Math.round(slowest)} ms per snapshot`)
+    const { sent } = await nativeDelivery(hub, 'page', receiver, undefined, { extraMs: Math.min(Math.ceil(3 * slowest), 8000) })
+    // The new message finishes into a full store: the oldest finished one goes, so the file stays at its cap.
+    const store = readStore(hub.messages)
+    assert.equal(store.filter(isFinishedRecord).length, FINISHED_KEPT)
+    assert.equal(store.filter(one => !isFinishedRecord(one)).length, 0)
+    assert.ok(!store.some(one => one.id === 'AB-seed-' + (FINISHED_KEPT - 1)), 'The oldest finished message is still kept')
+    // The next oldest was handed out and then expired, so it may have arrived: it waits for its 24 hours.
+    assert.ok(store.some(one => one.id === 'AB-seed-' + (FINISHED_KEPT - 2) && one.error === 'EXPIRED'), 'A message that may have arrived went by count')
+    const kept = store.find(one => one.id === sent.id)
+    assert.equal(kept?.status, 'acknowledged')
+    assert.equal(kept.text, '')
+    assert.equal(kept.hash, createHash('sha256').update(JSON.stringify(sent.text)).digest('hex'))
+  }, { prepare: atSizeCap }))
 
   test('messages: a receiver that never acknowledges leaves the card saying the delivery is uncertain', { timeout: 20000 }, async () => withHub([
     { agent: 'codex', noAck: true },

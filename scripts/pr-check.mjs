@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
+import { fragmentIssue, isFragmentPath, titleCommitNumbers } from './changelog-fold.mjs'
 import { bundleFiles, isBundleFile } from './bundle-text.mjs'
 
 // Pull requests from outside the team (CONTRIBUTING.md, Outside contributors; #482): two open per GitHub login and
@@ -23,6 +23,8 @@ const escapeRegex = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const result = () => ({ problems: [], info: [] })
 const problem = (check, message, fix) => ({ check, message, fix })
 const isReleaseTitle = title => /^chore\(release\):/.test(title)
+// A team pull request titled chore(changelog): shortens every fragment to one line under Unreleased and removes it.
+const isFoldTitle = title => /^chore\(changelog\):/.test(title)
 // The type is read as rule 6 reads it for the CHANGELOG: the word before "(", "!" or ":".
 const isFixTitle = title => /^fix[(!:]/.test(title)
 const linesOf = text => text.split(/\r?\n/)
@@ -229,38 +231,26 @@ export const testTitles = files => {
 export const titleKnown = (span, titles) => titles.exact.has(span)
   || (span.match(spanPlaceholder) ? titles.shapes.has(span.replace(spanPlaceholder, '\0')) : titles.templates.some(parts => fitsTemplate(span, parts)))
 
-const listedIssues = (issue, issues) => [...new Set(issues?.length ? issues : issue === null || issue === undefined ? [] : [issue])]
-
-// issues: every issue on the body's first lines; a fragment may be named for any of them, once each.
-export const fragmentChanges = ({ paths = [], addedPaths = [], headPaths, issue, issues, isRelease }) => {
+// The release writes each fix and feature's CHANGELOG line from its pull request title, so a new pull request adds no
+// fragment to changelog.d/. One opened before that change keeps its fragment, which the release folds in place of
+// the title; a fragment already on main is not edited, except by the release or a chore(changelog): pull request
+// that folds every fragment.
+export const fragmentChanges = ({ paths = [], addedPaths = [], headPaths, isRelease, isFold = false }) => {
   const output = result()
-  const listed = listedIssues(issue, issues)
-  const fragments = paths.filter(isFragmentPath)
-  const fresh = addedPaths.filter(isFragmentPath)
-  if (isRelease) {
+  if (isRelease || isFold) {
+    const who = isRelease ? 'the release' : 'the fold'
+    const fix = isRelease ? 'run node scripts/changelog-fold.mjs <version> --write and include the fragment removals.' : 'shorten each remaining fragment to one line under ## Unreleased and remove it.'
     if (headPaths === undefined || headPaths === null) output.info.push('changelog: unfolded fragment check skipped; head tree listing is unavailable.')
-    else if ([...headPaths].some(isFragmentPath)) output.problems.push(problem('changelog', 'the release leaves fragments unfolded in changelog.d/.', 'run node scripts/changelog-fold.mjs <version> --write and include the fragment removals.'))
+    else if ([...headPaths].some(isFragmentPath)) output.problems.push(problem('changelog', `${who} leaves fragments unfolded in changelog.d/.`, fix))
     return output
   }
+  const fresh = addedPaths.filter(isFragmentPath)
   for (const path of fresh) {
-    const number = fragmentIssue(path)
-    if (number === null) output.problems.push(problem('changelog', `invalid fragment name: ${path}.`, 'use changelog.d/<issue>-<lowercase-slug>.md; see changelog.d/README.md.'))
-    else if (listed.length && !listed.includes(Number(number))) {
-      const names = listed.map(item => `#${item}`).join(', ')
-      output.problems.push(problem('changelog', `the fragment ${path} is named for a different issue than ${names}.`, listed.length === 1 ? `rename it to changelog.d/${listed[0]}-<slug>.md.` : `rename it to changelog.d/<issue>-<slug>.md, with <issue> one of ${names}.`))
-    }
+    if (fragmentIssue(path) === null) output.problems.push(problem('changelog', `invalid fragment name: ${path}.`, 'remove the fragment: the release writes this pull request\'s CHANGELOG line from its title (CONTRIBUTING rule 6).'))
+    else output.info.push(`changelog: ${path} is kept as this pull request's entry; a new pull request adds no fragment (CONTRIBUTING rule 6).`)
   }
-  for (const path of fragments.filter(path => !fresh.includes(path))) {
-    output.problems.push(problem('changelog', `an existing fragment was edited or removed: ${path}.`, 'restore that fragment and add a new file with a different slug; only chore(release): pull requests fold existing fragments.'))
-  }
-  if (listed.length < 2) {
-    if (fresh.length > 1) output.problems.push(problem('changelog', 'more than one fragment was added.', 'combine this pull request entry into exactly one new changelog.d/<issue>-<slug>.md file.'))
-  } else {
-    // One fragment for each issue the body lists, so two for the same number still say too much.
-    const numbers = fresh.map(fragmentIssue).filter(number => number !== null)
-    for (const number of new Set(numbers.filter((item, index) => numbers.indexOf(item) !== index))) {
-      output.problems.push(problem('changelog', `more than one fragment was added for #${number}.`, `combine them into exactly one new changelog.d/${number}-<slug>.md file.`))
-    }
+  for (const path of paths.filter(path => isFragmentPath(path) && !fresh.includes(path))) {
+    output.problems.push(problem('changelog', `an existing fragment was edited or removed: ${path}.`, 'restore that fragment; only chore(release): pull requests fold existing fragments.'))
   }
   return output
 }
@@ -290,61 +280,73 @@ export const changelogEntry = ({ entry, issue, titles, isDocsOnly, location = 'U
   return output
 }
 
-// Rule 6 asks an entry of fix and feature pull requests; any other entry is checked when there is one.
-export const changelog = ({ text, added, issue, issues, titles, isRelease, isDocsOnly, isRequired = true, paths = [], addedPaths = [], headPaths }) => {
-  const output = fragmentChanges({ paths, addedPaths, headPaths, issue, issues, isRelease })
-  if (isRelease) {
-    output.info.push('changelog: skipped for a release pull request.')
+// isRequired: a fix or feature that edits CHANGELOG.md writes its own line under Unreleased, because the release
+// then leaves its title out. Every other pull request needs no entry.
+export const changelog = ({ text, added, issue, titles, isRelease, isFold = false, isDocsOnly, isRequired = true, paths = [], addedPaths = [], headPaths, title = '', releaseNumbers = [] }) => {
+  const output = fragmentChanges({ paths, addedPaths, headPaths, isRelease, isFold })
+  if (isFold) {
+    output.info.push('changelog: Unreleased lines not checked for a pull request that folds the old fragments.')
     return output
   }
-  const fresh = addedPaths.filter(isFragmentPath)
+  if (isRelease) {
+    const versionMatch = title.match(/(?:^|\s)v?(\d+\.\d+\.\d+)\b/)
+    const version = versionMatch ? versionMatch[1] : null
+    const lines = linesOf(text)
+    const escapedVersion = version ? version.replace(/\./g, '\\.') : null
+    const headingIndex = escapedVersion ? lines.findIndex(line => new RegExp(`^## ${escapedVersion}(?:\\s|$)`).test(line)) : -1
+    if (headingIndex === -1) {
+      if (releaseNumbers.length > 0) {
+        output.problems.push(problem('changelog', version ? `CHANGELOG.md has no section for version ${version}.` : 'the release pull request title must name the version being released.', version ? `run node scripts/changelog-fold.mjs ${version} --write.` : 'name the version in the title, e.g. chore(release): 1.1.0.'))
+        return output
+      }
+      output.info.push('changelog: skipped for a release pull request.')
+      return output
+    }
+    const nextHeadingIndex = lines.findIndex((line, idx) => idx > headingIndex && /^## /.test(line))
+    const sectionLines = lines.slice(headingIndex, nextHeadingIndex === -1 ? lines.length : nextHeadingIndex)
+    const sectionText = sectionLines.join('\n')
+    const sectionNumbers = new Set([...sectionText.matchAll(/#([1-9]\d*)\b/g)].map(m => Number(m[1])))
+    const missing = releaseNumbers.filter(n => !sectionNumbers.has(n))
+    if (missing.length > 0) {
+      output.problems.push(problem(
+        'changelog',
+        `the release section for ${version} is missing pull request ${missing.map(n => `#${n}`).join(', ')}.`,
+        `run node scripts/changelog-fold.mjs ${version} --write to include late merges before releasing.`
+      ))
+      return output
+    }
+    output.info.push(`changelog: release section for ${version} includes all ${releaseNumbers.length} merged fix and feature pull requests.`)
+    return output
+  }
+  // A kept fragment must still fold at release: it names its own issue and its covering tests.
+  for (const path of addedPaths.filter(path => fragmentIssue(path) !== null)) {
+    const entry = added.filter(item => item.path === path).map(item => item.text).join('\n')
+    output.problems.push(...changelogEntry({ entry, issue: fragmentIssue(path), titles, isDocsOnly, location: 'fragment' }).problems)
+  }
   const lines = linesOf(text)
   const start = lines.findIndex(line => /^## Unreleased\s*$/.test(line))
   const next = lines.findIndex((line, index) => index > start && /^## /.test(line))
   const end = next === -1 ? lines.length : next
   const nonblank = added.filter(line => line.path === 'CHANGELOG.md' && line.text.trim())
   const inside = start === -1 ? [] : nonblank.filter(line => line.line > start + 1 && line.line <= end && !/^## /.test(line.text))
-  if (fresh.length) {
-    if (inside.length) output.problems.push(problem('changelog', 'the entry is both in changelog.d/ and under Unreleased; keep only the fragment.', 'remove the added Unreleased entry from CHANGELOG.md.'))
-    // Each fragment names the issue in its own file name; one named for no listed issue is judged against the first.
-    const ownIssue = path => (issues ?? []).find(item => item === Number(fragmentIssue(path))) ?? issue
-    // A fix or feature pull request that names several issues needs a fragment for each (rule 6).
-    const listed = listedIssues(issue, issues)
-    if (isRequired && listed.length > 1) {
-      const named = new Set(fresh.map(path => Number(fragmentIssue(path))))
-      for (const number of listed.filter(item => !named.has(item))) {
-        output.problems.push(problem('changelog', `no fragment was added for #${number}.`, `add changelog.d/${number}-<slug>.md (rule 6: one fragment for each issue).`))
-      }
-    }
-    for (const path of fresh) output.problems.push(...changelogEntry({ entry: added.filter(item => item.path === path).map(item => item.text).join('\n'), issue: ownIssue(path), titles, isDocsOnly, location: 'fragment' }).problems)
-    return output
-  }
-  // An Unreleased entry names one issue, so several issues can only be covered by fragments.
-  const several = listedIssues(issue, issues)
-  if (isRequired && several.length > 1) {
-    output.problems.push(problem('changelog', 'a pull request that names several issues adds a fragment for each; an Unreleased entry covers one issue.', `add changelog.d/<issue>-<slug>.md for each listed issue (${several.map(item => `#${item}`).join(', ')}).`))
-    return output
-  }
-  const notNeeded = () => output.info.push('changelog: no entry needed; rule 6 asks one of fix and feature pull requests.')
-  if (start === -1) {
-    if (isRequired) output.problems.push(problem('changelog', 'CHANGELOG.md has no Unreleased section.', 'add a fragment in changelog.d/ (see changelog.d/README.md), or add "## Unreleased" above the newest version heading and put the entry under it.'))
-    else notNeeded()
-    return output
-  }
+  const fromTitle = 'remove the CHANGELOG.md change, and the release writes the line from the pull request title'
   if (!inside.length && !isRequired) {
-    notNeeded()
+    output.info.push('changelog: no entry needed; the release writes the line from the pull request title.')
+    return output
+  }
+  if (start === -1) {
+    output.problems.push(problem('changelog', 'CHANGELOG.md has no Unreleased section.', `${fromTitle}, or add "## Unreleased" above the newest version heading and put the entry under it.`))
     return output
   }
   if (!inside.length) {
     const outside = nonblank.filter(line => line.line < start + 1 || line.line > end)
     const headings = [...new Set(outside.map(item => lines.slice(0, item.line).filter(line => /^## /.test(line)).at(-1) ?? 'the preamble'))]
-    output.problems.push(problem('changelog', outside.length ? `the added entry landed under ${headings.join(', ')} instead of Unreleased.` : 'no entry was added under Unreleased.', outside.length ? 'move the entry under a new "## Unreleased" at the top, or add a fragment in changelog.d/.' : 'add a fragment in changelog.d/ naming the issue and covering tests (see changelog.d/README.md).'))
+    output.problems.push(problem('changelog', outside.length ? `the added entry landed under ${headings.join(', ')} instead of Unreleased.` : 'no entry was added under Unreleased.', outside.length ? `move the entry under "## Unreleased" at the top, or ${fromTitle}.` : `${fromTitle}, or add its line under Unreleased.`))
     return output
   }
-  const entry = inside.map(line => line.text).join('\n')
-  const checked = changelogEntry({ entry, issue, titles, isDocsOnly })
+  const checked = changelogEntry({ entry: inside.map(line => line.text).join('\n'), issue, titles, isDocsOnly })
   output.problems.push(...checked.problems)
-  if (!checked.problems.length) output.info.push('changelog: legacy Unreleased entry accepted; new pull requests use changelog.d/ (see changelog.d/README.md).')
+  if (!checked.problems.length) output.info.push('changelog: Unreleased entry accepted; the release uses it in place of the title.')
   return output
 }
 
@@ -489,6 +491,10 @@ const tokenPatterns = [
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
 ]
+// An email address names a person (docs/dev/RULES.md, R8); git@, noreply addresses and the reserved example domains do not.
+const emailPattern = /\b([A-Za-z0-9._%+-]+)@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b/g
+const isPlaceholderEmail = ([, local, domain]) => /^(?:git|no-?reply)$/i.test(local) || /^no-?reply\b/i.test(local) ||
+  /(?:^|\.)(?:example\.(?:com|org|net)|example|invalid|test|localhost)$/i.test(domain) || /(?:^|\.)users\.noreply\.github\.com$/i.test(domain)
 const uuidPattern = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
 const homePattern = /(?:[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}|\/(?:Users|home)\/)([^\\/\s"'`]+)/gi
 // A web address, such as https://github.com/users/<name>, is not a home folder; file:///home/…,
@@ -520,6 +526,10 @@ export const privateData = ({ added, body }) => {
     if (tokenPatterns.some(pattern => [...text.matchAll(pattern)].length > 0)) {
       add('token or token link', 'remove it, and revoke the token if it was real.')
     }
+    // Addresses inside a link count too: a link can carry one in its path or query.
+    if ([...text.matchAll(emailPattern)].some(match => !isPlaceholderEmail(match))) {
+      add('email address', 'use a GitHub login or a placeholder such as name@example.com; this repository is public (docs/dev/RULES.md, R8).')
+    }
     if (path && /\.svg$/i.test(path) && /data:image\/(png|jpe?g|gif|webp)/i.test(text)) {
       add('embedded bitmap image', 'draw the SVG from synthetic data with docs/preview/render.ts instead.')
     }
@@ -533,6 +543,28 @@ export const privateData = ({ added, body }) => {
       output.problems.push(problem('private-data', `image without synthetic alt text in body line ${line}.`, imageFix))
     }
   }
+  return output
+}
+
+// docs/dev/RULES.md is the one-page summary of these three files (its R5): a change to one of them changes it too,
+// or the body says why not.
+const rulesSources = ['CONTRIBUTING.md', 'docs/dev/team-process.md', 'docs/RELEASING.md']
+export const rulesPage = ({ paths = [], body = '', headPaths }) => {
+  const output = result()
+  const changed = paths.filter(path => rulesSources.includes(path))
+  if (!changed.length) return output
+  // A deleted or renamed-away page is not a changed one; headPaths is unknown only where the tree cannot be listed.
+  const isPresent = headPaths === undefined || headPaths === null || [...headPaths].includes('docs/dev/RULES.md')
+  if (!isPresent) {
+    output.problems.push(problem('rules-page', `${changed.join(', ')} changed, and docs/dev/RULES.md is not in the head.`, 'keep docs/dev/RULES.md, changed to match (docs/dev/RULES.md, R5).'))
+    return output
+  }
+  if (paths.includes('docs/dev/RULES.md')) return output
+  if (linesOf(stripComments(body)).some(line => /^\s*Rules page: unchanged, \S/.test(line))) {
+    output.info.push('rules page: unchanged, with a reason in the body.')
+    return output
+  }
+  output.problems.push(problem('rules-page', `${changed.join(', ')} changed, but docs/dev/RULES.md did not.`, 'change docs/dev/RULES.md to match, or add a body line "Rules page: unchanged, <reason>" (docs/dev/RULES.md, R5).'))
   return output
 }
 
@@ -580,8 +612,9 @@ export const checkPr = data => {
   }
   add(naming(data.title, data.branch))
   add(sections(data.body, data.template))
-  add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, issues: issue.issues, titles: testTitles(data.testFiles), isRelease, isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) }))
+  add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, titles: testTitles(data.testFiles), isRelease, isFold: !isOutside && isFoldTitle(data.title), isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) && data.paths.includes('CHANGELOG.md'), title: data.title, releaseNumbers: data.releaseNumbers ?? [] }))
   add(privateData({ added: data.added, body: data.body }))
+  add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
   if (issue.issue !== null) {
     // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
@@ -787,6 +820,16 @@ export const main = async (argv = process.argv.slice(2)) => {
       const event = readJson(readText(resolve(options['--event'])))
       const pr = event.pull_request
       if (!pr || !event.repository) throw new Error('event must contain pull_request and repository metadata.')
+      // Merged metadata cannot enter the merge queue again, but its public body still needs privacy checks.
+      if (pr.state === 'closed' && pr.merged === true) {
+        const checked = privateData({ added: [], body: pr.body ?? '' })
+        if (checked.problems.length) {
+          console.log(report(checked, 'merged pull request metadata'))
+          return 1
+        }
+        console.log('pr-check: contribution checks not run: the pull request is already merged; metadata privacy check passed.')
+        return 0
+      }
       repo = event.repository.full_name
       // author_association and user.login are in the event's pull_request; both stay undefined when it has none.
       data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.head?.ref, head: pr.head?.sha, isDraft: pr.draft, labels: pr.labels, association: pr.author_association, login: pr.user?.login }
@@ -838,6 +881,20 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.headPaths = headPaths
     data.changelogText = headPaths.has('CHANGELOG.md') ? git(cwd, 'show', `${data.head}:CHANGELOG.md`) : ''
     data.testFiles = linesOf(git(cwd, 'ls-tree', '-r', '--name-only', data.head, '--', 'tests')).filter(path => /\.test\.(mjs|ts|tsx)"?$/.test(path)).map(diffPath).map(path => ({ path, text: git(cwd, 'show', `${data.head}:${path}`) }))
+    if (isReleaseTitle(data.title)) {
+      const tagCheck = spawnSync('git', ['describe', '--tags', '--abbrev=0', '--match', 'agent-board--v*'], { cwd, encoding: 'utf8', maxBuffer })
+      const lastTag = tagCheck.status === 0 ? tagCheck.stdout.trim() : null
+      if (lastTag) {
+        const logCheck = spawnSync('git', ['log', `${lastTag}..${base}`, '--format=%x1e%s', '--name-only'], { cwd, encoding: 'utf8', maxBuffer })
+        if (logCheck.status === 0) {
+          const commits = logCheck.stdout.split('\x1e').filter(item => item.trim()).map(item => {
+            const [subject, ...paths] = item.split(/\r?\n/)
+            return { subject: subject.trim(), paths: paths.map(path => path.trim()).filter(Boolean) }
+          })
+          data.releaseNumbers = titleCommitNumbers(commits)
+        }
+      }
+    }
     data.issueData = null
     data.issueComments = null
     data.open = null

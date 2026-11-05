@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionsJson, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
@@ -11,6 +11,7 @@ import { markAsked } from '../hooks/digest'
 import { renderAutoBlock } from '../hooks/blocks'
 import { remindersOf } from '../hooks/remind'
 import { peekInbox } from '../hooks/board'
+import type { PendingTurn } from '../hooks/board'
 import { answerAgentPrompt, blockId } from '../hooks/inbox'
 import type { AgentTurn } from '../hooks/inbox'
 import { reusableQuestionObservation } from '../scripts/question-observation'
@@ -22,6 +23,437 @@ const observe = (ledger: QuestionLedger, text: string, answered: string[] = [], 
   observeQuestions(ledger, parseProgress(text), null, answered, at, settled)
 const view = (ledger: QuestionLedger, text: string, answered: string[] = []) =>
   buildView(parseProgress(text), [], null, NOW, 0, {}, STRINGS.en, answered, {}, ledger)
+
+test('same-prefix peers keep independent unanswered question records and displays across agents', () => {
+  for (const ownAgent of ['claude', 'codex']) for (const peerAgent of ['claude', 'codex']) {
+    const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW, '', ownAgent), { subject: 'Alpha question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha work' }
+    const peer = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW, '', peerAgent), { subject: 'Beta question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Beta work' }
+    const ownFile = `## demo\n${renderAutoBlock(mine).join('\n')}\n`
+    const text = `${ownFile}${renderAutoBlock(peer).join('\n')}\n`
+    const projects = parseProgress(text)
+    const fresh = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
+    expect(fresh.records).toHaveLength(2)
+    expect(view(fresh, text).waiting.map(item => item.text).sort()).toEqual(['Alpha question?', 'Beta question?'])
+    const initial = observeQuestions(emptyQuestions(), parseProgress(ownFile), mine, [], NOW, true).ledger
+    const alphaId = initial.records[0]!.id
+    const ledger = observeQuestions(initial, projects, mine, [], NOW + 1, true).ledger
+    expect(ledger.records).toHaveLength(2)
+    expect(ledger.records.every(record => record.isPresent && record.isUnresolved)).toBe(true)
+    expect(new Set(ledger.records.map(record => record.scope)).size).toBe(2)
+    expect(ledger.records.find(record => record.words === 'Alpha question?')?.id).toBe(alphaId)
+    const ids = ledger.records.map(record => record.id).sort()
+    for (const current of [mine, peer, null]) {
+      const observed = observeQuestions(ledger, projects, current, [], NOW + 2, true).ledger
+      const shown = buildView(projects, [], current, NOW + 2, 0, {}, STRINGS.en, [], {}, observed)
+      expect(shown.waiting.map(item => item.text).sort()).toEqual(['Alpha question?', 'Beta question?'])
+      expect(shown.waiting.map(item => item.hideKey).sort()).toEqual(ids)
+      const hidden = buildView(projects, [], current, NOW + 2, 0, {}, STRINGS.en, [alphaId], {}, observed)
+      expect(hidden.hidden.map(item => item.text)).toEqual(['Alpha question?'])
+      expect(hidden.waiting.map(item => item.text)).toEqual(['Beta question?'])
+    }
+    const alone = observeQuestions(ledger, parseProgress(ownFile), mine, [alphaId], NOW + 3, true).ledger
+    expect(alone.records.find(record => record.words === 'Alpha question?' && record.isPresent)?.id).toBe(alphaId)
+    const frozen = new Set([questionScope('demo', ownAgent, 'a1b2c3d4'), questionScope('demo', peerAgent, 'a1b2c3d4')])
+    const held = observeQuestions(ledger, projects, null, [], NOW + 4, true, 'frozen', undefined, [], [], frozen).ledger
+    expect(held.records).toEqual(ledger.records)
+  }
+})
+
+test('a question keeps its id, hide and resolution after a same-prefix peer with no question leaves', () => {
+  const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW), { subject: 'Alpha question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha work' }
+  const peer = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Quiet step' }, '1', NOW), title: 'Beta work' }
+  const ownFile = `## demo\n${renderAutoBlock(mine).join('\n')}\n`
+  const both = parseProgress(`${ownFile}${renderAutoBlock(peer).join('\n')}\n`)
+  const alone = parseProgress(ownFile)
+  const first = observeQuestions(emptyQuestions(), alone, mine, [], NOW, true).ledger
+  const id = first.records[0]!.id
+  const left = observeQuestions(observeQuestions(first, both, mine, [id], NOW + 1, true).ledger, alone, mine, [id], NOW + 2, true).ledger
+  expect(left.records.map(record => [record.id, record.isPresent, record.firstObserved])).toEqual([[id, true, first.records[0]!.firstObserved]])
+  const met = observeQuestions(first, both, mine, [id], NOW + 1, true).ledger
+  for (const ledger of [met, left]) {
+    expect(parseQuestions(questionsJson(ledger))).toEqual(ledger)
+    expect(parseQuestions(compactQuestionsJson(ledger))).toEqual(ledger)
+    const capture = captureJson(ledger.records[0]!, 'unresolved')
+    expect(parseCapture(capture, sha256(capture))?.record.id).toBe(id)
+  }
+  expect(buildView(alone, [], mine, NOW + 2, 0, {}, STRINGS.en, [id], {}, left).hidden.map(item => item.text)).toEqual(['Alpha question?'])
+
+  const fresh = observeQuestions(emptyQuestions(), both, null, [], NOW, true).ledger
+  const freshId = fresh.records[0]!.id
+  const freshLeft = observeQuestions(fresh, alone, null, [freshId], NOW + 1, true).ledger
+  expect(freshLeft.records.map(record => [record.id, record.isPresent])).toEqual([[freshId, true]])
+
+  const resolved = resolveQuestion(observeQuestions(emptyQuestions(), alone, null, [], NOW, true).ledger, observeQuestions(emptyQuestions(), alone, null, [], NOW, true).ledger.records[0]!.id, NOW + 1)
+  const after = observeQuestions(observeQuestions(resolved, both, null, [], NOW + 2, true).ledger, alone, null, [], NOW + 3, true).ledger
+  expect(after.records.filter(record => record.isUnresolved)).toEqual([])
+
+  const asker = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Beta question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Beta work' }
+  const paneOnly = parseProgress(`## demo\n${renderAutoBlock(asker).join('\n')}\n`)
+  const pane = observeQuestions(emptyQuestions(), paneOnly, mine, [], NOW, true).ledger
+  const betaId = pane.records.find(record => record.words === 'Beta question?')!.id
+  const script = observeQuestions(pane, paneOnly, null, [betaId], NOW + 1, true).ledger
+  expect(script.records.filter(record => record.words === 'Beta question?' && record.isPresent).map(record => record.id)).toEqual([betaId])
+})
+
+test('a run under the current session alias stays out of its questions', () => {
+  const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW), { subject: 'Alpha question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha work' }
+  const ownBlock = renderAutoBlock(mine).join('\n')
+  const at = new Date(NOW).toISOString()
+  const run = (task: string): string => `<!-- auto session=a1b2c3d4 agent=claude state=waiting updated=${at} resume=a1b2c3d4-run origin=run parent=a1b2c3d4-person-a -->\n### Run work\n${task}\n<!-- /auto session=a1b2c3d4 -->`
+  const first = observeQuestions(emptyQuestions(), parseProgress(`## demo\n${ownBlock}\n`), mine, [], NOW, true).ledger
+  const id = first.records[0]!.id
+  for (const task of [`- [?] Alpha question? <!-- id=1 -->`, `- [?] Run question? <!-- id=2 -->`]) {
+    const projects = parseProgress(`## demo\n${ownBlock}\n${run(task)}\n`)
+    expect(projects[0]!.tasks[1]!.auto?.isRun).toBe(true)
+    const next = observeQuestions(first, projects, mine, [id], NOW + 1, true).ledger
+    expect(next.records.map(record => [record.id, record.words, record.isPresent])).toEqual([[id, 'Alpha question?', true]])
+  }
+})
+
+test('archiving a same-prefix peer checks that peer alone', () => {
+  const ended = (id: string, title: string, step: string): string => `<!-- auto session=a1b2c3d4 agent=claude state=ended updated=${new Date(NOW).toISOString()} resume=${id} -->\n### ${title}\n${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const text = `## demo\n${ended('a1b2c3d4-person-a', 'Alpha work', '- [?] Alpha question?')}${ended('a1b2c3d4-person-b', 'Beta work', '- [?] Beta question?')}`
+  const projects = parseProgress(text)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
+  const refOf = (index: number) => {
+    const task = projects[0]!.tasks[index]!
+    return { project: 'demo', title: task.title, line: task.line, session: 'a1b2c3d4' }
+  }
+  expect(refTasks(projects, refOf(1)).map(task => task.title)).toEqual(['Beta work'])
+  expect(archiveQuestionsKept(projects, refOf(1), ledger)).toBe(true)
+  expect(archiveQuestionsKept(projects, refOf(1), emptyQuestions())).toBe(false)
+
+  const quiet = parseProgress(`## demo\n${ended('a1b2c3d4-person-a', 'Alpha work', '- [?] Alpha question?')}${ended('a1b2c3d4-person-b', 'Beta work', '- [x] Done')}`)
+  expect(refTasks(quiet, { project: 'demo', title: 'Beta work', line: quiet[0]!.tasks[1]!.line, session: 'a1b2c3d4' }).some(task => task.steps.some(step => step.status === 'waiting'))).toBe(false)
+
+  const sameTitle = parseProgress(`## demo\n${ended('a1b2c3d4-person-a', 'Same work', '- [?] Alpha question?')}${ended('a1b2c3d4-person-b', 'Same work', '- [?] Beta question?')}`)
+  const second = sameTitle[0]!.tasks[1]!
+  const secondRef = { project: 'demo', title: 'Same work', line: second.line, session: 'a1b2c3d4' }
+  expect(refTasks(sameTitle, secondRef)).toEqual([second])
+  const sameTitleLedger = observeQuestions(emptyQuestions(), sameTitle, null, [], NOW, true).ledger
+  expect(sameTitleLedger.records.filter(record => isAskedBy(record, secondRef, second)).map(record => record.words)).toEqual(['Beta question?'])
+  expect(archiveQuestionsKept(sameTitle, secondRef, sameTitleLedger)).toBe(true)
+
+  const crossText = (agent: string, step: string): string => ended('a1b2c3d4-person-a', 'Same work', step).replace('agent=claude', `agent=${agent}`)
+  const cross = parseProgress(`## demo\n${crossText('codex', '- [?] Alpha question?')}${crossText('claude', '- [?] Beta question?')}`)
+  const picked = cross[0]!.tasks[1]!
+  const crossRef = { project: 'demo', title: 'Same work', line: picked.line, session: 'a1b2c3d4' }
+  const crossLedger = observeQuestions(emptyQuestions(), cross, null, [], NOW, true).ledger
+  expect(refTasks(cross, crossRef)).toEqual([picked])
+  expect(crossLedger.records.filter(record => isAskedBy(record, crossRef, picked)).map(record => record.words)).toEqual(['Beta question?'])
+  const noResume = (text: string): string => text.replace(/ resume=\S+/, '')
+  for (const [codex, claude] of [[noResume, (text: string) => text], [noResume, noResume]] as const) {
+    const old = parseProgress(`## demo\n${codex(crossText('codex', '- [?] Alpha question?'))}${claude(crossText('claude', '- [?] Beta question?'))}`)
+    const oldPick = old[0]!.tasks[1]!
+    const oldRef = { ...crossRef, line: oldPick.line }
+    const oldLedger = observeQuestions(emptyQuestions(), old, null, [], NOW, true).ledger
+    expect(oldLedger.records.filter(record => isAskedBy(record, oldRef, oldPick)).map(record => record.words)).toEqual(['Beta question?'])
+  }
+
+  const twins = parseProgress(`## demo\n${ended('a1b2c3d4-person-a', 'Twin work', '- [?] Twin question?')}${ended('a1b2c3d4-person-a', 'Twin work', '- [?] Twin question?')}`)
+  expect(refTasks(twins, { project: 'demo', title: 'Twin work', line: twins[0]!.tasks[1]!.line, session: 'a1b2c3d4' })).toHaveLength(2)
+})
+
+test('an own question saved before same-prefix identity keeps its record when a peer appears', () => {
+  const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW), { subject: 'Alpha question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha work' }
+  const peer = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Beta question?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Beta work' }
+  const ownFile = `## demo\n${renderAutoBlock(mine).join('\n')}\n`
+  const saved = observeQuestions(emptyQuestions(), parseProgress(ownFile), mine, [], NOW, true).ledger
+  const old = { ...saved, records: saved.records.map(record => {
+    const { task, title, context } = JSON.parse(record.source!.data) as Record<string, unknown>
+    return { ...record, source: { ...record.source!, data: JSON.stringify({ task, title, context }) } }
+  }) }
+  const projects = parseProgress(`${ownFile}${renderAutoBlock(peer).join('\n')}\n`)
+  for (const current of [mine, null]) {
+    const next = observeQuestions(old, projects, current, [], NOW + 60000, true).ledger
+    const alpha = next.records.filter(record => record.words === 'Alpha question?')
+    expect(alpha.map(record => [record.id, record.firstObserved, record.isPresent])).toEqual([[saved.records[0]!.id, NOW, true]])
+    expect(parseQuestions(questionsJson(next))).toEqual(next)
+    expect(buildView(projects, [], current, NOW + 60000, 0, {}, STRINGS.en, [], {}, next).waiting.map(item => item.text).sort()).toEqual(['Alpha question?', 'Beta question?'])
+  }
+  const quiet = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-b', 'demo', NOW), { subject: 'Quiet step' }, '1', NOW), title: 'Beta work' }
+  const withQuiet = parseProgress(`${ownFile}${renderAutoBlock(quiet).join('\n')}\n`)
+  const resolved = resolveQuestion(old, saved.records[0]!.id, NOW + 1)
+  const alone = observeQuestions(resolved, parseProgress(ownFile), mine, [], NOW + 2, true).ledger
+  expect(alone.records.filter(record => record.isUnresolved)).toEqual([])
+  expect(alone.records.map(record => record.id)).toEqual([saved.records[0]!.id])
+  expect(parseQuestions(compactQuestionsJson(alone))).toEqual(alone)
+  // Its answer can't be told from the peer's, so it shows again rather than hide theirs.
+  const beside = observeQuestions(resolved, withQuiet, mine, [], NOW + 2, true).ledger
+  expect(beside.records.map(record => [record.words, record.isUnresolved])).toEqual([['Alpha question?', false], ['Alpha question?', true]])
+  expect(beside.records[0]!.id).toBe(saved.records[0]!.id)
+
+  // Another open question of the session doesn't reopen this one, whatever its words.
+  for (const second of ['Second question?', 'Alpha question?']) {
+    const two = { ...applyTaskCreate(mine, { subject: second, metadata: { waiting: 'you' } }, '2', NOW), title: 'Alpha work' }
+    const twoFile = `## demo\n${renderAutoBlock(two).join('\n')}\n`
+    const first = observeQuestions(emptyQuestions(), parseProgress(twoFile), two, [], NOW, true).ledger
+    const stripped = { ...first, records: first.records.map(record => {
+      const { task, title, context } = JSON.parse(record.source!.data) as Record<string, unknown>
+      return { ...record, source: { ...record.source!, data: JSON.stringify({ task, title, context }) } }
+    }) }
+    const after = observeQuestions(resolveQuestion(stripped, first.records[0]!.id, NOW + 1), parseProgress(twoFile), two, [], NOW + 2, true).ledger
+    expect(after.records.map(record => [record.id, record.isUnresolved])).toEqual([[first.records[0]!.id, false], [first.records[1]!.id, true]])
+  }
+})
+
+test('a resolved record with no full id is no answer for a peer sharing its alias', () => {
+  const block = (resume: string | null, title: string, step: string): string => `<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()}${resume === null ? '' : ` resume=${resume}`} -->\n### ${title}\n- [?] ${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const see = (ledger: QuestionLedger, text: string, at: number) => observeQuestions(ledger, parseProgress(`## demo\n${text}`), null, [], at, true)
+  const pass = (ledger: QuestionLedger, text: string, at: number) => parseQuestions(questionsJson(see(ledger, text, at).ledger))
+  const shown = (ledger: QuestionLedger, text: string, at: number) => buildView(parseProgress(`## demo\n${text}`), [], null, at, 0, {}, STRINGS.en, [], {}, ledger).waiting.map(item => item.text).sort()
+
+  const asked = pass(emptyQuestions(), block(null, 'Alpha', 'Dead?'), NOW)
+  const closed = pass(resolveQuestion(asked, asked.records[0]!.id, NOW + 1), '', NOW + 2)
+  const holding = pass(closed, block('a1b2c3d4-person-b', 'Bravo', 'B open?'), NOW + 3)
+  const both = block('a1b2c3d4-person-a', 'Beta', 'A ask?') + block('a1b2c3d4-person-b', 'Alpha', 'Dead?')
+  expect(Object.values(see(holding, both, NOW + 4).keys)).not.toContain(asked.records[0]!.id)
+  const met = pass(pass(holding, both, NOW + 4), both, NOW + 5)
+  expect(shown(met, both, NOW + 5)).toEqual(expect.arrayContaining(['A ask?', 'Dead?']))
+  expect(met.records.find(record => record.id === asked.records[0]!.id)!.isUnresolved).toBe(false)
+  expect(met.records.filter(record => record.words === 'Dead?' && record.isUnresolved).map(record => record.scope)).toEqual([questionScope('demo', 'codex', 'a1b2c3d4')])
+  // The second owner may have left long ago, with its questions closed: the alias still had two.
+  const askers = pass(holding, block('a1b2c3d4-person-a', 'Beta', 'A ask?') + block('a1b2c3d4-person-b', 'Bravo', 'B open?'), NOW + 4)
+  const quietened = askers.records.filter(record => record.isUnresolved && record.words !== 'Dead?').reduce((ledger, record) => resolveQuestion(ledger, record.id, NOW + 5), askers)
+  const left = block('a1b2c3d4-person-b', 'Alpha', 'Dead?')
+  expect(Object.values(see(quietened, left, NOW + 6).keys)).not.toContain(asked.records[0]!.id)
+  expect(shown(pass(quietened, left, NOW + 6), left, NOW + 6)).toContain('Dead?')
+  // A peer with nothing saved can come and go: the question stays on the one open record.
+  const noPeer = block('a1b2c3d4-person-b', 'Alpha', 'Dead?')
+  const withPeer = `${noPeer}<!-- auto session=a1b2c3d4 agent=codex state=working updated=${new Date(NOW).toISOString()} resume=a1b2c3d4-person-a -->\n### Quiet\n- [ ] A quiet step\n<!-- /auto session=a1b2c3d4 -->\n`
+  const opened = pass(holding, withPeer, NOW + 4)
+  const openIds = (ledger: QuestionLedger) => ledger.records.filter(record => record.words === 'Dead?' && record.isUnresolved).map(record => record.id)
+  const firstOpen = openIds(opened)
+  expect(firstOpen.length).toBe(1)
+  const cycled = pass(pass(pass(pass(opened, noPeer, NOW + 5), withPeer, NOW + 6), noPeer, NOW + 7), withPeer, NOW + 8)
+  expect(openIds(cycled)).toEqual(firstOpen)
+  expect(shown(cycled, withPeer, NOW + 8).filter(text => text === 'Dead?')).toEqual(['Dead?'])
+  // With no peer, only a record showing the same copies counts as that open record.
+  const lone = block('a1b2c3d4-person-b', 'Alpha', 'Dead?')
+  const returned = pass(pass(asked, '', NOW + 1), block(null, 'Alpha', 'Dead?'), NOW + 2)
+  const latest = returned.records.at(-1)!
+  const answered = resolveQuestion(returned, latest.id, NOW + 3)
+  expect(shown(pass(pass(answered, lone, NOW + 4), lone, NOW + 5), lone, NOW + 5)).toEqual(['Dead?'])
+  const dup = block(null, 'Alpha', 'Dup?')
+  const dupAsked = pass(emptyQuestions(), dup, NOW)
+  const dupClosed = resolveQuestion(dupAsked, dupAsked.records[0]!.id, NOW + 1)
+  const oneCopy = block('a1b2c3d4-person-b', 'Alpha', 'Dup?')
+  const twoCopies = block('a1b2c3d4-person-b', 'Alpha', 'Dup?\n- [?] Dup?')
+  const copied = pass(pass(pass(dupClosed, oneCopy, NOW + 2), twoCopies, NOW + 3), oneCopy, NOW + 4)
+  expect(shown(copied, oneCopy, NOW + 4)).toEqual(['Dup?', 'Dup?'])
+  // A block that still has no full id is the same block, whoever else shares the alias.
+  const others = block('a1b2c3d4-person-b', 'Bravo', 'B open?') + block('a1b2c3d4-person-c', 'Gamma', 'C open?')
+  const still = block(null, 'Alpha', 'Dead?') + others
+  expect(shown(pass(pass(closed, others, NOW + 3), still, NOW + 4), still, NOW + 4)).not.toContain('Dead?')
+
+  const mirror = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW), { subject: 'Same?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Alpha' }
+  const own = observeQuestions(emptyQuestions(), parseProgress(`## demo\n${renderAutoBlock(mirror).join('\n')}\n`), mirror, [], NOW, true).ledger
+  const old = { ...own, records: own.records.map(record => {
+    const { task, title, context } = JSON.parse(record.source!.data) as Record<string, unknown>
+    return { ...record, source: { ...record.source!, data: JSON.stringify({ task, title, context }) } }
+  }) }
+  const peers = `${renderAutoBlock({ ...mirror, title: 'Renamed', resume: 'a1b2c3d4-person-a' }).join('\n')}\n${renderAutoBlock({ ...mirror, sessionId: 'a1b2c3d4-person-b', resume: 'a1b2c3d4-person-b' }).join('\n')}\n`
+  const twice = pass(pass(resolveQuestion(old, own.records[0]!.id, NOW + 1), peers, NOW + 2), peers, NOW + 3)
+  expect(shown(twice, peers, NOW + 3)).toEqual(['Same?', 'Same?'])
+  expect(twice.records.find(record => record.id === own.records[0]!.id)!.isUnresolved).toBe(false)
+})
+
+test('a pending question pairs with the same-prefix peer block that asked it', () => {
+  const block = (id: string, title: string, step: string): string => `<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} resume=${id} -->\n### ${title}\n- [?] ${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const projects = parseProgress(`## demo\n${block('a1b2c3d4-person-a', 'Alpha work', 'Same ask?')}${block('a1b2c3d4-person-b', 'Beta work', 'Other ask?')}`)
+  const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', session: 'a1b2c3d4-person-a', text: 'Same ask?', isQuestion: true, at: NOW } as PendingTurn
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], NOW, true, 'pending', undefined, [turn]).ledger
+  expect(ledger.records.map(record => record.words).sort()).toEqual(['Other ask?', 'Same ask?'])
+  expect(isTurnRecorded(ledger, turn)).toBe(true)
+  expect(isTurnRecorded(emptyQuestions(), turn)).toBe(false)
+
+  const both = parseProgress(`## demo\n${block('a1b2c3d4-person-a', 'Alpha work', 'Same ask?')}${block('a1b2c3d4-person-b', 'Beta work', 'Same ask?')}`)
+  const shared = observeQuestions(emptyQuestions(), both, null, [], NOW, true, 'pending', undefined, [{ ...turn, sourceRevisions: ['a'.repeat(64)] }]).ledger
+  expect(shared.records.map(record => record.source?.kind)).toEqual(['block', 'block'])
+  const carrying = shared.records.filter(record => (record.producerSources ?? []).length > 0)
+  expect(carrying.map(record => record.source!.task)).toEqual(['Alpha work'])
+
+  const twice = parseProgress(`## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} -->\n### Alpha work\n- [?] Same ask?\n- [?] Same ask?\n<!-- /auto session=a1b2c3d4 -->\n`)
+  expect(observeQuestions(emptyQuestions(), twice, null, [], NOW, true, 'pending', undefined, [turn]).ledger.records.filter(record => record.source?.kind === 'inbox')).toHaveLength(1)
+})
+
+test('a saved turn with no full session stays held while two same-prefix owners could have asked it', () => {
+  const block = (id: string, title: string, step: string): string => `<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} resume=${id} -->\n### ${title}\n- [?] ${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const alpha = block('a1b2c3d4-person-a', 'Alpha work', 'Alpha ask?'), beta = block('a1b2c3d4-person-b', 'Beta work', 'Beta ask?')
+  const saved = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', text: 'Beta ask?', isQuestion: true, at: NOW } as PendingTurn
+  const pass = (ledger: QuestionLedger, text: string, turn: PendingTurn) => observeQuestions(ledger, parseProgress(`## demo\n${text}`), null, [], NOW, true, 'pending', undefined, [turn]).ledger
+  const carrying = (ledger: QuestionLedger) => ledger.records.filter(record => (record.producerSources ?? []).length > 0)
+
+  for (const turn of [saved, { ...saved, text: 'Neither ask?' }]) {
+    const held = parseQuestions(questionsJson(pass(emptyQuestions(), alpha + beta, turn)))
+    expect(held.records.map(record => record.source?.kind)).toEqual(['block', 'block'])
+    expect(carrying(held)).toEqual([])
+    expect(isTurnRecorded(held, turn)).toBe(false)
+  }
+  // Once one owner holds the alias the turn pairs with it, and later peers leave that capture alone.
+  const alone = parseQuestions(questionsJson(pass(emptyQuestions(), beta, saved)))
+  expect(carrying(alone).map(record => record.source?.task)).toEqual(['Beta work'])
+  expect(isTurnRecorded(alone, saved)).toBe(true)
+  const established = parseQuestions(questionsJson(pass(alone, alpha + beta, saved)))
+  expect(isTurnRecorded(established, saved)).toBe(true)
+  // A turn that names its full session is still paired beside a peer.
+  const named = { ...saved, session: 'a1b2c3d4-person-b' }
+  expect(isTurnRecorded(pass(emptyQuestions(), alpha + beta, named), named)).toBe(true)
+  // A peer that has no question left still names a second owner.
+  const finished = block('a1b2c3d4-person-a', 'Alpha work', 'Alpha ask?').replace('- [?]', '- [x]')
+  expect(isTurnRecorded(pass(emptyQuestions(), finished + beta, saved), saved)).toBe(false)
+  // So does the current session, whose own block the pass leaves out.
+  const mine = { ...applyTaskCreate(emptyMirror('a1b2c3d4-person-a', 'demo', NOW, '/demo', 'codex'), { subject: 'Own ask?', metadata: { waiting: 'you' } }, '1', NOW), title: 'Own work' }
+  const beside = observeQuestions(emptyQuestions(), parseProgress(`## demo\n${beta}`), mine, [], NOW, true, 'pending', undefined, [saved]).ledger
+  expect(carrying(beside)).toEqual([])
+  expect(isTurnRecorded(beside, saved)).toBe(false)
+  // A run asks nobody, so it owns no question under the alias.
+  const run = { ...mine, sessionId: 'a1b2c3d4-run-9', isRun: true }
+  const besideRun = observeQuestions(emptyQuestions(), parseProgress(`## demo\n${beta}`), run, [], NOW, true, 'pending', undefined, [saved]).ledger
+  expect(isTurnRecorded(besideRun, saved)).toBe(true)
+})
+
+test('a saved inbox question keeps its id when its block appears beside a same-prefix peer', () => {
+  const block = (id: string, title: string, step: string): string => `<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} resume=${id} -->\n### ${title}\n- [?] ${step}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', session: 'a1b2c3d4-person-a', text: 'Inbox ask?', isQuestion: true, at: NOW, sourceAt: NOW, sourceRevisions: ['a'.repeat(64)] } as PendingTurn
+  const pass = (ledger: QuestionLedger, text: string, pending: PendingTurn[], at = NOW + 1) => parseQuestions(questionsJson(observeQuestions(ledger, parseProgress(`## demo\n${text}`), null, [], at, true, 'pending', undefined, pending).ledger))
+  const saved = pass(emptyQuestions(), '', [turn], NOW)
+  const id = saved.records[0]!.id
+
+  for (const [other, words] of [['Other ask?', ['Inbox ask?', 'Other ask?']], ['Inbox ask?', ['Inbox ask?', 'Inbox ask?']]] as const) {
+    const file = block('a1b2c3d4-person-a', 'Alpha work', 'Inbox ask?') + block('a1b2c3d4-person-b', 'Beta work', other)
+    for (const pending of [[turn], []]) {
+      const met = pass(saved, file, pending)
+      expect(met.records.map(record => record.words)).toEqual([...words])
+      expect(met.records[0]!.id).toBe(id)
+      expect(met.records[1]!.scope).toBe(questionScope('demo', 'codex', 'a1b2c3d4-person-b'))
+      expect(isTurnRecorded(met, turn)).toBe(true)
+      expect(view(met, `## demo\n${file}`).waiting.map(item => item.text).sort()).toEqual([...words].sort())
+      const resolved = pass(resolveQuestion(met, id, NOW + 2), file, [], NOW + 3)
+      expect(resolved.records.find(record => record.id === id)?.resolvedAt).toBeDefined()
+      expect(resolved.records.find(record => record.scope === questionScope('demo', 'codex', 'a1b2c3d4-person-b'))?.isUnresolved).toBe(true)
+    }
+  }
+  // A question resolved before its block appears stays resolved, with or without a peer, and a peer's stays open.
+  const done = resolveQuestion(saved, id, NOW + 1)
+  for (const other of ['', block('a1b2c3d4-person-b', 'Beta work', 'Inbox ask?')]) {
+    const file = block('a1b2c3d4-person-a', 'Alpha work', 'Inbox ask?') + other
+    const after = pass(done, file, [], NOW + 2)
+    expect(after.records.filter(record => record.isUnresolved).map(record => record.scope)).toEqual(other === '' ? [] : [questionScope('demo', 'codex', 'a1b2c3d4-person-b')])
+    expect(after.records.find(record => record.id === id)?.resolvedAt).toBe(done.records[0]!.resolvedAt)
+    expect(view(after, `## demo\n${file}`).waiting.map(item => item.text)).toEqual(other === '' ? [] : ['Inbox ask?'])
+  }
+  // The peer's block alone does not take the resolved question.
+  const peerFile = block('a1b2c3d4-person-b', 'Beta work', 'Inbox ask?')
+  expect(pass(done, peerFile, [], NOW + 2).records.filter(record => record.isUnresolved).map(record => record.scope)).toEqual([questionScope('demo', 'codex', 'a1b2c3d4-person-b')])
+  // The opposite order: a peer already holds the alias when the inbox ask arrives, and keeps its record.
+  const beta = block('a1b2c3d4-person-b', 'Beta work', 'Beta ask?')
+  const holding = pass(pass(emptyQuestions(), beta, [], NOW), block('a1b2c3d4-person-a', 'Alpha work', 'Quiet?').replace('- [?]', '- [x]') + beta, [], NOW + 1)
+  const betaId = holding.records[0]!.id
+  const ask = { ...turn, text: 'Alpha ask?' }
+  const asked = pass(holding, block('a1b2c3d4-person-a', 'Alpha work', 'Quiet?').replace('- [?]', '- [x]') + beta, [ask], NOW + 2)
+  const shown = block('a1b2c3d4-person-a', 'Alpha work', 'Alpha ask?') + beta
+  const answered = pass(asked, shown, [], NOW + 3)
+  const beside = answered.records.find(record => record.words === 'Beta ask?')!
+  expect([beside.id, beside.isPresent, beside.isUnresolved]).toEqual([betaId, true, true])
+  const rows = view(answered, `## demo\n${shown}`).waiting
+  expect(rows.filter(item => item.text === 'Beta ask?').map(item => item.questionId)).toEqual([betaId])
+  expect(rows.every(item => item.questionId !== undefined)).toBe(true)
+  // So does a block saved before it named a full session, once it does.
+  const unnamed = beta.replace(' resume=a1b2c3d4-person-b', '')
+  const first = pass(emptyQuestions(), unnamed, [], NOW)
+  const later = pass(pass(first, unnamed, [ask], NOW + 1), beta, [], NOW + 2)
+  expect(later.records.filter(record => record.words === 'Beta ask?').map(record => record.id)).toEqual([first.records[0]!.id])
+  // An earlier asker with no block, resolved or open, does not keep a later asker from its own block.
+  const bravo = { ...turn, session: 'a1b2c3d4-person-b', text: 'Bravo ask?', sourceRevisions: ['b'.repeat(64)] } as PendingTurn
+  const bravoFile = block('a1b2c3d4-person-b', 'Beta work', 'Bravo ask?')
+  for (const [earlier, rows] of [[resolveQuestion(saved, id, NOW + 1), 1], [saved, 2]] as const) {
+    const both = pass(earlier, '', [bravo], NOW + 2)
+    const bravoId = both.records.find(record => record.words === 'Bravo ask?')!.id
+    const rejoined = pass(both, bravoFile, [], NOW + 3)
+    expect(rejoined.records.length).toBe(2)
+    expect(view(rejoined, `## demo\n${bravoFile}`).waiting.filter(item => item.text === 'Bravo ask?').map(item => item.questionId)).toEqual([bravoId])
+    expect(view(rejoined, `## demo\n${bravoFile}`).waiting.length).toBe(rows)
+  }
+  // Nor does one known only from a record saved earlier, with its block long gone.
+  const oldFile = block('a1b2c3d4-person-a', 'Alpha work', 'Old ask?') + block('a1b2c3d4-person-b', 'Beta work', 'Quiet?').replace('- [?]', '- [x]')
+  const oldPass = pass(emptyQuestions(), oldFile, [], NOW)
+  const gone = pass(resolveQuestion(oldPass, oldPass.records[0]!.id, NOW + 1), '', [], NOW + 2)
+  const askedAgain = pass(pass(gone, '', [turn], NOW + 3), '', [bravo], NOW + 4)
+  const againId = askedAgain.records.find(record => record.words === 'Bravo ask?')!.id
+  const back = pass(askedAgain, bravoFile, [], NOW + 5)
+  expect(view(back, `## demo\n${bravoFile}`).waiting.filter(item => item.text === 'Bravo ask?').map(item => item.questionId)).toEqual([againId])
+  // A block with no full id isn't known by its title beside a peer: the title can have moved to the peer.
+  const plain = block('a1b2c3d4-person-a', 'Alpha work', 'Alpha ask?')
+  const before = pass(emptyQuestions(), plain.replace(' resume=a1b2c3d4-person-a', ''), [], NOW)
+  const closedOld = resolveQuestion(before, before.records[0]!.id, NOW + 1)
+  const moved = [
+    plain + beta,
+    block('a1b2c3d4-person-a', 'Beta work', 'Beta ask?') + block('a1b2c3d4-person-b', 'Alpha work', 'Alpha ask?'),
+    block('a1b2c3d4-person-a', 'Renamed', 'Beta ask?') + block('a1b2c3d4-person-b', 'Alpha work', 'Alpha ask?'),
+  ]
+  for (const earlier of [closedOld, pass(closedOld, '', [], NOW + 2)]) for (const file of moved) {
+    const next = pass(earlier, file, [], NOW + 3)
+    const rows = view(next, `## demo\n${file}`).waiting
+    expect(rows.map(item => item.text).sort()).toEqual(['Alpha ask?', 'Beta ask?'])
+    expect(rows.every(item => item.questionId !== undefined && item.questionId !== before.records[0]!.id)).toBe(true)
+    expect(next.records.find(record => record.id === before.records[0]!.id)?.resolvedAt).toBe(closedOld.records[0]!.resolvedAt)
+  }
+  // The same with a second, open question saved on that block.
+  const twoAsked = plain.replace(' resume=a1b2c3d4-person-a', '').replace('- [?] Alpha ask?', '- [?] Alpha ask?\n- [?] Open ask?')
+  const twoSaved = pass(emptyQuestions(), twoAsked, [], NOW)
+  const oneClosed = resolveQuestion(twoSaved, twoSaved.records.find(record => record.words === 'Alpha ask?')!.id, NOW + 1)
+  const titleFile = block('a1b2c3d4-person-a', 'Beta work', 'Beta ask?') + block('a1b2c3d4-person-b', 'Alpha work', 'Alpha ask?').replace('- [?] Alpha ask?', '- [?] Alpha ask?\n- [?] Open ask?')
+  expect(view(pass(oneClosed, titleFile, [], NOW + 2), `## demo\n${titleFile}`).waiting.map(item => item.text)).toContain('Alpha ask?')
+  // Two inbox asks then both blocks with new words: each new ask gets a record of its own.
+  const twoAsks = pass(emptyQuestions(), '', [turn, { ...turn, session: 'a1b2c3d4-person-b', text: 'Bravo ask?', sourceRevisions: ['b'.repeat(64)] } as PendingTurn], NOW)
+  const fresh = block('a1b2c3d4-person-a', 'Alpha work', 'New A?') + block('a1b2c3d4-person-b', 'Beta work', 'New B?')
+  const freshPass = pass(twoAsks, fresh, [], NOW + 1)
+  expect(['New A?', 'New B?'].map(words => freshPass.records.filter(record => record.words === words && record.isPresent).length)).toEqual([1, 1])
+  // A record that names no full session is not known to be either peer's.
+  const { session: _session, ...oldTurn } = turn
+  const old = pass(emptyQuestions(), '', [oldTurn as PendingTurn], NOW)
+  const file = block('a1b2c3d4-person-a', 'Alpha work', 'Other ask?') + block('a1b2c3d4-person-b', 'Beta work', 'Beta ask?')
+  expect(pass(old, file, []).records.map(record => record.scope)).toEqual([questionScope('demo', 'codex', 'a1b2c3d4'), questionScope('demo', 'codex', 'a1b2c3d4-person-a'), questionScope('demo', 'codex', 'a1b2c3d4-person-b')])
+})
+
+test('a same-prefix peer neither answers an inbox ask nor takes its turn', () => {
+  const session = 'a1b2c3d4-person-a'
+  const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', session, text: 'Inbox ask?', isQuestion: true, at: NOW, sourceAt: NOW } as PendingTurn
+  const inbox = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'pending', undefined, [turn]).ledger
+  const later = NOW + 1000
+  const peer = { agent: 'codex', id: 'a1b2c3d4', session: 'a1b2c3d4-person-b', event: 'prompt' as const, at: later }
+  const open = observeQuestions(inbox, [], null, [], later, true, 'pending', undefined, [turn], [peer]).ledger
+  expect(open.records.map(record => record.isUnresolved)).toEqual([true])
+  expect(buildView([], [], null, later, 0, {}, STRINGS.en, [], {}, open, undefined, [turn]).waiting.map(item => item.text)).toEqual(['Inbox ask?'])
+  const own = observeQuestions(inbox, [], null, [], later, true, 'pending', undefined, [], [{ ...peer, session }]).ledger
+  expect(own.records.map(record => record.isUnresolved)).toEqual([false])
+  const { session: _session, ...oldTurn } = turn
+  const old = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'pending', undefined, [oldTurn as PendingTurn]).ledger
+  expect(observeQuestions(old, [], null, [], later, true, 'pending', undefined, [], [peer]).ledger.records.map(record => record.isUnresolved)).toEqual([false])
+
+  const block = `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${new Date(NOW).toISOString()} resume=a1b2c3d4-person-b -->\n### Beta work\n- [?] Coincidence?\n<!-- /auto session=a1b2c3d4 -->\n`
+  const coincidence = { ...turn, text: 'Coincidence?' }
+  const apart = observeQuestions(emptyQuestions(), parseProgress(block), null, [], NOW, true, 'pending', undefined, [coincidence]).ledger
+  expect(apart.records.map(record => record.source?.kind).sort()).toEqual(['block', 'inbox'])
+  expect(apart.records.find(record => record.source?.kind === 'block')?.producerSources ?? []).toEqual([])
+  expect(isTurnRecorded(apart, coincidence)).toBe(true)
+  const blockOnly = { ...apart, records: apart.records.filter(record => record.source?.kind === 'block') }
+  expect(isTurnRecorded(blockOnly, coincidence)).toBe(false)
+  const pairOfBlocks = block + block.replace('resume=a1b2c3d4-person-b', 'resume=a1b2c3d4-person-a').replace('### Beta work', '### Alpha work').replace('- [?] Coincidence?', '- [?] Alpha ask?')
+  const split = observeQuestions(emptyQuestions(), parseProgress(pairOfBlocks.replace(/\n## demo\n/, '\n')), null, [], NOW, true).ledger
+  const peerRecord = split.records.find(record => record.words === 'Coincidence?')!
+  expect(peerRecord.scope).toBe(questionScope('demo', 'codex', 'a1b2c3d4-person-b'))
+  const peerCarrying = { ...split, records: [{ ...peerRecord, producerSources: [JSON.stringify(coincidence)] }] }
+  expect(isTurnRecorded(peerCarrying, coincidence)).toBe(false)
+  const [first, second] = ['peer-fixture-1122789', 'peer-fixture-1339192']
+  const file = (session: string, order: number, event = 'turn') => ({ name: `codex-${event}-${NOW + order}-${order}.json`, body: JSON.stringify({ session_id: session, cwd: '/demo', last_assistant_message: 'Use staging?' }), at: NOW + order })
+  const peers = peekInbox([file(first, 1), file(second, 2)])
+  expect(peers.map(one => one.id)).toEqual(['fad2ee8b', 'fad2ee8b'])
+  expect(peers.map(one => one.session).sort()).toEqual([first, second])
+  const ended = peekInbox([file(first, 1), file(second, 2), file(second, 3, 'end')])
+  expect(ended.filter(one => one.isClosed === true).map(one => one.session)).toEqual([second])
+})
 
 test('compact question indexes preserve every value and parse like existing formatted indexes', () => {
   const ledger = observeQuestions(emptyQuestions(), parseProgress(file('- [?] 發送 synthetic plan, OK?')), null, [], NOW, true, 'birth').ledger

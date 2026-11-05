@@ -37,7 +37,9 @@ npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the board where you are: in its own window on a desktop, the live terminal board over SSH, or text for agents. In an agent's chat, `/agent-board` opens the same board. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. More in the [setup guide](docs/SETUP.md#install-with-npm).
+The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the live terminal board over SSH or in an interactive terminal without a display, and the page otherwise. In an agent's chat, `/agent-board` opens the same page. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. To remove it, see [Update and uninstall](docs/GUIDE.md#update-and-uninstall). More in the [setup guide](docs/SETUP.md#install-with-npm). An agent that needs the board's status reads `agent-board --json`; the [Board JSON reference](docs/BOARD-JSON.md) describes its versioned, redacted fields.
+
+The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise. To choose one, add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to both setup lines; the board, its page and `stop` then use it. An account connected through the Claude Code plugin uses `/progress lang` instead.
 
 Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
 
@@ -105,18 +107,16 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board` (checked in a synthetic home, not run live yet) |
 
-**In the Claude desktop app,** when its Code tab shows no pane, the footer shows the waiting count and `/agent-board opens the board`. `/agent-board` starts the live [board page](#the-boards-page) and replies with its link, where you can answer questions and archive work; it works in every Claude Code session and leaves the pane as it is. When the pane cannot be placed, `/progress` does the same. If the live page cannot start, both open the read-only page. The board page needs the board script that `/progress connect` installs, or the next session start updates.
+**In the Claude desktop app,** when its Code tab shows no pane, the footer shows the waiting count and `/agent-board opens the board`. `/agent-board` starts the live [board page](#the-boards-page) and replies with its link, where you can answer questions and archive work; it works in every Claude Code session and leaves the pane as it is. When the pane cannot be placed, `/progress` does the same. If the live page cannot start, both explain why and show the command that starts it. The board page needs the board script that `/progress connect` installs, or the next session start updates.
 
 ### Open the board anywhere
 
 | Where | Command |
 |---|---|
-| Any terminal | `node ~/.agent-board/agent-board.mjs --watch` (`--html` opens it in the browser) |
-| A browser | `node ~/.agent-board/agent-board.mjs --serve` |
-| A chat app, through an agent (Hermes Agent, OpenClaw) | `node ~/.agent-board/agent-board.mjs --chat` |
-| Check one agent's setup | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
-
-**In a chat app,** `--chat` prints the board as plain text cut to fit one message, with no page or link. It shows your home folder as `~` and hides the credential forms it knows, such as `token=...`; a secret in another shape is not recognised, so keep secrets out of the board.
+| A terminal or desktop | `node "$HOME/.agent-board/agent-board.mjs"` (terminal board over SSH or without a display, page otherwise) |
+| A browser | `node "$HOME/.agent-board/agent-board.mjs" --serve` |
+| An agent reading the board | `node "$HOME/.agent-board/agent-board.mjs" --json` ([field reference](docs/BOARD-JSON.md)) |
+| Check one agent's setup | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 
 <details>
 <summary><b>Keys on the terminal board</b></summary>
@@ -156,6 +156,52 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 | | dot, other web chats | Web | A block you merge | Answer in its chat |
 
 Hooks say whether a session is working or waiting; its steps and when it is done come from the agent's own reports. Gemini CLI is still a target (`--agent gemini`) for paid and enterprise use: see [setup](docs/SETUP.md#legacy-gemini-cli-compatibility).
+
+### Connected-session messaging
+
+<!-- messaging-matrix:start -->
+
+Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.
+
+| Host | Surface | Tier | Primitive | Status | Live run | Receiver |
+| --- | --- | --- | --- | --- | --- | --- |
+| Antigravity | 2.0 Desktop App | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Antigravity | agy TUI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
+| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
+| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-codex.ts](hooks/receivers/hook-mailbox-codex.ts) |
+| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
+| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
+| Cursor | cursor-agent CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
+| Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
+| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini CLI | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-gemini.ts](hooks/receivers/hook-mailbox-gemini.ts) |
+| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Muse Code | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-muse.ts](hooks/receivers/hook-mailbox-muse.ts) |
+| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+
+<!-- messaging-matrix:end -->
 
 <details>
 <summary><b>How each agent was checked</b></summary>
@@ -197,7 +243,7 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 
 ### The board's page
 
-The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node ~/.agent-board/agent-board.mjs --serve` does the same; run it again to reopen the page. On the page you can:
+The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node "$HOME/.agent-board/agent-board.mjs" --serve` does the same; run it again to reopen the page. On the page you can:
 
 - **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
@@ -207,7 +253,7 @@ The page listens on 127.0.0.1 only, and its address carries a random key: anythi
 
 ## How it works
 
-<img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, progress.html, the archive and the status line read it. Synthetic data." src="docs/images/flow-en.svg" width="100%">
+<img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, board page, archive and status line read it. Synthetic data." src="docs/images/flow-en.svg" width="100%">
 
 Each agent's hooks write what its session is doing into its own block of one local `progress.md` (a fresh install uses `~/.agent-board/progress.md`). Task steps come only from the agent's own reports, and no private conversation is read. The board reads the file without calling a model; the optional Claude plugin can sum up turns with Claude's model, as [the guide says](docs/GUIDE.md#does-anything-leave-my-machine-what-does-it-cost). You can read and edit the file too: [the file format](docs/FORMAT.md). In English, 繁體中文 and 简体中文.
 
@@ -224,10 +270,10 @@ For architectural positioning and coexistence with memory tools, see the [Archit
 Start with the doctor. It checks what the installer wrote for one agent and changes nothing:
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 ```
 
-Use the agent's own name after `--agent` (the doctor keeps its old name for every agent). `installed` says the files are in place and `ready` that the agent has a status adapter. `connected` stays `unverified`: only a new session that shows up on the board proves the connection.
+Use the agent's own name after `--agent` (the doctor keeps its old name for every agent). It prints whether the files are in place, what is wrong and one next step. Only a new session that shows up on the board proves the connection. With `--json`, `installed` says the files are in place and `ready` that the agent has a status adapter; `connected` stays `unverified`.
 
 | You see | Try |
 |---|---|
@@ -242,7 +288,7 @@ More answers are in the guide's [FAQ](docs/GUIDE.md#faq) and [Troubleshooting](d
 <details>
 <summary><b>Colours and marks</b></summary>
 
-The pane follows Claude Code's theme (`/config`, then **Theme**); the page and `progress.html` follow your computer's light or dark mode until you pick Light or Dark at the top right of the page. Every mark has its own shape, so it reads without colour; the pages draw a step still to do as a small dot rather than a ring, so it does not look like a button:
+The pane follows Claude Code's theme (`/config`, then **Theme**); the page follows your computer's light or dark mode until you pick Light or Dark at the top right. Every mark has its own shape, so it reads without colour; the page draws a step still to do as a small dot rather than a ring, so it does not look like a button:
 
 | Mark | Means | | Mark | Means |
 |:-:|---|---|:-:|---|
@@ -267,4 +313,4 @@ The pane follows Claude Code's theme (`/config`, then **Theme**); the page and `
 
 [MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) and belong to their owners; an agent without a logo is shown by its initial.
 
-<p align="center"><sub>Version 0.24.0 · <a href="CHANGELOG.md">Changelog</a></sub></p>
+<p align="center"><sub>Latest stable version: 0.24.2 · <a href="CHANGELOG.md">Changelog</a></sub></p>

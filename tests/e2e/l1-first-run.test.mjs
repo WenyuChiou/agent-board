@@ -18,7 +18,7 @@ describe('L1 first run', () => {
     try {
       assert.equal(world.exists('progress.md'), false)
       const screens = await inspectSurfaces(world)
-      for (const surface of ['terminal', 'chat', 'page', 'html']) {
+      for (const surface of ['terminal', 'chat', 'page', 'print']) {
         // The page has no Needs you section yet: its empty board is the "Your board is ready" card.
         assert.match(screens[surface], surface === 'page' ? EMPTY_PAGE : /Nothing needs you|No work in progress/, surface)
         await knownFailure('hold:empty-board-connect', () => assert.match(screens[surface], /\b(?:connect|set up|install)\b.*(?:agent|setup-agent)|setup-agent.*--apply/i, surface))

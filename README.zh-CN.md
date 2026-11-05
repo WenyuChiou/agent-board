@@ -37,7 +37,9 @@ npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，不写入任何东西；第二行才真正写入；第三行在所在位置打开看板：在桌面开窗口、SSH 开终端实时看板、agent 印纯文本。在 agent 对话中，输入 `/agent-board` 打开同一个看板。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。
+第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，不写入任何东西；第二行才真正写入；第三行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要卸载，见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
+
+看板语言跟随系统设置：系统是繁体或简体中文就用中文，其他用英文。要自己指定，在两行 setup 都加上 `--lang zh-CN`（或 `zh-TW`、`en`），之后看板、网页和 `stop` 都会用这个语言。通过 Claude Code 插件接上的账号，改用 `/progress lang`。
 
 用同一个 Wi-Fi 的手机，扫 `npx @wenyuchiou/agent-board --serve --lan` 印出的二维码。只在信得过的网络上用：这个链接没有加密，拿到的人都能打开网页。详情见[看板的网页](#看板的网页)。
 
@@ -105,18 +107,16 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board`（在测试环境检查过，还没实机运行） |
 
-**Claude 桌面 App** 的 Code 标签页没有显示面板时：底部状态栏会显示等你的数量和“/agent-board 打开看板”。`/agent-board` 会启动可回答问题、归档工作的[看板网页](#看板的网页)并提供链接；每个 Claude Code 会话都能用，也不动面板。面板无法显示时，`/progress` 做同样的事。交互网页无法启动时，两者都改开只读网页。看板网页需要 `/progress connect` 安装的看板脚本，或在下次会话开始时更新。
+**Claude 桌面 App** 的 Code 标签页没有显示面板时：底部状态栏会显示等你的数量和“/agent-board 打开看板”。`/agent-board` 会启动可回答问题、归档工作的[看板网页](#看板的网页)并提供链接；每个 Claude Code 会话都能用，也不动面板。面板无法显示时，`/progress` 做同样的事。交互网页无法启动时，两者都会说明原因，并显示启动网页的命令。看板网页需要 `/progress connect` 安装的看板脚本，或在下次会话开始时更新。
 
 ### 在任何地方打开看板
 
 | 在哪里 | 命令 |
 |---|---|
-| 任何终端 | `node ~/.agent-board/agent-board.mjs --watch`（`--html` 在浏览器打开） |
-| 浏览器 | `node ~/.agent-board/agent-board.mjs --serve` |
-| 聊天软件（通过 Hermes Agent 或 OpenClaw） | `node ~/.agent-board/agent-board.mjs --chat` |
-| 检查某个 agent 的设置 | `node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex` |
-
-**在聊天软件里，** `--chat` 把看板打印成纯文本，缩到一条消息放得下，没有网页也没有链接。它会把你的主目录显示成 `~`，并遮掉它认得的凭证形式，例如 `token=...`；其他形式的机密它识别不出来，所以别把机密写进看板。
+| 终端或桌面 | `node "$HOME/.agent-board/agent-board.mjs"`（SSH 或没有图形显示时打开终端看板，其他情况打开网页） |
+| 浏览器 | `node "$HOME/.agent-board/agent-board.mjs" --serve` |
+| Agent 读取看板 | `node "$HOME/.agent-board/agent-board.mjs" --json`（[字段说明](docs/BOARD-JSON.md)） |
+| 检查某个 agent 的设置 | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 
 <details>
 <summary><b>终端看板的按键</b></summary>
@@ -156,6 +156,52 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | | dot、其他网页聊天 | 网页 | 你合并进来的区块 | 在它的对话里回 |
 
 Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来自 agent 自己的报告。Gemini CLI 仍保留为付费和企业用的目标（`--agent gemini`），见[安装指南](docs/SETUP.md#legacy-gemini-cli-compatibility)（英文）。
+
+### 已连接对话的消息能力
+
+<!-- messaging-matrix:start -->
+
+由接收器记录生成：`node scripts/messaging-matrix.mjs --write`。进度报告与消息接收分别验证。Verified 需要该运行界面的 `<date>-<host>-live.md` 文件；合成测试只能证明 Implemented。未连接的目标使用 Tier 4 / [P5] 复制回退，不代表已有原生接收器。“未知”表示路线图没有为该运行界面指定原语。
+
+| 宿主 | 运行界面 | 层级 | 原语 | 状态 | 现场运行 | 接收器 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Antigravity | 2.0 Desktop App | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Antigravity | agy TUI | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | 未知 | Implemented（已实现） | 早期运行（不计入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
+| Antigravity | IDE | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented（已实现） | 未测试 | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
+| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Codex | CLI | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-codex.ts](hooks/receivers/hook-mailbox-codex.ts) |
+| Codex | Daemon | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented（已实现） | 早期运行（不计入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
+| Codex | Existing-owner proxy (active turn only) | 2 | 未知 | Verified（已验证） | [docs/validation/2026-11-04-codex-cli-proxy-live.md](docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
+| Cursor | cursor-agent CLI | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
+| Cursor | IDE (Composer) | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
+| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Gemini | Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Gemini CLI | CLI | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-gemini.ts](hooks/receivers/hook-mailbox-gemini.ts) |
+| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Muse Code | CLI | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-muse.ts](hooks/receivers/hook-mailbox-muse.ts) |
+| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+
+<!-- messaging-matrix:end -->
 
 <details>
 <summary><b>每个 agent 是怎么验证的</b></summary>
@@ -197,7 +243,7 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 ### 看板的网页
 
-上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `node ~/.agent-board/agent-board.mjs --serve` 也一样，再运行一次就会重新打开网页。在网页上可以：
+上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `node "$HOME/.agent-board/agent-board.mjs" --serve` 也一样，再运行一次就会重新打开网页。在网页上可以：
 
 - **回复**问题：开启消息功能、对话也连上时就**发送**，否则**复制**回复。LAN 网页没有消息功能。
 - **勾掉**下一步、**归档**一件工作，或点**现在归档**收走所有做完的。
@@ -207,7 +253,7 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 ## 怎么运作
 
-<img alt="Claude Code 对话、通过 hook 的其他 agent、和你，都写进同一个 Markdown 文件 progress.md；面板、progress.html、归档和状态栏都读它。合成数据。" src="docs/images/flow-zh-CN.svg" width="100%">
+<img alt="Claude Code 对话、通过 hook 的其他 agent、和你，都写进同一个 Markdown 文件 progress.md；面板、看板网页、归档和状态栏都读它。合成数据。" src="docs/images/flow-zh-CN.svg" width="100%">
 
 每个 agent 的 hooks 把它的对话正在做什么，写进本地同一个 `progress.md` 里它自己的区块（全新安装用 `~/.agent-board/progress.md`）。任务步骤只来自 agent 自己的报告，不读任何私人对话。看板读这个文件不需要调用模型；可选的 Claude 插件可以用 Claude 的模型总结每个回合，细节见[使用指南](docs/GUIDE.zh-CN.md#会把数据传出去吗要花多少钱)。这个文件你也可以自己看、自己改：[文件格式](docs/FORMAT.md)（英文）。支持 English、繁體中文、简体中文。
 
@@ -224,10 +270,10 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 先运行 doctor。它检查安装器替某个 agent 写了什么，不会改任何东西：
 
 ```sh
-node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 ```
 
-`--agent` 后面换成那个 agent 的名字（doctor 对每个 agent 都沿用这个旧名称）。`installed` 表示文件都在，`ready` 表示这个 agent 有报告状态的 adapter。`connected` 一律是 `unverified`：只有新开的对话真的出现在看板上，才算证明接通了。
+`--agent` 后面换成那个 agent 的名字（doctor 对每个 agent 都沿用这个旧名称）。它会说明文件在不在、哪里有问题，并给一个下一步。只有新开的对话真的出现在看板上，才算证明接通了。加 `--json` 时，`installed` 表示文件都在，`ready` 表示这个 agent 有报告状态的 adapter，`connected` 一律是 `unverified`。
 
 | 你看到 | 试试 |
 |---|---|
@@ -242,7 +288,7 @@ node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
 <details>
 <summary><b>颜色和符号</b></summary>
 
-面板跟着 Claude Code 的主题走（`/config`，再选 **Theme**）；网页和 `progress.html` 跟着你电脑的浅色或深色模式，直到你在页面右上角选了亮色或暗色。每个符号形状都不一样，不看颜色也分得出来；网页上还没做的步骤画成小圆点，不画圆圈，免得看起来像能点的按钮：
+面板跟着 Claude Code 的主题走（`/config`，再选 **Theme**）；网页跟着你电脑的浅色或深色模式，直到你在右上角选了亮色或暗色。每个符号形状都不一样，不看颜色也分得出来；网页上还没做的步骤画成小圆点，不画圆圈，免得看起来像能点的按钮：
 
 | 符号 | 意思 | | 符号 | 意思 |
 |:-:|---|---|:-:|---|
@@ -267,4 +313,4 @@ node ~/.agent-board/agent-board.mjs --codex-doctor --agent codex
 
 [MIT](LICENSE)。agent 的图标来自 [Simple Icons](https://simpleicons.org)（CC0）和 [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT），这些图标属于各自的所有者；没有图标的 agent 用名字的第一个字母表示。
 
-<p align="center"><sub>版本 0.24.0 · <a href="CHANGELOG.md">更新日志</a></sub></p>
+<p align="center"><sub>最新稳定版本 0.24.2 · <a href="CHANGELOG.md">更新日志</a></sub></p>

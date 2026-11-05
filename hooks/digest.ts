@@ -68,7 +68,8 @@ export const requestData = (text: string): string => text.slice(0, 1200).replace
 // token in a shape no pattern for tokens knows.
 const withoutEmphasis = (line: string): string =>
   line
-    .replace(/[*#>]+/g, '')
+    .replace(/[*#]+/g, '')
+    .replace(/^\s*>+\s?/, '')
     .replace(/_+/g, (run, at: number, whole: string) => (/[A-Za-z0-9]/.test(whole[at - 1] ?? '') && /[A-Za-z0-9]/.test(whole[at + run.length] ?? '') ? run : ''))
 
 // JSON objects and arrays are data, not prose. Only a top-level, nonempty string can
@@ -126,7 +127,9 @@ export const lastQuestionInProse = (answer: string, isFull = false): string | nu
     .filter(line => line !== '')
   const tail = lines.at(-1) ?? ''
   if (!/[?？]/.test(tail)) return null
-  const sentences = tail.match(/[^.。!！?？]*[?？]/g) ?? []
+  // Keep closing wrappers after the question mark so choice parsing can distinguish
+  // a wrapped question from a word's own leading apostrophe, such as '90s.
+  const sentences = tail.match(/[^.。!！?？]*[?？]["'”」』)]*/g) ?? []
   const question = (sentences.at(-1) ?? '').trim()
 
   return question === '' ? null : isFull ? question : clip(question, 120)

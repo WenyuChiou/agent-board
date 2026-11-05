@@ -21,7 +21,7 @@ import {
   GROK_UPDATES,
   HERMES_TURN,
   INBOX,
-  INBOX_ASK,
+  LIVE_SCRIPT,
   JOBS,
   LEDGER_LINK,
   NEXT_TURN,
@@ -49,7 +49,8 @@ import {
   breakQuestionFile,
   buildView,
   confirmStep,
-  dashboardHtml,
+  serveModel,
+  pageModelText,
   doneKey,
   effectivePromptMirror,
   emptyMirror,
@@ -58,6 +59,7 @@ import {
   expect,
   expireTaken,
   inNeeds,
+  installedBoard,
   launchBackground,
   migrationKey,
   observeQuestions,
@@ -87,6 +89,7 @@ import {
   type ProgressMirror,
   type World,
 } from './pane-helpers'
+import { parsePendingArchive } from '../hooks/journal'
 
 
 test('the task gets a line of background with its name, and a step that needs you says why', async ($, on) => {
@@ -653,9 +656,9 @@ test('historical hide marks survive failed reads while an observed renewed quest
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   // The list is read before progress.md at the start: the page written then still holds the file.
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   expect(page).toContain('Backfill last year')
-  expect(page).toContain('已回覆、隱藏的 1 項')
+  expect(JSON.parse(page).hidden).toHaveLength(1)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   const item = "data-pipeline::Backfill last year's events::0"
   expect(await ui.find({ type: 'Button', key: `${item}::unhide` })).toBeDefined()
@@ -918,6 +921,368 @@ test('/progress tidy still says two archived tasks when a stale write puts the t
   expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
 })
 
+test('/progress tidy twice on the same day with one same-title same-steps done block each time: the archive ends with two entries', async ($, on) => {
+  const block = (session: string): string => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+  const world: World = { files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block('a1b2c395')}`]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  world.files.set(FILE, `# Progress\n\n## Synthetic\n${block('a1b2c396')}`)
+  world.mtime += 1
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+})
+
+test('the pane archive twice on the same day with one same-title same-steps done block each time: the archive ends with two entries', async ($, on) => {
+  const block = (session: string): string => `<!-- auto session=${session} agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=${session} -->\n`
+  const world: World = { files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block('a1b2c395')}`]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui1 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui1.press({ key: 'section::recent' })
+    await ui1.press({ key: 'archive' })
+    expect(await ui1.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
+  } finally { await ui1.unmount() }
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  world.files.set(FILE, `# Progress\n\n## Synthetic\n${block('a1b2c396')}`)
+  world.mtime += 1
+  await clock.advance(5000)
+  const ui2 = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    if (await ui2.find({ type: 'Button', key: 'archive' }) === undefined) {
+      await ui2.press({ key: 'section::recent' })
+    }
+    await ui2.press({ key: 'archive' })
+    expect(await ui2.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
+  } finally { await ui2.unmount() }
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+})
+
+const noNodeDoneBlock = `<!-- auto session=a1b2c397 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c397 -->\n`
+
+test('with no node on the path, /progress tidy archives a done block', async ($, on) => {
+  const world: World = { files: new Map([[FILE, `# Progress\n\n## Synthetic\n${noNodeDoneBlock}`]]), mtime: 1, hasTasks: true, node: null, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)).toContain('### Synthetic twin\n- [x] Finished')
+})
+
+test('with no node on the path, the pane Archive button archives a done block', async ($, on) => {
+  const world: World = { files: new Map([[FILE, `# Progress\n\n## Synthetic\n${noNodeDoneBlock}`]]), mtime: 1, hasTasks: true, node: null, store: { lang: 'en', autoConnectOff: true } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::recent' })
+    await ui.press({ key: 'archive' })
+    expect(await ui.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
+  } finally { await ui.unmount() }
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)).toContain('### Synthetic twin\n- [x] Finished')
+})
+
+test('with no node on the path, a leftover recovery note still archives the twin once', async ($, on) => {
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  // The second block is not archived yet, so this tidy writes a new recovery note without Node.
+  const otherBlock = `<!-- auto session=a1b2c398 agent=codex state=done updated=2026-10-16T09:00:00Z -->\n### Synthetic other\n- [x] Finished too\n<!-- /auto session=a1b2c398 -->\n`
+  const boardText = `# Progress\n\n## Synthetic\n${noNodeDoneBlock}${otherBlock}`
+  const boardHash = sha256(boardText)
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, boardText],
+      [ARCHIVE, `# Archive\n\n${entry}\n`],
+      [pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry, held: 0, boardHash }] })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    node: null,
+    store: { lang: 'en', autoConnectOff: true },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(2))
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(FILE)).not.toContain('Synthetic other')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic other\n- [x] Finished too').length).toBe(2)
+  expect(world.files.has(pending)).toBe(false)
+})
+
+test('with no node on the path, a failed recovery note move leaves the archive and board unchanged', async ($, on) => {
+  const boardText = `# Progress\n\n## Synthetic\n${noNodeDoneBlock}`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const oldNote = JSON.stringify({ version: 1, boardHash: 'old-hash', entries: [{ entry: '## Old', held: 0, boardHash: 'old-hash' }] }) + '\n'
+  const archive = '# Archive\n\nPrevious entry\n'
+  const world: World = {
+    files: new Map([[FILE, boardText], [ARCHIVE, archive], [pending, oldNote]]),
+    mtime: 1,
+    hasTasks: true,
+    node: null,
+    store: { lang: 'en', autoConnectOff: true },
+    written: [],
+    isMoveRefused: path => path.startsWith(`${pending}.`),
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
+  expect(world.files.get(FILE)).toBe(boardText)
+  expect(world.files.get(ARCHIVE)).toBe(archive)
+  expect(world.files.get(pending)).toBe(oldNote)
+  expect(world.written?.filter(path => path.startsWith(`${pending}.`))).toHaveLength(1)
+  expect([...world.files.keys()].some(path => path.startsWith(`${pending}.`))).toBe(false)
+})
+
+test('/progress tidy with archive saved and task not removed (simulated failure), then tidy again: one entry, not two', async ($, on) => {
+  const block = `<!-- auto session=a1b2c397 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c397 -->\n`
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const boardText = `# Progress\n\n## Synthetic\n${block}`
+  const boardHash = sha256(boardText)
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, boardText],
+      [ARCHIVE, `# Archive\n\n${entry}\n`],
+      [pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry, held: 0, boardHash }] })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.has(pending)).toBe(false)
+})
+
+test('the pane archive with archive saved and task not removed (simulated failure), then tidy again: one entry, not two', async ($, on) => {
+  const block = `<!-- auto session=a1b2c397 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c397 -->\n`
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const boardText = `# Progress\n\n## Synthetic\n${block}`
+  const boardHash = sha256(boardText)
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, boardText],
+      [ARCHIVE, `# Archive\n\n${entry}\n`],
+      [pending, JSON.stringify({ version: 1, boardHash, entries: [{ entry, held: 0, boardHash }] })],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::recent' })
+    await ui.press({ key: 'archive' })
+    expect(await ui.find({ type: 'Text', text: STRINGS.en.tidyMoved(1) })).toBeDefined()
+  } finally { await ui.unmount() }
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.has(pending)).toBe(false)
+})
+
+test('/progress tidy with archive holding X once, board holding new identical X, and note left over from failed removal: archive ends with two entries', async ($, on) => {
+  const block1 = `<!-- auto session=a1b2c398 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c398 -->\n`
+  const block2 = `<!-- auto session=a1b2c399 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c399 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, `# Progress\n\n## Synthetic\n${block1}`],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unremovable: new Set([pending]),
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+    expect(world.files.has(pending)).toBe(true)
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+    expect(await ui.find({ type: 'Text', text: STRINGS.en.pendingNoteRemoveFailed('progress-archive.pending') })).toBeDefined()
+
+    world.files.set(FILE, `# Progress\n\n## Synthetic\n${block2}`)
+    world.mtime += 1
+    world.unremovable.clear()
+    expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+    expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+    expect(world.files.has(pending)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: STRINGS.en.pendingNoteRemoveFailed('progress-archive.pending') })).toBeUndefined()
+  } finally { await ui.unmount() }
+})
+
+test('/progress tidy does not restamp a leftover pending record onto a later twin when another task fails to clear', async ($, on) => {
+  const blockX1 = `<!-- auto session=a1b2c410 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c410 -->\n`
+  const blockY = '### Task Y\n- [x] Done step\n- [ ] Open step\n'
+  const blockX2 = `<!-- auto session=a1b2c412 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c412 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, `# Progress\n\n## Synthetic\n${blockX1}`],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unremovable: new Set([pending]),
+  }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.has(pending)).toBe(true)
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+
+  const secondBoard = `# Progress\n\n## Synthetic\n${blockY}\n${blockX2}`
+  world.files.set(FILE, secondBoard)
+  world.mtime += 1
+  world.unremovable.clear()
+  await clock.advance(60_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::others' })
+    world.unwritable = new Set([FILE])
+    await ui.press({ key: 'Synthetic::Task Y' })
+    await ui.press({ key: 'Synthetic::Task Y::archive' })
+    expect(world.files.get(FILE)).toBe(secondBoard)
+    expect(world.files.get(ARCHIVE)?.split('### Task Y').length).toBe(2)
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+
+    world.unwritable.clear()
+    expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+    expect(world.files.get(ARCHIVE)?.split('### Task Y').length).toBe(2)
+    expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+    expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+    expect(world.files.has(pending)).toBe(false)
+  } finally { await ui.unmount() }
+})
+
+test('/progress tidy when archive write fails after note is written: task stays in progress.md, and next tidy archives it once', async ($, on) => {
+  const entry = '## Synthetic · 2026-10-16\n### Synthetic twin\n- [x] Finished'
+  const block = `<!-- auto session=a1b2c399 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c399 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([
+      [FILE, `# Progress\n\n## Synthetic\n${block}`],
+      [ARCHIVE, `# Archive\n\n${entry}\n`],
+    ]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unwritable: new Set([ARCHIVE]),
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
+  expect(world.files.get(FILE)).toContain('Synthetic twin')
+  expect(world.files.has(pending)).toBe(true)
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(2)
+
+  world.unwritable.clear()
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(1))
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+  expect(world.files.has(pending)).toBe(false)
+})
+
+test('/progress tidy when note write fails: nothing is archived and board is unchanged', async ($, on) => {
+  const block = `<!-- auto session=a1b2c400 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c400 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block}`]]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unwritable: new Set([pending]),
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
+  expect(world.files.get(FILE)).toContain('Synthetic twin')
+  expect(world.files.has(pending)).toBe(false)
+  expect(world.files.has(ARCHIVE)).toBe(false)
+
+  const oldNote = JSON.stringify({ version: 1, boardHash: 'old-hash', entries: [{ entry: '## Old', held: 0, boardHash: 'old-hash' }] }) + '\n'
+  world.files.set(pending, oldNote)
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
+  expect(world.files.get(FILE)).toContain('Synthetic twin')
+  expect(world.files.has(ARCHIVE)).toBe(false)
+  expect(world.files.get(pending)).toBe(oldNote)
+})
+
+test('/progress tidy preserves pending recovery records across same-invocation board-rewrite retries when a twin arrives', async ($, on) => {
+  const block1 = `<!-- auto session=a1b2c420 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c420 -->\n`
+  const block2 = `<!-- auto session=a1b2c421 agent=codex state=done updated=2026-10-16T08:00:00Z -->\n### Synthetic twin\n- [x] Finished\n<!-- /auto session=a1b2c421 -->\n`
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([[FILE, `# Progress\n\n## Synthetic\n${block1}`]]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+  }
+  world.afterWrite = () => {
+    world.unwritable = new Set([FILE])
+    return `# Progress\n\n## Synthetic\n${block1}\n${block2}`
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyUnreadable)
+  expect(world.files.get(FILE)).toContain('a1b2c420')
+  expect(world.files.get(FILE)).toContain('a1b2c421')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+  expect(parsePendingArchive(world.files.get(pending) ?? '')).toHaveLength(2)
+
+  world.unwritable.clear()
+  expect((await $.command.run(TIDY)).text).toBe(STRINGS.en.tidyMoved(2))
+  expect(world.files.get(FILE)).not.toContain('Synthetic twin')
+  expect(world.files.get(ARCHIVE)?.split('### Synthetic twin').length).toBe(3)
+  expect(world.files.has(pending)).toBe(false)
+})
+
+test('archiveOne when archive write fails after note is written: task stays on board, and next archive archives it once', async ($, on) => {
+  const task = '### Manual task\n- [x] Done step\n- [ ] Open step\n'
+  const pending = `${FILE.replace(/\.md$/i, '')}-archive.pending`
+  const world: World = {
+    files: new Map([[FILE, `# Progress\n\n## Synthetic\n${task}`]]),
+    mtime: 1,
+    hasTasks: true,
+    store: { lang: 'en', autoConnectOff: true },
+    unwritable: new Set([ARCHIVE]),
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::others' })
+    await ui.press({ key: 'Synthetic::Manual task' })
+    await ui.press({ key: 'Synthetic::Manual task::archive' })
+    expect(world.files.get(FILE)).toContain('Manual task')
+    expect(world.files.has(pending)).toBe(true)
+    expect(world.files.has(ARCHIVE)).toBe(false)
+
+    world.unwritable.clear()
+    await ui.press({ key: 'Synthetic::Manual task::archive' })
+    expect(world.files.get(FILE)).not.toContain('Manual task')
+    expect(world.files.get(ARCHIVE)?.split('### Manual task').length).toBe(2)
+    expect(world.files.has(pending)).toBe(false)
+  } finally {
+    await ui.unmount()
+  }
+})
+
 test('on a light terminal no text falls back to the terminal dim', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, store: { opened: ['others', 'waiting', 'recent', 'steps'] } }
   engineBeneath(on, world)
@@ -985,23 +1350,32 @@ test('/progress lang switches the language and remembers it; auto goes back to t
   expect(ran.text).toBe('面板改用繁體中文。')
 })
 
-test('progress.html is written beside progress.md, and /progress open opens it in the browser', async ($, on) => {
-  const ran: string[][] = []
-  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, ran }
-  engineBeneath(on, world)
+test('nothing writes progress.html after a changed read or tick and the pane opens the live page', async ($, on) => {
+  const url = `http://127.0.0.1:34567/?t=${'a'.repeat(32)}`
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], liveOutput: `${ZH_TW.serveAt(url)}\n` }
+  const clock = engineBeneath(on, world)
   await start($, '幫我重做進度面板')
   await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain('<html lang="zh-Hant">')
-  expect(page).toContain('<title>Agent Board</title>')
+  expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
+  world.files.set(FILE, `${JOBS}\n## Synthetic\n### Changed report\n- [ ] Continue\n`)
+  world.mtime += 1
+  await clock.advance(30000)
+  expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
+  const page = await pageModelText($, world)
   expect(page).toContain('Google 暑期實習')
-
+  expect(page).toContain('Changed report')
   const result = await $.command.run({ ...TIDY, args: 'open' })
-  expect(ran.at(-1)).toEqual(['xdg-open', '/home/me/.claude/progress.html'])
-  expect(result.text).toBe(ZH_TW.windowOpened())
+  expect(result.text).toBe(`${ZH_TW.boardPageOpened}\n<${url}>`)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(await ui.find({ type: 'Button', key: 'page' })).toBeDefined()
+    await ui.press({ key: 'page' })
+    expect(world.ran?.at(-1)?.includes('--serve')).toBe(true)
+  } finally { await ui.unmount() }
+  expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
 })
 
-test('progress.html shows unprocessed inbox questions before a digest and drops the pending copy afterwards', async ($, on) => {
+test('the live page model shows unprocessed inbox questions before a digest and drops the pending copy afterwards', async ($, on) => {
   const question = 'Use 100 or 300 a minute?'
   const inbox = '/home/me/.claude/progress-inbox'
   const name = 'codex-turn-1792152000-1.json'
@@ -1018,23 +1392,23 @@ test('progress.html shows unprocessed inbox questions before a digest and drops 
   }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   expect(inNeeds(page, question)).toBe(true)
-  expect(page).toContain('<b id="needs-n">1</b>')
+  expect(JSON.parse(page).counts.waiting).toBe(1)
   expect(page).toContain('codex')
   expect(page).not.toContain('{ broken')
   await clock.advance(5000)
   await $.command.run({ ...TIDY, args: 'open' })
-  const digested = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const digested = await pageModelText($, world)
   expect(world.files.get(FILE)).toContain(question)
   expect(inNeeds(digested, question)).toBe(true)
   // The digest recorded the question, so the pending copy is gone: no inbox hint, no unprocessed ask.
   expect(digested).not.toContain(ZH_TW.dashInboxHint)
   expect(digested).not.toContain('this page cannot send replies.')
-  expect(digested).not.toMatch(INBOX_ASK)
+  expect(JSON.parse(digested).turns).toEqual([])
 })
 
-test('progress.html escapes inbox text and skips turns already recorded as processed', async ($, on) => {
+test('the live page model keeps inbox text as data and skips turns already recorded as processed', async ($, on) => {
   const inbox = '/home/me/.claude/progress-inbox'
   const name = 'codex-turn-1792152000-1.json'
   const world: World = {
@@ -1049,18 +1423,19 @@ test('progress.html escapes inbox text and skips turns already recorded as proce
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain('&lt;scriptalert(&quot;demo&quot;)&lt;/script &amp; done?')
-  expect(page).toContain('&lt;img &quot;demo&quot; &amp;&gt;')
-  expect(page).not.toContain('<script>alert')
+  const page = await pageModelText($, world)
+  const model = JSON.parse(page) as ReturnType<typeof serveModel>
+  const item = [...model.asks, ...model.turns].find(item => item.project === '<img "demo" &>')
+  expect(item?.text).toBe('<script>alert("demo")</script> & done?')
+  expect(item?.project).toBe('<img "demo" &>')
   expect(page).not.toContain('Already processed')
 })
 
-test('progress.html is still written and reminders run when inboxDone is malformed', async ($, on) => {
+test('the live page model and reminders remain available when inboxDone is malformed', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', last_assistant_message: 'Ship the demo build, OK?' })]]), mtime: 1, hasTasks: true, store: { inboxDone: 'oops', autoConnectOff: true }, storeReads: [] }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   expect(page).toContain('Google 暑期實習')
   // With no readable record of processed turns, every inbox file counts as not processed yet.
   expect(inNeeds(page, 'Ship the demo build, OK?')).toBe(true)
@@ -1070,11 +1445,11 @@ test('progress.html is still written and reminders run when inboxDone is malform
   await ui.unmount()
 })
 
-test('progress.html is still written and reminders run when reading inboxDone is denied', async ($, on) => {
+test('the live page model and reminders remain available when reading inboxDone is denied', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', last_assistant_message: 'Ship the demo build, OK?' })]]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, storeReads: [], failStore: (operation, key) => operation === 'get' && key === 'inboxDone' }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   expect(page).toContain('Google 暑期實習')
   // With no readable record of processed turns, every inbox file counts as not processed yet.
   expect(inNeeds(page, 'Ship the demo build, OK?')).toBe(true)
@@ -1084,7 +1459,7 @@ test('progress.html is still written and reminders run when reading inboxDone is
   await ui.unmount()
 })
 
-test('progress.html redacts home paths and credentials before clipping pending questions', async ($, on) => {
+test('the live page model redacts home paths and credentials before clipping pending questions', async ($, on) => {
   const secret = `sk-${'a'.repeat(40)}`
   const question = `Use /home/me/private with ${secret} or wait?`
   const world: World = {
@@ -1095,7 +1470,7 @@ test('progress.html redacts home paths and credentials before clipping pending q
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   expect(page).toContain('~/private')
   expect(page).toContain('•••')
   expect(page).not.toContain('/home/me/private')
@@ -1103,7 +1478,7 @@ test('progress.html redacts home paths and credentials before clipping pending q
   expect(page).toContain('or wait?')
 })
 
-test('progress.html shows only the agent and project for a pending turn without a question', async ($, on) => {
+test('the live page model shows only the agent and project for a pending turn without a question', async ($, on) => {
   const world: World = {
     files: new Map([[FILE, ''], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', prompt: 'Private prompt contents', last_assistant_message: '' })]]),
     mtime: 1,
@@ -1112,14 +1487,16 @@ test('progress.html shows only the agent and project for a pending turn without 
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(inNeeds(page, 'api-gateway · codex')).toBe(true)
-  expect(page).toMatch(INBOX_ASK)
-  expect(page).toContain(ZH_TW.dashInboxHint)
-  expect(page).not.toContain('Private prompt contents')
+  const page = await pageModelText($, world)
+  expect(JSON.parse(page).turns.some((turn: { project: string; agent: string; isQuestion: boolean }) => turn.project === 'api-gateway' && turn.agent === 'codex' && !turn.isQuestion)).toBe(true)
+  expect(JSON.parse(page).turns).toHaveLength(1)
+  expect(JSON.parse(page).counts.waiting).toBe(0)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try { expect(await ui.find({ type: 'Text', text: /Private prompt contents/ })).toBeUndefined() }
+  finally { await ui.unmount() }
 })
 
-test('progress.html reads only the newest thirty unprocessed inbox files', async ($, on) => {
+test('the live page model reads only the newest thirty unprocessed inbox files', async ($, on) => {
   const world: World = { files: new Map([[FILE, '']]), mtime: 1, hasTasks: true, store: { inboxDone: {}, autoConnectOff: true }, reads: [], mtimes: {} }
   for (let i = 0; i < 35; i++) {
     const path = `${INBOX}/codex-turn-1792152000-${i}.json`
@@ -1129,7 +1506,7 @@ test('progress.html reads only the newest thirty unprocessed inbox files', async
   world.store!.inboxDone = { 'codex-turn-1792152000-34.json': 'deadbeef:1792152000000' }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
+  const page = await pageModelText($, world)
   // The count file the inbox writers keep beside the turns (dropped.log) is read as well; it is not a turn.
   const reads = world.reads!.filter(path => path.startsWith(`${INBOX}/`) && !path.endsWith('/dropped.log'))
   expect(reads).toHaveLength(30)
@@ -1139,7 +1516,7 @@ test('progress.html reads only the newest thirty unprocessed inbox files', async
   expect(page).not.toContain('Use limit 34?')
 })
 
-test('progress.html shows pending questions without reading transcripts or starting an agent', async ($, on) => {
+test('the live page model shows pending questions without reading transcripts or starting an agent', async ($, on) => {
   const transcript = '/home/me/.codex/sessions/demo.jsonl'
   const body = JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', transcript_path: transcript, last_assistant_message: 'Use 100 or 300 a minute?' })
   const world: World = {
@@ -1152,7 +1529,7 @@ test('progress.html shows pending questions without reading transcripts or start
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  expect(world.files.get('/home/me/.claude/progress.html')).toContain('Use 100 or 300 a minute?')
+  expect(await pageModelText($, world)).toContain('Use 100 or 300 a minute?')
   expect(world.reads).not.toContain(transcript)
   expect(world.ran?.length).toBe(1)
   expect(world.ran?.[0]?.slice(0, 4)).toEqual(['node', '-e', LEDGER_LINK, '--'])
@@ -1160,7 +1537,7 @@ test('progress.html shows pending questions without reading transcripts or start
   expect(world.ran?.[0]?.[5]).toBe(QUESTIONS)
 })
 
-test('progress.html starts no process for a pending turn whose transcript path is a Node option', async ($, on) => {
+test('the live page model starts no process for a pending turn whose transcript path is a Node option', async ($, on) => {
   const transcript = '--require=/home/me/x.txt'
   const world: World = {
     files: new Map([[FILE, ''], [`${INBOX}/codex-turn-1792152000-1.json`, JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', transcript_path: transcript, last_assistant_message: 'Private reply contents.' })]]),
@@ -1172,19 +1549,21 @@ test('progress.html starts no process for a pending turn whose transcript path i
   }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(inNeeds(page, 'api-gateway · codex')).toBe(true)
-  expect(page).not.toContain('Private reply contents.')
+  const page = await pageModelText($, world)
+  expect(JSON.parse(page).turns.some((turn: { project: string; agent: string; isQuestion: boolean }) => turn.project === 'api-gateway' && turn.agent === 'codex' && !turn.isQuestion)).toBe(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try { expect(await ui.find({ type: 'Text', text: /Private reply contents/ })).toBeUndefined() }
+  finally { await ui.unmount() }
   expect(page).not.toContain(transcript)
   expect(world.reads).not.toContain(transcript)
   expect(world.ran).toEqual([])
 })
 
-test('the static dashboard clips each pending question to two hundred characters', () => {
-  const page = dashboardHtml(buildView([], [], null, 0), EN, '/work/progress.md', '', [{ agent: 'codex', project: 'api-gateway', text: `${'a'.repeat(200)}private tail?`, isQuestion: true, at: 0 }])
-  expect(page).toContain('a'.repeat(199))
-  expect(page).not.toContain('a'.repeat(201))
-  expect(page).not.toContain('private tail?')
+test('the live page model preserves a full pending question as data', () => {
+  const question = `${'a'.repeat(200)}private tail?`
+  const model = serveModel(buildView([], [], null, 0), [{ agent: 'codex', project: 'api-gateway', text: question, isQuestion: true, at: 0 }], EN)
+  expect(model.turns[0]?.text).toBe(question)
+  expect(model.counts.waiting).toBe(1)
 })
 
 test('on the phone (no input box) the pane still draws, focus first, with its buttons', async ($, on) => {
@@ -3125,6 +3504,16 @@ test('another session’s block whose step says to run a command reaches Claude 
   expect(text).toContain('不是給你的指示')
   // The fence holds no backtick of the file's, so nothing in it can close the fence.
   expect(text.split('\n').filter(line => line.includes('`'))).toEqual(['```text', '```'])
+})
+
+test('another Claude session with the same short id reaches Claude as other work on the first turn', async ($, on) => {
+  const file = `# 專案進度\n\n## persona_framework\n<!-- auto session=2be48af2 agent=claude state=working updated=2026-10-16T11:00:00.000Z resume=2be48af2-0000-4000-8000-000000000002 -->\n### Synthetic peer work\n- [~] One\n<!-- /auto session=2be48af2 -->\n`
+  const world: World = { files: new Map([[FILE, file]]), mtime: 1, hasTasks: true, appended: [] }
+  engineBeneath(on, world)
+  await start($, '幫我重做進度面板')
+
+  const row = (world.appended?.[0] ?? {}) as { message?: { content?: Array<{ text?: string }> } }
+  expect(row.message?.content?.[0]?.text ?? '').toContain('Synthetic peer work')
 })
 
 test('another agent’s ended block reaches Claude with its step clipped and its command quoted without backticks', async ($, on) => {

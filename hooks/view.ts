@@ -4,18 +4,19 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { agentLabel } from './strings'
 import type { AskKind } from './ask'
-import { confirmKey, shortId, stepWords, upsertAutoBlock } from './blocks'
+import { confirmKey, matchesSpan, shortId, stepWords, upsertAutoBlock } from './blocks'
 import type { ConfirmRef } from './blocks'
 import { isLifecycleStep } from './codex'
 import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, WORKING_MS } from './parse'
 import { sha256 } from './sha256'
-import { observeQuestions, pendingQuestionSlot, questionScope, questionSlot, questionWords, sourceSnapshot } from './questions'
+import { observeQuestions, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
+import { identity } from './grouping'
 import { closedCopies, mergeCopies, recordFolder } from './question-merge'
 import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
 import type { RunGroup } from './runs'
@@ -179,6 +180,27 @@ export type TaskRow = {
 export type PrView = { text: string; url: string; tone: Tone }
 
 export type DoneItem = { key: string; project: string; title: string; when: string; questions?: WaitingItem[] }
+
+// The page and terminal share which live rows need the person. Shelved sessions keep their
+// last steps for reference without presenting a blocked step as a live request.
+export const rowNeedsYou = (row: TaskRow, isShelved = false): { kind: 'stuck' | 'question'; reason: string } | null => {
+  if (isShelved || row.auto === null || row.auto === 'ended') return null
+  const blocked = row.steps.find(step => step.status === 'blocked')
+  if (blocked !== undefined) return { kind: 'stuck', reason: (blocked.note || blocked.text).replace(/\s+/g, ' ').trim().slice(0, 80) }
+
+  return row.question === null ? null : { kind: 'question', reason: row.question }
+}
+
+// Whether a row needs the person now. A question counts while it has its card, by the page's own
+// match: copies of one question merge into one card and a later answer can cover an earlier copy,
+// so a row's own question may have no card left.
+export const rowNeedsNow = (row: TaskRow, cards: readonly WaitingItem[], isShelved = false): ReturnType<typeof rowNeedsYou> => {
+  const needs = rowNeedsYou(row, isShelved)
+  if (needs?.kind !== 'question') return needs
+  const own = identity(row.agent, false, row.project, row.title, row.dir)
+
+  return cards.some(item => identity(item.agent, false, item.project, item.task, item.dir) === own) ? needs : null
+}
 
 // Other work, one group per project, this session's project first; `summary` says it in a
 // line (`3 件 · 1 等你 · 1 已停`) for while the list is folded.
@@ -537,7 +559,7 @@ const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
 }
 
 // This session's own steps that wait on the person: answered right from the pane.
-const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, string>>): WaitingItem[] => {
+const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, string>>, scope = questionScope(mine.project, mine.agent || 'claude', shortId(mine.sessionId))): WaitingItem[] => {
   const title = mine.title || fallbackTitle(mine)
   const context = contextFor(mine)
   // Keyed on the steps this session's block marks [?]: a blocked one is written [!], which no
@@ -548,7 +570,7 @@ const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, strin
   )
 
   return mine.tasks
-    .map((task, index) => ({ task, hideKey: stable?.[questionSlot(questionScope(mine.project, 'claude', shortId(mine.sessionId)), index)] ?? keys[index] ?? '' }))
+    .map((task, index) => ({ task, hideKey: stable?.[questionSlot(scope, index)] ?? keys[index] ?? '' }))
     .filter(({ task }) => waitsOnYou(mine, task))
     .map(({ task, hideKey }) => ({
       key: `mine::${task.id}`,
@@ -801,9 +823,9 @@ export const buildView = (
   // pair is no second row. What is left is what the rows, the questions and the counts read.
   const folded = foldRuns(projects)
   const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
+  const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const recordsById = new Map((observed?.ledger.records ?? []).map(record => [record.id, record]))
-  const ownId = mine === null ? '' : shortId(mine.sessionId)
   const waiting: WaitingItem[] = []
   const inactiveHidden: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
@@ -830,8 +852,8 @@ export const buildView = (
   let ownRuns: RunGroup | null = null
   // A run's own question is no question for anyone: its saved records stay in the ledger but are not asked again.
   const keptTasks = new Set(folded.projects.flatMap(project => project.tasks))
-  const keptScopes = new Set(folded.projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [questionScope(project.name, task.auto.agent, task.auto.session)])))
-  const foldedScopes = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto === null || keptTasks.has(task) ? [] : [questionScope(project.name, task.auto.agent, task.auto.session)])).filter(scope => !keptScopes.has(scope)))
+  const keptScopes = new Set(folded.projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [scopeOf(project.name, task.auto.agent, task.auto.session, task.auto.resume)])))
+  const foldedScopes = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto === null || keptTasks.has(task) ? [] : [scopeOf(project.name, task.auto.agent, task.auto.session, task.auto.resume)])).filter(scope => !keptScopes.has(scope)))
   const repeats = new Map<string, number>()
   // How many tasks share each project and title, counted once rather than for every row (#371).
   const twins = new Map<string, number>()
@@ -846,7 +868,7 @@ export const buildView = (
     const name = project.name || s.uncategorized
     const isHere = isHereProject(name, here)
     for (const task of project.tasks) {
-      if (task.auto !== null && task.auto.session === ownId) {
+      if (mine !== null && task.auto !== null && matchesSpan(task.auto, { ...mine, agent: mine.agent || 'claude' })) {
         const own = folded.runs.get(task)
         if (own !== undefined) {
           ownRuns = own
@@ -866,8 +888,8 @@ export const buildView = (
       const when = clock.isFuture ? updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(updated, now, s)) : relativeTime(updated, now, s)
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
       const isManual = task.auto === null
-      const scope = questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)
-      const isFrozen = frozen.has(scope)
+      const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
+      const isFrozen = frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))
       const lastActive = hasTime(updated) ? updated : seen[taskFingerprint(project.name, task)]
       const days = task.due === null ? null : dueDays(task.due, now)
       const isDue = task.due !== null && days !== null && days <= 14
@@ -875,7 +897,8 @@ export const buildView = (
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now, updated, staleMs)
-      const isInactive = !isManual && (isComplete || stale || task.auto?.state === 'ended')
+      const isSilence = task.auto?.state === 'working' && hasTime(lastActive) && now - lastActive > WORKING_MS && (task.steps.length === 0 || task.steps.every(step => isLifecycleStep(step.text)))
+      const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
       const taskQuestions: WaitingItem[] = []
@@ -976,7 +999,7 @@ export const buildView = (
         if (!isInactive || (unresolved.length === 0 && !task.steps.some(step => step.status === 'waiting'))) continue
       }
 
-      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || stale ? 'ended' : task.auto.state
+      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || stale || isSilence ? 'ended' : task.auto.state
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
@@ -990,7 +1013,7 @@ export const buildView = (
         auto === 'working'
           ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
           : auto === 'ended'
-            ? { status: stale ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
+            ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
             : task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
               ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
               : stepPhrase(task, s, isPrompt)
@@ -1028,13 +1051,13 @@ export const buildView = (
         handoff: handoffOf(task),
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142).
-        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || auto === 'ended')
+        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || (auto === 'ended' && !isSilence))
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
-            : auto === 'ended' && task.auto !== null
+            : auto === 'ended' && !isSilence && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               : null,
         target: targetOf(task.auto),
@@ -1113,20 +1136,6 @@ export const buildView = (
     if (group === undefined) groups.push({ project: row.project, isHere: row.isHere, rows: [row], summary: '' })
     else group.rows.push(row)
   }
-  for (const group of groups) {
-    const count = (test: (row: TaskRow) => boolean, word: (n: number) => string): string => {
-      const n = group.rows.filter(test).length
-      return n === 0 ? '' : word(n)
-    }
-    group.summary = [
-      s.groupCount(group.rows.length),
-      count(row => row.tone === 'warn', s.groupWaiting),
-      count(row => row.tone === 'alert', s.groupStuck),
-      count(row => row.auto === 'working', s.groupWorking),
-    ]
-      .filter(part => part !== '')
-      .join(' · ')
-  }
 
   const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined).flatMap(turn => {
     const updated = inactiveScopes.get(questionScope(turn.project, turn.agent, turn.id ?? ''))
@@ -1137,7 +1146,7 @@ export const buildView = (
     const parts = splitNote(turn.text)
     return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
-  const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys).map(item => ({ ...item, questionId: item.hideKey }))
+  const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).map(item => ({ ...item, questionId: item.hideKey }))
   // Each record by its id, once: a board holds hundreds of questions and thousands of records.
   const recordOf = new Map<string, QuestionRecord>()
   const rankOf = new Map<string, number>()
@@ -1148,8 +1157,8 @@ export const buildView = (
   }
   const isResolved = (item: WaitingItem): boolean => recordOf.get(item.questionId ?? '')?.isUnresolved === false
   const firstSeen = (item: WaitingItem): number => recordOf.get(item.questionId ?? '')?.firstObserved ?? 0
-  const scopeOf = (item: WaitingItem): string => recordOf.get(item.questionId ?? '')?.scope ?? ''
-  const seenAs = (item: WaitingItem) => ({ at: firstSeen(item), rank: rankOf.get(item.questionId ?? '') ?? -1, scope: scopeOf(item) })
+  const recordScopeOf = (item: WaitingItem): string => recordOf.get(item.questionId ?? '')?.scope ?? ''
+  const seenAs = (item: WaitingItem) => ({ at: firstSeen(item), rank: rankOf.get(item.questionId ?? '') ?? -1, scope: recordScopeOf(item) })
   const aged = (item: WaitingItem): WaitingItem => {
     const record = recordOf.get(item.questionId ?? '')
     const age = questionAge(firstSeen(item), now)
@@ -1236,6 +1245,20 @@ export const buildView = (
   // question list, and the row keeps its own.
   const merged = mergeCopies([...all.filter(item => !isMarked(item)), ...retained, ...onRows].map(item => ({ item, ...seenAs(item), isStopped: item.questionId !== undefined && stoppedQuestions.has(item.questionId) })), closedCopies(observed?.ledger.records ?? [], marked))
   const asks: WaitingItem[] = merged.filter(item => item.ageStage === 'pending')
+  for (const group of groups) {
+    const count = (test: (row: TaskRow) => boolean, word: (n: number) => string): string => {
+      const n = group.rows.filter(test).length
+      return n === 0 ? '' : word(n)
+    }
+    group.summary = [
+      s.groupCount(group.rows.length),
+      count(row => row.tone === 'warn', s.groupWaiting),
+      count(row => row.tone === 'alert', s.groupStuck),
+      count(row => row.auto === 'working' && rowNeedsNow(row, asks) === null, s.groupWorking),
+    ]
+      .filter(part => part !== '')
+      .join(' · ')
+  }
   const reminder: WaitingItem[] = merged.filter(item => item.ageStage === 'reminder')
   const older: WaitingItem[] = merged.filter(item => item.ageStage === 'older')
   const stoppedAsking = older.filter(item => item.questionId !== undefined && stoppedQuestions.has(item.questionId)).length

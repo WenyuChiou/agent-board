@@ -4,7 +4,6 @@ import { blockId } from '../hooks/inbox'
 import { emptyMirror } from '../hooks/mirror'
 import { upsertAutoBlock } from '../hooks/blocks'
 import { boardText, chatText } from '../hooks/board'
-import { dashboardHtml } from '../hooks/dashboard'
 import { parseProgress } from '../hooks/parse'
 import { emptyQuestions, observeQuestions, questionsJson } from '../hooks/questions'
 import { serveModel } from '../hooks/serve'
@@ -254,7 +253,6 @@ describe('L3 across agents and sessions', () => {
       terminal: boardText(view, [], EN),
       chat: chatText(view, [], [], EN, '/home/me'),
       page: [...page.asks.map(ask => ask.text), ...page.groups.flatMap(group => group.rows.flatMap(row => [row.title, row.status, row.next ?? '']))].join(' '),
-      html: dashboardHtml(view, EN, FILE, ''),
     }
     for (const visible of [surfaces.terminal, surfaces.chat]) {
       expect(visible).toContain('0 waiting')
@@ -262,9 +260,11 @@ describe('L3 across agents and sessions', () => {
     }
     expect(surfaces.terminal).toContain('✓ 1 Retry limit')
     expect(surfaces.terminal).not.toContain('● 1 Retry limit')
-    // progress.html counts what needs you in its Needs you flag, as the page does.
-    expect(surfaces.html).toContain('<b id="needs-n">0</b>')
-    expect(surfaces.html).toContain('Nothing needs you right now')
+    // Answering the question leaves the agent's remaining work on the page.
+    expect(page.counts.waiting).toBe(0)
+    expect(page.counts.active).toBe(1)
+    expect(page.groups).toHaveLength(1)
+    expect(page.groups[0]).toMatchObject({ project: 'api-gateway', rows: [{ title: 'Set the retry limit', done: 1, isAsking: false, steps: [{ text: 'Retry limit', status: 'done' }, { text: 'Apply the retry limit', status: 'todo', isCurrent: true }] }] })
     for (const visible of Object.values(surfaces)) {
       noMachineIds(visible, world)
       expect(visible).not.toContain('1 waiting')
@@ -302,7 +302,7 @@ describe('L3 across agents and sessions', () => {
 })
 
 describe('L3b messages between sessions and agents', () => {
-  test('messages: a Claude pane shows the Codex fallback while native reply remains tracked by #58', async ($, on) => {
+  test('messages: a Claude pane shows the Codex fallback while native reply remains tracked by #318', async ($, on) => {
     const source = block({
       state: 'waiting',
       title: 'Review gateway message',
@@ -330,7 +330,7 @@ describe('L3b messages between sessions and agents', () => {
       noSilentPress({ surface: 'pane', card: 'Review gateway message', button: 'Copy resume command', before, after })
       expect(after).toContain('node check-gateway.mjs')
       await noPaneMachineIds(after, world, { allow: [task.auto!.resume!] })
-      await knownFailure(58, async () => {
+      await knownFailure(318, async () => {
         expect(await ui.find({ type: 'Input', key: `${key}::reply` })).toBeDefined()
         await ui.input({ key: `${key}::reply`, text: 'The gateway is ready.' })
       })

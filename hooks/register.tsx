@@ -1,8 +1,11 @@
 import { BOARD_SCRIPT } from './board-script'
 import { connectRecordPath, hasOwnConnectData, recoveryUnreadableCode } from './connect-pure'
+import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiver, parseAddress, RECEIVER_MS } from './receiver'
+import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
-import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE } from './ledger-move'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
+import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } from 'claude-code'
@@ -46,6 +49,9 @@ import {
   parseJournal,
   previousMonth,
   progressReport,
+  nextPendingArchive,
+  parsePendingArchive,
+  pendingArchivePath,
   unwrittenEntries,
 } from './journal'
 import type { JournalEntry } from './journal'
@@ -78,7 +84,7 @@ import type { ListedTask } from './mirror'
 import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
 import { othersNote } from './others'
 import type { ProgressProject } from '../types'
-import { dashboardHtml } from './dashboard'
+import { boardRun } from './board-commands'
 import { peekInbox, redact, turnsFor } from './board'
 import type { PendingTurn, TurnCache } from './board'
 import { paletteFor } from './palette'
@@ -93,7 +99,7 @@ import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff
 import type { Digest } from './digest'
 import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
-import { liveBoardArgv, liveBoardPage, liveBoardScript } from './live-page'
+import { liveBoardArgv, liveBoardPage, liveBoardScript, pageDoneHash, pageDonePath, pageStatePath, readPageDone, readPageState } from './live-page'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -133,7 +139,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -169,6 +175,7 @@ const pressResults = atom({ plugin: 'agent-board', key: 'pressResults' } as cons
 const answer = atom({ plugin: 'agent-board', key: 'answer' } as const, null as ProgressAnswer | null)
 const resolveResult = atom({ plugin: 'agent-board', key: 'resolveResult' } as const, null as ResolveResult | null)
 const isNotifyOn = atom({ plugin: 'agent-board', key: 'isNotifyOn' } as const, true)
+const receiverState = atom({ plugin: 'agent-board', key: 'receiver' } as const, emptyReceiver())
 // The person's /config theme, which picks the dark or light 和色 set.
 const theme = atom({ plugin: 'agent-board', key: 'theme' } as const, 'dark')
 // Steps finished today, from the journal.
@@ -197,6 +204,11 @@ const wordsOf = async ($: EngineInterface): Promise<Strings> => STRINGS[langOf(a
 // Module state: reset by a reload, which only happens between turns.
 let isPolling = false
 let isTurnRunning = false
+let receiver: Receiver | null = null
+let receiverTimer: { cancel: () => void } | null = null
+// A hub that does not answer within this holds no tick up: it is a poll that failed.
+const HUB_MS = 5000
+const RECEIVER_END_MS = 500
 let writes: Promise<unknown> = Promise.resolve()
 let questionTrims: Promise<void> = Promise.resolve()
 let settingSaves: Promise<unknown> = Promise.resolve()
@@ -212,7 +224,6 @@ let isCheckingPr = false
 // gh is tried until it fails to start (not installed) or says it is signed out.
 let hasGh = true
 let countedDay = ''
-let lastDashboard = ''
 // Set once the questions and due dates already on file at the start are counted as told.
 let isReminderSeeded = false
 let isReminding = false
@@ -251,7 +262,6 @@ let pendingQuestionRetry: Promise<PendingTurn[]> | null = null
 let hasRestoredInboxQuestions = false
 const journalNoticesShown = new Set<string>()
 let journalNoticeKey = ''
-let dashboardAt = 0
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
 // when moved; otherwise ~/.claude/progress.md. USERPROFILE comes before HOME because that is
@@ -389,7 +399,7 @@ const pollAnswered = async ($: EngineInterface, path: string): Promise<void> => 
   // Before progress.md is first read the snapshot is empty; that first read draws both.
   if ((await read($, snapshot)).path !== path) return
   await refreshStatus($)
-  await writeDashboard($, true)
+
 }
 
 // Marks whose question has left the file go, so the same words asked again later show. Run once
@@ -415,9 +425,9 @@ let answersAdded = 0
 const rememberAnswered = (turns: readonly AgentTurn[]): void => {
   for (const turn of turns) {
     if ((turn.event !== 'prompt' && (turn.event !== 'turn' || turn.answer.trim() === '')) || turn.at === undefined || !Number.isFinite(turn.at)) continue
-    const key = JSON.stringify([turn.agent, turn.id])
+    const key = JSON.stringify([turn.agent, turn.id, turn.session])
     if ((answeredPending.get(key)?.at ?? -Infinity) >= turn.at) continue
-    answeredPending.set(key, { agent: turn.agent, id: turn.id, event: turn.event, at: turn.at })
+    answeredPending.set(key, { agent: turn.agent, id: turn.id, session: turn.session, event: turn.event, at: turn.at })
     answeredKeptSince.delete(key)
     answersAdded += 1
   }
@@ -831,7 +841,7 @@ const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects:
   rememberAnswered(evidence)
   if (evidence.length > 0 && questionsRunning !== null) return
   try {
-    const matches = (record: QuestionRecord, turn: QuestionAnswerEvidence): boolean => record.source?.kind === 'inbox' && record.source.agent === turn.agent && record.source.session === turn.id
+    const matches = isAnsweredBy
     const batch = [...answeredPending.entries()]
     // Counted with the batch, so an answer remembered while the key is read is not taken as carried.
     const added = answersAdded
@@ -917,7 +927,7 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
   if (list === null || list.includes(item.hideKey) !== isHidden) return { isDone: false, reason }
   await update($, hiddenAsks, () => list)
   await refreshStatus($)
-  await writeDashboard($, true)
+
   return { isDone: true }
 }
 
@@ -948,7 +958,7 @@ const pollSeen = async (
     // A changed progress.md redraws both after this; otherwise only the record moved.
     if (isChanged || (await read($, snapshot)).path !== path) return
     await refreshStatus($)
-    await writeDashboard($, true)
+
   }
   let at = 0
   let record: Record<string, number> | null = null
@@ -1010,7 +1020,7 @@ const pollSeen = async (
 // in total, then gives its own pass HUNG_MS. Giving up releases the caller and the write queue,
 // while the run keeps the gate until it settles. A run held for HUNG_MS shows the question-list
 // error; its finally clears it after success. Pending inbox questions stay saved until the
-// ledger records their source and words, while the status line and progress.html still draw.
+// ledger records their source and words, while the status line and pane still draw.
 const HUNG_MS = 15 * 1000
 let pollRun = 0
 let pollStartedAt = 0
@@ -1082,7 +1092,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
           if (JSON.stringify(cutBlocks) !== JSON.stringify(previous.cutBlocks ?? []) || JSON.stringify(cutSpans) !== JSON.stringify(previous.cutSpans ?? [])) {
             await update($, snapshot, snap => ({ ...snap, cutBlocks, cutSpans }))
             await refreshStatus($)
-            await writeDashboard($)
+
           }
         }
       }
@@ -1137,7 +1147,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       await noteDone($, projects, progressTail(source) === null)
       isPrunePending = true
       await refreshStatus($)
-      await writeDashboard($)
+
       await remind($)
     } catch (error) {
       if (!isCurrent()) return
@@ -1150,17 +1160,22 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
   }
 }
 
-const dashboardPath = (path: string): string => `${path.replace(/\.md$/i, '')}.html`
 
-const pad2 = (n: number): string => String(n).padStart(2, '0')
 
 // Pending turns are optional: an unavailable inbox must not stop the board or its reminders.
 let pendingCache: TurnCache = null
+let pageStateFailure: string | null = null
+let pageBacklogDueAt: number | null = null
+let publishedPageDone: string | null = null
+let publishedPageState: string | null = null
+const verifiedPageDone = new Set<string>()
 const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
   try {
     const path = await progressPath($)
     const dir = inboxPath(path)
     const done = await readInboxRecord($, 'inboxDone').catch(() => ({} as Record<string, string>))
+    const now = await $.clock.now()
+    if (publishedPageDone !== JSON.stringify(done) || pageStateFailure !== null || (pageBacklogDueAt !== null && now >= pageBacklogDueAt)) await syncPageState($, done)
     const entries = (await $.fs.list(dir))
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
@@ -1194,6 +1209,90 @@ let measuredStore = 0
 // What the board cleared in the last 7 days, read at the last sweep and after each prune (refreshPruned).
 let measuredPruned = { agent: 0, mirror: 0, turns: 0 }
 
+// A stale counts snapshot cannot undo an acknowledgement: each is verified in its own immutable
+// file before the snapshot is published. The old snapshot's acknowledgements migrate the same way.
+const syncPageState = async ($: EngineInterface, done?: Record<string, string>): Promise<void> => {
+  try {
+    const at = await $.clock.now()
+    if (pageStateFailure === null && pageBacklogDueAt !== null && at < pageBacklogDueAt) return
+    const path = await progressPath($)
+    const processed = done ?? await readInboxRecord($, 'inboxDone')
+    const pruned = addPruned(await $.store.get('prunedCounts'), { agent: 0, mirror: 0 }, at)
+    const publication = JSON.stringify([path, keepInboxDone(processed, at), measuredStore, pruned])
+    if (pageStateFailure === null && publishedPageState === publication) return
+    const previous = readPageState(await readText($, pageStatePath(path)))
+    const kept = keepInboxDone({ ...previous.inboxDone, ...processed }, at)
+    // The snapshot keeps the whole map while bounded batches migrate its newest receipts.
+    // Verified immutable files need no further read in this session.
+    const receipts = Object.entries(kept)
+      .filter(([name]) => isInboxFile(name))
+      .sort((a, b) => Number(b[1].split(':').at(-1)) - Number(a[1].split(':').at(-1)))
+      .map(([name, stamp]) => {
+        const text = JSON.stringify({ version: 1, name, stamp })
+        return { text, file: pageDonePath(path, sha256(text)) }
+      })
+      .filter(({ file }) => !verifiedPageDone.has(file))
+    const dir = path.replace(/[\\/][^\\/]*$/, '')
+    const existing = receipts.length === 0 ? new Set<string>() : new Set((await $.fs.list(dir)).filter(entry => entry.kind === 'file').map(entry => entry.name))
+    for (const { text, file } of receipts.slice(0, 50)) {
+      if (!existing.has(file.replace(/^.*[\\/]/, '')) || await readText($, file) !== text) {
+        const temporary = `${file}.tmp-${await $.session.id()}-${questionWrite++}`
+        const isWin = await isWindows($, path)
+        try {
+          await $.fs.write(temporary, text)
+          if (await $.fs.read(temporary) !== text || !(await replaceFile($, temporary, file, isWin))) throw new Error('PAGE_STATE_NOT_VERIFIED')
+          if (await $.fs.read(file).catch(() => null) !== text) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
+        } finally {
+          if (await $.fs.exists(temporary)) await removeFiles($, [temporary], isWin)
+        }
+      }
+      verifiedPageDone.add(file)
+    }
+    let before = ''
+    let hasLanded = false
+    await rewrite($, pageStatePath(path), text => {
+      before = text
+      const after = JSON.stringify({
+        version: 1,
+        inboxDone: keepInboxDone({ ...readPageState(before).inboxDone, ...kept }, at),
+        store: measuredStore,
+        pruned,
+      })
+      hasLanded = after === before
+      return after
+    }, (check, after) => {
+      // A torn or foreign read-back is no successor: readPageState would read it as an empty snapshot.
+      const invalid = { inboxDone: {}, store: 0, pruned: {} }
+      const parsed = readPageState(check, invalid)
+      const saved = parsed.inboxDone
+      const times = Object.values(saved).map(stamp => Number(stamp.split(':')[1] ?? 0))
+      const oldest = times.length === 2000 ? Math.min(...times) : -Infinity
+      // A peer may replace stamps or prune older names at the cap; its own counts
+      // still describe a valid successor when every acknowledgement is accounted for.
+      hasLanded = check === after || (check !== before && parsed !== invalid && Object.entries(kept).every(([name, stamp]) => {
+        const time = Number(stamp.split(':')[1] ?? 0)
+        return saved[name] !== undefined || at - time >= 3 * 24 * 60 * 60 * 1000 || oldest >= time
+      }))
+      return hasLanded
+    })
+    if (!hasLanded) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
+    pageStateFailure = null
+    // A backlog migrates one batch per poll because session start calls this many times.
+    if (receipts.length > 50) {
+      pageBacklogDueAt = at + POLL_MS
+      publishedPageState = null
+      return
+    }
+    pageBacklogDueAt = null
+    publishedPageDone = JSON.stringify(processed)
+    publishedPageState = publication
+  } catch (error) {
+    // Publication is retried at the next poll. Its warning must not replace the authoritative inbox.
+    const code = (error as { code?: unknown } | null)?.code
+    pageStateFailure = typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : inboxFailure(error)
+  }
+}
+
 // The moment a view is built for: the pane's, which the 30 s tick and each change of the file move.
 const viewTime = async ($: EngineInterface): Promise<number> => (await read($, now)) || (await $.clock.now())
 
@@ -1203,7 +1302,7 @@ const viewTime = async ($: EngineInterface): Promise<number> => (await read($, n
 const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; tornTail?: { tasks: number } | null; cutBlocks?: readonly CutBlock[] }, s: Strings, seen: Readonly<Record<string, number>>, at: number): { warning?: string; isLarge?: true; isCleanable?: true; details?: string; pruned?: string; health?: string[] } => {
   const sizes = { progress: snap.size, store: measuredStore }
   const large = sizeWarnings(sizes, s)
-  const lines = [...(snap.tornTail ? [s.progressIncomplete(snap.tornTail.tasks)] : []), ...large]
+  const lines = [...(snap.tornTail ? [s.progressIncomplete(snap.tornTail.tasks)] : []), ...(pageStateFailure === null ? [] : [s.pageStateFailed(pageStateFailure)]), ...large]
   const finished = countManualDone(snap.projects, at, (_key, project, task) => handKeptSeenAt(seen, project, task, at))
   const details = storageDetails(sizes, finished, s)
   const pruned = prunedNote(measuredPruned, s)
@@ -1211,63 +1310,9 @@ const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; t
   return { ...(lines.length === 0 ? {} : { warning: lines.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
-// progress.html beside progress.md: the file's view and pending turns, at most once a minute
-// and only when it changed.
-const writeDashboard = async ($: EngineInterface, force = false): Promise<{ path: string; problem?: string }> => {
-  const snap = await read($, snapshot)
-  const at = await $.clock.now()
-  const path = dashboardPath(snap.path || (await progressPath($)))
-  if (!force && at - dashboardAt < 60 * 1000) return { path }
-  const s = await wordsOf($)
-  const currentAt = await viewTime($)
-  const seen = await read($, firstSeen)
-  const view = {
-    ...views.view(snap.projects, [], null, currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), seen, await read($, questionLedger), await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), cutOffScopes(snap.projects, snap.cutSpans ?? [])),
-    ...warningOf(snap, s, seen, currentAt),
-  }
-  await breathe($)
-  const pending = await pendingTurns($)
-  const date = new Date(at)
-  const html = dashboardHtml(view, s, snap.path, s.dashStamp(`${localDay(at)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`), pending, at)
-  if (!force && html === lastDashboard) {
-    dashboardAt = at
-    return { path }
-  }
-  try {
-    await $.fs.write(path, html)
-    dashboardAt = at
-    lastDashboard = html
-    return { path }
-  } catch (error) {
-    const failure = error as { code?: string; message?: string } | null
-    const code = failure?.code ?? /\b(EACCES|EPERM|EROFS|EBUSY|EAGAIN|ENOSPC|EISDIR|ENOENT|ENOTDIR|EIO|EFBIG|EMFILE|ENFILE|ENAMETOOLONG)\b/.exec(failure?.message ?? String(error))?.[1]
-    return { path, problem: s.boardStorageFailed(s.fileNamed(path.split(/[\\/]/).pop() ?? ''), plainReason(s, code ?? '')) }
-  }
-}
-
 let isInteractiveSession = true
 
-// Opens progress.html in the default browser: a window of its own on the desktop.
-const openDashboard = async ($: EngineInterface, isInteractive: boolean): Promise<string> => {
-  const s = await wordsOf($)
-  const { path, problem } = await writeDashboard($, true)
-  if (problem !== undefined) return problem
-  if (!isInteractive) {
-    const file = (await read($, snapshot)).path || (await progressPath($))
-    return s.windowSaved(path.split(/[\\/]/).pop(), file.split(/[\\/]/).pop())
-  }
-  const argv = (await isWindows($, path))
-    ? ['cmd', '/c', 'start', '', path]
-    : (await $.env.get('HOME'))?.startsWith('/Users/')
-      ? ['open', path]
-      : ['xdg-open', path]
-  const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
-
-  const file = (await read($, snapshot)).path || (await progressPath($))
-  return ran !== null && ran.exitCode === 0 ? s.windowOpened() : s.windowFailed(path.split(/[\\/]/).pop(), file.split(/[\\/]/).pop())
-}
-
-const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Promise<{ page: { url: string; isKept: boolean } | null; needsInstall: boolean }> => {
+const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean } | null; needsInstall: boolean; reason?: string }> => {
   // Use the connector's installed file so sessions and agents share the same script
   // and the CLI's existing running-page check.
   const script = liveBoardScript(path)
@@ -1276,31 +1321,39 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings): Prom
   try {
     // Worst case: 2 s for the 0.19.0 address check + 8.5 s of checks + 10 s child
     // wait + 8.5 s of checks = 29 s, plus Node start. Going over is safe: the
-    // read-only page opens, and a late child is reused next time.
-    const ran = await $.process.run(liveBoardArgv(script, s.lang), { timeoutMs: 35000 })
-    if (ran.exitCode !== 0 || ran.isStdoutTruncated) return { page: null, needsInstall: false }
-    return { page: liveBoardPage(ran.stdout, s), needsInstall: false }
-  } catch {
-    return { page: null, needsInstall: false }
+    // command reports the failure, and a late child is reused next time.
+    const ran = await $.process.run(liveBoardArgv(script, s.lang, isInteractive), { timeoutMs: 35000 })
+    if (ran.isStdoutTruncated) return { page: null, needsInstall: false, reason: s.livePageTruncated }
+    if (ran.exitCode !== 0) {
+      const output = `${ran.stdout}\n${ran.stderr}`
+      const code = /\b(EACCES|EPERM|EROFS|ENOSPC|EBUSY|EAGAIN)\b/.exec(output)?.[1]
+      const reason = output.includes(s.serveRuntimePrivate) ? s.serveRuntimePrivate : code ? plainReason(s, code) : s.livePageExit(ran.exitCode)
+      return { page: null, needsInstall: false, reason }
+    }
+    const page = liveBoardPage(ran.stdout, s)
+    return { page, needsInstall: false, ...(page === null ? { reason: s.livePageNoAddress } : {}) }
+  } catch (error) {
+    const text = messageOf(error)
+    const code = /\b(EACCES|EPERM|EROFS|ENOSPC|EBUSY|EAGAIN)\b/.exec(text)?.[1]
+    return { page: null, needsInstall: false, reason: /ETIMEDOUT|timeout|timed out/i.test(text) ? s.livePageTimeout : code ? plainReason(s, code) : s.livePageRunFailed }
   }
 }
 
-const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, headline: string, isInteractive: boolean): Promise<{ text: string }> => {
+const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, headline: string, isInteractive = false): Promise<{ text: string }> => {
   // Starting the page can take half a minute; the footer says it is on its way meanwhile.
   startingPages += 1
   try {
     await refreshStatus($)
     const connecting = backgroundConnect
-    let live = await openLiveBoard($, progress, s)
+    let live = await openLiveBoard($, progress, s, isInteractive)
     if (live.needsInstall && connecting !== null) {
       // A first open can race the existing upgrade; never run the old file while waiting.
       await isDoneWithin($, connecting, 5000)
-      live = await openLiveBoard($, progress, s)
+      live = await openLiveBoard($, progress, s, isInteractive)
     }
-    const { page, needsInstall } = live
+    const { page, needsInstall, reason } = live
     if (page !== null) return { text: `${headline}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
-    // openDashboard already words the result, with the file names when the browser fails.
-    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : ''}${await openDashboard($, isInteractive)}` }
+    return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : `${s.serveFailed(reason ?? s.serveNotStarted)}\n`}${s.livePageCommand(boardRun(liveBoardScript(progress), ['--serve']))}` }
   } finally {
     startingPages -= 1
     // A footer that cannot be redrawn must not take away the link the person waited for.
@@ -1500,9 +1553,9 @@ const writeMine = async ($: EngineInterface): Promise<void> => {
         await poll($)
         return AGAIN
       }
-      return mirror.tasks.length === 0 ? removeAutoBlock(before, mirror.sessionId) : upsertAutoBlock(before, mirror, s)
+      return mirror.tasks.length === 0 ? removeAutoBlock(before, mirror) : upsertAutoBlock(before, mirror, s)
     },
-    (check, after) => extractAutoBlock(check, mirror.sessionId) === extractAutoBlock(after, mirror.sessionId),
+    (check, after) => extractAutoBlock(check, mirror) === extractAutoBlock(after, mirror),
   )
   await poll($)
 }
@@ -2068,7 +2121,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
     rememberAnswered(answers)
     const path = await progressPath($)
     const isKept = (check: string): boolean =>
-      extractAutoBlock(check, written.sessionId) === extractAutoBlock(upsertAutoBlock(check, written, s), written.sessionId)
+      extractAutoBlock(check, written) === extractAutoBlock(upsertAutoBlock(check, written, s), written)
     const wrote = await rewrite($, path, async before => {
       const current = await $.store.get(owner) as ProgressMirror | undefined
       if (JSON.stringify(current ?? null) !== JSON.stringify(written) || JSON.stringify((await agentProjection($, last.id, current)).mirror ?? null) !== JSON.stringify(written)) {
@@ -2117,15 +2170,15 @@ const takeAgentPrompt = async ($: EngineInterface, prompt: AgentTurn): Promise<v
       if (matches.length !== 1 || matches[0]?.auto?.agent !== prompt.agent || matches[0]?.auto?.resume !== prompt.session) return null
       const spans = scanBlocks(before.split(/\r?\n/)).filter(span => span.session === prompt.id)
       if (spans.length !== 1 || !spans[0]?.isClosed) return null
-      const block = extractAutoBlock(before, prompt.id)
+      const block = extractAutoBlock(before, prompt.id, prompt.agent, prompt.session)
       if (block === null) return null
       if (original !== undefined && block !== original) return null
       original = block
-      written = extractAutoBlock(upsertAutoBlock(before, next, s), prompt.id)
+      written = extractAutoBlock(upsertAutoBlock(before, next, s), prompt.id, prompt.agent, prompt.session)
       return upsertAutoBlock(before, next, s)
-    }, check => extractAutoBlock(check, prompt.id) === written)
+    }, check => extractAutoBlock(check, prompt.id, prompt.agent, prompt.session) === written)
     if (written === null) return
-    if (extractAutoBlock(await readText($, path), prompt.id) !== written) throw new Error(NOT_KEPT)
+    if (extractAutoBlock(await readText($, path), prompt.id, prompt.agent, prompt.session) !== written) throw new Error(NOT_KEPT)
     // No owner-key write: a later owner may advance while this await is pending.
     // Every receipt has its own key, so simultaneous prompts do not erase barriers.
     const key = `agentPrompt:${prompt.id}:${next.promptOrder}:${updated}`
@@ -2496,11 +2549,7 @@ const keepInboxQuestions = async ($: EngineInterface, captured: readonly Pending
         // A turn the pass never records (not a question, or no session) goes as before. Only this
         // turn's own evidence counts: an earlier ask of the same words by the same session, answered
         // long ago, is not a record of this one.
-        const scope = !turn.isQuestion || turn.id === undefined ? null : questionScope(turn.project, turn.agent, turn.id)
-        const json = JSON.stringify(turn)
-        const revisions = turn.sourceRevisions ?? []
-        const isRecorded = scope === null || ledger.records.some(record => record.scope === scope && record.words === questionWords(turn.text) && (record.producerSources?.includes(json) || revisions.length > 0 && revisions.every(revision => record.producerRevisions?.includes(revision))))
-        if (isRecorded) await discard(key)
+        if (isTurnRecorded(ledger, turn)) await discard(key)
         else {
           hasUnrecorded = true
           // Held like a cut-off block's turn: tried again once progress.md changes, not on every
@@ -2863,7 +2912,7 @@ const drainInbox = async ($: EngineInterface): Promise<void> => {
         if (unkept.length > 0) await holdBack(unkept, new Error('PENDING_QUESTION_NOT_KEPT'))
         // A question and its answer can arrive in one look: the answer was remembered before
         // the question was kept, so it settles now instead of at the next poll.
-        const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id])))
+        const asked = new Set(questions.map(one => JSON.stringify([one.agent, one.id, one.session])))
         // Its failure is made good at the next poll, so it sends back no run.
         if ([...answeredPending.keys()].some(key => asked.has(key))) await progressPath($).then(path => pollAnsweredQuestions($, path, undefined)).catch(() => undefined)
       } catch (error) {
@@ -2918,6 +2967,7 @@ const writeInboxRecord = async ($: EngineInterface, key: string, value: Record<s
   await $.store.set(key, value)
   const check = await readInboxRecord($, key)
   if (Object.keys(check).length !== Object.keys(value).length || Object.entries(value).some(([name, stamp]) => check[name] !== stamp)) throw new Error('INBOX_STORE_NOT_VERIFIED')
+  if (key === 'inboxDone') await syncPageState($, check)
 }
 
 // A compaction's summary made into one line for whoever takes over, kept in the block.
@@ -2961,9 +3011,11 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   let pendingEntries: string[] = []
   let pendingKeys: string[] = []
   let pendingMoved: Array<{ session: string, text: string }> = []
+  let currentBoardHash = ''
   // The blocks that ask which a try has archived, by session, with the lines they had then.
   const moved = new Map<string, string>()
   const wrote = await rewrite($, path, async (text, isLast) => {
+    currentBoardHash = sha256(text)
     // A block that still asks goes only when the explicit archive's own check passes for it (#174).
     // The ledger is settled once for all of them. Another agent's write meanwhile (a new `[?]`
     // step) must not be written over with a result made from the older text: start again from it.
@@ -2999,7 +3051,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   }, undefined, async (path, text) => {
     // Made again after another session's write, the same blocks are not archived twice.
     const fresh = unwrittenEntries(pendingEntries, archived)
-    await appendArchive($, archivePath(path, at), fresh, s)
+    await appendArchive($, path, archivePath(path, at), fresh, s, archived, currentBoardHash)
     for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     for (const entry of pendingMoved) moved.set(entry.session, entry.text)
     await $.fs.write(path, text)
@@ -3014,6 +3066,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     await poll($)
     return 0
   }
+  await removePendingArchiveNote($, path, s)
   if (keys.size > 0) {
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([key]) => !keys.has(key))))
     await saveDoneSeen($, at, kept => Object.fromEntries(Object.entries(kept).filter(([key]) => !keys.has(key))))
@@ -3027,6 +3080,30 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   return [...removed.values()].reduce((sum, one) => sum + one, 0)
 }
 
+const removePendingArchiveNote = async ($: EngineInterface, path: string, s: Strings): Promise<void> => {
+  const pendingFile = pendingArchivePath(path)
+  if (!(await $.fs.exists(pendingFile))) return
+  const parentDir = pendingFile.replace(/[\\/][^\\/]*$/, '')
+  const name = baseName(pendingFile)
+  const list = await $.fs.list(parentDir).catch(() => [])
+  const found = list.find(entry => entry.name === name)
+  if (found && found.kind !== 'file') return
+  const isWin = await isWindows($, path)
+  if (await removeFiles($, [pendingFile], isWin)) {
+    await update($, answer, current =>
+      current !== null && Object.values(STRINGS).some(words => current.text === words.pendingNoteRemoveFailed(name))
+        ? null
+        : current,
+    ).catch(() => undefined)
+    return
+  }
+  await update($, answer, current =>
+    current?.isAsking || current?.copied !== undefined
+      ? current
+      : { question: s.archiveTitle, text: s.pendingNoteRemoveFailed(name), isAsking: false },
+  ).catch(() => undefined)
+}
+
 // What the explicit archive checks before it takes a block that asks (#174): the ledger settled
 // against this text, every question of the block kept in it, and a durable 'archived' copy of each
 // one still open. False leaves the block where it is; a copy that cannot be written throws.
@@ -3035,20 +3112,86 @@ const keepAskedQuestions = async ($: EngineInterface, path: string, projects: re
   if (!isSettled && !(await pollQuestions($, path, projects, true))) return false
   const ledger = await read($, questionLedger)
   if (!archiveQuestionsKept(projects, ref, ledger)) return false
+  const task = refTasks(projects, ref)[0]
   for (const record of ledger.records) {
-    if (record.isUnresolved && isAskedBy(record, ref)) await keepQuestionCapture($, path, record, 'archived')
+    if (record.isUnresolved && isAskedBy(record, ref, task)) await keepQuestionCapture($, path, record, 'archived')
   }
 
   return true
 }
 
 // Entries added at the end of a month's archive file, after what it holds.
-const appendArchive = async ($: EngineInterface, month: string, entries: readonly string[], s: Strings): Promise<void> => {
-  if (entries.length === 0) return
-  const archive = await partFor($, month)
+const appendArchive = async (
+  $: EngineInterface,
+  progressFile: string,
+  month: string,
+  entries: readonly string[],
+  s: Strings,
+  written: ReadonlyMap<string, number> = new Map(),
+  currentBoardHash?: string,
+): Promise<void> => {
+  if (entries.length === 0 && written.size === 0) return
+  const pendingFile = pendingArchivePath(progressFile)
+  const parentDir = pendingFile.replace(/[\\/][^\\/]*$/, '')
+  const pendingBase = baseName(pendingFile)
+  let pendingText = ''
+  try {
+    const list = await $.fs.list(parentDir).catch(() => [])
+    const found = list.find(entry => entry.name === pendingBase)
+    if (found?.kind === 'file') {
+      pendingText = await readText($, pendingFile)
+    }
+  } catch {}
+  const pending = parsePendingArchive(pendingText)
+  const sizes = await readMonthParts(month, async path => (await $.fs.stat(path).catch(() => undefined))?.size ?? null)
+  const archive = currentPart(month, path => sizes.get(path) ?? null)
+  const earlierPaths = monthParts(month, path => (sizes.get(path) ?? null) !== null).filter(one => one !== archive)
   const past = await readText($, archive)
-  const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
-  await $.fs.write(archive, head + entries.join('\n\n') + '\n')
+  const earlier = earlierPaths.length === 0 ? [] : await Promise.all(earlierPaths.map(one => readText($, one).catch(() => '')))
+  const planned = nextPendingArchive([past, ...earlier], entries, written, pending, currentBoardHash)
+  if (planned.missing.length === 0 && written.size === 0) return
+  const list = await $.fs.list(parentDir).catch(() => [])
+  const existing = list.find(entry => entry.name === pendingBase)
+  if (existing && existing.kind !== 'file') {
+    throw new Error('PENDING_NOTE_NOT_REGULAR_FILE')
+  }
+  const payload = JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n'
+  const stagedRun = await $.process.run(['node', '-e', PENDING_STAGE, '--', pendingFile], { timeoutMs: 10000 }).catch(() => null)
+  if (stagedRun === null || stagedRun.exitCode === 127) {
+    // Computers without Node still need a complete recovery note before the archive changes.
+    const isWin = await isWindows($, progressFile)
+    const suffix = Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
+    const temporary = `${pendingFile}.${suffix}.tmp`
+    try {
+      await $.fs.write(temporary, payload)
+      if (!(await replaceFile($, temporary, pendingFile, isWin))) throw new Error('PENDING_NOTE_WRITE_FAILED')
+    } catch {
+      await removeFiles($, [temporary], isWin).catch(() => false)
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+  } else {
+    let stage: PendingStage | null = null
+    if (stagedRun.exitCode === 0 && !stagedRun.isStdoutTruncated) {
+      try {
+        stage = pendingStage(JSON.parse(stagedRun.stdout))
+      } catch {}
+    }
+    if (stage === null) throw new Error('PENDING_NOTE_WRITE_FAILED')
+    try {
+      await $.fs.write(stage.file, payload)
+    } catch {
+      await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, ''], { timeoutMs: 10000 }).catch(() => null)
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+    const committed = await $.process.run(['node', '-e', PENDING_COMMIT, '--', pendingFile, stage.directory, stage.token, sha256(payload)], { timeoutMs: 10000 }).catch(() => null)
+    if (committed === null || committed.exitCode !== 0) {
+      throw new Error('PENDING_NOTE_WRITE_FAILED')
+    }
+  }
+  if (planned.missing.length > 0) {
+    const head = past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')
+    await $.fs.write(archive, head + planned.missing.join('\n\n') + '\n')
+  }
 }
 
 // One task to the archive at the person's word, written the way archiveOld writes. False when
@@ -3057,12 +3200,14 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const path = await progressPath($)
   const at = await $.clock.now()
   const s = await wordsOf($)
-  const archived = new Set<string>()
+  const archived = new Map<string, number>()
   const observed = await read($, firstSeen)
   let pendingEntries: string[] = []
+  let currentBoardHash = ''
   const wrote = await rewrite($, path, async text => {
+    currentBoardHash = sha256(text)
     const projects = parseProgress(text)
-    const hasQuestions = projects.some(project => project.name === ref.project && project.tasks.some(task => (ref.session === null ? task.title === ref.title : task.auto?.session === ref.session) && task.steps.some(step => step.status === 'waiting')))
+    const hasQuestions = refTasks(projects, ref).some(task => task.steps.some(step => step.status === 'waiting'))
     if (hasQuestions) {
       if (!(await keepAskedQuestions($, path, projects, ref))) throw new Error('QUESTION_RETENTION_FAILED')
       // Another agent's write while the question check ran is not written over with the older text.
@@ -3073,11 +3218,13 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
     pendingEntries = taken.entries
     return taken.text
   }, undefined, async (path, text) => {
-    await appendArchive($, archivePath(path, at), pendingEntries.filter(entry => !archived.has(entry)), s)
-    for (const entry of pendingEntries) archived.add(entry)
+    const fresh = unwrittenEntries(pendingEntries, archived)
+    await appendArchive($, path, archivePath(path, at), fresh, s, archived, currentBoardHash)
+    for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     await $.fs.write(path, text)
   })
   if (wrote === null) return false
+  await removePendingArchiveNote($, path, s)
   if (ref.session === null) {
     const key = doneKey(ref.project, ref.title)
     await update($, doneSeen, old => Object.fromEntries(Object.entries(old).filter(([one]) => one !== key)))
@@ -3194,7 +3341,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
 const othersNoteFor = async ($: EngineInterface): Promise<string | null> => {
   const mirror = await read($, mine)
 
-  return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : shortId(mirror.sessionId), await $.clock.now(), await wordsOf($))
+  return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : { ...mirror, agent: mirror.agent || 'claude' }, await $.clock.now(), await wordsOf($))
 }
 
 // Keeps the store to what the board still needs (retention.ts, #373). A pass reads at most
@@ -3392,6 +3539,7 @@ const refreshPruned = async ($: EngineInterface, at: number): Promise<void> => {
     const log = await $.fs.read(`${inbox}${sepOf(inbox)}${INBOX_DROPPED_FILE}`).catch(() => '')
     const turns = inboxDropped(log, prunedSince(at))
     measuredPruned = { ...records, turns: turns.age + turns.cap }
+    await syncPageState($)
   } catch {
     // The line keeps its last numbers.
   }
@@ -3430,6 +3578,7 @@ const sweepFiles = async ($: EngineInterface): Promise<void> => {
     ...staleStoreTemps(kept ?? [], at).map(name => `${store}${sepOf(store)}${name}`),
     ...swept.map(name => `${inbox}${sepOf(inbox)}${name}`),
     ...staleInboxTemps(failed ?? [], at).map(name => `${inbox}${sepOf(inbox)}${name}`),
+    ...await stalePageDone($, path, at),
   ]
   for (let from = 0; from < stale.length; from += 50) {
     await removeFiles($, stale.slice(from, from + 50), isWin)
@@ -3447,6 +3596,21 @@ const sweepFiles = async ($: EngineInterface): Promise<void> => {
     ...Object.fromEntries(Object.entries(current).filter(([name]) => !drop.has(name))),
     ...Object.fromEntries(unseen.filter(name => current[name] === undefined).map(name => [name, at])),
   })).catch(() => undefined)
+}
+
+// Immutable acknowledgements use the same three-day retention as inboxDone. A delayed writer
+// cannot change a file's meaning while a sweep checks it, since its name binds all its bytes.
+const stalePageDone = async ($: EngineInterface, path: string, at: number): Promise<string[]> => {
+  const dir = path.replace(/[\\/][^\\/]*$/, '')
+  const entries = await $.fs.list(dir).catch(() => [])
+  const stale: string[] = []
+  for (const entry of entries.filter(entry => entry.kind === 'file' && pageDoneHash(entry.name) !== null).sort((a, b) => a.mtimeMs - b.mtimeMs).slice(0, PRUNED_PER_SWEEP)) {
+    const file = `${dir}${sepOf(dir)}${entry.name}`
+    const body = await $.fs.read(file).catch(() => '')
+    const done = readPageDone(body, pageDoneHash(entry.name)!)
+    if (done !== null && keepInboxDone({ [done.name]: done.stamp }, at)[done.name] === undefined) stale.push(file)
+  }
+  return stale
 }
 
 // When each inbox file was set aside as `.failed`, by name: a rename keeps the file's own time.
@@ -3572,11 +3736,12 @@ const showCopied = async ($: EngineInterface, question: string, text: string, su
   return copied ? { text: s.copied } : { text: s.pressCopyFallback, copyText: text, tone: 'alert' }
 }
 
-// The language from the four places it can come from (strings.ts resolveLang).
+// The language from the five places it can come from (strings.ts resolveLang).
 const settleLang = async ($: EngineInterface, options: PluginOptions, preference?: Lang | null): Promise<void> => {
   const settings = (await $.settings.read().catch(() => ({}))) as { language?: unknown }
   const stored = preference === undefined ? await $.store.get('lang') : preference
-  const chosen = resolveLang(options.language, stored, settings.language, await $.env.get('LANG'))
+  const locale = (options as { locale?: unknown }).locale ?? (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().locale : undefined)
+  const chosen = resolveLang(options.language, stored, settings.language, await $.env.get('LANG'), locale)
   await update($, lang, () => chosen)
 }
 
@@ -3631,9 +3796,63 @@ const answerHere = async ($: EngineInterface): Promise<void> => {
   await settle($)
 }
 
+// POSIX only: a folder that only this account can reach, and in it, when named, a plain file of its own.
+const OWN_ADDRESS = "const fs=require('fs');const[d,f]=process.argv.slice(1);const a=fs.statSync(d),u=process.getuid();const b=f&&fs.lstatSync(f);process.exit(a.isDirectory()&&a.uid===u&&(a.mode&63)===0&&(!b||b.isFile()&&b.uid===u)?0:1)"
+const isOwnAddress = async ($: EngineInterface, ...paths: string[]): Promise<boolean> =>
+  (await $.process.run(['node', '-e', OWN_ADDRESS, '--', ...paths], { timeoutMs: 5000 }).catch(() => null))?.exitCode === 0
+
+// Where the running page left its address, or null: no page, or nothing this account can trust.
+const readAddress = async ($: EngineInterface): Promise<BoardAddress | null> => {
+  const path = await progressPath($)
+  const key = addressKey(path)
+  if (key === null) return null
+  const isWin = await isWindows($, path)
+  const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '')
+  const runtime = await $.env.get('XDG_RUNTIME_DIR')
+  const isRuntimeOwn = !isWin && runtime !== undefined && runtime !== '' && await isOwnAddress($, runtime)
+  const folder = addressFolder(isWin, home, runtime, isRuntimeOwn)
+  if (folder === null) return null
+  const file = [folder, addressFileName(key)].join(isWin ? '\\' : '/')
+  const found = await $.fs.stat(file).catch(() => undefined)
+  if (found === undefined || found.isLink || found.kind !== 'file') return null
+  if (!isWin && !(await isOwnAddress($, folder, file))) return null
+
+  return parseAddress(await $.fs.read(file), key)
+}
+
+const makeReceiver = ($: EngineInterface): Receiver => createReceiver({
+  session: () => $.session.id(),
+  address: () => readAddress($),
+  call: async (address, action, body) => {
+    const asked = $.http.fetch(`${address.origin}/api/messages/${action}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-board-token': address.token },
+      body: JSON.stringify(body),
+    })
+    const hung = $.clock.sleep(HUB_MS).then(() => { throw new Error('HUB_TIMEOUT') })
+    const { status, text } = await Promise.race([asked, hung])
+    return { status, json: JSON.parse(text) as unknown }
+  },
+  isBusy: () => isTurnRunning,
+  now: () => $.clock.now(),
+  submit: text => $.prompt.submit({ text }),
+  load: () => read($, receiverState),
+  save: state => update($, receiverState, () => state),
+})
+
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     isInteractiveSession = e.isInteractive !== false
+    // Started before anything is awaited: a slow start must not cost the session its address.
+    // Each tick looks for the page itself; none of it runs inside this hook's budget.
+    receiver = null
+    if (isInteractiveSession) {
+      const own = makeReceiver($)
+      receiver = own
+      receiverTimer = $.clock.every(RECEIVER_MS, () => {
+        own.tick().catch(() => undefined)
+      })
+    }
     pendingCache = null
     progressChangedAt = null
     heldInboxQuestions.clear()
@@ -3706,7 +3925,7 @@ export const register: Register = (on, options) => {
           // A new day starts the count over.
           if (localDay(at) !== countedDay) await countToday($)
           await refreshStatus($)
-          await writeDashboard($)
+
           // A date turns due at midnight with nothing in the file changing.
           await remind($)
         })
@@ -3747,7 +3966,6 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'progress' }, async ($, e) => {
-    const isInteractive = isInteractiveSession
     const arg = e.args.trim()
     const language = /^(?:lang|language|語言|语言)\s*(\S*)$/i.exec(arg)
     if (language !== null) {
@@ -3782,7 +4000,8 @@ export const register: Register = (on, options) => {
       return { text: moved === 0 ? s.tidyNothing : s.tidyMoved(moved) }
     }
     if (/^(open|window|html|視窗|窗口|網頁|网页)$/i.test(arg)) {
-      return { text: await openDashboard($, isInteractive) }
+      const { path } = await read($, snapshot)
+      return showBoardPage($, path || (await progressPath($)), s, s.boardPageOpened, true)
     }
     if (/^(同步|sync)$/i.test(arg)) {
       await resync($)
@@ -3847,15 +4066,14 @@ export const register: Register = (on, options) => {
     // This open's own answer decides; the footer's flag may already follow a newer roster.
     if (!hasNoPaneSurfaceIn(opened)) return { text: s.paneNotOpened(opened.reason) }
     const progress = path || (await progressPath($))
-    return showBoardPage($, progress, s, s.livePageOpened, isInteractive)
+    return showBoardPage($, progress, s, s.livePageOpened)
   })
 
   on('command.run', { command: 'agent-board' }, async $ => {
-    const isInteractive = isInteractiveSession
     const s = await wordsOf($)
     const { path } = await read($, snapshot)
     const progress = path || (await progressPath($))
-    return showBoardPage($, progress, s, s.boardPageOpened, isInteractive)
+    return showBoardPage($, progress, s, s.boardPageOpened, true)
   })
 
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers
@@ -3888,7 +4106,10 @@ export const register: Register = (on, options) => {
     hasTurnBackgroundLaunch = false
     turnBackgroundJobIds = new Set()
     turnBackgroundLaunchesWithoutId = 0
-    turnPrompt = e.text.trim()
+    // A board message's turn: neither what it said nor what Claude answered joins the board's
+    // own records. Only its ACK goes back, as the message's receipt.
+    const isDelivery = (await receiver?.turnStarted(e.text, e.turnId).catch(() => false)) === true
+    turnPrompt = isDelivery ? '' : e.text.trim()
     const isAnswer = isNextTurnAnswer && e.text.trim() !== ''
     isNextTurnAnswer = false
     const isNotification = nextTurnNotification
@@ -3905,7 +4126,7 @@ export const register: Register = (on, options) => {
       await saveBackground($, one => finishBackgroundJob(one, e.text, isNotification === true))
       mirror = await read($, mine)
     }
-    if (mirror !== null && mirror.firstPrompt === '' && e.text.trim() !== '') {
+    if (mirror !== null && !isDelivery && mirror.firstPrompt === '' && e.text.trim() !== '') {
       await saveMine($, one => ({ ...one, firstPrompt: promptKey(e.text) }))
     }
     // The person is answering: what waited on them from the last turn's question is settled.
@@ -3932,16 +4153,23 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    if (receiver !== null && e.agentId === undefined && result !== undefined) await receiver.stepAnswered(e.turnId, result.answer).catch(() => undefined)
+    return result
+  })
+
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     if (hasBackgroundActivity) await backgroundChanges
     isTurnRunning = false
+    const isDelivery = (await receiver?.turnEnded(e.turnId, e.answer, e.isAborted).catch(() => false)) === true
     const mirror = await read($, mine)
     const hasRunningTurnBackgroundJob = (mirror?.backgroundJobIds ?? []).some(id => turnBackgroundJobIds.has(id)) ||
       (turnBackgroundLaunchesWithoutId > 0 && (mirror?.backgroundJobs ?? 0) > (mirror?.backgroundJobIds?.length ?? 0))
     if ((mirror?.backgroundReleases?.length ?? 0) > 0 || (mirror?.backgroundReleaseCount ?? 0) > 0)
       await saveBackground($, one => ({ ...one, backgroundReleases: [], backgroundReleaseCount: 0 })).catch(() => undefined)
-    const question = e.isAborted ? null : lastQuestion(e.answer)
+    const question = e.isAborted || isDelivery ? null : lastQuestion(e.answer)
     if (mirror !== null && mirror.tasks.length > 0) {
       const branch = await branchName($)
       await saveMine($, one => ({ ...one, branch }))
@@ -3961,7 +4189,7 @@ export const register: Register = (on, options) => {
     if (mirror !== null && mirror.tasks.length === 0 && mirror.source === 'turns') await settle($)
     // No Task list: a turn that changed something, or any turn once the session is tracked,
     // is summed up into steps.
-    if (mirror !== null && !e.isAborted && (mirror.tasks.length === 0 || mirror.source === 'turns')) {
+    if (mirror !== null && !e.isAborted && !isDelivery && (mirror.tasks.length === 0 || mirror.source === 'turns')) {
       const hasWork = mirror.source === 'turns' || hasTurnBackgroundLaunch || isWork(turnTools(await $.session.messages().catch(() => [])))
       if (hasWork) {
         const prompt = turnPrompt
@@ -4088,6 +4316,13 @@ export const register: Register = (on, options) => {
       })
       await queueWrite($)
     }
+    // After a /clear or a resume the process goes on under another id, with no session.start: the
+    // timer goes on and registers that id. Last, and bounded: this hook's time is short, and a
+    // session that could not say goodbye is gone from the board when its lease ends.
+    const isGoingOn = e.reason === 'clear' || e.reason === 'resume'
+    if (!isGoingOn) receiverTimer?.cancel()
+    if (receiver !== null) await isDoneWithin($, receiver.end().catch(() => undefined), RECEIVER_END_MS)
+    if (!isGoingOn) receiver = null
 
     return next(e)
   })
@@ -4354,6 +4589,10 @@ export const register: Register = (on, options) => {
       hide: item => hide(item, true),
       unhide: item => hide(item, false),
       revise: async item => { await update($, revising, open => open === reviseKey(item) ? '' : reviseKey(item)); return s.pressDone },
+      openPage: async () => {
+        const { path } = await read($, snapshot)
+        return (await showBoardPage($, path || (await progressPath($)), s, s.boardPageOpened, true)).text
+      },
       toggleLegend: async () => { await update($, isLegendOpen, open => !open); return s.pressDone },
       toggleNotify: async () => { await setNotify($); return s.pressDone },
     }

@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 type Json = Record<string, unknown>
 type Hook = { key: string; currentHash: string; sourcePath: string; eventName: string; command: string; enabled: boolean; trustStatus: string }
@@ -82,6 +82,53 @@ export const findCodexExecutable = (pathValue: string, platform: string, arch: s
   return undefined
 }
 
+// Auto-discovers the installed Codex binary: checks PATH, and on Windows
+// %LOCALAPPDATA%\OpenAI\Codex\bin (picking the newest version subdirectory by mtime).
+export const discoverCodexBinary = (env: Record<string, string | undefined> = process.env, platform = process.platform, arch = process.arch): string | undefined => {
+  const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path')
+  const pathValue = (pathKey ? env[pathKey] : undefined) ?? env.PATH ?? env.Path ?? ''
+  const fromPath = findCodexExecutable(pathValue, platform, arch)
+  if (fromPath) return fromPath
+  if (platform === 'win32' && env.LOCALAPPDATA) {
+    const base = join(env.LOCALAPPDATA, 'OpenAI', 'Codex', 'bin')
+    try {
+      let newest: { file: string; mtime: number } | undefined
+      const direct = join(base, 'codex.exe')
+      try {
+        const s = statSync(direct)
+        if (s.isFile()) newest = { file: realpathSync(direct), mtime: s.mtimeMs }
+      } catch {}
+      const entries = readdirSync(base, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          const candidate = join(base, entry.name, 'codex.exe')
+          try {
+            const s = statSync(candidate)
+            if (s.isFile() && (newest === undefined || s.mtimeMs > newest.mtime)) {
+              newest = { file: realpathSync(candidate), mtime: s.mtimeMs }
+            }
+          } catch {}
+        }
+      }
+      if (newest) return newest.file
+    } catch {}
+  }
+  return undefined
+}
+
+// Inspects config.toml when Codex cannot be queried directly.
+// Returns false when config.toml is missing or has no trusted_hash entries;
+// otherwise returns 'unknown' because exact hook approval requires verification through Codex.
+export const inspectCodexConfigToml = (configToml: string): boolean | 'unknown' => {
+  try {
+    const tomlText = readFileSync(configToml, 'utf8')
+    const hasTrustedHash = /^\s*trusted_hash\s*=\s*['"][^'"]+['"]/m.test(tomlText)
+    return hasTrustedHash ? 'unknown' : false
+  } catch {
+    return false
+  }
+}
+
 // Our hooks as Codex lists them. Not listed, or turned off in /hooks, is a no.
 const ownedHooks = (response: Json, config: string, expected: readonly CodexHookIdentity[]): Hook[] => {
   const data = response.data
@@ -124,11 +171,33 @@ const killTree = (child: ChildProcess): void => {
   child.kill()
 }
 
+// Never interpret a shim as a shell command. Accept npm's Codex shim only when
+// its fixed package launcher is present inside the named package.
+const codexShimTarget = (executable: string): string => {
+  try {
+    if (!/^codex\.(cmd|ps1)$/i.test(basename(executable))) throw new Error()
+    const stat = statSync(executable)
+    if (!stat.isFile() || stat.size > 64 * 1024) throw new Error()
+    const text = readFileSync(executable, 'utf8').replace(/\\/g, '/')
+    const prefix = /\.cmd$/i.test(executable) ? '%dp0%' : '\\$(?:basedir|\\{basedir\\})'
+    if (!new RegExp(`${prefix}/node_modules/@openai/codex/bin/codex\\.js`, 'i').test(text)) throw new Error()
+    const root = realpathSync(join(dirname(executable), 'node_modules', '@openai', 'codex'))
+    if ((JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as Json).name !== '@openai/codex') throw new Error()
+    const target = realpathSync(join(root, 'bin', 'codex.js'))
+    const within = relative(root, target)
+    if (!within || within.startsWith('..') || isAbsolute(within) || !statSync(target).isFile()) throw new Error()
+    return target
+  } catch {
+    throw new Error('CODEX_SHIM_UNSUPPORTED')
+  }
+}
+
 // A control-only app-server process: no thread/read, resume, model call or transcript access.
 // A deadline is on the performance.now() clock, which a change of the wall clock cannot move.
 const client = (executable: string, timeoutMs = 5000, deadline?: number, initializeMs = timeoutMs) => {
   if (!isAbsolute(executable)) throw new Error('ABSOLUTE_CODEX_BINARY_REQUIRED')
-  const child = /\.m?js$/i.test(executable) ? spawn(process.execPath, [executable, 'app-server', '--stdio'], { windowsHide: true }) : spawn(executable, ['app-server', '--stdio'], { windowsHide: true })
+  const target = process.platform === 'win32' && /\.(cmd|ps1)$/i.test(executable) ? codexShimTarget(executable) : executable
+  const child = /\.m?js$/i.test(target) ? spawn(process.execPath, [target, 'app-server', '--stdio'], { windowsHide: true }) : spawn(target, ['app-server', '--stdio'], { windowsHide: true })
   let next = 0, buffer = ''
   const pending = new Map<number, { resolve: (value: Json) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   const fail = (): void => {

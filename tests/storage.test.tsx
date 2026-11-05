@@ -1084,7 +1084,7 @@ test('a store that stays over 1572864 bytes keeps the records of blocks on the b
   await ui.unmount()
 })
 
-test('a store under the cap loses no record to it, and the pane and progress.html say nothing about clearing', async ($, on) => {
+test('a store under the cap loses no record to it, and the pane says nothing about clearing', async ($, on) => {
   const world = capWorld(1_572_864 - 1)
   await capStart($, on, world)
   const store = world.store ?? {}
@@ -1094,9 +1094,10 @@ test('a store under the cap loses no record to it, and the pane and progress.htm
   expect(await ui.find({ type: 'Text', text: /Cleared/ })).toBeUndefined()
   await ui.unmount()
   await $.command.run({ command: 'progress', args: 'open', origin: { kind: 'composer' } })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain('<!doctype html>')
-  expect(page).not.toContain('Cleared')
+  expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
+  const reopened = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await reopened.find({ type: 'Text', text: /Cleared/ })).toBeUndefined()
+  await reopened.unmount()
 })
 
 // The cap deletes only under the guard the age rules have: progress.md must still have the time and
@@ -1146,12 +1147,14 @@ test('the pane says what was cleared in the last 7 days, with the inbox turns fr
   await ui.unmount()
 })
 
-test('progress.html says what was cleared in the last 7 days, with the inbox turns from the count file and without older ones', async ($, on) => {
+test('the pane keeps the cleared count when opening the page in the last 7 days, with the inbox turns from the count file and without older ones', async ($, on) => {
   const world = countedWorld()
   await capStart($, on, world)
   await $.command.run({ command: 'progress', args: 'open', origin: { kind: 'composer' } })
-  const page = world.files.get('/home/me/.claude/progress.html') ?? ''
-  expect(page).toContain(`<p role="status" class="quiet">${COUNTED_LINE}</p>`)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: COUNTED_LINE })).toBeDefined()
+  await ui.unmount()
+  expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
 })
 
 for (const [lang, line] of [

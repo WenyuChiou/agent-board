@@ -10,11 +10,13 @@ import { EN } from '../hooks/strings-en'
 import { paletteFor } from '../hooks/palette'
 import { ZH_CN } from '../hooks/strings-zh-cn'
 import { pressTarget } from '../hooks/pane'
-import { dashboardHtml } from '../hooks/dashboard'
+import { serveModel } from '../hooks/serve'
+import type { Strings } from '../hooks/i18n'
+import { parseQuestions } from '../hooks/questions'
 import { buildView, IDLE_MS, OLDER_SHOWN, parseSeen, relativeTime, seenJson, seenPath, SWEEP_ARMED_KEY, withSeen } from '../hooks/view'
 import type { TaskRow, View } from '../hooks/view'
 import { doneKey, parseProgress } from '../hooks/parse'
-import { chatText, peekInbox } from '../hooks/board'
+import { chatText, peekInbox, redact } from '../hooks/board'
 import { answerAgentPrompt, blockId, CLAIM_MS, isInboxFile, takenName, withAgentPrompts } from '../hooks/inbox'
 import { applyTaskCreate, applyTaskUpdate, completionKey, completionOverlay, emptyMirror } from '../hooks/mirror'
 import { applyDigest, startBackgroundJob } from '../hooks/digest'
@@ -25,7 +27,7 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
-import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED } from '../hooks/ledger-move'
+import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED, PENDING_COMMIT, PENDING_STAGE } from '../hooks/ledger-move'
 import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
 
@@ -65,6 +67,8 @@ const PROPS: RenderPropsOf['Pane'] = {
 }
 
 type World = {
+  // Whether the check a receiver runs on the board's address folder finds it this account's own.
+  isAddressOwn?: boolean
   files: Map<string, string>
   dirs?: Set<string>
   unlistable?: Set<string>
@@ -272,6 +276,9 @@ const engineBeneath = (on: On, world: World): MockClock => {
     value: world.hasTasks ? [{ name: 'TaskCreate', description: '', mcp: false }] : [{ name: 'Read', description: '', mcp: false }],
   }))
   on('process.run', async ($, e) => {
+    if (e.argv[0] === 'node' && e.argv[1] === '-e' && world.isAddressOwn !== undefined) {
+      return { value: { exitCode: world.isAddressOwn ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (world.browserExitCode !== undefined && e.argv.some(arg => /\.html$/.test(arg))) {
       world.ran?.push([...e.argv])
       return { value: { exitCode: world.browserExitCode, stdout: '', stderr: 'synthetic browser refusal', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -341,6 +348,29 @@ const engineBeneath = (on: On, world: World): MockClock => {
       } catch (error) {
         return { value: { exitCode: 1, stdout: '', stderr: String(error), isStdoutTruncated: false, isStderrTruncated: false } }
       }
+    }
+    if (e.argv[0] === 'node' && e.argv[2] === PENDING_STAGE && e.argv[3] === '--') {
+      world.ran?.push([...e.argv])
+      const target = posix(e.argv[4] ?? '')
+      if (world.node === null) return { value: { exitCode: 127, stdout: '', stderr: 'node: command not found', isStdoutTruncated: false, isStderrTruncated: false } }
+      if (world.dirs?.has(target)) return { value: { exitCode: 1, stdout: '', stderr: 'EISDIR', isStdoutTruncated: false, isStderrTruncated: false } }
+      const directory = `/tmp/agent-board-pending-${workerStageSequence += 1}`
+      return { value: { exitCode: 0, stdout: JSON.stringify({ protocol: 1, directory, file: `${directory}/pending.json`, token: 'b'.repeat(32) }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (e.argv[0] === 'node' && e.argv[2] === PENDING_COMMIT && e.argv[3] === '--') {
+      world.ran?.push([...e.argv])
+      const target = posix(e.argv[4] ?? '')
+      const directory = posix(e.argv[5] ?? '')
+      const digest = e.argv[7] ?? ''
+      const stagedFile = `${directory}/pending.json`
+      const text = world.files.get(stagedFile)
+      world.files.delete(stagedFile)
+      if (world.node === null) return { value: { exitCode: 127, stdout: '', stderr: 'node: command not found', isStdoutTruncated: false, isStderrTruncated: false } }
+      if (text === undefined || sha256(text) !== digest || world.dirs?.has(target) || world.isMoveRefused?.(stagedFile) === true || world.unwritable?.has(target) === true) {
+        return { value: { exitCode: 1, stdout: '', stderr: 'PENDING_COMMIT_FAILED', isStdoutTruncated: false, isStderrTruncated: false } }
+      }
+      world.files.set(target, text)
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv[0] === 'rmdir') {
       world.ran?.push([...e.argv])
@@ -859,10 +889,25 @@ const ANSWERED = '/home/me/.claude/progress-answered.json'
 const storedQuestion = (world: World, words: string): string =>
   (JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ id: string; words: string; isWaiting: boolean }>).find(row => row.words === words && row.isWaiting)?.id ?? ''
 
-// progress.html lists what needs you in its Needs you sheet, before Working now (#546).
-const inNeeds = (page: string, text: string): boolean => { const at = page.indexOf(text); return at > page.indexOf('id="dash-needs"') && at < page.indexOf('id="dash-working"') }
-// An unprocessed inbox turn's copy; a Needs you item also uses class="ask", but starts with its kind.
-const INBOX_ASK = /<div class="ask" data-agent="[^"]*"><div class="where">/
+// Feed the live model the fixture's persisted report and unprocessed inbox data.
+// Mounting the pane first exercises the production pending reader and its read limits.
+const pageModelText = async ($: Engine, world: World, s: Strings = ZH_TW): Promise<string> => {
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.unmount()
+  const done = typeof world.store?.inboxDone === 'object' && world.store.inboxDone !== null ? world.store.inboxDone as Record<string, string> : {}
+  const files = [...world.files].filter(([path]) => path.startsWith(`${INBOX}/`) && isInboxFile(path.slice(INBOX.length + 1)) && done[path.slice(INBOX.length + 1)] === undefined)
+    .map(([path, body]) => ({ name: path.slice(INBOX.length + 1), body, at: world.mtimes?.[path] ?? world.mtime }))
+    .sort((a, b) => b.at - a.at).slice(0, 30)
+  const pending = peekInbox(files, () => '', text => redact(text, '/home/me'), s)
+  const ledger = parseQuestions(world.files.get(QUESTIONS) ?? '', true) ?? emptyQuestions()
+  const hidden = JSON.parse(world.files.get(ANSWERED) ?? '{"answered":[]}').answered as string[]
+  const view = buildView(parseProgress(world.files.get(FILE) ?? ''), [], null, world.at ?? Date.parse('2026-10-16T12:00:00Z'), 0, {}, s, hidden, {}, ledger, undefined, pending)
+  return JSON.stringify(serveModel(view, pending, s))
+}
+const inNeeds = (page: string, text: string): boolean => {
+  const model = JSON.parse(page) as ReturnType<typeof serveModel>
+  return [...model.asks, ...model.turns.filter(turn => turn.isQuestion)].some(item => item.text.includes(text))
+}
 
 const ASKED = (text: string): string => `# 專案進度
 
@@ -1082,7 +1127,6 @@ export {
   HERMES_TURN,
   IDLE_MS,
   INBOX,
-  INBOX_ASK,
   JOBS,
   JOURNAL,
   LEDGER_LINK,
@@ -1151,7 +1195,8 @@ export {
   confirmStep,
   connectDataRoots,
   controlFile,
-  dashboardHtml,
+  serveModel,
+  pageModelText,
   doneKey,
   effectivePromptMirror,
   emptyMirror,

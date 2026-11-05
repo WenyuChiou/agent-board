@@ -13,7 +13,7 @@ export const HOOK_WORKER_GRACE = 500
 // A worker that starts after its host's stop line still reads its input this long, then queues it.
 export const HOOK_LATE_INPUT_GRACE = 500
 export const HOOK_TIMEOUTS: Record<string, { timeout: number; events?: Record<string, number> }> = {
-  codex: { timeout: 3000, events: { Stop: 10000 } },
+  codex: { timeout: 3000, events: { Stop: 10000, UserPromptSubmit: 10000 } },
   cursor: { timeout: 3000 },
   gemini: { timeout: 5000 },
   grok: { timeout: 5000, events: { Stop: 10000 } },
@@ -144,7 +144,7 @@ const run = async () => {
   const inherited = value('--hook-deadline')
   if (inherited !== undefined && !Number.isSafeInteger(Number(inherited))) return fail('REPORTER_FAILED')
   const hostTimeout = policy.events?.[value('--hook-event')] ?? policy.timeout
-  const deadline = Math.min(started + Math.min(3000, hostTimeout - 1000), inherited === undefined ? Infinity : Number(inherited))
+  const deadline = Math.min(started + hostTimeout - 1000, inherited === undefined ? Infinity : Number(inherited))
   // Input may arrive until 300 ms before the host's limit, whether the worker starts before or
   // after its deadline: one starting just before it must not give up sooner. A worker that starts
   // even later, after a slow Windows PowerShell start (#241), still reads its input for a short

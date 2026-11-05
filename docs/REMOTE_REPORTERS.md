@@ -66,7 +66,7 @@ machine and merge it into `progress.md`.
 
 | Transport | How | Notes | Expected latency |
 |---|---|---|---|
-| Chat relay | Paste the fragment into the board or run the merge locally | Manual per update | After the user imports it and the board refreshes |
+| Chat relay | Press Copy in the chat, then Ctrl+V on the board's page | Manual per update | After the user imports it and the board refreshes |
 | Git | Push fragments; pull and merge on the board's computer | Requires a configured sync job | Next pull interval, plus transfer, merge and refresh time |
 | Cloud drive | Sync fragments; merge them locally | Requires sync and a local merge job | Both schedules, plus transfer, merge and refresh time |
 
@@ -109,6 +109,7 @@ Rules:
 - <ID> is 8 random lower-case hex characters (0-9, a-f). Pick it once and keep it
   for the whole conversation.
 - <name> is your own name in lower case, for example muse or dot.
+- If you are Claude, write claude-web. The name claude alone is refused.
 - <project> is the project's name; keep it the same every time.
 - Write the two marker lines exactly as shown, starting at the beginning of the line.
   No other marker names.
@@ -120,6 +121,11 @@ Rules:
   again, done when every step is [x] or [-], ended if you stop for good with steps
   left. updated= is the time of this update in UTC, ending in Z.
 ```
+
+On the board's page, **Connect a web chat** copies this prompt. After that, press
+Copy on the assistant's block and press Ctrl+V (Cmd+V on a Mac) on the board's page, or press
+**Import from clipboard**. Text that is not a block stays in the page. Without
+the page, save and merge it:
 
 Save each block the assistant prints, from `## <project>` to the end marker,
 to a file, check it and merge it:
@@ -149,10 +155,7 @@ the time: check `updated=` before merging, since a block with an old timestamp
 is skipped as older when the board has a newer one. If inserted, an old block
 shows as stopped and leaves at the next archive sweep.
 
-The board's page no longer has a box to paste a block into; [#561](https://github.com/WenyuChiou/agent-board/issues/561)
-brings back a way in without the script. Until then, use the script above.
-
-The board's import behind that box still requires a real UTC source time ending in `Z`. Missing, invalid,
+The board's page import requires a real UTC source time ending in `Z`. Missing, invalid,
 timezone-free or future times are refused, and so is a `working` or `waiting`
 block more than three days behind the board (it would arrive already old enough
 to archive); `done` and `ended` blocks still merge as history. Check both clocks

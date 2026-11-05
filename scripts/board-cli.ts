@@ -1,6 +1,6 @@
 // The Agent Board for any terminal and any agent, without Claude Code: `node agent-board.mjs`
 // prints the board once, `--watch` keeps it on screen and, on a terminal, lets you work in it
-// the way the pane does (arrows, Enter, x, a, c, digits), and `--html` writes progress.html
+// the way the pane does (arrows, Enter, x, a, c, digits); the browser key opens the live page
 // and opens it. `--serve` prints the board and opens the board's page in the browser, where it
 // can be clicked (board-serve.ts). `--chat` prints the board as plain text short enough for a
 // chat app, with no link and no secrets, for an agent that answers there. `/progress connect` writes the bundled copy of this file
@@ -8,7 +8,9 @@
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
+import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
 import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -17,25 +19,32 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import { startServer } from './board-serve'
+import { moveLockAside } from './board-messaging'
+import { claimMessageStore, hasLiveClaims } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
-import { idleTimeout } from '../hooks/serve'
+import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { addressFileName } from '../hooks/receiver'
+import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
-import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
+import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
+import { boardStatus } from '../hooks/board-status'
+import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, clipped, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, plain, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
+import { BOARD_JSON_SCHEMA, boardDocument } from '../hooks/board-json'
+import { RELEASED } from '../hooks/released'
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
-import { LOG_TAIL, isInboxFile } from '../hooks/inbox'
-import { dashboardHtml } from '../hooks/dashboard'
-import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, missingEntries, parseJournal, unwrittenEntries } from '../hooks/journal'
-import { currentPart, monthParts, sizeWarnings, storageDetails } from '../hooks/retention'
+import { LOG_TAIL, isInboxFile, keepInboxDone } from '../hooks/inbox'
+import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
+import type { PendingArchiveRecord } from '../hooks/journal'
+import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 import { codexSignal, isStrongRun, runLookupId } from '../hooks/runs'
@@ -45,6 +54,7 @@ import { findSessionFile, readSessionMeta } from './codex-history'
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
 
 const args = process.argv.slice(2)
+const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust'].includes(arg))
 const flag = (name: string): string | undefined => {
   const at = args.indexOf(name)
   return at === -1 ? undefined : args[at + 1]
@@ -65,8 +75,15 @@ const progressFile = (): string => {
   return localProgressPath(flag('--progress-file'), BAKED.path || join(config || join(homedir(), '.claude'), 'progress.md'))
 }
 
+// Windows usually has no LANG, so the board also checks the system locale.
+const systemLang = (env: unknown) => {
+  const language = langOf(env)
+  if (language !== null) return language
+  try { return langOf(Intl.DateTimeFormat().resolvedOptions().locale) } catch { return null }
+}
+
 const path = progressFile()
-const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? langOf(process.env.LANG) ?? 'en']
+const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? systemLang(process.env.LANG) ?? 'en']
 
 // Files changed since the board last read progress.md in full. A read refused because another
 // program holds the file open can say that nothing was changed only while this is 0. It is
@@ -154,9 +171,32 @@ const readLog = (file: string): string => {
 }
 
 // `scrub` hides what must not be sent on, in a reply, before its question is picked and cut.
+let pageStateCache = readPageState('')
+const pageDoneFiles = immutableQuestionFiles({
+  directory: dirname(path),
+  isPersistent: args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg)),
+  accepts: name => pageDoneHash(name) !== null,
+  parse: (text, name) => readPageDone(text, pageDoneHash(name)!),
+  // A broken receipt cannot invalidate another session's processed question.
+  isValidationIndependent: true,
+})
+let pageDoneCache: Array<{ name: string; stamp: string }> = []
+// A poll can meet the plugin's verified write halfway through; retain its last complete record.
+const sharedPageState = () => {
+  pageStateCache = readPageState(read(pageStatePath(path)), pageStateCache)
+  pageDoneCache = pageDoneFiles.read(!isViewQuestionRead) ?? pageDoneCache
+  const at = Date.now()
+  // An expired receipt for the same filename must not shadow another session's live receipt.
+  const kept = pageDoneCache.filter(done => keepInboxDone({ [done.name]: done.stamp }, at)[done.name] !== undefined)
+  return { ...pageStateCache, inboxDone: keepInboxDone({ ...pageStateCache.inboxDone, ...Object.fromEntries(kept.map(done => [done.name, done.stamp])) }, at) }
+}
+let viewPageState: ReturnType<typeof sharedPageState> | null = null
+let droppedLogCache: { at: number; text: string } | null = null
+
 const pending = (scrub?: (text: string) => string, isFresh = !isViewQuestionRead) => {
   const files = inboxFiles.read(isFresh)
-  return peekInbox(files, readLog, scrub, s)
+  const done = (viewPageState ?? sharedPageState()).inboxDone
+  return peekInbox(files.filter(file => done[file.name] === undefined), readLog, scrub, s)
 }
 
 // The record last read, kept when the next read catches it half-written, and progress.md's
@@ -168,8 +208,8 @@ let lastStat = { stat: '', at: 0 }
 let lastQuestions = emptyQuestions()
 const questionWriter = randomUUID()
 let questionWrite = 0
-const isQuestionWriter = !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
-const isPersistentQuestions = !args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
+const isQuestionWriter = !args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
+const isPersistentQuestions = !args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
 let isViewQuestionRead = false
 const inboxFiles = recentInboxFiles({
   directory: join(dirname(path), 'progress-inbox'),
@@ -341,9 +381,10 @@ const keepAskedQuestions = (projects: ReturnType<typeof parseProgress>, ref: Tas
   const proofs = readQuestionProofs()
   if (latest === null || proofs === null || !archiveQuestionsKept(projects, ref, latest)) return false
   const settled = observeQuestions(latest, projects, null, parseAnswered(read(answeredPath(path))) ?? [], now, true, 'preview', proofs, pending(), [], frozen).ledger
-  if (settled.records.some(record => record.isUnresolved && isAskedBy(record, ref) && !latest.records.some(old => old.id === record.id && old.isUnresolved))) return false
+  const task = refTasks(projects, ref)[0]
+  if (settled.records.some(record => record.isUnresolved && isAskedBy(record, ref, task) && !latest.records.some(old => old.id === record.id && old.isUnresolved))) return false
   for (const record of latest.records) {
-    if (record.isUnresolved && isAskedBy(record, ref)) keepQuestionCapture(record, 'archived')
+    if (record.isUnresolved && isAskedBy(record, ref, task)) keepQuestionCapture(record, 'archived')
   }
 
   return true
@@ -353,6 +394,8 @@ let progressHealthCache: { source: string; isCutSettled: boolean; frozen: Readon
 const observeWriterQuestions = reusableQuestionObservation()
 const observeViewQuestions = reusableQuestionObservation()
 const readBoardView = (source: string, now: number) => {
+  const pageState = sharedPageState()
+  viewPageState = pageState
   for (const proof of [...pendingQuestionProofs.values()]) keepQuestionProof(proof.kind, proof.hash)
   if (progressProjectCache?.source !== source) progressProjectCache = { source, projects: parseProgress(source) }
   const projects = progressProjectCache.projects
@@ -386,8 +429,8 @@ const readBoardView = (source: string, now: number) => {
     const record = parseSeen(read(file), answeredAge(file))
     if (record !== null) {
       seen = record
-      // Chat wins over every other flag and must never write a sidecar.
-      if (!args.includes('--chat') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
+      // Read-only output must never write a sidecar, even beside interactive flags.
+      if (!args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
         let observed = withSeen(record, projects, now, {}, false, true)
         const wrote = rewrite(file, before => {
           const current = parseSeen(before, answeredAge(file))
@@ -435,7 +478,7 @@ const readBoardView = (source: string, now: number) => {
       }
       for (const id of identitiesToRetire(current, next, resolvedQuestionsToRetire(current, projects, null, turns, frozen), proofs?.retired)) keepQuestionProof('retired', sha256(id))
       const latestProofs = readQuestionProofs()
-      if (latestProofs === null) return null
+      if (latestProofs === null) { proofs = null; return null }
       // New retirement proofs change the observation; unchanged validated proofs already produced
       // this result. Repeating it needlessly copies and hashes every retained question (#428).
       if (latestProofs !== proofs) {
@@ -457,12 +500,18 @@ const readBoardView = (source: string, now: number) => {
           const current = parseAnswered(before, answeredAge(answeredPath(path)))
           if (current === null) return null
           const latestProofs = readQuestionProofs()
-          if (latestProofs === null) return null
+          if (latestProofs === null) { proofs = null; return null }
+          proofs = latestProofs
           const next = migratedAnswered(current, lastQuestions, latestProofs.consumed)
           const consumed = new Set(latestProofs.consumed)
+          let hasNewProof = false
           for (const key of current) {
-            if (Object.hasOwn(lastQuestions.legacy, key) && !consumed.has(sha256(key))) keepQuestionProof('consumed', sha256(key))
+            if (Object.hasOwn(lastQuestions.legacy, key) && !consumed.has(sha256(key))) {
+              keepQuestionProof('consumed', sha256(key))
+              hasNewProof = true
+            }
           }
+          if (hasNewProof) { proofs = readQuestionProofs(); if (proofs === null) return null }
           return answeredJson(next) === answeredJson(current) ? before : answeredJson(next)
         })
         if (migrated !== null) answered = parseAnswered(migrated) ?? answered
@@ -472,13 +521,20 @@ const readBoardView = (source: string, now: number) => {
   questions ??= observeWriterQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', previewProofs ?? undefined, turns, [], frozen).ledger
   // A question marked answered in a pane on this machine is kept off the board too.
   const tail = progressHealthCache.tail
-  const sizes = { progress: Buffer.byteLength(source), store: 0 }
+  const sizes = { progress: Buffer.byteLength(source), store: pageState.store }
   const large = sizeWarnings(sizes, s)
   const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...large]
   const finished = countManualDone(projects, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now))
   const details = storageDetails(sizes, finished, s)
   const health = progressHealthCache.lines
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, readQuestionProofs(), turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(health.length === 0 ? {} : { health }) }
+  const droppedAt = Date.now()
+  if (droppedLogCache === null || droppedAt < droppedLogCache.at || droppedAt - droppedLogCache.at >= 60000) {
+    droppedLogCache = { at: droppedAt, text: read(join(dirname(path), 'progress-inbox', 'dropped.log')) }
+  }
+  const dropped = inboxDropped(droppedLogCache.text, prunedSince(now))
+  const pruned = prunedNote({ ...prunedTotal(pageState.pruned, now), turns: dropped.age + dropped.cap }, s)
+  // Proof writes above refresh this snapshot; drawing need not list the directory again.
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const view = (source = read(path), now = Date.now()) => {
@@ -493,7 +549,6 @@ const freshView = () => {
   return shown
 }
 
-const pad = (n: number): string => String(n).padStart(2, '0')
 
 // The questions the running page can answer into their session, as it last said (`refreshRoutes`).
 let routes: Record<string, AnswerRoute> = {}
@@ -596,6 +651,18 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
 // Windows looks in the current folder first for a program started by name, and an agent's folder
 // can be a cloned repository: the system's own tools go by their full path, from the board's folder.
 const system32 = (name: string): string => join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', name)
+const powershell = (): string => system32('WindowsPowerShell\\v1.0\\powershell.exe')
+
+// clip.exe reads its input in the console's code page (950 on a Traditional Chinese Windows), so text
+// outside ASCII reached the clipboard garbled while the board said it was copied (#817). That text goes
+// to PowerShell's Set-Clipboard as base64, which no code page changes; PowerShell takes about a second
+// to start, so ASCII stays with clip.exe. A command line holds at most 32,767 characters; 30,000 leaves
+// room for the program's path and its flags.
+const windowsClipboard = (text: string): Array<[string, string[]]> => {
+  if (/^[\x00-\x7f]*$/.test(text)) return [[system32('clip.exe'), []]]
+  const command = `Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(text).toString('base64')}')))`
+  return command.length < 30000 ? [[powershell(), ['-NoProfile', '-NonInteractive', '-Command', command]]] : []
+}
 
 const copy = (text: string): boolean => {
   // OSC 52 asks the terminal itself to set the clipboard, which works over SSH too; the
@@ -604,10 +671,35 @@ const copy = (text: string): boolean => {
   const isOsc = process.stdout.isTTY === true
   if (isOsc) process.stdout.write(`\u001b]52;c;${Buffer.from(text).toString('base64')}\u0007`)
   const tools: Array<[string, string[]]> =
-    process.platform === 'darwin' ? [['pbcopy', []]] : process.platform === 'win32' ? [[system32('clip.exe'), []]] : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['-b', '-i']]]
-  // A clipboard tool that hangs (X forwarded over a slow link) must not freeze the board.
-  const isNative = tools.some(([tool, rest]) => spawnSync(tool, rest, { cwd: dirname(path), input: text, stdio: ['pipe', 'ignore', 'ignore'], timeout: 2000 }).status === 0)
+    process.platform === 'darwin' ? [['pbcopy', []]] : process.platform === 'win32' ? windowsClipboard(text) : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['-b', '-i']]]
+  // A clipboard tool that hangs (X forwarded over a slow link) must not freeze the board. PowerShell
+  // takes about a second to start, so it gets 5 s; it reads the text from its command, not its input,
+  // and runs hidden so no console window flashes.
+  const isNative = tools.some(([tool, rest]) => {
+    const isPowershell = tool === powershell()
+    return spawnSync(tool, rest, { cwd: dirname(path), input: isPowershell ? undefined : text, stdio: ['pipe', 'ignore', 'ignore'], timeout: isPowershell ? 5000 : 2000, windowsHide: isPowershell }).status === 0
+  })
   return isNative || isOsc
+}
+
+// A browser that starts and then exits with an error at once (no display, no sandbox) opened no
+// window, so a launch counts only when it exits cleanly or is still running a moment later.
+const LAUNCH_GRACE_MS = 750
+const watchLaunch = (child: ChildProcess, onResult: (isOpen: boolean) => void): void => {
+  let isSettled = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const finish = (isOpen: boolean) => {
+    if (isSettled) return
+    isSettled = true
+    if (timer !== undefined) clearTimeout(timer)
+    onResult(isOpen)
+  }
+  child.once('error', () => finish(false))
+  child.once('exit', code => finish(code === 0))
+  child.once('spawn', () => {
+    child.unref()
+    timer = setTimeout(() => finish(true), LAUNCH_GRACE_MS)
+  })
 }
 
 // A file or a page's address in the browser. The page's address holds only letters, digits,
@@ -616,13 +708,10 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) return done(false)
   const fallback = () => {
     const opener = process.platform === 'win32' ? [system32('cmd.exe'), ['/c', 'start', '', target]] : process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]]
-    // Not waited on: with no desktop, xdg-open can run a text browser that never returns, and the
-    // agent's command would wait with it.
+    // Waited on only for the launch grace: with no desktop, xdg-open can run a text browser that
+    // never returns, and the agent's command would wait with it.
     try {
-      const child = spawn(opener[0] as string, opener[1] as string[], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: true })
-      child.once('error', () => done(false))
-      child.once('spawn', () => done(true))
-      child.unref()
+      watchLaunch(spawn(opener[0] as string, opener[1] as string[], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: true }), done)
     } catch {
       done(false)
     }
@@ -668,20 +757,7 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
         if (!existsSync(bin)) return tryCandidate(index + 1)
       }
       const child = spawn(bin, [`--app=${target}`], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: false })
-      let settled = false
-      const onSpawn = () => {
-        if (settled) return
-        settled = true
-        child.unref()
-        done(true)
-      }
-      const onError = () => {
-        if (settled) return
-        settled = true
-        tryCandidate(index + 1)
-      }
-      child.once('spawn', onSpawn)
-      child.once('error', onError)
+      watchLaunch(child, isOpen => isOpen ? done(true) : tryCandidate(index + 1))
     } catch {
       tryCandidate(index + 1)
     }
@@ -690,21 +766,23 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
   tryCandidate(0)
 }
 
-const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
-  // Through Date.now, so a test clock reaches progress.html's Working now as it reaches the rest.
-  const now = new Date(Date.now())
-  const stamp = s.dashStamp(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`)
-  const html = path.replace(/\.md$/i, '') + '.html'
-  const home = homeOrNone()
-  const page = dashboardHtml(view(), s, path, stamp, pending(text => redact(text, home, process.platform === 'win32')), now.getTime())
-  // Named like any other file the board cannot write, so --watch reports it and runs on.
+const isRegularFile = (file: string): boolean => {
   try {
-    writeFileSync(html, page)
-    writes += 1
-  } catch (error) {
-    throw fileError(html, error)
+    const stat = lstatSync(file)
+    return stat.isFile() && !stat.isSymbolicLink()
+  } catch {
+    return false
   }
-  openInBrowser(html, isOpen => done(isOpen ? s.windowOpened() : s.windowFailed(basename(html), basename(path)), isOpen))
+}
+
+const isSymlinkOrNonRegular = (file: string): boolean => {
+  try {
+    const stat = lstatSync(file)
+    return stat.isSymbolicLink() || !stat.isFile()
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code === 'ENOENT') return false
+    return true
+  }
 }
 
 // Into the archive first, then out of the file, as the pane does: a crash between the two
@@ -715,26 +793,62 @@ const openHtml = (done: (note: string, isOpen: boolean) => void): void => {
 // the same entry text, and both leave (#231).
 const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[] } | null | typeof AGAIN, now: number): number | null => {
   const archived = new Map<string, number>()
+  const pendingFile = pendingArchivePath(path)
+  let pending: PendingArchiveRecord[] = []
+  if (isRegularFile(pendingFile)) {
+    try {
+      pending = parsePendingArchive(read(pendingFile))
+    } catch {}
+  }
+  let didRemove = false
   const wrote = rewrite(path, (text, isLast) => {
+    didRemove = false
+    const currentBoardHash = createHash('sha256').update(text).digest('hex')
     const taken = take(text, isLast)
     if (taken === AGAIN) return AGAIN
-    if (taken === null) return text
+    if (taken === null || taken.entries.length === 0) return text
+    didRemove = true
     const fresh = unwrittenEntries(taken.entries, archived)
-    if (fresh.length > 0) {
-      const part = partOf(archivePath(path, now))
-      // A previous try may have saved to the part before, the one that then reached 1 MB.
-      const earlier = monthParts(archivePath(path, now), existsSync).filter(one => one !== part).at(-1)
-      const before = earlier === undefined ? '' : read(earlier)
+    if (fresh.length > 0 || archived.size > 0) {
+      const month = archivePath(path, now)
+      const part = partOf(month)
+      // Earlier parts of this month keep the copy-count baseline stable across part rotations.
+      const earlier = monthParts(month, existsSync).filter(one => one !== part).map(read)
       const kept = rewrite(part, past => {
         // A previous process may have saved the archive but failed to remove the task.
-        const missing = missingEntries([past, before], fresh, archived)
-        return missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${missing.join('\n\n')}\n`
+        const planned = nextPendingArchive([past, ...earlier], fresh, archived, pending, currentBoardHash)
+        if (planned.missing.length === 0 && archived.size === 0) return past
+        if (isSymlinkOrNonRegular(pendingFile)) {
+          throw fileError(pendingFile, Object.assign(new Error('EEXIST: refusing to write symlinked or non-regular pending note'), { code: 'EEXIST' }))
+        }
+        const temp = `${pendingFile}.${process.pid}.${Date.now().toString(36)}.board-tmp`
+        try {
+          const fd = openSync(temp, 'wx', 0o600)
+          closeSync(fd)
+          writeFileSync(temp, JSON.stringify({ version: 1, boardHash: currentBoardHash, entries: planned.records }) + '\n')
+          renameSync(temp, pendingFile)
+        } catch (error) {
+          try { unlinkSync(temp) } catch {}
+          throw fileError(part, error)
+        }
+        pending = planned.records
+        return planned.missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${planned.missing.join('\n\n')}\n`
       })
       if (kept === null) return null
       for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     }
     return taken.text
   })
+
+  if (wrote !== null && didRemove && isRegularFile(pendingFile)) {
+    try {
+      unlinkSync(pendingFile)
+    } catch (error) {
+      const rawCode = error !== null && typeof error === 'object' && 'code' in error ? (error as { code?: unknown }).code : undefined
+      const code = typeof rawCode === 'string' && /^[A-Z0-9_]+$/.test(rawCode) ? rawCode : undefined
+      process.stderr.write(`${s.pendingNoteRemoveFailed(basename(pendingFile), code)}\n`)
+    }
+  }
 
   return wrote === null ? null : [...archived.values()].reduce((sum, one) => sum + one, 0)
 }
@@ -856,12 +970,12 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     view()
     const projects = parseProgress(read(path))
     const ledger = readQuestions(questionsPath(path))
-    const hasQuestions = projects.some(project => project.name === action.ref.project && project.tasks.some(task => (action.ref.session === null ? task.title === action.ref.title : task.auto?.session === action.ref.session) && task.steps.some(step => step.status === 'waiting')))
+    const hasQuestions = refTasks(projects, action.ref).some(task => task.steps.some(step => step.status === 'waiting'))
     if (hasQuestions && (ledger === null || !archiveQuestionsKept(projects, action.ref, ledger))) return s.questionRetentionFailed
     let retentionFailed = false
     const count = archiveOut(text => {
       const current = parseProgress(text)
-      const asking = current.some(project => project.name === action.ref.project && project.tasks.some(task => (action.ref.session === null ? task.title === action.ref.title : task.auto?.session === action.ref.session) && task.steps.some(step => step.status === 'waiting')))
+      const asking = refTasks(current, action.ref).some(task => task.steps.some(step => step.status === 'waiting'))
       if (asking && !keepAskedQuestions(current, action.ref, now, cutOffScopes(current, cutOffSpans(text, isCutSettledAt(now))))) {
         retentionFailed = true
         return { text, entries: [] }
@@ -1151,23 +1265,25 @@ const paste = (text: string, reviewToken = '') => {
   return { isAdded: true, note: found.isUnchanged ? s.pasteUnchanged : s.servePasted(found.title) }
 }
 
-// A folder only this account can use: on a shared one, another account could take the file's
-// name first and keep every page from starting.
-const isOwnFolder = (dir: string): boolean => {
-  try {
-    const found = lstatSync(dir)
-    return found.isDirectory() && (process.getuid === undefined || (found.uid === process.getuid() && (found.mode & 0o077) === 0))
-  } catch {
-    return false
-  }
-}
-
 // Windows temp folders can grant sandbox accounts access. Protect only our dedicated child,
 // never the caller's whole runtime directory, before a token can be written.
 // `name` is the address file: it is read in the same check as the folder when it is already there.
+let runtimeUnprotected = false
 const runFolder = (name: string): string => {
   const runtime = process.env.XDG_RUNTIME_DIR
-  if (process.platform === 'win32') return privateRuntimeFolder(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'), [name])
+  if (process.platform === 'win32') {
+    const folder = runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board')
+    try {
+      return privateRuntimeFolder(folder, [name])
+    } catch (error) {
+      if (!(error instanceof RuntimeFolderError)) throw error
+      // A process that cannot protect the folder (a read-only sandbox) may still read an
+      // address file a page started outside it left behind, and reuse that page. It must
+      // never start one: every later step checks this flag before writing anything.
+      runtimeUnprotected = true
+      return unprotectedRuntimeFolder(folder)
+    }
+  }
   if (runtime && isOwnFolder(runtime)) return runtime
   const own = join(homedir(), '.cache', 'agent-board')
   try {
@@ -1187,13 +1303,15 @@ let served: string | undefined
 const board = (file: string): string => resolve(file)
 const serveFile = (): string => {
   if (served !== undefined) return served
-  const name = `agent-board-${createHash('sha256').update(board(path)).digest('hex').slice(0, 16)}.json`
+  const name = addressFileName(board(path))
   return (served = join(runFolder(name), name))
 }
+const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? serveFile().replace(/\.json$/, '-messages'))
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
 const built = (() => {
+  if (args.includes('--status')) return ''
   try {
     return String(statSync(script).mtimeMs)
   } catch {
@@ -1259,52 +1377,71 @@ const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unk
 }
 
 const serveChild = (): void => {
-  // Fail within run's bounded error handler before any asynchronous server callback exists.
+  // Resolve the protected address before asynchronous callbacks can run.
   const file = serveFile()
-  startServer({
-    allowResume: args.includes('--allow-resume'),
-    messagesDirectory: flag('--messages-dir'),
-    reports: () => parseProgress(read(path)).flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }])),
-    s,
-    port: Number(flag('--port') ?? 0) || 0,
-    ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: flag('--messages-dir') ? resolve(flag('--messages-dir')!) : null },
-    // Every page request starts by reading the board.
-    view: freshView,
-    pending: (isFresh = true) => pending(undefined, isFresh),
-    act,
-    tidy,
-    paste,
-    clean: cleanUp,
-    sweep: () => { tidyCount(false, true) },
-    // Tests can shorten the hourly interval without changing the sweep rules.
-    sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,
-    // The page names a file it could not read or write the way the terminal board does, for a
-    // press and for the board it shows. The page is answered, so the exit code and stderr are
-    // left alone. File labels and reasons stay the same on local and network pages.
-    failure: error => (error instanceof BoardFileError ? storageNote(error) : null),
-    idleMs: idleMs(),
-    onReady: (url, port) => {
-      // Without its address file no later `--serve` finds this page, and each would start one
-      // more; so it does not start at all. Nor when the file is there already: another
-      // `--serve` started a page at the same moment and wrote first, and that one is the page.
-      try {
-        const text = JSON.stringify({ pid: process.pid, port, url, path, built })
-        if (process.platform === 'win32') writePrivateRuntimeFile(file, text)
-        else writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
-      } catch {
-        return false
-      }
-      // The one line `--serve` waits for. Its pipe closes once it has read it.
-      process.stdout.on('error', () => undefined)
-      process.stdout.write(`${url}\n`)
-      return true
-    },
-    onStop: () => {
-      // The file goes only while it is still this server's: a newer one may have taken it over.
-      unlinkIf(file, () => readRunning(file)?.pid === process.pid)
-      process.exit(0)
-    },
-  })
+  // A child that could not protect the folder cannot start a page: its address file would
+  // be unprotected. The parent reuses a running page itself; a child on its own refuses.
+  if (runtimeUnprotected) throw new RuntimeFolderError()
+  try {
+    startServer({
+      allowResume: args.includes('--allow-resume'),
+      messagesDirectory: messagesDirectory(),
+      isDefaultMessagesDirectory: flag('--messages-dir') === undefined,
+      reports: (isFresh = true) => {
+        // A page snapshot follows its synchronous view read. Handoff requests
+        // still read current bytes instead of accepting an older page's baseline.
+        const projects = !isFresh && progressProjectCache !== null ? progressProjectCache.projects : parseProgress(read(path))
+        return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
+      },
+      s,
+      port: Number(flag('--port') ?? 0) || 0,
+      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
+      // Every page request starts by reading the board.
+      view: freshView,
+      pending: (isFresh = true) => pending(undefined, isFresh),
+      act,
+      tidy,
+      paste,
+      clean: cleanUp,
+      sweep: () => { tidyCount(false, true) },
+      // Tests can shorten the hourly interval without changing the sweep rules.
+      sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,
+      // The page names a file it could not read or write the way the terminal board does, for a
+      // press and for the board it shows. The page is answered, so the exit code and stderr are
+      // left alone. File labels and reasons stay the same on local and network pages.
+      failure: error => (error instanceof BoardFileError ? storageNote(error) : null),
+      idleMs: idleMs(),
+      onReady: (url, port) => {
+        // Without its address file no later `--serve` finds this page, and each would start one
+        // more; so it does not start at all. Nor when the file is there already: another
+        // `--serve` started a page at the same moment and wrote first, and that one is the page.
+        try {
+          const text = JSON.stringify({ pid: process.pid, port, url, path, built })
+          if (process.platform === 'win32') writePrivateRuntimeFile(file, text)
+          else writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
+        } catch {
+          return false
+        }
+        // The one line `--serve` waits for. Its pipe closes once it has read it.
+        process.stdout.on('error', () => undefined)
+        process.stderr.on('error', () => undefined)
+        process.stdout.write(`${url}\n`)
+        return true
+      },
+      onStop: () => {
+        // The file goes only while it is still this server's: a newer one may have taken it over.
+        unlinkIf(file, () => readRunning(file)?.pid === process.pid)
+        process.exit(0)
+      },
+    })
+  } catch (error) {
+    if (!(error instanceof Error) || error.cause !== 'MESSAGE_STORE_FAILED') throw error
+    const errno = (error as NodeJS.ErrnoException).code
+    const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message
+      : typeof errno === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(errno) ? errno : 'UNREADABLE'
+    process.stderr.write(`MESSAGE_STORE_FAILED ${code}\n`)
+    process.exitCode = 1
+  }
 }
 
 // The page at that address is asked to close, and whether it agreed is answered. It refuses while
@@ -1332,6 +1469,17 @@ const stays = async (running: Running, file: string): Promise<boolean> => {
   return false
 }
 
+// A page already running, found without asking it to close and without touching its file. A
+// process that cannot start a replacement reuses the link as it is, even when the page would
+// not match a new start: closing it would leave no page and no link.
+const keptPage = async (file: string): Promise<Running | null> => {
+  const running = readRunning(file)
+  if (running === null) return null
+  const answer = await ping(running)
+  if (answer === 'silent' ? isRunning(running.pid) : answer !== null) return running
+  return null
+}
+
 // The running page of this copy for this file, or null. Any other page found in the file (one
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
@@ -1351,7 +1499,7 @@ const runningPage = async (isStarting = false): Promise<{ page: Running; isKept:
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
   const requestedStale = staleTimeoutMs()
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === resolve(flag('--messages-dir')!)) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
@@ -1385,14 +1533,23 @@ interface RunningServer {
   idleMs?: number | undefined
 }
 
-const ensureServer = async (): Promise<RunningServer | null> => {
+const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningServer | null> => {
   const file = serveFile()
-  if (process.platform === 'win32' && !existsSync(file)) {
+  // A folder that could not be protected is read-only: no legacy address is ever moved into
+  // it, and no page is ever started from it. Only a page already running is reused.
+  if (process.platform === 'win32' && !runtimeUnprotected && !existsSync(file)) {
     const runtime = process.env.XDG_RUNTIME_DIR
     const legacy = [runtime ? join(runtime, basename(file)) : '', join(tmpdir(), basename(file))]
     for (const previous of new Set(legacy.filter(value => value !== '' && value !== file))) {
       if (!existsSync(file)) migratePrivateRuntimeFile(previous, file, text => parseRunning(text) !== null)
     }
+  }
+  // A lookup that cannot start a replacement never asks a page to close: the page it finds
+  // is reused as it is, even when it would not match a new start.
+  if (runtimeUnprotected) {
+    const kept = (await keptPage(oldServeFile)) ?? (await keptPage(file))
+    if (kept !== null) return { url: kept.url, port: kept.port, isKept: true, isNew: false }
+    throw new RuntimeFolderError()
   }
   const old = readRunning(oldServeFile)
   if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
@@ -1403,42 +1560,105 @@ const ensureServer = async (): Promise<RunningServer | null> => {
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
-  // In the board's own folder, not the agent's, so the server holds no project folder open.
   // On Windows the server child is told which folder was just checked, so it does not check it again.
   const handoff = runtimeFolderHandoff()
-  const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: serverMemoryEnv(handoff === undefined ? process.env : { ...process.env, [RUNTIME_FOLDER_ENV]: handoff }) })
-  const readyBy = performance.now() + 10_000
-  // The child prints its address once it listens; it exits at once when it cannot.
-  const url = await new Promise<string | null>(done => {
-    let out = ''
-    const timer = setTimeout(() => done(null), Math.max(0, readyBy - performance.now()))
-    const end = (value: string | null): void => {
-      clearTimeout(timer)
-      done(value)
-    }
-    child.stdout?.on('data', (chunk: Buffer) => {
-      out += chunk.toString('utf8')
-      if (out.includes('\n')) end(out.split('\n')[0]?.trim() || null)
+  const childEnv = serverMemoryEnv(handoff === undefined ? process.env : { ...process.env, [RUNTIME_FOLDER_ENV]: handoff })
+  const startPage = async (): Promise<{ url: string | null; stderr: string; readyBy: number }> => {
+    // In the board's own folder, not the agent's, so the server holds no project folder open.
+    const readyBy = performance.now() + 10_000
+    const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: childEnv })
+    let stderr = ''
+    child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-16_384) })
+    // The child prints its address once it listens; it exits at once when it cannot.
+    const url = await new Promise<string | null>(done => {
+      let out = ''
+      const timer = setTimeout(() => done(null), Math.max(0, readyBy - performance.now()))
+      const end = (value: string | null): void => {
+        clearTimeout(timer)
+        done(value)
+      }
+      child.stdout?.on('data', (chunk: Buffer) => {
+        out += chunk.toString('utf8')
+        if (out.includes('\n')) end(out.split('\n')[0]?.trim() || null)
+      })
+      child.once('close', () => end(null))
+      child.once('error', () => end(null))
     })
-    child.once('exit', () => end(null))
-    child.once('error', () => end(null))
-  })
-  // One that has not answered in time would start late and hold a page nobody was told about.
-  if (url === null && child.exitCode === null) child.kill()
-  child.stdout?.destroy()
-  child.unref()
-  if (url === null) {
-    let other = await runningPage(true)
-    while (other === null && process.platform === 'win32' && performance.now() < readyBy) {
-      if (!existsSync(file)) break
-      await new Promise<void>(done => setTimeout(done, 50))
-      other = await runningPage(true)
+    // One that has not answered in time would start late and hold a page nobody was told about.
+    if (url === null && child.exitCode === null) child.kill()
+    child.stdout?.destroy()
+    child.stderr?.destroy()
+    child.unref()
+    return { url, stderr, readyBy }
+  }
+  // Whether the lock no longer holds `held`: gone, or another pid. A lock that cannot be read counts as unchanged.
+  const isTaken = (lock: string, held: string): boolean => {
+    try { return readFileSync(lock, 'utf8') !== held } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' }
+  }
+  const deadline = performance.now() + 20_000
+  while (performance.now() < deadline) {
+    const { url, stderr, readyBy } = await startPage()
+    if (url !== null) return { url, port: Number(new URL(url).port), isKept: false, isNew: true }
+    // Another `--serve` started at the same moment may have written its address first: this
+    // page stopped then, and that one is the page to show. When it took the message folder
+    // first, this page stopped before that one had written its address, so it is given the
+    // few seconds a page takes to start.
+    const storeCode = /^MESSAGE_STORE_FAILED ([A-Z][A-Z0-9_]{0,63})\r?$/m.exec(stderr)?.[1]
+    const lock = join(messagesDirectory(), 'server.lock')
+    let held = ''
+    if (storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
+      try {
+        held = readFileSync(lock, 'utf8')
+      } catch { held = '' }
     }
-    if (other !== null) return { url: other.page.url, port: other.page.port, isKept: other.isKept, isNew: false, idleMs: other.idleMs }
+    const until = storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
+    for (;;) {
+      const other = await runningPage(true)
+      if (other !== null) return { url: other.page.url, port: other.page.port, isKept: other.isKept, isNew: false, idleMs: other.idleMs }
+      if (performance.now() >= until) break
+      // A protected Windows address may still be publishing within this launch deadline.
+      if (storeCode !== 'MESSAGE_STORE_IN_USE' && (process.platform !== 'win32' || !existsSync(file))) break
+      await new Promise(done => setTimeout(done, storeCode === 'MESSAGE_STORE_IN_USE' ? 100 : 50))
+    }
+    if (held === '' && storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
+      try { held = readFileSync(lock, 'utf8') } catch { held = '' }
+    }
+    // A hub killed without stopping leaves its pid, and after a restart that number can belong to
+    // another program. The hub of the default folder leaves its address beside the lock, so the
+    // lock is moved only when that address no longer answers. A hub still starting has no address
+    // yet, and another board using this folder through --messages-dir writes none and removes
+    // any left from before it took the lock, so neither is ever taken over. A folder given here
+    // through --messages-dir is never taken over either.
+    if (/^[1-9][0-9]*$/.test(held)) {
+      let isMoved = false
+      let releaseClaim: (() => void) | undefined
+      try {
+        const claim = claimMessageStore(messagesDirectory())
+        releaseClaim = claim.release
+        const owner = JSON.parse(readFileSync(join(messagesDirectory(), 'server.owner'), 'utf8')) as Partial<Running>
+        if (owner.pid === Number(held) && typeof owner.port === 'number' && Number.isInteger(owner.port) && typeof owner.url === 'string'
+          && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url)
+          && owner.port === Number(new URL(owner.url).port)
+          && await ping({ pid: owner.pid, port: owner.port, url: owner.url, path: '', built: '' }, 5000) === null
+          && readFileSync(lock, 'utf8') === held) {
+          isMoved = moveLockAside(lock, held, claim)
+        }
+      } catch {} finally { releaseClaim?.() }
+      // Another try only when this --serve moved the lock, or the lock is gone or holds another pid.
+      // It may be gone because its hub stopped meanwhile; another --serve's page may still be starting.
+      // The next try waits for that page; the same pid (put back, or never moved) is not tried again.
+      if (isMoved || isTaken(lock, held)) continue
+    } else if (storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
+      // Collision in claims or another start is in flight: back off with randomized jitter, then retry or wait for its page
+      await new Promise(done => setTimeout(done, Math.floor(Math.random() * 150) + 50))
+      const afterWait = await runningPage(true)
+      if (afterWait !== null) return { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs }
+      if (performance.now() < deadline) continue
+    }
+    if (failure !== undefined && storeCode !== undefined) failure.storeCode = storeCode
     return null
   }
-  const port = Number(new URL(url).port)
-  return { url, port, isKept: false, isNew: true }
+  return null
 }
 
 // Prints the board, then the address of its page, started in the background if no page of this
@@ -1456,42 +1676,31 @@ const serveBoard = async (): Promise<void> => {
     if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)) await new Promise<void>(done => openInBrowser(url, () => done()))
     if (args.includes('--lan')) await showLan(url)
   }
-  const server = await ensureServer()
+  const failure: { storeCode?: string } = {}
+  const server = await ensureServer(failure)
   if (server === null) {
-    process.stdout.write(`\n${s.serveFailed(s.serveNotStarted)}\n`)
+    process.stdout.write(`\n${failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted)}\n`)
     return
   }
   await show(server.url, server.isKept, server.idleMs)
 }
 
-const openPageSurface = async (): Promise<void> => {
-  const server = await ensureServer()
+const openPage = async (): Promise<{ note: string; isOpen: boolean }> => {
+  const failure: { storeCode?: string } = {}
+  const server = await ensureServer(failure)
   if (server === null) {
-    process.stdout.write(`${s.serveFailed(s.serveNotStarted)}\n`)
     process.exitCode = 1
-    return
+    return { note: failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted), isOpen: false }
   }
-  const v = view()
-  const waiting = v.overview.waiting
-  const urgent = v.overview.due
-  const whatNeedsYou = waiting > 0 ? (urgent > 0 ? `${s.statusWaiting(waiting)} · ${s.statusDue(urgent)}` : s.statusWaiting(waiting)) : (urgent > 0 ? s.statusDue(urgent) : s.pgNothing)
-  const howManyWorking = s.groupWorking(v.overview.active)
-
   const address = server.url
-  if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)) {
-    await new Promise<void>(done => openInBrowser(address, isOpen => {
-      if (!isOpen && !process.env.SSH_CONNECTION && !process.env.SSH_TTY) {
-        process.stdout.write(`${s.serveBrowserNone(address)}\n`)
-      }
-      done()
-    }, true))
-  }
+  const isOpen = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
+    ? await new Promise<boolean>(done => openInBrowser(address, done, true))
+    : false
+  return { note: isOpen ? s.boardPageWindowOpened(address) : s.boardPageLink(address), isOpen }
+}
 
-  if (server.isNew) {
-    process.stdout.write(`${whatNeedsYou}\n${howManyWorking}\n${s.serveAt(server.url)}\n`)
-  } else {
-    process.stdout.write(`${s.serveAlreadyRunning}\n${whatNeedsYou} · ${howManyWorking}\n${s.serveAt(server.url)}\n`)
-  }
+const openPageSurface = async (): Promise<void> => {
+  process.stdout.write(`${(await openPage()).note}\n`)
 }
 
 const stopBoard = async (): Promise<void> => {
@@ -1547,6 +1756,42 @@ const chat = (): void => {
     const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
     process.stdout.write(`${redact(told, homeOrNone(), isWin)}\n`)
   }
+}
+
+const jsonFailure = (error: unknown): void => {
+  process.exitCode = 1
+  const home = homeOrNone()
+  const isWin = process.platform === 'win32'
+  const code = (error as { code?: unknown } | null)?.code
+  const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0] || error.name : 'UNKNOWN'
+  const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
+  process.stdout.write(`${JSON.stringify({ schemaVersion: BOARD_JSON_SCHEMA, error: redact(clipped(plain(told), home, isWin), home, isWin) })}\n`)
+}
+
+const json = (): void => {
+  try {
+    const now = Date.now()
+    const home = homeOrNone()
+    const isWin = process.platform === 'win32'
+    const source = read(path)
+    const updates = pending(text => redact(text, home, isWin))
+    const current = view(source, now)
+    const board = RELEASED.reduce((held, release) => {
+      const next = release.version.split('.').map(Number)
+      const previous = held.split('.').map(Number)
+      for (let index = 0; index < 3; index += 1) {
+        if ((next[index] ?? 0) !== (previous[index] ?? 0)) return (next[index] ?? 0) > (previous[index] ?? 0) ? release.version : held
+      }
+      return held
+    }, '0.0.0')
+    const packageVersion = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
+    const group = {
+      now, repoOf: repoLookup(worktreeRepoName),
+      versions: { board, package: /^\d+\.\d+\.\d+$/.test(packageVersion) ? packageVersion : null },
+      unreadable: current.unreadable ?? [],
+    }
+    process.stdout.write(`${JSON.stringify(boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group))}\n`)
+  } catch (error) { jsonFailure(error) }
 }
 
 const runWatchTerminal = async (): Promise<void> => {
@@ -1605,8 +1850,11 @@ const runWatchTerminal = async (): Promise<void> => {
         state = pressed.state
         if (pressed.isQuit) quit()
         if (pressed.isHtml) {
-          openHtml((note, isOpen) => {
+          void openPage().then(({ note, isOpen }) => {
             state = { ...state, note, tone: isOpen ? 'done' : 'alert', result: undefined }
+            draw()
+          }).catch(error => {
+            state = { ...state, note: failureNote(error), tone: 'alert', result: undefined }
             draw()
           })
         }
@@ -1632,6 +1880,15 @@ const runWatchTerminal = async (): Promise<void> => {
 }
 
 const run = async (): Promise<void> => {
+  // Setup keeps its own --json protocol; a board read wins over every action flag.
+  if (isJsonBoard) {
+    json()
+    return
+  }
+  if (args.includes('--status')) {
+    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs())}\n`)
+    return
+  }
   const request = flag('--legacy-connect-request')
   if (request !== undefined) {
     const trusted = (globalThis as { AGENT_BOARD_WORKER_SOURCE?: string }).AGENT_BOARD_WORKER_SOURCE
@@ -1655,9 +1912,11 @@ const run = async (): Promise<void> => {
   } else if (args.includes('--serve')) {
     await serveBoard()
   } else if (args.includes('--html')) {
-    openHtml(note => process.stdout.write(`${note}\n`))
+    await openPageSurface()
   } else if (args.includes('--print')) {
-    process.stdout.write(boardText(view(), pending(), s, options()))
+    // The explicit read-only print retains the questions and journal the old chat view showed.
+    const at = Date.now()
+    process.stdout.write(boardText(view(undefined, at), pending(), s, { ...options(), isQuestionsOpen: true }, doneToday(journalToday(at), at, s)))
   } else if (flag('--keys') !== undefined) {
     let state = emptyBoardState
     await refreshRoutes()
@@ -1671,10 +1930,10 @@ const run = async (): Promise<void> => {
         await refreshRoutes()
       }
       if (pressed.isHtml) {
-        await new Promise<void>(done => {
-          try { openHtml((note, isOpen) => { state = { ...state, note, tone: isOpen ? 'done' : 'alert' }; done() }) }
-          catch (error) { state = { ...state, note: failureNote(error), tone: 'alert' }; done() }
-        })
+        try {
+          const { note, isOpen } = await openPage()
+          state = { ...state, note, tone: isOpen ? 'done' : 'alert' }
+        } catch (error) { state = { ...state, note: failureNote(error), tone: 'alert' } }
       }
     }
     process.stdout.write(screen(pin(state)))
@@ -1722,7 +1981,9 @@ const run = async (): Promise<void> => {
 try {
   await run()
 } catch (error) {
-  if (error instanceof RuntimeFolderError) {
+  if (isJsonBoard) {
+    jsonFailure(error)
+  } else if (error instanceof RuntimeFolderError) {
     process.exitCode = 1
     const output = args.includes('--serve-child') ? process.stderr : process.stdout
     output.write(`${s.serveRuntimePrivate}\n`)
