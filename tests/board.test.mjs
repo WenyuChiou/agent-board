@@ -2012,6 +2012,67 @@ test('killing the page mid-flush and restarting it re-queues the missing capture
   }
 })
 
+// #921: a resolved capture is written synchronously inside the resolving view,
+// not queued for the background flush. After a restart copiesToKeep emits
+// nothing for a record the ledger already holds resolved, so a queued resolved
+// copy lost to an exit is never re-derived. The view here runs in-process, so
+// the assertions run in the same tick as the view: no flush tick can have run
+// yet, and a resolved file on disk can only be the synchronous write.
+test('a view that resolves a question writes its resolved capture synchronously, before the flush runs', { timeout: 30_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-921-resolved-'))
+  const path = join(dir, 'progress.md')
+  const source = `# Progress\n\n## Synthetic\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${ago(60000)} resume=a1b2c3d4 -->\n### Answer this\n- [?] Ship it, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
+  writeFileSync(path, source)
+  const script = join(dir, 'worker.mjs')
+  const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${skipped}\nexport { view, path };\n`)
+  const previousArgs = process.argv
+  const previousBoard = globalThis.AGENT_BOARD
+  const previousProgress = process.env.CLAUDE_PROGRESS_FILE
+  let runtime
+  try {
+    process.argv = [process.execPath, script, '--keys', 'q']
+    delete process.env.CLAUDE_PROGRESS_FILE
+    runtime = await import(pathToFileURL(script).href)
+  } finally {
+    globalThis.AGENT_BOARD = previousBoard; process.argv = previousArgs
+    if (previousProgress === undefined) delete process.env.CLAUDE_PROGRESS_FILE
+    else process.env.CLAUDE_PROGRESS_FILE = previousProgress
+  }
+  try {
+    const captures = () => readdirSync(dir).filter(name => name.includes('-questions-source-')).map(name => JSON.parse(readFileSync(join(dir, name), 'utf8')))
+    // The first view opens the question, so its unresolved capture is queued,
+    // not written — and no flush tick has run yet, so nothing is on disk.
+    runtime.view()
+    assert.equal(captures().length, 0, 'no capture may land before the flush runs')
+    // Tick the question done: the next view observes the open-to-resolved
+    // transition, and the resolved capture must be on disk the moment that
+    // view returns, with no drain wait.
+    writeFileSync(path, source.replace('- [?] Ship it, OK?', '- [x] Ship it, OK?'))
+    runtime.view()
+    const landed = captures()
+    const resolved = landed.filter(one => one.disposition === 'resolved')
+    assert.equal(resolved.length, 1, `the resolving view must write the resolved capture synchronously, got ${JSON.stringify(landed.map(one => one.disposition))}`)
+    assert.equal(resolved[0].record.isUnresolved, false)
+    // The control: the unresolved capture is still queued, not on disk — no
+    // flush tick ran, so the resolved file above is the synchronous write.
+    assert.equal(landed.filter(one => one.disposition === 'unresolved').length, 0, 'the flush must not have run yet')
+    // The same pass retires the record (its block no longer waits on it), so
+    // the ledger keeps it unresolved with a retirement proof — and a restart
+    // emits no resolved copy for it. The file above is the only receipt.
+    const ledger = JSON.parse(readFileSync(join(dir, 'progress-questions.json'), 'utf8'))
+    const record = ledger.records.find(one => one.id === resolved[0].record.id)
+    assert.equal(record?.isWaiting, false)
+    assert.equal(record?.isPresent, false)
+    const retired = readdirSync(dir).filter(name => name.startsWith('progress-questions-retired-'))
+    assert.equal(retired.length, 1, `the resolving view must retire the record, got ${JSON.stringify(retired)}`)
+    assert.equal(JSON.parse(readFileSync(join(dir, retired[0]), 'utf8')).hash, createHash('sha256').update(resolved[0].record.id).digest('hex'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
 test('live blocks of every agent refuse forged web archives without writes and terminal a and tidy preserve them', { timeout: 30_000 }, async () => {
   const agents = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek', 'custom-agent']
   const blocks = agents.flatMap((agent, index) => ['working', 'waiting'].map((state, n) => {

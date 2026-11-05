@@ -553,8 +553,13 @@ const readBoardView = (source: string, now: number) => {
       if (emptyCopyCache?.current !== current || emptyCopyCache.captures !== captures || emptyCopyCache.observed !== nextText) {
         // Pending captures count as held: a copy already queued is not queued
         // again, and the view returns without waiting for the flush (#921).
+        // A resolved copy is written synchronously instead: after a restart
+        // copiesToKeep emits nothing for a record the ledger already holds
+        // resolved, so a queued resolved copy lost to an exit is never
+        // re-derived. Unresolved copies are re-derived, so only they queue.
         const copies = copiesToKeep(current, next, [...captures, ...pendingQuestionCaptures.values()])
-        queueQuestionCaptures(copies)
+        for (const copy of copies) if (copy.disposition === 'resolved') keepQuestionCapture(copy.record, copy.disposition)
+        queueQuestionCaptures(copies.filter(copy => copy.disposition === 'unresolved'))
         if (copies.length === 0) emptyCopyCache = { current, captures, observed: nextText }
       }
       for (const id of identitiesToRetire(current, next, resolvedQuestionsToRetire(current, projects, null, turns, frozen), proofs?.retired)) keepQuestionProof('retired', sha256(id))
