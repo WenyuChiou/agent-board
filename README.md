@@ -58,6 +58,8 @@ In the new session, open the board with its entry:
 - **I use Antigravity:** `/agent-board` (checked in a synthetic home, not run live yet)
 - **I use OpenCode:** `/board`
 
+To add a task of your own, type `+ project: title; step; step` in the pane's box, or `/progress add …` in an agent's chat.
+
 <details>
 <summary><b>Without npm: install from a checkout</b></summary>
 

@@ -9096,6 +9096,43 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
   assert.equal(questionOwn.getAttribute('title'), 'Your own tasks: 1 needs you')
 })
 
+test('a hand-written own task with one unfinished step shows no Last: for it and one Done button per step', async () => {
+  const model = redesignModel()
+  model.groups = [{
+    project: 'home',
+    rows: [{
+      key: 'row:own:1', project: 'home', title: 'Draft the notes', isOwn: true,
+      steps: [{ text: 'Draft the notes', note: '', status: 'todo', isCurrent: true }],
+      next: 'Draft the notes',
+    }],
+  }]
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const board = dom.node('board').textContent
+  assert.ok(!board.includes('Last: Draft the notes'), board)
+  assert.equal(dom.buttons().filter(button => button.textContent === 'Done: Draft the notes').length, 1)
+})
+
+test('an own task with a finished step still shows Last: for the finished step', async () => {
+  const model = redesignModel()
+  model.groups = [{
+    project: 'home',
+    rows: [{
+      key: 'row:own:1', project: 'home', title: 'Draft the notes', isOwn: true,
+      steps: [
+        { text: 'Draft the outline', note: '', status: 'done', isCurrent: false },
+        { text: 'Draft the notes', note: '', status: 'todo', isCurrent: true },
+      ],
+      next: 'Draft the notes',
+    }],
+  }]
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const board = dom.node('board').textContent
+  assert.ok(board.includes('Last: Draft the outline'), board)
+  assert.ok(!board.includes('Last: Draft the notes'), board)
+  assert.equal(dom.buttons().filter(button => button.textContent === 'Done: Draft the notes').length, 1)
+  assert.equal(dom.buttons().filter(button => button.textContent === 'Done: Draft the outline').length, 0)
+})
+
 test('on a wide screen the sidebar lists views, agents and projects', async () => {
   const { board, model, html } = await groupedPage()
   try {
