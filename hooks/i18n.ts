@@ -128,6 +128,7 @@ export const ZH_TW = {
   setupSummary: {
     "preview": "將更新 {count} 個設定檔案",
     "applied": "已更新 {count} 個設定檔案",
+    "current": "{count} 個已是最新",
     "ready": "已設定完成",
     "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案，再執行 {command} 重試。",
     "retry": "修正衝突的檔案後重試：{command}",
@@ -138,7 +139,14 @@ export const ZH_TW = {
     "apply": "套用這些變更：{command}",
     "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。然後開始新的工作階段。",
     "codexMissing": "Codex：setup 找不到 Codex；請在 PowerShell 執行 where.exe codex 或在 bash 執行 command -v codex，再用 --codex-bin 傳入完整路徑。",
-    "reload": "{host}：啟用回報 hooks 或外掛，再開始新的工作階段。",
+    "antigravity": "Antigravity：開始新的對話；setup 已設定回報 hooks。",
+    "cursor": "Cursor：在 Cursor 或 cursor-agent 開始新的對話；setup 已設定回報 hooks。",
+    "grok": "Grok Build：開始新的工作階段；setup 已設定回報 hooks。",
+    "muse": "Muse Code：開始新的工作階段；setup 已設定回報 hooks。",
+    "gemini": "Gemini CLI：開始新的工作階段；setup 已設定回報 hooks。",
+    "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛，再開始新的工作階段。",
+    "openclaw": "OpenClaw：重新啟動 OpenClaw，載入 setup 產生的 agent-board 外掛，再開始新的對話。",
+    "deepseek": "DeepSeek：重新啟動 Cordis CLI，載入 setup 產生的 agent-board 外掛，再開始新的工作階段。",
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
     "plugin": "Claude Code：執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。",
     "board": "開啟看板：{command}"

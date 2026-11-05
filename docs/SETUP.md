@@ -23,6 +23,11 @@ line gives the `--agent <name>` command to retry after fixing its files. Setup e
 nonzero when every selected agent has a conflict. A second run with nothing to change
 says each agent is already set up and writes nothing.
 
+When several selected agents share files, apply also counts the files an earlier agent
+already updated as already current. The next steps name each host's actual action:
+start a new session for hooks already configured, or restart the named host to load its
+generated plugin. Installing the files does not verify a live host connection.
+
 Without `--lang`, setup uses `LANG`, then the system language, else English, and writes that language into the files it installs.
 
 Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`),

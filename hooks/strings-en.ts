@@ -90,6 +90,7 @@ export const EN: Strings = {
   setupSummary: {
     "preview": "would update {count} setup files",
     "applied": "updated {count} setup files",
+    "current": "{count} already current",
     "ready": "already set up",
     "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry with {command}.",
     "retry": "Retry after fixing the conflicting files: {command}",
@@ -100,7 +101,14 @@ export const EN: Strings = {
     "apply": "Apply these changes: {command}",
     "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works). Then start a new session.",
     "codexMissing": "Codex: setup could not find Codex; run where.exe codex in PowerShell or command -v codex in bash, then pass its full path to --codex-bin.",
-    "reload": "{host}: enable its reporting hooks or plugin, then start a new session.",
+    "antigravity": "Antigravity: start a new conversation; setup has already configured its reporting hooks.",
+    "cursor": "Cursor: start a new chat in Cursor or cursor-agent; setup has already configured its reporting hooks.",
+    "grok": "Grok Build: start a new session; setup has already configured its reporting hooks.",
+    "muse": "Muse Code: start a new session; setup has already configured its reporting hooks.",
+    "gemini": "Gemini CLI: start a new session; setup has already configured its reporting hooks.",
+    "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin, then start a new session.",
+    "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin, then start a new chat.",
+    "deepseek": "DeepSeek: restart the Cordis CLI to load its generated agent-board plugin, then start a new session.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
     "board": "Open the board: {command}"
