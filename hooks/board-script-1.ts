@@ -12938,7 +12938,7 @@ export const LINES = [
 "      if (task.shelf !== \"open\" || task.hasCard || task.isOwn)",
 "        return false;",
 "      const source = task.source;",
-"      const isDoing = typeof source === \"object\" && source !== null && \"steps\" in source && Array.isArray(source.steps) && source.steps.some((step) => step.status === \"doing\" || step.status === \"running\");",
+"      const isDoing = typeof source === \"object\" && source !== null && \"steps\" in source && Array.isArray(source.steps) && source.steps.some((step) => step.status === \"doing\");",
 "      return isDoing || task.at > 0 && now - task.at <= WORKING_MS2;",
 "    }),",
 "    quiet: quietOf(cards, sortedTasks, now),",

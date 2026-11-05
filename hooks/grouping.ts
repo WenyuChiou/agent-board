@@ -426,11 +426,11 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
       older: sortedOlder,
     },
     // Rows that wait on the person are on the Needs you list, and a hand-kept task is not an agent at work.
-    // A working row with a doing/running step remains counted even after 30 minutes.
+    // A working row with a doing step remains counted even after 30 minutes.
     working: sortedTasks.filter(task => {
       if (task.shelf !== 'open' || task.hasCard || task.isOwn) return false
       const source = task.source
-      const isDoing = typeof source === 'object' && source !== null && 'steps' in source && Array.isArray(source.steps) && source.steps.some(step => step.status === 'doing' || step.status === 'running')
+      const isDoing = typeof source === 'object' && source !== null && 'steps' in source && Array.isArray(source.steps) && source.steps.some(step => step.status === 'doing')
       return isDoing || (task.at > 0 && now - task.at <= WORKING_MS)
     }),
     quiet: quietOf(cards, sortedTasks, now),
