@@ -8927,14 +8927,14 @@ test('an agent not heard from for 30 minutes keeps its icon colours, and its sta
   }
 })
 
-test('the agent list says working, open, closed or not heard from, and a word alone needs no count', async () => {
+test('the agent list says closed for an agent whose sessions ended, with no question left', async () => {
   const model = redesignModel()
   model.stopped[0] = { ...model.stopped[0], isClosed: true }
   model.asks = []
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   const gemini = sideAgent(dom, 'gemini')
   assert.equal(gemini.getAttribute('data-presence'), 'offline')
-  assert.equal(gemini.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgOffline}`)
+  assert.equal(gemini.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgOffline}: ${EN.pgChipEmpty}`)
   assert.ok(shownWords(gemini).includes(EN.pgOffline))
 })
 
@@ -9354,7 +9354,7 @@ test('an agent with a recently finished task and no closed session shows as open
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   const node = rowAgent(dom, 'codex')
   assert.equal(node.getAttribute('data-presence'), 'open')
-  assert.equal(node.getAttribute('aria-label'), 'Codex: No work yet')
+  assert.equal(node.getAttribute('aria-label'), `Codex · ${EN.pgStateOpen}: No work yet`)
 })
 
 test('the own tasks chip label shows open task counts instead of empty when to-dos are open', async () => {
@@ -9754,7 +9754,7 @@ test('the page uses ink for actions and amber only for what needs you', async ()
   assert.deepEqual(using('accent'), [], 'the blue accent is not on the live page')
   // Green is for what is alive, red for what is wrong, and a finished task is muted.
   assert.ok(html.includes('--alive:var(--done)'))
-  assert.deepEqual(using('alive'), ['.chip.working::after', '.s-agent.working .ag::after', '.s-running', '.v-working>svg.i'].sort())
+  assert.deepEqual(using('alive'), ['.chip.working::after', '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', '.s-agent.working .ag::after', '.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after', '.s-running', '.v-working>svg.i'].sort())
   for (const selector of ['#offline', '.t-alert', '.badge.bad', '.s-blocked']) assert.ok(using('alert').includes(selector), selector)
   assert.ok(rules.some(([selector, body]) => selector.includes('.s-done') && body.includes('var(--muted)')))
 })

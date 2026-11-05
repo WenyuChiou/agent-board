@@ -1871,7 +1871,7 @@ const PAGE_SCRIPT = String.raw`
     }
     if (entry.unreadable) parts.push(w('pgTipCantRead'));
     var state = stateWord(entry);
-    if (state && !parts.length) return entry.name + ' · ' + state;
+    if (entry.working > 0 && !parts.length) return entry.name + ' · ' + state;
     return entry.name + (state ? ' · ' + state : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
   }
   // One button per agent, twice: in the icon row (phones) and in the sidebar (the rail and wider). Same label, count, dot and filter.
