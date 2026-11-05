@@ -175,5 +175,5 @@ test('Codex reports use the bound thread instead of session fields in report bod
   assert.match(readFileSync(f.progress, 'utf8'), new RegExp(`<!-- auto session=${out.block} agent=codex`))
   const unbound = f.command(['--codex-report', '--lang', 'en'], { ...body, session: 'untrusted-session-123' }, { CODEX_THREAD_ID: undefined })
   assert.notEqual(unbound.status, 0)
-  assert.match(unbound.stderr, /This session cannot report steps yet/)
+  assert.match(unbound.stderr, /This report is not bound to a session/)
 }))
