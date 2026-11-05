@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
+import { RULES } from '../hooks/rule'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor } from '../hooks/board'
 import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
@@ -4670,4 +4671,17 @@ test('a pending archive note distinguishes crash-recovery retries from distinct 
       { entry, held: 0, boardHash: 'hash2' },
     ],
   })
+})
+
+test('the rule in every language asks for one-line steps of at most 120 characters and keeps hand-kept tasks for the person', () => {
+  for (const rule of Object.values(RULES)) {
+    expect(rule).toContain('120')
+    expect(rule).toContain('TaskCreate')
+    // A due date stays possible, but only on a task the person asked to note for themselves.
+    expect(rule).toContain('10-31')
+  }
+  expect(RULES.en).toContain('Otherwise never edit that file by hand')
+  expect(RULES['zh-TW']).toContain('其他時候不要手改這個檔')
+  expect(RULES['zh-CN']).toContain('其他时候不要手改这个文件')
+  expect(RULES.en).not.toContain('goes into progress.md by hand')
 })
