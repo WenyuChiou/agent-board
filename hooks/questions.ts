@@ -224,6 +224,13 @@ const isSameAsker = (source: QuestionSource | undefined, row: QuestionSource): b
   return owner !== null && inboxSession(source) === canonicalOf(owner)
 }
 // An answer closes only the inbox ask of the session that gave it, not a same-prefix peer's.
+// Cursor and Grok emit an empty stop for the asking turn. Only a later text-bearing
+// response or an accepted prompt proves continuation, even if the session moved folders.
+export const isContinuationTurn = (turn: AgentTurn | QuestionAnswerEvidence): turn is QuestionAnswerEvidence =>
+  (turn.event === 'prompt' || (turn.event === 'turn' && (!('answer' in turn) || turn.answer.trim() !== '')))
+  && turn.at !== undefined
+  && Number.isFinite(turn.at)
+
 export const isAnsweredBy = (record: QuestionRecord, turn: QuestionAnswerEvidence): boolean => {
   if (record.source?.kind !== 'inbox' || record.source.agent !== turn.agent || record.source.session !== turn.id) return false
   const asker = inboxSession(record.source)
@@ -626,7 +633,7 @@ export const observeQuestions = (
     const at = source?.sourceAt ?? source?.at
     // Cursor and Grok emit an empty stop for the asking turn. Only a later text-bearing
     // response or an accepted prompt proves continuation, even if the session moved folders.
-    if (!Number.isFinite(at) || !answeredTurns.some(turn => (turn.event === 'prompt' || (turn.event === 'turn' && (!('answer' in turn) || turn.answer.trim() !== ''))) && turn.at !== undefined && Number.isFinite(turn.at) && turn.at > at && isAnsweredBy(record, turn))) continue
+    if (!Number.isFinite(at) || !answeredTurns.some(turn => isContinuationTurn(turn) && turn.at > at && isAnsweredBy(record, turn))) continue
     record.isUnresolved = false
     record.isWaiting = false
     record.isPresent = false
