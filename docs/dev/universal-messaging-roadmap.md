@@ -1,6 +1,6 @@
 # Universal Cross-Agent & Cross-Surface Messaging Roadmap
 
-This document is the repository-tracked architecture, execution map, and coordinator handover guide for bidirectional messaging across all 12 Agent Board ecosystems (CLI, Desktop App, IDE, Chat Gateway, and Web Chat). Keeping this specification in `docs/dev/` and on the linked GitHub issues ensures any session or collaborator can take over QA, review, or coordination immediately if an active agent hits a usage or context limit (`docs/dev/team-process.md`: *"If it is not on the issue or the PR, it did not happen"*).
+This document is the repository-tracked architecture, execution map, and handover guide for bidirectional messaging across all 12 Agent Board ecosystems (CLI, Desktop App, IDE, Chat Gateway, and Web Chat). Keeping this specification in `docs/dev/` and on the linked GitHub issues ensures any session or collaborator can take over QA, review, or coordination immediately if an active agent hits a usage or context limit (`docs/dev/team-process.md`: *"If it is not on the issue or the PR, it did not happen"*).
 
 ---
 
@@ -22,14 +22,14 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
    - The atomic lock acquisition and disk commit in `claimMessages` (`queued` -> `uncertain`) is the single immutable point of no return.
    - **Wait cancellation (empty wait)**: When a caller aborts or times out a parked wait (`board_wait` / `--wait-message`) without a message having arrived, the wait is cleanly unregistered and aborted; any queued messages in the store remain untouched (`queued`) and unconsumed (matching #685).
    - **Pre-claim message withdrawal**: When the sender explicitly cancels or dismisses a message while still `queued` (before atomic claim wins), the message transitions to `rejected` with `error: 'DISMISSED'` / `'CANCELLED'`. Text is dropped, hash is preserved, and target blocking is released immediately. It is never claimed by or delivered to any host.
-   - **Post-claim cancellation / disconnect**: Once `queued` -> `uncertain` is committed to disk, a cancellation or disconnect **cannot** roll back the message to `queued` (violates strict no-replay). In accordance with the core `#388` contract (`hooks/messaging.ts:158–164`), the message remains in or transitions to `uncertain` with `error: 'DISMISSED'` / `'CANCELLED'`; target blocking is preserved until the message settles, is acknowledged, or reaches `OPEN_LIMIT_MS` (30 minutes) (a target with an ACK channel; a hook-only target is not held, invariant 4). The message is **never** automatically re-injected on later turns. A message whose completed transport write already persisted `accepted` keeps `accepted` (it never moves back to `uncertain` or `queued`); target blocking is preserved until it is acknowledged, settled, or reaches `OPEN_LIMIT_MS` (a target with an ACK channel; a hook-only target is not held, invariant 4).
-   - *Code today:* `dismissMessage` in #388 (`hooks/messaging.ts`) moves an `accepted` message to `uncertain`. Keeping it `accepted` is a #388 pre-merge fix (section 6, wave 0).
+   - **Post-claim cancellation / disconnect**: Once `queued` -> `uncertain` is committed to disk, a cancellation or disconnect **cannot** roll back the message to `queued` (violates strict no-replay). In accordance with the core `#388` contract (`hooks/messaging.ts:158–164`), the message remains in or transitions to `uncertain` with `error: 'DISMISSED'` / `'CANCELLED'`; target blocking is preserved until the message settles, is acknowledged, or reaches `OPEN_LIMIT_MS` (30 minutes) (a target with an ACK channel; a hook-only target is not held, invariant 4). The message is **never** automatically re-injected on later turns.
+   - **Dismissing a claimed message** (owner decision, 2026-11-02, [on #728](https://github.com/WenyuChiou/agent-board/pull/728#issuecomment-6592764318)): `#388`'s behaviour is the contract. An `accepted` or `uncertain` message becomes final `uncertain` with `error: 'DISMISSED'`, and the target is free for the next message (`dismissMessage` in `hooks/messaging.ts`). It is never automatically re-injected.
 
 | Scenario | Durable State | Waiter Cleanup | Target-Blocking Effect | No-Replay Outcome |
 | :--- | :--- | :--- | :--- | :--- |
 | **Wait Cancellation (Empty Wait)** | `queued` (messages unaffected) | Waiter unregistered from `WaitManager` | Unchanged (existing open message blocking preserved; queued messages remain available) | N/A (no claim occurred) |
 | **Pre-Claim Message Withdrawal** | `rejected` (`error: 'DISMISSED'`) | Message-specific waiter notification aborted | Target unblocked immediately | Message permanently finished; never delivered |
-| **Post-Claim Cancellation / Disconnect** | `uncertain` (`error: 'DISMISSED'`), or unchanged `accepted` if the transport write already completed | Transport process aborted/killed; waiter closed | Target remains blocked until settled/timeout; a hook-only target is not held (invariant 4) | Strict no-replay; never automatically re-injected |
+| **Post-Claim Cancellation / Disconnect** | `uncertain` (`error: 'DISMISSED'`); an `accepted` message that is dismissed also becomes `uncertain` | Transport process aborted/killed; waiter closed | A disconnect leaves the target blocked until settled/timeout; a dismiss frees it (invariant 3); a hook-only target is not held (invariant 4) | Strict no-replay; never automatically re-injected |
 
 4. **Target Blocking, Transport Evidence & Semantic Acknowledgement**:
    - Retain `#388`'s target blocking: `claimMessages` blocks a target while an open message is `accepted` or `uncertain` (`hooks/messaging.ts:158–164`). This prevents out-of-order execution, split delivery, and race conditions.
@@ -39,8 +39,7 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
      2. *Completed transport write / `accepted`*: External transport write verified complete (stdout pipe flushed, SDK turn submitted, or MCP tool call returned; process spawn alone is insufficient). Persists status as `accepted`; **target remains blocked** if it has an ACK channel, while a hook-only target is not held (invariant 4). This is strictly transport receipt evidence, **never** proof of model reading or semantic comprehension.
      3. *Semantic ACK / `acknowledged`*: Host agent issues `ACK <nonce>` or `board_ack` within the turn. Persists status as `acknowledged`; target unblocks.
      4. *Settled / queue release*: Message text dropped, hash preserved, pruned after retention period (`FINISHED_KEEP_MS`).
-   - Retain current `HOP_LIMIT=2` across all roadmaps and briefs (#603, #319, #685, #686) and six-hex ACK token (`ACK <nonce>`). The 128-bit random framing boundary used to isolate delivered peer prompts is stored and verified as a distinct field (`framingNonce`), preventing truncation or collision with the 6-character ACK token.
-   - *Code today:* #388 has no `framingNonce`; its fence `<<<AB-<nonce>` reuses the six-hex ACK nonce. Adding the field before the store format ships is a #388 pre-merge fix (section 6, wave 0).
+   - Retain current `HOP_LIMIT=2` across all roadmaps and briefs (#603, #319, #685, #686) and six-hex ACK token (`ACK <nonce>`). The fence that isolates a delivered peer prompt is `<<<AB-<nonce>`, which reuses the same six-hex nonce, as in `#388`.
 5. **Trusted Session/Turn Enrollment & Capability Lease Lifecycle**:
    - A capability token is enrolled and bound by a trusted local launcher or host adapter to:
      - Message store path
@@ -77,9 +76,9 @@ Keep visible state and latency distinct so an enqueue or delivery failure cannot
 | Dimension | Adopted Decision & Technical Contract | Covered Boundaries & Failure Modes | Owning Slice & Artifact |
 | :--- | :--- | :--- | :--- |
 | **1. Delivery Goal & Two-Host Proof** | Primary target: user-led communication from one board. First two targeted live-push paths: **Claude Code** (`[P1]`, #316) and **Codex** (`[P1]` daemon `turn/start`, #318); #603 provides Tier 3 next-turn delivery and #319 provides Tier 2 step-end continuation. All other surfaces keep honest `Copy` / next-turn mailbox fallback until separate native evidence is checked in. | Distinguishes UI feedback (1–2s), board refresh (~2s), and model latency; prevents fabricated delivery claims. | `#687` Roadmap, `#316` Claude receiver, `#318` Codex daemon, `#603` Hook mailbox, `#319` Codex step-end |
-| **2. Cancellation, Claim & Uncertainty** | Atomic claim commit (`queued -> uncertain`) is the single ordering boundary. Pre-claim cancel removes from queue; post-claim cancel keeps an already-`accepted` message `accepted`, otherwise retains `uncertain`, preserving **no-replay**. | Arrival races, disconnect after claim, timeout after claim, stale-waiter cleanup. | `#603` Mailbox state machine, `#685` MCP cancellation semantics |
+| **2. Cancellation, Claim & Uncertainty** | Atomic claim commit (`queued -> uncertain`) is the single ordering boundary. Pre-claim cancel removes from queue; post-claim dismiss leaves the message `uncertain` (also from `accepted`) and frees the target, preserving **no-replay**. | Arrival races, disconnect after claim, timeout after claim, stale-waiter cleanup. | `#603` Mailbox state machine, `#685` MCP cancellation semantics |
 | **3. Trusted Session/Turn Enrollment** | Local launcher/host binds capability to store path, native agent, PID/start time, canonical workspace path, owner generation, and turn boundary. Unbound callers fall back to restricted mailbox polling. | Forged identity claims, stale leases, cross-workspace leakage, restart/reconnect. | `#603` Contract, `#685` Lease manager |
-| **4. Acceptance, Ordering & Compatibility** | Retains `#388` target blocking while messages are `accepted` or `uncertain`, except for a hook-only target with no ACK channel (invariant 4). `accepted` is transport evidence only. Keeps `HOP_LIMIT=2` and six-hex ACK token; 128-bit framing boundary is separate `framingNonce`. **DAG: `#365` unlocks only after `#388` + `#603` + `#319` merge.** | Out-of-order delivery, late/duplicate ACK, shared-file conflicts across `#319` and `#365`. | `#603` Core, `#319` Codex, `#365` Antigravity/Gemini, `#687` DAG |
+| **4. Acceptance, Ordering & Compatibility** | Retains `#388` target blocking while messages are `accepted` or `uncertain`, except for a hook-only target with no ACK channel (invariant 4). `accepted` is transport evidence only. Keeps `HOP_LIMIT=2` and six-hex ACK token; the fence reuses the six-hex nonce. **DAG: `#365` unlocks only after `#388` + `#603` + `#319` merge.** | Out-of-order delivery, late/duplicate ACK, shared-file conflicts across `#319` and `#365`. | `#603` Core, `#319` Codex, `#365` Antigravity/Gemini, `#687` DAG |
 | **5. Capability Evidence & Visible Latency** | Surfaces explicitly tiered as `Proposed`, `Implemented`, or `Verified`. Target 1–2s visible send status, ~2s board update, separate from host ACK and model reply. Empty wait 45s max; prompt wake on event. | Prevents stacked 2s polling loops; surfaces real failure states. | `#687` Matrix, `#685` Waiter, `#365` Card gating |
 
 ---
@@ -138,8 +137,6 @@ The lane is the suggested executor. It is not a claim: whoever takes a `ready` i
 | Web-chat relay | `#561` | `claude` (assigned) | `docs/validation/*-web-chat-relay.md`, `hooks/serve.ts`, `scripts/board-serve.ts` | `dot` and web chats, Tier 4 |
 | Vendor API spikes | step 1 of `#722`, `#724`, `#725`, `#726` | a local agent with that app installed | `docs/validation/<date>-<host>-spike.md` | the slice that uses that API |
 
-`#388` pre-merge fixes, both small: `dismissMessage` keeps an `accepted` message `accepted` (invariant 3), and the store gains `framingNonce` (invariant 4). It is approved by someone who wrote neither it nor its brief, such as the owner or `RyanGosling0508`.
-
 A spike is half a day: on a machine with the app, call the one API the slice depends on (Antigravity's wakeup on a background command exiting 0; OpenCode `client.session.promptAsync`; DeepSeek `agent.followup`; OpenClaw `chat.send`) and record the version, OS, call and result. A spike that fails stops its slice with a `Question:` before any code is written. Claude Code needs none: `$.prompt.submit` already passed as L1 in [2026-10-20-send-spikes.md](../validation/2026-10-20-send-spikes.md), so #316 starts from that record.
 
 ### Wave 1: after `#388` merges
@@ -180,7 +177,7 @@ A spike is half a day: on a machine with the app, call the one API the slice dep
 
 ---
 
-## 7. QA Acceptance & Coordinator Handover Playbook
+## 7. QA Acceptance & Handover Playbook
 
 Any agent or person who is not an author of a slice may run its QA; `antigravity` did it first. If one stops, the next takes over with these steps.
 
@@ -192,7 +189,7 @@ gh issue list --repo WenyuChiou/agent-board --state open --milestone "0.25.0 Sen
 ```
 
 ### Step 2 — Technical QA Checklist on Incoming PRs
-1. **Scope**: the diff touches only the files its issue lists, carries the CHANGELOG entry that [CONTRIBUTING rule 6](../../CONTRIBUTING.md#pull-requests) asks for, and never mixes a bug fix (`#232`) into a feature PR.
+1. **Scope**: the diff touches only the files its issue lists, has a title that can serve as its changelog line (pull requests add no `changelog.d` fragment since #719), and never mixes a bug fix (`#232`) into a feature PR.
 2. **Bundle rebuilds**: if a PR from `dot` or `muse` touched files compiled into `hooks/board-script.ts` and wrote `"maintainer rebuilds at merge"` under Checks, check out the branch in a clean worktree and run `npx --yes bun@1.4.2 scripts/build-board.ts`.
 3. **Local verification, one command at a time** in an isolated temporary home: the touched Node test files (`node --test <file>`); `claude plugin validate --strict .` and `claude plugin test .` once, alone, if TS/TSX test files changed; and `node scripts/pr-check.mjs --pr <PR>`.
 4. **Who approves** ([RULES.md R2](RULES.md#r2-nobody-approves-their-own-work)): the authors of a slice are its executor and whoever wrote its brief. `antigravity` wrote the briefs of `#603`, `#316`, `#317`, `#318`, `#319`, `#365`, `#685`, `#686`, `#233`, `#232` and `#561`; `claude (cloud)` wrote `#720` to `#726`. The `Review: APPROVE <full sha> by <name>` comes from anyone else: another agent or session, a collaborator, or the owner. An author may still run QA and write `Review: REQUEST CHANGES`.
