@@ -106,6 +106,9 @@ const isolatedEnv = (home, pathValue) => {
     LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
     // A board these tests start opens no window and stops once this test process is gone (#959).
     AGENT_BOARD_TEST_PID: String(process.pid),
+    // A bare `board` here prints text, as on CI, where CI is set. Without it the fixture's
+    // CODEX_THREAD_ID picks the page, and that server holds the fixture folder open (#975).
+    CI: '1',
     LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
     CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
     CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
