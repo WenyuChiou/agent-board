@@ -312,7 +312,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) |
-| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Implemented | Not tested | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |
+| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |
 | Cursor | cursor-agent CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) |
 | Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
@@ -474,7 +474,15 @@ the receiver ends the old connection and registers the new id.
 ## Codex existing-owner adapter
 
 `scripts/codex-message-connector.mjs` uses the installed Codex executable's existing
-`app-server proxy` control socket. It does not start a daemon or create/resume a thread.
+`app-server proxy` control socket. It speaks WebSocket through the proxy's byte stream:
+an HTTP upgrade with a checked `Sec-WebSocket-Accept`, then masked client text frames
+and one JSON-RPC message per text message. A failed upgrade reports
+`OWNER_HANDSHAKE_FAILED`; a silent owner still times out. It does not start a daemon
+or create a thread. After `initialize` it checks that the thread is already loaded, then
+calls `thread/resume` with `excludeTurns: true` and no overrides: on a loaded thread this
+only subscribes the connection to the thread's events, which the daemon sends to
+subscribed connections alone. A thread that is not loaded fails with `TARGET_MISMATCH`
+and is never opened from disk.
 After a person approves the exact disposable server/thread/active-turn binding, give it
 JSON on stdin:
 
@@ -490,8 +498,9 @@ retains the ACK line only, and ignores approval requests. No saved history is re
 
 Availability of this socket differs by surface. The Windows desktop tested with Codex
 0.163.0-alpha.10.2 had no reachable shared control socket (OS error 10050). Therefore this
-change does **not** establish messaging to that desktop chat. Codex CLI shared-daemon
-delivery remains a separate real-session test. Other agent-native connectors and real
+change does **not** establish messaging to that desktop chat. A live Codex CLI 0.163.0
+session on Windows received a board message in its running turn, and the board recorded
+its ACK: [the live run](validation/2026-11-04-codex-cli-proxy-live.md). Other agent-native connectors and real
 dot delivery are not implemented or claimed. The UI shows no receiving target until an
 adapter actually registers.
 
@@ -533,7 +542,7 @@ conservative uncertainty without replay. The existing-proxy adapter continues to
 | Surface | Current evidence | Still required |
 | --- | --- | --- |
 | Disposable Codex app-server, exclusively owned | A real `AB-TEST-001` ACK; one native turn; exact retry caused no second turn; changed contents returned `ID_CONFLICT`; no tool action observed | Product installation of a receiver into each supported host |
-| Codex CLI | Adapter API and mock proxy tests | Real live CLI owner/socket, native ACK and actual TTY acceptance |
+| Codex CLI | Mock proxy tests; a live 0.163.0 turn on Windows took a board message and the board recorded its native ACK ([live run](validation/2026-11-04-codex-cli-proxy-live.md)) | Approval requests while the board is subscribed; an idle session; Linux and macOS |
 | Codex desktop App | Interactive web controls and card API tested; exact native session binding and offline fallback | A supported live connection to that desktop chat; its own native ACK |
 | dot | Generic adapter API only | A supported dot owner connector and actual dot ACK |
 | Claude Code CLI | Existing plugin progress and prompt submission design | Native receiver integration and actual bidirectional ACK |
@@ -623,8 +632,8 @@ availability tradeoff, not permission to retry an uncertain message.
 
 Run the board with `--mcp` for newline-delimited JSON-RPC on stdin and stdout.
 It offers `board_status`, `board_inbox`, `board_ack` and `board_send`.
-Status omits session cards when the current folder cannot match one project heading.
-It reads the selected progress file and uses an existing message folder; it creates no folder.
+`board_status` returns the document `--json` prints ([BOARD-JSON.md](BOARD-JSON.md)); the caller's level is in the result's `_meta`.
+It uses an existing message folder and creates none.
 A named caller verified against its parent's PID and start time holds a 60-second lease.
 Each tool call renews it; after inactivity, verification runs again.
 A named caller without verification is restricted to its own inbox and unverified sending.

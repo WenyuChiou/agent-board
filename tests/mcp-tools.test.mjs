@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -21,6 +21,7 @@ registerHooks({ resolve: resolveLocal })
 const { createMcpServer, runMcp, processStart } = await import('../scripts/board-mcp.ts')
 const { MCP_LEASE_MS, MCP_TOOLS } = await import('../hooks/mcp-tools.ts')
 const { sha256 } = await import('../hooks/sha256.ts')
+const { BOARD_JSON_SCHEMA } = await import('../hooks/board-json.ts')
 const { createMessaging, parseMessageStore, mcpMailbox, hookMailbox } = await import('../scripts/board-messaging.ts')
 const { enrollMcp, takeMailboxMessage, mailboxId } = await import('../hooks/hook-messages.ts')
 const { queueMessage, deliveryText, shownMessage } = await import('../hooks/messaging.ts')
@@ -33,9 +34,9 @@ const temp = () => mkdtempSync(join(tmpdir(), 'ab-mcp-'))
 const binding = { AGENT_BOARD_AGENT: 'codex', AGENT_BOARD_SESSION_ID: 'alpha', AGENT_BOARD_HOST_PID: '123', AGENT_BOARD_HOST_STARTED: 'start' }
 const call = async (server, name, args = {}, now = 1000) => {
   const response = await server.handle(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }), now)
-  return { ...response, data: response.frame.result ? JSON.parse(response.frame.result.content[0].text) : response.frame.error }
+  return { ...response, level: response.frame.result?._meta?.level, data: response.frame.result ? JSON.parse(response.frame.result.content[0].text) : response.frame.error }
 }
-const options = (root, extra = {}) => ({ directory: join(root, 'messages'), progress: join(root, 'progress.md'), cwd: root, version: 'test', s: EN, env: binding, parentPid: 123, processStart: () => 'start', ...extra })
+const options = (root, extra = {}) => ({ directory: join(root, 'messages'), document: () => ({ schemaVersion: 1 }), cwd: root, version: 'test', s: EN, env: binding, parentPid: 123, processStart: () => 'start', ...extra })
 const prepare = root => {
   mkdirSync(join(root, 'messages'))
   writeFileSync(join(root, 'progress.md'), `## ${basename(root)}\n<!-- auto session=synthetic agent=codex state=working updated=2026-11-03T12:00:00Z -->\n### Example\n- [ ] Next\n<!-- /auto session=synthetic -->\n`)
@@ -87,7 +88,8 @@ test('stdio --mcp serves board_status, board_inbox, board_ack and board_send ove
     assert.equal(results.length, 6, stderr)
     assert.equal(results[0].result.protocolVersion, '2025-03-26')
     assert.deepEqual(results[1].result.tools.map(one => one.name), ['board_status', 'board_inbox', 'board_ack', 'board_send'])
-    assert.equal(JSON.parse(results[2].result.content[0].text).sessions[0].title, 'Example')
+    assert.equal(JSON.parse(results[2].result.content[0].text).schemaVersion, BOARD_JSON_SCHEMA)
+    assert.equal(results[2].result._meta.level, 'unbound')
     assert.deepEqual(results.slice(3).map(one => JSON.parse(one.result.content[0].text).code), ['NO_SESSION', 'NO_SESSION', 'BOARD_NOT_RUNNING'])
     assert.equal(JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).dependencies, undefined)
   } finally {
@@ -190,18 +192,18 @@ test('lease lapses after MCP_LEASE_MS and re-verification failure drops to restr
     let isValid = true
     const server = createMcpServer(options(root, { processStart: () => isValid ? 'start' : null }))
     await server.start(1000)
-    assert.equal((await call(server, 'board_status')).data.level, 'leased')
+    assert.equal((await call(server, 'board_status')).level, 'leased')
     isValid = false
-    assert.equal((await call(server, 'board_status', {}, 1000 + MCP_LEASE_MS - 1)).data.level, 'leased')
-    assert.equal((await call(server, 'board_status', {}, 1000 + 2 * MCP_LEASE_MS)).data.level, 'restricted')
+    assert.equal((await call(server, 'board_status', {}, 1000 + MCP_LEASE_MS - 1)).level, 'leased')
+    assert.equal((await call(server, 'board_status', {}, 1000 + 2 * MCP_LEASE_MS)).level, 'restricted')
     await t.test('an over-budget or failing processStart means no lease', async () => {
       let ticks = 0
-      for (const extra of [{ elapsed: () => ticks++ * 121 }, { processStart: () => { throw new Error('fail') } }, { env: { ...binding, AGENT_BOARD_HOST_PID: '999' } }]) assert.equal((await call(createMcpServer(options(root, extra)), 'board_status')).data.level, 'restricted')
+      for (const extra of [{ elapsed: () => ticks++ * 121 }, { processStart: () => { throw new Error('fail') } }, { env: { ...binding, AGENT_BOARD_HOST_PID: '999' } }]) assert.equal((await call(createMcpServer(options(root, extra)), 'board_status')).level, 'restricted')
     })
     assert.equal(processStart(-1), null)
     server.revokeLease()
     isValid = true
-    assert.equal((await call(server, 'board_status')).data.level, 'restricted')
+    assert.equal((await call(server, 'board_status')).level, 'restricted')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -212,8 +214,8 @@ test('a second owner marks contested and both lose', async t => {
     const first = createMcpServer(options(root)), second = createMcpServer(options(root, { parentPid: 456, env: { ...binding, AGENT_BOARD_HOST_PID: '456' } }))
     await first.start(1000)
     await second.start(1001)
-    assert.equal((await call(second, 'board_status')).data.level, 'restricted')
-    assert.equal((await call(first, 'board_status')).data.level, 'restricted')
+    assert.equal((await call(second, 'board_status')).level, 'restricted')
+    assert.equal((await call(first, 'board_status')).level, 'restricted')
     let state = parseMessageStore(readFileSync(join(root, 'messages', 'messages.json'), 'utf8'), 1002)
     const entry = state.mailboxes[0]
     const taken = takeMailboxMessage({ ...state, pausePeerMessages: true }, 'codex', 'alpha', 'hook', 1002, 100000, 'abcdef')
@@ -381,7 +383,7 @@ test('a send refused for the target does not cost the sender its lease', async (
     for (const owner of ['7:one', '8:two']) board.store.act('mcp-enroll', { agent: 'codex', session: 'beta', surface: 'mcp', owner, folderDigest: cwdDigest(realpathSync(root)), until: now + MCP_LEASE_MS }, now)
     const server = createMcpServer(options(root))
     assert.equal((await call(server, 'board_send', { agent: 'codex', session: 'beta', text: 'hello' }, now)).data.code, 'CONTESTED')
-    assert.equal((await call(server, 'board_status', {}, now)).data.level, 'leased')
+    assert.equal((await call(server, 'board_status', {}, now)).level, 'leased')
   } finally {
     await board?.close()
     rmSync(root, { recursive: true, force: true })
@@ -499,4 +501,48 @@ test('peer-send refuses a malformed sender before it writes, and the store reope
     store?.close()
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('board_status returns the same document as agent-board --json for one board', async () => {
+  const root = temp()
+  let child
+  try {
+    prepare(root)
+    writeFileSync(join(root, 'loader.mjs'), loader)
+    const command = ['--experimental-transform-types', '--import', pathToFileURL(join(root, 'loader.mjs')).href, cli]
+    const board = ['--messages-dir', join(root, 'messages'), '--progress-file', join(root, 'progress.md')]
+    const printed = spawnSync(process.execPath, [...command, '--json', ...board], { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 60_000 })
+    assert.equal(printed.status, 0, printed.stderr)
+    child = spawn(process.execPath, [...command, '--mcp', ...board], { cwd: root, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true })
+    let out = ''
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', chunk => { out += chunk })
+    const exit = once(child, 'exit')
+    child.stdin.end(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'board_status', arguments: {} } })}\n`)
+    await exit
+    const result = JSON.parse(out).result
+    assert.equal(result.isError, false)
+    assert.equal(result._meta.level, 'unbound')
+    const { generatedAt: at, ...fromMcp } = JSON.parse(result.content[0].text)
+    const { generatedAt: _at, ...fromJson } = JSON.parse(printed.stdout)
+    assert.match(at, /^\d{4}-\d{2}-\d{2}T/)
+    assert.equal(fromMcp.schemaVersion, BOARD_JSON_SCHEMA)
+    assert.deepEqual(fromMcp, fromJson)
+    // Not the same empty document twice: the card in the file is in it.
+    assert.deepEqual([...fromMcp.working, ...fromMcp.waiting, ...fromMcp.stopped].map(one => one.title), ['Example'])
+  } finally {
+    if (child && child.exitCode === null) { child.kill(); await once(child, 'exit') }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('board_status answers a board it cannot read with the error document, keeping the stream and the level', async () => {
+  const root = temp()
+  try {
+    const server = createMcpServer(options(root, { env: {}, document: () => ({ schemaVersion: 1, error: 'unreadable' }) }))
+    const { frame, data, level } = await call(server, 'board_status', {}, Date.now())
+    assert.equal(frame.result.isError, true)
+    assert.deepEqual(data, { schemaVersion: 1, error: 'unreadable' })
+    assert.equal(level, 'unbound')
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })

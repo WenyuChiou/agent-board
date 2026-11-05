@@ -62,7 +62,6 @@ test('an edit above a block that asks writes no new copy of its question over te
   const clock = engineBeneath(on, world)
   await $.session.start(START)
   await clock.advance(2000)
-  await clock.advance(2000)
   const id = parseQuestions(world.files.get(LEDGER) ?? '')?.records.find(record => record.isUnresolved)?.id
   expect(id).toBeDefined()
   world.written = []

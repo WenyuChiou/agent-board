@@ -406,6 +406,10 @@ export const createMessaging = (directory: string, isDefault = false) => {
 
 const mailboxAccess = (directory: string, budget: number, storeBudget = budget) => {
   const root = resolve(directory)
+  let hasDeferred = false
+  // A claim Windows would not let go of is still this hook's own, checked again before every write.
+  // The next call reuses it, so the accept for a message already handed out is not refused by it.
+  let held: MessageStoreClaim | null = null
   const livePid = (): number | null => {
     try {
       const raw = readFileSync(join(root, 'server.lock'), 'utf8')
@@ -421,12 +425,16 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
       throw error
     }
   }
-  return async (action: string, body: Record<string, unknown>, now: number): Promise<Record<string, unknown>> => {
+  const call = async (action: string, body: Record<string, unknown>, now: number): Promise<Record<string, unknown>> => {
+    hasDeferred = false
     const wait = budget
     try {
       const started = Date.now()
       const folder = lstatSync(root)
-      if (!folder.isDirectory() || folder.isSymbolicLink() || budget <= 0) throw new Error('BOARD_NOT_RUNNING')
+      if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING')
+      // Only a real mailbox can hold a message back; with no folder there is nothing to defer.
+      hasDeferred = true
+      if (budget <= 0) throw new Error('BOARD_NOT_RUNNING')
       const pid = livePid()
       if (pid !== null) {
         const owner = JSON.parse(readFileSync(join(root, 'server.owner'), 'utf8')) as { pid: number; url: string }
@@ -442,6 +450,7 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
               try {
                 const result = JSON.parse(text)
                 if (res.statusCode !== 200) throw new Error(result.error ?? 'BOARD_NOT_RUNNING')
+                hasDeferred = false
                 done(result)
               } catch (error) { fail(error) }
             })
@@ -453,10 +462,14 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
         })
       }
       if (action === 'peer-send') throw new Error('BOARD_NOT_RUNNING')
-      const claim = claimMessageStore(root)
+      // A kept claim that is no longer on disk is gone, and a fresh one is taken.
+      const kept = held
+      held = null
+      const claim = kept !== null && (() => { try { kept.check(root); return true } catch { return false } })() ? kept : claimMessageStore(root)
       const file = join(root, 'messages.json'), temp = `${file}.${process.pid}.tmp`
       try {
-        if (Date.now() - started > storeBudget || livePid() !== null) throw new Error('BOARD_NOT_RUNNING')
+        // An accept acknowledges output already written, so a slow claim must not discard it.
+        if (action !== 'mailbox-accept' && Date.now() - started > storeBudget || livePid() !== null) throw new Error('BOARD_NOT_RUNNING')
         if (existsSync(file) && (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink())) throw new Error('UNSAFE_MESSAGE_FILE')
         let state = existsSync(file) ? parseMessageStore(readFileSync(file, 'utf8'), now) : { messages: [] }
         const next = mailboxAction(state, action, body, now)
@@ -464,10 +477,12 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
         claim.check(root)
         writeFileSync(temp, JSON.stringify({ version: 2, ...pruneMessages(state, now) }), { flag: 'wx', mode: 0o600 })
         replaceFile(temp, file)
+        hasDeferred = false
         return next.result
       } finally {
         try { unlinkSync(temp) } catch {}
-        claim.release()
+        // Cleanup cannot take back a saved delivery that the host still needs to read.
+        try { claim.release() } catch { held = claim }
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -477,14 +492,16 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
       throw error
     }
   }
+  return { call, isDeferred: () => hasDeferred }
 }
-export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(directory, budget)
+export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(directory, budget).call
 export const hookMailbox = (directory: string, budget: number) => {
   const access = mailboxAccess(directory, Math.min(150, budget), Math.min(120, budget))
   const call = async (action: string, body: Record<string, string>, now: number): Promise<Message | null> => {
-    try { return (await access(action, body, now)).message as Message ?? null } catch { return null }
+    try { return (await access.call(action, body, now)).message as Message ?? null } catch { return null }
   }
   return {
+    get hasDeferred() { return access.isDeferred() },
     turn: (agent: string, session: string, surface: string, now: number) => call('mailbox-turn', { agent, session, surface }, now),
     accept: (agent: string, session: string, id: string, nonce: string, now: number) => call('mailbox-accept', { agent, session, id, nonce }, now),
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),

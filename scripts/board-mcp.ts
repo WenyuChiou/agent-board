@@ -1,11 +1,8 @@
 import { randomBytes } from 'node:crypto'
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { performance } from 'node:perf_hooks'
 import type { Readable, Writable } from 'node:stream'
-import { boardStatus } from '../hooks/board-status'
-import { folderProject } from '../hooks/codex'
-import { parseProgress } from '../hooks/parse'
 import { address, deliveryText, messageId, senderLabel } from '../hooks/messaging'
 import type { Message } from '../hooks/messaging'
 import type { Strings } from '../hooks/i18n'
@@ -28,7 +25,9 @@ export const processStart = (pid: number): string | null => {
   } catch { return null }
 }
 type Options = {
-  directory: string; progress: string; cwd: string; version: string; s: Strings
+  directory: string; cwd: string; version: string; s: Strings
+  // What agent-board --json prints: the board's document, or its error document when the board cannot be read.
+  document: () => object
   env?: Record<string, string | undefined>; parentPid?: number; processStart?: typeof processStart; elapsed?: () => number
 }
 export const createMcpServer = (o: Options) => {
@@ -84,10 +83,9 @@ export const createMcpServer = (o: Options) => {
       try {
         await start(now)
         if (name === 'board_status') {
-          if (!existsSync(o.directory)) throw new Error('BOARD_NOT_RUNNING')
-          const markdown = readFileSync(o.progress, 'utf8'), project = folderProject(o.cwd)
-          const matches = parseProgress(markdown).filter(one => one.name === project && project !== '')
-          return reply(toolResult({ line: boardStatus(markdown, now, o.s), level, ...(matches.length === 1 ? { sessions: matches[0]!.tasks.filter(one => one.auto).slice(0, 20).map(one => ({ agent: one.auto!.agent, title: one.title.slice(0, 120), state: one.auto!.state })) } : {}) }))
+          const document = o.document()
+          // The caller's level is not the board's, so it stays outside the shared document.
+          return reply({ ...toolResult(document, 'error' in document), _meta: { level } })
         }
         if (name === 'board_send') return reply(toolResult(await access('peer-send', { ...args, id: args.id ?? randomBytes(16).toString('hex'), from: level === 'leased' ? address(agent, session) : 'unverified', folderDigest }, now)))
         if (level === 'unbound') throw new Error('NO_SESSION')

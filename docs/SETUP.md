@@ -23,6 +23,8 @@ line gives the `--agent <name>` command to retry after fixing its files. Setup e
 nonzero when every selected agent has a conflict. A second run with nothing to change
 says each agent is already set up and writes nothing.
 
+Without `--lang`, setup uses `LANG`, then the system language, else English, and writes that language into the files it installs.
+
 Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`),
 the next steps include both `claude plugin` commands to connect it, even alongside other
 agents. If only Claude Code is found, setup prints its plugin guidance and exits 0.
@@ -87,7 +89,7 @@ keep manual tasks; an unreadable observation file stays untouched and does not p
 eligible agent blocks from being archived.
 Archive entries are saved before removing work from the board, and repeated runs do
 not duplicate them. A failed persistence operation exits nonzero; retain the files and
-retry after fixing its reported problem. `--chat` remains read-only even with `--tidy`.
+retry after fixing its reported problem. `--json` remains read-only even with `--tidy`.
 `--tidy` takes precedence over `--serve`, `--watch` and `--html`, so those combinations
 run only the sweep. A running `--serve` page also sweeps every hour; if the seen file cannot
 be read, that hourly pass writes nothing. A person's Clean up on the pane or page archives
@@ -163,8 +165,13 @@ files: the board script lands at `~/.agent-board/agent-board.mjs`, and no hook p
 npm's cache, so clearing that cache breaks nothing. `npm install -g @wenyuchiou/agent-board` gives a
 lasting `agent-board` command in place of `npx`.
 
-Every other call (`--serve`, `--watch`, `--chat`, `--html`, or none to print the board)
-runs the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
+A plain `agent-board` call opens the interactive local page on a desktop, from an agent or
+in a non-interactive call. An interactive terminal over SSH or without a display opens the
+terminal board; CI prints text. `--serve` and `--html` start or reuse the local service and
+open the page; `--watch` selects the terminal board, `--print` prints text, and `--json`
+returns the board for agents.
+
+These board calls run the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
 the board the Claude Code plugin's connector last connected, else
 `~/.agent-board/agent-board.mjs`, else the Claude Code plugin's beside
 `~/.claude/progress.md`. It never runs a second copy from the package, which would restart

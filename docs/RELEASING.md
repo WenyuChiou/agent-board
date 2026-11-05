@@ -10,7 +10,9 @@ The maintainer session, or a collaborator when the maintainer is away, prepares 
 |---|---|---|
 | GitHub release | marked Latest | marked Pre-release |
 | npm dist-tag | `latest`, which `npx @wenyuchiou/agent-board` installs | `next`: `npx @wenyuchiou/agent-board@next` |
-| README version line | updated | unchanged |
+| README version line | `Latest stable version: X.Y.Z` | `Latest stable version: <last stable>`, unchanged |
+
+The README line names the latest stable version in every package, so a pre-release package never reads as though the last stable version were its own version.
 
 The release gate, checked on the exact tagged commit:
 
@@ -29,13 +31,18 @@ gh release edit agent-board--vX.Y.Z --prerelease=false --latest
 npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
 ```
 
+The owner runs the npm line. The same day, a promotion also does what a stable release does at steps 8 and 10 below:
+- **The release notes.** Their first line, "Pre-release: this version did not pass the release gate (docs/RELEASING.md).", becomes "Stable since YYYY-MM-DD: this version passed the release gate on its tagged commit", followed by its parity and live-run records. Edit it with `gh release edit agent-board--vX.Y.Z --notes-file notes.md`.
+- **The README line.** A pull request changes `Latest stable version:` to X.Y.Z in all three READMEs.
+- **The milestone.** It is closed.
+
 ## Checklist
 
 1. **Version.** Put the same `X.Y.Z` in `.claude-plugin/plugin.json` and `package.json`, the three README badges and the marketplace descriptions. `node --test tests/npm-package.test.mjs` fails when `package.json` and `plugin.json` disagree.
 2. **CHANGELOG.** Run `node scripts/changelog-fold.mjs X.Y.Z` to preview, then add `--write`. It writes `## X.Y.Z — YYYY-MM-DD` from the fix and feature titles merged since the last release tag, any entry left under `## Unreleased` and any fragment left in `changelog.d/`. A title becomes one line, with its pull request number; check the preview and reword any line that does not read well for the person using agent-board. Run `git fetch --tags origin` first, and `git fetch --unshallow` in a shallow clone; without the last release tag the preview leaves out every title line. With `--write` its output ends with three questions for the next version's plan (the goal above this version's, one hard number it should move, which other field has solved a problem like ours); it only prints them.
 3. **Generated files.** Rebuild as in [CONTRIBUTING.md, Releases](../CONTRIBUTING.md#releases) step 3: the board bundle and the released-files table, and both `--check` commands pass.
 4. **Checks.** Run everything in [CONTRIBUTING.md, Run the checks](../CONTRIBUTING.md#run-the-checks). The npm test also checks that `npm pack` would publish only the files `package.json` lists.
-5. **Pull request.** Title it `chore(release): Agent Board X.Y.Z`. Run the simulated user (gate 5) on its head, then commit the record. The record names the commit it ran on and is not itself published, so a later push that changes no file the release ships (what `npm pack` publishes, and the Claude Code plugin under `hooks/` and `.claude-plugin/`) and no guide (`docs/GUIDE*.md`) keeps it valid; any other push needs a new run, which may cover only what the push reaches ([USER-SIM.md, A run after a change](validation/USER-SIM.md#a-run-after-a-change)). Once the run that is meant to be the last one starts, merge nothing but the release pull request into `main` until the tag, and say so on the open pull requests, so the record still matches what the tag publishes. Obtain the approval required by CONTRIBUTING rule 8 and squash-merge with `--match-head-commit` only once every CI job and all other checks required by rule 9 have succeeded on that exact head. Merge only when the head contains current `main`: run `git fetch origin` and `git merge-base --is-ancestor origin/main HEAD` right before the merge. If `main` has moved, merge it, add a CHANGELOG line for each fix or feature it brought, run the simulated user again, and check again before merging. If `main` still moved between the check and the merge, run the simulated user again on the merged commit before the tag. Then the tagged commit publishes the same files as the commit the record was made on.
+5. **Pull request.** Title it `chore(release): Agent Board X.Y.Z`. Before the simulated-user run that is meant to be the last one starts, list in its body every pull request merged since the last release tag under [RULES.md, R2](dev/RULES.md#r2-nobody-approves-their-own-work)'s exception for a lane's own reviewer, with its merge commit, who read it in full and any issue opened; that reading is done (a pull request already read in full outside its lane counts), and the fix of any P0 or P1 it found has merged, before that run starts. Run the simulated user (gate 5) on its head, then commit the record. The record names the commit it ran on and is not itself published, so a later push that changes no file the release ships (what `npm pack` publishes, and the Claude Code plugin under `hooks/` and `.claude-plugin/`) and no guide (`docs/GUIDE*.md`) keeps it valid; any other push needs a new run, which may cover only what the push reaches ([USER-SIM.md, A run after a change](validation/USER-SIM.md#a-run-after-a-change)). Once the run that is meant to be the last one starts, merge nothing but the release pull request into `main` until the tag, and say so on the open pull requests, so the record still matches what the tag publishes. A P0 or P1 found after that run starts, in a pull request merged under that R2 exception, goes to the next release, unless the owner decides otherwise. Obtain the approval required by CONTRIBUTING rule 8 and squash-merge with `--match-head-commit` only once every CI job and all other checks required by rule 9 have succeeded on that exact head. Merge only when the head contains current `main`: run `git fetch origin` and `git merge-base --is-ancestor origin/main HEAD` right before the merge. If `main` has moved, merge it, add a CHANGELOG line for each fix or feature it brought, run the simulated user again, and check again before merging. If `main` still moved between the check and the merge, run the simulated user again on the merged commit before the tag. Then the tagged commit publishes the same files as the commit the record was made on.
 6. **Tag.** On the merged commit, run `claude plugin tag . --dry-run`, then `claude plugin tag .`. Push only the new tag.
 7. **Gate.** Check the release gate above: it decides stable or pre-release.
 8. **GitHub release.** Write it from the version's CHANGELOG section, then a link comparing the previous tag with the new one. A pre-release's notes open with: "Pre-release: this version did not pass the release gate (docs/RELEASING.md)."
@@ -50,7 +57,7 @@ npm dist-tag add @wenyuchiou/agent-board@X.Y.Z latest --otp <code>
    gh release create agent-board--vX.Y.Z --verify-tag --title "Agent Board X.Y.Z" --notes-file notes.md --prerelease --latest=false
    ```
 9. **npm.** The owner publishes; see below.
-10. **Close.** Close the milestone. For a stable release, update the README version line.
+10. **Close.** Close the milestone. For a stable release, update the README line to the new stable version.
 
 ## Publish to npm (owner only)
 

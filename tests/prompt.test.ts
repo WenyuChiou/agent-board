@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { agentHooks, COLLISION, DELETE, openclawPlugin, opencodePlugin } from '../hooks/connect'
+import { hookTimeout, hostHookTimeout } from '../hooks/hook-safety'
 import { answerAgentPrompt, blockId, inboxOrder, normalizeTurnOrder, readTurn, turnOrder, turnsToDigest, withAgentPrompts } from '../hooks/inbox'
 import { emptyMirror, isStaleStoreKey } from '../hooks/mirror'
 import { answerTurns, applyDigest, markAsked } from '../hooks/digest'
@@ -157,4 +158,15 @@ test('exact pre-prompt Grok OpenCode and OpenClaw files upgrade and remove while
     expect(String(hook.edit(legacy, false))).toContain('UserPromptSubmit')
     expect(hook.edit(legacy, true)).toBe(DELETE)
   }
+})
+
+test('the Codex prompt hook has a 10 s timeout matching its Stop hook', () => {
+  expect(hookTimeout('codex', 'UserPromptSubmit')).toBe(10000)
+  expect(hostHookTimeout('codex', 'UserPromptSubmit')).toBe(10)
+  expect(hookTimeout('codex', 'UserPromptSubmit')).toBe(hookTimeout('codex', 'Stop'))
+
+  const hook = agentHooks(CTX).find(one => one.agent === 'codex' && one.label !== '')!
+  const config = JSON.parse(String(hook.edit('{}', false)))
+  const promptGroup = config.hooks.UserPromptSubmit[0].hooks[0]
+  expect(promptGroup.timeout).toBe(10)
 })

@@ -2,7 +2,6 @@ import { expect, test } from 'claude-code/testing'
 
 import { boardItems, boardScreen, boardText, chatText, emptyBoardState } from '../hooks/board'
 import { extractAutoBlock, removeAutoBlock, renderAutoBlock, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { dashboardHtml } from '../hooks/dashboard'
 import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
 import { autoOf, parseProgress } from '../hooks/parse'
 import { emptyQuestions, observeQuestions, withCaptures } from '../hooks/questions'
@@ -362,7 +361,6 @@ test('every board surface shows the runs line and the Background runs line and n
     boardText(view, [], en, { width: 100, isColor: false }),
     boardScreen(view, [], emptyBoardState, en, { width: 100, isColor: false }),
     chatText(view, [], [], en, '/home/synthetic'),
-    dashboardHtml(view, en, 'progress.md', 'now'),
     JSON.stringify(serveModel(view, [], en)),
   ]
   for (const surface of surfaces) {
