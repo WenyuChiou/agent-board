@@ -4,11 +4,12 @@ import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
-import { beforeEach, test } from 'node:test'
+import { beforeEach, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 import { formatWriter } from './e2e/lib/faults.mjs'
+import { neverShown } from './fixtures/never-shown.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { HOOK_INPUT_TIMEOUT, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
@@ -17,6 +18,11 @@ import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/nat
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
 import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { partTest } from '../scripts/ci-impact.mjs'
+
+// The Windows board job runs this file in two parts, and each part runs its share of the tests: the
+// file alone took about 8 minutes there against a ten-minute limit (#899).
+const test = partTest(nodeTest)
 
 test('native cleanup diagnostics keep watchdog failures bounded and private', () => {
   const error = Object.assign(new Error('PRIVATE_ERROR'), { code: 'ETIMEDOUT', path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] })
@@ -402,6 +408,19 @@ const mailboxFixture = async fn => fixture(async f => {
   await fn({ ...f, script, progress, env, directory, call, seed, state, mailboxId })
 })
 
+// Inject only the claim boundary so the real mailbox write and cleanup still run.
+const importMailboxWithClaim = async (name, wrap) => {
+  const url = new URL('../scripts/board-messaging.ts', import.meta.url)
+  url.searchParams.set('claim', name)
+  const claim = new URL('../scripts/message-store-claim.ts', import.meta.url)
+  const injected = 'data:text/javascript,' + encodeURIComponent(`import { claimMessageStore as original } from ${JSON.stringify(claim.href)}
+export const claimMessageStore = directory => (${wrap})(original(directory))`)
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    return next(specifier === './message-store-claim' && context.parentURL === url.href ? injected : specifier, context)
+  } })
+  try { return await importTs(url.href) } finally { resolver.deregister() }
+}
+
 test('hookWorker preserves host timeouts above 3 seconds instead of clamping to 3000 ms', () => {
   const source = hookWorker('synthetic-home', 'synthetic-script', '')
   assert.ok(source.includes('started + hostTimeout - 1000'))
@@ -415,8 +434,14 @@ test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, G
   for (const [agent, events] of Object.entries({ codex: ['SessionStart', 'UserPromptSubmit'], antigravity: ['SessionStart', 'PreInvocation'], gemini: ['SessionStart', 'BeforeAgent'], muse: ['UserPromptSubmit'], cursor: ['sessionStart'] })) {
     for (const event of events) {
       f.seed(agent)
-      const result = f.call(agent, event)
+      let result = f.call(agent, event)
       assert.equal(result.status, 0, result.stderr)
+      if (!result.stdout.includes('Synthetic mailbox payload')) {
+        assert.equal(result.stderr, 'board: mailbox deferred\n', agent + ' ' + event)
+        assert.equal(f.state().messages[0].status, 'queued')
+        result = f.call(agent, event)
+        assert.equal(result.status, 0, result.stderr)
+      }
       const output = JSON.parse(result.stdout)
       assert.ok(JSON.stringify(output).includes('Synthetic mailbox payload'), agent + ' ' + event + ': ' + result.stdout)
       if (agent === 'codex' || agent === 'gemini' || agent === 'muse') assert.equal(output.hookSpecificOutput.hookEventName, event)
@@ -430,6 +455,108 @@ test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, G
       if (agent === 'gemini') assert.equal(output.decision, 'allow')
     }
   }
+}))
+
+test('a held mailbox store claim reports deferral and the next turn delivers after release', async () => mailboxFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  f.seed()
+  const before = readFileSync(join(f.directory, 'messages.json'), 'utf8')
+  const claim = claimMessageStore(f.directory)
+  const nonce = 'a'.repeat(32)
+  const pending = join(f.directory, `.message-pending-${process.pid}-${nonce}.json`)
+  f.save(pending, JSON.stringify({ version: 1, pid: process.pid, nonce }) + '\n')
+  try {
+    assert.ok(existsSync(pending))
+    const deferred = f.call('codex', 'UserPromptSubmit')
+    assert.equal(deferred.status, 0, deferred.stderr)
+    assert.equal(deferred.stdout, '')
+    assert.equal(deferred.stderr, 'board: mailbox deferred\n')
+    assert.equal(f.state().messages[0].status, 'queued')
+    assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
+  } finally {
+    claim.release()
+    unlinkSync(pending)
+  }
+  const delivered = f.call('codex', 'UserPromptSubmit')
+  assert.equal(delivered.status, 0, delivered.stderr)
+  assert.ok(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext.includes('Synthetic mailbox payload'))
+  assert.equal(f.state().messages[0].status, 'accepted')
+}))
+
+test('a mailbox turn returns its saved message when claim release throws', async () => mailboxFixture(async f => {
+  const { hookMailbox } = await importMailboxWithClaim('release-failure', `claim => ({
+    check: directory => claim.check(directory),
+    release: () => { claim.release(); throw new Error('SYNTHETIC_RELEASE_FAILURE') },
+  })`)
+  f.seed()
+  const mailbox = hookMailbox(f.directory, Infinity)
+  const message = await mailbox.turn('codex', session, 'CLI', Date.now())
+  assert.equal(message?.id, 'hook-mailbox-message')
+  assert.equal(message.text, 'Synthetic mailbox payload')
+  assert.equal(f.state().messages[0].status, 'uncertain')
+  assert.equal(mailbox.hasDeferred, false)
+  await mailbox.accept('codex', session, message.id, message.nonce, Date.now())
+  assert.equal(f.state().messages[0].status, 'accepted')
+  assert.equal(await mailbox.turn('codex', session, 'CLI', Date.now()), null)
+  assert.equal(mailbox.hasDeferred, false, 'an empty mailbox is not deferred')
+  assert.equal(readdirSync(f.directory).some(name => name.startsWith('.message-claim-') || name.endsWith('.tmp')), false)
+
+  const { hookMailbox: beforeWrite } = await importMailboxWithClaim('check-failure', `claim => ({
+    check: () => { throw new Error('SYNTHETIC_CHECK_FAILURE') },
+    release: () => { claim.release(); throw new Error('SYNTHETIC_RELEASE_FAILURE') },
+  })`)
+  f.seed()
+  const failed = beforeWrite(f.directory, Infinity)
+  assert.equal(await failed.turn('codex', session, 'CLI', Date.now()), null)
+  assert.equal(failed.hasDeferred, true)
+  assert.equal(f.state().messages[0].status, 'queued')
+}))
+
+test('a mailbox claim that cannot be removed is reused, so the accept of a message handed out still saves', async () => mailboxFixture(async f => {
+  globalThis.syntheticClaims = 0
+  globalThis.syntheticStuckReleases = 1
+  const { hookMailbox } = await importMailboxWithClaim('stuck-release', `claim => (globalThis.syntheticClaims++, {
+    check: directory => claim.check(directory),
+    release: () => {
+      if (globalThis.syntheticStuckReleases-- > 0) throw Object.assign(new Error('SYNTHETIC_STUCK_RELEASE'), { code: 'EPERM' })
+      claim.release()
+    },
+  })`)
+  f.seed()
+  const mailbox = hookMailbox(f.directory, Infinity)
+  const message = await mailbox.turn('codex', session, 'CLI', Date.now())
+  assert.equal(message?.id, 'hook-mailbox-message')
+  assert.equal(f.state().messages[0].status, 'uncertain')
+  assert.equal(readdirSync(f.directory).filter(name => name.startsWith('.message-claim-')).length, 1)
+  await mailbox.accept('codex', session, message.id, message.nonce, Date.now())
+  assert.equal(f.state().messages[0].status, 'accepted')
+  assert.equal(globalThis.syntheticClaims, 1)
+  assert.equal(readdirSync(f.directory).some(name => name.startsWith('.message-claim-')), false)
+}))
+
+test('a mailbox accept saves after a slow successful claim while turns still defer', async () => mailboxFixture(async f => {
+  const { hookMailbox } = await importMailboxWithClaim('slow-claim', `claim => {
+    const started = Date.now()
+    Date.now = () => started + 121
+    return claim
+  }`)
+  const { takeMailboxMessage } = await importTs('../hooks/hook-messages.ts')
+  f.seed()
+  const now = Date.now()
+  const taken = takeMailboxMessage(f.state(), 'codex', session, 'CLI', now, 43_200_000, 'abcdef')
+  assert.ok(taken.message)
+  f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, ...taken.state }))
+  const clock = Date.now
+  Date.now = () => now
+  try {
+    const mailbox = hookMailbox(f.directory, Infinity)
+    await mailbox.accept('codex', session, taken.message.id, taken.message.nonce, now)
+    assert.equal(f.state().messages[0].status, 'accepted')
+    f.seed()
+    assert.equal(await mailbox.turn('codex', session, 'CLI', Date.now()), null)
+    assert.equal(mailbox.hasDeferred, true)
+    assert.equal(f.state().messages[0].status, 'queued')
+  } finally { Date.now = clock }
 }))
 
 test('a turn-start hook with an empty mailbox prints exactly what it printed before', async () => mailboxFixture(async f => {
@@ -1358,6 +1485,52 @@ test('removal preview and apply print plain changes and one next step unless JSO
     assert.equal(result.applied, true)
     assert.equal(jsonApply.stdout, `${JSON.stringify(result, null, 2)}\n`)
     assert.equal(existsSync(join(f.root, 'install-antigravity.json')), false)
+  }
+}))
+
+test('a removal preview names the shared files it keeps while another agent uses them', () => fixture(f => {
+  const runner = join(f.home, 'kept-shared-cli.mjs')
+  f.save(runner, bundleFromDir(new URL('..', import.meta.url)))
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const shared = [f.script, worker, f.skill]
+  const remove = (agent, lang, ...args) => spawnSync(process.execPath, [runner, '--home', f.home, '--codex-remove', '--agent', agent, '--lang', lang, ...args], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  for (const [lang, removeWord, next] of [
+    ['en', 'Would remove: ', 'Next:'],
+    ['zh-TW', '將移除：', '下一步：'],
+    ['zh-CN', '将移除：', '下一步：'],
+  ]) {
+    assert.equal(f.install('--agent', 'codex', '--lang', lang, '--apply').status, 0)
+    assert.equal(f.install('--agent', 'antigravity', '--lang', lang, '--apply').status, 0)
+    const snapshot = homeSnapshot(f.home)
+    const preview = remove('antigravity', lang)
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.equal(preview.stdout.split(next).length - 1, 1, preview.stdout)
+    for (const file of shared) {
+      const keptLine = lang === 'en' ? `Keeps ${file}; still in use by Codex` : `保留 ${file}；Codex 仍在使用`
+      assert.ok(preview.stdout.includes(keptLine), preview.stdout)
+      assert.ok(!preview.stdout.includes(`${removeWord}${file}`), preview.stdout)
+    }
+    assert.deepEqual(homeSnapshot(f.home), snapshot)
+    const jsonPreview = remove('antigravity', lang, '--json')
+    assert.equal(jsonPreview.status, 0, jsonPreview.stderr)
+    const plan = JSON.parse(jsonPreview.stdout)
+    assert.equal(plan.mode, 'remove')
+    assert.equal(plan.applied, undefined)
+    assert.deepEqual(plan.keptShared, shared.map(file => ({ file, usedBy: ['codex'] })), jsonPreview.stdout)
+    assert.ok(!plan.changes.some(change => shared.includes(change.file)), jsonPreview.stdout)
+    // Applying the removal leaves the shared files for Codex.
+    const applied = remove('antigravity', lang, '--apply')
+    assert.equal(applied.status, 0, applied.stderr)
+    assert.equal(existsSync(join(f.root, 'install-antigravity.json')), false)
+    for (const file of shared) assert.equal(existsSync(file), true, file)
+    // Codex is now the last agent: its preview names the shared files as removed.
+    const lastPreview = remove('codex', lang)
+    assert.equal(lastPreview.status, 0, lastPreview.stderr)
+    for (const file of shared) assert.ok(lastPreview.stdout.includes(`${removeWord}${file}`), lastPreview.stdout)
+    const lastPlan = JSON.parse(remove('codex', lang, '--json').stdout)
+    assert.equal(lastPlan.keptShared, undefined)
+    assert.ok(shared.every(file => lastPlan.changes.some(change => change.file === file && change.action === 'remove')), JSON.stringify(lastPlan.changes))
+    assert.equal(remove('codex', lang, '--apply').status, 0)
   }
 }))
 
@@ -2450,7 +2623,7 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
     wasReaped = !existsSync(pidFile) || !isReporterAlive(Number(readFileSync(pidFile, 'utf8')))
     assert.equal(result.status, 0, hookFailure(result))
     assert.equal(wasReaped, true, 'the timed-out reporter must be reaped before the hook returns')
-    assert.ok(performance.now() - started < 3000)
+    assert.ok(performance.now() - started < 11000)
     const files = pendingFiles(f)
     assert.equal(files.length, 1)
     assert.match(files[0], /^\d{15}-[\da-f-]+\.raw\.json$/)
@@ -2517,12 +2690,12 @@ test('the hook deadline counts from the process start, not from when the worker 
 test('a late Codex worker queues an ISO event time and recovery preserves it', t => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   holdAutomaticRecovery(f)
-  const at = Date.now() - 3000
+  const at = Date.now() - 10000
   const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
   const worker = join(f.root, 'agent-board-hook.mjs')
   const payload = { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'late-iso-turn' }
   const result = spawnSync(process.execPath, [worker, '--hook-version', '1', '--hook-event', 'UserPromptSubmit', '--codex-event', '--agent', 'codex', '--progress-file', f.progress, '--hook-started', String(at)], {
-    env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000,
+    env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 15000,
   })
   assert.equal(result.status, 0, hookFailure(result))
   const files = pendingFiles(f)
@@ -2611,6 +2784,79 @@ test('an older live lifecycle event cannot replace a newer state or its update t
   assert.equal(report('working', 'PreInvocation', newer + 1).status, 0)
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'working')
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).appliedAt, newer + 1)
+}))
+
+test('two Antigravity sessions in one folder show different titles before either reports (#814)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  // No folder reaches the board for Antigravity: its hook binds only the
+  // conversation id, so both sessions arrive with the same fixture folder.
+  const first = 'synthetic-first-antigravity-814'
+  const second = 'synthetic-second-antigravity-814'
+  const report = (conversationId, state, event) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId })
+  for (const conversationId of [first, second]) {
+    assert.equal(report(conversationId, 'waiting', 'SessionStart').status, 0)
+    assert.equal(report(conversationId, 'working', 'PreInvocation').status, 0)
+  }
+  const ownerOf = id => createHash('sha256').update(`antigravity:${id}`).digest('hex')
+  const firstRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(first)}.json`), 'utf8'))
+  const secondRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(second)}.json`), 'utf8'))
+  assert.notEqual(firstRecord.title, secondRecord.title)
+  // No hash in the title: a default view shows no session id, hash or file
+  // path (parity checklist; dot's Question on #849). The distinction is the
+  // session's start time, to the millisecond — second precision would let two
+  // sessions started in the same second share a title.
+  for (const [record, id] of [[firstRecord, first], [secondRecord, second]]) {
+    assert.ok(!record.title.includes(ownerOf(id).slice(0, 8)), record.title)
+    assert.match(record.title, / · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, record.title)
+  }
+  const text = readFileSync(f.progress, 'utf8')
+  assert.ok(text.includes(`### ${firstRecord.title}`), text)
+  assert.ok(text.includes(`### ${secondRecord.title}`), text)
+  // Both distinct titles reach the default terminal view in every language, and
+  // the rendered output passes the never-shown check.
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardText, boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { LANGS } = await importTs('../hooks/i18n.ts')
+  for (const lang of LANGS) {
+    const s = STRINGS[lang]
+    const view = buildView(parseProgress(text), [], null, Date.now(), 0, {}, s)
+    for (const drawn of [boardText(view, [], s, { width: 80, isColor: false }), boardScreen(view, [], emptyBoardState, s, { width: 80, isColor: false })]) {
+      assert.ok(drawn.includes(firstRecord.title), `${lang}: first title drawn`)
+      assert.ok(drawn.includes(secondRecord.title), `${lang}: second title drawn`)
+      assert.deepEqual(neverShown(drawn), [], lang)
+    }
+  }
+  // An explicit report still supplies its own title: distinct only until the agent reports.
+  const reported = f.command(['--codex-report', '--agent', 'antigravity', '--session', first], { title: 'Reported summary', project: 'antigravity', state: 'working', steps: ['- [~] Reported step'] })
+  assert.equal(reported.status, 0, reported.stderr)
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(first)}.json`), 'utf8')).title, 'Reported summary')
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(second)}.json`), 'utf8')).title, secondRecord.title)
+}))
+
+test('an Antigravity session created before the distinct title still gets one on its next event (#814)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const conversationId = 'synthetic-legacy-antigravity-814'
+  const report = (state, event) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId })
+  assert.equal(report('waiting', 'SessionStart').status, 0)
+  const owner = createHash('sha256').update(`antigravity:${conversationId}`).digest('hex')
+  const recordFile = join(f.root, 'sessions', `${owner}.json`)
+  const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+  // Rewrite the record and its block heading as the pre-fix shape: the generic title.
+  const before = readFileSync(f.progress, 'utf8')
+  writeFileSync(recordFile, `${JSON.stringify({ ...record, title: 'Local antigravity task' }, null, 2)}\n`)
+  writeFileSync(f.progress, before.replace(`### ${record.title}`, '### Local antigravity task'))
+  assert.equal(report('working', 'PreInvocation').status, 0)
+  const after = JSON.parse(readFileSync(recordFile, 'utf8'))
+  // The re-title is a start time, not the old hash suffix: it differs from the
+  // first event's title, carries no hash, and then stays put on later events.
+  assert.notEqual(after.title, 'Local antigravity task')
+  assert.ok(!after.title.includes(owner.slice(0, 8)), after.title)
+  assert.match(after.title, / · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, after.title)
+  assert.ok(readFileSync(f.progress, 'utf8').includes(`### ${after.title}`))
+  assert.equal(report('working', 'PostInvocation').status, 0)
+  assert.equal(JSON.parse(readFileSync(recordFile, 'utf8')).title, after.title)
 }))
 
 test('a hook worker that starts after the host would stop it still reads its input and queues the event', () => fixture(f => {

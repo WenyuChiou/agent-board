@@ -1,9 +1,9 @@
 // Pure decision function: decides whether `agent-board` with no flags should print
 // plain text, start the terminal board (--watch), or open the desktop web page (--serve).
 //
-// 1. Not an interactive terminal (piped stdout, CI set, or agent env vars present): 'text'
-// 2. Interactive terminal without display (SSH_CONNECTION / SSH_TTY on any OS, or Linux without DISPLAY): 'terminal'
-// 3. Interactive terminal with display (desktop): 'page'
+// CI keeps a text read for scripts. Agents and non-interactive calls open the page.
+// An interactive terminal uses the terminal board over SSH or without a display,
+// and opens the page on a desktop.
 
 export type Surface = 'text' | 'terminal' | 'page'
 
@@ -28,7 +28,7 @@ export const AGENT_ENV_VARS = [
   'AGENT_BOARD_SESSION_ID',
 ] as const
 
-export interface SurfaceInput {
+export type SurfaceInput = {
   env?: Record<string, string | undefined>
   isTty?: boolean
   platform?: NodeJS.Platform
@@ -39,14 +39,14 @@ export const pickSurface = ({
   isTty = Boolean(process.stdout?.isTTY),
   platform = process.platform,
 }: SurfaceInput = {}): Surface => {
-  if (!isTty) return 'text'
   if (env.CI && env.CI !== '0' && env.CI !== 'false') return 'text'
   if (AGENT_ENV_VARS.some(name => {
     const val = env[name]
     return typeof val === 'string' && val.length > 0 && val !== '0' && val !== 'false'
   })) {
-    return 'text'
+    return 'page'
   }
+  if (!isTty) return 'page'
 
   const isSsh = Boolean((env.SSH_CONNECTION && env.SSH_CONNECTION.length > 0) || (env.SSH_TTY && env.SSH_TTY.length > 0))
   if (isSsh) return 'terminal'

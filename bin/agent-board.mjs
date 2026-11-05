@@ -39,11 +39,11 @@ Set up, once per computer:
   setup options: --agent <name>[,<name>] or all, --home <folder>, --data-dir <folder>
 
 The board:
-  agent-board                  open the board where you are (desktop window, live board in terminal over SSH, text for agents)
+  agent-board                  open the terminal board over SSH or without a display; open the page otherwise
   agent-board stop             stop the board's page
-  agent-board --chat           the board as plain text, for a chat app
+  agent-board --json           read the board as JSON for an agent
 
-All options: agent-board --help all (--watch, --serve, --html, --print, --tidy, ...)
+All options: agent-board --help all (--watch, --serve, --print, --tidy, ...)
 
 The board runs the board script that setup installed (~/.agent-board/agent-board.mjs, or the
 Claude Code plugin's, beside its progress.md). Other options are passed to it unchanged.
@@ -57,11 +57,11 @@ Without installing: npx ${name} <the same options>`,
   setup 選項：--agent <名稱>[,<名稱>] 或 all、--home <資料夾>、--data-dir <資料夾>
 
 看板：
-  agent-board                  在所在位置打開看板（桌面開視窗、SSH 在終端機開看板、agent 印純文字）
+  agent-board                  SSH 或無顯示器的終端機開終端看板，其他情況開網頁
   agent-board stop             停止看板網頁
-  agent-board --chat           純文字看板，給聊天 app 用
+  agent-board --json           供 agent 以 JSON 讀取看板
 
-所有選項：agent-board --help all（--watch、--serve、--html、--print、--tidy...）
+所有選項：agent-board --help all（--watch、--serve、--print、--tidy...）
 
 看板執行的是 setup 安裝的看板程式（~/.agent-board/agent-board.mjs，或 Claude Code
 外掛放在 progress.md 旁的那份）。其他選項原樣交給它。
@@ -75,11 +75,11 @@ Without installing: npx ${name} <the same options>`,
   setup 选项：--agent <名称>[,<名称>] 或 all、--home <文件夹>、--data-dir <文件夹>
 
 看板：
-  agent-board                  在所在位置打开看板（桌面开窗口、SSH 在终端打开看板、agent 印纯文本）
+  agent-board                  SSH 或无显示器的终端打开终端看板，其他情况打开网页
   agent-board stop             停止看板网页
-  agent-board --chat           纯文本看板，给聊天 app 用
+  agent-board --json           供 agent 以 JSON 读取看板
 
-所有选项：agent-board --help all（--watch、--serve、--html、--print、--tidy...）
+所有选项：agent-board --help all（--watch、--serve、--print、--tidy...）
 
 看板运行的是 setup 安装的看板程序（~/.agent-board/agent-board.mjs，或 Claude Code
 插件放在 progress.md 旁的那份）。其他选项原样交给它。
@@ -98,11 +98,10 @@ The board:
   agent-board                  open the board where you are
   agent-board stop             stop the board's page
   agent-board --print          print the board as text
+  agent-board --json           read the board as JSON for an agent
   agent-board --status         one line for a status bar; reads only progress.md
   agent-board --watch          the board in this terminal, with keys
   agent-board --serve          the board's page in your browser
-  agent-board --chat           the board as plain text, for a chat app
-  agent-board --html           write the board as a page and open it
   agent-board --tidy           archive eligible completed tasks
   agent-board --no-open        start the server without opening a browser
   agent-board --lan            open the board to devices on your local network
@@ -126,11 +125,10 @@ Without installing: npx ${name} <the same options>`,
   agent-board                  在所在位置打開看板
   agent-board stop             停止看板網頁
   agent-board --print          印出純文字看板
+  agent-board --json           供 agent 以 JSON 讀取看板
   agent-board --status         狀態列的一行摘要，只讀 progress.md
   agent-board --watch          在這個終端機開看板，可用按鍵操作
   agent-board --serve          在瀏覽器開看板網頁
-  agent-board --chat           純文字看板，給聊天 app 用
-  agent-board --html           把看板寫成網頁並打開
   agent-board --tidy           封存符合條件的已完成工作
   agent-board --no-open        啟動伺服器但不打開瀏覽器
   agent-board --lan            開放區域網路連線
@@ -154,11 +152,10 @@ Without installing: npx ${name} <the same options>`,
   agent-board                  在所在位置打开看板
   agent-board stop             停止看板网页
   agent-board --print          打印纯文本看板
+  agent-board --json           供 agent 以 JSON 读取看板
   agent-board --status         状态栏的一行摘要，只读 progress.md
   agent-board --watch          在这个终端打开看板，可用按键操作
   agent-board --serve          在浏览器打开看板网页
-  agent-board --chat           纯文本看板，给聊天 app 用
-  agent-board --html           把看板写成网页并打开
   agent-board --tidy           归档符合条件的已完成工作
   agent-board --no-open        启动服务器但不打开浏览器
   agent-board --lan            开放局域网连接

@@ -98,7 +98,7 @@ export type AnswerRoute = { mode: 'connected' | 'send'; agent: string; session: 
 // `depth` and `theme` pick the page's colours for a terminal; `routes` are the questions the
 // running page can answer into their session, by line key; `agents` the agents that reported to
 // this board, which an empty board names.
-export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; depth?: ColorDepth; theme?: Theme; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
+export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; isQuestionsOpen?: boolean; depth?: ColorDepth; theme?: Theme; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
 
 export const remainingInbox = (view: View, pending: readonly PendingTurn[]): readonly PendingTurn[] => view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
 
@@ -285,7 +285,7 @@ const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: 
   })),
 ]
 
-export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
+export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }, done: readonly string[] = []): string => {
   const c = paint(o)
   const isWide = isWideLang(s)
   const cut = (raw: string, width: number): string => fit(raw, width, isWide)
@@ -297,8 +297,9 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
   for (const [title, items] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
     if (items.length === 0) continue
-    lines.push(`${title} (${items.length}) · --all`)
-    if (o.isIdleOpen) for (const item of items) lines.push(`  ${cut(`${item.project} › ${item.task} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
+    const isOpen = o.isIdleOpen || o.isQuestionsOpen
+    lines.push(`${title} (${items.length})${isOpen ? '' : ' · --all'}`)
+    if (isOpen) for (const item of items) lines.push(`  ${cut(`${item.project} › ${item.task} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
   }
   // Questions marked answered in a pane are left out, and counted so they are not lost.
   const hidden = view.hidden.length === 0 ? [] : [c('quiet', s.hiddenCount(view.hidden.length))]
@@ -330,11 +331,10 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
 
   for (const [rows, count] of [[view.idle, s.idleCount], [view.stopped, s.stoppedCount]] as const) {
     if (rows.length === 0) continue
-    lines.push(c('quiet', o.isIdleOpen ? count(rows.length) : `${count(rows.length)} · --all`))
-    if (o.isIdleOpen) {
-      for (const row of rows) {
-        lines.push(`  ${c('project', cut(row.project, o.width - 4), true)}`, ...rowLines(view, row, s, o, true))
-      }
+    const shown = o.isIdleOpen ? rows : o.isQuestionsOpen ? rows.filter(row => (row.questions?.length ?? 0) > 0) : []
+    lines.push(c('quiet', shown.length === rows.length ? count(rows.length) : `${count(rows.length)} · --all`))
+    for (const row of shown) {
+      lines.push(`  ${c('project', cut(row.project, o.width - 4), true)}`, ...rowLines(view, row, s, o, true))
     }
     lines.push('')
   }
@@ -358,6 +358,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   // Runs agents started for themselves, with no session known: one folded line, never in the counts (#399).
   if (view.background) lines.push(c('quiet', cut(view.background, o.width)), '')
   for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2, isWide).map(part => c('quiet', part)))
+  if (done.length > 0) lines.push('', ...done.map(words => c('done', `✓ ${cut(words, o.width - 2)}`)))
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
 }
@@ -469,7 +470,7 @@ const withoutHomeStart = (text: string, home: string, isWindows: boolean): strin
   return text.slice(0, cut).replace(OTHER_HOME_START, '').trimEnd()
 }
 
-const clipped = (text: string, home: string, isWindows: boolean): string =>
+export const clipped = (text: string, home: string, isWindows: boolean): string =>
   text.length <= CHAT_CLIP ? text : withoutHomeStart(text.slice(0, CHAT_CLIP).replace(/\s*\S*$/, ''), home, isWindows)
 
 const chatLine = (text: string, indent: number, home: string, isWindows: boolean): string =>
@@ -708,6 +709,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   const moved = (selected: number): { state: BoardState; action: null } => ({ state: { ...state, selected, key: items[selected]?.key ?? null, note: '' }, action: null })
   if (key === 'up' || key === 'k') return moved(Math.max(0, at - 1))
   if (key === 'down' || key === 'j') return moved(Math.min(last, at + 1))
+  // The legacy action name now opens the same live page as the desktop command.
   if (key === 'o') return { state, action: { type: 'html' } }
   if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: state.isIdleOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
   if (key === 'l') return { state: { ...state, isOlderOpen: !state.isOlderOpen, selected: 0, key: null, open: null, note: state.isOlderOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }

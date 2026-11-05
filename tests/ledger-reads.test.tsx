@@ -74,9 +74,8 @@ test('an idle poll reads no file with piles of captures, proofs and inbox turns 
   const world = makeWorld([[FILE, board]])
   world.env = english
   const clock = engineBeneath(on, world)
-  // Forty answered questions, each with two copies and a retirement proof, twenty acknowledgement
-  // proofs and thirty turns that other agents left in the inbox.
-  const answered = Array.from({ length: 40 }, (_, n) => finished(n + 1))
+  // Each question has two copies and both proofs; 31 turns still exceed a 30-turn startup batch.
+  const answered = Array.from({ length: 31 }, (_, n) => finished(n + 1))
   put(world, LEDGER, questionsJson(ledgerOf(...answered)), 1)
   answered.forEach((record, n) => {
     putCapture(world, reopened(record), 'unresolved', 10 + n)
@@ -825,7 +824,7 @@ test('a write made while a poll is held still lands, without waiting on the held
   expect(world.files.get(FILE)).toContain('Synthetic second quick task')
 })
 
-test('a poll held for a minute leaves at most two reads of the held file waiting', async ($, on) => {
+test('a held poll leaves at most two reads of the held file waiting', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
@@ -836,12 +835,13 @@ test('a poll held for a minute leaves at most two reads of the held file waiting
   put(world, answered, '{}\n', NOW + 6_000)
   world.holdRead = path => (path === answered ? new Promise(() => undefined) : undefined)
   world.reads = []
-  for (let n = 0; n < 30; n++) await clock.advance(2000)
+  // Two 15-second hung-read windows and another timer tick expose a third read.
+  for (let n = 0; n < 18; n++) await clock.advance(2000)
   // The held poll and the one that took its place; no third while both are held.
   expect(world.reads.filter(path => path === answered)).toHaveLength(2)
 })
 
-test('a poll whose reads of progress.md hang for a minute starts at most two polls while the 2-second timer ticks', async ($, on) => {
+test('a poll whose reads of progress.md hang starts at most two polls while the 2-second timer ticks', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
@@ -853,14 +853,15 @@ test('a poll whose reads of progress.md hang for a minute starts at most two pol
   world.files.set(FILE, `${board}${block('a1b2c302', 'working', 1, '- [~] Later work')}`)
   world.mtime += 1
   world.reads = []
-  for (let n = 0; n < 30; n++) await clock.advance(2000)
+  // Two 15-second hung-read windows and another timer tick expose a third poll.
+  for (let n = 0; n < 18; n++) await clock.advance(2000)
   // The held poll and the one that took its place: no third starts while the first is still held.
   expect(world.reads.filter(path => path === FILE)).toHaveLength(2)
   world.holdRead = undefined
   for (const release of held) release()
 })
 
-test('a question pass held for a minute leaves one read of the ledger waiting', async ($, on) => {
+test('a held question pass leaves one read of the ledger waiting', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
@@ -871,7 +872,8 @@ test('a question pass held for a minute leaves one read of the ledger waiting', 
   put(world, LEDGER, world.files.get(LEDGER)!, NOW)
   world.holdRead = path => (path === LEDGER ? new Promise(() => undefined) : undefined)
   world.reads = []
-  for (let n = 0; n < 30; n++) await clock.advance(2000)
+  // Keep ticking beyond both hung-read windows while the question pass stays held.
+  for (let n = 0; n < 18; n++) await clock.advance(2000)
   expect(world.reads.filter(path => path === LEDGER)).toHaveLength(1)
 })
 
@@ -1097,7 +1099,8 @@ test('a board with no ledger, two torn ledgers days old and a block cut off in t
   expect(await ui.find({ type: 'Text', text: notice })).toBeUndefined()
   await ui.press({ key: 'section::health' })
   expect(await ui.find({ type: 'Text', text: notice })).toBeDefined()
-  expect((world.files.get(FILE.replace('.md', '.html')) ?? '').split(notice).length - 1).toBe(1)
+  expect(visiblePaneText(await ui.drawn()).split(notice).length - 1).toBe(1)
+  expect(world.files.has(FILE.replace('.md', '.html'))).toBe(false)
   // The ledger is written, with the board's question and the inbox turn's, and the torn ledgers,
   // three days old, stay for the sweep.
   const words = ledgerRecords(world).map(record => record.words)
@@ -1374,10 +1377,7 @@ test('the pane shows a frozen question once in full without its cut-off prefix',
     expect(await ui.findAll({ type: 'Button', text: 'Paint it, OK?' })).toHaveLength(1)
     // The text match is a substring one, so the full question is the only button it may find.
     expect((await ui.findAll({ type: 'Button', text: 'Paint it, O' }) as Array<{ text?: string }>).map(node => node.text)).toEqual(['Paint it, OK?'])
-    await $.command.run({ ...TIDY, args: 'open' })
-    const html = world.files.get(FILE.replace(/\.md$/, '.html')) ?? ''
-    expect(html).toContain('Paint it, OK?')
-    expect(html).not.toContain('Paint it, O<')
+    expect(world.files.has(FILE.replace(/\.md$/, '.html'))).toBe(false)
   } finally {
     await ui.unmount()
   }
