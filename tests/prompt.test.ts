@@ -160,7 +160,7 @@ test('exact pre-prompt Grok OpenCode and OpenClaw files upgrade and remove while
   }
 })
 
-test('the Codex prompt hook writes its event within its timeout on Windows', () => {
+test('the Codex prompt hook has a 10 s timeout matching its Stop hook', () => {
   expect(hookTimeout('codex', 'UserPromptSubmit')).toBe(10000)
   expect(hostHookTimeout('codex', 'UserPromptSubmit')).toBe(10)
   expect(hookTimeout('codex', 'UserPromptSubmit')).toBe(hookTimeout('codex', 'Stop'))

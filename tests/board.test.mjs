@@ -9649,8 +9649,8 @@ const sourceBoard = async () => {
     },
   })
   try {
-    const [board, view, parse, serve, questions, blocks] = await Promise.all([import('../hooks/board.ts'), import('../hooks/view.ts'), import('../hooks/parse.ts'), import('../hooks/serve.ts'), import('../hooks/questions.ts'), import('../hooks/blocks.ts')])
-    return { ...board, ...view, ...parse, ...serve, ...questions, cutOffSpans: blocks.cutOffSpans }
+    const [board, view, parse, serve, questions, blocks, retention] = await Promise.all([import('../hooks/board.ts'), import('../hooks/view.ts'), import('../hooks/parse.ts'), import('../hooks/serve.ts'), import('../hooks/questions.ts'), import('../hooks/blocks.ts'), import('../hooks/retention.ts')])
+    return { ...board, ...view, ...parse, ...serve, ...questions, ...retention, cutOffSpans: blocks.cutOffSpans, cutOffBlocks: blocks.cutOffBlocks, cutBlockLines: blocks.cutBlockLines }
   } finally { loader.deregister() }
 }
 
@@ -10071,24 +10071,36 @@ test('a worktree whose repository was moved shows its own folder name again with
 const firstScreenText = node => node.hidden || node.inert === true ? '' : [node.text, ...node.childNodes.filter(child => node.tag !== 'details' || node.open || child.tag === 'summary').map(firstScreenText)].filter(Boolean).join('\n')
 
 test('the first screen of the synthetic big board shows nothing from the never-shown list', async () => {
+  const runtime = await sourceBoard()
   const extra = [
     ...Array.from({ length: 20 }, (_, index) => groupedBlock(String(47701000 + index), 'codex', 'working', 'cap-repo', `Synthetic cap open ${index}`, ['- [~] Continue the synthetic work'], 0)),
     ...Array.from({ length: 12 }, (_, index) => groupedBlock(String(47702000 + index), 'codex', 'done', 'cap-repo', `Synthetic cap done ${index}`, ['- [x] Finish the synthetic work'], 180)),
   ].join('\n')
-  const grouped = await groupedPage(bigBoard(460) + '\n' + extra, {}, bigBoardNow)
-  try {
-    const dom = await pageDom(grouped.html, grouped.model)
-    assert.deepEqual(neverShown(['board', 'chips', 'agent-note', 'versions'].map(id => firstScreenText(dom.node(id))).join('\n')), [])
-    // Working now draws the tasks with activity in the last half hour, and the Stopped and Done shelves start closed.
-    const working = pressWalk(dom.node('working-now')).filter(node => node.tag === 'li' && node.getAttribute('data-k') !== null)
-    assert.ok(working.length >= 20)
-    assert.equal(working.length, grouped.model.view.working.length)
-    const shelves = pressWalk(dom.node('board')).filter(node => node.tag === 'section' && node.className?.startsWith('shelf'))
-    assert.ok(shelves.length >= 2)
-    assert.ok(shelves.every(shelf => !shelf.className.includes('open')))
-    // The page never carries the retired agent grouping parameter.
-    assert.ok(!grouped.html.includes('"group":"agent"'))
-  } finally { await grouped.board.close() }
+  const source = bigBoard(460) + '\n' + extra
+  const projects = runtime.parseProgress(source)
+  const ledger = runtime.observeQuestions(runtime.emptyQuestions(), projects, null, [], bigBoardNow).ledger
+  const sizes = { progress: Buffer.byteLength(source), store: 0 }
+  const warnings = runtime.sizeWarnings(sizes, EN)
+  const health = runtime.cutBlockLines(runtime.cutOffBlocks(source), EN)
+  const view = {
+    ...runtime.buildView(projects, [], null, bigBoardNow, 0, {}, EN, [], {}, ledger),
+    ...(warnings.length === 0 ? {} : { warning: warnings.join(' · '), isLarge: true, isCleanable: true }),
+    details: runtime.storageDetails(sizes, 0, EN),
+    ...(health.length === 0 ? {} : { health }),
+  }
+  const model = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, { now: bigBoardNow, repoOf: () => null, versions: { board: '1.2.3', package: null }, unreadable: view.unreadable ?? [] })
+  const html = runtime.servePage(EN, 'synthetic', false, 0, true)
+  const dom = await pageDom(html, model)
+  assert.deepEqual(neverShown(['board', 'chips', 'agent-note', 'versions'].map(id => firstScreenText(dom.node(id))).join('\n')), [])
+  // Working now draws the tasks with activity in the last half hour, and the Stopped and Done shelves start closed.
+  const working = pressWalk(dom.node('working-now')).filter(node => node.tag === 'li' && node.getAttribute('data-k') !== null)
+  assert.ok(working.length >= 20)
+  assert.equal(working.length, model.view.working.length)
+  const shelves = pressWalk(dom.node('board')).filter(node => node.tag === 'section' && node.className?.startsWith('shelf'))
+  assert.ok(shelves.length >= 2)
+  assert.ok(shelves.every(shelf => !shelf.className.includes('open')))
+  // The page never carries the retired agent grouping parameter.
+  assert.ok(!html.includes('"group":"agent"'))
 })
 
 test('an agent whose block was cut off is named unreadable in the board view, the grouped model and the page', async () => {
