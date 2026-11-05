@@ -49,9 +49,17 @@ const identityOf = text => {
 // Two names are the same agent when the base name matches and the lanes do not disagree: a name with no
 // lane is read as the same agent, so a bare "codex" still counts as the author "codex (x)" — the
 // conservative reading for self-approval, which can only ask for another reviewer, never merge early.
-const sameAgent = (a, b) => {
-  const x = identityOf(a), y = identityOf(b)
-  return Boolean(x && y && x.base === y.base && (!x.lane || !y.lane || x.lane === y.lane))
+const sameAgent = (reviewer, author) => {
+  const own = identityOf(author), name = fullName(reviewer)
+  const matches = other => Boolean(other && own && other.base === own.base && (!other.lane || !own.lane || other.lane === own.lane))
+  if (matches(identityOf(name))) return true
+  if (!name || !own) return false
+  // Review lines may append these explicit prose forms to the complete name.
+  // Do not split arbitrary punctuation or words: "Dr. Agent" and "Agent — Helper"
+  // are legitimate bases, and embedded parentheses may also belong to a name.
+  const withoutVerdict = name.replace(/(?:[.:](?=\s|$)|[。！？：]|\s+[-–—](?=\s|$))\s*(?:no findings|ok)\b.*$/, '').trim()
+  const withoutProse = withoutVerdict.replace(/^(.*?\))\s+after\b.*$/, '$1').trim()
+  return matches(identityOf(withoutProse))
 }
 // The built bundle and the string tables change in almost every pull request, so approved ones that touch them merge one at a time.
 const sharedPath = /^hooks\/(?:board-script(?:-[^/]+)?\.ts|i18n\.ts|strings-en\.ts|strings-zh-cn\.ts)$/
