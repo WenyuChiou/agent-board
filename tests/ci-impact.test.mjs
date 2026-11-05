@@ -277,7 +277,7 @@ test('dependency walking follows the generated board bundle to its parts without
   })
 })
 
-test('a change to one board bundle part alone counts as a bundle change and selects the npm and installer checks', async () => {
+test('a change to one board bundle part alone counts as a bundle change and selects the npm, installer and browser checks', async () => {
   const { buildPlan } = await import('../scripts/ci-impact.mjs')
   assert.equal(makePlan(['hooks/board-script-1.ts'], options()).generated.bundle, true)
   await withFixture(async root => {
@@ -286,7 +286,8 @@ test('a change to one board bundle part alone counts as a bundle change and sele
     const plan = await buildPlan(['hooks/board-script-1.ts'], { roots: [root] })
     assert.equal(plan.full, false)
     assert.equal(plan.generated.bundle, true)
-    assertOnly(plan, ['npm', 'installers', 'generated'])
+    // The browser journeys install this bundle in a child process: a page change runs them (#942).
+    assertOnly(plan, ['npm', 'installers', 'browser', 'generated'])
   })
 })
 
