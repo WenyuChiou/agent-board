@@ -387,6 +387,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     }
     if (item.type === 'row') {
       const { row } = item
+      if (view.recentAsking?.some(one => one.key === row.key)) continue
       const needs = rowNeedsYou(row, idleKeys.has(row.key) || stoppedKeys.has(row.key))
       const connection = isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)
       const isContested = !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (row.agent || 'claude') && one.session === row.nativeSession) ?? false)

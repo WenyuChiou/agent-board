@@ -42,7 +42,7 @@ import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedT
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
-import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
@@ -985,7 +985,19 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
-    return done(s.archivedOne(action.title))
+    // Not through view(), which may rewrite the question list and throw: a list another process holds
+    // for a moment must not change what is said about an archive that has already happened.
+    try {
+      const source = read(path)
+      const after = parseProgress(source)
+      const latest = readQuestions(questionsPath(path))
+      const proofs = readQuestionProofs()
+      const frozen = cutOffScopes(after, cutOffSpans(source, isCutSettledAt(now)))
+      const kept = latest === null || proofs === null ? 0 : keptQuestionCount(buildView(after, [], null, now, 0, {}, s, parseAnswered(read(answeredPath(path))) ?? [], {}, latest, proofs, pending(), frozen, undefined, staleTimeoutMs()), action.ref, s)
+      return done(kept > 0 ? s.archivedKeptQuestions(action.title, kept) : s.archivedOne(action.title))
+    } catch {
+      return done(s.archivedOne(action.title))
+    }
   }
   if (action.type === 'hide' || action.type === 'unhide') {
     // The list every pane on this machine reads too; nothing goes to the agent that asked.

@@ -640,6 +640,7 @@ export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOp
     ...(isOlderOpen ? [...(view.reminder ?? []), ...(view.older ?? [])].map(ask => ({ type: 'ask' as const, key: olderKey(ask), ask })) : []),
     ...rows.map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
     ...remainingInbox(view, pending).map((turn, index) => ({ type: 'turn' as const, key: `turn:${turn.agent}:${turn.project}:${index}`, turn })),
+    ...(view.recentAsking ?? []).filter(row => !listed.some(one => one.key === row.key)).map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
   ]
 }
 
@@ -896,6 +897,16 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
   const host = isOrphan ? items.find(item => item.type === 'row' && item.row.title === result.label)?.key ?? null : null
   let section = ''
   let focus: readonly [number, number] | null = null
+  const rowDetails = (row: TaskRow): void => {
+    if (row.question) lines.push(`    ${cut(row.question, o.width - 6)}`)
+    if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
+    for (const step of row.steps) {
+      const tone = step.status === 'waiting' ? 'waiting' : step.status === 'blocked' ? 'alert' : step.isCurrent ? 'accent' : step.status === 'done' ? 'quiet' : null
+      const line = cut(stepLine(step), o.width - 6)
+      lines.push(`    ${tone === null ? line : c(tone, line)}`)
+    }
+    if (row.handoff) lines.push(`    ${c('quiet', cut(row.handoff, o.width - 6))}`)
+  }
   const drawItem = (item: BoardItem, index: number): void => {
     const isHere = index === at
     const isOpen = state.open === item.key
@@ -957,16 +968,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const quiet = status.startsWith(lead) ? lead : ''
       lines.push(`    ${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
       if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
-      if (isOpen) {
-        if (row.question) lines.push(`    ${cut(row.question, o.width - 6)}`)
-        if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
-        for (const step of row.steps) {
-          const tone = step.status === 'waiting' ? 'waiting' : step.status === 'blocked' ? 'alert' : step.isCurrent ? 'accent' : step.status === 'done' ? 'quiet' : null
-          const line = cut(stepLine(step), o.width - 6)
-          lines.push(`    ${tone === null ? line : c(tone, line)}`)
-        }
-        if (row.handoff) lines.push(`    ${c('quiet', cut(row.handoff, o.width - 6))}`)
-      }
+      if (isOpen) rowDetails(row)
       return
     }
     const { turn } = item
@@ -974,6 +976,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
     if (result?.key === item.key) resultLines('    ')
   }
   items.forEach((item, index) => {
+    if (item.type === 'row' && view.recentAsking?.some(row => row.key === item.row.key)) return
     const from = lines.length
     drawItem(item, index)
     if (index === at) focus = [from, lines.length - 1]
@@ -988,8 +991,16 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
     if (lines.at(-1) !== '') lines.push('')
     lines.push(`${c('done', cut(heading, o.width), true)}${c('quiet', cut(`  ${s.boardKeyArchiveDone}`, o.width - cols(heading)))}`)
     for (const item of view.recent) {
-      lines.push(`  ${c('done', '✓')} ${titled(4, `${item.project} › ${item.title}`, item.when, false, 'quiet')}`)
-      for (const question of item.questions ?? []) lines.push(`    ${cut(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
+      const index = items.findIndex(one => one.type === 'row' && one.row.key === item.key && view.recentAsking?.some(row => row.key === one.row.key))
+      const selectable = items[index]
+      const isHere = index >= 0 && index === at
+      const from = lines.length
+      lines.push(`${isHere ? c('accent', '›', true) : ' '} ${c('done', '✓')} ${titled(4, `${item.project} › ${item.title}`, item.when, isHere, 'quiet')}`)
+      if (selectable !== undefined && (result?.key === selectable.key || host === selectable.key)) resultLines('    ')
+      // Open, its steps say the question themselves.
+      if (selectable?.type === 'row' && state.open === selectable.key) rowDetails({ ...selectable.row, question: null })
+      else for (const question of item.questions ?? []) lines.push(`    ${cut(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
+      if (isHere) focus = [from, lines.length - 1]
     }
   }
   if (isEmptyBoard(view, pending)) {

@@ -137,7 +137,7 @@ import { keepRecent, liveToldKeys, remindersOf } from './remind'
 import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, doneRecord, inboxDropped, isExpiredRecord, isSameWrite, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, readMonthParts, RETENTION, sizeWarnings, storageDetails, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, STORE_FILE, unseenFailedInbox } from './retention'
 import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
-import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
+import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
@@ -4490,7 +4490,13 @@ export const register: Register = (on, options) => {
       archiveRow: async row => {
         if (row.archive === null) return failure(s.archiveGone)
         const isTaken = await enqueue(() => archiveOne($, row.archive!))
-        return isTaken ? s.archivedOne(row.title) : failure(s.archiveGone)
+        if (!isTaken) return failure(s.archiveGone)
+        try {
+          const count = keptQuestionCount(await paneView(), row.archive, s)
+          return count > 0 ? s.archivedKeptQuestions(row.title, count) : s.archivedOne(row.title)
+        } catch {
+          return s.archivedOne(row.title)
+        }
       },
       confirmRow: async row => {
         if (row.confirm == null) return failure(s.boardLineChanged)
