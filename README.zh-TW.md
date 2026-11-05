@@ -58,7 +58,7 @@ npx @wenyuchiou/agent-board
 - **我用 Antigravity：** `/agent-board`（在測試環境檢查過，還沒實機執行）
 - **我用 OpenCode：** `/board`
 
-要加自己的任務，在面板的輸入框打 `+ 專案：標題；步驟；步驟`，或在 agent 的對話裡打 `/progress add …`。
+要加自己的任務，在 `progress.md` 裡寫一個 `### 標題`，下面每個步驟寫一行 `- [ ] 步驟`（全新安裝用 `~/.agent-board/progress.md`；[檔案格式](docs/FORMAT.md)，英文）。裝了 Claude Code 外掛時，也可以在面板的輸入框打 `+ 專案：標題；步驟；步驟`，或在 Claude Code 的對話裡打 `/progress add …`。
 
 <details>
 <summary><b>不用 npm：用 git clone 安裝</b></summary>
