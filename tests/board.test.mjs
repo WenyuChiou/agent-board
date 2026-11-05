@@ -9333,6 +9333,55 @@ test('an agent whose only session ended in the last 30 minutes shows as offline'
   }
 })
 
+const claudeChip = async (state, minutesAgo) => {
+  const runtime = await sourceBoard()
+  const at = new Date(groupedNow - minutesAgo * 60_000).toISOString()
+  const source = `## Synthetic project\n<!-- auto session=aaaa1111 agent=claude state=${state} updated=${at} -->\n### Synthetic Claude task\n- [x] First step\n- [ ] Second step\n<!-- /auto session=aaaa1111 -->\n`
+  const options = { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null } }
+  const model = runtime.serveModel(runtime.buildView(runtime.parseProgress(source), [], null, groupedNow, 0, {}, EN), [], EN, new Set(), false, undefined, false, options)
+  const dom = await pageDom(runtime.servePage(EN, 'synthetic', false), model, { width: 1280 })
+  return { model, chip: rowAgent(dom, 'claude'), side: sideAgent(dom, 'claude') }
+}
+
+test('a Claude Code block that recorded state=ended shows its chip as offline, the way a Codex chip does', async () => {
+  for (const minutesAgo of [1, 45]) {
+    const { model, chip, side } = await claudeChip('ended', minutesAgo)
+    assert.ok([...model.stopped, ...model.idle, ...model.groups.flatMap(group => group.rows)].some(row => row.isClosed === true), JSON.stringify(model.stopped))
+    for (const node of [chip, side]) {
+      assert.equal(node.getAttribute('data-presence'), 'offline', `${minutesAgo} minutes after the end`)
+      assert.ok(node.getAttribute('aria-label').includes(EN.pgOffline), node.getAttribute('aria-label'))
+    }
+    // The rendered chip says what an ended Codex chip says: the same word, from the same branch.
+    assert.ok(shownWords(chip).includes(EN.pgOffline), shownWords(chip))
+    assert.ok(shownWords(side).includes(EN.pgOffline), shownWords(side))
+  }
+})
+
+test('a Claude Code block that is only quiet, for minutes or for hours, is not shown as offline', async () => {
+  for (const minutesAgo of [45, 600, 800]) {
+    const { model, chip, side } = await claudeChip('waiting', minutesAgo)
+    assert.ok(![...model.stopped, ...model.idle, ...model.groups.flatMap(group => group.rows)].some(row => row.isClosed === true), `${minutesAgo} minutes`)
+    for (const node of [chip, side]) {
+      assert.notEqual(node.getAttribute('data-presence'), 'offline', `${minutesAgo} minutes`)
+      assert.ok(!shownWords(node).includes(EN.pgOffline), shownWords(node))
+    }
+  }
+})
+
+test('a Claude Code block that wrote state=ended and then writes again shows open again', async () => {
+  const ended = await claudeChip('ended', 5)
+  assert.equal(ended.chip.getAttribute('data-presence'), 'offline')
+  // The same block, written again by a later turn: it is no longer recorded as ended.
+  const again = await claudeChip('working', 1)
+  assert.equal(again.chip.getAttribute('data-presence'), 'open')
+  assert.ok(!shownWords(again.chip).includes(EN.pgOffline), shownWords(again.chip))
+})
+
+test('a Claude Code block that is working keeps its chip open', async () => {
+  const { chip, side } = await claudeChip('working', 1)
+  for (const node of [chip, side]) assert.equal(node.getAttribute('data-presence'), 'open')
+})
+
 test('an agent with a recently finished task and no closed session shows as open', async () => {
   const base = redesignModel()
   base.asks = []

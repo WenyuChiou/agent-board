@@ -457,7 +457,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
         isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
         hasCopyBox: isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined,
-        ...(row.target?.isClosed === true ? { isClosed: true as const } : {}),
+        // A Claude row has no target, so its closed session is the block's own state=ended.
+        ...(row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true ? { isClosed: true as const } : {}),
       })
       continue
     }

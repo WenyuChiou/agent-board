@@ -155,6 +155,9 @@ export type TaskRow = {
   hasFutureTime?: boolean
   isHere: boolean
   auto: 'working' | 'waiting' | 'ended' | null
+  // The block itself says state=ended (its session closed). `auto` also reads 'ended' for a finished,
+  // stale or silent block, which does not mean the session is closed.
+  isRecordedEnded?: true
   steps: ViewStep[]
   // Every open step, unfolded: what a take-over hands on.
   left: string[]
@@ -1168,6 +1171,7 @@ export const buildView = (
         due: null,
         pr: autoPr(task.auto, s),
         agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+        ...(task.auto?.state === 'ended' ? { isRecordedEnded: true as const } : {}),
         // Only an agent whose resume by id is known gets a command.
         resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
         handoff: handoffOf(task),
