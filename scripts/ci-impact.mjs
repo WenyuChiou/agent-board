@@ -314,25 +314,27 @@ export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
   return Object.assign((...args) => (ordinal++ % total === index - 1 ? test(...args) : undefined), { skip: test.skip, only: test.only, todo: test.todo })
 }
 
-export const testArgs = (files, { isSerial = false } = {}) => ['--test', ...(isSerial ? ['--test-concurrency=1'] : []), ...files]
+// A Windows job ran three spawn-heavy files at once on a 4-vCPU runner: every test slowed about 1.35x and the
+// tightest timing budgets failed in turn (#910). Two files at a time leaves them room; serial stays one.
+export const testArgs = (files, { isSerial = false, isWindows = false } = {}) => ['--test', ...(isSerial ? ['--test-concurrency=1'] : isWindows ? ['--test-concurrency=2'] : []), ...files]
 
 // The Node run of one part: every nth of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so the files still run side by side as they do without parts.
-export const testRuns = (files, { isSerial = false, part = '' } = {}) => {
+export const testRuns = (files, { isSerial = false, isWindows = false, part = '' } = {}) => {
   const { index, total } = parsePart(part)
-  if (total === 1) return [testArgs(files, { isSerial })]
+  if (total === 1) return [testArgs(files, { isSerial, isWindows })]
   const rest = files.filter(path => !selfPartedTests.includes(path)).filter((path, ordinal) => ordinal % total === index - 1)
   const share = [...rest, ...files.filter(path => selfPartedTests.includes(path))]
-  return share.length ? [testArgs(share, { isSerial })] : []
+  return share.length ? [testArgs(share, { isSerial, isWindows })] : []
 }
 
-export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync) => {
+export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform) => {
   if (!Array.isArray(files) || !files.length || files.some(path => !/^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/.test(path) || !existsSync(path))) throw new Error('selected tests are empty, invalid or missing')
   // A self-parted file reads its part from CI_TEST_PART, so the child gets the part this run was given,
   // not whatever part the environment holds.
   const env = { ...process.env, CI_TEST_PART: part }
   // Every run goes ahead even when an earlier one failed, so one job shows all of its failures.
-  const failures = testRuns(files, { isSerial: process.env.CI_TEST_SERIAL === '1', part }).flatMap(args => {
+  const failures = testRuns(files, { isSerial: process.env.CI_TEST_SERIAL === '1', isWindows: platform === 'win32', part }).flatMap(args => {
     const result = spawn(process.execPath, args, { stdio: 'inherit', env })
     if (result.error) throw result.error
     return result.status === 0 ? [] : [result.status ?? result.signal]
