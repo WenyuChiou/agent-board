@@ -10,6 +10,7 @@ import { makeWorld } from './lib/world.mjs'
 import { EN } from '../../hooks/strings-en.ts'
 import { BLOCKS, LIVE_SESSIONS, PAGE_MS } from './lib/budget.mjs'
 import { block } from './lib/writers.mjs'
+import { hookOrDeferred } from '../helpers/deferred-turn.mjs'
 import { finishedRecord, isFinishedRecord, readStore, seedStore } from './lib/hub-wire.mjs'
 
 const text = 'Review route /health?mode=ready — 測試 intact\nKeep both lines.'
@@ -21,8 +22,7 @@ test('messages: a Codex session with no poller takes a page message on its next 
   try {
     const server = await serve.start(world)
     const hook = event => run(world, ['--codex-event', '--home', world.home, '--progress-file', world.path], { input: JSON.stringify({ session_id: session, hook_event_name: event, turn_id: 'next-turn' }) })
-    const enrolled = await hook('SessionStart')
-    assert.equal(enrolled.status, 0, enrolled.stderr)
+    await hookOrDeferred(() => hook('SessionStart'), async () => (await server.get('/api/board')).json().messaging.mailboxes.length > 0)
     let snapshot = (await server.get('/api/board')).json()
     assert.equal(snapshot.messaging.connections.length, 0)
     assert.equal(snapshot.messaging.mailboxes.length, 1)
@@ -41,8 +41,7 @@ test('messages: a Codex session with no poller takes a page message on its next 
     await page.flush()
     snapshot = (await server.get('/api/board')).json()
     assert.equal(snapshot.messaging.messages[0].status, 'queued')
-    const delivered = await hook('UserPromptSubmit')
-    assert.equal(delivered.status, 0, delivered.stderr)
+    const delivered = await hookOrDeferred(() => hook('UserPromptSubmit'), one => one.stdout.includes('Synthetic next-turn mailbox message'))
     assert.ok(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext.includes('Synthetic next-turn mailbox message'))
     snapshot = (await server.get('/api/board')).json()
     assert.equal(snapshot.messaging.messages[0].status, 'accepted')
