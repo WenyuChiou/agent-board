@@ -31,6 +31,38 @@ export type CodexReport = Origin & {
 
 export const codexEvents = ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop', 'Interrupt', 'SessionEnd'] as const
 
+// The plan a tool call carries, as a report input (#922). Codex's update_plan sends
+// `plan: [{step, status}]` and Gemini's write_todos `todos: [{description, status}]`; nothing else of
+// the call is read. Null when it is another tool, no session id, or no usable step.
+const PLAN_MARKS: Record<string, string> = { completed: 'x', in_progress: '~', pending: ' ', cancelled: '-', blocked: '!' }
+export const planReport = (raw: Record<string, unknown>): { session: string; input: { state: 'working'; steps: string[]; planTitle: string } } | null => {
+  const call = raw.tool_input
+  const body = typeof call === 'object' && call !== null && !Array.isArray(call) ? call as Record<string, unknown> : {}
+  const isCodex = raw.tool_name === 'update_plan'
+  const list = isCodex ? body.plan : raw.tool_name === 'write_todos' ? body.todos : undefined
+  if (typeof raw.session_id !== 'string' || !Array.isArray(list)) return null
+  const items: { mark: string; text: string }[] = []
+  for (const item of list) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue
+    const one = item as Record<string, unknown>
+    const words = one[isCodex ? 'step' : 'description']
+    if (typeof words !== 'string') continue
+    let text = words.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()
+    // The report check refuses a step line over 500 characters, its `- [m] ` marker included: a longer
+    // step keeps its first 494, which the writer then cuts to 120 and journals.
+    if (text.length > 494) text = text.slice(0, text.charCodeAt(493) >= 0xd800 && text.charCodeAt(493) < 0xdc00 ? 493 : 494)
+    if (text === '') continue
+    const status = typeof one.status === 'string' && Object.hasOwn(PLAN_MARKS, one.status) ? one.status : 'pending'
+    items.push({ mark: PLAN_MARKS[status]!, text })
+    if (items.length === 40) break
+  }
+  if (items.length === 0) return null
+  return {
+    session: raw.session_id,
+    input: { state: 'working', steps: items.map(one => `- [${one.mark}] ${one.text}`), planTitle: (items.find(one => one.mark === '~') ?? items[0]!).text },
+  }
+}
+
 const line = (value: unknown): string => {
   if (typeof value !== 'string') throw new Error('INVALID_TEXT')
   const clean = value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()

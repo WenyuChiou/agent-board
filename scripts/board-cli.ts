@@ -2176,8 +2176,9 @@ try {
   } else if (flag('--legacy-connect-request') !== undefined && typeof (globalThis as { AGENT_BOARD_WORKER_SOURCE?: unknown }).AGENT_BOARD_WORKER_SOURCE === 'string') {
     // The verified worker wrapper bounds data-URL errors and owns stage cleanup.
     throw error
-  } else if (args.some(arg => ['--codex-event', '--agent-status', '--codex-report', '--report'].includes(arg))) {
-    process.exitCode = 1
+  } else if (args.some(arg => ['--codex-event', '--agent-status', '--codex-report', '--report', '--plan-event'].includes(arg))) {
+    // A plan mirror is a host's decision hook: it never fails the host, and says why on stderr only.
+    process.exitCode = args.includes('--plan-event') ? 0 : 1
     const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))
     const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : 'UNKNOWN'
     process.stderr.write(`${reason === 'UNBOUND_REPORT' ? s.codexReportUnbound : reason === 'LOCK_DENIED' ? s.reporterLockDenied : reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)

@@ -13,9 +13,10 @@ export const HOOK_WORKER_GRACE = 500
 // A worker that starts after its host's stop line still reads its input this long, then queues it.
 export const HOOK_LATE_INPUT_GRACE = 500
 export const HOOK_TIMEOUTS: Record<string, { timeout: number; events?: Record<string, number> }> = {
-  codex: { timeout: 3000, events: { Stop: 10000, UserPromptSubmit: 10000 } },
+  // The plan hooks fire only on a plan update and take ~240 ms warm, but a cold Windows start can pass 3 s and would drop that update.
+  codex: { timeout: 3000, events: { Stop: 10000, UserPromptSubmit: 10000, PostToolUse: 10000 } },
   cursor: { timeout: 3000 },
-  gemini: { timeout: 5000 },
+  gemini: { timeout: 5000, events: { AfterTool: 10000 } },
   grok: { timeout: 5000, events: { Stop: 10000 } },
   muse: { timeout: 5000, events: { Stop: 10000 } },
   hermes: { timeout: 10000 },
@@ -126,7 +127,9 @@ const policies = ${JSON.stringify(HOOK_TIMEOUTS)}
 const safeAgent = Object.hasOwn(policies, agent) ? agent : 'unknown'
 ${hookLogSource(home, '__AGENT__', true).replace(JSON.stringify('__AGENT__'), 'safeAgent')}
 const isReport = args.includes('--codex-report')
-const fail = code => { hookError(code); process.exitCode = isReport ? 1 : 0; if (!isReport && ['cursor', 'gemini', 'antigravity'].includes(agent)) process.stdout.write('{}\\n'); return false }
+// The plan mirror (#922) is read as a decision by Codex and Gemini: it never prints and is never queued.
+const isPlan = args.includes('--plan-event')
+const fail = code => { hookError(code); process.exitCode = isReport ? 1 : 0; if (!isReport && !isPlan && ['cursor', 'gemini', 'antigravity'].includes(agent)) process.stdout.write('{}\\n'); return false }
 ${hookRecoverySource(home, script, dataRoot)}
 const run = async () => {
   const now = Date.now(), supplied = Number(value('--hook-started'))
@@ -150,7 +153,7 @@ const run = async () => {
   // even later, after a slow Windows PowerShell start (#241), still reads its input for a short
   // grace and queues the event, unless the host stops it first.
   // A report is never queued, so it waits only until its deadline.
-  const budget = isReport ? deadline - Date.now() : Math.max(started + hostTimeout - 300 - Date.now(), ${HOOK_LATE_INPUT_GRACE})
+  const budget = isReport || isPlan ? deadline - Date.now() : Math.max(started + hostTimeout - 300 - Date.now(), ${HOOK_LATE_INPUT_GRACE})
   if (budget <= 0) return fail('REPORTER_TIMEOUT')
   let text = '', timer
   process.stdin.setEncoding('utf8')
@@ -172,7 +175,7 @@ const run = async () => {
     try {
       // A late copy is still written: it holds the worker's start time, and replay drops it once a
       // newer event was applied. A host that stops the worker mid-write leaves a .tmp file that is swept.
-      if (isReport) return fail('REPORTER_TIMEOUT')
+      if (isReport || isPlan) return fail('REPORTER_TIMEOUT')
       const pending = path.join(${dataRoot === undefined ? `path.dirname(${JSON.stringify(script)})` : JSON.stringify(dataRoot)}, 'pending')
       fs.mkdirSync(pending, { recursive: true, mode: 0o700 })
       // Concurrent workers can pass 64 by a few because the count and write are separate.
@@ -203,11 +206,17 @@ const run = async () => {
   }
   const remaining = deadline - Date.now()
   if (remaining <= 0) return queue()
-  const childArgs = [...reporterArgs, ...(!isReport ? ['--hook-recovery-parent'] : []), '--hook-deadline', String(deadline), '--hook-started', String(started), '--home', ${JSON.stringify(home)}]
+  const childArgs = [...reporterArgs, ...(!isReport && !isPlan ? ['--hook-recovery-parent'] : []), '--hook-deadline', String(deadline), '--hook-started', String(started), '--home', ${JSON.stringify(home)}]
   const result = spawnSync(process.execPath, [${JSON.stringify(script)}, ...childArgs], {
     input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true,
     timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 1048576,
   })
+  // A plan that failed in the board script exits 0 there; its code is only logged here.
+  if (isPlan && !result.error && result.status === 0) {
+    const code = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
+    if (code) hookError('REPORTER_FAILED ' + code)
+    return true
+  }
   if (result.error?.code === 'ETIMEDOUT' || result.signal || (result.error || result.status !== 0) && Date.now() >= deadline) return queue()
   if (result.error || result.status !== 0) {
     // The board names why it refused (INVALID_SESSION, say), in brackets that are full-width in
@@ -220,7 +229,7 @@ const run = async () => {
     // foresaw (#241) costs a retry, not the event. A refusal of the event itself (INVALID_SESSION, say) would refuse
     // its replay too, and replay drops such an entry, so it is only logged. A refusal missing here is saved and dropped
     // at replay, which wastes a replay; a retryable code listed here would lose its event.
-    if (isReport || /^(?:INVALID_|BLOCK_|SESSION_CONFLICT$|UNSUPPORTED_AGENT$|MISSING_ARGUMENT$|MISSING_TURN$|STALE_TURN$|SHARED_BOARD_PATH_CONFLICT$|UNSAFE_COMMAND_PATH$)/.test(reason ?? '')) return fail(failure)
+    if (isReport || isPlan || /^(?:INVALID_|BLOCK_|SESSION_CONFLICT$|UNSUPPORTED_AGENT$|MISSING_ARGUMENT$|MISSING_TURN$|STALE_TURN$|SHARED_BOARD_PATH_CONFLICT$|UNSAFE_COMMAND_PATH$)/.test(reason ?? '')) return fail(failure)
     return queue(failure)
   }
   if (!isReport && result.stderr?.split(/\\r?\\n/).includes('AGENT_BOARD_HOOK_PENDING')) requestRecovery()
