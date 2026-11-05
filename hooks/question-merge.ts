@@ -55,7 +55,7 @@ const recordKey = (record: QuestionRecord): string | null => {
 
 // When a copy was first seen, and its place in the ledger: copies seen in the same pass share the
 // time, and the ledger's order says which came last.
-export type Seen = { at: number; rank: number }
+export type Seen = { at: number; rank: number; isHidden?: boolean }
 const isBefore = (a: Seen, b: Seen): boolean => a.at < b.at || (a.at === b.at && a.rank < b.rank)
 
 // A closed copy covers the copies of the same question asked before it, in other sessions, unless
@@ -84,7 +84,10 @@ export const closedCopies = (records: readonly QuestionRecord[], marked: Readonl
     if (!marked.has(record.id) && record.resolvedAt === undefined && after !== undefined && records[after]?.words === record.words) return
     const key = recordKey(record)
     if (key === null) return
-    const at: Seen = record.isUnresolved === false && record.resolvedAt !== undefined ? { at: record.resolvedAt, rank: -1 } : { at: record.firstObserved, rank }
+    const isHidden = marked.has(record.id)
+    const at: Seen = record.isUnresolved === false && record.resolvedAt !== undefined
+      ? { at: record.resolvedAt, rank: -1 }
+      : { at: record.firstObserved, rank, ...(isHidden ? { isHidden: true } : {}) }
     const sessions = closed.get(key) ?? new Map<string, Seen>()
     const had = sessions.get(record.scope)
     if (had === undefined || isBefore(had, at)) sessions.set(record.scope, at)
@@ -105,38 +108,68 @@ export type Copy = Seen & { item: WaitingItem; scope: string; isStopped?: boolea
 // in the order they came. A copy with no known time is never covered, and never the newest one while
 // another has a time. Questions of one session that can each be answered stay as they are, each its
 // own card; a review-only copy is the source of a question this session already shows, so it is no
-// row of its own beside another copy (#861), and the row keeps the title that copy knew.
+// row of its own beside another copy (#861, #970), and the row keeps the newest title that copy knew.
 export const mergeCopies = (copies: readonly Copy[], closed: ReadonlyMap<string, ReadonlyMap<string, Seen>>): WaitingItem[] => {
-  const groups = new Map<string, Copy[]>()
+  const gone = new Set<WaitingItem>()
+  const carried = new Map<WaitingItem, WaitingItem>()
+  const titles = new Map<WaitingItem, string>()
+
+  // A same-session review-only copy takes no second row in its own pane or for a block with no folder (#970).
+  const ofSessionGroups = new Map<string, Copy[]>()
   for (const copy of copies) {
+    if (copy.scope === '') continue
+    const words = questionWords(copy.item.note === '' ? copy.item.text : `${copy.item.text} — ${copy.item.note}`)
+    const sessionKey = partsKey3(copy.scope, copy.item.agent === '' ? 'claude' : copy.item.agent.toLowerCase(), words)
+    const group = ofSessionGroups.get(sessionKey)
+    if (group === undefined) ofSessionGroups.set(sessionKey, [copy])
+    else group.push(copy)
+  }
+  for (const sessionCopies of ofSessionGroups.values()) {
+    const reviewOnly = sessionCopies.filter(copy => copy.item.canHide === false)
+    if (sessionCopies.length === 1 || reviewOnly.length === 0) continue
+    const answerable = sessionCopies.filter(copy => copy.item.canHide !== false)
+    const hasFolder = sessionCopies.some(copy => copy.item.dir !== null && copy.item.dir !== undefined && copy.item.dir.trim() !== '')
+    if (answerable.length === 0 && !hasFolder) continue
+    const kept = answerable.length > 0 ? answerable : [reviewOnly.reduce((best, copy) => (isBefore(best, copy) ? copy : best))]
+    for (const copy of reviewOnly) if (!kept.includes(copy)) gone.add(copy.item)
+    const withTask = sessionCopies.filter(copy => copy.item.task !== '')
+    const newestWithTask = withTask.length === 0 ? undefined : withTask.reduce((best, copy) => isBefore(best, copy) ? copy : best)
+    const title = newestWithTask?.item.task
+    if (kept.length === 1 && kept[0] !== undefined && kept[0].item.task === '' && title !== undefined) titles.set(kept[0].item, title)
+    if (kept.length === 1 && kept[0] !== undefined) {
+      const newestInSession = sessionCopies.reduce((best, copy) => isBefore(best, copy) ? copy : best)
+      if (newestInSession !== kept[0]) {
+        carried.set(kept[0].item, {
+          ...kept[0].item,
+          when: newestInSession.item.when,
+          hideKey: newestInSession.item.hideKey || kept[0].item.hideKey,
+        })
+      }
+    }
+  }
+
+  const remaining = copies.filter(copy => !gone.has(copy.item))
+  const groups = new Map<string, Copy[]>()
+  for (const copy of remaining) {
     const key = itemKey(copy.item)
     if (key === null) continue
     const group = groups.get(key)
     if (group === undefined) groups.set(key, [copy])
     else group.push(copy)
   }
-  const gone = new Set<WaitingItem>()
-  const carried = new Map<WaitingItem, WaitingItem>()
-  const titles = new Map<WaitingItem, string>()
+
   for (const [key, every] of groups) {
-    const ofSession = new Map<string, Copy[]>()
-    for (const copy of every) if (copy.scope !== '') ofSession.set(copy.scope, [...(ofSession.get(copy.scope) ?? []), copy])
-    for (const copies of ofSession.values()) {
-      const reviewOnly = copies.filter(copy => copy.item.canHide === false)
-      if (copies.length === 1 || reviewOnly.length === 0) continue
-      const answerable = copies.filter(copy => copy.item.canHide !== false)
-      const kept = answerable.length > 0 ? answerable : [reviewOnly.reduce((best, copy) => (isBefore(best, copy) ? copy : best))]
-      for (const copy of reviewOnly) if (!kept.includes(copy)) gone.add(copy.item)
-      const title = copies.find(copy => copy.item.task !== '')?.item.task
-      if (kept.length === 1 && kept[0] !== undefined && kept[0].item.task === '' && title !== undefined) titles.set(kept[0].item, title)
-    }
-    const all = every.filter(copy => !gone.has(copy.item))
     const sessions = new Map<string, number>()
-    for (const copy of all) sessions.set(copy.scope, (sessions.get(copy.scope) ?? 0) + 1)
-    const group = all.filter(copy => copy.scope !== '' && sessions.get(copy.scope) === 1)
+    for (const copy of every) sessions.set(copy.scope, (sessions.get(copy.scope) ?? 0) + 1)
+    const group = every.filter(copy => copy.scope !== '' && sessions.get(copy.scope) === 1)
     const closedHere = [...(closed.get(key) ?? [])]
-    // A review-only copy has no Hide of its own, so its own session's later answer closes it too.
-    const isCovered = (copy: Copy): boolean => copy.at > 0 && closedHere.some(([scope, seen]) => (scope !== copy.scope || copy.item.canHide === false) && isBefore(copy, seen))
+    // A review-only copy has no Hide of its own, so its own session's answer or hide closes it too.
+    const isCovered = (copy: Copy): boolean =>
+      copy.at > 0 && closedHere.some(([scope, seen]) =>
+        scope !== copy.scope
+          ? isBefore(copy, seen)
+          : (copy.item.canHide === false && seen.isHidden) || isBefore(copy, seen)
+      )
     const open = group.filter(copy => !isCovered(copy))
     for (const copy of group) if (!open.includes(copy)) gone.add(copy.item)
     if (open.length === 0) continue

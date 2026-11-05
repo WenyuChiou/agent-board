@@ -594,6 +594,7 @@ const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, strin
     .map(({ task, hideKey }) => ({
       key: `mine::${task.id}`,
       project: mine.project,
+      dir: mine.cwd || null,
       task: title,
       context,
       text: task.subject,
