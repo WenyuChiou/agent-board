@@ -13,7 +13,8 @@ import { RESUME } from './parse'
 import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message } from './messaging'
-import { address, isOpen } from './messaging'
+import { deliveryTargets } from './hook-messages'
+import { address, isMailboxTarget, isOpen } from './messaging'
 
 // The board's page: what `agent-board.mjs --serve` shows in a browser for agents other than
 // Claude Code, and what a press on it does. It does what the pane does: tick a hand-kept step,
@@ -24,18 +25,23 @@ import { address, isOpen } from './messaging'
 // Grok Build or Codex session that has closed, so the page is its only writer); open: in its
 // own window, since it is still open and two writers on one session would mix up; claude: in
 // that Claude Code session; none: copied, then pasted into the agent's chat.
-export type SendMode = 'send' | 'connected' | 'open' | 'claude' | 'none'
+export type SendMode = 'send' | 'connected' | 'mailbox' | 'open' | 'claude' | 'none'
 type Delivery = { id: string; turn: string; agent: string }
-type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text'> & { when: string }
-type Messaging = { connections: readonly Connection[]; messages: readonly Omit<Message, 'nonce' | 'hash'>[] }
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text'> & { when: string; isMailbox: boolean }
+type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly Omit<Message, 'nonce' | 'hash'>[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
   const matches = session === undefined ? [] : connections.filter(one => address(one.agent, one.session) === address(agent || 'claude', session))
   return matches.length === 1 && !matches[0]?.contested ? matches[0] : undefined
 }
+// A mailbox waits for a next turn, and a session that has ended has none.
+const reachable = (agent: string, session: string | undefined, target: AgentTarget | null, targets: readonly Connection[]): Connection | undefined => {
+  const found = liveTarget(agent, session, targets)
+  return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
+}
 const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[], now: number, s: Strings): { receipt?: Receipt } => {
   const one = session === undefined ? undefined : messages.filter(message => message.to === address(agent || 'claude', session)).at(-1)
-  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, when: relativeTime(one.updated, now, s) } }
+  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerCase() === 'claude'
 // What pressing Send does right now, for a Claude session that is receiving (#316).
@@ -89,7 +95,16 @@ export const idleTimeout = (value: string | undefined): number => {
 // `line`, here and on the other texts below, is the text folded to one line (hooks/clip.ts) and
 // capped; it is absent when that is the text itself. The browser cuts the line to its width with an
 // ellipsis.
-export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean; line?: string }
+export type ServeStep = {
+  text: string
+  note: string
+  status: string
+  isCurrent: boolean
+  line?: string
+  // The file line the step came from, so a press can tick exactly the line it showed; absent
+  // on a folded summary line, which is no step. `line` above is the clipped text it shows.
+  fileLine?: number
+}
 
 export type ServeAsk = {
   at?: number
@@ -167,6 +182,8 @@ export type ServeRow = {
   next: string | null
   // The words of the Done button for `next`, clipped; `next` itself is what a press must send back.
   nextLabel?: string
+  // The file line `next` came from, so a press can tick exactly the line it showed.
+  nextFileLine?: number
   // A hand-kept task, the person's own (its agent is '', as Claude Code's is); absent otherwise.
   isOwn?: true
   canArchive: boolean
@@ -242,6 +259,8 @@ export const worktreeRepoName = (dir: string, gitFile: string, commonDir: string
 export type ServeModel = {
   warning?: string
   details?: string
+  pruned?: string
+  health?: string[]
   isLarge?: true
   isCleanable?: true
   // Runs agents started for themselves that no session is known for, as one folded line (#399).
@@ -316,6 +335,7 @@ const retainedOf = (item: WaitingItem): ServeRetained => ({
 
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
+  const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   const asks: ServeAsk[] = []
@@ -330,10 +350,10 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     if (item.type === 'ask') {
       const { ask } = item
       const isManual = ask.where === 'manual'
-      const connection = isManual || isLan ? undefined : liveTarget(ask.agent, ask.nativeSession, messaging?.connections ?? [])
+      const connection = isManual || isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)
       const isContested = !isManual && !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (ask.agent || 'claude') && one.session === ask.nativeSession) ?? false)
       const baseMode = isManual ? 'none' : sendMode(ask.agent, ask.target)
-      const mode = connection ? 'connected' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
+      const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan, true)
@@ -371,18 +391,19 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
-        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && isOpen(one)) ?? false),
+        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
         ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
       continue
     }
     if (item.type === 'row') {
       const { row } = item
+      if (view.recentAsking?.some(one => one.key === row.key)) continue
       const needs = rowNeedsYou(row, idleKeys.has(row.key) || stoppedKeys.has(row.key))
-      const connection = isLan ? undefined : liveTarget(row.agent, row.nativeSession, messaging?.connections ?? [])
+      const connection = isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)
       const isContested = !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (row.agent || 'claude') && one.session === row.nativeSession) ?? false)
       const baseMode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
-      const mode = connection ? 'connected' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
+      const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
       // A Claude session still at work that this board cannot reach: its card says so and copies.
       const isOpenClaude = !isLan && send === 'claude' && row.auto !== 'ended'
@@ -415,9 +436,10 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         total: row.total,
         due: row.due?.left ?? null,
         pr: row.pr,
-        steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent, ...lined(step.note ? `${step.text} — ${step.note}` : step.text) })),
+        steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent, ...lined(step.note ? `${step.text} — ${step.note}` : step.text), ...(step.line === null ? {} : { fileLine: step.line }) })),
         next: row.next?.step ?? null,
         ...(nextLabel === undefined ? {} : { nextLabel }),
+        ...(row.next === null ? {} : { nextFileLine: row.next.line }),
         canArchive: row.archive !== null,
         canConfirm: row.confirm != null,
         archiveNote: row.auto === 'working' || row.auto === 'waiting' ? s.archiveLive : '',
@@ -433,7 +455,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         where: send === 'send' ? (row.target?.dir ?? '') : send === 'connected' ? claudeHint(row.agent, row.auto === 'working', s) : '',
         // A row says why only when a reply could otherwise be expected here.
         info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
-        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && isOpen(one)) ?? false),
+        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
         hasCopyBox: isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined,
         ...(row.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
@@ -445,7 +467,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       key: item.key,
       project: turn.project,
       agent: turn.agent,
-      text: turn.text,
+      text: turn.isQuestion ? turn.text : '',
       isQuestion: turn.isQuestion,
       // Connection closure does not answer an unresolved inbox question.
       info: turn.isQuestion ? infoOf(SENDERS.has(turn.agent) ? 'open' : 'none', turn.agent, '', '', s) : '',
@@ -456,6 +478,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     counts: { ...view.overview, waiting: view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length },
     warning: view.warning,
     ...(view.details === undefined ? {} : { details: view.details }),
+    ...(view.pruned === undefined ? {} : { pruned: view.pruned }),
+    ...(view.health === undefined ? {} : { health: [...view.health] }),
     ...(view.isLarge ? { isLarge: true } : {}),
     ...(view.isCleanable ? { isCleanable: true } : {}),
     ...(view.background === undefined ? {} : { background: view.background }),
@@ -475,8 +499,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   model.reminder = (view.reminder ?? []).map(extra)
   model.older = (view.older ?? []).map(extra)
   model.finished = (view.finished ?? []).map(item => ({ ...item, key: `row:${item.key}`, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) }))
+  const finishedByKey = new Map((model.finished ?? []).map(one => [one.key, one]))
   model.recent = view.recent.map((item, index) => {
-    const finished = model.finished?.find(one => one.key === `row:${item.key}`)
+    const finished = finishedByKey.get(`row:${item.key}`)
     return { ...model.recent[index]!, key: `row:${item.key}`, ...(finished === undefined ? {} : { agent: finished.agent, ...(finished.isOwn ? { isOwn: true as const } : {}), dir: finished.dir, at: finished.at }) }
   })
   model.agents = [...new Set(group.unreadable)].map(agent => ({ agent, unreadable: true }))
@@ -515,7 +540,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
 
 // `asked`: with a reply, the question the page showed it under ('' for none). `fp`: the line's
 // fingerprint as the page drew it; a tick, an archive and a reply need it, hide and unhide do not.
-export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string; fp?: string; connection?: string; turn?: string }
+// `line` is the file line the pressed step came from, so a tick can name the exact step
+// when two open steps share a text; absent on a press that names the next step by text.
+export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string; fp?: string; line?: number; connection?: string; turn?: string }
 
 export type ServeAction =
   | { type: 'tick'; ref: StepRef }
@@ -559,9 +586,28 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   const item = items.find(one => one.key === request.key)
   if (item === undefined) return { type: 'refuse', note: s.boardLineChanged }
   if (request.type === 'tick') {
-    const ref = item.type === 'ask' ? item.ask.step : item.type === 'row' ? item.row.next : null
+    if (item.type === 'ask') {
+      const ref = item.ask.step
+      return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
+    }
+    if (item.type !== 'row') return { type: 'refuse', note: s.boardTickGone }
+    // A press names the step it showed by its file line, so two open steps with the same
+    // text are told apart; a press without a line ticks the next step, as before.
+    if (request.line !== undefined) {
+      const step = item.row.steps.find(one => one.line === request.line)
+      if (step !== undefined && step.line !== null && request.text === step.text) {
+        return { type: 'tick', ref: { project: item.row.project, title: item.row.title, step: step.text, line: step.line, raw: step.raw } }
+      }
+      // The primary Done button still names the next step when the step list folded it
+      // out of view: the page then sends the next step's line and its full text, which
+      // the folded list does not hold, so the next step's own ref answers the press.
+      const next = item.row.next
+      if (next !== null && next.line === request.line && request.text === next.step) return { type: 'tick', ref: next }
+      return { type: 'refuse', note: s.boardLineChanged }
+    }
+    const ref = item.row.next
     // A task keeps its key while its next step moves on: only the step the page showed is ticked.
-    if (ref !== null && item.type === 'row' && request.text !== ref.step) return { type: 'refuse', note: s.boardLineChanged }
+    if (ref !== null && request.text !== ref.step) return { type: 'refuse', note: s.boardLineChanged }
     return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
   }
   // Marked answered sends nothing: only the hidden list is written.
@@ -584,8 +630,8 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   const mode = target === null ? (agent === '' ? 'claude' : 'none') : sendMode(agent, target)
   const title = item.type === 'ask' ? item.ask.task : item.row.title
   const native = item.type === 'ask' ? item.ask.nativeSession : item.row.nativeSession
-  const connected = liveTarget(agent, native, connections)
-  if (!isLan && !connected && connections.some(one => one.agent === (agent || 'claude') && one.session === native)) return { type: 'refuse', note: s.messagesContested }
+  const connected = reachable(agent, native, target, connections)
+  if (!isLan && !connected && connections.some(one => one.scope !== 'mailbox' && one.agent === (agent || 'claude') && one.session === native)) return { type: 'refuse', note: s.messagesContested }
   if (request.type === 'message') {
     const question = item.type === 'ask' ? item.ask.text : item.row.question ?? ''
     if (isLan || !connected || connected.id !== request.connection || connected.turn !== request.turn || connected.session !== request.session || (request.asked ?? '') !== question || !text) return { type: 'refuse', note: s.messagesFailed }
@@ -702,10 +748,11 @@ Rules:
 const PAGE_WORDS = [
   'webChatConnect', 'webChatCopied', 'importClipboard', 'importNoBlock', 'importUseKeys', 'pasteReview',
   'claudeSendNow', 'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'serveQueueNextTurn', 'serveNextTurnHint', 'serveQueueNextOpen', 'serveNextOpenHint', 'messagesHandedNextTurn', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
   'archiveNow', 'cleanUp', 'stoppedCount',
+  'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
@@ -1025,7 +1072,7 @@ ${PAGE_CSS}
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" class="btn" id="connect-web-chat" data-static>${esc(s.webChatConnect)}</button><button type="button" class="btn" id="import-clipboard" data-static>${esc(s.importClipboard)}</button>`}<button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
+<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" class="btn" id="connect-web-chat" data-static>${esc(s.webChatConnect)}</button><button type="button" class="btn" id="import-clipboard" data-static>${esc(s.importClipboard)}</button>`}<button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
@@ -1112,10 +1159,14 @@ const PAGE_SCRIPT = String.raw`
   var resultSlots = {};
   var lostResults = [];
   resultSlot(document.querySelector('.pfoot'), 'close', '', w('serveClose'));
+  resultSlot(document.getElementById('tidy-bulk'), 'tidy', '', w('tidyBulk'));
   function resultSlot(card, key, revision, label) {
     card.setAttribute('data-card-key', key);
     var previous = results[key];
-    if (previous && previous.awaitingRefresh) { previous.revision = revision; previous.awaitingRefresh = false; }
+    // A result whose card was gone for a whole update belongs to the showing that went
+    // away: when the card comes back, its line is drawn fresh, without the old notice (#815).
+    if (previous && previous.orphaned && !previous.pending) delete results[key];
+    else if (previous && previous.awaitingRefresh) { previous.revision = revision; previous.awaitingRefresh = false; }
     else if (previous && !previous.pending && previous.tone !== 'alert' && previous.revision && revision && previous.revision !== revision) delete results[key];
     var slot = el('div', 'press-result');
     slot.setAttribute('role', 'status');
@@ -1149,6 +1200,7 @@ const PAGE_SCRIPT = String.raw`
     }
   }
   function beginPress() {
+    resetTidy(false);
     note.textContent = '';
     note.className = '';
     lostResults.forEach(function (card) { card.remove(); });
@@ -1266,11 +1318,11 @@ const PAGE_SCRIPT = String.raw`
   }
   // fp: the fingerprint the line was drawn with, which the server checks before it writes. go: the button
   // that sent it. A failed send keeps the message for Send again and Copy message.
-  function act(key, type, text, waiting, session, asked, fp, go) {
+  function act(key, type, text, waiting, session, asked, fp, go, line) {
     if (isUnreachable) return Promise.resolve();
     busyOn(go);
     say(waiting || w('pressPending'), '', key);
-    return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '' }).then(function (data) {
+    return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '', ...(line === undefined ? {} : { line: line }) }).then(function (data) {
       say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok);
       busyOff(go, data.ok);
       return data.ok;
@@ -1358,8 +1410,9 @@ const PAGE_SCRIPT = String.raw`
     if (!receipt) return null;
     clearEnqueueResult(key, receipt);
     if (!agent || String(agent).toLowerCase() === 'claude') return claudeReceipt(receipt, key, canSend);
-    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
-    if (receipt.status === 'acknowledged' || receipt.status === 'rejected') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: receipt.isMailbox ? 'messagesHandedNextTurn' : 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
+    // A mailbox message that was handed over gets no ACK, so its id is done with here: the next send is a new message.
+    if (receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
     // The server already took a nonce ACK off; a receipt kept from a version 1 store was
     // acknowledged with the message id instead.
     var reply = receipt.reply || '';
@@ -1368,7 +1421,7 @@ const PAGE_SCRIPT = String.raw`
     var isFailed = receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error);
     var labelKey = receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error)
       ? 'messagesTimeout'
-      : receipt.status === 'accepted' && receipt.error === 'DISCONNECTED'
+      : receipt.status === 'accepted' && !receipt.isMailbox && receipt.error === 'DISCONNECTED'
         ? 'messagesAcceptedDisconnected'
         : labels[receipt.status];
     var line = el('p', 'receipt' + (isFailed ? ' t-alert' : ''), w(labelKey) + (reply ? ' · ' + reply : ''));
@@ -1390,13 +1443,15 @@ const PAGE_SCRIPT = String.raw`
     // line under the same key starts an empty box, so the text is never sent to that session.
     input.setAttribute('data-key', [key, session || '', asked || '', delivery ? delivery.id + ':' + delivery.turn : ''].join('\u0001'));
     var draftKey = input.getAttribute('data-key');
-    var go = mode === 'send' || mode === 'connected'
-      ? button(w('serveSend', mode === 'connected' && (!agent || String(agent).toLowerCase() === 'claude') ? 'Claude' : agentName(agent)), function () {
+    // Cursor ignores what a hook gives it at a prompt, so its mailbox waits for the chat to open.
+    var isOpenOnly = String(agent).toLowerCase() === 'cursor';
+    var go = mode === 'send' || mode === 'connected' || mode === 'mailbox'
+      ? button(w(mode === 'mailbox' ? (isOpenOnly ? 'serveQueueNextOpen' : 'serveQueueNextTurn') : 'serveSend', mode === 'connected' && (!agent || String(agent).toLowerCase() === 'claude') ? 'Claude' : agentName(agent)), function () {
         var text = input.value.trim();
         if (!text) { say(w('pressEmpty'), 'alert', key); return; }
         // The same text goes again through the same path; the box keeps it until it was sent.
         var run = function () {
-          var sent = mode === 'connected' ? nativeAct(key, text, delivery, session, asked, fp, go) : act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp, go);
+          var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, text, delivery, session, asked, fp, go) : act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp, go);
           return sent.then(function (ok) { if (ok) { clearDraft(draftKey); if (done) done(text); } return ok; });
         };
         sentLast[key] = { text: text, again: run };
@@ -1412,10 +1467,17 @@ const PAGE_SCRIPT = String.raw`
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go.click(); }
     });
     var footer = el('div', 'cf');
-    if (isSending === true && !results[key] && !(mode === 'connected' && (!agent || String(agent).toLowerCase() === 'claude'))) add(box, el('p', 'receipt', w('serveSendBusy', agentName(agent))));
+    if (isSending === true && mode !== 'mailbox' && !results[key] && !(mode === 'connected' && (!agent || String(agent).toLowerCase() === 'claude'))) add(box, el('p', 'receipt', w('serveSendBusy', agentName(agent))));
     if (where) add(footer, el('div', 'where', where));
     if (extras && extras.onCancel) add(footer, navButton(w('pgCancel'), extras.onCancel));
     add(box, input, add(footer, go));
+    if (mode === 'mailbox') {
+      add(footer, button(w('pgCopyAnswer'), function () {
+        var text = input.value.trim();
+        if (text) copy(text, key); else say(w('pressEmpty'), 'alert', key);
+      }, '', true));
+      add(box, el('p', 'where', w(isOpenOnly ? 'serveNextOpenHint' : 'serveNextTurnHint')));
+    }
     return box;
   }
   // A text shows as one line, cut to the width it has with an ellipsis (the style does that);
@@ -1516,10 +1578,10 @@ const PAGE_SCRIPT = String.raw`
     if (!parts) return;
     reveal(parts.ask, state.mode === 'ask');
     reveal(parts.reply, state.mode === 'write');
-    var isAfter = state.mode === 'copied' || state.mode === 'sent';
+    var isAfter = state.mode === 'copied' || state.mode === 'sent' || state.mode === 'queued';
     reveal(parts.after, isAfter);
     if (!isAfter) return;
-    parts.msg.textContent = state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text) : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
+    parts.msg.textContent = state.mode === 'queued' ? w('messagesQueued') : state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text) : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
     parts.answered.hidden = state.mode !== 'copied' || !parts.canHide;
     parts.again.hidden = state.mode !== 'copied';
   }
@@ -1539,10 +1601,15 @@ const PAGE_SCRIPT = String.raw`
       var line = el('li', step.isCurrent ? 'now' : '');
       var whole = step.note ? step.text + ' — ' + step.note : step.text;
       var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
-      add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '○'), clipped(clean(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)));
-      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled') {
+      add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'), clipped(clean(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)));
+      // The next step's Done button is the primary one in the actions row, so the step list
+      // does not tick it again: each step has exactly one Done button. Steps are told apart
+      // by the file line they came from, so two open steps with the same text each keep one;
+      // a step with no line (a folded summary) falls back to its text.
+      var isNext = step.fileLine !== undefined ? step.fileLine === row.nextFileLine : step.text === row.next;
+      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && !isNext) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
-        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp); }, 'btn');
+        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp, undefined, step.fileLine); }, 'btn');
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
         tick.title = step.text;
         add(line, tick);
@@ -1556,7 +1623,7 @@ const PAGE_SCRIPT = String.raw`
     var box = el('details');
     return add(box, el('summary', '', label), list);
   }
-  function sends(mode) { return mode === 'send' || mode === 'connected'; }
+  function sends(mode) { return mode === 'send' || mode === 'connected' || mode === 'mailbox'; }
   // One question or stuck task on the Needs you sheet, answerable where it is.
   // isOlder: a question kept for review (its chat has stopped): nothing to answer here, only to hide once answered.
   function buildCard(ref, isOlder) {
@@ -1641,7 +1708,7 @@ const PAGE_SCRIPT = String.raw`
     if (canWrite) {
       parts.reply = fx(replyBox(key, w('serveReplyPlaceholder'), sends(mode) ? mode : 'copy', agent, sends(mode) ? ask.where : '', ask.isSending, ask.session, ask.text, ask.fp, ask.delivery, {
         onCancel: function () { setMode(key, 'ask'); },
-        onDone: function (value) { setMode(key, sends(mode) ? 'sent' : 'copied', value); },
+        onDone: function (value) { setMode(key, mode === 'mailbox' ? 'queued' : sends(mode) ? 'sent' : 'copied', value); },
       }), false);
     } else parts.reply = fx(el('div'), false);
     var after = el('div', 'state');
@@ -1663,10 +1730,10 @@ const PAGE_SCRIPT = String.raw`
   }
   function pressAnswer(ask, key, answer, node) {
     var mode = ask.send;
-    if (mode !== 'connected' && mode !== 'send') { copy(answer, key, function () { setMode(key, 'copied', answer); }); return; }
+    if (mode !== 'connected' && mode !== 'mailbox' && mode !== 'send') { copy(answer, key, function () { setMode(key, 'copied', answer); }); return; }
     var run = function () {
-      var sent = mode === 'connected' ? nativeAct(key, answer, ask.delivery, ask.session, ask.text, ask.fp, node || el('button')) : act(key, 'send', answer, w('serveSending', agentName(ask.agent)), ask.session, ask.text, ask.fp, node);
-      return sent.then(function (ok) { if (ok) setMode(key, 'sent', answer); return ok; });
+      var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, answer, ask.delivery, ask.session, ask.text, ask.fp, node || el('button')) : act(key, 'send', answer, w('serveSending', agentName(ask.agent)), ask.session, ask.text, ask.fp, node);
+      return sent.then(function (ok) { if (ok) setMode(key, mode === 'mailbox' ? 'queued' : 'sent', answer); return ok; });
     };
     sentLast[key] = { text: answer, again: run };
     run();
@@ -1697,7 +1764,11 @@ const PAGE_SCRIPT = String.raw`
       if (sends(row.send)) add(inner, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery));
       else if (row.hasCopyBox) add(inner, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, row.question));
       if (row.isOwn && section !== 'done' && row.next) {
-        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', row.next, '', '', '', row.fp); }, 'primary');
+        // The press names the next step by its file line and its shown text, the same way
+        // the step list names a step, so the server can tell it from a twin with the same text.
+        var nextStep = null;
+        for (var index = 0; index < row.steps.length; index += 1) if (row.nextFileLine !== undefined && row.steps[index].fileLine === row.nextFileLine) { nextStep = row.steps[index]; break; }
+        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.fp, undefined, row.nextFileLine); }, 'primary');
         // A long step is named by its first words; the whole step is its title (#463).
         if (row.nextLabel) tickNext.title = row.next;
         add(acts, tickNext);
@@ -1714,7 +1785,10 @@ const PAGE_SCRIPT = String.raw`
     if (isExpandable) resultSlot(inner, key, row.fp, row.title || row.task);
     var current = steps.filter(function (one) { return one.isCurrent; })[0] || steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled'; })[0];
     var step = current ? clean(current.text) : '';
-    var detail = !step ? '' : section === 'working' ? step : section === 'others' ? w('pgLast', step) : section === 'stopped' ? w('pgStoppedAt', step) : '';
+    // "Last:" names the last finished step, not the next one: a task with nothing finished yet shows no Last: line.
+    var lastDone = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
+    var lastFinished = lastDone.length ? clean(lastDone[lastDone.length - 1].text) : '';
+    var detail = section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
     var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
     var project = showProject ? clean(ref.repo || row.project) : '';
@@ -1766,7 +1840,7 @@ const PAGE_SCRIPT = String.raw`
         if (one.isClosed === true || one.state === 'ended') {
           isClosed = true;
           if (at > closedAt) closedAt = at;
-        } else if (one.send === 'open' || one.send === 'claude' || one.send === 'connected') {
+        } else if (one.send === 'open' || one.send === 'claude' || one.send === 'connected' || one.send === 'mailbox') {
           isOpen = true;
         }
       });
@@ -2312,8 +2386,10 @@ const PAGE_SCRIPT = String.raw`
     pg.cardNodes = {};
     cardParts = {};
     var closeSlot = resultSlots.close;
+    var tidySlot = resultSlots.tidy;
     resultSlots = {};
     if (closeSlot) resultSlots.close = closeSlot;
+    if (tidySlot) resultSlots.tidy = tidySlot;
     agentPresence = presenceMap(view);
     drawChips(view);
     var parts = [];
@@ -2338,6 +2414,8 @@ const PAGE_SCRIPT = String.raw`
     }
     var notices = el('div', 'notices');
     if (model.details) add(notices, el('p', 't-quiet', model.details));
+    if (model.pruned) add(notices, el('p', 't-quiet', model.pruned));
+    (model.health || []).forEach(function (line) { add(notices, el('p', 't-alert', line)); });
     if (model.background) add(notices, el('p', 't-quiet', model.background));
     if (model.isCleanable) {
       var cleanup = add(el('div', 'acts'), button(w('cleanUp'), function () { tidyBoard('cleanup', '/api/clean'); }));
@@ -2364,6 +2442,9 @@ const PAGE_SCRIPT = String.raw`
       arriving.forEach(function (one) { reveal(one.block, true); toggleClass(one.li, 'arrived', true); });
     }
     drawLostResults();
+    // A result with no slot in this update was drawn apart from its card, if at all. It
+    // stays for this update, and is dropped when a slot for its card is drawn again.
+    Object.keys(results).forEach(function (key) { if (!resultSlots[key]) results[key].orphaned = true; });
     board.querySelectorAll('textarea[data-key]').forEach(function (box) {
       var key = box.getAttribute('data-key');
       if (Object.prototype.hasOwnProperty.call(pg.drafts, key)) box.value = pg.drafts[key];
@@ -2562,6 +2643,66 @@ const PAGE_SCRIPT = String.raw`
         refresh();
       }
     }, function () { say(w('serveOffline'), 'alert', 'close'); unreachable(); });
+  });
+  // A bulk archive previews first and archives only on a second, separate press. Any
+  // other press drops the preview; the token on the server then simply expires.
+  var tidyToken = '';
+  var tidyPreview = null;
+  var tidyBusy = false;
+  var tidyCommitting = false;
+  function resetTidy(cancel) {
+    if (tidyCommitting) return;
+    if (cancel && tidyToken) call('/api/tidy-bulk', { kind: 'cancel', token: tidyToken }).catch(function () {});
+    tidyToken = '';
+    tidyPreview = null;
+    var confirm = document.getElementById('tidy-confirm');
+    var cancelButton = document.getElementById('tidy-cancel');
+    if (confirm) confirm.disabled = true;
+    if (cancelButton) cancelButton.disabled = true;
+  }
+  function tidySelector() {
+    var kind = document.getElementById('tidy-kind').value;
+    if (kind === 'agent') return { kind: kind, value: document.getElementById('tidy-value').value.trim() };
+    if (kind === 'older') return { kind: kind, days: Number(document.getElementById('tidy-value').value.trim()) };
+    return { kind: 'stopped' };
+  }
+  document.getElementById('tidy-preview').addEventListener('click', function () {
+    if (isUnreachable || tidyBusy) return;
+    var selector = tidySelector();
+    if (selector.kind === 'agent' && !/^[a-z][a-z0-9-]{0,63}$/.test(selector.value || '')) { say(w('tidyInvalid'), 'alert', 'tidy'); return; }
+    if (selector.kind === 'older' && !(Number.isSafeInteger(selector.days) && selector.days >= 1 && selector.days <= 365000)) { say(w('tidyInvalid'), 'alert', 'tidy'); return; }
+    tidyBusy = true;
+    say(w('pressPending'), '', 'tidy');
+    call('/api/tidy-bulk', { kind: 'preview', selector: selector }).then(function (data) {
+      tidyBusy = false;
+      if (!data.token || !data.preview) { say(data.note || w('pressFailed'), 'alert', 'tidy'); return; }
+      tidyToken = data.token;
+      tidyPreview = data.preview;
+      document.getElementById('tidy-confirm').disabled = false;
+      document.getElementById('tidy-cancel').disabled = false;
+      say(data.note || '', 'quiet', 'tidy');
+    }, function () { tidyBusy = false; say(w('serveOffline'), 'alert', 'tidy'); unreachable(); });
+  });
+  document.getElementById('tidy-confirm').addEventListener('click', function () {
+    if (isUnreachable || tidyBusy || !tidyToken || !tidyPreview) return;
+    tidyBusy = true;
+    tidyCommitting = true;
+    say(w('pressPending'), '', 'tidy');
+    call('/api/tidy-bulk', { kind: 'confirm', token: tidyToken, preview: tidyPreview }).then(function (data) {
+      tidyBusy = false;
+      tidyCommitting = false;
+      tidyToken = '';
+      tidyPreview = null;
+      document.getElementById('tidy-confirm').disabled = true;
+      document.getElementById('tidy-cancel').disabled = true;
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'tidy');
+      refresh();
+    }, function () { tidyBusy = false; tidyCommitting = false; say(w('serveOffline'), 'alert', 'tidy'); unreachable(); });
+  });
+  document.getElementById('tidy-cancel').addEventListener('click', function () {
+    if (tidyBusy) return;
+    resetTidy(true);
+    say(w('tidyCancelled'), '', 'tidy');
   });
   refresh();
 })();

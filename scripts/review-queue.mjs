@@ -9,8 +9,6 @@ const maxBuffer = 64 * 1024 * 1024
 const hour = 60 * 60 * 1000
 const day = 24 * hour
 const laneLimitHours = 2
-const noticeWaitHours = 24
-const noticeGapHours = 48
 const awayLimitDays = 14
 const claimSlotDays = 7
 
@@ -35,6 +33,41 @@ export const parseArgs = argv => {
 const nameOf = text => (text ?? '').match(/[A-Za-z0-9][A-Za-z0-9_-]*/)?.[0].toLowerCase() ?? null
 const reviewingName = body => nameOf((body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1])
 const verdictName = body => nameOf((body ?? '').match(/^Review:[ \t]*(?:APPROVE|REQUEST CHANGES)\b[^\r\n]*?\bby[ \t]+(\S[^\r\n]*)/m)?.[1])
+// The full identity keeps the dispatching lane, like authorKey does: "codex (phase1)" and "codex (e2e)"
+// are distinct agents (CONTRIBUTING rule 7), so only the first word is not enough to tell them apart.
+// reviewingName and verdictName above stay first-word names: countOpenReviews keys its counts by them,
+// and the reviewers file lists first-word names. The author comparisons in classify use these instead.
+const fullName = text => (text ?? '').replace(/`/g, '').split(',')[0].replace(/\s+/g, ' ').trim().toLowerCase() || null
+const verdictFullName = body => fullName((body ?? '').match(/^Review:[ \t]*(?:APPROVE|REQUEST CHANGES)\b[^\r\n]*?\bby[ \t]+(\S[^\r\n]*)/m)?.[1])
+const identityOf = text => {
+  const name = fullName(text)
+  if (!name) return null
+  // Only a final parenthesized suffix is a lane; earlier parentheses and all other name characters stay in the base.
+  const match = name.match(/^(.+?)\s*\(([^()]*)\)$/)
+  return match ? { base: match[1].trim(), lane: match[2].trim() || null } : { base: name, lane: null }
+}
+// Two names are the same agent when the base name matches and the lanes do not disagree: a name with no
+// lane is read as the same agent, so a bare "codex" still counts as the author "codex (x)" — the
+// conservative reading for self-approval, which can only ask for another reviewer, never merge early.
+const sameAgent = (reviewer, author) => {
+  const own = identityOf(author), name = fullName(reviewer)
+  const matches = other => Boolean(other && own && other.base === own.base && (!other.lane || !own.lane || other.lane === own.lane))
+  if (matches(identityOf(name))) return true
+  if (!name || !own || !name.startsWith(own.base)) return false
+  // Review prose has a boundary, not a vocabulary. A space alone after a bare
+  // base is not one: "Claude" and "Claude Code" must remain distinct names.
+  const boundary = tail => /^(?:$|[.:;!?。！？：；](?:\s|$)|\s[-–—]\s)/.test(tail)
+  const tail = name.slice(own.base.length)
+  // Ambiguous punctuation prefixes ("Dr" / "Dr. Agent") deliberately refuse
+  // approval conservatively, as settled in the round-2 review of #952.
+  if (boundary(tail)) return true
+  const lane = tail.match(/^\s*\(([^()]*)\)(.*)$/)
+  if (!lane) return false
+  const reviewLane = lane[1].trim()
+  if (reviewLane && own.lane && reviewLane !== own.lane) return false
+  // After a complete matching lane, ordinary words may begin the review prose.
+  return /^\s/.test(lane[2]) || boundary(lane[2])
+}
 // The built bundle and the string tables change in almost every pull request, so approved ones that touch them merge one at a time.
 const sharedPath = /^hooks\/(?:board-script(?:-[^/]+)?\.ts|i18n\.ts|strings-en\.ts|strings-zh-cn\.ts)$/
 
@@ -52,7 +85,6 @@ const utcMs = (date, time = '00:00:00') => {
   const ms = Date.parse(`${date}T${time}Z`)
   return Number.isFinite(ms) && new Date(ms).toISOString().startsWith(`${date}T${time}`) ? ms : NaN
 }
-const formatUtc = ms => `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`
 
 const codexLogin = /^chatgpt-codex-connector(?:\[bot\])?$/i
 const codexMarker = /<!--\s*codex-review-state:v1\s+(\{[\s\S]*?\})\s*-->/
@@ -97,84 +129,6 @@ const isGreptile = login => (login ?? '').toLowerCase().includes('greptile')
 const hasGreptileReview = (comments, reviews, head) =>
   comments.some(({ comment }) => isGreptile(comment.user?.login) && mentionsHead(head, comment.body))
   || (Array.isArray(reviews) ? reviews : []).some(review => isGreptile(review?.author?.login) && (mentionsHead(head, review.body) || mentionsHead(head, review.commit?.oid)))
-
-// A comment "Merging after <UTC time> unless someone objects" that also names a commit id (CONTRIBUTING rule 8).
-export const parseNotice = body => {
-  const named = (body ?? '').match(/^[ \t]*Merging after\b([^\r\n]*?)\bunless someone objects\b/mi)?.[1]
-  const parts = named?.match(/^\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::(\d{2}))?\s*(?:UTC|Z)?\s*$/i)
-  const at = parts ? utcMs(parts[1], `${parts[2]}:${parts[3] ?? '00'}`) : NaN
-  const shas = shaWords(body)
-  return Number.isFinite(at) && shas.length ? { at, shas } : null
-}
-
-// Governance files, workflows and the release files: a pull request touching one never merges after a notice (team-process, From claim to merge).
-const governedPaths = new Set([
-  'AGENTS.md',
-  'CONTRIBUTING.md',
-  'docs/dev/RULES.md',
-  'docs/dev/team-process.md',
-  'docs/dev/universal-messaging-roadmap.md',
-  'CHANGELOG.md',
-  'package.json',
-  '.claude-plugin/plugin.json',
-])
-const isGovernedPath = path => governedPaths.has(path) || path.startsWith('.github/')
-
-// Checks whether an unresolved REQUEST CHANGES verdict exists for the current head.
-const unresolvedRequestChanges = (comments, head) => {
-  const headVerdicts = comments
-    .map(entry => ({ verdict: reviewOf(entry.comment.body), comment: entry.comment }))
-    .filter(entry => entry.verdict && matchesHead(head, entry.verdict.sha))
-  if (!headVerdicts.length) return false
-  const latestVerdict = headVerdicts.at(-1)?.verdict
-  if (latestVerdict?.kind === 'REQUEST CHANGES') return true
-  const reviewerVerdicts = new Map()
-  for (const entry of headVerdicts) {
-    const reviewer = verdictName(entry.comment.body) ?? (entry.comment.user?.login ? nameOf(entry.comment.user.login) : null)
-    if (reviewer) reviewerVerdicts.set(reviewer, entry.verdict.kind)
-  }
-  return [...reviewerVerdicts.values()].some(kind => kind === 'REQUEST CHANGES')
-}
-
-// Where the merge-after-notice stands for a pull request (team-process, From claim to merge). Only the pull request's own author can
-// give a notice, and the latest one that names the current head is the one that counts: a push leaves the old notice behind, so the
-// check for a first notice starts over for the new head.
-const noticeFor = ({ comments, head, ready, readyHours, takenBy, nowMs, isInQueue, isAllAway, hasBackSince, isGoverned, author }) => {
-  const isByAuthor = comment => author !== '' && (comment.user?.login ?? '').toLowerCase() === author
-  const authorNotice = entry => isByAuthor(entry.comment) ? parseNotice(entry.comment.body) : null
-  const hasUnresolvedChanges = unresolvedRequestChanges(comments, head)
-  const isAllowed = isInQueue && !takenBy && !hasUnresolvedChanges && ((readyHours ?? 0) > noticeWaitHours || isAllAway)
-  if (isGoverned) return comments.some(authorNotice) || isAllowed ? { state: 'not-allowed', at: null } : null
-  const last = comments.findLastIndex(entry => authorNotice(entry)?.shas.some(word => head.startsWith(word)))
-  if (last < 0) return isAllowed ? { state: 'allowed', at: null } : null
-  const notice = authorNotice(comments[last])
-  const at = new Date(notice.at).toISOString()
-  if (hasUnresolvedChanges) return { state: 'cancelled', at }
-  // A notice must be posted while the notice path is open.
-  if (!ready || comments[last].time < ready.time) return { state: 'too-early', at }
-  const isTakenBeforeNotice = comments.slice(ready.order + 1, last).some(({ comment }) => /^Reviewing:[ \t]*\S/m.test(comment.body ?? '') && !isByAuthor(comment))
-  if (isTakenBeforeNotice) return { state: 'cancelled', at }
-  if (!(comments[last].time - ready.time > noticeWaitHours * hour || isAllAway)) return { state: 'too-early', at }
-  // The author's own Reviewing comment does not take the review, so it does not end the notice.
-  const isCancelled = comments.slice(last + 1).some(({ comment }) => {
-    const isOtherReviewing = /^Reviewing:[ \t]*\S/m.test(comment.body ?? '') && !isByAuthor(comment)
-    const isObjection = /^\s*Objection\b/i.test(comment.body ?? '')
-    const rev = reviewOf(comment.body)
-    const isHeadRequestChanges = rev?.kind === 'REQUEST CHANGES' && matchesHead(head, rev.sha)
-    return isOtherReviewing || isObjection || isHeadRequestChanges
-  })
-  // A collaborator's Back on the roadmap issue after the notice ends it too (team-process, From claim to merge).
-  if (isCancelled || hasBackSince(comments[last].time)) return { state: 'cancelled', at }
-  const isTooEarly = notice.at - comments[last].time < noticeGapHours * hour || Boolean(ready && notice.at - ready.time < noticeGapHours * hour)
-  if (isTooEarly) return { state: 'too-early', at }
-  return { state: nowMs >= notice.at ? 'due' : 'waiting', at }
-}
-
-// Every collaborator except the pull request's own author is away. An unknown list, or nobody else, is not "everyone".
-const isEveryOtherAway = (collaborators, awayLogins, author) => {
-  const others = (collaborators ?? []).filter(login => login !== author)
-  return others.length > 0 && others.every(login => awayLogins.has(login))
-}
 
 const reviewerNote = 'docs/dev/reviewers.json could not be read, so no reviewer is suggested'
 const reviewersPath = fileURLToPath(new URL('../docs/dev/reviewers.json', import.meta.url))
@@ -227,17 +181,12 @@ export const suggestReviewer = (map, { author, isOverFourHours }, openCounts) =>
   return { suggested: eligible[isEscalated ? 1 : 0] ?? null, isEscalated }
 }
 
-// context: { collaborators, awayLogins, backs, bundleSources } from the GitHub lookups. Every part may be missing, and a missing part only
-// leaves its hint out: no collaborator list means no "everyone is away" notice, no bundle sources means only the generated files count.
-// With no collaborator list, a Back from anyone but the author cancels a notice, since the safe reading is that the notice no longer stands.
+// context: { bundleSources } from the GitHub lookups. Missing bundle sources means only the generated files count.
 export const classify = (prs, commentsByNumber, now, reviewers = null, context = {}) => {
   const result = { needsReviewer: [], needsMain: [], approved: [], approvedNow: [], approvedOneAtATime: [], waitingForAuthor: [], drafts: 0 }
   const nowMs = new Date(now).getTime()
   if (!Number.isFinite(nowMs)) throw new Error('invalid current time')
   const openCounts = reviewers ? countOpenReviews(prs, commentsByNumber, nowMs) : null
-  const collaborators = Array.isArray(context.collaborators) ? context.collaborators : null
-  const awayLogins = new Set(context.awayLogins ?? [])
-  const backs = context.backs ?? []
   // The bundle's sources and the release table change the generated files, so a pull request touching one conflicts with the others that do.
   const isSharedPath = path => sharedPath.test(path) || path === 'hooks/released.ts' || Boolean(context.bundleSources?.has(path))
   for (const pr of prs) {
@@ -260,32 +209,23 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     const comments = entriesOf(commentsFor(commentsByNumber, pr.number))
     const ready = comments.map((entry, index) => ({ ...entry, order: index }))
       .filter(entry => matchesHead(head, readySha(entry.comment.body))).at(-1)
-    const verdicts = comments.map((entry, index) => ({ ...entry, order: index, verdict: reviewOf(entry.comment.body) }))
+    const verdicts = comments.map((entry, index) => ({ ...entry, order: index, verdict: reviewOf(entry.comment.body), by: verdictFullName(entry.comment.body) }))
       .filter(entry => entry.verdict)
     const headVerdicts = verdicts.filter(entry => matchesHead(head, entry.verdict.sha))
     const latestHeadVerdict = headVerdicts.at(-1)
     const reviewAfterReady = ready && headVerdicts.some(entry => entry.order > ready.order)
+    // Agents share one GitHub login, so a Reviewing name is compared with the Author line's agent name, never the login:
+    // the author's own Reviewing does not count as a review taken. The comparison keeps the dispatching lane:
+    // "codex (e2e)" taking a review of "codex (phase1)" is a different agent, not the author.
     const taking = ready ? comments.slice(ready.order + 1)
       .map(entry => ({ name: (entry.comment.body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1]?.trim(), time: entry.time }))
-      .filter(entry => entry.name).at(-1) ?? null : null
+      .filter(entry => entry.name && !sameAgent(entry.name, item.author)).at(-1) ?? null : null
     // A Reviewing comment past its 4 hours no longer holds the review; the queue names who let it lapse.
     const takenBy = taking && !isLapsed(taking.time, nowMs) ? taking.name : null
     const lapsedBy = taking && !takenBy ? taking.name : null
-    const author = (pr.author?.login ?? '').toLowerCase()
-    const hasBackSince = since => backs.some(back => back.time > since && back.login !== author && (!collaborators || collaborators.includes(back.login)))
-    // What the review bots and the merge-after-notice say about the head. A missing bot review never moves a pull request between groups.
+    // What the review bots say about the head. A missing bot review never moves a pull request between groups.
     const extras = {
       bots: { codex: codexStateOf(comments, head), codexSecurity: codexSecurityOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
-      // A lapse frees the reviewer slot and the suggestion only: any Reviewing after the Ready still closes the notice path, as it
-      // still cancels a notice (team-process, From claim to merge).
-      notice: noticeFor({
-        comments, head, ready, takenBy: taking?.name ?? null, nowMs,
-        readyHours: ready && Number.isFinite(ready.time) ? Math.max(0, nowMs - ready.time) / hour : null,
-        isInQueue: Boolean(ready && !reviewAfterReady),
-        isAllAway: isEveryOtherAway(collaborators, awayLogins, author), hasBackSince, author,
-        // Without a file list a pull request cannot be shown to be clear of the governance files, but nothing is claimed about it either.
-        isGoverned: Array.isArray(pr.files) && pr.files.some(file => isGovernedPath(file?.path ?? '')),
-      }),
     }
     if (ready && !reviewAfterReady) {
       if (!Number.isFinite(ready.time)) throw new Error('invalid Ready time')
@@ -293,6 +233,11 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
       const isOverFourHours = hours > 4
       const suggestion = reviewers ? suggestReviewer(reviewers, { author: nameOf(item.author), isOverFourHours }, openCounts) : {}
       result.needsReviewer.push({ ...item, readyAt: ready.comment.created_at, hours, isOverFourHours, takenBy, lapsedBy, ...suggestion, ...extras })
+    } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by, item.author)) {
+      // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
+      // even when it arrives from the shared login. The lane is part of the identity, so "codex (e2e)" approving
+      // "codex (phase1)" counts, while a verdict with no name keeps its old reading.
+      result.waitingForAuthor.push({ ...item, detail: 'approval is by the author', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
       const isOneAtATime = !Array.isArray(pr.files) || pr.files.some(file => isSharedPath(file?.path ?? ''))
@@ -353,7 +298,7 @@ export const collaboratorLogins = (logins, repo) => {
 
 // "Away: until YYYY-MM-DD" as the first line of a comment on the roadmap issue sets that login away through that UTC date; a later
 // comment by the same login starting "Back" ends it. A date more than 14 days after the comment is ignored and noted.
-// backs lists every Back comment (lower case login, time in ms), since a notice to merge also ends when a collaborator is back.
+// backs lists every Back comment (lower case login, time in ms).
 export const readAway = (comments, now) => {
   const nowMs = new Date(now).getTime()
   const away = new Map()
@@ -505,15 +450,7 @@ const codexSecurityText = {
   open: 'codex security: findings open — answer each before approving',
 }
 const botText = bots => [codexText[bots?.codex], codexSecurityText[bots?.codexSecurity], bots?.greptile ? 'greptile: reviewed' : ''].filter(Boolean).join('  ')
-const noticeText = notice => {
-  if (notice.state === 'allowed') return 'notice allowed outside the governance files (team-process, From claim to merge)'
-  if (notice.state === 'waiting') return `notice: merges after ${formatUtc(Date.parse(notice.at))}`
-  if (notice.state === 'due') return 'notice due: merge if checks are green, someone other than the author approved this head and no bot P0/P1 is open'
-  if (notice.state === 'not-allowed') return 'no notice: governance, workflow or release pull requests merge only with an approval (CONTRIBUTING rules 8 and 12)'
-  if (notice.state === 'too-early') return `notice too early: post it once Ready is ${noticeWaitHours} hours old with nobody reviewing, or everyone else away, naming a time ${noticeGapHours} hours after the notice and after Ready`
-  return 'notice cancelled'
-}
-// The groups a reviewer or merger acts on show the bot state and the notice under each pull request.
+// The groups a reviewer or merger acts on show the bot state under each pull request.
 const detailedGroups = new Set(['Needs a reviewer', 'Merge now, smallest first', 'One at a time, oldest Ready first'])
 
 export const formatQueue = queue => {
@@ -537,7 +474,6 @@ export const formatQueue = queue => {
       lines.push(`#${item.number}  ${item.size} lines  ${item.author}  ${item.title.slice(0, 70)}  ${detail}`)
       if (!detailedGroups.has(heading)) continue
       if (item.bots) lines.push(`    ${botText(item.bots)}`)
-      if (item.notice) lines.push(`    ${noticeText(item.notice)}`)
     }
   }
   lines.push(`Drafts: ${data.drafts}`)

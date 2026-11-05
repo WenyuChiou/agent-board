@@ -17,14 +17,31 @@ Temporary store locks (`EPERM`, `EBUSY`, `EAGAIN`) report HTTP 503 so polling ca
 recover within that deadline. Idle polls do not rewrite the message file. Sending
 and receipts are never automatically retried, including after a store lock.
 
-Use the existing reply box on the session's card. Its Copy button becomes Send Codex
-(or that receiver's agent name) only when the full native session id and agent match a
-live receiver. Internal connection ids stay hidden. There is no
+Use the existing reply box on the session's card. A matching live receiver enables Send;
+a hook mailbox offers Queue for next turn beside Copy. Internal connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
 An offline card retains Copy. By default, the web UI and
 action API cannot spawn a CLI or resume a saved session. The existing copy-resume command
 remains available where the board already offered it.
+
+## Next-turn mailbox
+
+A turn-start hook enrolls its session when the default message store already exists.
+The page can queue a message for that exact session without waking it. Its next hook
+hands over one message, oldest first. `accepted` means the hook wrote it to the host;
+it does not prove the model read it, and no ACK is collected. Claimed messages never replay.
+An interrupted claim stays uncertain and blocks that target until the open-message limit.
+
+Mailboxes expire after 12 hours. Session end rejects queued messages with `DISCONNECTED`.
+Storage and connection failures leave progress hooks running normally. Hooks never create
+the store and only find the default folder; a board using `--messages-dir` has no hook mailboxes.
+
+Supported turn starts: Codex `SessionStart` / `UserPromptSubmit`, Antigravity
+`SessionStart` / `PreInvocation`, Gemini CLI `SessionStart` / `BeforeAgent`, Muse Code
+`UserPromptSubmit`, and Cursor `sessionStart` (never `beforeSubmitPrompt`, which Cursor
+ignores, so a Cursor message waits until that chat opens again and its card says so). End events
+are `SessionEnd` for Codex, Gemini and Muse, and `sessionEnd` for Cursor.
 
 The separate legacy `--serve --allow-resume` option deliberately allows a local reply to
 start an ended Codex or Grok Build session. It is disabled by default, never enabled by
@@ -284,20 +301,20 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 
 | Host | Surface | Tier | Primitive | Status | Live run | Receiver |
 | --- | --- | --- | --- | --- | --- | --- |
-| Antigravity | 2.0 Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Antigravity | agy TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | 2.0 Desktop App | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
+| Antigravity | agy TUI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
 | Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) |
-| Antigravity | IDE | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
 | Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Codex | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) |
 | Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) |
-| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Implemented | Not tested | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |
-| Cursor | cursor-agent CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Cursor | IDE (Composer) | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |
+| Cursor | cursor-agent CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) |
+| Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
@@ -308,11 +325,11 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Gemini CLI | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Gemini CLI | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-gemini.ts](../hooks/receivers/hook-mailbox-gemini.ts) |
 | Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Muse Code | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Muse Code | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-muse.ts](../hooks/receivers/hook-mailbox-muse.ts) |
 | OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
@@ -457,7 +474,15 @@ the receiver ends the old connection and registers the new id.
 ## Codex existing-owner adapter
 
 `scripts/codex-message-connector.mjs` uses the installed Codex executable's existing
-`app-server proxy` control socket. It does not start a daemon or create/resume a thread.
+`app-server proxy` control socket. It speaks WebSocket through the proxy's byte stream:
+an HTTP upgrade with a checked `Sec-WebSocket-Accept`, then masked client text frames
+and one JSON-RPC message per text message. A failed upgrade reports
+`OWNER_HANDSHAKE_FAILED`; a silent owner still times out. It does not start a daemon
+or create a thread. After `initialize` it checks that the thread is already loaded, then
+calls `thread/resume` with `excludeTurns: true` and no overrides: on a loaded thread this
+only subscribes the connection to the thread's events, which the daemon sends to
+subscribed connections alone. A thread that is not loaded fails with `TARGET_MISMATCH`
+and is never opened from disk.
 After a person approves the exact disposable server/thread/active-turn binding, give it
 JSON on stdin:
 
@@ -473,8 +498,9 @@ retains the ACK line only, and ignores approval requests. No saved history is re
 
 Availability of this socket differs by surface. The Windows desktop tested with Codex
 0.163.0-alpha.10.2 had no reachable shared control socket (OS error 10050). Therefore this
-change does **not** establish messaging to that desktop chat. Codex CLI shared-daemon
-delivery remains a separate real-session test. Other agent-native connectors and real
+change does **not** establish messaging to that desktop chat. A live Codex CLI 0.163.0
+session on Windows received a board message in its running turn, and the board recorded
+its ACK: [the live run](validation/2026-11-04-codex-cli-proxy-live.md). Other agent-native connectors and real
 dot delivery are not implemented or claimed. The UI shows no receiving target until an
 adapter actually registers.
 
@@ -516,7 +542,7 @@ conservative uncertainty without replay. The existing-proxy adapter continues to
 | Surface | Current evidence | Still required |
 | --- | --- | --- |
 | Disposable Codex app-server, exclusively owned | A real `AB-TEST-001` ACK; one native turn; exact retry caused no second turn; changed contents returned `ID_CONFLICT`; no tool action observed | Product installation of a receiver into each supported host |
-| Codex CLI | Adapter API and mock proxy tests | Real live CLI owner/socket, native ACK and actual TTY acceptance |
+| Codex CLI | Mock proxy tests; a live 0.163.0 turn on Windows took a board message and the board recorded its native ACK ([live run](validation/2026-11-04-codex-cli-proxy-live.md)) | Approval requests while the board is subscribed; an idle session; Linux and macOS |
 | Codex desktop App | Interactive web controls and card API tested; exact native session binding and offline fallback | A supported live connection to that desktop chat; its own native ACK |
 | dot | Generic adapter API only | A supported dot owner connector and actual dot ACK |
 | Claude Code CLI | Existing plugin progress and prompt submission design | Native receiver integration and actual bidirectional ACK |
@@ -601,3 +627,27 @@ updating or sharing their message directory. Mixed-version reclaimers and networ
 filesystems are not covered by the current-writer exclusivity tests. Concurrent
 contenders may both refuse; retry once the failed starts have exited. This is an
 availability tradeoff, not permission to retry an uncertain message.
+
+## stdio MCP
+
+Run the board with `--mcp` for newline-delimited JSON-RPC on stdin and stdout.
+It offers `board_status`, `board_inbox`, `board_ack` and `board_send`.
+`board_status` returns the document `--json` prints ([BOARD-JSON.md](BOARD-JSON.md)); the caller's level is in the result's `_meta`.
+It uses an existing message folder and creates none.
+A named caller verified against its parent's PID and start time holds a 60-second lease.
+Each tool call renews it; after inactivity, verification runs again.
+A named caller without verification is restricted to its own inbox and unverified sending.
+An unbound caller can read status and send as unverified, but has no inbox.
+Acknowledgements require a lease (`NO_LEASE`); an unnamed inbox or ACK gets `NO_SESSION`.
+Sending requires the running board hub (`BOARD_NOT_RUNNING`) and a target enrolled by MCP
+in the same workspace (`WORKSPACE_UNKNOWN` or `WORKSPACE_MISMATCH` otherwise).
+Contested owners, peer pause, hop limit and pair budget can refuse delivery. Peer pause and pair budget
+also apply to a connected adapter's own sends. An unverified sender's message cannot be passed on.
+A message taken by a lease holder holds its session until `board_ack` or 30 minutes; a hook's does not.
+Inbox acceptance means the response write completed; ACK separately records acknowledgement.
+There is no parked wait, progress notification, host launcher or automatic MCP configuration yet.
+A lease needs a launcher that sets `AGENT_BOARD_AGENT`, `AGENT_BOARD_SESSION_ID`, `AGENT_BOARD_HOST_PID` and `AGENT_BOARD_HOST_STARTED`.
+None ships yet, so a host started from a config file runs without one: `board_ack` answers `NO_LEASE`, and a peer send
+answers `WORKSPACE_UNKNOWN` until a leased session enrolls its folder.
+The start time is looked up once, beside the server; on Windows that takes about a second. No tool call waits on it for
+more than 120 ms: a call that arrives sooner runs without the lease, and a later call has it.

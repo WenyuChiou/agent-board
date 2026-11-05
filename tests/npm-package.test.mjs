@@ -55,6 +55,27 @@ const success = result => {
   assert.equal(result.signal, null)
   assert.equal(result.status, 0, result.stderr)
 }
+
+test('the launcher falls back to the system language before setup', () => fixture(f => {
+  const env = { LANG: '', NODE_OPTIONS: `--require ${JSON.stringify(join(repo, 'tests/fixtures/system-lang-zh-tw.cjs'))}` }
+  const help = f.run(repo, ['--help'], env)
+  success(help)
+  assert.match(help.stdout, /給程式 agent 用的本機看板/)
+  assert.doesNotMatch(help.stdout, /a local board for coding agents/)
+  const missing = f.run(repo, [], env)
+  assert.equal(missing.status, 1, missing.stderr)
+  assert.match(missing.stderr, /這個帳號還沒設定 Agent Board/)
+  assert.doesNotMatch(missing.stderr, /not set up for this account/)
+}))
+
+test('every Quick start says how to choose the language', () => {
+  for (const [file, heading, language] of [['README.md', 'Quick start', 'en'], ['README.zh-TW.md', '快速開始', 'zh-TW'], ['README.zh-CN.md', '快速开始', 'zh-CN']]) {
+    const section = readFileSync(join(repo, file), 'utf8').split(`## ${heading}`)[1]?.split('\n## ')[0]
+    assert.ok(section, `${file} has its Quick start section`)
+    assert.ok(section.includes(`--lang ${language}`), `${file} explains its language flag`)
+  }
+})
+
 let packedResult
 const pack = () => {
   if (!packedResult) {
@@ -93,6 +114,25 @@ const unnamed = (result, pkg) => {
 
 test('npm pack publishes only the files package.json lists', () => {
   assert.deepEqual(pack(), [...manifest.files, 'package.json', 'README.md', 'README.zh-CN.md', 'README.zh-TW.md', 'LICENSE'].sort())
+})
+
+test('the README footer names the latest stable version, not the package version', () => {
+  // A pre-release package keeps the last stable version in its README footer (#813), so the
+  // footer must say that is what the version is, in every language, and all three must agree.
+  const footers = [
+    ['README.md', /<sub>Latest stable version: (\d+\.\d+\.\d+) ·/, /<sub>Version \d/],
+    ['README.zh-CN.md', /<sub>最新稳定版本 (\d+\.\d+\.\d+) ·/, /<sub>版本 \d/],
+    ['README.zh-TW.md', /<sub>最新穩定版本 (\d+\.\d+\.\d+) ·/, /<sub>版本 \d/],
+  ]
+  const versions = new Set()
+  for (const [path, labelled, bare] of footers) {
+    const text = readFileSync(join(repo, path), 'utf8')
+    const match = text.match(labelled)
+    assert.ok(match, `${path} names the latest stable version in its footer`)
+    versions.add(match[1])
+    assert.equal(bare.test(text), false, `${path} footer reads as the package's own version`)
+  }
+  assert.equal(versions.size, 1, `the three README footers name one stable version: ${[...versions].join(', ')}`)
 })
 
 test('the npm package lists every bundle part and the reader, and the installed command reads them', () => fixture(f => {
@@ -433,17 +473,18 @@ test('the launcher tells the board script which package version it runs from', (
 
 test('agent-board setup with no agent found says how to name one, without a stack trace', () => fixture(f => {
   const pkg = packed(f)
-  for (const [lang, hint] of [['en', 'setup found no agent'], ['zh-TW', 'setup 在這台電腦找不到要設定的 agent'], ['zh-CN', 'setup 在这台电脑找不到要设置的 agent']]) {
+  for (const [lang, hint, unknown] of [['en', 'Setup found no agent', '--agent named an agent setup does not know'], ['zh-TW', 'setup 在這台電腦沒有找到 agent', '--agent 寫了 setup 不認得的 agent 名稱'], ['zh-CN', 'setup 在这台电脑没有找到 agent', '--agent 写了 setup 不认识的 agent 名称']]) {
     for (const extra of [[], ['--agent', 'unknown']]) {
       const result = f.run(pkg, ['setup', '--home', f.home, '--lang', lang, ...extra])
       assert.ifError(result.error)
-      assert.equal(result.status, 1)
-      assert.equal(result.stdout, '')
-      assert.ok(result.stderr.includes(hint), result.stderr)
-      assert.ok(result.stderr.includes(`npx ${manifest.name} setup --agent codex`), result.stderr)
-      assert.equal(result.stderr.includes('    at '), false)
-      assert.equal(result.stderr.includes(pkg), false)
-      assert.equal(result.stderr.trim().split('\n').length, 1)
+      assert.equal(result.status, extra.length ? 1 : 0)
+      assert.equal(extra.length ? result.stdout : result.stderr, '')
+      const text = extra.length ? result.stderr : result.stdout
+      assert.ok(text.includes(extra.length ? unknown : hint), text)
+      assert.ok(text.includes(`npx ${manifest.name} setup`) && text.includes('--agent codex'), text)
+      assert.equal(text.includes('    at '), false)
+      assert.equal(text.includes(pkg), false)
+      assert.equal(text.trim().split('\n').length, 1)
       assert.deepEqual(filesUnder(f.home), [])
     }
   }
@@ -509,8 +550,8 @@ test('npx guidance uses the package name while command examples keep the bin nam
     assert.equal(missing.status, 1)
     assert.ok(missing.stderr.includes(`npx ${renamed.name} setup --apply`))
     const setup = f.run(pkg, ['setup', '--home', f.home, '--lang', lang])
-    assert.equal(setup.status, 1)
-    assert.ok(setup.stderr.includes(`npx ${renamed.name} setup --agent codex`))
+    assert.equal(setup.status, 0)
+    assert.ok(setup.stdout.includes(`npx ${renamed.name} setup`) && setup.stdout.includes('--agent codex'), setup.stdout)
   }
   const text = `${prelude(f)}${fake.slice(fake.indexOf('\n') + 1)}`
   save(boardPath(f), text)

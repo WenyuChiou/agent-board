@@ -1,0 +1,160 @@
+// Lookup indexes in the observe/view path stay correct when the underlying data
+// changes (#192). The indexes are built fresh on every observeQuestions call and
+// every record pushed during a call is indexed, so a later call — or a later
+// question group in the same call — never reads a stale list. Synthetic data only:
+// no network, no clock or platform input, no model call anywhere in this file.
+//
+// These tests guard the index change, not the budget: timings live in
+// tests/performance-budgets.test.mjs and are not asserted here.
+
+import { registerHooks } from 'node:module'
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+
+// The board modules use extensionless imports; resolve only those local paths, as
+// tests/messaging.test.mjs does.
+registerHooks({ resolve(specifier, context, next) {
+  try { return next(specifier, context) } catch (error) {
+    if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+    return next(`${specifier}.ts`, context)
+  }
+} })
+
+const { parseProgress } = await import('../hooks/parse.ts')
+const { buildView } = await import('../hooks/view.ts')
+const { emptyQuestions, observeQuestions, questionScope } = await import('../hooks/questions.ts')
+const { ZH_TW } = await import('../hooks/i18n.ts')
+const { confirmKey } = await import('../hooks/blocks.ts')
+const { sha256 } = await import('../hooks/sha256.ts')
+
+const NOW = Date.parse('2026-10-25T12:00:00Z')
+const file = (steps, project = 'demo', session = 'a1b2c3d4') =>
+  `## ${project}\n<!-- auto session=${session} agent=codex state=waiting updated=${new Date(NOW).toISOString()} dir=${encodeURIComponent(`/work/${project}`)} -->\n### Ship\n${steps}\n<!-- /auto session=${session} -->\n`
+const observe = (ledger, text) => observeQuestions(ledger, parseProgress(text), null, [], NOW, true)
+const viewOf = (ledger, text) => buildView(parseProgress(text), [], null, NOW, 0, {}, ZH_TW, [], {}, ledger, { retired: [], consumed: [] }, [], new Set())
+
+test('a later observe call sees ledger mutations and board edits, not a stale index', () => {
+  const first = file('- [?] First question?\n- [?] Second question?')
+  const observed = observe(emptyQuestions(), first)
+  assert.equal(observed.ledger.records.length, 2)
+  assert.ok(observed.ledger.records.every(record => record.isPresent && record.isWaiting && record.isUnresolved))
+
+  // Between calls the first question is resolved and the second is reworded.
+  const ledger = observed.ledger
+  const firstRecord = ledger.records.find(record => record.words === 'First question?')
+  assert.ok(firstRecord !== undefined)
+  firstRecord.isUnresolved = false
+  firstRecord.isWaiting = false
+  firstRecord.resolvedAt = NOW
+  const second = file('- [?] First question?\n- [?] Second question, revised?')
+  const again = observe(ledger, second)
+  // The resolved record stays resolved, the reworded ask is a new record, and the
+  // old wording no longer waits: nothing is resurrected from a stale list.
+  assert.equal(again.ledger.records.length, 3)
+  assert.equal(again.ledger.records.find(record => record.words === 'First question?')?.isUnresolved, false)
+  assert.equal(again.ledger.records.find(record => record.words === 'Second question?')?.isWaiting, false)
+  const revised = again.ledger.records.find(record => record.words === 'Second question, revised?')
+  assert.ok(revised !== undefined && revised.isWaiting && revised.isUnresolved)
+  // The preview view re-observes unsettled, so an absent-but-unresolved record may
+  // still show; what matters is the revised ask shows under its new record's id.
+  const shown = viewOf(again.ledger, second).waiting
+  assert.ok(shown.some(item => item.text === 'Second question, revised?' && item.questionId === revised.id))
+})
+
+test('a record pushed for one group is visible to a later group in the same call', () => {
+  const text = file('- [?] Alpha ask?\n- [?] Beta ask?')
+  const projects = parseProgress(text)
+  const steps = projects.flatMap(project => project.tasks.flatMap(task => task.steps))
+  assert.equal(steps.length, 2)
+  // Two asks from one owner prefix, different full producers: the second ask's
+  // owner scan must find the record the first ask just created and retire it,
+  // which only happens when pushes join the per-call indexes.
+  steps[0].questionToken = 'ownerX:11111111'
+  steps[1].questionToken = 'ownerX:22222222'
+  const observed = observeQuestions(emptyQuestions(), projects, null, [], NOW, true)
+  assert.equal(observed.ledger.records.length, 2)
+  const alpha = observed.ledger.records.find(record => record.words === 'Alpha ask?')
+  const beta = observed.ledger.records.find(record => record.words === 'Beta ask?')
+  assert.ok(alpha !== undefined && beta !== undefined)
+  assert.equal(alpha.isPresent, false)
+  assert.equal(alpha.isWaiting, false)
+  assert.equal(alpha.isUnresolved, false)
+  assert.equal(beta.isPresent, true)
+  assert.equal(beta.isWaiting, true)
+})
+
+test('a hashed input that changes between calls hashes fresh, never from a stale entry', () => {
+  // sha256 memoizes by the exact input string, so the same string always returns
+  // its hash and a changed string never returns the old one (#192). The confirm
+  // key goes through the same cache keyed by the task's hashed text, so editing
+  // the task must change its key and restoring it must bring the key back.
+  assert.equal(sha256('abc'), sha256('abc'))
+  assert.notEqual(sha256('abc'), sha256('abd'))
+  assert.equal(sha256('abc'), sha256('abc'))
+  const long = 'x'.repeat(5000)
+  assert.equal(sha256(long), sha256(long))
+  assert.notEqual(sha256(long), sha256(`${long}y`))
+
+  const projects = parseProgress(file('- [ ] First step\n- [ ] Second step'))
+  const task = projects[0].tasks[0]
+  const before = confirmKey('demo', task, 0)
+  const raw = task.steps[0].raw
+  task.steps[0].raw = `${raw} (edited)`
+  const edited = confirmKey('demo', task, 0)
+  assert.notEqual(edited, before)
+  task.steps[0].raw = raw
+  assert.equal(confirmKey('demo', task, 0), before)
+})
+
+test('a reworded question binds a fresh id while the old wording keeps its own', () => {
+  const first = file('- [?] First question?')
+  const observed = observe(emptyQuestions(), first)
+  const oldRecord = observed.ledger.records.find(record => record.words === 'First question?')
+  assert.ok(oldRecord !== undefined)
+  // Re-observing the unchanged wording returns the same binding, not a new id.
+  const again = observe(observed.ledger, first)
+  assert.equal(again.ledger.records.find(record => record.words === 'First question?')?.id, oldRecord.id)
+  // The reworded ask binds a different id, and the old wording's record is untouched.
+  const second = file('- [?] First question, revised?')
+  const revised = observe(observed.ledger, second)
+  const revisedRecord = revised.ledger.records.find(record => record.words === 'First question, revised?')
+  assert.ok(revisedRecord !== undefined)
+  assert.notEqual(revisedRecord.id, oldRecord.id)
+  assert.equal(revised.ledger.records.find(record => record.words === 'First question?')?.id, oldRecord.id)
+})
+
+test('a frozen set that matches nothing leaves the view unchanged, and a matching freeze reroutes the question', () => {
+  // The frozen fast paths (no scope string built, no saved-record scan) must give
+  // the same view as the slow paths when nothing is frozen. When a scope is
+  // frozen, the live step is skipped and the saved question shows instead: the
+  // waiting list keeps one item, but it comes from the saved record rather than
+  // the live step, so it carries no live-session marker (#192).
+  const text = file('- [?] First question?\n- [x] Done step')
+  const fresh = () => observe(emptyQuestions(), text).ledger
+  const plain = viewOf(fresh(), text)
+  const unmatched = buildView(parseProgress(text), [], null, NOW, 0, {}, ZH_TW, [], {}, fresh(), { retired: [], consumed: [] }, [], new Set(['not-json']))
+  assert.deepEqual(unmatched, plain)
+  const frozen = buildView(parseProgress(text), [], null, NOW, 0, {}, ZH_TW, [], {}, fresh(), { retired: [], consumed: [] }, [], new Set([questionScope('demo', 'codex', 'a1b2c3d4')]))
+  assert.equal(frozen.waiting.length, 1)
+  assert.equal(frozen.waiting[0].text, 'First question?')
+  assert.ok(!('nativeSession' in frozen.waiting[0]))
+  assert.ok(plain.waiting.some(item => item.text === 'First question?' && 'nativeSession' in item))
+})
+
+test('rebuilding a view sees ledger edits, never a previous call', () => {
+  // The per-task memos in the view build live for one call only: a second build
+  // of the same inputs is identical, and a ledger edit between calls is seen.
+  const text = file('- [?] First question?\n- [?] Second question?')
+  const ledger = observe(emptyQuestions(), text).ledger
+  const first = viewOf(ledger, text)
+  assert.equal(first.waiting.length, 2)
+  assert.deepEqual(viewOf(ledger, text), first)
+  const record = ledger.records.find(record => record.words === 'First question?')
+  assert.ok(record !== undefined)
+  record.isUnresolved = false
+  record.isWaiting = false
+  record.resolvedAt = NOW
+  const third = viewOf(ledger, text)
+  assert.ok(!third.waiting.some(item => item.text === 'First question?'))
+  assert.ok(third.waiting.some(item => item.text === 'Second question?'))
+})

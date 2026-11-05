@@ -1,9 +1,9 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -61,6 +61,412 @@ const decoded = text => text.replace(/String\.fromCodePoint\(([\d,]+)\)/g, (_, c
 const snapshot = directory => Object.fromEntries(readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
   const path = join(directory, entry.name)
   return entry.isDirectory() ? Object.entries(snapshot(path)) : [[path, readFileSync(path, 'utf8')]]
+}))
+
+// Keep setup and the probe in separate processes, outside the source checkout, as the
+// installed plugin runs them. The target was absent from the first connect's scope.
+const withSetup = (agent, check, setupArgs = home => []) => fixture(async f => {
+  const dirs = agent === 'codex' ? { codex: join(f.home, 'absent-codex') } : undefined
+  if (agent === 'codex') mkdirSync(join(f.home, '.cursor'))
+  const initial = f.run(f.request('connect', { dirs }))
+  assert.ok(initial.state.setup.agents.some(one => one.hook === 'configured'))
+  assert.equal(initial.state.setup.agents.some(one => one.agent === agent), false)
+  const signs = {
+    codex: '.codex', cursor: '.cursor', opencode: '.config/opencode', gemini: '.gemini', antigravity: '.gemini/antigravity',
+    grok: '.grok/sessions', muse: '.config/muse', hermes: '.hermes', openclaw: '.openclaw',
+  }
+  mkdirSync(join(f.home, signs[agent]), { recursive: true })
+  const env = {
+    ...process.env, HOME: f.home, USERPROFILE: f.home, LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
+    APPDATA: join(f.home, 'AppData', 'Roaming'), LOCALAPPDATA: join(f.home, 'AppData', 'Local'),
+    CLAUDE_CONFIG_DIR: join(f.home, '.claude'), CLAUDE_PROGRESS_FILE: '',
+    CODEX_HOME: join(f.home, '.codex'), GROK_HOME: join(f.home, '.grok'), HERMES_HOME: join(f.home, '.hermes'),
+    XDG_CONFIG_HOME: join(f.home, '.config'), OPENCODE_CONFIG_DIR: join(f.home, '.config', 'opencode'),
+    OPENCLAW_STATE_DIR: join(f.home, '.openclaw'), DSH_HOME: join(f.home, '.dsh'),
+  }
+  const installed = spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--agent', agent, '--apply', '--json', ...setupArgs(f.home)], {
+    cwd: f.home, env, encoding: 'utf8', windowsHide: true, timeout: 30000,
+  })
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+  assert.equal(JSON.parse(installed.stdout).plans[0].managedBy, undefined)
+  const recordFile = join(setupArgs(f.home)[1] ?? join(f.home, '.agent-board'), `install-${agent}.json`)
+  assert.ok(existsSync(recordFile))
+  const owned = Object.keys(JSON.parse(readFileSync(recordFile, 'utf8')).files)
+  assert.ok(owned.length > 0)
+  const run = (mode, lang = 'en') => {
+    const result = f.command(f.request(mode, { lang, openclawVersion: '2026.10.1' }), { cwd: f.home, env })
+    assert.equal(result.status, 0, result.stderr + result.stdout)
+    return JSON.parse(result.stdout)
+  }
+  const setup = script => {
+    const done = spawnSync(process.execPath, script === 'apply' ? [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--agent', agent, '--apply', '--json'] : [join(f.home, '.agent-board', 'agent-board.mjs'), '--codex-remove', '--agent', agent, '--apply'], {
+      cwd: f.home, env, encoding: 'utf8', windowsHide: true, timeout: 30000,
+    })
+    assert.equal(done.status, 0, done.stderr + done.stdout)
+  }
+  await check({ f, env, run, setup, recordFile, owned, before: snapshot(f.home) })
+})
+const setupThenProbe = agent => withSetup(agent, ({ f, run, owned, before }) => {
+  // Status must identify the installer even before the next probe refreshed its record.
+  assert.equal(run('status').state.setup.agents.find(one => one.agent === agent).hook, 'setup')
+  for (const mode of ['auto', 'connect']) {
+    const output = run(mode)
+    const status = output.state.setup.agents.find(one => one.agent === agent)
+    assert.equal(status.hook, 'setup', agent)
+    assert.equal(status.board, 'none', agent)
+    assert.match(output.result.text, new RegExp(`${status.label}: managed by setup`))
+    assert.equal(output.result.problems.some(one => one.key.startsWith('preserved:')), false, agent)
+    assert.equal(output.result.done.includes(status.label), false)
+    for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], `${mode}: ${file}`)
+    for (const [file, text] of Object.entries(snapshot(f.home))) {
+      if (file.startsWith(join(f.home, '.agent-board'))) continue
+      assert.equal(text, before[file], `${mode}: unexpected host change ${file}`)
+    }
+  }
+  // One agent proves every language; the others prove the same strings once, in
+  // English. Language rendering itself is covered by the string-table tests.
+  const langs = agent === 'codex' ? ['en', 'zh-TW', 'zh-CN'] : ['en']
+  for (const lang of langs) {
+    const state = run('status', lang).state.setup
+    assert.equal(state.agents.find(one => one.agent === agent).hook, 'setup')
+    const { text } = run('connect', lang).result
+    assert.match(text, /managed by setup|由 setup 管理/)
+    assert.match(text, /Connected by the plugin: |由(?:外掛|插件)連?连?接：/)
+    assert.equal(state.problems.some(one => one.key === `missingBoard:${agent}` || agent === 'codex' && one.key === 'codex:approval'), false)
+  }
+  if (agent === 'grok') {
+    assert.ok(existsSync(join(f.home, '.grok', 'hooks', 'agent-board-local.json')))
+    assert.equal(existsSync(join(f.home, '.grok', 'hooks', 'agent-board.json')), false)
+    assert.equal(existsSync(join(f.home, '.grok', 'hooks', 'progress-pane.json')), false)
+  }
+  run('remove')
+  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], `remove: ${file}`)
+})
+
+test('a connector probe leaves Grok with only the setup hook and reports its installer', () => setupThenProbe('grok'))
+
+const BOTH_INSTALLERS = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'openclaw']
+test('connect and automatic probes leave setup managed agents unchanged', async t => {
+  for (const agent of BOTH_INSTALLERS) await t.test(agent, () => setupThenProbe(agent))
+})
+
+// A computer an earlier build reached: the probe added its hook because it did not read setup's record.
+const withBothHooks = (agent, check) => withSetup(agent, async ({ f, run, recordFile, owned, before }) => {
+  const record = readFileSync(recordFile, 'utf8')
+  unlinkSync(recordFile)
+  const hooked = run('connect')
+  assert.equal(hooked.state.setup.agents.find(one => one.agent === agent).hook, 'configured', agent)
+  writeFileSync(recordFile, record)
+  await check({ f, run, recordFile, owned, before })
+})
+
+test('a probe takes out the hook an earlier probe left beside the setup hook', async t => {
+  for (const agent of BOTH_INSTALLERS) await t.test(agent, () => withBothHooks(agent, ({ f, run, owned, before }) => {
+    const output = run('auto')
+    assert.equal(output.state.setup.agents.find(one => one.agent === agent).hook, 'setup', agent)
+    assert.equal(output.result.problems.some(one => one.key.startsWith('preserved:')), false, agent)
+    for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], `${agent}: ${file}`)
+    const after = snapshot(f.home)
+    for (const [file, text] of Object.entries(before)) {
+      if (!file.startsWith(join(f.home, '.agent-board'))) assert.equal(after[file], text, `${agent}: ${file}`)
+    }
+    for (const [file, text] of Object.entries(after)) {
+      if (!(file in before) && !file.startsWith(join(f.home, '.agent-board'))) assert.doesNotMatch(text, /progress-report|progress-hook|const INBOX =/, `${agent}: ${file}`)
+    }
+  }))
+})
+
+// Antigravity shares ~/.gemini with Gemini CLI, which the connector may still connect, so it has its own test.
+test('a setup managed Antigravity is reported and keeps the setup files', () => withSetup('antigravity', ({ run, owned, before }) => {
+  for (const mode of ['status', 'auto', 'connect']) {
+    assert.equal(run(mode).state.setup.agents.find(one => one.agent === 'antigravity').hook, 'setup', mode)
+    for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], `${mode}: ${file}`)
+  }
+}))
+
+test('a probe takes out the Antigravity hook of an earlier connect', () => withSetup('antigravity', ({ f, run, setup, recordFile }) => {
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const record = readFileSync(recordFile, 'utf8')
+  writeFileSync(config, '{}')
+  unlinkSync(recordFile)
+  run('connect')
+  assert.match(readFileSync(config, 'utf8'), /"agent-board"/)
+  writeFileSync(recordFile, record)
+  run('auto')
+  assert.doesNotMatch(readFileSync(config, 'utf8'), /"agent-board"/)
+  setup('apply')
+  const hooks = readFileSync(config, 'utf8')
+  assert.match(hooks, /"agent-board-local"/)
+  assert.doesNotMatch(hooks, /"agent-board"/)
+}))
+
+test('an Antigravity config that cannot be parsed is named, and its worker stays', () => withSetup('antigravity', ({ f, run, recordFile, owned }) => {
+  const config = join(f.home, '.gemini', 'config', 'hooks.json')
+  const record = readFileSync(recordFile, 'utf8')
+  writeFileSync(config, '{}')
+  unlinkSync(recordFile)
+  run('connect')
+  writeFileSync(recordFile, record)
+  const text = `// note\n${readFileSync(config, 'utf8')}`
+  writeFileSync(config, text)
+  for (const mode of ['auto', 'remove']) {
+    assert.ok(run(mode).result.problems.some(one => one.key === `removeFailed:${config}`), mode)
+    assert.equal(readFileSync(config, 'utf8'), text, mode)
+    for (const file of owned) assert.ok(existsSync(file), `${mode} ${file}`)
+  }
+}))
+
+test('removing the connector names OpenClaw once', () => withBothHooks('openclaw', ({ run }) => {
+  assert.deepEqual(run('remove').result.done.filter(label => label === 'OpenClaw'), ['OpenClaw'])
+}))
+
+test('a hook that cannot be taken out is named, and the other agents still connect', { skip: process.getuid?.() === 0 ? 'root ignores the read-only folder this test needs' : false }, () => withBothHooks('codex', ({ f, run }) => {
+  const config = join(f.home, '.codex', 'hooks.json')
+  const lock = isLocked => process.platform === 'win32'
+    ? execFileSync('attrib', [isLocked ? '+R' : '-R', config])
+    : chmodSync(join(f.home, '.codex'), isLocked ? 0o555 : 0o755)
+  lock(true)
+  try {
+    mkdirSync(join(f.home, '.grok', 'sessions'), { recursive: true })
+    const output = run('auto')
+    assert.equal(output.state.setup.agents.find(one => one.agent === 'grok').hook, 'configured')
+    assert.ok(output.result.problems.some(one => one.key === `removeFailed:${config}`))
+  } finally {
+    lock(false)
+  }
+  run('auto')
+  assert.doesNotMatch(readFileSync(config, 'utf8'), /progress-report/)
+}))
+
+test('a config that cannot be parsed is named when its hook cannot be taken out', () => withBothHooks('muse', ({ f, run }) => {
+  const config = join(f.home, '.config', 'muse', 'settings.json')
+  writeFileSync(config, `// mine\n${readFileSync(config, 'utf8')}`)
+  for (const mode of ['auto', 'remove']) assert.ok(run(mode).result.problems.some(one => one.key === `removeFailed:${config}`), mode)
+}))
+
+test('a probe leaves a setup managed config with nothing of ours as it is', () => withSetup('cursor', ({ f, run }) => {
+  const config = join(f.home, '.cursor', 'hooks.json')
+  const saved = JSON.parse(readFileSync(config, 'utf8'))
+  const text = JSON.stringify({ ...saved, hooks: { ...saved.hooks, PersonEvent: [] } }, null, 4)
+  writeFileSync(config, text)
+  run('auto')
+  assert.equal(readFileSync(config, 'utf8'), text)
+}))
+
+test('which agents setup manages is read each time and never stored', () => withSetup('grok', ({ f, run, setup }) => {
+  run('auto')
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).setup.agents.some(one => one.hook === 'setup'), false)
+  setup('remove')
+  assert.equal(run('status').state.setup.agents.some(one => one.agent === 'grok'), false)
+}))
+
+test('status names a setup managed agent before any probe', () => fixture(async f => {
+  mkdirSync(join(f.home, '.grok', 'sessions'), { recursive: true })
+  mkdirSync(join(f.home, '.agent-board'), { recursive: true })
+  const record = join(f.home, '.agent-board', 'install-grok.json')
+  writeFileSync(record, JSON.stringify({ config: join(f.home, '.grok', 'hooks', 'agent-board-local.json') }))
+  assert.equal(f.run(f.request('status')).state.setup.agents.find(one => one.agent === 'grok').hook, 'setup')
+  writeFileSync(record, '{}')
+  assert.notEqual(f.run(f.request('status')).state.setup?.agents.find(one => one.agent === 'grok')?.hook, 'setup')
+}))
+
+test('a setup record for another host folder leaves the connector to connect this one', () => withSetup('codex', ({ f, env, recordFile }) => {
+  const other = join(f.home, 'other-codex')
+  mkdirSync(other)
+  const main = join(f.home, '.codex', 'hooks.json')
+  const saved = readFileSync(main, 'utf8')
+  assert.ok(JSON.parse(readFileSync(recordFile, 'utf8')).config)
+  const run = mode => {
+    const result = f.command(f.request(mode, { dirs: { codex: other } }), { cwd: f.home, env })
+    assert.equal(result.status, 0, result.stderr + result.stdout)
+    return JSON.parse(result.stdout)
+  }
+  const connected = run('connect')
+  const reporter = readFileSync(join(other, 'hooks.json'), 'utf8')
+  assert.equal(connected.state.setup.agents.find(one => one.agent === 'codex').hook, 'configured')
+  assert.notEqual(run('auto').state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  assert.equal(readFileSync(join(other, 'hooks.json'), 'utf8'), reporter)
+  assert.notEqual(run('status').state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  assert.equal(readFileSync(main, 'utf8'), saved)
+}))
+
+test('a setup hook still leads to the record in its data folder however its path is quoted', () => withSetup('codex', ({ f, run }) => {
+  const file = join(f.home, '.codex', 'hooks.json')
+  const worker = join(f.home, 'other', "it's data", 'agent-board-hook.mjs')
+  const setupHook = () => run('auto').state.setup.agents.find(one => one.agent === 'codex').hook
+  // As setup wrote it on this system.
+  const written = readFileSync(file, 'utf8')
+  assert.equal(setupHook(), 'setup')
+  assert.equal(readFileSync(file, 'utf8'), written)
+  // Node at a spaced path with no 8.3 name: the worker path exists only inside the base64.
+  const launch = "& 'C:\\Program Files\\nodejs\\node.exe' '" + worker.replaceAll("'", "''") + "' 'SessionStart'; exit $LASTEXITCODE"
+  for (const command of [
+    'powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + Buffer.from(launch, 'utf16le').toString('base64'),
+    `node "${worker}" SessionStart`,
+    `node '${worker.replaceAll("'", "'\\''")}' SessionStart`,
+    `node '${worker.replaceAll("'", "''")}' SessionStart`,
+  ]) {
+    const quoted = JSON.stringify(JSON.parse(written), (key, value) => key === 'command' ? command : value, 2)
+    writeFileSync(file, quoted)
+    assert.equal(setupHook(), 'setup', command)
+    assert.equal(readFileSync(file, 'utf8'), quoted, command)
+  }
+}, home => ['--data-dir', join(home, 'other', "it's data")]))
+
+for (const [agent, folder, parts, reporterParts] of [['codex', '.codex', ['hooks.json'], ['hooks.json']], ['grok', '.grok', ['hooks', 'agent-board-local.json'], ['hooks', 'agent-board.json']]]) {
+  test(`${agent} set up with its host folder as the data folder stays setup's with its hook deleted by hand`, () => withSetup(agent, ({ f, env, recordFile }) => {
+    const reporter = join(f.home, folder, ...reporterParts)
+    unlinkSync(join(f.home, folder, ...parts))
+    const row = request => {
+      const result = f.command(f.request('auto', request), { cwd: f.home, env })
+      assert.equal(result.status, 0, result.stderr + result.stdout)
+      return JSON.parse(result.stdout).state.setup.agents.find(one => one.agent === agent)
+    }
+    assert.equal(row({ dirs: { [agent]: join(f.home, folder) } }).hook, 'setup')
+    assert.equal(row({}).hook, 'setup')
+    assert.equal(existsSync(reporter), false)
+    // Control: the same record naming another folder says nothing about this one.
+    writeFileSync(recordFile, JSON.stringify({ config: join(f.home, 'other', 'hooks.json') }))
+    assert.notEqual(row({}).hook, 'setup')
+    assert.ok(existsSync(reporter))
+  }, home => ['--data-dir', join(home, folder)]))
+}
+
+const DATA_DIR_HOSTS = { codex: '.codex', cursor: '.cursor', gemini: '.gemini', muse: 'muse', grok: '.grok', opencode: 'opencode', openclaw: '.openclaw' }
+for (const [agent, folder] of Object.entries(DATA_DIR_HOSTS)) {
+  test(`${agent} set up with its own data folder gets no second hook`, () => withSetup(agent, ({ f, run, before }) => {
+    assert.equal(run('auto').state.setup.agents.find(one => one.agent === agent).hook, 'setup')
+    const host = files => Object.entries(files).filter(([file]) => file.includes(folder) && !file.includes('install-'))
+    assert.deepEqual(host(snapshot(f.home)), host(before))
+  }, home => ['--data-dir', join(home, 'other', 'my data')]))
+  test(`${agent} with a setup record from before config gets no second hook`, () => withSetup(agent, ({ f, run, recordFile, before }) => {
+    const { config, ...old } = JSON.parse(readFileSync(recordFile, 'utf8'))
+    writeFileSync(recordFile, JSON.stringify(old))
+    assert.equal(run('auto').state.setup.agents.find(one => one.agent === agent).hook, 'setup')
+    const host = files => Object.entries(files).filter(([file]) => file.includes(folder) && !file.includes('install-'))
+    assert.deepEqual(host(snapshot(f.home)), host(before))
+  }))
+}
+
+test('a setup record with no config counts where the hook file names its data folder', () => withSetup('codex', ({ f, run, recordFile }) => {
+  const { config, ...old } = JSON.parse(readFileSync(recordFile, 'utf8'))
+  writeFileSync(recordFile, JSON.stringify(old))
+  assert.equal(run('auto').state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  const saved = readFileSync(config, 'utf8')
+  writeFileSync(config, '{}')
+  assert.notEqual(run('status').state.setup?.agents.find(one => one.agent === 'codex')?.hook, 'setup')
+  assert.ok(saved.length > 0)
+}))
+
+test('a setup record that cannot be read is named, and nothing is added or retired', () => withBothHooks('grok', ({ f, run, recordFile }) => {
+  const hook = join(f.home, '.grok', 'hooks', 'agent-board.json')
+  const saved = readFileSync(hook, 'utf8')
+  writeFileSync(recordFile, 'not a record')
+  for (const mode of ['auto', 'status']) {
+    const { result, state } = run(mode)
+    assert.ok([...(result?.problems ?? []), ...(state.setup?.problems ?? [])].some(one => one.key === `setupRecord:${recordFile}`), mode)
+    assert.equal(readFileSync(hook, 'utf8'), saved, mode)
+  }
+  rmSync(hook)
+  run('auto')
+  assert.equal(existsSync(hook), false)
+}))
+
+test('a setup record that cannot be read leaves Codex without fallback instructions', () => withSetup('codex', ({ f, run, recordFile }) => {
+  writeFileSync(recordFile, 'not a record')
+  run('auto')
+  assert.equal(existsSync(join(f.home, '.codex', 'AGENTS.md')), false)
+  unlinkSync(recordFile)
+  run('connect')
+  assert.ok(existsSync(join(f.home, '.codex', 'AGENTS.md')))
+}))
+
+for (const [agent, parts] of [['gemini', ['.gemini', 'commands', 'board.toml']], ['opencode', ['.config', 'opencode', 'commands', 'board.md']]]) test(`${agent} remove leaves no board command naming the script it deleted`, () => withSetup(agent, ({ f, run, recordFile, owned, before }) => {
+  // A record from setup beside a /board command the connector wrote.
+  const command = join(f.home, ...parts)
+  const record = readFileSync(recordFile, 'utf8')
+  unlinkSync(recordFile)
+  unlinkSync(command)
+  run('connect')
+  writeFileSync(recordFile, record)
+  const script = join(dirname(f.progress), 'agent-board.mjs')
+  assert.ok(existsSync(script))
+  assert.notEqual(readFileSync(command, 'utf8'), before[command])
+  const { result } = run('remove')
+  assert.deepEqual(result.problems, [])
+  assert.equal(existsSync(script), false)
+  assert.equal(existsSync(command), false)
+  for (const file of owned) if (file !== command) assert.equal(readFileSync(file, 'utf8'), before[file], file)
+}))
+
+test('remove keeps a board command naming setup, and an edited one keeps the board script it runs', () => withSetup('gemini', ({ f, run, recordFile, before }) => {
+  const command = join(f.home, '.gemini', 'commands', 'board.toml')
+  const script = join(dirname(f.progress), 'agent-board.mjs')
+  assert.deepEqual(run('remove').result.problems, [])
+  assert.equal(readFileSync(command, 'utf8'), before[command])
+
+  const record = readFileSync(recordFile, 'utf8')
+  unlinkSync(recordFile)
+  unlinkSync(command)
+  run('connect')
+  writeFileSync(recordFile, record)
+  writeFileSync(command, readFileSync(command, 'utf8') + '# mine\n')
+  run('remove')
+  assert.ok(readFileSync(command, 'utf8').endsWith('# mine\n'))
+  assert.ok(existsSync(script))
+}))
+
+test('setup taking over Codex takes out the connector fallback instructions and keeps the rest', () => withSetup('codex', ({ f, run, recordFile }) => {
+  const instructions = join(f.home, '.codex', 'AGENTS.md')
+  const record = readFileSync(recordFile, 'utf8')
+  unlinkSync(recordFile)
+  run('connect')
+  const fallback = readFileSync(instructions, 'utf8')
+  assert.match(fallback, /agent-board:start/)
+  writeFileSync(instructions, 'Keep this line.\n\n' + fallback)
+  writeFileSync(recordFile, record)
+  const { state, result } = run('auto')
+  assert.equal(state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
+  assert.equal(result.problems.some(one => one.key === 'codex:approval'), false)
+  assert.equal(readFileSync(instructions, 'utf8').trim(), 'Keep this line.')
+}))
+
+test('setup gives Hermes a skill, so a probe keeps the connector reporter it still needs', () => withSetup('hermes', ({ f, run, owned, before }) => {
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const { state } = run('auto')
+  assert.notEqual(state.setup.agents.find(one => one.agent === 'hermes')?.hook, 'setup')
+  const reporter = readFileSync(config, 'utf8')
+  assert.match(reporter, /progress-report/)
+  assert.deepEqual(run('auto').result.problems.filter(one => one.key !== 'codex:approval'), [])
+  assert.equal(readFileSync(config, 'utf8'), reporter)
+  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], file)
+  run('remove')
+  assert.doesNotMatch(readFileSync(config, 'utf8'), /progress-report/)
+  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], file)
+}))
+
+test('removing the connector takes out its hook and leaves the setup hook', () => withBothHooks('grok', ({ f, run, owned, before }) => {
+  assert.ok(existsSync(join(f.home, '.grok', 'hooks', 'agent-board.json')))
+  const { result } = run('remove')
+  assert.ok(result.done.includes('Grok Build'))
+  assert.equal(existsSync(join(f.home, '.grok', 'hooks', 'agent-board.json')), false)
+  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], file)
+}))
+
+test('a setup record with its hook deleted by hand keeps the connector out until setup removes it', () => withSetup('grok', ({ f, run, setup, recordFile }) => {
+  const local = join(f.home, '.grok', 'hooks', 'agent-board-local.json'), connector = join(f.home, '.grok', 'hooks', 'agent-board.json')
+  unlinkSync(local)
+  assert.equal(run('auto').state.setup.agents.find(one => one.agent === 'grok').hook, 'setup')
+  assert.equal(existsSync(connector), false)
+  setup('apply')
+  assert.ok(existsSync(local))
+  assert.equal(existsSync(connector), false)
+  unlinkSync(local)
+  setup('remove')
+  assert.equal(existsSync(recordFile), false)
+  assert.equal(run('connect').state.setup.agents.find(one => one.agent === 'grok').hook, 'configured')
+  assert.ok(existsSync(connector))
+  assert.equal(existsSync(local), false)
 }))
 
 test("only a manual connect changes the machine's selected progress file", () => fixture(async f => {

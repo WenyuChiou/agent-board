@@ -6,7 +6,8 @@ import { describe, test } from 'node:test'
 import { BoardPage } from './board-page.mjs'
 import { browserFixture, hiddenQuestion, installAntigravity, monthlyArchive, writeProgress } from './fixture.mjs'
 
-const block = (session, agent, state, project, title, steps, context = 'Synthetic browser fixture only.', updated = new Date().toISOString()) => `## ${project}
+// One second in the past: the board refuses a pasted source time ahead of its own clock (#954).
+const block = (session, agent, state, project, title, steps, context = 'Synthetic browser fixture only.', updated = new Date(Date.now() - 1000).toISOString()) => `## ${project}
 <!-- auto session=${session} agent=${agent} state=${state} updated=${updated} -->
 ### ${title}
 > Context: ${context}
@@ -103,9 +104,10 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
       const noteWhole = await noted.locator('.clip.context .whole').textContent()
       for (const note of notes) assert.ok(noteWhole.includes(note))
       assert.deepEqual(await task.locator('.steps .whole').allTextContents(), [chinese, english, unbroken])
-      // Each step's Done button sits under its text, as wide as its one-line label allows (not squeezed into the mark's column).
+      // Each step has one Done button (#942): the next step's is the primary button in the actions row, and the
+      // list ticks only the others, each under its text, as wide as its one-line label allows (not squeezed into the mark's column).
       const ticks = task.locator('.steps li > button')
-      assert.equal(await ticks.count(), 3)
+      assert.equal(await ticks.count(), 2)
       for (const tick of await ticks.all()) {
         const place = await tick.evaluate(node => {
           const box = node.getBoundingClientRect(), text = node.parentElement.querySelector('.clip').getBoundingClientRect()
@@ -115,9 +117,11 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
         assert.equal(place.cls, 'btn', JSON.stringify(place))
         assert.ok(place.width >= 44 && place.left >= place.textLeft - 1 && place.right <= place.textRight + 1, JSON.stringify(place))
         assert.ok(place.height <= 56, JSON.stringify(place))
-        assert.ok([chinese, english, unbroken].includes(place.title), place.title)
+        assert.ok([english, unbroken].includes(place.title), place.title)
       }
-      await task.getByRole('button', { name: `Done: ${chinese}`, exact: true }).first().click()
+      const next = task.locator(`button[title="${chinese}"]`)
+      assert.equal(await next.count(), 1)
+      await next.click()
       await waitFor(() => readFileSync(progress, 'utf8').includes(`- [x] ${chinese}`))
       assert.ok(readFileSync(progress, 'utf8').includes(`- [ ] ${english}`))
     })

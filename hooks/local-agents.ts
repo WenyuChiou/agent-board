@@ -44,6 +44,12 @@ export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> =
   muse: { UserPromptSubmit: 'working', Stop: 'waiting', SessionEnd: 'ended' },
   antigravity: { SessionStart: 'waiting', PreInvocation: 'working', PostInvocation: 'working', Stop: 'waiting' },
 }
+// The one tool call each agent's plan list rides on (#922): the group's own matcher picks it, so
+// the hook only starts for that tool. A person's other PostToolUse or AfterTool groups stay theirs.
+export const planEvents: Partial<Record<LocalAgent, { event: string; matcher: string }>> = {
+  codex: { event: 'PostToolUse', matcher: 'update_plan' },
+  gemini: { event: 'AfterTool', matcher: '^write_todos$' },
+}
 export const lifecycleCapability = (agent: LocalAgent): string =>
   agent === 'hermes' ? 'adapter-pending' : 'adapter-installed-unverified'
 
@@ -60,7 +66,7 @@ export const hookCommandArgs = (node: string, home: string, agent: LocalAgent, w
   node, '--input-type=commonjs', '-e',
   `eval(Buffer.from('${base64(new TextEncoder().encode(hookBootstrap(home, agent).split('\n').map(line => line.trim()).join('\n')))}','base64').toString('utf8'))`,
   worker, '--hook-version', String(HOOK_VERSION), '--hook-event', event,
-  state === undefined ? '--codex-event' : '--agent-status', '--agent', agent,
+  planEvents[agent]?.event === event ? '--plan-event' : state === undefined ? '--codex-event' : '--agent-status', '--agent', agent,
   ...(state === undefined ? [] : ['--state', state]),
   ...(agent === 'antigravity' ? ['--event', event] : []), '--progress-file', progress,
 ]
