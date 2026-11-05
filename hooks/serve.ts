@@ -1568,7 +1568,9 @@ const PAGE_SCRIPT = String.raw`
       var whole = step.note ? step.text + ' — ' + step.note : step.text;
       var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
       add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'), clipped(clean(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)));
-      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled') {
+      // The next step's Done button is the primary one in the actions row, so the step list
+      // does not tick it again: each step has exactly one Done button.
+      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && step.text !== row.next) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
         var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp); }, 'btn');
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
@@ -1742,7 +1744,10 @@ const PAGE_SCRIPT = String.raw`
     if (isExpandable) resultSlot(inner, key, row.fp, row.title || row.task);
     var current = steps.filter(function (one) { return one.isCurrent; })[0] || steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled'; })[0];
     var step = current ? clean(current.text) : '';
-    var detail = !step ? '' : section === 'working' ? step : section === 'others' ? w('pgLast', step) : section === 'stopped' ? w('pgStoppedAt', step) : '';
+    // "Last:" names the last finished step, not the next one: a task with nothing finished yet shows no Last: line.
+    var lastDone = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
+    var lastFinished = lastDone.length ? clean(lastDone[lastDone.length - 1].text) : '';
+    var detail = section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
     var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
     var project = showProject ? clean(ref.repo || row.project) : '';
