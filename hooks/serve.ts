@@ -760,7 +760,7 @@ const PAGE_WORDS = [
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -930,7 +930,6 @@ ${CLIP_CSS}
 .s-item:hover{background:var(--hover)}
 .s-item:active{background:var(--press)}
 .s-item[aria-pressed="true"]{background:var(--current);font-weight:600}
-.s-agent[aria-pressed="true"].working .ag::after{border-color:var(--current)}
 .s-item>svg.i{width:18px;height:18px;margin-inline:3px}
 .s-item .ag{position:relative;width:24px;height:24px;border-radius:var(--radius-s);flex:none}
 .v-needs>svg.i{color:var(--waiting-text)}.v-working>svg.i{color:var(--alive)}.v-others>svg.i,.v-done>svg.i{color:var(--muted)}
@@ -940,8 +939,12 @@ ${CLIP_CSS}
 .s-n:empty{display:none}
 .s-n.hot,.side .badge{position:static;flex:none;min-width:22px;height:22px;padding:0 6px;border:0;border-radius:var(--radius-round);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-xs);font-weight:600;line-height:22px;text-align:center;font-variant-numeric:tabular-nums}
 .side .badge.bad{background:var(--alert)}
-.s-agent[data-presence="offline"] .ag,.s-agent[data-presence="notseen"] .ag{background-color:var(--muted)}
-.s-agent.working .ag::after{content:"";position:absolute;right:-5px;bottom:-5px;width:9px;height:9px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--alive)}
+.s-agent[data-presence] .ag::after,.s-agent.working .ag::after{content:"";position:absolute;right:-5px;bottom:-5px;width:9px;height:9px;border:2px solid var(--ground);border-radius:var(--radius-round)}
+.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after{border-color:var(--alive);background:var(--ground)}
+.s-agent[data-presence="offline"] .ag::after{border-radius:var(--radius-s);background:var(--muted)}
+.s-agent[data-presence="notseen"] .ag::after{background:linear-gradient(var(--muted),var(--muted)) center/6px 2px no-repeat var(--ground)}
+.s-agent.working .ag::after{border-color:var(--ground);border-radius:var(--radius-round);background:var(--alive)}
+.s-agent[aria-pressed="true"].working .ag::after,.s-agent[aria-pressed="true"][data-presence="offline"] .ag::after,.s-agent[aria-pressed="true"][data-presence="notseen"] .ag::after{border-color:var(--current)}
 .shell[data-empty="1"] :is(.s-views,.s-projects){display:none}
 /* the settings at the foot of the sidebar: the language spot (reserved, in a row with the theme button), the project link, then Close the board */
 .s-foot{margin-top:auto;padding-top:var(--s3);border-top:1px solid var(--line)}
@@ -1851,20 +1854,25 @@ const PAGE_SCRIPT = String.raw`
     });
     return map;
   }
-  // The word that follows the name when the board cannot reach the agent: offline or not seen.
+  // The word when the board cannot reach the agent: closed, or not heard from in the last 30 minutes.
   function lateWord(state) { return state === 'offline' ? w('pgOffline') : state === 'notseen' ? w('pgNotSeen') : ''; }
+  // An agent's icon keeps its colours in every state, so the state is this word and the mark beside the icon (#870).
+  function stateWord(entry) {
+    if (entry.working > 0) return w('pgTipWorking');
+    return entry.presence === 'open' || entry.presence === 'connected' ? w('pgStateOpen') : lateWord(entry.presence);
+  }
   function chipLabel(entry) {
     var parts = [];
     if (entry.needs === 1) parts.push(w('pgTipNeedsOne'));
     else if (entry.needs > 1) parts.push(w('pgTipNeeds', entry.needs));
-    if (entry.working > 0) parts.push(w('pgTipWorking'));
     if (entry.id === 'own' && entry.open > 0) {
       if (entry.open === 1) parts.push(w('pgTipOpenOne'));
       else parts.push(w('pgTipOpen', entry.open));
     }
     if (entry.unreadable) parts.push(w('pgTipCantRead'));
-    var late = lateWord(entry.presence);
-    return entry.name + (late ? ' · ' + late : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
+    var state = stateWord(entry);
+    if (state && !parts.length) return entry.name + ' · ' + state;
+    return entry.name + (state ? ' · ' + state : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
   }
   // One button per agent, twice: in the icon row (phones) and in the sidebar (the rail and wider). Same label, count, dot and filter.
   function newChip(entry, isSide) {
@@ -1879,7 +1887,7 @@ const PAGE_SCRIPT = String.raw`
     chip.node.setAttribute('title', label);
     chip.node.className = (chip.isSide ? 's-item s-agent' : 'chip') + (entry.working > 0 ? ' working' : '');
     if (entry.presence) chip.node.setAttribute('data-presence', entry.presence);
-    setText(chip.name, lateWord(entry.presence) ? entry.name + ' · ' + lateWord(entry.presence) : entry.name);
+    setText(chip.name, stateWord(entry) ? entry.name + ' · ' + stateWord(entry) : entry.name);
     var text = entry.unreadable ? '!' : entry.needs > 0 ? String(entry.needs) : '';
     if (text && !chip.badge) { chip.badge = el('span', 'badge'); chip.node.appendChild(chip.badge); }
     if (!text && chip.badge) { chip.node.removeChild(chip.badge); chip.badge = null; }

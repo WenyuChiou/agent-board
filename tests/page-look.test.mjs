@@ -262,7 +262,11 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
     assert.equal(declared(rules, '.badge', 'color'), 'var(--on-accent)', `${name}: the badge numerals are on-accent`)
     assert.equal(declared(rules, '.badge.bad', 'background'), 'var(--alert)', `${name}: the "!" badge is the alert colour`)
     assert.equal(declared(rules, '.badge', 'border'), '2px solid var(--ground)', `${name}: the badge has the 2px ground ring`)
-    assert.equal(declared(rules, '.chip[data-presence="offline"] .ag,.chip[data-presence="notseen"] .ag', 'background-color'), 'var(--muted)', `${name}: an offline agent's mark is the muted colour at full opacity`)
+    assert.ok(!rules.some(rule => /data-presence[^,]*\.ag(?!::)/.test(rule.selector)), `${name}: no state repaints an agent's icon`)
+    assert.equal(declared(rules, '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', 'border-color'), 'var(--alive)', `${name}: an open agent's mark is a green ring`)
+    assert.equal(declared(rules, '.chip[data-presence="offline"]::after', 'background'), 'var(--muted)', `${name}: a closed agent's mark is a grey square`)
+    assert.ok(declared(rules, '.chip[data-presence="notseen"]::after', 'background')?.includes('8px 2px'), `${name}: a quiet agent's mark is a grey dash`)
+    assert.equal(declared(rules, '.chip.working::after', 'background'), 'var(--alive)', `${name}: a working agent's mark is a green dot`)
     assert.ok(!rules.some(rule => rule.selector.includes('.chip') && rule.declarations.some(item => item.property === 'opacity')), `${name}: no icon is dimmed with opacity`)
     assert.equal(declared(rules, '.flag', 'background'), 'var(--waiting-fill)', `${name}: the flag sits on the amber fill`)
   }
