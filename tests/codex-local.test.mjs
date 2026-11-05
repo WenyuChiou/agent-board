@@ -65,26 +65,41 @@ test('native cleanup diagnostics allowlist unknown fields and missing markers', 
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
-const withoutCodexOnPath = pathValue => {
+const withoutCodexOnPath = (pathValue, home) => {
   if (!pathValue) return ''
-  return pathValue
+  let isNodeHidden = false
+  const cleanPath = pathValue
     .split(delimiter)
     .filter(dir => {
       if (!dir) return false
       try {
-        return !existsSync(join(dir, 'codex.exe')) && !existsSync(join(dir, 'codex')) && !existsSync(join(dir, 'codex.cmd'))
+        const hasCodex = ['codex.exe', 'codex', 'codex.cmd'].some(name => existsSync(join(dir, name)))
+        if (hasCodex && existsSync(join(dir, process.platform === 'win32' ? 'node.exe' : 'node'))) isNodeHidden = true
+        return !hasCodex
       } catch {
         return true
       }
     })
     .join(delimiter)
+  if (!isNodeHidden) return cleanPath
+  // Preserve only this running runtime, never the host commands beside it.
+  // A stable fixture-owned location also keeps repeated environment reads inert.
+  const runtimeDir = join(home, '.test-node-runtime')
+  const runtime = join(runtimeDir, process.platform === 'win32' ? 'node.exe' : 'node')
+  if (!existsSync(runtime)) {
+    mkdirSync(runtimeDir, { recursive: true })
+    if (process.platform === 'win32') {
+      try { linkSync(process.execPath, runtime) } catch { copyFileSync(process.execPath, runtime) }
+    } else symlinkSync(process.execPath, runtime)
+  }
+  return [runtimeDir, cleanPath].filter(Boolean).join(delimiter)
 }
 // A runner may set XDG/host overrides. No synthetic home may inherit those and
 // write into another test or the account's actual native configuration.
 const isolatedEnv = home => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
   const originalPath = process.env[pathKey] ?? ''
-  const cleanPath = withoutCodexOnPath(originalPath)
+  const cleanPath = withoutCodexOnPath(originalPath, home)
   const env = {
     ...process.env,
     HOME: home, USERPROFILE: home,
@@ -381,6 +396,42 @@ const fixture = async fn => {
   // persistent cleanup failures still fail the test.
   finally { if (isSafeToRemove) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
+
+test('PATH isolation preserves Node beside Codex without exposing Codex', () => fixture(async f => {
+  const shared = join(f.home, 'shared tools')
+  mkdirSync(shared)
+  const runtime = join(shared, process.platform === 'win32' ? 'node.exe' : 'node')
+  try { linkSync(process.execPath, runtime) } catch { copyFileSync(process.execPath, runtime) }
+  for (const name of ['codex', 'codex.cmd', 'codex.exe']) {
+    const host = join(shared, name)
+    f.save(host, 'synthetic host must stay undiscoverable')
+    const env = { ...f.env }
+    for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+    env.PATH = withoutCodexOnPath(shared, f.home)
+    assert.equal(withoutCodexOnPath(shared, f.home), env.PATH, 'repeated isolation keeps the same fixture runtime')
+    const node = await nativeProcess('node', ['--version'], env, '', callback => setTimeout(callback, 5000), stopNativeTree, { cwd: f.home })
+    assert.equal(node.error, undefined, 'the preserved runtime launches without a process error')
+    assert.equal(node.status, 0, `isolated Node failed: ${node.error?.code ?? 'none'}`)
+    assert.equal(node.stdout.trim(), process.version)
+    const codex = spawnSync('codex', ['--version'], { cwd: f.home, env, encoding: 'utf8', timeout: 5000 })
+    assert.equal(codex.error?.code, 'ENOENT', 'the real host must remain undiscoverable')
+    unlinkSync(host)
+  }
+}))
+
+test('PATH isolation keeps explicit no-Node paths without adding a runtime', () => fixture(f => {
+  const tools = join(f.home, 'tools without node')
+  mkdirSync(tools)
+  f.save(join(tools, 'codex'), 'synthetic host')
+  const path = withoutCodexOnPath(tools, f.home)
+  assert.equal(path, '')
+  assert.equal(withoutCodexOnPath('', f.home), '')
+  const env = { ...f.env }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = path
+  const node = spawnSync('node', ['-e', 'process.exit(0)'], { cwd: f.home, env, encoding: 'utf8', timeout: 5000 })
+  assert.equal(node.error?.code, 'ENOENT')
+}))
 
 const mailboxFixture = async fn => fixture(async f => {
   const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
