@@ -371,12 +371,15 @@ export const hookMailbox = (directory: string, budget: number) => {
     }
   }
   const call = async (action: string, body: Record<string, string>, now: number): Promise<Message | null> => {
-    hasDeferred = true
+    hasDeferred = false
     const wait = Math.min(150, budget)
     try {
       const started = Date.now()
       const folder = lstatSync(root)
-      if (!folder.isDirectory() || folder.isSymbolicLink() || budget <= 0) return null
+      if (!folder.isDirectory() || folder.isSymbolicLink()) return null
+      // Only a real mailbox can hold a message back; with no folder there is nothing to defer.
+      hasDeferred = true
+      if (budget <= 0) return null
       const pid = livePid()
       if (pid !== null) {
         const owner = JSON.parse(readFileSync(join(root, 'server.owner'), 'utf8')) as { pid: number; url: string }
