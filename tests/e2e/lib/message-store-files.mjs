@@ -1,7 +1,8 @@
 import { closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-const standard = /^(?:messages\.json|server\.lock|[^/\\]+\.tmp)$/
+// A saved access list the folder check could not delete while a scanner held it (#799).
+const standard = /^(?:messages\.json|server\.lock|[^/\\]+\.tmp|\.acl-[0-9a-f]{16})$/
 const claimName = /^\.message-claim-([1-9][0-9]*)-([a-f0-9]{32})\.json$/
 // A hub writes its claim under this name, then renames it to the claim's.
 const stagedName = /^\.message-pending-([1-9][0-9]*)-([a-f0-9]{32})\.json$/

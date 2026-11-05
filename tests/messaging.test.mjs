@@ -1175,6 +1175,56 @@ test("on Windows a folder that still holds another account's entry after the rem
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+// A virus scanner can hold the access list the check just saved, and Windows then refuses to delete
+// it for a moment (#799): the check waits, and leaves a copy that stays held inside the folder.
+test('on Windows a folder check survives a scanner holding its saved access list', { skip: process.platform !== 'win32' ? 'Windows ACLs require whoami and icacls' : false }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-store-acl-held-'))
+  const original = fs.unlinkSync
+  // The next `times` deletes of a saved copy fail with `code`; -1 fails every one.
+  const hold = (times, code = 'EBUSY') => {
+    let left = times
+    fs.unlinkSync = (file, ...rest) => {
+      if (basename(String(file)).startsWith('.acl-') && left !== 0) {
+        left--
+        throw Object.assign(new Error('held'), { code })
+      }
+      return original(file, ...rest)
+    }
+    syncBuiltinESMExports()
+  }
+  const release = () => {
+    fs.unlinkSync = original
+    syncBuiltinESMExports()
+  }
+  const copies = folder => readdirSync(folder).filter(name => name.startsWith('.acl-'))
+  try {
+    const brief = join(dir, 'brief')
+    hold(2)
+    try { privateFolder(brief) } finally { release() }
+    assert.deepEqual(copies(brief), [])
+    const refused = join(dir, 'refused')
+    hold(2, 'EPERM')
+    try { privateFolder(refused) } finally { release() }
+    assert.deepEqual(copies(refused), [])
+    const stuck = join(dir, 'stuck')
+    hold(-1)
+    try { privateFolder(stuck) } finally { release() }
+    assert.equal(copies(stuck).length, 2)
+    // The copy left behind does not stop the next check.
+    privateFolder(stuck)
+    // Any other failure still refuses the folder, and the cause stays on the error.
+    hold(1, 'ENOSPC')
+    let refusal
+    try { createMessaging(join(dir, 'full')) } catch (error) { refusal = error } finally { release() }
+    assert.equal(refusal?.message, 'MESSAGE_STORE_ACL')
+    assert.equal(refusal.cause?.message, 'PRIVATE_FOLDER')
+    assert.equal(refusal.cause.cause?.code, 'ENOSPC')
+  } finally {
+    release()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("restarts and disconnects do not extend an uncertain message's age limit", () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-message-age-'))
   // A minute before it expires: three restarts on a loaded runner fit well inside that.
