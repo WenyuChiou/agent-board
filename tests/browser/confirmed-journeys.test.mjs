@@ -6,7 +6,8 @@ import { describe, test } from 'node:test'
 import { BoardPage } from './board-page.mjs'
 import { browserFixture, hiddenQuestion, installAntigravity, monthlyArchive, writeProgress } from './fixture.mjs'
 
-const block = (session, agent, state, project, title, steps, context = 'Synthetic browser fixture only.', updated = new Date().toISOString()) => `## ${project}
+// One second in the past: the board refuses a pasted source time ahead of its own clock (#954).
+const block = (session, agent, state, project, title, steps, context = 'Synthetic browser fixture only.', updated = new Date(Date.now() - 1000).toISOString()) => `## ${project}
 <!-- auto session=${session} agent=${agent} state=${state} updated=${updated} -->
 ### ${title}
 > Context: ${context}
