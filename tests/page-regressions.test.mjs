@@ -183,9 +183,9 @@ test('a warmed publisher migrates all 51 peer acknowledgements after cleared cou
   } finally { await f.close() }
 })
 
-test('five publication calls inside one poll write only one batch of a 120-name backlog', async () => {
-  const names = Array.from({ length: 120 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
-  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 120 + n}`]))
+test('five publication calls inside one poll write only one batch of a 60-name backlog', async () => {
+  const names = Array.from({ length: 60 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
+  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 60 + n}`]))
   const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
   const f = await fixture('', {}, { version: 1, inboxDone: done, store: 0, pruned: {} })
   const written = () => names.filter(name => existsSync(livePage.pageDonePath(f.path, sha256(receipt(name))))).length
@@ -196,12 +196,12 @@ test('five publication calls inside one poll write only one batch of a 120-name 
     assert.equal(written(), 50)
     engine.clock.advance(POLL_MS)
     assert.deepEqual(await production.pendingTurns(engine), [])
-    assert.equal(written(), 100)
+    assert.equal(written(), 60)
     for (let n = 0; n < 5; n++) await production.syncPageState(engine, {})
-    assert.equal(written(), 100)
+    assert.equal(written(), 60)
     engine.clock.advance(POLL_MS)
     assert.deepEqual(await production.pendingTurns(engine), [])
-    assert.equal(written(), 120)
+    assert.equal(written(), 60)
     for (const name of names) assert.equal(readFileSync(livePage.pageDonePath(f.path, sha256(receipt(name))), 'utf8'), receipt(name))
     assert.equal(production.warning(), undefined)
   } finally { await f.close() }

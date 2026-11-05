@@ -50,6 +50,8 @@ const isolatedEnvironment = root => {
   for (const directory of Object.values(directories)) mkdirSync(directory, { recursive: true })
   const env = {
     ...process.env,
+    // A board this fixture starts opens no window and stops once this test process is gone (#959).
+    AGENT_BOARD_TEST_PID: String(process.pid),
     HOME: home,
     USERPROFILE: home,
     CODEX_HOME: directories.codex,

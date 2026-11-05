@@ -13,7 +13,7 @@ node scripts/setup-agent.mjs
 node scripts/setup-agent.mjs --apply
 ```
 
-Auto detection finds host configuration, not active sessions. Use `--agent <name>` for a known host whose configuration is missing, or `--agent all` to preview every target. It does not install the AI products. [Setup](SETUP.md) lists paths and adapter coverage.
+Auto detection finds host configuration, install records, commands on the PATH and installed apps, not active sessions. Use `--agent <name>` for a known host it does not find, or `--agent all` to preview every target. It does not install the AI products. [Setup](SETUP.md) lists paths and adapter coverage.
 
 Fresh independent installs use `~/.agent-board/progress.md`. Existing installs retain their selected file; `--progress-file /absolute/path/progress.md` selects one explicitly. Do not choose another computer's board for an ordinary local install.
 
