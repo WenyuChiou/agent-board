@@ -838,6 +838,8 @@ export const EN: Strings = {
   pgCopyAgain: 'Copy again',
   pgCancel: 'Cancel',
   pgNoQuestions: (name: string): string => `${name} has no items in the current Needs you list.`,
+  pgNoOthers: 'No other work.',
+  pgNoOthersFor: (name: string): string => `${name} has no other work.`,
   pgOthers: 'Other work',
   pgDoneWeek: (n: number): string => `${n} this week`,
   pgChipEmpty: 'No work yet',

@@ -760,7 +760,7 @@ const PAGE_WORDS = [
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -849,7 +849,7 @@ textarea:focus{outline:none;border-color:var(--ink);box-shadow:var(--ring)}
 .press-result{font-size:var(--text-sm)}.press-result .acts{margin-top:var(--s2)}.press-result:empty{display:none}.press-result.done{color:var(--done)}.press-result.alert{color:var(--alert)}
 .press-result textarea{margin-top:var(--s2);font-size:var(--text-sm)}
 .empty{display:grid;gap:var(--s1);padding:var(--s4)}
-.empty p{margin:0}.empty .sub{font-size:var(--text-xs);color:var(--muted)}
+.empty p{margin:0}.empty .sub{font-size:var(--text-xs);color:var(--muted)}.empty .btn{justify-self:start}
 .sec{display:flex;flex-direction:column;gap:var(--s2)}
 .sec-head{display:flex;align-items:baseline;gap:var(--s3);flex-wrap:wrap}
 .sec-head h2{margin:0;font-size:var(--text-lg);line-height:1.4;font-weight:600}
@@ -2011,6 +2011,15 @@ const PAGE_SCRIPT = String.raw`
     setText(pg.nodes.needsText, pg.filter ? w('pgNoQuestions', nameOf(pg.filter)) : w('pgNothing'));
     setText(pg.nodes.needsSub, pg.filter ? '' : w('pgNothingHint'));
     reveal(pg.nodes.needsEmpty, count.shown === 0);
+    var isFiltered = !!(pg.filter || pg.project);
+    reveal(pg.nodes.needsClear, isFiltered);
+    // The Other work view says so when it has nothing, here or on the Stopped shelf; Overview leaves the empty section out.
+    setText(pg.nodes.othersText, isFiltered ? w('pgNoOthersFor', pg.filter ? nameOf(pg.filter) : pg.project) : w('pgNoOthers'));
+    reveal(pg.nodes.othersEmpty, count.others === 0);
+    reveal(pg.nodes.othersClear, isFiltered);
+    // The tab title counts what the page shows, so a filter that hides questions is not a count the page lacks.
+    var waitingShown = isFiltered ? count.cards : pg.waitingNow;
+    document.title = waitingShown ? w('pgTabTitle', waitingShown) : 'Agent Board';
     if (pg.model && pg.model.view) setText(pg.nodes.workingEmpty, quietLine(pg.model.view.quiet, pg.model.view.now));
     reveal(pg.nodes.workingEmpty, count.working === 0 && !pg.filter && !pg.project);
     // The line counts every older question the filters allow, drawn or not.
@@ -2018,7 +2027,10 @@ const PAGE_SCRIPT = String.raw`
     if (pg.nodes.olderLine) setText(pg.nodes.olderLine, plural('pgOlder', count.older));
     reveal(pg.nodes.olderBlock, count.older > 0);
     Object.keys(pg.nodes.counts).forEach(function (name) { setText(pg.nodes.counts[name], name === 'done' ? w('pgDoneWeek', count.done) : count[name]); });
-    pg.sections.forEach(function (section) { reveal(section.block, count[section.list] > 0 || section.list === 'working' && !pg.filter && !pg.project); });
+    pg.sections.forEach(function (section) {
+      var isOthersView = section.list === 'others' && pg.view === 'others' && count.stopped === 0;
+      reveal(section.block, count[section.list] > 0 || section.list === 'working' && !pg.filter && !pg.project || isOthersView);
+    });
     drawSide(count, projects);
   }
   // The sidebar's numbers come from the same counts as the headings, so every number on the page agrees.
@@ -2053,6 +2065,15 @@ const PAGE_SCRIPT = String.raw`
     wanted.forEach(function (node, index) { if (list.childNodes[index] !== node) list.insertBefore(node, list.childNodes[index] || null); });
     if (group) group.hidden = wanted.length === 0;
   }
+  // Next to an empty list while a filter is on: a filter kept from an earlier visit is plain to see and one press clears it (#809).
+  function clearFiltersButton() {
+    var node = navButton(w('clearFilters'), function () {
+      pg.project = '';
+      setFilter('');
+    });
+    node.className = 'btn';
+    return node;
+  }
   function setProject(name) {
     pg.project = pg.project === name ? '' : name;
     layout();
@@ -2072,6 +2093,8 @@ const PAGE_SCRIPT = String.raw`
     shell.setAttribute('data-view', name);
     VIEWS.forEach(function (one) { document.getElementById('view-' + one).setAttribute('aria-pressed', String(one === name)); });
     if (name === 'done' && pg.openShelf.done) pg.openShelf.done(true);
+    // A view picks a section; it leaves the agent and project filters as they were (#809).
+    layout();
     enter(board);
     if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
   }
@@ -2159,7 +2182,8 @@ const PAGE_SCRIPT = String.raw`
     });
     pg.nodes.needsText = el('p', '');
     pg.nodes.needsSub = el('p', 'sub');
-    pg.nodes.needsEmpty = fx(add(el('div', 'empty'), pg.nodes.needsText, pg.nodes.needsSub));
+    pg.nodes.needsClear = clearFiltersButton();
+    pg.nodes.needsEmpty = fx(add(el('div', 'empty'), pg.nodes.needsText, pg.nodes.needsSub, pg.nodes.needsClear));
     add(sheet, list, pg.nodes.needsEmpty);
     var foot = el('div', 'sheet-foot');
     var older = view.needs.older;
@@ -2236,6 +2260,9 @@ const PAGE_SCRIPT = String.raw`
     });
     var sec = el('section', 'sec');
     add(sec, sectionHead(w('pgOthers'), 'others'));
+    pg.nodes.othersText = el('p', '');
+    pg.nodes.othersClear = clearFiltersButton();
+    pg.nodes.othersEmpty = fx(add(el('div', 'empty'), pg.nodes.othersText, pg.nodes.othersClear));
     order.forEach(function (name) {
       var list = el('ul', 'rows');
       var group = { ul: list, entries: [], block: null };
@@ -2251,7 +2278,8 @@ const PAGE_SCRIPT = String.raw`
       pg.groups.push(group);
       add(sec, list);
     });
-    return refs.length ? sec : null;
+    add(sec, pg.nodes.othersEmpty);
+    return sec;
   }
   // A closed shelf: Stopped and Done list their rows flat, so each row names its project.
   function shelf(name, title, refs, section, extra) {
@@ -2379,6 +2407,7 @@ const PAGE_SCRIPT = String.raw`
       pg.sentBy[who] = (pg.sentBy[who] || 0) + 1;
     });
     var waitingNow = Math.max(0, view.needs.n - pg.sentTotal);
+    pg.waitingNow = waitingNow;
     document.title = waitingNow ? w('pgTabTitle', waitingNow) : 'Agent Board';
     var version = view.versions;
     document.getElementById('versions').textContent = !version.package || version.package === version.board ? w('pgVersion', version.board) : w('pgVersions', version.board, version.package);
@@ -2409,8 +2438,7 @@ const PAGE_SCRIPT = String.raw`
       var workingKeys = {};
       parts.push(needsSection(view));
       parts.push(sectionBlock(workingSection(view, workingKeys), 'working'));
-      var others = othersSection(view, workingKeys);
-      if (others) parts.push(sectionBlock(others, 'others'));
+      parts.push(sectionBlock(othersSection(view, workingKeys), 'others'));
       var stopped = shelf('stopped', w('pgStopped'), view.all.stopped.concat(view.own.stopped).sort(byTime), 'stopped');
       if (stopped) parts.push(sectionBlock(stopped, 'stopped'));
       var finished = view.all.done.concat(view.own.done).sort(byTime);
