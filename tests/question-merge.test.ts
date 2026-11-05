@@ -1,5 +1,5 @@
 import { test, expect } from 'claude-code/testing'
-import { emptyQuestions, observeQuestions, resolveQuestion, withCaptures } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, questionWords, resolveQuestion, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { parseProgress } from '../hooks/parse'
 import { buildView, questionHead, relativeTime } from '../hooks/view'
@@ -83,6 +83,41 @@ test('a review-only copy answered in its own session leaves with the card it joi
   const resolved = resolveQuestion(ledger, live.id, START + 2 * HOUR)
   const view = viewOf(quiet, resolved)
   expect([...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)).toHaveLength(0)
+})
+
+test('a session with only review-only copies of a question keeps one row, the newest, with its own time', () => {
+  const words = 'Blue or green?'
+  const asked = block('aaaa1111', 'codex', 'demo', words)
+  const quiet = asked.replace(`- [?] ${words}`, '- [~] Keep going')
+  const ledger = ledgerOf([
+    { text: asked, at: START },
+    { text: quiet, at: START + 1 },
+    { text: asked, at: START + HOUR },
+    { text: quiet, at: START + HOUR + 1 },
+  ])
+  expect(ledger.records.filter(record => record.isUnresolved && record.words === questionWords(words)).length).toBeGreaterThan(1)
+  const view = viewOf(quiet, ledger)
+  const rows = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.canHide).toBe(false)
+  expect(rows[0]?.when).toBe(relativeTime(START + HOUR, NOW, EN))
+})
+
+test("a capture with no task takes the title its session's review-only copy knew", () => {
+  const words = 'Blue or green?'
+  const asked = block('aaaa1111', 'codex', 'demo', words)
+  const quiet = asked.replace(`- [?] ${words}`, '- [~] Keep going')
+  const pending = [capture('aaaa1111', 'codex', 'demo', words, START + HOUR)]
+  const ledger = ledgerOf([
+    { text: asked, at: START },
+    { text: quiet, at: START + 1 },
+    { text: quiet, at: START + HOUR, pending },
+  ])
+  const view = viewOf(quiet, ledger, pending)
+  const rows = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.key.startsWith('inbox::')).toBe(true)
+  expect(rows[0]?.task).toBe('Task aaaa1111')
 })
 
 test('the same question in a block and in an inbox capture shows as one card', () => {
