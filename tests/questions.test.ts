@@ -1,8 +1,8 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
-import type { QuestionLedger } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isContinuationTurn, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import type { QuestionAnswerEvidence, QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
 import { sha256 } from '../hooks/sha256'
@@ -1295,4 +1295,40 @@ test('the own list\'s part of the idle question key moves with its questions, no
     null,
   ]
   for (const [index, one] of moved.entries()) expect([index, ownQuestionsKey(one) === key]).toEqual([index, false])
+})
+
+test('continuation guard narrows QuestionAnswerEvidence and excludes end events or empty stops', () => {
+  const baseTurn: AgentTurn = {
+    agent: 'codex',
+    event: 'turn',
+    session: 'sess-1',
+    id: 'block-1',
+    cwd: '/work/demo',
+    project: 'demo',
+    prompt: '',
+    answer: 'Here is the answer',
+    transcript: '',
+    at: NOW + 1000,
+  }
+
+  // Nonempty turn is continuation
+  expect(isContinuationTurn(baseTurn)).toBe(true)
+
+  // Prompt event is continuation
+  expect(isContinuationTurn({ ...baseTurn, event: 'prompt', answer: '' })).toBe(true)
+
+  // Turn without answer field (e.g. minimal QuestionAnswerEvidence) is continuation
+  const evidence: QuestionAnswerEvidence = { agent: 'codex', id: 'block-1', session: 'sess-1', event: 'turn', at: NOW + 1000 }
+  expect(isContinuationTurn(evidence)).toBe(true)
+
+  // Empty turn stop (Cursor/Grok) is rejected
+  expect(isContinuationTurn({ ...baseTurn, answer: '' })).toBe(false)
+  expect(isContinuationTurn({ ...baseTurn, answer: '   \n  ' })).toBe(false)
+
+  // End event is rejected
+  expect(isContinuationTurn({ ...baseTurn, event: 'end' })).toBe(false)
+
+  // Missing or non-finite at is rejected
+  expect(isContinuationTurn({ ...baseTurn, at: undefined })).toBe(false)
+  expect(isContinuationTurn({ ...baseTurn, at: NaN })).toBe(false)
 })
