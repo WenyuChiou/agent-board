@@ -99,10 +99,13 @@ export const closedCopies = (records: readonly QuestionRecord[], marked: Readonl
 export type Copy = Seen & { item: WaitingItem; scope: string; isStopped?: boolean }
 
 // The card each question keeps. It is the newest copy that can be acted on, of a session that has
-// not stopped when there is one, so a reply goes to the session that asked last, and it carries the age of the oldest copy still open. The cards of
-// questions that are not repeated come back as they were, in the order they came. A copy with no
-// known time is never covered, and never the newest one while another has a time. Copies of one
-// session stay as they are, each its own card.
+// not stopped when there is one, so a reply goes to the session that asked last, and it shows that
+// copy's own time (#861): a question asked ten minutes ago does not read an hour old because the
+// same words were asked before. The cards of questions that are not repeated come back as they were,
+// in the order they came. A copy with no known time is never covered, and never the newest one while
+// another has a time. Questions of one session that can each be answered stay as they are, each its
+// own card; a review-only copy is the source of a question this session already shows, so it is no
+// row of its own beside another copy (#861), and the row keeps the title that copy knew.
 export const mergeCopies = (copies: readonly Copy[], closed: ReadonlyMap<string, ReadonlyMap<string, Seen>>): WaitingItem[] => {
   const groups = new Map<string, Copy[]>()
   for (const copy of copies) {
@@ -114,12 +117,26 @@ export const mergeCopies = (copies: readonly Copy[], closed: ReadonlyMap<string,
   }
   const gone = new Set<WaitingItem>()
   const carried = new Map<WaitingItem, WaitingItem>()
-  for (const [key, all] of groups) {
+  const titles = new Map<WaitingItem, string>()
+  for (const [key, every] of groups) {
+    const ofSession = new Map<string, Copy[]>()
+    for (const copy of every) if (copy.scope !== '') ofSession.set(copy.scope, [...(ofSession.get(copy.scope) ?? []), copy])
+    for (const copies of ofSession.values()) {
+      const reviewOnly = copies.filter(copy => copy.item.canHide === false)
+      if (copies.length === 1 || reviewOnly.length === 0) continue
+      const answerable = copies.filter(copy => copy.item.canHide !== false)
+      const kept = answerable.length > 0 ? answerable : [reviewOnly.reduce((best, copy) => (isBefore(best, copy) ? copy : best))]
+      for (const copy of reviewOnly) if (!kept.includes(copy)) gone.add(copy.item)
+      const title = copies.find(copy => copy.item.task !== '')?.item.task
+      if (kept.length === 1 && kept[0] !== undefined && kept[0].item.task === '' && title !== undefined) titles.set(kept[0].item, title)
+    }
+    const all = every.filter(copy => !gone.has(copy.item))
     const sessions = new Map<string, number>()
     for (const copy of all) sessions.set(copy.scope, (sessions.get(copy.scope) ?? 0) + 1)
     const group = all.filter(copy => copy.scope !== '' && sessions.get(copy.scope) === 1)
     const closedHere = [...(closed.get(key) ?? [])]
-    const isCovered = (copy: Copy): boolean => copy.at > 0 && closedHere.some(([scope, seen]) => scope !== copy.scope && isBefore(copy, seen))
+    // A review-only copy has no Hide of its own, so its own session's later answer closes it too.
+    const isCovered = (copy: Copy): boolean => copy.at > 0 && closedHere.some(([scope, seen]) => (scope !== copy.scope || copy.item.canHide === false) && isBefore(copy, seen))
     const open = group.filter(copy => !isCovered(copy))
     for (const copy of group) if (!open.includes(copy)) gone.add(copy.item)
     if (open.length === 0) continue
@@ -127,16 +144,17 @@ export const mergeCopies = (copies: readonly Copy[], closed: ReadonlyMap<string,
     const pool = running.length > 0 ? running : open
     const actionable = pool.filter(copy => copy.item.canHide !== false)
     const newest = (actionable.length > 0 ? actionable : pool).reduce((best, copy) => (isBefore(best, copy) ? copy : best))
-    const known = open.filter(copy => copy.at > 0)
-    const [first = newest, ...rest] = known.length > 0 ? known : open
-    const oldest = rest.reduce((best, copy) => (copy.at < best.at ? copy : best), first)
     for (const copy of open) if (copy !== newest) gone.add(copy.item)
     // Hide acknowledges the newest observed copy, including stopped copies recorded after the
     // live reply target. That record's time and order cover this group, while later asks stay new.
     const acknowledged = open.filter(copy => copy.item.canHide !== false)
     const last = (acknowledged.length > 0 ? acknowledged : open).reduce((best, copy) => isBefore(best, copy) ? copy : best)
-    if (oldest.item !== newest.item || last.item !== newest.item) carried.set(newest.item, { ...newest.item, when: oldest.item.when, hideKey: last.item.hideKey })
+    if (last.item !== newest.item) carried.set(newest.item, { ...newest.item, hideKey: last.item.hideKey })
   }
 
-  return copies.filter(copy => !gone.has(copy.item)).map(copy => carried.get(copy.item) ?? copy.item)
+  return copies.filter(copy => !gone.has(copy.item)).map(copy => {
+    const item = carried.get(copy.item) ?? copy.item
+    const task = titles.get(copy.item)
+    return task === undefined ? item : { ...item, task }
+  })
 }

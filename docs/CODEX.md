@@ -88,6 +88,8 @@ a turn id. Stale turns are rejected and recent repeated events are no-ops. Retir
 ids and event keys are bounded to 128 and 256 per session. This protects lifecycle replay;
 it is not an authenticated message-delivery channel.
 
+A seventh hook, `PostToolUse` with the matcher `update_plan`, copies each plan Codex sets (its step text and status) into the session's steps through the same writer as `--report`, with no model call. It prints nothing. Gemini CLI's `AfterTool` hook with the matcher `^write_todos$` does the same for its todos.
+
 A real resume/start and new prompt reactivate the same session's block. Changing reporters
 or starting a follow-up task is not evidence that a session ended: never mark a legacy
 block `ended` merely to avoid duplicate cards. Finish a completed task as `done`, and keep
@@ -179,11 +181,11 @@ not automatic lifecycle hooks or reverse delivery.
 Official schema and trust rules: [Codex hooks](https://learn.chatgpt.com/docs/hooks).
 
 Installation and hook trust are separate. Agent-assisted trust needs one explicit user
-confirmation for six exact definitions, instead of asking the person to navigate a CLI:
+confirmation for seven exact definitions, instead of asking the person to navigate a CLI:
 
 ```sh
 node /path/to/installed/agent-board.mjs --codex-trust --codex-bin /absolute/path/to/codex --json
-# After the person approves the displayed config.toml scope and six hashes:
+# After the person approves the displayed config.toml scope and seven hashes:
 node /path/to/installed/agent-board.mjs --codex-trust --codex-bin /absolute/path/to/codex --json --apply
 ```
 

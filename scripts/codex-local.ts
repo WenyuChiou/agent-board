@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, putCodexBlock, sessionTitle } from '../hooks/codex'
+import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, planReport, putCodexBlock, sessionTitle } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
@@ -14,7 +14,7 @@ import { reporterTail } from './reporter-tail'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
-import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents, windowsHookCommand } from '../hooks/local-agents'
+import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, planEvents, statusEvents, windowsHookCommand } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
 import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
@@ -371,9 +371,11 @@ const saveReporterTail = (progress: string, fragment: Buffer): string => {
 // sends one for that (#217); the others keep their agent's heading.
 const filesByFolder = (mode: string, agent: string): boolean => mode === '--codex-event' || mode === '--agent-status' && agent === 'opencode'
 
-export const runCodexLocal = async (args: string[], boardPath: string, s: Strings): Promise<boolean> => {
+// `planInput` is a plan the --plan-event step already turned into a report's input: the report then
+// runs as --report does and prints nothing, because Codex and Gemini read a hook's stdout as a decision.
+export const runCodexLocal = async (args: string[], boardPath: string, s: Strings, planInput?: Json): Promise<boolean> => {
   args = args.map(arg => arg === '--report' ? '--codex-report' : arg)
-  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-event', '--agent-status'].find(one => args.includes(one))
+  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event'].find(one => args.includes(one))
   if (!mode) return false
   const flag = (name: string): string | undefined => {
     const index = args.indexOf(name)
@@ -386,6 +388,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // Reporting needs a known board name, while setup and lifecycle events need a native adapter.
   const agent = (flag('--agent') ?? 'codex') as LocalAgent
   if (!(mode === '--codex-report' ? Object.hasOwn(s.agentNames, agent) : localAgents.includes(agent))) throw new Error('UNSUPPORTED_AGENT')
+  if (mode === '--plan-event') {
+    if (planEvents[agent] === undefined) throw new Error('UNSUPPORTED_AGENT')
+    const plan = planReport(await input())
+    if (plan === null) return true
+    return runCodexLocal([...args.filter(arg => arg !== '--plan-event'), '--codex-report', '--session', plan.session], boardPath, s, plan.input)
+  }
   const home = resolve(flag('--home') ?? homedir())
   const root = resolve(flag('--data-dir') ?? baked?.codexRoot ?? join(home, '.agent-board'))
   const before = new Map<string, string | null>()
@@ -498,7 +506,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const hookDeadline = isRecovery ? Math.min(Date.now() + 1800, suppliedDeadline) : suppliedDeadline
     const checkDeadline = (): void => { if (Date.now() >= hookDeadline) throw new Error('HOOK_TIMEOUT') }
     checkDeadline()
-    const raw: Json = isRecovery ? {} : await input()
+    const raw: Json = isRecovery ? {} : planInput ?? await input()
     checkDeadline()
     type Pending = {
       version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
@@ -527,7 +535,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // Read before Cursor's adapter drops workspace_roots; a queued raw event keeps cwd and workspace_roots for this (#246).
       const folder = filesByFolder(mode, agent) ? folderProject(rawCwd) : ''
       // Only metadata selected below is retained. Save no prompts, tool inputs,
-      // last_assistant_message, or permission decisions from a hook payload. transcript_path is
+      // last_assistant_message, or permission decisions from a hook payload. The plan mirror is the
+      // one place a tool input is read (--plan-event, before this): only each step's text and status,
+      // which a report carries. transcript_path is
       // opened, when it is this session's own history file, for its first record at a session's
       // start or prompt, which says whether a person started it (#399), and for nothing else.
       const session = mode !== '--codex-report'
@@ -643,11 +653,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const text = bytes.toString('utf8')
       const previous = original === null || mode === '--codex-report' || isRun ? original : boardConfirmedReport(text, original, owner)
       const clock = previous === null ? now : new Date(Math.max(Date.parse(now), Date.parse(previous.updated))).toISOString()
+      // A mirrored plan keeps the block's own title, unless it is still the generic one a lifecycle event wrote.
+      const given = typeof payload.planTitle !== 'string' ? payload : {
+        state: payload.state, steps: payload.steps,
+        title: previous !== null && !Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(previous.title)) ? previous.title : payload.planTitle,
+      }
       const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s) : codexReport(previous, session, mode === '--agent-status' ? {
         title: previous?.title ?? s.localAgentTask(agent), project: previous?.project ?? agent,
         state: isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status,
         steps: previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`],
-      } : payload, clock, s)
+      } : given, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)
       // An Antigravity session keeps no folder (its hook binds only the conversation
@@ -929,6 +944,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
       }
     }
+    if (mode === '--codex-report' && planInput !== undefined) return true
     if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress, cut: reportCut })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
     else if (agent === 'antigravity') {
@@ -947,7 +963,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
 
   const hasHooks = agent === 'codex' || agent === 'cursor' || statusEvents[agent] !== undefined
-  const ownEvents = !hasHooks || agent === 'antigravity' ? [] : agent === 'cursor' ? Object.keys(cursorEvents) : agent === 'codex' ? codexEvents : Object.keys(statusEvents[agent] ?? {})
+  const ownEvents: readonly string[] = !hasHooks || agent === 'antigravity' ? [] : [...(agent === 'cursor' ? Object.keys(cursorEvents) : agent === 'codex' ? codexEvents : Object.keys(statusEvents[agent] ?? {})), ...(planEvents[agent] === undefined ? [] : [planEvents[agent].event])]
   const nativeConfig = agent === 'openclaw' ? join(openclawDir, 'openclaw.json') : agent === 'deepseek' ? join(deepseekDir, 'cordis.patch.yml') : config
   const nativeConfigText = initial(nativeConfig) ?? ''
   // Windows tools may start any JSON host config with a UTF-8 BOM; JSON.parse does not accept it.
@@ -1012,7 +1028,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
     const eventCommand = isPowerShellHost ? windowsHookCommand(hookArgs(event, state), quote, hostNode) : hookArgs(event, state).map(quote).join(' ')
-    const group = agent === 'cursor' ? { command: eventCommand, timeout: hostHookTimeout(agent, event) } : { hooks: [{ type: 'command', command: eventCommand, timeout: hostHookTimeout(agent, event) }] }
+    // The plan mirror's group carries its tool matcher on the group, not on the hook inside it.
+    const matcher = planEvents[agent]?.event === event ? planEvents[agent].matcher : undefined
+    const group = agent === 'cursor' ? { command: eventCommand, timeout: hostHookTimeout(agent, event) } : { ...(matcher === undefined ? {} : { matcher }), hooks: [{ type: 'command', command: eventCommand, timeout: hostHookTimeout(agent, event) }] }
     if (hooks[event] !== undefined && !Array.isArray(hooks[event])) throw new Error('INVALID_HOOK_GROUP')
     const entries = (hooks[event] ?? []) as unknown[]
     const old = manifest.groups[event]
