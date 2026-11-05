@@ -15,7 +15,7 @@ import { ZH_TW } from './i18n'
 import { agentLabel } from './strings'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { OLDER_SHOWN, progressBar, replyHint } from './view'
+import { OLDER_SHOWN, progressBar, questionHead, replyHint } from './view'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
 // The pane's drawing, from the view and a set of actions; it never touches the engine,
@@ -412,7 +412,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const askDetail = (item: WaitingItem) => (
     <Box flexDirection="column">
       <Text color={palette.project} wrap="truncate-end">
-        {`${item.project} › ${item.task}${item.where === 'manual' ? '' : ` · ${agentLabel(item.agent || 'claude', s)}`}`}
+        {`${questionHead(item.project, item.task)}${item.where === 'manual' ? '' : ` · ${agentLabel(item.agent || 'claude', s)}`}`}
       </Text>
       {item.note !== '' && <Text wrap="wrap">{item.note}</Text>}
       {item.note === '' && item.context !== '' && muted(s.contextLine(item.context))}
@@ -616,7 +616,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const hiddenRow = (item: WaitingItem) => (
     <Box flexDirection="column" marginTop={1} paddingLeft={1}>
       {muted(item.text)}
-      {muted(`${item.project} › ${item.task}`)}
+      {muted(questionHead(item.project, item.task))}
       <Box marginTop={1}>
         <Button key={`${item.key}::unhide`} onPress={buttonPress(`${item.key}::unhide`, () => actions.unhide(item))}>
           {s.showAgain}
