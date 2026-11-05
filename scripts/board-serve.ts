@@ -40,6 +40,8 @@ export type ServeOptions = {
   act: (action: BoardAction) => string
   // Every finished task to the archive now: the line to show.
   tidy: () => string
+  // A bulk archive in two steps: a preview names the count, a confirm archives it.
+  bulkTidy?: (request: { kind: 'preview'; selector: import('../hooks/tidy').TidySelector } | { kind: 'confirm'; token: string; preview: import('../hooks/tidy').TidyPreview } | { kind: 'cancel'; token: string }) => { ok: boolean; note: string; token?: string; preview?: import('../hooks/tidy').TidyPreview; count?: number }
   // The Clean up button: the sweep `--tidy` runs (agent blocks by age; hand-kept tasks only once the
   // move is on, #464), the line to show.
   clean: () => string
@@ -459,6 +461,11 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/tidy') {
         const note = o.tidy()
         return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
+      }
+      if (url.pathname === '/api/tidy-bulk') {
+        if (o.bulkTidy === undefined) return json(res, 400, { note: o.s.pressFailed })
+        const result = o.bulkTidy(body as unknown as Parameters<Exclude<typeof o.bulkTidy, undefined>>[0])
+        return json(res, result.ok ? 200 : 409, result)
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()

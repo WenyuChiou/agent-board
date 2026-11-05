@@ -35,6 +35,7 @@ import {
   takeManualDone,
   takeTask,
   upsertAutoBlock,
+  cutEntries,
 } from './blocks'
 import type { ConfirmedTask, ConfirmRef } from './blocks'
 import { withRunMark } from './runs'
@@ -137,7 +138,7 @@ import { keepRecent, liveToldKeys, remindersOf } from './remind'
 import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, doneRecord, inboxDropped, isExpiredRecord, isSameWrite, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, readMonthParts, RETENTION, sizeWarnings, storageDetails, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, STORE_FILE, unseenFailedInbox } from './retention'
 import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
-import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
+import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
@@ -1560,7 +1561,36 @@ const writeMine = async ($: EngineInterface): Promise<void> => {
   await poll($)
 }
 
-const queueWrite = ($: EngineInterface): Promise<void> => enqueue(() => writeMine($)).catch(() => undefined)
+// The full words of a title or step the block shortens (#922) go to the journal once, before
+// the shortened block is written. A set remembers what this session saved; the month's journal
+// answers for an earlier session or a restart (the same line minus its minute stamp).
+const journaledCuts = new Set<string>()
+const saveCutTextNow = async ($: EngineInterface): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || mirror.isRun === true || mirror.tasks.length === 0) return
+  const s = await wordsOf($)
+  const fresh = cutEntries(mirror, s).filter(entry => !journaledCuts.has(JSON.stringify(entry)))
+  if (fresh.length === 0) return
+  const at = await $.clock.now()
+  const past = await readText($, await partFor($, journalPath(await progressPath($), at))).catch(() => '')
+  const tail = (line: string): string => line.replace(/^(?:> )?- \d{4}-\d{2}-\d{2} \d{2}:\d{2} · /, '')
+  const seen = new Set(past.split(/\r?\n/).map(tail))
+  const isNew = fresh.filter(entry => !seen.has(tail(journalLine(entry, at, s))))
+  if (isNew.length > 0) await journal($, isNew)
+  for (const entry of fresh) journaledCuts.add(JSON.stringify(entry))
+}
+
+// One at a time, so two writes in a row cannot both find a line missing and save it twice.
+let cutSaves: Promise<unknown> = Promise.resolve()
+const saveCutText = ($: EngineInterface): Promise<void> => {
+  const run = cutSaves.then(() => saveCutTextNow($))
+  cutSaves = run.catch(() => undefined)
+  return run
+}
+
+// The full words are handed to the journal before the shortened block is written. journal() keeps
+// lines it could not save pending for a retry, and a failing check here never stops the block write.
+const queueWrite = ($: EngineInterface): Promise<void> => saveCutText($).catch(() => undefined).then(() => enqueue(() => writeMine($))).catch(() => undefined)
 
 const notify = async ($: EngineInterface, text: string, project: string): Promise<void> => {
   if (!(await read($, isNotifyOn))) return
@@ -4490,7 +4520,13 @@ export const register: Register = (on, options) => {
       archiveRow: async row => {
         if (row.archive === null) return failure(s.archiveGone)
         const isTaken = await enqueue(() => archiveOne($, row.archive!))
-        return isTaken ? s.archivedOne(row.title) : failure(s.archiveGone)
+        if (!isTaken) return failure(s.archiveGone)
+        try {
+          const count = keptQuestionCount(await paneView(), row.archive, s)
+          return count > 0 ? s.archivedKeptQuestions(row.title, count) : s.archivedOne(row.title)
+        } catch {
+          return s.archivedOne(row.title)
+        }
       },
       confirmRow: async row => {
         if (row.confirm == null) return failure(s.boardLineChanged)

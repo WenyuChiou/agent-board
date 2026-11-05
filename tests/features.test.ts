@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
+import { RULES } from '../hooks/rule'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor } from '../hooks/board'
 import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
@@ -832,7 +833,17 @@ test('options the agent gave win over options found in the question or the note'
   expect(askOf('win rate or Elo?', 'A or B?', { options: [' X ', 'Y', '', null] })).toMatchObject({ kind: 'choose', options: ['X', 'Y'] })
   expect(askOf('win rate or Elo?', 'A or B?', { ask: 'choose', options: ['X'] }).options).toEqual(['X'])
   expect(askOf('Which one?', 'A or B?', { options: 'X or Y?' })).toMatchObject({ kind: 'choose', options: ['A', 'B'] })
-  expect(askOf('Pick', `A or ${'B'.repeat(25)}?`, { ask: 'choose' }).options).toEqual(['A'])
+})
+
+test('inferred choices retain complete long options with and without an explicit choose kind', () => {
+  for (const [first, second] of [['A', 'B'.repeat(25)], ['A'.repeat(25), 'B'], ['A'.repeat(25), 'B'.repeat(25)]]) {
+    const question = `${first} or ${second}?`
+    for (const given of [{}, { ask: 'choose' }]) {
+      expect(askOf(question, '', given)).toMatchObject({ kind: 'choose', options: [first, second] })
+      expect(askOf('Pick', question, given)).toMatchObject({ kind: 'choose', options: [first, second] })
+    }
+    expect(askOf('Pick', question, { ask: 'choose', options: ['Only'] }).options).toEqual(['Only'])
+  }
 })
 
 test('a question with no choice still takes its options from the note', () => {
@@ -4670,4 +4681,17 @@ test('a pending archive note distinguishes crash-recovery retries from distinct 
       { entry, held: 0, boardHash: 'hash2' },
     ],
   })
+})
+
+test('the rule in every language asks for one-line steps of at most 120 characters and keeps hand-kept tasks for the person', () => {
+  for (const rule of Object.values(RULES)) {
+    expect(rule).toContain('120')
+    expect(rule).toContain('TaskCreate')
+    // A due date stays possible, but only on a task the person asked to note for themselves.
+    expect(rule).toContain('10-31')
+  }
+  expect(RULES.en).toContain('Otherwise never edit that file by hand')
+  expect(RULES['zh-TW']).toContain('其他時候不要手改這個檔')
+  expect(RULES['zh-CN']).toContain('其他时候不要手改这个文件')
+  expect(RULES.en).not.toContain('goes into progress.md by hand')
 })

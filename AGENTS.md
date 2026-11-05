@@ -154,7 +154,23 @@ Release steps and the rules for changing the format are in [CONTRIBUTING.md](CON
 
 ## Report your progress to the progress pane
 
-Use the installed reporter and its selected progress path. On a fresh independent setup this is `~/.agent-board/progress.md`; the optional Claude plugin defaults to `~/.claude/progress.md` and respects `$CLAUDE_PROGRESS_FILE` / `$CLAUDE_CONFIG_DIR`. For work with two or more steps, keep one block of your own. Native reporters bind the host-proven session id; do not replace it with a random id. The manual format below is for hosts without that adapter. Format: https://github.com/WenyuChiou/agent-board/blob/main/docs/FORMAT.md
+For work with two or more steps, report through the installed board command. Use the absolute board path printed by setup and your own agent name:
+
+```sh
+node "/absolute/path/from/setup/agent-board.mjs" --report --agent codex
+```
+
+Send the current plan as JSON on stdin, updating it after each step:
+
+```json
+{"title":"Check the installer","project":"Example project","state":"working","steps":["- [x] Read setup","- [~] Run tests","- [ ] Check the result"]}
+```
+
+The command uses the installed board's selected progress path. Native reporters bind the host-proven session id: Codex uses `CODEX_THREAD_ID`; other adapters may supply `AGENT_BOARD_AGENT` and `AGENT_BOARD_SESSION_ID`. Supply `--session` only with the exact id provided by your host, never a random id or another conversation's id. If the command cannot bind this session, continue the work without editing `progress.md` by hand.
+
+Keep the title and each step to one line of at most 120 characters, with a link for detail. Never extend a finished step; add new work as a new step. The writer shortens longer text to 120 characters including `…`, saves the full text to this month's journal, and returns `cut`, the number of titles and steps shortened. `--codex-report` remains an alias for installed integrations.
+
+Hand-edit your own block only when the report command is missing. Fresh independent setups use `~/.agent-board/progress.md`; existing installations retain their selected path. The optional Claude plugin defaults to `~/.claude/progress.md` and respects `$CLAUDE_PROGRESS_FILE` / `$CLAUDE_CONFIG_DIR`. The format below is the fallback for a missing command. Format: https://github.com/WenyuChiou/agent-board/blob/main/docs/FORMAT.md
 
 ```markdown
 <!-- auto session=ID agent=NAME state=working updated=2026-01-31T09:30:00Z -->
@@ -167,8 +183,8 @@ Use the installed reporter and its selected progress path. On a fresh independen
 <!-- /auto session=ID -->
 ```
 
-- Put the block under `## <repository name>` (add that heading at the end of the file if it is missing). `ID` is 8 random hex characters, chosen once per session. `NAME` is your own name in lower case (`codex`, `antigravity`, `cursor`, `aider`). The `###` title is yours to word: the outcome, in plain words. Keep the `Context:` label as written; other `>` lines are allowed, and the pane shows the `Context:` one. Start the markers at the beginning of the line.
-- After each step: read the file again, replace only your block, update the step's mark and `updated=` (UTC, ending in `Z`), write the file.
+- Only for the manual fallback, put the block under `## <repository name>` (add that heading at the end of the file if it is missing). `ID` is 8 hex characters, chosen once per session; never replace a native reporter's binding. `NAME` is your own name in lower case. The `###` title names the outcome in plain words. Keep the `Context:` label as written; other `>` lines are allowed, and the pane shows the `Context:` one. Start the markers at the beginning of the line.
+- With the command, report the updated JSON after each step. Only for the manual fallback, read the file again, replace your block, update the step's mark and `updated=` (UTC, ending in `Z`), and write the file.
 - Marks: `[x]` done, `[~]` doing, `[ ]` todo, `[?]` needs the user, `[>]` running or waiting on someone else, `[!]` blocked, `[-]` cancelled.
 - When you need the user, mark the step `[?]` and add ` — ` and one line: what you need and why. Word it so the pane can tell what is asked: end a yes/no question with `OK?` (`Deploy it to staging, OK?`); write a choice as two short options and a question mark (`24 hours or 7 days?`); put a command, and only a command, in backticks; give a link as a full `https://` URL; start a wait with `waiting for` (`waiting for Prof. Lee to reply`).
 - Never edit, move or delete anything outside your own markers, above all another agent's block.

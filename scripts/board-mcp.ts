@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { readFileSync, realpathSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { performance } from 'node:perf_hooks'
 import type { Readable, Writable } from 'node:stream'
@@ -8,7 +8,7 @@ import type { Message } from '../hooks/messaging'
 import type { Strings } from '../hooks/i18n'
 import { MCP_LEASE_MS, mcpRequest, rpcError, toolResult } from '../hooks/mcp-tools'
 import type { McpLevel } from '../hooks/mcp-tools'
-import { cwdDigest } from './codex-local'
+import { folderIdentity } from './folder-identity'
 import { mcpMailbox } from './board-messaging'
 
 export const processStart = (pid: number): string | null => {
@@ -39,7 +39,9 @@ export const createMcpServer = (o: Options) => {
     level = 'restricted'
   } catch {}
   const access = mcpMailbox(o.directory)
-  const folderDigest = cwdDigest(realpathSync(o.cwd))
+  // Two names for one folder are one workspace, as they are for a reporter's owner.
+  const identity = folderIdentity(o.cwd)
+  const folderDigest = identity?.folderCanonicalDigest ?? identity?.folderDigest
   const binding = () => ({ agent, session, surface: 'mcp' })
   const renew = async (now: number) => {
     if (level === 'unbound' || isRevoked) return

@@ -2280,9 +2280,11 @@ await import(${JSON.stringify(new URL('../scripts/board-cli.ts', import.meta.url
     await dom.settle()
     assert.deepEqual(dom.copied, [prompt])
     assert.ok(dom.node('.pfoot').textContent.includes(EN.webChatCopied))
+    // One second in the past: the board refuses any source time ahead of its own clock, and this test's
+    // process and the board's can read a few milliseconds apart on Windows (#954).
     const text = prompt.slice(prompt.indexOf('## <project>'), prompt.indexOf('<!-- /auto session=<ID> -->') + '<!-- /auto session=<ID> -->'.length)
       .replaceAll('<project>', 'Synthetic relay').replaceAll('<ID>', 'a561cafe').replaceAll('<name>', 'muse')
-      .replace('<working|waiting|done|ended>', 'working').replace('<UTC time, like 2026-10-17T08:10:52Z>', new Date().toISOString())
+      .replace('<working|waiting|done|ended>', 'working').replace('<UTC time, like 2026-10-17T08:10:52Z>', new Date(Date.now() - 1000).toISOString())
       .replace('<the outcome, in plain words>', 'Synthetic web chat report').replace('<one line on why this work exists>', 'Synthetic relay check')
       .replace('<a finished step>', 'Synthetic finished').replace('<the step you are on>', 'Synthetic current')
       .replace('<a step that needs me>', 'Synthetic question').replace('<one line saying what you need>', 'Choose a synthetic option')
@@ -3267,7 +3269,7 @@ const pressKeysFor = item => item.type === 'ask'
   : item.type === 'row' ? ['enter', ...(item.row.next === null ? [] : ['x']), ...(item.row.archive === null ? [] : ['a']), ...(item.row.confirm == null ? [] : ['d']), ...(item.row.resume === null ? [] : ['c'])] : ['enter']
 const pressExpected = (runtime, action) => action.type === 'copy' ? runtime.s.copied
   : action.type === 'tick' ? runtime.s.boardTicked(action.ref.step)
-    : action.type === 'archive' ? runtime.s.archivedOne(action.title)
+    : action.type === 'archive' ? action.title.startsWith('hand-kept ') ? runtime.s.archivedKeptQuestions(action.title, 1) : runtime.s.archivedOne(action.title)
       : action.type === 'done' ? runtime.s.confirmedDone(action.title)
         : action.type === 'hide' ? runtime.s.boardHidden(action.text) : runtime.s.boardShown
 
@@ -4663,6 +4665,24 @@ test('Windows trusted address fixtures replace unrelated explicit grants', { ski
     assert.deepEqual(acl.Sids, [acl.CurrentSid])
     assert.equal(acl.AreAccessRulesProtected, true)
   } finally { await fs.promises.rm(board.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('the watch board keeps drawing while a three second runtime ACL check runs, and refreshes never overlap', () => {
+  const preload = readFileSync(new URL('./fixtures/slow-runtime-acl.cjs', import.meta.url), 'utf8')
+  const ran = chatRun(['--watch'], { preload })
+  assert.equal(ran.status, 0, ran.stderr)
+  const report = JSON.parse(ran.stderr.match(/ACL_SCHEDULE (.+)/)?.[1] ?? 'null')
+  assert.ok(report, ran.stderr)
+  assert.equal(report.sync, 0, 'no Windows ACL command may block the watch')
+  assert.ok(report.acl >= 2, 'the folder and address access list must both be checked')
+  assert.equal(report.maxActive, 1, 'a tick skips a route refresh that is still running')
+  // No wall-clock limit: a draw made while a three second ACL call is still running proves the
+  // check no longer blocks the draw loop, and slow Windows runners cannot make that flaky.
+  for (const title of ['First scheduled question', 'Second scheduled question']) {
+    const draw = report.draws.find(one => one.title === title)
+    assert.ok(draw, `${title}: ${JSON.stringify(report)}`)
+    assert.equal(draw.pending, true, `${title} drew at ${draw.ms} ms, event-loop delay ${report.delay} ms, while no ACL call ran`)
+  }
 })
 
 test('runtime ACL validation rejects other owners, other accounts, inherited folders and incomplete grants', () => {
@@ -6082,6 +6102,195 @@ test('--tidy twice on the same day with one same-title same-steps done block eac
     assert.equal(result.stdout, 'Archived 1 task.\n')
     assert.ok(!readFileSync(f.path, 'utf8').includes('Local synthetic task'))
     assert.equal(copies(), 2)
+  })
+})
+
+const bulkBlock = (session, agent, state, hours, step = '- [x] Finished') => `<!-- auto session=${session} agent=${agent} state=${state} updated=${ago(hours * 3600000)} -->\n### ${agent} ${state} ${session}\n${step}\n<!-- /auto session=${session} -->\n`
+
+test('tidy --stopped moves every stopped block and names the count', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${bulkBlock('b1c2d3e1', 'codex', 'ended', 73)}\n${bulkBlock('b1c2d3e2', 'grok', 'working', 73, '- [~] Paused')}\n${bulkBlock('b1c2d3e3', 'codex', 'working', 1, '- [ ] Next')}\n${bulkBlock('b1c2d3e4', 'codex', 'done', 11)}`)
+    const preview = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'preview', selector: { kind: 'stopped' } } })
+    assert.equal(preview.status, 200, preview.body)
+    assert.equal(preview.json().note, 'Preview: 3 blocks would be archived.')
+    assert.equal(preview.json().count, 3)
+    const confirmed = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'confirm', token: preview.json().token, preview: preview.json().preview } })
+    assert.equal(confirmed.status, 200, confirmed.body)
+    assert.equal(confirmed.json().note, 'Archived 3 blocks.')
+    const after = readFileSync(board.path, 'utf8')
+    assert.ok(!after.includes('b1c2d3e1') && !after.includes('b1c2d3e2') && !after.includes('b1c2d3e4'), after)
+    assert.ok(after.includes('b1c2d3e3'), after)
+    const archive = readdirSync(board.dir).filter(name => name.startsWith('progress-archive-'))
+    assert.equal(archive.length, 1)
+    const history = readFileSync(join(board.dir, archive[0]), 'utf8')
+    assert.ok(history.includes('b1c2d3e1') && history.includes('b1c2d3e2') && history.includes('b1c2d3e4'), history)
+  } finally { await board.close() }
+})
+
+test('tidy --agent grok leaves other agents\' blocks alone', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${bulkBlock('b1c2d3f1', 'codex', 'ended', 73)}\n${bulkBlock('b1c2d3f2', 'grok', 'ended', 73)}\n${bulkBlock('b1c2d3f3', 'muse', 'ended', 73)}`)
+    const preview = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'preview', selector: { kind: 'agent', value: 'grok' } } })
+    assert.equal(preview.status, 200, preview.body)
+    assert.equal(preview.json().count, 1)
+    const confirmed = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'confirm', token: preview.json().token, preview: preview.json().preview } })
+    assert.equal(confirmed.status, 200, confirmed.body)
+    assert.equal(confirmed.json().note, 'Archived 1 block.')
+    const after = readFileSync(board.path, 'utf8')
+    assert.ok(after.includes('b1c2d3f1') && after.includes('b1c2d3f3') && !after.includes('b1c2d3f2'), after)
+  } finally { await board.close() }
+})
+
+test('tidy --older 14 refuses a row that changed during the sweep', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const first = bulkBlock('b1c2d401', 'codex', 'ended', 24 * 20)
+    const second = bulkBlock('b1c2d402', 'codex', 'ended', 24 * 20)
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${first}\n${second}\n${bulkBlock('b1c2d403', 'codex', 'ended', 24 * 5)}`)
+    const preview = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'preview', selector: { kind: 'older', days: 14 } } })
+    assert.equal(preview.status, 200, preview.body)
+    assert.equal(preview.json().count, 2)
+    // The row changes between the preview and the confirm: a step is reworded.
+    writeFileSync(board.path, readFileSync(board.path, 'utf8').replace('- [x] Finished', '- [x] Finished later'))
+    const confirmed = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'confirm', token: preview.json().token, preview: preview.json().preview } })
+    assert.equal(confirmed.status, 200, confirmed.body)
+    assert.equal(confirmed.json().note, 'Archived 1 block; 1 refused because its state changed.')
+    const after = readFileSync(board.path, 'utf8')
+    assert.ok(after.includes('Finished later') && after.includes('b1c2d403'), after)
+    assert.ok(!after.includes('b1c2d402'), after)
+    const journals = readdirSync(board.dir).filter(name => name.startsWith('progress-journal-'))
+    assert.equal(journals.length, 1)
+    const journal = readFileSync(join(board.dir, journals[0]), 'utf8')
+    assert.equal(journal.split('"state":"prepared"').length - 1, 1, journal)
+    assert.equal(journal.split('"state":"committed"').length - 1, 1, journal)
+    assert.ok(journal.includes('b1c2d402') && !journal.includes('b1c2d401'), journal)
+  } finally { await board.close() }
+})
+
+test('tidy --stopped refuses a block changed while its prepared marker lands', { timeout: 30_000 }, () => {
+  tidyFixture(f => {
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c341', 'Old ended', 'ended', 73)}\n`)
+    // A second writer lands a question in the block while the prepared marker
+    // is written: the archive callback must recheck the fingerprint and refuse.
+    const preload = join(f.dir, 'race-preload.cjs')
+    writeFileSync(preload, `
+const fs = require('node:fs')
+const write = fs.writeFileSync
+let fired = false
+fs.writeFileSync = function (file, data, ...rest) {
+  const text = typeof data === 'string' ? data : (Buffer.isBuffer(data) ? data.toString('utf8') : '')
+  if (!fired && typeof file === 'string' && text.includes('"state":"prepared"')) {
+    fired = true
+    const progress = process.env.CLAUDE_PROGRESS_FILE
+    const body = fs.readFileSync(progress, 'utf8')
+    write.call(this, progress, body.replace('### Old ended\\n', '### Old ended\\n- [?] Added while prepared, OK?\\n'))
+  }
+  return write.call(this, file, data, ...rest)
+}
+`)
+    const twice = f.command(['--keys', 'A A'], preload)
+    assert.equal(twice.status, 0, twice.stderr)
+    assert.match(twice.stdout, /Archived 0 blocks; 1 refused because its state changed\./)
+    const after = readFileSync(f.path, 'utf8')
+    assert.ok(after.includes('a1b2c341') && after.includes('Added while prepared, OK?'), after)
+    assert.deepEqual(readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')), [])
+    const journals = readdirSync(f.dir).filter(name => name.startsWith('progress-journal-'))
+    assert.equal(journals.length, 1)
+    const journal = readFileSync(join(f.dir, journals[0]), 'utf8')
+    assert.equal(journal.split('"state":"prepared"').length - 1, 1, journal)
+    assert.equal(journal.split('"state":"committed"').length - 1, 0, journal)
+  })
+})
+
+test('tidy --stopped with a long configured stale timeout keeps a 13-hour working block', { timeout: 30_000 }, () => {
+  tidyFixture(f => {
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c351', 'Still working', 'working', 13, '- [~] Working')}\n`)
+    const plain = f.command(['--tidy', '--stopped'])
+    assert.equal(plain.status, 0, plain.stderr)
+    assert.equal(plain.stdout, 'Preview: 1 block would be archived.\nA terminal confirmation is needed. Preview and type ARCHIVE in a terminal, or use the board page.\n')
+    const configured = f.command(['--tidy', '--stopped', '--stale-ms', '172800000'])
+    assert.equal(configured.status, 0, configured.stderr)
+    assert.equal(configured.stdout, 'Preview: 0 blocks would be archived.\nA terminal confirmation is needed. Preview and type ARCHIVE in a terminal, or use the board page.\n')
+    const twice = f.command(['--keys', 'A A', '--stale-ms', '172800000'])
+    assert.equal(twice.status, 0, twice.stderr)
+    const after = readFileSync(f.path, 'utf8')
+    assert.ok(after.includes('a1b2c351'), after)
+    assert.deepEqual(readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')), [])
+  })
+})
+
+test('tidy --stopped refuses a block that asks when its question has no kept record, and journals the block it moves', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${bulkBlock('b1c2d411', 'codex', 'ended', 73, '- [?] Publish, OK?')}\n${bulkBlock('b1c2d412', 'codex', 'ended', 73)}`)
+    const preview = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'preview', selector: { kind: 'stopped' } } })
+    assert.equal(preview.json().count, 2)
+    const confirmed = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'confirm', token: preview.json().token, preview: preview.json().preview } })
+    assert.equal(confirmed.status, 200, confirmed.body)
+    assert.equal(confirmed.json().note, 'Archived 1 block; 1 refused because its state changed.')
+    const after = readFileSync(board.path, 'utf8')
+    assert.ok(after.includes('Publish, OK?') && !after.includes('b1c2d412'), after)
+  } finally { await board.close() }
+})
+
+test('the page shows the bulk archive section, and cancelling a preview discards its token', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    writeFileSync(board.path, `# Progress\n\n## Synthetic\n${bulkBlock('b1c2d421', 'codex', 'ended', 73)}`)
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    assert.ok(html.includes('id="tidy-bulk"'), html)
+    assert.ok(html.includes('Bulk archive') && html.includes('Stopped sessions') && html.includes('One agent') && html.includes('Older than'), html)
+    const preview = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'preview', selector: { kind: 'stopped' } } })
+    assert.equal(preview.json().count, 1)
+    const cancelled = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'cancel', token: preview.json().token } })
+    assert.equal(cancelled.status, 200, cancelled.body)
+    assert.equal(cancelled.json().note, 'Cancelled. Nothing was archived.')
+    const confirmed = await board.call('POST', '/api/tidy-bulk', { body: { kind: 'confirm', token: preview.json().token, preview: preview.json().preview } })
+    assert.equal(confirmed.status, 409, confirmed.body)
+    assert.equal(confirmed.json().note, 'The preview expired. Preview again.')
+    assert.ok(readFileSync(board.path, 'utf8').includes('b1c2d421'))
+  } finally { await board.close() }
+})
+
+test('--tidy --stopped without a terminal only previews, and conflicting or invalid selectors change nothing', () => {
+  tidyFixture(f => {
+    const file = `## Synthetic\n${f.block('a1b2c321', 'Old ended', 'ended', 73)}\n${f.block('a1b2c322', 'Active', 'working', 1, '- [~] Working')}`
+    writeFileSync(f.path, file)
+    const preview = f.command(['--tidy', '--stopped'])
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.equal(preview.stdout, 'Preview: 1 block would be archived.\nA terminal confirmation is needed. Preview and type ARCHIVE in a terminal, or use the board page.\n')
+    assert.equal(readFileSync(f.path, 'utf8'), file)
+    assert.deepEqual(readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')), [])
+    const conflict = f.command(['--tidy', '--stopped', '--agent', 'grok'])
+    assert.equal(conflict.status, 1)
+    assert.equal(conflict.stdout, 'Choose a valid scope.\n')
+    assert.equal(readFileSync(f.path, 'utf8'), file)
+    const invalid = f.command(['--tidy', '--agent', 'GROK!'])
+    assert.equal(invalid.status, 1)
+    assert.equal(invalid.stdout, 'Choose a valid scope.\n')
+    assert.equal(readFileSync(f.path, 'utf8'), file)
+  })
+})
+
+// Each press starts a cold Node, and a cold start is slow under load. The test
+// checks what the presses do, not how fast a cold start is, so the presses
+// carry no timeout of their own; the test timeout is the only bound, as in
+// the other terminal-board tests. The presses also clear CLAUDE_PROGRESS_FILE,
+// as the other board spawns do: a value inherited from the runner would
+// redirect the board away from this fixture's file.
+test('terminal A previews stopped blocks on the first press and archives them on the second', { timeout: 30_000 }, () => {
+  tidyFixture(f => {
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c331', 'Old ended', 'ended', 73)}\n${f.block('a1b2c332', 'Active', 'working', 1, '- [~] Working')}`)
+    const once = execFileSync(process.execPath, [join(f.dir, 'agent-board.mjs'), '--keys', 'A'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8' })
+    assert.match(once, /Preview: 1 block would be archived\./)
+    assert.match(once, /Press A again to confirm the archive/)
+    assert.ok(readFileSync(f.path, 'utf8').includes('Old ended'))
+    const twice = execFileSync(process.execPath, [join(f.dir, 'agent-board.mjs'), '--keys', 'A A'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8' })
+    assert.match(twice, /Archived 1 block\./)
+    const after = readFileSync(f.path, 'utf8')
+    assert.ok(!after.includes('Old ended') && after.includes('Active'), after)
   })
 })
 
@@ -9094,6 +9303,43 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
   const questionOwn = rowAgent(questionDom, 'own')
   assert.equal(questionOwn.getAttribute('aria-label'), 'Your own tasks: 1 needs you')
   assert.equal(questionOwn.getAttribute('title'), 'Your own tasks: 1 needs you')
+})
+
+test('a hand-written own task with one unfinished step shows no Last: for it and one Done button per step', async () => {
+  const model = redesignModel()
+  model.groups = [{
+    project: 'home',
+    rows: [{
+      key: 'row:own:1', project: 'home', title: 'Draft the notes', isOwn: true,
+      steps: [{ text: 'Draft the notes', note: '', status: 'todo', isCurrent: true }],
+      next: 'Draft the notes',
+    }],
+  }]
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const board = dom.node('board').textContent
+  assert.ok(!board.includes('Last: Draft the notes'), board)
+  assert.equal(dom.buttons().filter(button => button.textContent === 'Done: Draft the notes').length, 1)
+})
+
+test('an own task with a finished step still shows Last: for the finished step', async () => {
+  const model = redesignModel()
+  model.groups = [{
+    project: 'home',
+    rows: [{
+      key: 'row:own:1', project: 'home', title: 'Draft the notes', isOwn: true,
+      steps: [
+        { text: 'Draft the outline', note: '', status: 'done', isCurrent: false },
+        { text: 'Draft the notes', note: '', status: 'todo', isCurrent: true },
+      ],
+      next: 'Draft the notes',
+    }],
+  }]
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const board = dom.node('board').textContent
+  assert.ok(board.includes('Last: Draft the outline'), board)
+  assert.ok(!board.includes('Last: Draft the notes'), board)
+  assert.equal(dom.buttons().filter(button => button.textContent === 'Done: Draft the notes').length, 1)
+  assert.equal(dom.buttons().filter(button => button.textContent === 'Done: Draft the outline').length, 0)
 })
 
 test('on a wide screen the sidebar lists views, agents and projects', async () => {

@@ -42,15 +42,26 @@ node "$HOME/.agent-board/agent-board.mjs" --watch
 
 The existing keyboard actions, web controls and clipboard actions are the same as the
 standalone board. On Windows use the absolute path printed by setup. To report, the agent
-passes minimal task summaries as JSON on stdin to:
+passes minimal task summaries as JSON on stdin to the installed board path printed by setup:
 
 ```sh
-node "$HOME/.agent-board/agent-board.mjs" --codex-report
+node "$HOME/.agent-board/agent-board.mjs" --report --agent codex
 ```
 
 ```json
 {"title":"Check the installer","project":"Agent-Board","state":"working","steps":["- [x] Read setup","- [~] Run tests"]}
 ```
+
+Every board agent uses `--report --agent <name>` with the same JSON and binding rules.
+`--codex-report` remains an equivalent alias for installed hooks and fallback instructions.
+The command accepts 1–40 steps and retains the existing 500-character input validation.
+Titles and step text on the board are limited to 120 Unicode characters, including a final
+`…` when shortened; the Markdown step marker is not part of that limit. Full shortened
+titles and steps go to this month's journal before the board changes, as quoted entries
+that do not count as finished work. JSON output includes `cut`, the number of titles and
+steps shortened. A journal write failure leaves the board unchanged and returns a failure.
+Keep each step short, link to detail, and add a new step for new work instead of extending
+a finished one. Agents must use the command; hand edits are allowed only when it is missing.
 
 `--session` or `CODEX_THREAD_ID`, when supplied, binds to that exact thread. Otherwise the
 command binds only when one recent working or waiting Codex hook record has the same cleaned
@@ -242,6 +253,12 @@ namespaced by agent, so different agents do not overwrite one another. A bounded
 write lock preserves concurrent reports. Removing a target keeps shared files required by
 another target. The generic explicit report command accepts `--agent <name>`; use only a
 session id actually provided by that host, never a guessed name or a transcript scan.
+Use `--report --agent <name>` for `claude`, `codex`, `gemini`, `cursor`, `grok`, `muse`,
+`dot`, `hermes`, `openclaw`, `opencode`, `antigravity` or `deepseek`. Outside Codex, a
+matching `AGENT_BOARD_AGENT` / `AGENT_BOARD_SESSION_ID` pair or an exact host-provided
+`--session` binds the report; otherwise the same unique recent folder match is required.
+An unbound report exits non-zero with one sentence and writes no block. Desktop-app Claude
+and cloud bots still need a host-proven binding; accepting their names does not create one.
 
 | Target | Native adapter in this change | Remaining limit |
 | --- | --- | --- |

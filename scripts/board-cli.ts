@@ -25,7 +25,7 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { defaultMessagesDirectory, isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { defaultMessagesDirectory, isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
@@ -42,11 +42,12 @@ import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedT
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
-import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
+import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
 import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
+import { currentTidyCandidate, previewTidy, tidySelector, type TidyCandidate, type TidyPreview, type TidySelector } from '../hooks/tidy'
 import { codexSignal, isStrongRun, runLookupId } from '../hooks/runs'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { runMcp } from './board-mcp'
@@ -792,7 +793,7 @@ const isSymlinkOrNonRegular = (file: string): boolean => {
 // when a file could not be written.
 // Entries are counted with their number: two done blocks with the same title and steps make
 // the same entry text, and both leave (#231).
-const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[] } | null | typeof AGAIN, now: number): number | null => {
+const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[] } | null | typeof AGAIN, now: number, onReplaced?: () => void): number | null => {
   const archived = new Map<string, number>()
   const pendingFile = pendingArchivePath(path)
   let pending: PendingArchiveRecord[] = []
@@ -839,7 +840,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
       for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     }
     return taken.text
-  })
+  }, onReplaced)
 
   if (wrote !== null && didRemove && isRegularFile(pendingFile)) {
     try {
@@ -986,7 +987,19 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
-    return done(s.archivedOne(action.title))
+    // Not through view(), which may rewrite the question list and throw: a list another process holds
+    // for a moment must not change what is said about an archive that has already happened.
+    try {
+      const source = read(path)
+      const after = parseProgress(source)
+      const latest = readQuestions(questionsPath(path))
+      const proofs = readQuestionProofs()
+      const frozen = cutOffScopes(after, cutOffSpans(source, isCutSettledAt(now)))
+      const kept = latest === null || proofs === null ? 0 : keptQuestionCount(buildView(after, [], null, now, 0, {}, s, parseAnswered(read(answeredPath(path))) ?? [], {}, latest, proofs, pending(), frozen, undefined, staleTimeoutMs()), action.ref, s)
+      return done(kept > 0 ? s.archivedKeptQuestions(action.title, kept) : s.archivedOne(action.title))
+    } catch {
+      return done(s.archivedOne(action.title))
+    }
   }
   if (action.type === 'hide' || action.type === 'unhide') {
     // The list every pane on this machine reads too; nothing goes to the agent that asked.
@@ -1105,6 +1118,124 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
   return count
 }
 
+// A bulk archive is two steps: a preview names the count, and a second step confirms
+// it. Between the two the file may change, so the confirm re-previews and refuses any
+// block whose session, project or fingerprint no longer matches. Every block that moves
+// leaves an audit marker in the journal, and a block that still asks goes only when its
+// questions are kept, as the single archive does.
+const tidyAudit = (candidate: TidyCandidate, state: 'prepared' | 'committed', now: number): string =>
+  `<!-- agent-board-tidy ${JSON.stringify({ state, at: new Date(now).toISOString(), session: candidate.ref.session, project: candidate.ref.project, title: candidate.ref.title, fingerprint: candidate.fingerprint })} -->`
+
+const bulkTidyPreviews = new Map<string, { preview: TidyPreview; expires: number }>()
+
+const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind: 'confirm'; token: string; preview: TidyPreview } | { kind: 'cancel'; token: string }): { ok: boolean; note: string; token?: string; preview?: TidyPreview; count?: number } => {
+  const now = Date.now()
+  if (request.kind === 'cancel') {
+    bulkTidyPreviews.delete(request.token)
+    return { ok: true, note: s.tidyCancelled }
+  }
+  if (request.kind === 'preview') {
+    // A request that arrives over HTTP may carry any shape; only a selector that
+    // validates is honoured, so a malformed one cannot silently mean "stopped".
+    const raw = request.selector
+    const selector = tidySelector(raw.kind, raw.kind === 'agent' ? raw.value : raw.kind === 'older' ? String(raw.days) : undefined)
+    if (selector === null) return { ok: false, note: s.tidyInvalid }
+    const text = read(path)
+    const preview = previewTidy(text, selector, now, s, staleTimeoutMs())
+    const token = randomUUID()
+    bulkTidyPreviews.set(token, { preview, expires: now + 5 * 60000 })
+    if (bulkTidyPreviews.size > 16) for (const [old] of bulkTidyPreviews) { bulkTidyPreviews.delete(old); break }
+    return { ok: true, note: s.tidyPreviewCount(preview.candidates.length), token, preview, count: preview.candidates.length }
+  }
+  const entry = bulkTidyPreviews.get(request.token)
+  // The page round-trips the preview through JSON, so the comparison is structural, not
+  // by reference: a reference check would refuse every confirm that came over HTTP.
+  if (entry === undefined || JSON.stringify(entry.preview) !== JSON.stringify(request.preview) || entry.expires <= now) {
+    bulkTidyPreviews.delete(request.token)
+    return { ok: false, note: s.tidyExpired }
+  }
+  bulkTidyPreviews.delete(request.token)
+  const staleMs = staleTimeoutMs()
+  let moved = 0
+  let refused = 0
+  for (const candidate of entry.preview.candidates) {
+    const body = read(path)
+    const current = currentTidyCandidate(body, entry.preview, candidate, s, staleMs)
+    if (current === undefined) { refused += 1; continue }
+    const projects = parseProgress(body)
+    const frozen = cutOffScopes(projects, cutOffSpans(body, isCutSettledAt(now)))
+    if (current.asks && !keepAskedQuestions(projects, current.ref, now, frozen)) { refused += 1; continue }
+    // The marker goes in first: a crash after it leaves the block in place with a
+    // prepared marker, never an archived block with no audit trail.
+    rewrite(journalPath(path, now), text => appendJournal(text, [tidyAudit(current, 'prepared', now)], s))
+    const taken = archiveOut((text, isLast) => {
+      // Recheck at the write boundary: the block may have changed after the
+      // preview check, while the prepared marker was written, or on a retry.
+      // takeTask alone checks ownership and staleness, not the fingerprint or
+      // the question retention, so a changed block would otherwise be archived
+      // and its new question lost.
+      const fresh = currentTidyCandidate(text, entry.preview, candidate, s, staleMs)
+      if (fresh === undefined) return null
+      const freshProjects = parseProgress(text)
+      if (fresh.asks && !keepAskedQuestions(freshProjects, fresh.ref, now, cutOffScopes(freshProjects, cutOffSpans(text, isCutSettledAt(now))))) return null
+      const again = takeTask(text, fresh.ref, now, s, {}, staleMs)
+      if (again === null) return null
+      if (isLast) return { text: again.text, entries: again.entries }
+      if (read(path) !== text) return AGAIN
+      return { text: again.text, entries: again.entries }
+    }, now, () => rewrite(journalPath(path, now), text => appendJournal(text, [tidyAudit(current, 'committed', now)], s)))
+    if (taken === null || taken === 0) {
+      // Another agent's archive landed first, or the question check failed after the
+      // preview: the block stays, and the prepared marker says it was never committed.
+      refused += 1
+      continue
+    }
+    moved += taken
+  }
+  if (moved === 0 && refused > 0) return { ok: false, note: s.tidyPartial(moved, refused) }
+  return { ok: true, note: refused > 0 ? s.tidyPartial(moved, refused) : s.tidyResult(moved), count: moved }
+}
+
+// The command line asks once and acts once: without a terminal there is no second press,
+// so a selector without one only previews and changes nothing.
+const runBulkTidy = (): boolean => {
+  const kinds = ['--stopped', '--agent', '--older'].filter(one => args.includes(one))
+  if (kinds.length === 0) return false
+  if (kinds.length > 1) {
+    process.stdout.write(`${s.tidyInvalid}\n`)
+    process.exitCode = 1
+    return true
+  }
+  const selector = tidySelector(kinds[0]?.slice(2), kinds[0] === '--agent' ? flag('--agent') : kinds[0] === '--older' ? flag('--older') : undefined)
+  if (selector === null) {
+    process.stdout.write(`${s.tidyInvalid}\n`)
+    process.exitCode = 1
+    return true
+  }
+  const preview = bulkTidy({ kind: 'preview', selector })
+  if (process.stdin.isTTY !== true) {
+    process.stdout.write(`${preview.note}\n${s.tidyNeedsTerminal}\n`)
+    return true
+  }
+  process.stdout.write(`${s.tidyConfirmPrompt(preview.count ?? 0)}\n`)
+  let answer = ''
+  const chunk = Buffer.alloc(1024)
+  let readBytes: number | null = 0
+  while (readBytes !== null && !answer.includes('\n')) {
+    readBytes = (() => { try { return readSync(0, chunk, 0, chunk.length, null) } catch { return null } })()
+    if (readBytes !== null && readBytes > 0) answer += chunk.subarray(0, readBytes).toString('utf8')
+  }
+  if (answer.trim() !== 'ARCHIVE') {
+    bulkTidy({ kind: 'cancel', token: preview.token ?? '' })
+    process.stdout.write(`${s.tidyCancelled}\n`)
+    return true
+  }
+  const result = bulkTidy({ kind: 'confirm', token: preview.token ?? '', preview: preview.preview as TidyPreview })
+  process.stdout.write(`${result.note}\n`)
+  if (!result.ok) process.exitCode = 1
+  return true
+}
+
 const tidyNote = (count: number | null, isNow: boolean, finished = 0): string =>
   count === null ? s.boardWriteFailed : count === 0 ? (isNow ? s.tidyNothing : finished > 0 ? s.canArchive(finished) : s.tidyScheduledNothing) : s.tidyMoved(count)
 
@@ -1153,7 +1284,24 @@ type Send = Extract<BoardAction, { type: 'send' }>
 const press = (state: BoardState, key: string): { state: BoardState; isQuit: boolean; isHtml: boolean; isWrite: boolean; send?: Send } => {
   const shown = freshView()
   const items = boardItems(shown, pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false)
-  const { state: next, action } = boardKey(state, key, items, s, routes)
+  // A bulk archive previews on the first A and confirms on the second; any other key
+  // drops the pending preview and acts as usual.
+  if (key === 'A') {
+    try {
+      if (state.bulkTidy !== undefined) {
+        const result = bulkTidy({ kind: 'confirm', token: state.bulkTidy.token, preview: state.bulkTidy.preview })
+        return { state: { ...state, bulkTidy: undefined, key: null, note: result.note, tone: result.ok ? 'done' : 'alert' }, isQuit: false, isHtml: false, isWrite: result.ok }
+      }
+      const preview = bulkTidy({ kind: 'preview', selector: { kind: 'stopped' } })
+      if (!preview.ok || preview.token === undefined || preview.preview === undefined) {
+        return { state: { ...state, key: null, note: preview.note, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+      }
+      return { state: { ...state, bulkTidy: { token: preview.token, preview: preview.preview }, key: null, note: `${preview.note} ${s.tidyConfirmKey}`, tone: 'quiet' }, isQuit: false, isHtml: false, isWrite: false }
+    } catch (error) {
+      return { state: { ...state, bulkTidy: undefined, key: null, note: failureNote(error), tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+    }
+  }
+  const { state: next, action } = boardKey(state.bulkTidy === undefined ? state : { ...state, bulkTidy: undefined }, key, items, s, routes)
   if (action === null) return { state: next, isQuit: false, isHtml: false, isWrite: false }
   if (action.type === 'quit') return { state: next, isQuit: true, isHtml: false, isWrite: false }
   if (action.type === 'html') return { state: { ...next, note: s.pressPending, tone: 'quiet' }, isQuit: false, isHtml: true, isWrite: false }
@@ -1200,12 +1348,22 @@ const screen = (state: BoardState): string => {
 const pin = (state: BoardState): BoardState => pinned(state, boardItems(view(), pending(), state.isIdleOpen ?? false, state.isOlderOpen ?? false))
 
 // The running page, found without making its folder: the terminal board only looks for one.
-const runningAddress = (): Running | null => {
+const runningAddress = async (): Promise<Running | null> => {
   const runtime = process.env.XDG_RUNTIME_DIR
   const folder = process.platform === 'win32' ? (runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board')) : runtime && isOwnFolder(runtime) ? runtime : join(homedir(), '.cache', 'agent-board')
   if (!existsSync(folder)) return null
   try {
-    return readRunning()
+    if (process.platform !== 'win32') return readRunning()
+    if (served === undefined) {
+      const name = addressFileName(board(path))
+      let root: string
+      try { root = await privateRuntimeFolderAsync(folder, [name]) }
+      catch (error) { root = readOnlyRunFolder(folder, error) }
+      served = join(root, name)
+    }
+    if (!isOwnAddressFile(served)) return null
+    const source = (await readPrivateRuntimeFileAsync(served))?.text
+    return source === undefined ? null : parseRunning(source)
   } catch {
     return null
   }
@@ -1213,8 +1371,15 @@ const runningAddress = (): Running | null => {
 
 // Which questions the running page answers into their session; true when that changed. With no
 // page, or none that answers, every answer key copies.
+let routeRefresh: Promise<boolean> | null = null
 const refreshRoutes = async (): Promise<boolean> => {
-  const running = runningAddress()
+  if (routeRefresh !== null) return false
+  routeRefresh = updateRoutes()
+  try { return await routeRefresh }
+  finally { routeRefresh = null }
+}
+const updateRoutes = async (): Promise<boolean> => {
+  const running = await runningAddress()
   let next: Record<string, AnswerRoute> = {}
   if (running !== null) {
     try {
@@ -1230,7 +1395,7 @@ const refreshRoutes = async (): Promise<boolean> => {
 // An answer key's answer, sent by the running page as its own button sends it: the page checks
 // the line, the question and the session again, and answers with what came of it.
 const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 'alert' }> => {
-  const running = runningAddress()
+  const running = await runningAddress()
   if (running === null) return { note: s.messagesFailed, tone: 'alert' }
   const { route } = action
   const body = route.mode === 'connected' && route.delivery !== undefined
@@ -1270,6 +1435,13 @@ const paste = (text: string, reviewToken = '') => {
 // never the caller's whole runtime directory, before a token can be written.
 // `name` is the address file: it is read in the same check as the folder when it is already there.
 let runtimeUnprotected = false
+const readOnlyRunFolder = (folder: string, error: unknown): string => {
+  if (!(error instanceof RuntimeFolderError)) throw error
+  // A process that cannot protect the folder may reuse a running page, but every later
+  // step must refuse to start one or write through this unprotected path.
+  runtimeUnprotected = true
+  return unprotectedRuntimeFolder(folder)
+}
 const runFolder = (name: string): string => {
   const runtime = process.env.XDG_RUNTIME_DIR
   if (process.platform === 'win32') {
@@ -1277,12 +1449,7 @@ const runFolder = (name: string): string => {
     try {
       return privateRuntimeFolder(folder, [name])
     } catch (error) {
-      if (!(error instanceof RuntimeFolderError)) throw error
-      // A process that cannot protect the folder (a read-only sandbox) may still read an
-      // address file a page started outside it left behind, and reuse that page. It must
-      // never start one: every later step checks this flag before writing anything.
-      runtimeUnprotected = true
-      return unprotectedRuntimeFolder(folder)
+      return readOnlyRunFolder(folder, error)
     }
   }
   if (runtime && isOwnFolder(runtime)) return runtime
@@ -1335,11 +1502,14 @@ const parseRunning = (text: string): Running | null => {
   } catch { return null }
 }
 
+const isOwnAddressFile = (file: string): boolean => {
+  const own = lstatSync(file)
+  return !own.isSymbolicLink() && (process.getuid === undefined || own.uid === process.getuid())
+}
 const readRunning = (file = serveFile()): Running | null => {
   try {
     // Only a file of this account's own, never a link to one somewhere else.
-    const own = lstatSync(file)
-    if (own.isSymbolicLink() || (process.getuid !== undefined && own.uid !== process.getuid())) return null
+    if (!isOwnAddressFile(file)) return null
     const source = process.platform === 'win32' ? readPrivateRuntimeFile(file)?.text : read(file)
     return source === undefined ? null : parseRunning(source)
   } catch {
@@ -1404,6 +1574,7 @@ const serveChild = (): void => {
       tidy,
       paste,
       clean: cleanUp,
+      bulkTidy,
       sweep: () => { tidyCount(false, true) },
       // Tests can shorten the hourly interval without changing the sweep rules.
       sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,
@@ -1918,7 +2089,7 @@ const run = async (): Promise<void> => {
     // Before the flags that serve, open or write: a chat reply never starts a page.
     chat()
   } else if (args.includes('--tidy')) {
-    process.stdout.write(`${tidy(false)}\n`)
+    if (!runBulkTidy()) process.stdout.write(`${tidy(false)}\n`)
   } else if (args.includes('--serve')) {
     await serveBoard()
   } else if (args.includes('--html')) {
@@ -2003,7 +2174,7 @@ try {
   } else if (flag('--legacy-connect-request') !== undefined && typeof (globalThis as { AGENT_BOARD_WORKER_SOURCE?: unknown }).AGENT_BOARD_WORKER_SOURCE === 'string') {
     // The verified worker wrapper bounds data-URL errors and owns stage cleanup.
     throw error
-  } else if (args.some(arg => ['--codex-event', '--agent-status', '--codex-report'].includes(arg))) {
+  } else if (args.some(arg => ['--codex-event', '--agent-status', '--codex-report', '--report'].includes(arg))) {
     process.exitCode = 1
     const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))
     const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : 'UNKNOWN'

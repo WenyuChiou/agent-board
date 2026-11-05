@@ -65,26 +65,41 @@ test('native cleanup diagnostics allowlist unknown fields and missing markers', 
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
-const withoutCodexOnPath = pathValue => {
+const withoutCodexOnPath = (pathValue, home) => {
   if (!pathValue) return ''
-  return pathValue
+  let isNodeHidden = false
+  const cleanPath = pathValue
     .split(delimiter)
     .filter(dir => {
       if (!dir) return false
       try {
-        return !existsSync(join(dir, 'codex.exe')) && !existsSync(join(dir, 'codex')) && !existsSync(join(dir, 'codex.cmd'))
+        const hasCodex = ['codex.exe', 'codex', 'codex.cmd'].some(name => existsSync(join(dir, name)))
+        if (hasCodex && existsSync(join(dir, process.platform === 'win32' ? 'node.exe' : 'node'))) isNodeHidden = true
+        return !hasCodex
       } catch {
         return true
       }
     })
     .join(delimiter)
+  if (!isNodeHidden) return cleanPath
+  // Preserve only this running runtime, never the host commands beside it.
+  // A stable fixture-owned location also keeps repeated environment reads inert.
+  const runtimeDir = join(home, '.test-node-runtime')
+  const runtime = join(runtimeDir, process.platform === 'win32' ? 'node.exe' : 'node')
+  if (!existsSync(runtime)) {
+    mkdirSync(runtimeDir, { recursive: true })
+    if (process.platform === 'win32') {
+      try { linkSync(process.execPath, runtime) } catch { copyFileSync(process.execPath, runtime) }
+    } else symlinkSync(process.execPath, runtime)
+  }
+  return [runtimeDir, cleanPath].filter(Boolean).join(delimiter)
 }
 // A runner may set XDG/host overrides. No synthetic home may inherit those and
 // write into another test or the account's actual native configuration.
-const isolatedEnv = home => {
+const isolatedEnv = (home, pathValue) => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
-  const originalPath = process.env[pathKey] ?? ''
-  const cleanPath = withoutCodexOnPath(originalPath)
+  const originalPath = pathValue ?? process.env[pathKey] ?? ''
+  const cleanPath = withoutCodexOnPath(originalPath, home)
   const env = {
     ...process.env,
     HOME: home, USERPROFILE: home,
@@ -113,18 +128,18 @@ const stopNativeTree = child => {
   }
 }
 
-const nativeProcess = (executable, args, env, input, after = setTimeout, stop = stopNativeTree, { isInputOpen = false, ...options } = {}) => new Promise((resolve, reject) => {
+const nativeProcess = (executable, args, env, input, after = setTimeout, stop = stopNativeTree, { isInputOpen = false, inputFd, stdoutFd, stderrFd, ...options } = {}) => new Promise((resolve, reject) => {
   const child = spawn(executable, args, {
-    env, ...options, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32',
+    env, ...options, stdio: [inputFd ?? 'pipe', stdoutFd ?? 'pipe', stderrFd ?? 'pipe'], windowsHide: true, detached: process.platform !== 'win32',
   })
   let stdout = '', stderr = '', error, termination
   let isClosed = false, isTimedOut = false
   let grace, notifyClosed
   const whenClosed = new Promise(done => { notifyClosed = done })
-  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
-  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  child.stdout?.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+  child.stderr?.setEncoding('utf8').on('data', chunk => { stderr += chunk })
   child.on('error', failure => { error ??= failure })
-  child.stdin.on('error', failure => { error ??= failure })
+  child.stdin?.on('error', failure => { error ??= failure })
   const timer = after(() => {
     if (isClosed || isTimedOut || child.pid === undefined) return
     isTimedOut = true
@@ -135,9 +150,9 @@ const nativeProcess = (executable, args, env, input, after = setTimeout, stop = 
       // An OS refusal cannot prove the descendants exited. Keep their fixture and
       // report the owned PID rather than hanging or deleting files they may use.
       const failure = Object.assign(new Error(`Native hook tree ${child.pid} did not close; fixture retained; ${JSON.stringify(termination)}`), { code: 'NATIVE_HOOK_UNREAPED', keepFixture: true, pid: child.pid, termination, whenClosed })
-      child.stdin.destroy()
-      child.stdout.destroy()
-      child.stderr.destroy()
+      child.stdin?.destroy()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
       child.unref()
       reject(failure)
     }, 2000)
@@ -146,12 +161,12 @@ const nativeProcess = (executable, args, env, input, after = setTimeout, stop = 
     isClosed = true
     clearTimeout(timer)
     clearTimeout(grace)
-    child.stdin.destroy()
+    child.stdin?.destroy()
     notifyClosed({ status, signal })
     resolve({ status, signal, error, termination, stdout, stderr })
   })
-  if (isInputOpen) child.stdin.write(input)
-  else child.stdin.end(input)
+  if (isInputOpen) child.stdin?.write(input)
+  else child.stdin?.end(input)
 })
 
 const nativeHook = (command, env, input, after = setTimeout, stop = stopNativeTree) => {
@@ -381,6 +396,42 @@ const fixture = async fn => {
   // persistent cleanup failures still fail the test.
   finally { if (isSafeToRemove) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
+
+test('PATH isolation preserves Node beside Codex without exposing Codex', () => fixture(async f => {
+  const shared = join(f.home, 'shared tools')
+  mkdirSync(shared)
+  const runtime = join(shared, process.platform === 'win32' ? 'node.exe' : 'node')
+  try { linkSync(process.execPath, runtime) } catch { copyFileSync(process.execPath, runtime) }
+  for (const name of ['codex', 'codex.cmd', 'codex.exe']) {
+    const host = join(shared, name)
+    f.save(host, 'synthetic host must stay undiscoverable')
+    const env = { ...f.env }
+    for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+    env.PATH = withoutCodexOnPath(shared, f.home)
+    assert.equal(withoutCodexOnPath(shared, f.home), env.PATH, 'repeated isolation keeps the same fixture runtime')
+    const node = await nativeProcess('node', ['--version'], env, '', callback => setTimeout(callback, 5000), stopNativeTree, { cwd: f.home })
+    assert.equal(node.error, undefined, 'the preserved runtime launches without a process error')
+    assert.equal(node.status, 0, `isolated Node failed: ${node.error?.code ?? 'none'}`)
+    assert.equal(node.stdout.trim(), process.version)
+    const codex = spawnSync('codex', ['--version'], { cwd: f.home, env, encoding: 'utf8', timeout: 5000 })
+    assert.equal(codex.error?.code, 'ENOENT', 'the real host must remain undiscoverable')
+    unlinkSync(host)
+  }
+}))
+
+test('PATH isolation keeps explicit no-Node paths without adding a runtime', () => fixture(f => {
+  const tools = join(f.home, 'tools without node')
+  mkdirSync(tools)
+  f.save(join(tools, 'codex'), 'synthetic host')
+  const path = withoutCodexOnPath(tools, f.home)
+  assert.equal(path, '')
+  assert.equal(withoutCodexOnPath('', f.home), '')
+  const env = { ...f.env }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = path
+  const node = spawnSync('node', ['-e', 'process.exit(0)'], { cwd: f.home, env, encoding: 'utf8', timeout: 5000 })
+  assert.equal(node.error?.code, 'ENOENT')
+}))
 
 const mailboxFixture = async fn => fixture(async f => {
   const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
@@ -867,6 +918,16 @@ const homeSnapshot = home => Object.fromEntries(readdirSync(home, { recursive: t
   return [path.slice(home.length), entry.isDirectory() ? 'directory' : { bytes: readFileSync(path).toString('base64'), mtimeMs: statSync(path).mtimeMs }]
 }))
 
+const sharedRuntimePath = f => {
+  const shared = join(f.home, 'shared tools')
+  mkdirSync(shared)
+  const runtime = join(shared, process.platform === 'win32' ? 'node.exe' : 'node')
+  try { linkSync(process.execPath, runtime) } catch { copyFileSync(process.execPath, runtime) }
+  f.save(join(shared, 'codex.cmd'), 'synthetic host must stay undiscoverable')
+  const inherited = Object.entries(f.env).find(([key]) => key.toLowerCase() === 'path')?.[1] ?? ''
+  return [shared, inherited].filter(Boolean).join(delimiter)
+}
+
 test('setup preview lists every planned file under its agent and apply changes only those files', () => fixture(f => {
   f.save(f.hooks, '{"other":{"keep":true},"hooks":{}}\n')
   f.save(join(f.home, 'notes.txt'), 'Keep this file.\n')
@@ -934,8 +995,11 @@ test('setup preview groups files per agent and shortens only paths inside the se
   const home = join(f.home, 'home')
   const data = join(f.home, 'home-other')
   mkdirSync(home)
+  // Preparing this fixture's runtime is not a change made by preview. Do it
+  // before the no-write snapshot, even when Node and Codex share a PATH entry.
+  const env = isolatedEnv(home, sharedRuntimePath(f))
   const run = (...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', home, '--data-dir', data, '--agent', 'codex,hermes', ...args], {
-    cwd: f.home, env: isolatedEnv(home), encoding: 'utf8', windowsHide: true, timeout: 30000,
+    cwd: f.home, env, encoding: 'utf8', windowsHide: true, timeout: 30000,
   })
   const before = homeSnapshot(f.home)
   const json = run('--json')
@@ -1096,9 +1160,41 @@ test('a second setup says everything is already set up and writes nothing', () =
   assert.deepEqual(snapshot(f.home), before)
 }))
 
+test('after setup --lang en --apply on a zh-TW system, a plain setup says already set up and writes nothing', () => fixture(f => {
+  const zhTw = { ...f, env: { ...f.env, LANG: 'zh_TW.UTF-8' } }
+  const first = setupAgent(zhTw, '--lang', 'en', '--agent', 'codex', '--apply')
+  assert.equal(first.status, 0, first.stderr)
+  const snapshot = directory => Object.fromEntries(readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => {
+      const file = join(entry.parentPath, entry.name)
+      return [file.slice(directory.length), { bytes: readFileSync(file), mtimeMs: statSync(file).mtimeMs }]
+    }))
+  const before = snapshot(f.home)
+  // Plain setup preview without --lang
+  const preview = setupAgent(zhTw, '--agent', 'codex')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.equal(preview.stderr, '')
+  assert.match(preview.stdout, /已設定完成/)
+  assert.doesNotMatch(preview.stdout, /將更新/)
+  assert.deepEqual(snapshot(f.home), before)
+  // Plain setup apply without --lang
+  const second = setupAgent(zhTw, '--agent', 'codex', '--apply')
+  assert.equal(second.status, 0, second.stderr)
+  assert.equal(second.stderr, '')
+  assert.match(second.stdout, /已設定完成/)
+  assert.doesNotMatch(second.stdout, /已更新/)
+  assert.deepEqual(snapshot(f.home), before)
+  // Explicit --lang zh-TW preview names the updated files
+  const langChange = setupAgent(zhTw, '--agent', 'codex', '--lang', 'zh-TW')
+  assert.equal(langChange.status, 0, langChange.stderr)
+  assert.match(langChange.stdout, /將更新 3 個設定檔案/)
+}))
+
 test('setup on a computer with only Claude Code prints guidance and exits 0 without a stack trace', () => fixture(f => {
   mkdirSync(join(f.home, '.claude'))
-  const english = { ...f, env: { ...f.env, LANG: 'en' } }
+  const english = { ...f, env: { ...f.env, ...isolatedEnv(f.home, sharedRuntimePath(f)), LANG: 'en' } }
+  const before = homeSnapshot(f.home)
   const guidance = setupAgent(english)
   assert.equal(guidance.status, 0, guidance.stderr)
   assert.equal(guidance.stderr, '')
@@ -1116,7 +1212,7 @@ test('setup on a computer with only Claude Code prints guidance and exits 0 with
   assert.equal(traditional.status, 0, traditional.stderr)
   assert.equal(traditional.stderr, '')
   assert.ok(traditional.stdout.includes('claude plugin install agent-board@agent-board'))
-  assert.deepEqual(readdirSync(f.home), ['.claude'])
+  assert.deepEqual(homeSnapshot(f.home), before)
 }))
 
 test('setup on a computer with Claude Code and Codex previews Codex only', async () => {
@@ -3852,6 +3948,141 @@ test('Codex explicit reports bind the current thread and preserve other blocks b
   assert.ok(f.command([]).stdout.includes('Task'))
   assert.equal(f.report('done', ['- [x] Finished']).status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /state=done updated=\d{4}-/)
+}))
+
+test('the same report from three agents gives three blocks of the same shape', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const payload = { title: 'Shared report', project: 'Synthetic project', state: 'working', steps: ['- [x] Read the task', '- [~] Check the result'] }
+  const shapes = []
+  for (const agent of ['codex', 'cursor', 'muse']) {
+    const id = `synthetic-report-${agent}`
+    const result = f.command(['--report', '--print', '--agent', agent, '--session', id], payload)
+    assert.equal(result.status, 0, result.stderr)
+    const text = readFileSync(f.progress, 'utf8')
+    const owner = createHash('sha256').update(`${agent}:${id}`).digest('hex').slice(0, 8)
+    const block = text.match(new RegExp(`<!-- auto session=${owner} [^\\n]*\\n[\\s\\S]*?<!-- /auto session=${owner} -->`))?.[0]
+    assert.ok(block, `${agent} has a bound block`)
+    assert.match(block, new RegExp(` agent=${agent} `))
+    shapes.push(block.replace(/owner=[a-f0-9]{64}/, 'owner=OWNER').replaceAll(owner, 'OWNER').replace(`agent=${agent}`, 'agent=AGENT').replace(`source=${agent}-local`, 'source=AGENT-local').replace(`resume=${id}`, 'resume=SESSION').replace(/updated=\S+/, 'updated=TIME'))
+    assert.equal(JSON.parse(result.stdout).cut, 0)
+  }
+  assert.equal((readFileSync(f.progress, 'utf8').match(/^<!-- auto /gm) ?? []).length, 3)
+  assert.equal(new Set(shapes).size, 1)
+}))
+
+test('a report step over 120 characters is cut on the board and kept in full in the journal', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const title = 'Synthetic title ' + 't'.repeat(130)
+  const long = 'Synthetic detail ' + 's'.repeat(130)
+  const exact = 'e'.repeat(120)
+  const unicode = '🧪'.repeat(121)
+  const result = f.command(['--codex-report'], { title, project: 'Synthetic project', state: 'working', steps: [`- [~] ${long}`, `- [ ] ${exact}`, `- [ ] ${unicode}`] })
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.cut, 3)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.ok(text.includes(`### ${title.slice(0, 119)}…\n`))
+  assert.ok(text.includes(`- [~] ${long.slice(0, 119)}…\n`))
+  assert.ok(text.includes(`- [ ] ${exact}\n`))
+  assert.ok(text.includes(`- [ ] ${'🧪'.repeat(119)}…\n`))
+  assert.ok(!text.includes(long))
+  const now = new Date(output.updated)
+  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+  const journal = readFileSync(join(f.root, `progress-journal-${month}.md`), 'utf8')
+  assert.ok(journal.includes(title))
+  assert.ok(journal.includes(long))
+  assert.ok(journal.includes(unicode))
+  const { countDay } = await importTs('../hooks/journal.ts')
+  assert.equal(countDay(journal, now.getTime()), 0)
+  const titleOnly = f.command(['--report'], { title, state: 'working', steps: ['- [~] Short step'] })
+  assert.equal(titleOnly.status, 0, titleOnly.stderr)
+  assert.equal(JSON.parse(titleOnly.stdout).cut, 1)
+  assert.ok(!readFileSync(join(f.root, `progress-journal-${month}.md`), 'utf8').includes('Short step'))
+  const blockedProgress = join(f.root, 'blocked.md')
+  f.save(blockedProgress, '## Preserve this project\n')
+  mkdirSync(join(f.root, `blocked-journal-${month}.md`))
+  const blocked = f.command(['--report', '--progress-file', blockedProgress], { title: 'Blocked journal', state: 'working', steps: [`- [~] ${long}`] })
+  assert.notEqual(blocked.status, 0)
+  assert.equal(readFileSync(blockedProgress, 'utf8'), '## Preserve this project\n')
+}))
+
+const journalOf = (f, updated) => {
+  const day = new Date(updated)
+  return join(f.root, `progress-journal-${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}.md`)
+}
+
+test('the same long report sent again a minute later adds no journal line', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const long = 'Synthetic detail ' + 's'.repeat(130)
+  const payload = { title: 'Resent plan', project: 'Synthetic project', state: 'working', steps: [`- [~] ${long}`] }
+  const started = Math.floor(Date.now() / 60000) * 60000 - 600000
+  const first = f.command(['--report', '--hook-started', String(started)], payload)
+  assert.equal(first.status, 0, first.stderr)
+  const file = journalOf(f, JSON.parse(first.stdout).updated)
+  const before = readFileSync(file, 'utf8')
+  assert.ok(before.includes(long))
+  const again = f.command(['--report', '--hook-started', String(started + 60000)], payload)
+  assert.equal(again.status, 0, again.stderr)
+  assert.equal(readFileSync(file, 'utf8'), before)
+}))
+
+test('a cut title with uncut steps journals only the title, once', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const title = 'Synthetic title ' + 't'.repeat(130)
+  const payload = { title, project: 'Synthetic project', state: 'working', steps: ['- [~] First short step', '- [ ] Second short step'] }
+  const first = f.command(['--report'], payload)
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(JSON.parse(first.stdout).cut, 1)
+  const file = journalOf(f, JSON.parse(first.stdout).updated)
+  const text = readFileSync(file, 'utf8')
+  assert.equal(text.split(title).length - 1, 2, 'the title is the task and the step of its one line')
+  assert.equal(text.split(/\r?\n/).filter(line => line.startsWith('> - ')).length, 1)
+  assert.ok(!text.includes('short step'))
+}))
+
+test('a journal line written between the report read and its replace survives', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const long = 'Synthetic detail ' + 's'.repeat(130)
+  const other = '- 2000-01-01 00:00 · Other project · Other task · Finished by the board'
+  const result = f.command(['--report'], { title: 'Racing plan', project: 'Synthetic project', state: 'working', steps: [`- [~] ${long}`] }, { AGENT_BOARD_TEST_JOURNAL_RACE: other })
+  assert.equal(result.status, 0, result.stderr)
+  const text = readFileSync(journalOf(f, JSON.parse(result.stdout).updated), 'utf8')
+  assert.ok(text.includes(other))
+  assert.ok(text.includes(long))
+}))
+
+test('--report and --codex-report write the same block', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const payload = { title: 'Alias report', project: 'Synthetic project', state: 'waiting', steps: ['- [?] Choose the next step', '- [ ] Continue'] }
+  const legacy = f.command(['--codex-report', '--print'], payload)
+  assert.equal(legacy.status, 0, legacy.stderr)
+  const normalize = text => text.replace(/updated=\S+/g, 'updated=TIME')
+  const before = normalize(readFileSync(f.progress, 'utf8'))
+  const alias = f.command(['--report', '--print'], payload)
+  assert.equal(alias.status, 0, alias.stderr)
+  assert.equal(normalize(readFileSync(f.progress, 'utf8')), before)
+  const { updated: legacyUpdated, ...legacyOutput } = JSON.parse(legacy.stdout)
+  const { updated: aliasUpdated, ...aliasOutput } = JSON.parse(alias.stdout)
+  assert.deepEqual(aliasOutput, legacyOutput)
+  assert.equal(aliasOutput.cut, 0)
+  for (const flag of ['--report', '--codex-report']) {
+    const rejected = f.command([flag, '--print'], payload, { CODEX_THREAD_ID: '' })
+    assert.notEqual(rejected.status, 0)
+    assert.equal(rejected.stderr.trim().split('\n').length, 1)
+    assert.equal(normalize(readFileSync(f.progress, 'utf8')), before)
+  }
+  // These are every named agent in the board's three language tables, including report-only hosts.
+  for (const agent of ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'dot', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek']) {
+    const id = `synthetic-alias-${agent}`
+    for (const flag of ['--report', '--codex-report']) {
+      const result = f.command([flag, '--agent', agent, '--session', id], payload)
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(JSON.parse(result.stdout).session, id)
+    }
+    const unbound = f.command(['--report', '--agent', agent], payload, { CODEX_THREAD_ID: '', AGENT_BOARD_AGENT: '', AGENT_BOARD_SESSION_ID: '' })
+    assert.notEqual(unbound.status, 0)
+    assert.equal(unbound.stderr.trim().split('\n').length, 1)
+  }
 }))
 
 test('Codex cannot mark unfinished work done or inject another Markdown block', () => fixture(f => {
@@ -7808,6 +8039,119 @@ const reportPayload = { title: 'Synthetic work', project: 'demo', state: 'workin
 const folderReport = (f, cwd, payload = reportPayload, extra = []) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-report', ...extra], {
   cwd, env: { ...f.env, CODEX_THREAD_ID: undefined }, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 15000,
 })
+// Exercise the real standalone entry without a synchronous bootstrap child;
+// the test's own process helper waits for exit and reaps only its child tree.
+const folderIdentityFixture = fn => fixture(async f => {
+  const bootstrap = join(f.home, 'offline-board.mjs')
+  f.save(bootstrap, bundleFromDir(new URL('..', import.meta.url)))
+  const args = ['--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes')]
+  const invoke = async (flags, input, cwd = f.home, extra = {}, script = f.script) => {
+    const payload = join(f.home, 'offline-input.json')
+    const output = join(f.home, 'offline-stdout.txt'), errors = join(f.home, 'offline-stderr.txt')
+    f.save(payload, input === undefined ? '' : JSON.stringify(input))
+    // File-backed stdio makes the real CLI's bytes observable independently of
+    // parent pipe delivery; all descriptors remain owned by this fixture.
+    const inputFd = openSync(payload, 'r'), stdoutFd = openSync(output, 'w'), stderrFd = openSync(errors, 'w')
+    try {
+      const ran = await nativeProcess(process.execPath, [script, ...flags, ...args],
+        { ...f.env, CODEX_THREAD_ID: undefined, ...extra }, '', callback => setTimeout(callback, 15000), stopNativeTree, { cwd, inputFd, stdoutFd, stderrFd })
+      return { ...ran, stdout: readFileSync(output, 'utf8'), stderr: readFileSync(errors, 'utf8') }
+    } finally { closeSync(inputFd); closeSync(stdoutFd); closeSync(stderrFd) }
+  }
+  const installed = await invoke(['--codex-setup', '--apply'], undefined, f.home, {}, bootstrap)
+  assert.equal(installed.error, undefined, hookFailure(installed))
+  assert.equal(installed.status, 0, hookFailure(installed))
+  return fn({ ...f, invoke })
+})
+
+const aliasFolders = f => {
+  const physical = join(f.home, 'physical'), alias = join(f.home, 'alias')
+  mkdirSync(join(physical, 'demo'), { recursive: true })
+  symlinkSync(physical, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  return { real: join(physical, 'demo'), alias: join(alias, 'demo') }
+}
+const aliasEvent = (f, cwd, turn = 'alias-turn', id = session, extra = {}) => f.invoke(['--codex-event'], {
+  session_id: id, hook_event_name: 'UserPromptSubmit', turn_id: turn, cwd,
+  transcript_path: rollout(f, id, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' }),
+}, f.home, extra)
+const aliasReport = (f, cwd) => f.invoke(['--codex-report'], reportPayload, cwd)
+const folderCacheFile = (f, id = session) => join(f.root, 'sessions', createHash('sha256').update(`codex:${id}`).digest('hex') + '.json')
+const assertAliasRefused = async (f, cwd) => {
+  const before = everyFile(f.root).map(file => [file, readFileSync(file)])
+  const ran = await aliasReport(f, cwd)
+  assert.notEqual(ran.status, 0)
+  assert.equal(ran.stdout, '')
+  assert.equal(ran.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
+  assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file)]), before)
+}
+
+test('folder aliases bind one native owner without rebinding another same-named directory', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  const started = await aliasEvent(f, dirs.alias)
+  assert.equal(started.status, 0, hookFailure(started))
+  const history = rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  const historyBytes = readFileSync(history)
+  const other = join(f.home, 'other', 'demo')
+  mkdirSync(other, { recursive: true })
+  await assertAliasRefused(f, other)
+  const ran = await aliasReport(f, dirs.real)
+  assert.equal(ran.status, 0, hookFailure(ran))
+  assert.equal(JSON.parse(ran.stdout).session, session)
+  const record = sessionRecord(f, session)
+  assert.match(record.folderDigest, /^[a-f0-9]{64}$/)
+  assert.match(record.folderCanonicalDigest, /^[a-f0-9]{64}$/)
+  assert.ok(!JSON.stringify(record).includes(f.home))
+  assert.deepEqual(readFileSync(history), historyBytes)
+  assert.equal((await aliasEvent(f, dirs.real, 'real-turn')).status, 0)
+  assert.equal((await aliasReport(f, dirs.alias)).status, 0)
+}))
+
+test('folder aliases keep legacy exact digests and require a fresh hook for old alias hashes', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  assert.equal((await aliasEvent(f, dirs.real)).status, 0)
+  const { folderCanonicalDigest: discarded, ...legacy } = sessionRecord(f, session)
+  f.save(folderCacheFile(f), JSON.stringify(legacy))
+  const accepted = await aliasReport(f, dirs.real)
+  assert.equal(accepted.status, 0, hookFailure(accepted))
+  assert.equal(sessionRecord(f, session).folderDigest, legacy.folderDigest)
+  assert.equal((await aliasEvent(f, dirs.alias, 'old-alias-turn')).status, 0)
+  const { folderCanonicalDigest: omitted, ...oldAlias } = sessionRecord(f, session)
+  f.save(folderCacheFile(f), JSON.stringify(oldAlias))
+  await assertAliasRefused(f, dirs.real)
+  assert.equal((await aliasEvent(f, dirs.alias, 'fresh-alias-turn')).status, 0)
+  assert.equal((await aliasReport(f, dirs.real)).status, 0)
+}))
+
+test('folder aliases refuse ambiguous stale ended run and malformed canonical records', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  assert.equal((await aliasEvent(f, dirs.alias)).status, 0)
+  const original = sessionRecord(f, session)
+  for (const change of [
+    { state: 'ended' }, { origin: 'run' }, { updated: '2020-01-01T00:00:00Z' },
+    { updated: new Date(Date.now() + 60000).toISOString() }, { folderDigest: undefined },
+    { folderCanonicalDigest: 'malformed' }, { folderCanonicalDigest: '0'.repeat(64) },
+  ]) {
+    f.save(folderCacheFile(f), JSON.stringify({ ...original, ...change }))
+    await assertAliasRefused(f, dirs.real)
+  }
+  f.save(folderCacheFile(f), JSON.stringify(original))
+  assert.equal((await aliasEvent(f, dirs.real, 'second-owner-turn', secondSession)).status, 0)
+  await assertAliasRefused(f, dirs.real)
+}))
+
+test('folder aliases keep missing and unreadable paths on exact legacy matching only', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  assert.equal((await aliasEvent(f, join(f.home, 'missing', 'demo'))).status, 0)
+  assert.equal(sessionRecord(f, session).folderCanonicalDigest, undefined)
+  await assertAliasRefused(f, dirs.real)
+  const denied = join(f.home, 'deny-realpath.cjs')
+  f.save(denied, `const fs = require('node:fs')\nconst original = fs.realpathSync\nfs.realpathSync = (path, ...args) => { if (path === ${JSON.stringify(dirs.alias)}) throw Object.assign(new Error('SYNTHETIC_DENIED'), { code: 'EACCES' }); return original(path, ...args) }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  assert.equal((await aliasEvent(f, dirs.alias, 'unreadable-turn', session, { NODE_OPTIONS: `--require ${JSON.stringify(denied)}` })).status, 0)
+  assert.equal(sessionRecord(f, session).folderCanonicalDigest, undefined)
+  await assertAliasRefused(f, dirs.real)
+  assert.equal((await aliasEvent(f, dirs.alias, 'readable-turn')).status, 0)
+  assert.equal((await aliasReport(f, dirs.real)).status, 0)
+}))
 const oldBlock = (id, title, mark = '') => {
   const block = createHash('sha256').update(`codex:${id}`).digest('hex').slice(0, 8)
   return `<!-- auto session=${block} agent=codex state=waiting updated=${new Date().toISOString()} resume=${id}${mark} -->
@@ -7934,7 +8278,7 @@ test("a report from a folder with the same name as a person's session in another
   const before = everyFile(f.root).map(file => [file, readFileSync(file)])
   const result = folderReport(f, otherFolder)
   assert.notEqual(result.status, 0)
-  assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+  assert.equal(result.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
   assert.equal(result.stdout, '')
   assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file)]), before)
   assert.equal(sessionRecord(f, session).folder, 'demo')
@@ -8137,7 +8481,7 @@ test('folder reporting rechecks an inferred session after a two-session backlog'
   }))
   const result = folderReport(f, cwd)
   assert.notEqual(result.status, 0)
-  assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+  assert.equal(result.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
   assert.equal(result.stdout, '')
   assert.ok(readFileSync(f.progress).includes(before))
   assert.deepEqual(sessionRecord(f, session), record)
@@ -8158,7 +8502,7 @@ test('folder reporting refuses ambiguous, stale, ended, old and strong-run recor
     const before = everyFile(f.root).map(file => [file, readFileSync(file, 'utf8')])
     const result = folderReport(f, cwd)
     assert.notEqual(result.status, 0)
-    assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+    assert.equal(result.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
     assert.equal(result.stdout, '')
     assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file, 'utf8')]), before)
   }

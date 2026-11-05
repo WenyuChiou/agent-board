@@ -1302,6 +1302,21 @@ test('a denied board write immediately names the retained claim and persistence 
   expect(world.files.get(FILE)).toBe('# Progress\n')
 })
 
+test('a long task subject puts its full text in the journal once, however often the block is written again', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '# 專案進度\n']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await start($, 'Synthetic long request')
+  const long = `${'x'.repeat(130)}`
+
+  await $.tool.call({ tool: 'TaskCreate', subject: long, description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Short step', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress' })
+
+  expect(world.files.get(FILE)).toContain(`- [ ] ${'x'.repeat(119)}…\n`)
+  const saved = world.files.get('/home/me/.claude/progress-journal-2026-10.md') ?? ''
+  expect(saved.split(long).length - 1).toBe(1)
+})
+
 test('Claude’s task calls fill the file and the pane by themselves', async ($, on) => {
   const world: World = { files: new Map([[FILE, '# 專案進度\n\n## 求職\n### Google 暑期實習\n- [?] 推薦信 — 等教授回覆\n']]), mtime: 1, hasTasks: true }
   engineBeneath(on, world)
@@ -3270,6 +3285,22 @@ test('question retention failure refuses explicit archive and preserves the orig
   expect(world.files.get(FILE)).toBe(board)
   expect(await ui.find({ type: 'Text', text: ZH_TW.questionRetentionFailed })).toBeDefined()
   await ui.unmount()
+})
+
+test('pressing Archive on a stopped task that asks says its question stays', async ($, on) => {
+  const board = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [x] Prepare\n- [?] Notify the team, OK?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::stopped' })
+    await ui.press({ key: 'demo::Stopped plan' })
+    await ui.press({ key: 'demo::Stopped plan::archive' })
+    expect(await ui.find({ type: 'Text', text: ZH_TW.archivedKeptQuestions('Stopped plan', 1) })).toBeDefined()
+  } finally {
+    await ui.unmount()
+  }
 })
 
 test('the pane keeps stopped tasks behind one toggle and shows their actions when opened', async ($, on) => {
