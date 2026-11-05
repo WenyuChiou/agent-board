@@ -2280,9 +2280,11 @@ await import(${JSON.stringify(new URL('../scripts/board-cli.ts', import.meta.url
     await dom.settle()
     assert.deepEqual(dom.copied, [prompt])
     assert.ok(dom.node('.pfoot').textContent.includes(EN.webChatCopied))
+    // One second in the past: the board refuses any source time ahead of its own clock, and this test's
+    // process and the board's can read a few milliseconds apart on Windows (#954).
     const text = prompt.slice(prompt.indexOf('## <project>'), prompt.indexOf('<!-- /auto session=<ID> -->') + '<!-- /auto session=<ID> -->'.length)
       .replaceAll('<project>', 'Synthetic relay').replaceAll('<ID>', 'a561cafe').replaceAll('<name>', 'muse')
-      .replace('<working|waiting|done|ended>', 'working').replace('<UTC time, like 2026-10-17T08:10:52Z>', new Date().toISOString())
+      .replace('<working|waiting|done|ended>', 'working').replace('<UTC time, like 2026-10-17T08:10:52Z>', new Date(Date.now() - 1000).toISOString())
       .replace('<the outcome, in plain words>', 'Synthetic web chat report').replace('<one line on why this work exists>', 'Synthetic relay check')
       .replace('<a finished step>', 'Synthetic finished').replace('<the step you are on>', 'Synthetic current')
       .replace('<a step that needs me>', 'Synthetic question').replace('<one line saying what you need>', 'Choose a synthetic option')
