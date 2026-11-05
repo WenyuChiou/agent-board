@@ -824,7 +824,7 @@ test('a write made while a poll is held still lands, without waiting on the held
   expect(world.files.get(FILE)).toContain('Synthetic second quick task')
 })
 
-test('a poll held for a minute leaves at most two reads of the held file waiting', async ($, on) => {
+test('a held poll leaves at most two reads of the held file waiting', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
@@ -835,12 +835,13 @@ test('a poll held for a minute leaves at most two reads of the held file waiting
   put(world, answered, '{}\n', NOW + 6_000)
   world.holdRead = path => (path === answered ? new Promise(() => undefined) : undefined)
   world.reads = []
-  for (let n = 0; n < 30; n++) await clock.advance(2000)
+  // Two 15-second hung-read windows and another timer tick expose a third read.
+  for (let n = 0; n < 18; n++) await clock.advance(2000)
   // The held poll and the one that took its place; no third while both are held.
   expect(world.reads.filter(path => path === answered)).toHaveLength(2)
 })
 
-test('a poll whose reads of progress.md hang for a minute starts at most two polls while the 2-second timer ticks', async ($, on) => {
+test('a poll whose reads of progress.md hang starts at most two polls while the 2-second timer ticks', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'working', 1, '- [~] Work')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
@@ -852,14 +853,15 @@ test('a poll whose reads of progress.md hang for a minute starts at most two pol
   world.files.set(FILE, `${board}${block('a1b2c302', 'working', 1, '- [~] Later work')}`)
   world.mtime += 1
   world.reads = []
-  for (let n = 0; n < 30; n++) await clock.advance(2000)
+  // Two 15-second hung-read windows and another timer tick expose a third poll.
+  for (let n = 0; n < 18; n++) await clock.advance(2000)
   // The held poll and the one that took its place: no third starts while the first is still held.
   expect(world.reads.filter(path => path === FILE)).toHaveLength(2)
   world.holdRead = undefined
   for (const release of held) release()
 })
 
-test('a question pass held for a minute leaves one read of the ledger waiting', async ($, on) => {
+test('a held question pass leaves one read of the ledger waiting', async ($, on) => {
   const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
@@ -870,7 +872,8 @@ test('a question pass held for a minute leaves one read of the ledger waiting', 
   put(world, LEDGER, world.files.get(LEDGER)!, NOW)
   world.holdRead = path => (path === LEDGER ? new Promise(() => undefined) : undefined)
   world.reads = []
-  for (let n = 0; n < 30; n++) await clock.advance(2000)
+  // Keep ticking beyond both hung-read windows while the question pass stays held.
+  for (let n = 0; n < 18; n++) await clock.advance(2000)
   expect(world.reads.filter(path => path === LEDGER)).toHaveLength(1)
 })
 

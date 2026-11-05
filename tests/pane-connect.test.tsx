@@ -610,10 +610,13 @@ test('a hand-run connect names each approval it needs once', { options: { autoCo
   }
 })
 
-test('a file that cannot be read is named as unreadable, not as unwritable', { options: { autoConnect: false } }, async ($, on) => {
-  const board = '/home/me/.claude/agent-board.mjs'
-  const reporter = '/home/me/.claude/progress-report.sh'
-  const command = '/home/me/.gemini/commands/board.toml'
+for (const [kind, file] of [
+  ['board script', '/home/me/.claude/agent-board.mjs'],
+  ['reporter', '/home/me/.claude/progress-report.sh'],
+  ['board command', '/home/me/.gemini/commands/board.toml'],
+  ['configuration', '/home/me/.cursor/hooks.json'],
+  ['legacy hook', '/home/me/.grok/hooks/progress-pane.json'],
+] as const) test(`a ${kind} file that cannot be read is named as unreadable, not as unwritable`, { options: { autoConnect: false } }, async ($, on) => {
   const config = '/home/me/.cursor/hooks.json'
   const old = '/home/me/.grok/hooks/progress-pane.json'
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
@@ -621,23 +624,30 @@ test('a file that cannot be read is named as unreadable, not as unwritable', { o
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   for (const s of Object.values(STRINGS)) {
     await $.command.run({ ...TIDY, args: `lang ${s.lang}` })
-    for (const file of [board, reporter, command, config, old]) {
-      world.files.clear()
-      for (const [path, text] of [['/home/me/.gemini/settings.json', '{}'], ['/home/me/.grok/config.toml', ''], [file, 'unreadable bytes']]) world.files.set(path!, text!)
-      world.unreadable = new Set([file])
-      const connected = await $.command.run({ ...TIDY, args: 'connect' })
-      const expected = file === config ? s.connectReadFailed('Cursor', file) : file === old ? s.connectReadFailed('Grok Build', file) : s.connectBoardReadFailed(file)
-      expect(connected.text.split(expected)).toHaveLength(2)
-      expect(connected.text).not.toContain(s.connectBoardFailed(file))
-      expect(connected.text).not.toContain(s.connectReporterFailed(file))
-      expect(connected.text).not.toContain(s.connectFailed(file === config ? 'Cursor' : 'Grok Build', file))
-      if (file === config) expect(connected.text).not.toContain(s.connectSkipped('Cursor', file))
-      expect(connected.text).not.toContain(s.setupHookUnreadable)
-      expect(world.files.get(file)).toBe('unreadable bytes')
-      const status = await $.command.run({ ...TIDY, args: 'connect status' })
-      expect(status.text.split(expected)).toHaveLength(2)
-    }
-    world.unreadable = new Set()
+    world.files.clear()
+    for (const [path, text] of [['/home/me/.gemini/settings.json', '{}'], ['/home/me/.grok/config.toml', ''], [file, 'unreadable bytes']]) world.files.set(path!, text!)
+    world.unreadable = new Set([file])
+    const connected = await $.command.run({ ...TIDY, args: 'connect' })
+    const expected = file === config ? s.connectReadFailed('Cursor', file) : file === old ? s.connectReadFailed('Grok Build', file) : s.connectBoardReadFailed(file)
+    expect(connected.text.split(expected)).toHaveLength(2)
+    expect(connected.text).not.toContain(s.connectBoardFailed(file))
+    expect(connected.text).not.toContain(s.connectReporterFailed(file))
+    expect(connected.text).not.toContain(s.connectFailed(file === config ? 'Cursor' : 'Grok Build', file))
+    if (file === config) expect(connected.text).not.toContain(s.connectSkipped('Cursor', file))
+    expect(connected.text).not.toContain(s.setupHookUnreadable)
+    expect(world.files.get(file)).toBe('unreadable bytes')
+    const status = await $.command.run({ ...TIDY, args: 'connect status' })
+    expect(status.text.split(expected)).toHaveLength(2)
+  }
+})
+
+test('a Cursor configuration with invalid JSON is named as invalid, not as a read failure', { options: { autoConnect: false } }, async ($, on) => {
+  const config = '/home/me/.cursor/hooks.json'
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  for (const s of Object.values(STRINGS)) {
+    await $.command.run({ ...TIDY, args: `lang ${s.lang}` })
     world.files.clear()
     world.files.set(config, 'invalid json')
     const connected = await $.command.run({ ...TIDY, args: 'connect' })
