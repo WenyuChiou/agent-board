@@ -1374,10 +1374,11 @@ const openBoard = async ($: EngineInterface): Promise<{ text: string }> => {
 }
 
 // A refused registration must not hide the entry (a name clash did, silently), nor stop the plugin
-// starting: it goes to the debug log, where the host's own refusal text says why.
-const registerOrLog = async <T,>($: EngineInterface, what: string, registering: Promise<T>): Promise<T | null> => {
+// starting: it goes to the debug log, where the host's own refusal text says why. The call is made
+// inside the try, so a host without the API (an older Claude Code has no $.tool) is logged too.
+const registerOrLog = async <T,>($: EngineInterface, what: string, registering: () => Promise<T>): Promise<T | null> => {
   try {
-    return await registering
+    return await registering()
   } catch (error) {
     try {
       await $.ui.log(`agent-board: ${what} was not registered: ${messageOf(error)}`, { to: 'debug' })
@@ -3930,9 +3931,9 @@ export const register: Register = (on, options) => {
     await settleLang($, options)
     const words = await wordsOf($)
     await $.command.register({ name: 'progress', description: words.commandDescription, argumentHint: words.commandHint })
-    await registerOrLog($, 'the /agent-board command', $.command.register({ name: 'agent-board', description: words.liveBoardCommandDescription }))
-    boardToolName = null
-    await isDoneWithin($, registerOrLog($, 'the agent-board tool', $.tool.register({ name: 'agent-board', description: words.liveBoardToolDescription })).then(registered => { boardToolName = registered?.tool ?? null }), HUNG_MS)
+    await registerOrLog($, 'the /agent-board command', () => $.command.register({ name: 'agent-board', description: words.liveBoardCommandDescription }))
+    // A refused repeat (a host that keeps the tool from an earlier start) keeps the name it gave then.
+    await isDoneWithin($, registerOrLog($, 'the agent-board tool', () => $.tool.register({ name: 'agent-board', description: words.liveBoardToolDescription })).then(registered => { boardToolName = registered?.tool ?? boardToolName }), HUNG_MS)
     sendingOwn.clear()
     await detectHere($)
     await loadMine($, e.cwd)

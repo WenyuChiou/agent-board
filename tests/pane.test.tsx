@@ -3229,6 +3229,21 @@ test('a refused /agent-board command or agent-board tool registration is logged,
   expect(world.registeredTools).toEqual([])
 })
 
+test('a tool registration refused on a later session start keeps the board tool answering', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], liveCalls: [], registeredTools: [], debugLog: [], store: { autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  world.toolRefusal = 'agent-board is already registered'
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.debugLog?.map(line => line.text)).toEqual(['agent-board: the agent-board tool was not registered: agent-board: $.tool.register: agent-board is already registered'])
+  const url = `http://127.0.0.1:34567/?t=${'c'.repeat(32)}`
+  world.liveOutput = `${STRINGS.en.serveAt(url)}
+`
+  const viaTool = await $.tool.call({ tool: 'mcp__plugin_synthetic__agent-board' })
+  expect(viaTool.result).toBe(`${STRINGS.en.boardPageOpened}
+<${url}>`)
+})
+
 test('a second press of continue before the first turn starts sends nothing', async ($, on) => {
   const fixture = paneEngineFixture({ agent: 'claude', source: 'this-session', kind: 'own-block', name: 'Pending continue' })
   const { world } = fixture
