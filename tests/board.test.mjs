@@ -1708,7 +1708,7 @@ setTimeout(() => process.stdout.write('Redis it is; wiring it up now.\\n'), 1000
   setup?.(dir, path)
   const child = spawn(process.execPath, [script, '--serve-child', ...serveArgs], {
     cwd,
-    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, APPDATA: dir, LOCALAPPDATA: dir, NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, XDG_RUNTIME_DIR: run, ...env },
+    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, APPDATA: dir, LOCALAPPDATA: dir, NO_COLOR: '1', AGENT_BOARD_GROK: stand, AGENT_BOARD_CODEX: stand, AGENT_BOARD_TEST_PID: String(process.pid), XDG_RUNTIME_DIR: run, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let stderr = ''
@@ -3797,7 +3797,8 @@ test('a browser that exits with an error at once is not reported as opened: the 
     chmodSync(join(bin, name), 0o755)
   }
   const press = () => {
-    const result = spawnSync(process.execPath, [board.script, '--keys', 'o'], { encoding: 'utf8', timeout: 20000, windowsHide: true, env: { ...board.env, PATH: bin } })
+    // The openers here are fakes, so this one test lets a test-started board open them (#959).
+    const result = spawnSync(process.execPath, [board.script, '--keys', 'o'], { encoding: 'utf8', timeout: 20000, windowsHide: true, env: { ...board.env, PATH: bin, AGENT_BOARD_TEST_PID: '' } })
     const url = board.urlOf(result.stdout)
     if (url) urls.push(url)
     assert.equal(result.status, 0, result.stderr)
@@ -4441,6 +4442,8 @@ const serveIn = () => {
     XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_CACHE_HOME: join(home, '.cache'),
     TEMP: temp, TMP: temp, TMPDIR: temp,
     CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: run,
+    // A page started here stops once this test process is gone, even after a killed run (#959).
+    AGENT_BOARD_TEST_PID: String(process.pid),
   }
   const serve = (extra = []) =>
     new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
@@ -4471,6 +4474,28 @@ const serveIn = () => {
   }
   return { dir, path, script, env, serve, urlOf, served, end }
 }
+
+test('a page a test started stops by itself once that test process is gone, and opens no window (#959)', async () => {
+  const board = serveIn()
+  // Stands in for a test run that is killed before it can close its page.
+  const tester = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true })
+  const alive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
+  let pid = null
+  try {
+    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve'], { env: { ...board.env, AGENT_BOARD_TEST_PID: String(tester.pid) }, encoding: 'utf8', timeout: 20_000 }, (error, text) => (error ? fail(error) : done(text))))
+    assert.ok(board.urlOf(out), out)
+    assert.doesNotMatch(out, /Opened Agent Board/)
+    pid = JSON.parse(readFileSync(board.served, 'utf8')).pid
+    assert.ok(alive(pid))
+    tester.kill()
+    for (let tries = 0; alive(pid) && tries < 100; tries++) await new Promise(done => setTimeout(done, 100))
+    assert.equal(alive(pid), false, 'the page must stop once the test process is gone')
+    assert.equal(existsSync(board.served), false)
+  } finally {
+    if (alive(tester.pid)) tester.kill()
+    await board.end([])
+  }
+})
 
 test('the board command picks text, the terminal board or the page from where it runs', () => {
   assert.equal(pickSurface({ isTty: false, env: {} }), 'page')

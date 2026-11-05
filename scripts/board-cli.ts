@@ -706,7 +706,8 @@ const watchLaunch = (child: ChildProcess, onResult: (isOpen: boolean) => void): 
 // A file or a page's address in the browser. The page's address holds only letters, digits,
 // `:/?=._-`, so cmd's `start` reads it as one word.
 const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = false): void => {
-  if (process.env.SSH_CONNECTION || process.env.SSH_TTY) return done(false)
+  // A board a test started never opens a window on the tester's screen (#959).
+  if (process.env.SSH_CONNECTION || process.env.SSH_TTY || process.env.AGENT_BOARD_TEST_PID) return done(false)
   const fallback = () => {
     const opener = process.platform === 'win32' ? [system32('cmd.exe'), ['/c', 'start', '', target]] : process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]]
     // Waited on only for the launch grace: with no desktop, xdg-open can run a text browser that
@@ -1552,6 +1553,20 @@ const serveChild = (): void => {
   // A child that could not protect the folder cannot start a page: its address file would
   // be unprotected. The parent reuses a running page itself; a child on its own refuses.
   if (runtimeUnprotected) throw new RuntimeFolderError()
+  // A page a test started stops once that test's process is gone, even after a killed run (#959).
+  // Only tests set AGENT_BOARD_TEST_PID, to their own process id.
+  const testPid = Number(process.env.AGENT_BOARD_TEST_PID)
+  if (Number.isInteger(testPid) && testPid > 0) {
+    setInterval(() => {
+      try {
+        process.kill(testPid, 0)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return
+        unlinkIf(file, () => readRunning(file)?.pid === process.pid)
+        process.exit(0)
+      }
+    }, 2000).unref()
+  }
   try {
     startServer({
       allowResume: args.includes('--allow-resume'),
