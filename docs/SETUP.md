@@ -9,10 +9,11 @@ node scripts/setup-agent.mjs
 node scripts/setup-agent.mjs --apply
 ```
 
-Auto detection checks four signs: host-specific configuration paths, an earlier setup's
-install record in the data folder (`--data-dir`, else `~/.agent-board`), commands on the
-PATH, and installed apps. With `--home`, it checks only configuration paths and install
-records, since commands and apps belong to the account running setup. It does not read
+Auto detection checks five signs: host-specific configuration paths, an earlier setup's
+install record in the data folder (`--data-dir`, else `~/.agent-board`), Grok Build's own
+`~/.grok/bin` program, commands on the PATH, and installed apps. On Windows a command counts
+as `.exe`, `.cmd`, `.bat`, `.com` or `.ps1`. With `--home`, it checks only the first three,
+since commands and apps belong to the account running setup. It does not read
 conversations or credentials. A found command or app is a candidate, not an active
 session or account access. Run setup without `--apply` first: its preview lists each file;
 a bare `--apply` writes to the same agents and prints only how many files changed.

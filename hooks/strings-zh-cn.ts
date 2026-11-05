@@ -105,6 +105,11 @@ export const ZH_CN: Strings = {
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",
     "board": "打开看板：{command}"
   },
+  setupNoAgent: {
+    "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "home": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "unknown": "agent-board：--agent 写了 setup 不认识的 agent 名称。指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
+  },
   setupErrorMissingValue: 'agent-board：setup 有个选项后面没有接值。--agent、--home、--data-dir 这类选项都要接一个值；请在选项后面补上，再运行一次 setup。',
   setupErrorConfig: (host: string): string => `agent-board：setup 读不懂或无法安全更新 ${host} 的设置，所以保持原样。请修正或移开该 agent 的配置文件，再运行一次 setup。`,
   setupErrorRecord: (file: string): string => `agent-board：setup 读不懂自己先前留下的安装记录 ${file}，所以保持原样。请把这个文件从 setup 存放数据的文件夹移到别处，再运行一次 setup。`,

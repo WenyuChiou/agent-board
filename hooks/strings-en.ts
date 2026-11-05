@@ -105,6 +105,11 @@ export const EN: Strings = {
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
     "board": "Open the board: {command}"
   },
+  setupNoAgent: {
+    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all)."
+  },
   setupErrorMissingValue: 'agent-board: a setup option is missing its value. Options such as --agent, --home and --data-dir each take one; add it after the option and run setup again.',
   setupErrorConfig: (host: string): string => `agent-board: setup cannot read or safely update the settings for ${host}, so it left them as they were. Fix or move that agent's config file, then run setup again.`,
   setupErrorRecord: (file: string): string => `agent-board: setup cannot read ${file}, its own record of an earlier setup, so it left everything as it was. Move that file out of the folder where setup keeps its data, then run setup again.`,

@@ -930,6 +930,56 @@ test('a repeat setup preview lists Antigravity after an all-agent apply', () => 
   assert.equal(result.stdout.match(/^.+: already set up/gm)?.length, installed.length, result.stdout)
 }))
 
+test('the setup messages for no agent and an unknown agent match all three string tables', () => {
+  const installer = readFileSync(resolve('scripts/setup-agent.mjs'), 'utf8')
+  const start = installer.indexOf('const noAgentWords = ') + 'const noAgentWords = '.length
+  const end = installer.indexOf('\nconst noAgentText = ', start)
+  assert.ok(start >= 'const noAgentWords = '.length && end > start)
+  const tables = ['hooks/strings-en.ts', 'hooks/i18n.ts', 'hooks/strings-zh-cn.ts'].map(file => {
+    const match = readFileSync(resolve(file), 'utf8').match(/  setupNoAgent: (\{[\s\S]*?\n  \}),/)
+    assert.ok(match, file)
+    return JSON.parse(match[1])
+  })
+  assert.deepEqual(JSON.parse(installer.slice(start, end)), tables)
+})
+
+test('setup finds Grok Build in its own bin folder when it is not on the PATH', () => detectedSetupFixture(f => {
+  f.env.GROK_HOME = join(f.home, 'grok elsewhere')
+  const own = join(f.home, '.grok', 'bin')
+  mkdirSync(own, { recursive: true })
+  writeFileSync(join(own, process.platform === 'win32' ? 'grok.exe' : 'grok'), 'synthetic Grok', { mode: 0o755 })
+  for (const args of [[], ['--home', f.home]]) {
+    const result = f.run('--json', ...args)
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual(JSON.parse(result.stdout).targets, ['grok'], JSON.stringify(args))
+  }
+}))
+
+test('setup on Windows counts every command spelling and not a bare name', { skip: process.platform !== 'win32' }, () => detectedSetupFixture(f => {
+  const targetsWith = name => {
+    const file = join(f.env.PATH, name)
+    writeFileSync(file, 'synthetic command')
+    try {
+      const result = f.run('--json')
+      assert.equal(result.status, 0, result.stderr)
+      return JSON.parse(result.stdout).targets
+    } finally { rmSync(file) }
+  }
+  for (const extension of ['.exe', '.cmd', '.bat', '.com', '.ps1']) assert.deepEqual(targetsWith(`gemini${extension}`), ['gemini'], extension)
+  assert.deepEqual(targetsWith('gemini'), [])
+}))
+
+test('a removed Antigravity is not listed again although its emptied hooks file stays', () => fixture(f => {
+  const applied = setupAgent(f, '--lang', 'en', '--agent', 'antigravity', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  const removed = spawnSync(process.execPath, [join(f.root, 'agent-board.mjs'), '--home', f.home, '--codex-remove', '--agent', 'antigravity', '--apply'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(join(f.home, '.gemini', 'config', 'hooks.json')), true)
+  const result = setupAgent(f, '--lang', 'en')
+  assert.equal(result.status, 0, result.stderr)
+  assert.doesNotMatch(result.stdout, /^Antigravity:/m)
+}))
+
 test('a command on the PATH is listed once setup applies it, and again as already set up', () => detectedSetupFixture(f => {
   f.fake('gemini')
   const applied = f.run('--apply')

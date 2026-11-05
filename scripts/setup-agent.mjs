@@ -91,17 +91,32 @@ const summaries = [
 ]
 const summary = summaries[['en', 'zh-TW', 'zh-CN'].indexOf(language)]
 const words = (key, values = {}) => summary[key].replace(/\{(\w+)\}/g, (text, name) => String(values[name] ?? text))
+// Keep this copy identical to setupNoAgent in all three tables.
+const noAgentWords = [
+  {
+    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all)."
+  },
+  {
+    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
+  },
+  {
+    "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "home": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "unknown": "agent-board：--agent 写了 setup 不认识的 agent 名称。指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
+  }
+]
+const noAgentText = (key, values) => message(...noAgentWords.map(table => table[key].replace(/\{(\w+)\}/g, (text, name) => String(values[name] ?? text))))
 const names = { codex: 'Codex', cursor: 'Cursor', opencode: 'OpenCode', gemini: 'Gemini CLI', grok: 'Grok Build', muse: 'Muse Code', hermes: 'Hermes Agent', openclaw: 'OpenClaw', antigravity: 'Antigravity', deepseek: 'DeepSeek' }
 const missingValue = message(
   'agent-board: a setup option is missing its value. Options such as --agent, --home and --data-dir each take one; add it after the option and run setup again.',
   'agent-board：setup 有個選項後面沒有接值。--agent、--home、--data-dir 這類選項都要接一個值；請在選項後面補上，再執行一次 setup。',
   'agent-board：setup 有个选项后面没有接值。--agent、--home、--data-dir 这类选项都要接一个值；请在选项后面补上，再运行一次 setup。',
 )
-const noTarget = message(
-  `agent-board: --agent named an agent setup does not know. Name one: ${command ? `${command} ` : ''}--agent codex (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).`,
-  `agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：${command ? `${command} ` : ''}--agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
-  `agent-board：--agent 写了 setup 不认识的 agent 名称。指定一个：${command ? `${command} ` : ''}--agent codex（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
-)
+const noTarget = noAgentText('unknown', { next: `${command ? `${command} ` : ''}--agent codex` })
 const childFailed = host => message(
   `agent-board: setup stopped while working on ${host}. Run it again with --json to see the reason.`,
   `agent-board：setup 處理 ${host} 時中止了。加上 --json 再執行一次，就能看到原因。`,
@@ -142,8 +157,9 @@ class SetupFailure extends Error {
 }
 const fail = (code, message, extra = {}) => { throw new SetupFailure(code, message, extra) }
 
-// Detect installed commands without starting them during setup.
-const findOnPath = (commands, extensions = ['.exe', '.cmd', '.ps1', '.bat']) => {
+// Detect installed commands without starting them during setup. A bare name on Windows is left
+// out: cmd and PowerShell cannot start one, and npm's bare shim always has a .cmd beside it.
+const findOnPath = (commands, extensions = ['.exe', '.cmd', '.bat', '.com', '.ps1']) => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path')
   const path = (pathKey ? process.env[pathKey] : '') || ''
   const filenames = process.platform === 'win32' ? commands.flatMap(command => extensions.map(extension => `${command}${extension}`)) : commands
@@ -177,6 +193,9 @@ const main = () => {
     grok: ['grok'], muse: ['muse'], hermes: ['hermes'], openclaw: ['openclaw'],
     antigravity: ['agy', 'antigravity'], deepseek: ['dsh'],
   }
+  // Grok Build installs itself here and does not always add it to the PATH (board-serve.ts starts it
+  // from the same place). It sits in the home, so it counts with --home, and GROK_HOME does not move it.
+  const ownPrograms = { grok: join(home, '.grok', 'bin', process.platform === 'win32' ? 'grok.exe' : 'grok') }
   const apps = process.platform === 'win32'
     ? process.env.LOCALAPPDATA ? Object.fromEntries(Object.entries({ cursor: 'cursor', antigravity: 'Antigravity' }).map(([agent, folder]) => [agent, [join(process.env.LOCALAPPDATA, 'Programs', folder)]])) : {}
     : process.platform === 'darwin'
@@ -196,6 +215,7 @@ const main = () => {
   const selected = selector === 'all' ? targets : selector === 'auto' ? targets.filter(agent =>
     (hostDirs[agent] ? existsSync(hostDirs[agent]) : signs[agent].some(sign => existsSync(join(home, sign))))
     || existsSync(join(data, `install-${agent}.json`))
+    || (ownPrograms[agent] !== undefined && existsSync(ownPrograms[agent]))
     || (homeAt < 0 && (findOnPath(commands[agent]) || apps[agent]?.some(app => existsSync(app)))),
   ) : selector.split(',')
   const hasClaude = existsSync(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')) || (homeAt < 0 && !!findOnPath(['claude']))
@@ -206,11 +226,7 @@ const main = () => {
   const setupCommand = extra => [command || nodeCommand(fileURLToPath(import.meta.url)), ...common.map(quote), ...extra.map(quote)].join(' ')
   if (selector === 'auto' && !selected.length) {
     const next = setupCommand(['--agent', 'codex'])
-    const noAgent = message(
-      `Setup found no agent on this computer. It looked for their folders in ${home}${homeAt < 0 ? ', their commands on the PATH and their apps' : ''}. Install an agent and run setup again, or name one: ${next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).`,
-      `setup 在這台電腦沒有找到 agent。它找過 ${home} 裡的資料夾${homeAt < 0 ? '、PATH 上的命令和已安裝的應用程式' : ''}。請安裝一個 agent 再執行一次 setup，或指定一個：${next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
-      `setup 在这台电脑没有找到 agent。它找过 ${home} 里的文件夹${homeAt < 0 ? '、PATH 上的命令和已安装的应用程序' : ''}。请安装一个 agent 再运行一次 setup，或指定一个：${next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。`,
-    )
+    const noAgent = noAgentText(homeAt < 0 ? 'anywhere' : 'home', { home, next })
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n1. ${words('plugin')}` : noAgent}\n`)
     return
   }
@@ -278,6 +294,7 @@ const main = () => {
   for (const agent of available) {
     const plan = results[selected.indexOf(agent)]
     if (plan.managedBy === 'connector') continue
+    // Narrower than detection: this path goes to --codex-bin, which cannot start a .bat or .com.
     const codex = agent === 'codex' ? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
     steps.push(words(agent === 'codex' ? codex ? 'codex' : 'codexMissing' : plan.capabilities.lifecycle === 'adapter-pending' ? 'skill' : 'reload', { host: names[agent], command: boardCommand, codex: codex ? quote(codex) : '' }))
   }
