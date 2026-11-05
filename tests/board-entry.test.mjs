@@ -16,6 +16,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+import { removeTree } from './helpers/remove-tree.mjs'
 const { BOARD_REQUEST_HINTS, LEGACY_BOARD_PROMPTS, boardRequestWords, geminiBoardCommand, isBoardRequest, opencodeBoardCommand } = await import('../hooks/board-commands.ts')
 const { isInstallerSkill } = await import('../hooks/connect-pure.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
@@ -91,7 +92,7 @@ test('agent-board with no flag inside an agent opens the page and prints one bar
       assert.equal(alive(), false, 'the page server exits before scratch cleanup')
     }
     assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep))
-    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    removeTree(root)
   }
 })
 
@@ -151,4 +152,21 @@ test('every launcher help lists the agent JSON read and leaves out the retired s
       assert.ok(!stdout.includes('text for agents') && !stdout.includes('agent 印純文字') && !stdout.includes('agent 印纯文本'))
     }
   }
+})
+
+// Node's rmSync does not retry an EBUSY from the folder itself (main 78fc392), so the test
+// cleanup retries it; a stand-in removal makes the busy folder the same on every computer.
+test('a test folder that is busy for a moment is still removed, and one that stays busy fails with its error', () => {
+  const busy = code => Object.assign(new Error(`synthetic ${code}`), { code })
+  for (const code of ['EBUSY', 'EPERM', 'ENOTEMPTY']) {
+    let calls = 0
+    removeTree('synthetic-folder', { delayMs: 1, remove: () => { calls++; if (calls < 3) throw busy(code) } })
+    assert.equal(calls, 3, code)
+  }
+  let calls = 0
+  assert.throws(() => removeTree('synthetic-folder', { attempts: 4, delayMs: 1, remove: () => { calls++; throw busy('EBUSY') } }), { code: 'EBUSY' })
+  assert.equal(calls, 4)
+  calls = 0
+  assert.throws(() => removeTree('synthetic-folder', { delayMs: 1, remove: () => { calls++; throw busy('EACCES') } }), { code: 'EACCES' })
+  assert.equal(calls, 1, 'another error is not retried')
 })
