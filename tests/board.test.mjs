@@ -6184,14 +6184,20 @@ test('--tidy --stopped without a terminal only previews, and conflicting or inva
   })
 })
 
-test('terminal A previews stopped blocks on the first press and archives them on the second', () => {
+// Each press starts a cold Node, and a cold start is slow under load. The test
+// checks what the presses do, not how fast a cold start is, so the presses
+// carry no timeout of their own; the test timeout is the only bound, as in
+// the other terminal-board tests. The presses also clear CLAUDE_PROGRESS_FILE,
+// as the other board spawns do: a value inherited from the runner would
+// redirect the board away from this fixture's file.
+test('terminal A previews stopped blocks on the first press and archives them on the second', { timeout: 30_000 }, () => {
   tidyFixture(f => {
     writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c331', 'Old ended', 'ended', 73)}\n${f.block('a1b2c332', 'Active', 'working', 1, '- [~] Working')}`)
-    const once = execFileSync(process.execPath, [join(f.dir, 'agent-board.mjs'), '--keys', 'A'], { env: { ...process.env, NO_COLOR: '1' }, encoding: 'utf8', timeout: 5000 })
+    const once = execFileSync(process.execPath, [join(f.dir, 'agent-board.mjs'), '--keys', 'A'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8' })
     assert.match(once, /Preview: 1 block would be archived\./)
     assert.match(once, /Press A again to confirm the archive/)
     assert.ok(readFileSync(f.path, 'utf8').includes('Old ended'))
-    const twice = execFileSync(process.execPath, [join(f.dir, 'agent-board.mjs'), '--keys', 'A A'], { env: { ...process.env, NO_COLOR: '1' }, encoding: 'utf8', timeout: 5000 })
+    const twice = execFileSync(process.execPath, [join(f.dir, 'agent-board.mjs'), '--keys', 'A A'], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }, encoding: 'utf8' })
     assert.match(twice, /Archived 1 block\./)
     const after = readFileSync(f.path, 'utf8')
     assert.ok(!after.includes('Old ended') && after.includes('Active'), after)
