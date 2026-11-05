@@ -288,6 +288,9 @@ test('a change to one board bundle part alone counts as a bundle change and sele
     assert.equal(plan.generated.bundle, true)
     // The browser journeys install this bundle in a child process: a page change runs them (#942).
     assertOnly(plan, ['npm', 'installers', 'browser', 'generated'])
+    // setup-agent.mjs runs setup-codex.mjs in a child process too, so a change to it alone runs them as well.
+    await writeFixture(root, 'scripts/setup-codex.mjs', 'export {}')
+    assert.equal((await buildPlan(['scripts/setup-codex.mjs'], { roots: [root] })).checks.browser, true)
   })
 })
 

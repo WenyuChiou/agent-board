@@ -229,9 +229,9 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
     for (const path of ['bin/agent-board.mjs', 'scripts/setup-agent.mjs', 'scripts/setup-codex.mjs', ...bundleFiles(root), 'hooks/released.ts']) {
       for (const dependency of await walkDependencies(root, [path])) deps.npm.add(dependency)
     }
-    // The browser journeys install the board with scripts/setup-agent.mjs in a child process, which the import walk
-    // cannot see, so a page change alone selected no browser check (#942 reached main untested).
-    for (const path of ['scripts/setup-agent.mjs', ...bundleFiles(root), 'hooks/released.ts']) {
+    // The browser journeys install the board with scripts/setup-agent.mjs, which runs setup-codex.mjs, both in child
+    // processes the import walk cannot see, so a page change alone selected no browser check (#942 reached main untested).
+    for (const path of ['scripts/setup-agent.mjs', 'scripts/setup-codex.mjs', ...bundleFiles(root), 'hooks/released.ts']) {
       for (const dependency of await walkDependencies(root, [path])) deps.browser.add(dependency)
     }
     for (const path of ['hooks/parse.ts', 'hooks/blocks.ts']) deps.remote.add(path)
