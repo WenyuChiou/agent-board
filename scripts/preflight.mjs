@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir, userInfo } from 'node:os'
-import { dirname, join, relative, resolve, win32 } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { addedLines, testTitles, titleKnown } from './pr-check.mjs'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
@@ -130,6 +130,30 @@ const isLiveProcess = pid => {
     return true
   } catch (error) {
     return error?.code !== 'ESRCH'
+  }
+}
+
+const handoverFolder = /^agent-board-preflight-main-([1-9]\d*)-[A-Za-z0-9]{6}$/
+const isDeadHandover = path => {
+  const match = handoverFolder.exec(basename(path))
+  return Boolean(match && !isLiveProcess(Number(match[1])))
+}
+
+// Concurrent handovers in one process must all be removed before a signal ends it.
+const handoverCleanups = new Set()
+const handoverSignals = new Map([['SIGINT', 130], ['SIGTERM', 143]].map(([signal, code]) => [signal, () => {
+  for (const cleanup of handoverCleanups) {
+    try { cleanup() } catch {}
+  }
+  process.exit(code)
+}]))
+
+const watchHandover = cleanup => {
+  if (!handoverCleanups.size) for (const [signal, handler] of handoverSignals) process.on(signal, handler)
+  handoverCleanups.add(cleanup)
+  return () => {
+    handoverCleanups.delete(cleanup)
+    if (!handoverCleanups.size) for (const [signal, handler] of handoverSignals) process.off(signal, handler)
   }
 }
 
@@ -567,7 +591,7 @@ const parseArgs = argv => {
   return options
 }
 
-export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessIdentity = processStartIdentity, onCheck, onProgress, onLockPublished } = {}) => {
+export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, isFromMain = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessIdentity = processStartIdentity, onCheck, onProgress, onLockPublished } = {}) => {
   const checks = []
   // `exact` replaces the \ue001 mark after redaction: a validated lock file name and fixed folder pattern, which an account name must not alter.
   const add = (state, message, exact = '') => {
@@ -584,6 +608,58 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     if (executed.error || executed.status !== 0) throw new Error('Git could not read the requested base or working tree')
     return executed.stdout
   }
+  const recoverHandovers = () => {
+    const candidates = new Map()
+    const protectedFolders = new Set()
+    const keyOf = path => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path)
+    const containsCwd = path => {
+      const part = relative(path, resolve(cwd))
+      return part === '' || (!isAbsolute(part) && part !== '..' && !part.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`))
+    }
+    const worktrees = git('worktree', 'list', '--porcelain', '-z').split('\0').filter(line => line.startsWith('worktree '))
+    for (const [index, line] of worktrees.entries()) {
+      const checkout = resolve(line.slice('worktree '.length))
+      const temp = dirname(checkout)
+      if (basename(checkout) !== 'repo' || !handoverFolder.test(basename(temp))) continue
+      const key = keyOf(temp)
+      if (index === 0 || containsCwd(temp)) {
+        protectedFolders.add(key)
+        continue
+      }
+      if (!isDeadHandover(temp)) continue
+      try {
+        if (!lstatSync(temp).isDirectory()) continue
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+      candidates.set(key, { temp, checkout, isRegistered: true })
+    }
+    for (const item of readdirSync(tmpdir(), { withFileTypes: true })) {
+      const temp = join(tmpdir(), item.name)
+      const key = keyOf(temp)
+      if (item.isDirectory() && !protectedFolders.has(key) && !containsCwd(temp) && isDeadHandover(temp) && !candidates.has(key)) {
+        candidates.set(key, { temp, checkout: join(temp, 'repo'), isRegistered: false })
+      }
+    }
+    let hasRemoved = false
+    let hasFailed = false
+    for (const { temp, checkout, isRegistered } of candidates.values()) {
+      if (!isDeadHandover(temp)) continue
+      hasRemoved = true
+      try {
+        const removed = command('git', ['worktree', 'remove', '--force', checkout])
+        if (isRegistered && (removed.error || removed.status !== 0)) hasFailed = true
+      } catch { if (isRegistered) hasFailed = true }
+      try { rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }) } catch { hasFailed = true }
+    }
+    if (hasRemoved) {
+      try {
+        const pruned = command('git', ['worktree', 'prune'])
+        if (pruned.error || pruned.status !== 0) hasFailed = true
+      } catch { hasFailed = true }
+    }
+    if (hasFailed) throw new Error('preflight orphan cleanup failed')
+  }
   const check = async (label, action) => {
     try { await action() } catch { add('FAIL', `${label} could not finish; check its inputs and tools.`) }
   }
@@ -593,15 +669,69 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   let newPaths
   try {
     let hasFetchFailed = false
-    if (!isNoFetch) {
+    if (!isFromMain && isNoFetch) add('WARN', 'using the local preflight because --no-fetch was supplied; origin/main freshness is unknown.')
+    if (!isFromMain && !isNoFetch) {
       const fetched = command('git', ['fetch', 'origin', 'main'])
       hasFetchFailed = Boolean(fetched.error || fetched.status !== 0)
-      if (hasFetchFailed) add('FAIL', 'git fetch origin main failed; fetch main before running preflight again.')
+      if (hasFetchFailed) add('WARN', 'using the local preflight because git fetch origin main failed; origin/main freshness is unknown.')
+    }
+    // Hand over before taking the test lock; main's imports come from its checkout, while all checks still target cwd.
+    if (!isFromMain && !isNoFetch && !hasFetchFailed) {
+      try {
+        const sha = git('rev-parse', '--verify', 'origin/main^{commit}').trim()
+        const compared = command('git', ['diff', '--quiet', '--no-ext-diff', '--no-textconv', sha, '--', 'scripts/preflight.mjs'])
+        if (compared.error || ![0, 1].includes(compared.status)) throw new Error('preflight comparison failed')
+        if (compared.status === 1) {
+          recoverHandovers()
+          const temp = mkdtempSync(join(tmpdir(), `agent-board-preflight-main-${process.pid}-`))
+          const checkout = join(temp, 'repo')
+          let isCreated = false
+          let isCleaned = false
+          const cleanup = () => {
+            if (isCleaned) return
+            isCleaned = true
+            let hasFailed = false
+            let needsPrune = false
+            try {
+              if (isCreated || existsSync(join(checkout, '.git'))) {
+                const removed = command('git', ['worktree', 'remove', '--force', checkout])
+                needsPrune = Boolean(removed.error || removed.status !== 0)
+                hasFailed = needsPrune
+              }
+            } catch { hasFailed = needsPrune = true }
+            try { rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }) } catch { hasFailed = true }
+            if (needsPrune) {
+              try {
+                const pruned = command('git', ['worktree', 'prune'])
+                if (pruned.error || pruned.status !== 0) hasFailed = true
+              } catch { hasFailed = true }
+            }
+            if (hasFailed) throw new Error('preflight checkout cleanup failed')
+          }
+          const unwatch = watchHandover(cleanup)
+          try {
+            const created = command('git', ['worktree', 'add', '--detach', checkout, sha])
+            if (created.error || created.status !== 0) throw new Error('preflight checkout failed')
+            isCreated = true
+            const fromMain = await import(pathToFileURL(join(checkout, 'scripts/preflight.mjs')).href)
+            add('PASS', 'preflight from origin/main \ue001', sha)
+            checks.push(...await fromMain.runPreflight({
+              cwd, base, isNoFetch: true, isFromMain: true, bodyFile, title, run, lockPath, fallbackLockPath,
+              readProcessIdentity, onCheck, onProgress, onLockPublished,
+            }))
+          } finally {
+            try { cleanup() } finally { unwatch() }
+          }
+          return checks
+        }
+      } catch {
+        add('FAIL', 'preflight from origin/main could not finish; check main and Git working tree.')
+        return checks
+      }
     }
     const ancestor = command('git', ['merge-base', '--is-ancestor', base, 'HEAD'])
     if (ancestor.error || ![0, 1].includes(ancestor.status)) add('FAIL', 'the main merged check could not read the base or HEAD.')
     else {
-      if (hasFetchFailed) add('WARN', 'the ancestry check used the local ref because fetch failed; freshness is unknown.')
       // main does not require an up-to-date branch, so a branch behind main can merge as it is; main is merged only for a conflict.
       if (ancestor.status === 1) add('WARN', 'the branch does not contain the latest main; that is fine unless GitHub shows a conflict, then merge origin/main (no rebase, no force-push).')
       else if (!hasFetchFailed) add('PASS', 'the branch contains the base.')
