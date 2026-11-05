@@ -1852,6 +1852,10 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
 // an agent's command tool is not left waiting on the server.
 const serveBoard = async (): Promise<void> => {
   const requestedIdle = idleMs()
+  const requestedStale = staleTimeoutMs()
+  const failure: { storeCode?: string } = {}
+  // Start server preparation concurrently so background process spawn does not wait for text board formatting (#862).
+  const serverPromise = ensureServer(failure)
   if (!args.includes('--quiet-board')) process.stdout.write(boardText(view(), pending(), s, options()))
   // The note goes above the address, so the address stays the last line an agent shows.
   const show = async (url: string, isKept = false, actualIdle?: number): Promise<void> => {
@@ -1862,8 +1866,7 @@ const serveBoard = async (): Promise<void> => {
     if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)) await new Promise<void>(done => openInBrowser(url, () => done()))
     if (args.includes('--lan')) await showLan(url)
   }
-  const failure: { storeCode?: string } = {}
-  const server = await ensureServer(failure)
+  const server = await serverPromise
   if (server === null) {
     process.stdout.write(`\n${failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted)}\n`)
     return
