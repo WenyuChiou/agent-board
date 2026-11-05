@@ -29,7 +29,8 @@ All other surfaces retain an honest `Copy` or mailbox next-turn delivery fallbac
 | :--- | :--- | :--- | :--- | :--- |
 | **Wait Cancellation (Empty Wait)** | `queued` (messages unaffected) | Waiter unregistered from `WaitManager` | Unchanged (existing open message blocking preserved; queued messages remain available) | N/A (no claim occurred) |
 | **Pre-Claim Message Withdrawal** | `rejected` (`error: 'DISMISSED'`) | Message-specific waiter notification aborted | Target unblocked immediately | Message permanently finished; never delivered |
-| **Post-Claim Cancellation / Disconnect** | `uncertain` (`error: 'DISMISSED'`); an `accepted` message that is dismissed also becomes `uncertain` | Transport process aborted/killed; waiter closed | Target remains blocked until settled/timeout, except after a dismiss, which frees it (invariant 3); a hook-only target is not held (invariant 4) | Strict no-replay; never automatically re-injected |
+| **Post-Claim Cancellation / Disconnect** | `uncertain` (`error: 'CANCELLED'`) | Transport process aborted/killed; waiter closed | Target remains blocked until settled/timeout; a hook-only target is not held (invariant 4) | Strict no-replay; never automatically re-injected |
+| **Post-Claim Dismiss** | `uncertain` (`error: 'DISMISSED'`), also from `accepted` | Transport process aborted/killed; waiter closed | Target freed for the next message | Strict no-replay; never automatically re-injected |
 
 4. **Target Blocking, Transport Evidence & Semantic Acknowledgement**:
    - Retain `#388`'s target blocking: `claimMessages` blocks a target while an open message is `accepted` or `uncertain` (`hooks/messaging.ts:158–164`). This prevents out-of-order execution, split delivery, and race conditions.
