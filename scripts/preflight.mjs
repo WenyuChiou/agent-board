@@ -567,7 +567,7 @@ const parseArgs = argv => {
   return options
 }
 
-export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessIdentity = processStartIdentity, onCheck, onProgress, onLockPublished } = {}) => {
+export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, isFromMain = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessIdentity = processStartIdentity, onCheck, onProgress, onLockPublished } = {}) => {
   const checks = []
   // `exact` replaces the \ue001 mark after redaction: a validated lock file name and fixed folder pattern, which an account name must not alter.
   const add = (state, message, exact = '') => {
@@ -593,15 +593,52 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   let newPaths
   try {
     let hasFetchFailed = false
-    if (!isNoFetch) {
+    if (!isFromMain && isNoFetch) add('WARN', 'using the local preflight because --no-fetch was supplied; origin/main freshness is unknown.')
+    if (!isFromMain && !isNoFetch) {
       const fetched = command('git', ['fetch', 'origin', 'main'])
       hasFetchFailed = Boolean(fetched.error || fetched.status !== 0)
-      if (hasFetchFailed) add('FAIL', 'git fetch origin main failed; fetch main before running preflight again.')
+      if (hasFetchFailed) add('WARN', 'using the local preflight because git fetch origin main failed; origin/main freshness is unknown.')
+    }
+    // Hand over before taking the test lock; main's imports come from its checkout, while all checks still target cwd.
+    if (!isFromMain && !isNoFetch && !hasFetchFailed) {
+      try {
+        const sha = git('rev-parse', '--verify', 'origin/main^{commit}').trim()
+        const compared = command('git', ['diff', '--quiet', '--no-ext-diff', '--no-textconv', sha, '--', 'scripts/preflight.mjs'])
+        if (compared.error || ![0, 1].includes(compared.status)) throw new Error('preflight comparison failed')
+        if (compared.status === 1) {
+          const temp = mkdtempSync(join(tmpdir(), 'agent-board-preflight-main-'))
+          const checkout = join(temp, 'repo')
+          let isCreated = false
+          try {
+            const created = command('git', ['worktree', 'add', '--detach', checkout, sha])
+            if (created.error || created.status !== 0) throw new Error('preflight checkout failed')
+            isCreated = true
+            const fromMain = await import(pathToFileURL(join(checkout, 'scripts/preflight.mjs')).href)
+            add('PASS', 'preflight from origin/main \ue001', sha)
+            checks.push(...await fromMain.runPreflight({
+              cwd, base, isNoFetch, isFromMain: true, bodyFile, title, run, lockPath, fallbackLockPath,
+              readProcessIdentity, onCheck, onProgress, onLockPublished,
+            }))
+          } finally {
+            try {
+              if (isCreated || existsSync(join(checkout, '.git'))) {
+                const removed = command('git', ['worktree', 'remove', '--force', checkout])
+                if (removed.error || removed.status !== 0) throw new Error('preflight checkout cleanup failed')
+              }
+            } finally {
+              rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+            }
+          }
+          return checks
+        }
+      } catch {
+        add('FAIL', 'preflight from origin/main could not finish; check main and Git working tree.')
+        return checks
+      }
     }
     const ancestor = command('git', ['merge-base', '--is-ancestor', base, 'HEAD'])
     if (ancestor.error || ![0, 1].includes(ancestor.status)) add('FAIL', 'the main merged check could not read the base or HEAD.')
     else {
-      if (hasFetchFailed) add('WARN', 'the ancestry check used the local ref because fetch failed; freshness is unknown.')
       // main does not require an up-to-date branch, so a branch behind main can merge as it is; main is merged only for a conflict.
       if (ancestor.status === 1) add('WARN', 'the branch does not contain the latest main; that is fine unless GitHub shows a conflict, then merge origin/main (no rebase, no force-push).')
       else if (!hasFetchFailed) add('PASS', 'the branch contains the base.')
