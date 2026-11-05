@@ -1128,7 +1128,7 @@ const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind:
     const selector = tidySelector(raw.kind, raw.kind === 'agent' ? raw.value : raw.kind === 'older' ? String(raw.days) : undefined)
     if (selector === null) return { ok: false, note: s.tidyInvalid }
     const text = read(path)
-    const preview = previewTidy(text, selector, now, s)
+    const preview = previewTidy(text, selector, now, s, staleTimeoutMs())
     const token = randomUUID()
     bulkTidyPreviews.set(token, { preview, expires: now + 5 * 60000 })
     if (bulkTidyPreviews.size > 16) for (const [old] of bulkTidyPreviews) { bulkTidyPreviews.delete(old); break }
@@ -1142,11 +1142,12 @@ const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind:
     return { ok: false, note: s.tidyExpired }
   }
   bulkTidyPreviews.delete(request.token)
+  const staleMs = staleTimeoutMs()
   let moved = 0
   let refused = 0
   for (const candidate of entry.preview.candidates) {
     const body = read(path)
-    const current = currentTidyCandidate(body, entry.preview, candidate, s)
+    const current = currentTidyCandidate(body, entry.preview, candidate, s, staleMs)
     if (current === undefined) { refused += 1; continue }
     const projects = parseProgress(body)
     const frozen = cutOffScopes(projects, cutOffSpans(body, isCutSettledAt(now)))
@@ -1155,7 +1156,16 @@ const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind:
     // prepared marker, never an archived block with no audit trail.
     rewrite(journalPath(path, now), text => appendJournal(text, [tidyAudit(current, 'prepared', now)], s))
     const taken = archiveOut((text, isLast) => {
-      const again = takeTask(text, current.ref, now, s)
+      // Recheck at the write boundary: the block may have changed after the
+      // preview check, while the prepared marker was written, or on a retry.
+      // takeTask alone checks ownership and staleness, not the fingerprint or
+      // the question retention, so a changed block would otherwise be archived
+      // and its new question lost.
+      const fresh = currentTidyCandidate(text, entry.preview, candidate, s, staleMs)
+      if (fresh === undefined) return null
+      const freshProjects = parseProgress(text)
+      if (fresh.asks && !keepAskedQuestions(freshProjects, fresh.ref, now, cutOffScopes(freshProjects, cutOffSpans(text, isCutSettledAt(now))))) return null
+      const again = takeTask(text, fresh.ref, now, s, {}, staleMs)
       if (again === null) return null
       if (isLast) return { text: again.text, entries: again.entries }
       if (read(path) !== text) return AGAIN

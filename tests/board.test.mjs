@@ -6149,6 +6149,58 @@ test('tidy --older 14 refuses a row that changed during the sweep', { timeout: 3
   } finally { await board.close() }
 })
 
+test('tidy --stopped refuses a block changed while its prepared marker lands', { timeout: 30_000 }, () => {
+  tidyFixture(f => {
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c341', 'Old ended', 'ended', 73)}\n`)
+    // A second writer lands a question in the block while the prepared marker
+    // is written: the archive callback must recheck the fingerprint and refuse.
+    const preload = join(f.dir, 'race-preload.cjs')
+    writeFileSync(preload, `
+const fs = require('node:fs')
+const write = fs.writeFileSync
+let fired = false
+fs.writeFileSync = function (file, data, ...rest) {
+  const text = typeof data === 'string' ? data : (Buffer.isBuffer(data) ? data.toString('utf8') : '')
+  if (!fired && typeof file === 'string' && text.includes('"state":"prepared"')) {
+    fired = true
+    const progress = process.env.CLAUDE_PROGRESS_FILE
+    const body = fs.readFileSync(progress, 'utf8')
+    write.call(this, progress, body.replace('### Old ended\\n', '### Old ended\\n- [?] Added while prepared, OK?\\n'))
+  }
+  return write.call(this, file, data, ...rest)
+}
+`)
+    const twice = f.command(['--keys', 'A A'], preload)
+    assert.equal(twice.status, 0, twice.stderr)
+    assert.match(twice.stdout, /Archived 0 blocks; 1 refused because its state changed\./)
+    const after = readFileSync(f.path, 'utf8')
+    assert.ok(after.includes('a1b2c341') && after.includes('Added while prepared, OK?'), after)
+    assert.deepEqual(readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')), [])
+    const journals = readdirSync(f.dir).filter(name => name.startsWith('progress-journal-'))
+    assert.equal(journals.length, 1)
+    const journal = readFileSync(join(f.dir, journals[0]), 'utf8')
+    assert.equal(journal.split('"state":"prepared"').length - 1, 1, journal)
+    assert.equal(journal.split('"state":"committed"').length - 1, 0, journal)
+  })
+})
+
+test('tidy --stopped with a long configured stale timeout keeps a 13-hour working block', { timeout: 30_000 }, () => {
+  tidyFixture(f => {
+    writeFileSync(f.path, `## Synthetic\n${f.block('a1b2c351', 'Still working', 'working', 13, '- [~] Working')}\n`)
+    const plain = f.command(['--tidy', '--stopped'])
+    assert.equal(plain.status, 0, plain.stderr)
+    assert.equal(plain.stdout, 'Preview: 1 block would be archived.\nA terminal confirmation is needed. Preview and type ARCHIVE in a terminal, or use the board page.\n')
+    const configured = f.command(['--tidy', '--stopped', '--stale-ms', '172800000'])
+    assert.equal(configured.status, 0, configured.stderr)
+    assert.equal(configured.stdout, 'Preview: 0 blocks would be archived.\nA terminal confirmation is needed. Preview and type ARCHIVE in a terminal, or use the board page.\n')
+    const twice = f.command(['--keys', 'A A', '--stale-ms', '172800000'])
+    assert.equal(twice.status, 0, twice.stderr)
+    const after = readFileSync(f.path, 'utf8')
+    assert.ok(after.includes('a1b2c351'), after)
+    assert.deepEqual(readdirSync(f.dir).filter(name => name.startsWith('progress-archive-')), [])
+  })
+})
+
 test('tidy --stopped refuses a block that asks when its question has no kept record, and journals the block it moves', { timeout: 30_000 }, async () => {
   const board = await page()
   try {
