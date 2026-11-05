@@ -398,15 +398,20 @@ const queueQuestionCaptures = (copies: readonly { record: QuestionRecord; dispos
 // Writes up to `budget` queued captures, in queue order, with the same
 // per-file semantics as a synchronous write (keepQuestionCapture also bumps
 // `writes` per landed file, so a locked read after a flush still says files
-// may have changed). A file that cannot be written is dropped and named on
-// stderr: the record stays in the ledger, so the next view re-derives the
-// capture, and the empty-copy cache is cleared so that view looks again
-// instead of trusting the earlier empty decision.
+// may have changed). Every attempt counts toward the budget, failed or not:
+// counting only successes let one tick attempt the whole queue when every
+// write failed (#921 dot P2). A file that cannot be written stays queued and
+// is named on stderr: the record may no longer be in the ledger (a stale
+// replay can drop it while its capture is still pending), so dropping it here
+// would lose the only remaining evidence (#921 dot P1). The empty-copy cache
+// is cleared so the next view looks again instead of trusting the earlier
+// empty decision, and that view restarts the flush while entries remain.
 const flushQuestionCaptures = (budget: number): void => {
-  let written = 0
+  let attempted = 0
+  let landed = 0
   for (const [key, capture] of [...pendingQuestionCaptures]) {
-    if (written >= budget) break
-    pendingQuestionCaptures.delete(key)
+    if (attempted >= budget) break
+    attempted += 1
     try {
       keepQuestionCapture(capture.record, capture.disposition)
     } catch (error) {
@@ -414,9 +419,13 @@ const flushQuestionCaptures = (budget: number): void => {
       process.stderr.write(`agent-board: could not write queued question capture ${basename(capturePath(path, sha256(key)))}: ${error instanceof Error ? error.message : String(error)}\n`)
       continue
     }
-    written += 1
+    pendingQuestionCaptures.delete(key)
+    landed += 1
   }
-  if (pendingQuestionCaptures.size > 0) scheduleQuestionCaptureFlush()
+  // Only keep the chain running while it makes progress: retrying a tick
+  // that landed nothing would spin the setImmediate loop on a failure that
+  // is not going away. A later view restarts the flush while entries remain.
+  if (landed > 0 && pendingQuestionCaptures.size > 0) scheduleQuestionCaptureFlush()
 }
 // Drains the whole queued-capture backlog synchronously. Only deliberate acts
 // call this (archive, tidy, sweep): the view never waits for the queue, but a
@@ -610,6 +619,11 @@ const readBoardView = (source: string, now: number) => {
   // write would have shown it. View-only: the persisted ledger never sees
   // pending captures (#921).
   const viewQuestions = pendingQuestionCaptures.size === 0 ? questions : withCaptures(questions, [...pendingQuestionCaptures.values()])
+  // A flush that stopped after a tick that landed nothing (every write
+  // failed) restarts here: the queue still holds the evidence, and the next
+  // view is the retry. Without this, a retained failed entry would sit until
+  // a new copy arrived. A no-op while a flush is already scheduled.
+  if (pendingQuestionCaptures.size > 0) scheduleQuestionCaptureFlush()
   // A question marked answered in a pane on this machine is kept off the board too.
   const tail = progressHealthCache.tail
   const sizes = { progress: Buffer.byteLength(source), store: pageState.store }
