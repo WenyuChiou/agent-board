@@ -1889,7 +1889,8 @@ createInterface({ input: process.stdin }).on('line', line => {
     f.save(shim, source)
     const result = f.command(['--codex-trust', '--codex-bin', shim, '--json'])
     assert.equal(result.status, 0, result.stderr)
-    assert.equal(JSON.parse(result.stdout).hooks.length, 6)
+    assert.equal(JSON.parse(result.stdout).hooks.length, 7)
+    assert.ok(JSON.parse(result.stdout).hooks.some(hook => hook.event === 'postToolUse'))
     assert.equal(JSON.parse(result.stdout).applied, false)
     f.save(shim, 'not an npm shim')
     for (const lang of ['en', 'zh-TW', 'zh-CN']) {
@@ -3937,7 +3938,7 @@ test('--codex-trust prints one plain line by default and the JSON only with --js
   } finally { resolver.deregister() }
 })
 
-test('the installed Codex host grants only six reviewed hashes and preserves unrelated config', { skip: !process.env.AGENT_BOARD_TEST_CODEX }, () => fixture(f => {
+test('the installed Codex host grants only seven reviewed hashes and preserves unrelated config', { skip: !process.env.AGENT_BOARD_TEST_CODEX }, () => fixture(f => {
   const executable = process.env.AGENT_BOARD_TEST_CODEX
   f.env.CODEX_HOME = join(f.home, '.codex')
   const config = join(f.home, '.codex', 'config.toml')
@@ -3948,19 +3949,19 @@ test('the installed Codex host grants only six reviewed hashes and preserves unr
   const args = ['--codex-trust', '--codex-bin', executable, '--json']
   const plan = f.command(args)
   assert.equal(plan.status, 0, plan.stderr)
-  assert.equal(JSON.parse(plan.stdout).changes, 6)
+  assert.equal(JSON.parse(plan.stdout).changes, 7)
   assert.equal(readFileSync(config, 'utf8'), original)
   const applied = f.command([...args, '--apply'])
   assert.equal(applied.status, 0, applied.stderr)
-  assert.equal(JSON.parse(applied.stdout).trusted, 6)
+  assert.equal(JSON.parse(applied.stdout).trusted, 7)
   const saved = readFileSync(config, 'utf8')
   assert.match(saved, /# Keep this comment/)
   assert.match(saved, /\[hooks.state.unrelated\]\nenabled = false/)
-  assert.equal((saved.match(/trusted_hash/g) ?? []).length, 6)
+  assert.equal((saved.match(/trusted_hash/g) ?? []).length, 7)
   const again = f.command(args)
   assert.equal(again.status, 0, again.stderr)
   assert.equal(JSON.parse(again.stdout).changes, 0)
-  assert.equal(JSON.parse(again.stdout).hooks.length, 6)
+  assert.equal(JSON.parse(again.stdout).hooks.length, 7)
   const doctor = f.command(['--codex-doctor', '--codex-bin', executable, '--json'])
   assert.equal(JSON.parse(doctor.stdout).hooksTrusted, true, doctor.stderr)
   assert.equal(JSON.parse(doctor.stdout).connected, 'unverified')
@@ -4056,7 +4057,36 @@ test('--codex-doctor auto-discovers Codex on PATH and verifies hook trust', { sk
   assert.ok(step?.includes('--codex-bin'), plainUntrusted)
   const preview = spawnSync(step, { shell: true, cwd: f.home, env: { ...f.env, ...withBinOnPath }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
   assert.equal(preview.status, 0, preview.stderr)
-  assert.ok(preview.stdout.includes('would trust'), preview.stdout)
+  assert.ok(preview.stdout.includes("would trust the board's 7 hooks"), preview.stdout)
+}))
+
+test('a six-hook Codex install from before the plan hook is sent to setup by the doctor, refused by trust, and gets its seventh group from setup', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const manifestFile = join(f.root, 'install-codex.json')
+  const older = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  delete older.hooks.PostToolUse
+  f.save(f.hooks, `${JSON.stringify(older, null, 2)}\n`)
+  const record = JSON.parse(readFileSync(manifestFile, 'utf8'))
+  delete record.groups.PostToolUse
+  delete record.foreignGroups.PostToolUse
+  f.save(manifestFile, `${JSON.stringify(record, null, 2)}\n`)
+  const doctor = f.command(['--codex-doctor', '--lang', 'en'])
+  assert.equal(doctor.status, 0, doctor.stderr)
+  const lines = doctor.stdout.split(/\r?\n/)
+  assert.ok(lines.some(line => /^Missing or outdated: .*hooks\.json$/.test(line)), doctor.stdout)
+  const next = lines.filter(line => line.startsWith('Next:'))
+  assert.equal(next.length, 1, doctor.stdout)
+  assert.match(next[0], /^Next: preview the setup repair: /)
+  assert.doesNotMatch(doctor.stdout, /--codex-trust/)
+  const trust = f.command(['--codex-trust', '--codex-bin', join(f.home, 'codex.exe'), '--json'])
+  assert.notEqual(trust.status, 0)
+  assert.match(trust.stderr, /OWNED_CODEX_INSTALL_REQUIRED/)
+  assert.equal(f.install('--apply').status, 0)
+  const groups = JSON.parse(readFileSync(f.hooks, 'utf8')).hooks
+  assert.equal(groups.PostToolUse.length, 1)
+  assert.equal(groups.PostToolUse[0].matcher, 'update_plan')
+  assert.equal(Object.keys(groups).length, 7)
+  assert.ok(Object.hasOwn(JSON.parse(readFileSync(manifestFile, 'utf8')).groups, 'PostToolUse'))
 }))
 
 test('--codex-doctor detects missing trusted_hash and unverified hash without --codex-bin', () => fixture(f => {
@@ -8932,4 +8962,120 @@ test('a Codex start note uses the folder name for a bare repository worktree and
   const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext
   assert.match(context, /Synthetic bare work/)
   assert.doesNotMatch(context, /Synthetic parent folder work/)
+}))
+
+// The plan mirror (#922): a plan tool call becomes the session's steps, through the report's writer.
+const planCall = (id, tool, list, extra = {}) => ({
+  session_id: id, hook_event_name: tool === 'update_plan' ? 'PostToolUse' : 'AfterTool', tool_name: tool,
+  tool_input: tool === 'update_plan' ? { explanation: 'synthetic', plan: list } : { todos: list }, ...extra,
+})
+const planLong = `Synthetic plan detail ${'p'.repeat(130)}`
+
+test('a Codex update_plan call becomes the session steps, titled and cut like a report, and prints nothing', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const first = f.command(['--plan-event'], planCall(session, 'update_plan', [
+    { step: 'Read the spec', status: 'completed' }, { step: 'Write   the\ncode', status: 'in_progress' }, { step: planLong, status: 'pending' },
+  ]))
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(first.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /state=working/)
+  assert.match(text, /^### Write the code$/m)
+  assert.match(text, /^- \[x\] Read the spec$/m)
+  assert.match(text, /^- \[~\] Write the code$/m)
+  const cut = `${planLong.slice(0, 119)}…`
+  assert.ok(text.includes(`- [ ] ${cut}`), text)
+  assert.ok(!text.includes(planLong))
+  assert.ok(readFileSync(journalOf(f, sessionRecord(f, session).updated), 'utf8').includes(planLong))
+  // The block's own title stays when a later plan arrives.
+  const second = f.command(['--plan-event'], planCall(session, 'update_plan', [{ step: 'Only step', status: 'in_progress' }]))
+  assert.equal(second.status, 0, second.stderr)
+  assert.equal(second.stdout, '')
+  const later = readFileSync(f.progress, 'utf8')
+  assert.match(later, /^### Write the code$/m)
+  assert.match(later, /^- \[~\] Only step$/m)
+  assert.ok(!later.includes('Read the spec'))
+}))
+
+test('a Gemini write_todos call marks cancelled and blocked todos, and the first todo titles a block with none in progress', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  const id = 'gemini-plan-session-1'
+  const ran = f.command(['--plan-event', '--agent', 'gemini'], planCall(id, 'write_todos', [
+    { description: 'Done one', status: 'completed' }, { description: 'Dropped one', status: 'cancelled' }, { description: 'Stuck one', status: 'blocked' },
+  ]))
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=gemini/)
+  assert.match(text, /^### Done one$/m)
+  assert.match(text, /^- \[-\] Dropped one$/m)
+  assert.match(text, /^- \[!\] Stuck one$/m)
+}))
+
+test('a plan call that is not a plan, is bad JSON or is empty writes nothing, prints nothing and exits 0', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const before = existsSync(f.progress) ? readFileSync(f.progress, 'utf8') : null
+  for (const input of [
+    planCall(session, 'shell', [{ step: 'Not a plan', status: 'pending' }]),
+    { ...planCall(session, 'update_plan', [{ step: 'x', status: 'pending' }]), tool_name: 'write_todos' },
+    planCall(session, 'update_plan', []),
+    planCall(session, 'update_plan', [{ step: '   ', status: 'pending' }, 7]),
+    { ...planCall(session, 'update_plan', [{ step: 'No session', status: 'pending' }]), session_id: undefined },
+  ]) {
+    const ran = f.command(['--plan-event'], input)
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.equal(ran.stdout, '')
+  }
+  const broken = spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--plan-event'], { env: f.env, input: '{broken', encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(broken.status, 0, broken.stderr)
+  assert.equal(broken.stdout, '')
+  assert.equal(existsSync(f.progress) ? readFileSync(f.progress, 'utf8') : null, before)
+  assertNoBlock(f, session)
+}))
+
+test('a plan call into a denied Windows folder exits 0, prints nothing and names LOCK_DENIED for the hook log', { skip: process.platform !== 'win32' && 'Windows ACLs only' }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const folder = join(f.home, 'denied-plan')
+  const progress = join(folder, 'progress.md')
+  f.save(progress, '## Synthetic denied plan\n')
+  const before = readFileSync(progress)
+  await withDeniedCreation(folder, () => {
+    const result = f.command(['--plan-event', '--progress-file', progress, '--lang', 'en'], planCall(session, 'update_plan', [{ step: 'Synthetic denied step', status: 'in_progress' }]))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, '')
+    assert.match(result.stderr, /\(LOCK_DENIED\)/)
+    assert.deepEqual(readFileSync(progress), before)
+  })
+}))
+
+test('setup writes the plan hook as a matcher group for Codex and Gemini, and remove leaves a person\'s own groups', () => fixture(async f => {
+  const mine = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo mine' }] }
+  const geminiConfig = join(f.home, '.gemini', 'settings.json')
+  f.save(f.hooks, JSON.stringify({ hooks: { PostToolUse: [mine] } }))
+  f.save(geminiConfig, JSON.stringify({ hooks: { AfterTool: [mine] } }))
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  const codex = JSON.parse(readFileSync(f.hooks, 'utf8')).hooks
+  assert.deepEqual(codex.PostToolUse[0], mine)
+  assert.equal(codex.PostToolUse.length, 2)
+  assert.equal(codex.PostToolUse[1].matcher, 'update_plan')
+  assert.match(codex.PostToolUse[1].hooks[0].command, /agent-board|EncodedCommand/)
+  assert.equal(codex.PostToolUse[1].hooks[0].matcher, undefined)
+  const gemini = JSON.parse(readFileSync(geminiConfig, 'utf8')).hooks
+  assert.deepEqual(gemini.AfterTool[0], mine)
+  assert.equal(gemini.AfterTool.length, 2)
+  assert.equal(gemini.AfterTool[1].matcher, '^write_todos$')
+  assert.equal(gemini.AfterTool[1].hooks[0].matcher, undefined)
+  // The installed command is the real hook: it writes the steps and prints nothing.
+  const fired = await fireCommand(f, codex.PostToolUse[1].hooks[0].command, JSON.stringify(planCall(session, 'update_plan', [{ step: 'Fired through the hook', status: 'in_progress' }])))
+  assert.equal(fired.status, 0, fired.stderr)
+  assert.equal(fired.stdout, '')
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[~\] Fired through the hook$/m)
+  // Installing again adds no second group of ours.
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.PostToolUse.length, 2)
+  assert.equal(f.command(['--codex-remove', '--apply']).status, 0)
+  assert.equal(f.command(['--codex-remove', '--agent', 'gemini', '--apply']).status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')), { hooks: { PostToolUse: [mine] } })
+  assert.deepEqual(JSON.parse(readFileSync(geminiConfig, 'utf8')), { hooks: { AfterTool: [mine] } })
 }))
