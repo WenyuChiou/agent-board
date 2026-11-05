@@ -10171,7 +10171,7 @@ export const LINES = [
 "  const config = configs[agent] ?? \"\";",
 "  const script = join11(root, \"agent-board.mjs\");",
 "  const fileWords = (() => {",
-"    if (mode !== \"--codex-doctor\" && mode !== \"--codex-trust\")",
+"    if (mode === \"--codex-setup\" && flag(\"--lang\") !== undefined)",
 "      return s;",
 "    const head = /^globalThis\\.AGENT_BOARD = (.*)$/.exec(readLocal2(script)?.split(`",
 "`, 1)[0] ?? \"\");",

@@ -1096,6 +1096,37 @@ test('a second setup says everything is already set up and writes nothing', () =
   assert.deepEqual(snapshot(f.home), before)
 }))
 
+test('after setup --lang en --apply on a zh-TW system, a plain setup says already set up and writes nothing', () => fixture(f => {
+  const zhTw = { ...f, env: { ...f.env, LANG: 'zh_TW.UTF-8' } }
+  const first = setupAgent(zhTw, '--lang', 'en', '--agent', 'codex', '--apply')
+  assert.equal(first.status, 0, first.stderr)
+  const snapshot = directory => Object.fromEntries(readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => {
+      const file = join(entry.parentPath, entry.name)
+      return [file.slice(directory.length), { bytes: readFileSync(file), mtimeMs: statSync(file).mtimeMs }]
+    }))
+  const before = snapshot(f.home)
+  // Plain setup preview without --lang
+  const preview = setupAgent(zhTw, '--agent', 'codex')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.equal(preview.stderr, '')
+  assert.match(preview.stdout, /已設定完成/)
+  assert.doesNotMatch(preview.stdout, /將更新/)
+  assert.deepEqual(snapshot(f.home), before)
+  // Plain setup apply without --lang
+  const second = setupAgent(zhTw, '--agent', 'codex', '--apply')
+  assert.equal(second.status, 0, second.stderr)
+  assert.equal(second.stderr, '')
+  assert.match(second.stdout, /已設定完成/)
+  assert.doesNotMatch(second.stdout, /已更新/)
+  assert.deepEqual(snapshot(f.home), before)
+  // Explicit --lang zh-TW preview names the updated files
+  const langChange = setupAgent(zhTw, '--agent', 'codex', '--lang', 'zh-TW')
+  assert.equal(langChange.status, 0, langChange.stderr)
+  assert.match(langChange.stdout, /將更新 3 個設定檔案/)
+}))
+
 test('setup on a computer with only Claude Code prints guidance and exits 0 without a stack trace', () => fixture(f => {
   mkdirSync(join(f.home, '.claude'))
   const english = { ...f, env: { ...f.env, LANG: 'en' } }
