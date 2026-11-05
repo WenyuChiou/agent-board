@@ -37,6 +37,18 @@ type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
+
+const pad2 = (value: number): string => String(value).padStart(2, '0')
+const pad3 = (value: number): string => String(value).padStart(3, '0')
+
+// A start time a person can read, in local time to the millisecond (#814).
+// Second precision is not enough: two sessions started in the same second
+// would share a title. The millisecond part keeps back-to-back starts apart
+// without showing any hash, id or path on a default view.
+const distinctStarted = (at: number): string => {
+  const date = new Date(at)
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}.${pad3(date.getMilliseconds())}`
+}
 // Folder names are display labels; reports bind to the whole directory without retaining its path.
 const cwdDigest = (cwd: unknown): string | undefined => {
   if (typeof cwd !== 'string' || !isAbsolute(cwd)) return undefined
@@ -601,8 +613,20 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       } : payload, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)
-      const initial = filesByFolder(mode, agent) && !previous ? codexReport(base, session, {
-        ...base, title: sessionTitle(name, s.localAgentTask(agent)), project: name || agent,
+      // An Antigravity session keeps no folder (its hook binds only the conversation
+      // id), so a new one would otherwise read as every other unreported Antigravity
+      // session. A session that still carries only the generic title is re-titled
+      // the same way on its next lifecycle event (#814). The distinct part is the
+      // session's start time in local time, to the millisecond: second precision
+      // would let two sessions started in the same second share a title, and a
+      // hash prefix is not shown on a default view. The title is set once and kept
+      // by later events (stillGeneric only matches the generic title), and an
+      // explicit report title still wins; no new data is retained, and the
+      // translated fallback needs no new string.
+      const stillGeneric = previous !== null && Object.values(STRINGS).some(one => one.localAgentTask(agent) === previous.title)
+      const distinctAntigravity = mode === '--agent-status' && agent === 'antigravity' && (previous === null || stillGeneric)
+      const initial = (filesByFolder(mode, agent) && !previous) || distinctAntigravity ? codexReport(base, session, {
+        ...base, title: sessionTitle(name, s.localAgentTask(agent), distinctAntigravity ? distinctStarted(at ?? Date.parse(now)) : ''), project: previous?.project ?? (name || agent),
       }, clock, s) : base
       const priorActivity = previous?.activity ?? []
       // Only a weak hint needs a parent; a strong run keeps its record without a block.
@@ -622,7 +646,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
       // A replay can skip writes only after a board completion reached the cache too.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }

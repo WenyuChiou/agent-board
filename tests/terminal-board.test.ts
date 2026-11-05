@@ -1,4 +1,5 @@
 import { expect, test } from 'claude-code/testing'
+import { confirmTask, takeTask } from '../hooks/blocks'
 import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, pinned, routesOf, terminalLook } from '../hooks/board'
 import type { AnswerRoute } from '../hooks/board'
 import { isLifecycleStep, LIFECYCLE_STEPS } from '../hooks/codex'
@@ -458,3 +459,55 @@ test('every placeholder step a hook writes, in every language and as earlier rel
   expect(isLifecycleStep('Water the synthetic rows')).toBe(false)
   expect([...LIFECYCLE_STEPS].length).toBeGreaterThanOrEqual(9)
 })
+
+test('an Antigravity session stopped on a limit leaves the working list', () => {
+  const s = STRINGS.en
+  const file = `## scratch
+<!-- auto session=ab770010 agent=antigravity state=working updated=${at(58)} -->
+### Local antigravity task
+- [ ] ${s.localAgentLifecycle}
+<!-- /auto session=ab770010 -->
+`
+  const view = viewOf(file)
+  const model = serveModel(view, [], s, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } })
+  expect(model.view!.working).toEqual([])
+  expect(view.groups.length).toBe(0)
+  expect(view.stopped.length).toBe(1)
+  expect(view.stopped[0]!.title).toBe('Local antigravity task')
+  const text = boardText(view, [], s, { width: 100, isColor: false })
+  expect(text).not.toContain(s.agentWorking('Antigravity'))
+  expect(text).not.toContain(s.groupWorking(1))
+})
+
+test('a silence-classified row does not offer confirmation or archive that the write guard refuses', () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+    const file = `## scratch\n<!-- auto session=ab770010 agent=antigravity state=working updated=${at(58)} -->\n### Local antigravity task\n- [ ] ${s.localAgentLifecycle}\n<!-- /auto session=ab770010 -->\n`
+    const view = viewOf(file, lang)
+    expect(view.stopped.length).toBe(1)
+    const stoppedRow = view.stopped[0]!
+    expect(stoppedRow.confirm).toBeNull()
+    expect(stoppedRow.archive).toBeNull()
+    // The write guard refuses confirmation and archive for an active session under STALE_MS
+    const forgedConfirm = { project: 'scratch', title: 'Local antigravity task', line: 2, session: 'ab770010', expected: '' }
+    expect(confirmTask(file, forgedConfirm, NOW, s)).toBeNull()
+    const forgedArchive = { project: 'scratch', title: 'Local antigravity task', line: 2, session: 'ab770010' }
+    expect(takeTask(file, forgedArchive, NOW, s)).toBeNull()
+  }
+})
+
+test('a working row with a doing step remains counted after thirty minutes', () => {
+  for (const agent of ['antigravity', 'codex'] as const) {
+    for (const age of [5, 30, 31, 58]) {
+      const s = STRINGS.en
+      const file = `## demo\n<!-- auto session=11223344 agent=${agent} state=working updated=${at(age)} -->\n### Active task\n- [~] Compute the synthetic result\n<!-- /auto session=11223344 -->\n`
+      const view = viewOf(file, 'en')
+      expect(view.stopped.length).toBe(0)
+      expect(view.groups.length).toBe(1)
+      expect(view.groups[0]!.summary).toContain(s.groupWorking(1))
+      const text = boardText(view, [], s, { width: 100, isColor: false })
+      expect(text).toContain(s.agentWorking(agent === 'codex' ? 'Codex' : 'Antigravity'))
+    }
+  }
+})
+

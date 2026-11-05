@@ -1052,6 +1052,9 @@ test('languages: the setting, the stored choice and the system pick the language
   expect(resolveLang('auto', undefined, '繁體中文', undefined)).toBe('zh-TW')
   expect(resolveLang('auto', undefined, 'Chinese', undefined)).toBe('zh-CN')
   expect(resolveLang(undefined, undefined, undefined, 'zh_TW.UTF-8')).toBe('zh-TW')
+  expect(resolveLang(undefined, undefined, undefined, undefined, 'zh-TW')).toBe('zh-TW')
+  expect(resolveLang(undefined, undefined, undefined, undefined, 'zh_CN.UTF-8')).toBe('zh-CN')
+  expect(resolveLang(undefined, undefined, undefined, 'en_US.UTF-8', 'zh-TW')).toBe('en')
   expect(resolveLang(undefined, undefined, undefined, 'de_DE.UTF-8')).toBe('en')
   // Every language has every word, functions included.
   for (const lang of LANGS) {

@@ -19,8 +19,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: test-${{ github.ref }}
-  # A newer push to a PR replaces its run; every commit on main keeps its own result.
+  # A newer push to a PR replaces its run. Every other run (a push to main, the weekly
+  # run, a manual run) gets a group of its own: GitHub keeps one pending run per group
+  # and cancels the older one, which left main commits with no result (#902).
+  group: test-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

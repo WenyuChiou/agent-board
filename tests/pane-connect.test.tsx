@@ -480,6 +480,28 @@ test('the plugin’s language option gives the board script and skill their lang
   expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_CN.boardCommandDescription)}`)
 })
 
+test('with no option, stored language, setting or LANG, and a zh-TW locale passed in, the pane speaks zh-TW and the board script it writes holds lang: zh-TW', { options: { autoConnect: true, locale: 'zh-TW' } }, async ($, on) => {
+  const board = '/home/me/.claude/agent-board.mjs'
+  const skill = '/home/me/.agents/skills/agent-board/SKILL.md'
+  const world: World = {
+    files: new Map([
+      ['/home/me/.codex/config.toml', ''],
+    ]),
+    env: { HOME: '/home/me' },
+    mtime: 1,
+    hasTasks: true,
+    ran: [],
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: ZH_TW.empty })).toBeDefined()
+  await ui.unmount()
+  expect((world.files.get(board) ?? '').split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
+  expect(world.files.get(skill)).toContain(`description: ${JSON.stringify(ZH_TW.boardCommandDescription)}`)
+})
+
 test('an agent’s turn that only showed the board gets no block', { options: { autoConnect: true } }, async ($, on) => {
   const look = JSON.stringify({ session_id: 'c9', cwd: '/home/me/work/api-gateway', prompt: '$agent-board', last_assistant_message: 'Here it is. The release plan needs you first.' })
   const { text, asked } = await takeInbox($, on, [[`${INBOX}/codex-turn-1792220000-1.json`, look]])
