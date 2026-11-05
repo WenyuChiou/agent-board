@@ -4,6 +4,7 @@ import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
 import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
 import { scanBlocks } from './blocks'
+import { cutLine } from './step-words'
 import type { BlockSpan } from './blocks'
 import { sha256 } from './sha256'
 import type { Origin } from './runs'
@@ -124,10 +125,7 @@ export const codexReport = (previous: CodexReport | null, session: string, input
 
 // Keep the full words available until the caller has saved them in the journal.
 export const limitReport = <T extends CodexReport>(report: T): { report: T; entries: Omit<JournalEntry, 'at'>[]; cut: number } => {
-  const short = (text: string): string => {
-    const chars = [...text]
-    return chars.length > 120 ? `${chars.slice(0, 119).join('')}…` : text
-  }
+  const short = (text: string): string => cutLine(text).text
   const title = short(report.title)
   const steps = report.steps.map(step => `${step.slice(0, 6)}${short(step.slice(6))}`)
   // Only a field that was shortened is journaled: the title once, and each cut step with

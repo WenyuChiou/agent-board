@@ -35,6 +35,7 @@ import {
   takeManualDone,
   takeTask,
   upsertAutoBlock,
+  cutEntries,
 } from './blocks'
 import type { ConfirmedTask, ConfirmRef } from './blocks'
 import { withRunMark } from './runs'
@@ -1560,7 +1561,35 @@ const writeMine = async ($: EngineInterface): Promise<void> => {
   await poll($)
 }
 
-const queueWrite = ($: EngineInterface): Promise<void> => enqueue(() => writeMine($)).catch(() => undefined)
+// The full words of a title or step the block shortens (#922) go to the journal once, before
+// the shortened block is written. A set remembers what this session saved; the month's journal
+// answers for an earlier session or a restart (the same line minus its minute stamp).
+const journaledCuts = new Set<string>()
+const saveCutTextNow = async ($: EngineInterface): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || mirror.isRun === true || mirror.tasks.length === 0) return
+  const s = await wordsOf($)
+  const fresh = cutEntries(mirror, s).filter(entry => !journaledCuts.has(JSON.stringify(entry)))
+  if (fresh.length === 0) return
+  const at = await $.clock.now()
+  const past = await readText($, await partFor($, journalPath(await progressPath($), at))).catch(() => '')
+  const tail = (line: string): string => line.replace(/^(?:> )?- \d{4}-\d{2}-\d{2} \d{2}:\d{2} · /, '')
+  const seen = new Set(past.split(/\r?\n/).map(tail))
+  const isNew = fresh.filter(entry => !seen.has(tail(journalLine(entry, at, s))))
+  if (isNew.length > 0) await journal($, isNew)
+  for (const entry of fresh) journaledCuts.add(JSON.stringify(entry))
+}
+
+// One at a time, so two writes in a row cannot both find a line missing and save it twice.
+let cutSaves: Promise<unknown> = Promise.resolve()
+const saveCutText = ($: EngineInterface): Promise<void> => {
+  const run = cutSaves.then(() => saveCutTextNow($))
+  cutSaves = run.catch(() => undefined)
+  return run
+}
+
+// A journal that failed to save stops this write: the block must not be shortened first.
+const queueWrite = ($: EngineInterface): Promise<void> => saveCutText($).then(() => enqueue(() => writeMine($))).catch(() => undefined)
 
 const notify = async ($: EngineInterface, text: string, project: string): Promise<void> => {
   if (!(await read($, isNotifyOn))) return

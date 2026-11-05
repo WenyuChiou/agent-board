@@ -2,7 +2,7 @@ import { emptyQuestions, observeQuestions } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror } from '../types'
-import { archivableAsking, countManualDone, confirmTask, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { archivableAsking, countManualDone, confirmTask, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, takeManualDone, takeTask, upsertAutoBlock, cutEntries } from '../hooks/blocks'
 import { ZH_TW } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { answerAgentPrompt } from '../hooks/inbox'
@@ -1126,4 +1126,38 @@ ${isClosed ? `<!-- /auto session=${id} -->` : ''}
   expect(taken.text).not.toContain('session=aaaa1111')
   expect(taken.text).toContain('session=bbbb2222')
   expect(taken.text).toContain('session=cccc3333')
+})
+
+test('a task subject over 120 characters is written as 119 characters plus an ellipsis while the mirror keeps it whole', () => {
+  const long = `${'a'.repeat(130)}`
+  const mirror = applyTaskCreate(emptyMirror('2be48af2-6193-5040', 'persona_framework', NOW), { subject: long }, '1', NOW)
+  const file = upsertAutoBlock('', { ...mirror, title: 'Synthetic title', state: 'working' })
+
+  expect(file).toContain(`- [ ] ${'a'.repeat(119)}…\n`)
+  expect(file).not.toContain('a'.repeat(120))
+  expect(mirror.tasks[0]?.subject).toBe(long)
+  expect(cutEntries({ ...mirror, title: 'Synthetic title' })).toEqual([{ project: 'persona_framework', task: 'Synthetic title', step: long }])
+})
+
+test('a step of exactly 120 characters is not cut and a title over 120 is', () => {
+  const exact = 'b'.repeat(120)
+  const longTitle = 'c'.repeat(121)
+  const mirror = applyTaskCreate(emptyMirror('2be48af2-6193-5040', 'persona_framework', NOW), { subject: exact }, '1', NOW)
+  const file = upsertAutoBlock('', { ...mirror, title: longTitle, state: 'working' })
+
+  expect(file).toContain(`- [ ] ${exact}\n`)
+  expect(file).toContain(`### ${'c'.repeat(119)}…\n`)
+  expect(cutEntries({ ...mirror, title: longTitle }).map(entry => entry.step)).toEqual([longTitle])
+})
+
+test('CJK characters and emoji each count as one code point when a step is cut', () => {
+  const cjk = '寫'.repeat(121)
+  const emoji = '😀'.repeat(120)
+  let mirror = applyTaskCreate(emptyMirror('2be48af2-6193-5040', 'persona_framework', NOW), { subject: cjk }, '1', NOW)
+  mirror = applyTaskCreate(mirror, { subject: emoji }, '2', NOW)
+  const file = upsertAutoBlock('', { ...mirror, title: 'Synthetic title', state: 'working' })
+
+  expect(file).toContain(`- [ ] ${'寫'.repeat(119)}…\n`)
+  expect(file).toContain(`- [ ] ${emoji}\n`)
+  expect(cutEntries({ ...mirror, title: 'Synthetic title' }).map(entry => entry.step)).toEqual([cjk])
 })

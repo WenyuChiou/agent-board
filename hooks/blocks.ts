@@ -10,7 +10,7 @@ import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
 import { isOutranked, pickParent } from './runs'
-import { oneLine, plain } from './step-words'
+import { cutLine, oneLine, plain } from './step-words'
 import { isStale, observedTime } from './parse'
 import type { JournalEntry } from './journal'
 
@@ -102,11 +102,27 @@ const markerOf = (mirror: ProgressMirror, parent?: string): string => {
 // back (trimmed). The pane keys a question on it too, so its key is the one every other reader
 // of the block works out.
 export const stepWords = (task: ProgressMirrorTask, s: Strings = ZH_TW): string => {
-  if (task.handoffTo) return `${oneLine(task.subject)} — ${s.transferredTo(oneLine(task.handoffTo))}`
+  const subject = cutLine(oneLine(task.subject)).text
+  if (task.handoffTo) return `${subject} — ${s.transferredTo(oneLine(task.handoffTo))}`
   const note = task.blocked !== null && task.blocked !== '' ? task.blocked : task.status === 'completed' ? '' : (task.why ?? '')
   const reason = note === '' ? '' : ` — ${oneLine(note)}`
 
-  return `${oneLine(task.subject)}${reason}`
+  return `${subject}${reason}`
+}
+
+const titleOf = (mirror: ProgressMirror, s: Strings): string => oneLine(mirror.title) || oneLine(fallbackTitle(mirror)) || s.unnamed
+
+// The full words of every title and step the block shortens (#922), for the caller to save in
+// the journal. The mirror keeps its full subjects: matching and handoff work on those.
+export const cutEntries = (mirror: ProgressMirror, s: Strings = ZH_TW): Omit<JournalEntry, 'at'>[] => {
+  const title = titleOf(mirror, s)
+  return [
+    ...(cutLine(title).isCut ? [{ project: mirror.project, task: title, step: title }] : []),
+    ...mirror.tasks.flatMap(task => {
+      const subject = oneLine(task.subject)
+      return cutLine(subject).isCut ? [{ project: mirror.project, task: title, step: subject }] : []
+    }),
+  ]
 }
 
 export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, parent?: string): string[] => {
@@ -116,7 +132,7 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
   return [
     markerOf(mirror, parent),
-    `### ${oneLine(mirror.title) || oneLine(fallbackTitle(mirror)) || s.unnamed}`,
+    `### ${cutLine(titleOf(mirror, s)).text}`,
     `> ${oneLine(meta)}`,
     ...(mirror.context ? [s.contextNote(oneLine(mirror.context))] : []),
     ...(mirror.handoff ? [s.handoffNote(oneLine(mirror.handoff))] : []),
