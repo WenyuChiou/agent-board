@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 import { formatWriter } from './e2e/lib/faults.mjs'
 import { neverShown } from './fixtures/never-shown.mjs'
+import { hookOrDeferred, turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { HOOK_INPUT_TIMEOUT, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
@@ -703,7 +704,8 @@ test('PATH isolation preserves Node beside Codex without exposing Codex', () => 
     for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
     env.PATH = withoutCodexOnPath(shared, f.home)
     assert.equal(withoutCodexOnPath(shared, f.home), env.PATH, 'repeated isolation keeps the same fixture runtime')
-    const node = await nativeProcess('node', ['--version'], env, '', callback => setTimeout(callback, 5000), stopNativeTree, { cwd: f.home })
+    // `node --version` never reads its input and can exit before an empty write reaches it (EPIPE).
+    const node = await nativeProcess('node', ['--version'], env, '', callback => setTimeout(callback, 5000), stopNativeTree, { cwd: f.home, inputFd: 'ignore' })
     assert.equal(node.error, undefined, 'the preserved runtime launches without a process error')
     assert.equal(node.status, 0, `isolated Node failed: ${node.error?.code ?? 'none'}`)
     assert.equal(node.stdout.trim(), process.version)
@@ -765,6 +767,9 @@ export const claimMessageStore = directory => (${wrap})(original(directory))`)
   } })
   try { return await importTs(url.href) } finally { resolver.deregister() }
 }
+
+// On Windows a scanner can hold a new claim file past the hook's 120 ms store limit.
+const codexTurn = (f, mailbox, beforeNext) => turnOrDeferred(mailbox, ['codex', session, 'CLI', Date.now()], () => f.state().messages[0].status, beforeNext)
 
 test('hookWorker preserves host timeouts above 3 seconds instead of clamping to 3000 ms', () => {
   const source = hookWorker('synthetic-home', 'synthetic-script', '')
@@ -835,7 +840,7 @@ test('a mailbox turn returns its saved message when claim release throws', async
   })`)
   f.seed()
   const mailbox = hookMailbox(f.directory, Infinity)
-  const message = await mailbox.turn('codex', session, 'CLI', Date.now())
+  const message = await codexTurn(f, mailbox)
   assert.equal(message?.id, 'hook-mailbox-message')
   assert.equal(message.text, 'Synthetic mailbox payload')
   assert.equal(f.state().messages[0].status, 'uncertain')
@@ -869,7 +874,8 @@ test('a mailbox claim that cannot be removed is reused, so the accept of a messa
   })`)
   f.seed()
   const mailbox = hookMailbox(f.directory, Infinity)
-  const message = await mailbox.turn('codex', session, 'CLI', Date.now())
+  // A deferred first turn used up the stuck release; the turn that delivers gets its own.
+  const message = await codexTurn(f, mailbox, () => { globalThis.syntheticStuckReleases = 1 })
   assert.equal(message?.id, 'hook-mailbox-message')
   assert.equal(f.state().messages[0].status, 'uncertain')
   assert.equal(readdirSync(f.directory).filter(name => name.startsWith('.message-claim-')).length, 1)
@@ -975,15 +981,27 @@ test('a live hub takes hook mailbox calls over loopback and the hook does not wr
   try {
     writeFileSync(join(f.directory, 'server.lock'), String(process.pid))
     writeFileSync(join(f.directory, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token` }))
-    const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--codex-event'], { cwd: f.home, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
-    let out = '', err = ''
-    child.stdout.on('data', chunk => { out += chunk })
-    child.stderr.on('data', chunk => { err += chunk })
-    const exited = new Promise(done => child.once('close', done))
-    child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }))
-    assert.equal(await exited, 0, err)
-    assert.ok(out.includes('Synthetic mailbox payload'))
-    assert.deepEqual(calls.map(one => one[0]), ['/api/messages/mailbox-turn', '/api/messages/mailbox-accept'])
+    const hook = async () => {
+      const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--codex-event'], { cwd: f.home, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+      let out = '', err = ''
+      child.stdout.on('data', chunk => { out += chunk })
+      child.stderr.on('data', chunk => { err += chunk })
+      const exited = new Promise(done => child.once('close', done))
+      child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }))
+      assert.equal(await exited, 0, err)
+      return { out, err }
+    }
+    let { out, err } = await hook()
+    // A hub slower than the hook's 150 ms defers the turn by design, and the next turn delivers (#902).
+    const isDeferred = !out.includes('Synthetic mailbox payload')
+    if (isDeferred) {
+      assert.equal(err, 'board: mailbox deferred\n')
+      ;({ out, err } = await hook())
+    }
+    assert.ok(out.includes('Synthetic mailbox payload'), err)
+    // The turn the hook gave up on may or may not have reached the hub before the one that delivered.
+    const expected = ['/api/messages/mailbox-turn', '/api/messages/mailbox-accept']
+    assert.deepEqual(calls.map(one => one[0]), isDeferred && calls.length === 3 ? [expected[0], ...expected] : expected)
     assert.ok(calls.every(one => one[2] === 'synthetic-token'))
     assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
   } finally { await new Promise(done => server.close(done)) }
@@ -1005,10 +1023,10 @@ test('the hook finds the same default messages folder as --serve', async () => m
     const server = await serve.start(world)
     const directory = defaultMessagesDirectory(world.path, world.home, world.env, process.platform)
     assert.equal(existsSync(join(directory, 'server.lock')), true)
-    const hook = spawnSync(process.execPath, [world.script, '--codex-event', '--home', world.home, '--progress-file', world.path], { cwd: world.root, env: world.env, encoding: 'utf8', windowsHide: true, timeout: 15000, input: JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }) })
-    assert.equal(hook.status, 0, hook.stderr)
-    const snapshot = (await server.get('/api/board')).json()
-    assert.equal(snapshot.messaging.mailboxes[0].session, session)
+    const hook = () => spawnSync(process.execPath, [world.script, '--codex-event', '--home', world.home, '--progress-file', world.path], { cwd: world.root, env: world.env, encoding: 'utf8', windowsHide: true, timeout: 15000, input: JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }) })
+    const mailboxes = async () => (await server.get('/api/board')).json().messaging.mailboxes
+    const result = await hookOrDeferred(hook, async () => (await mailboxes()).length > 0)
+    assert.equal((await mailboxes())[0]?.session, session, result.stderr)
   } finally { await world.close() }
 }))
 

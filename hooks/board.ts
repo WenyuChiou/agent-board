@@ -1,5 +1,6 @@
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
+import { boardCounts } from './board-status'
 import { lastQuestionInProse, normalizeReply } from './digest'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
@@ -253,8 +254,9 @@ const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelv
 const countLine = (view: View, pending: readonly PendingTurn[], s: Strings, c: ReturnType<typeof paint>): string => {
   const { due, today } = view.overview
   // A row that needs the person is counted as waiting, as the page does, and not as moving too.
-  const active = view.overview.active - liveRows(view).filter(row => boardNeeds(view, row) !== null).length
-  const waiting = view.overview.waiting + blockedRows(view).length + remainingInbox(view, pending).filter(turn => turn.isQuestion).length
+  const counts = boardCounts(view, pending, s)
+  const active = counts.working
+  const waiting = counts.needs
 
   return `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`, true)}  ${c('accent', `▸ ${active} ${s.countActive}`, true)}  ${c('alert', `⚑ ${due} ${s.countDue}`, true)}  ${c('done', `✓ ${today} ${s.countToday}`, true)}`
 }

@@ -8,6 +8,7 @@ import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+import { turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/message-client.mjs'
 import { observeSession } from '../hooks/messaging.ts'
@@ -89,7 +90,8 @@ test('claimed mailbox messages transition to accepted after turn-start delivery 
     const state = mailboxQueue(mailboxSeed(), 'mailbox-delivery')
     writeFileSync(join(dir, 'messages.json'), JSON.stringify({ version: 2, ...state }))
     const mailbox = hookMailbox(dir, 500)
-    const message = await mailbox.turn('codex', 'mailbox-session', 'CLI', Date.now())
+    const status = () => parseMessageStore(readFileSync(join(dir, 'messages.json'), 'utf8'), Date.now()).messages[0].status
+    const message = await turnOrDeferred(mailbox, ['codex', 'mailbox-session', 'CLI', Date.now()], status)
     assert.equal(message.id, 'mailbox-delivery')
     assert.equal(parseMessageStore(readFileSync(join(dir, 'messages.json'), 'utf8'), Date.now()).messages[0].status, 'uncertain')
     await mailbox.accept('codex', 'mailbox-session', message.id, message.nonce, Date.now())

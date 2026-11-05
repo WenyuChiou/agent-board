@@ -111,6 +111,8 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 
 **In the Claude desktop app,** when its Code tab shows no pane, the footer shows the waiting count and `/agent-board opens the board`. `/agent-board` starts the live [board page](#the-boards-page) and replies with its link, where you can answer questions and archive work; it works in every Claude Code session and leaves the pane as it is. When the pane cannot be placed, `/progress` does the same. If the live page cannot start, both explain why and show the command that starts it. The board page needs the board script that `/progress connect` installs, or the next session start updates.
 
+In the Claude desktop app the agent can open the board too: ask it to open the board and it starts the same page and gives you the same link.
+
 ### Open the board anywhere
 
 | Where | Command |

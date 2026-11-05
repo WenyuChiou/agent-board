@@ -388,6 +388,7 @@ export const EN: Strings = {
   livePageNoAddress: 'the page command did not return a valid local page address.',
   livePageRunFailed: 'the page command could not run; check that Node is installed and the board script is readable.',
   liveBoardCommandDescription: 'Agent Board: start the live board page and show its link (leaves the pane as it is)',
+  liveBoardToolDescription: 'Open the Agent Board page for the person and return its link. Call it when the person asks you to open the board; it takes no input.',
   boardPageOpened: 'The board page, where you can answer questions and archive work:',
   connectDone: (list: string): string => `Connected: ${list}. After you restart them, every turn they finish reports to the pane.`,
   connectNone: 'No agent to connect was found (Codex, Gemini CLI, Cursor, OpenCode, Grok Build, Hermes Agent, Muse Code, OpenClaw).',

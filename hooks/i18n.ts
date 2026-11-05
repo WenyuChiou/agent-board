@@ -426,6 +426,7 @@ export const ZH_TW = {
   livePageNoAddress: '網頁指令未傳回有效的本機網頁網址。',
   livePageRunFailed: '無法執行網頁指令；請確認已安裝 Node，並且可以讀取看板腳本。',
   liveBoardCommandDescription: 'Agent Board：啟動可以操作的看板網頁並提供連結（不動面板）',
+  liveBoardToolDescription: '為使用者開啟 Agent Board 看板網頁並回傳連結。使用者要求開啟看板時呼叫；不需要參數。',
   boardPageOpened: '看板網頁，可以回覆問題或封存工作：',
   connectDone: (list: string): string => `已接上：${list}。重開它們之後，每回合結束都會自動回報到面板。`,
   connectNone: '沒找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code、OpenClaw）。',

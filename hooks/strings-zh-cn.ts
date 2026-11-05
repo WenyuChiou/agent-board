@@ -387,6 +387,7 @@ export const ZH_CN: Strings = {
   livePageNoAddress: '网页命令未返回有效的本地网页网址。',
   livePageRunFailed: '无法运行网页命令；请确认已安装 Node，并且可以读取看板脚本。',
   liveBoardCommandDescription: 'Agent Board：启动可以操作的看板网页并提供链接（不动面板）',
+  liveBoardToolDescription: '为用户打开 Agent Board 看板网页并返回链接。用户要求打开看板时调用；不需要参数。',
   boardPageOpened: '看板网页，可以回答问题或归档工作：',
   connectDone: (list: string): string => `已接上：${list}。重启它们之后，每回合结束都会自动汇报到面板。`,
   connectNone: '没找到可以接的 agent（Codex、Gemini CLI、Cursor、OpenCode、Grok Build、Hermes Agent、Muse Code、OpenClaw）。',
