@@ -11575,7 +11575,7 @@ export const LINES = [
 "import { chmodSync, closeSync as closeSync9, existsSync as existsSync6, linkSync as linkSync2, lstatSync as lstatSync8, mkdirSync as mkdirSync7, openSync as openSync9, readdirSync as readdirSync9, readFileSync as readFileSync13, readSync as readSync6, renameSync as renameSync6, statSync as statSync10, unlinkSync as unlinkSync9, writeFileSync as writeFileSync8 } from \"node:fs\";",
 "import { createHash as createHash7, randomUUID as randomUUID2 } from \"node:crypto\";",
 "import { homedir as homedir4, tmpdir } from \"node:os\";",
-"import { basename as basename5, dirname as dirname8, join as join16, resolve as resolve11 } from \"node:path\";",
+"import { basename as basename5, dirname as dirname8, join as join17, resolve as resolve11 } from \"node:path\";",
 "",
 "// scripts/board-serve.ts",
 "import { spawn as spawn2 } from \"node:child_process\";",

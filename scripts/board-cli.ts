@@ -210,8 +210,8 @@ let lastStat = { stat: '', at: 0 }
 let lastQuestions = emptyQuestions()
 const questionWriter = randomUUID()
 let questionWrite = 0
-const isQuestionWriter = !args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
-const isPersistentQuestions = !args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
+const isQuestionWriter = !args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
+const isPersistentQuestions = !args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
 let isViewQuestionRead = false
 const inboxFiles = recentInboxFiles({
   directory: join(dirname(path), 'progress-inbox'),
@@ -432,7 +432,7 @@ const readBoardView = (source: string, now: number) => {
     if (record !== null) {
       seen = record
       // Read-only output must never write a sidecar, even beside interactive flags.
-      if (!args.includes('--chat') && !args.includes('--json') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
+      if (!args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
         let observed = withSeen(record, projects, now, {}, false, true)
         const wrote = rewrite(file, before => {
           const current = parseSeen(before, answeredAge(file))
@@ -1945,12 +1945,18 @@ const jsonFailure = (error: unknown): void => {
 
 // The one document for an agent's read: --json prints it and MCP's board_status returns it.
 const boardJson = () => {
+  // --mcp keeps running and --json does not: each read starts from what a new process would hold.
+  lastSeen = {}
+  lastStat = { stat: '', at: 0 }
+  lastQuestions = emptyQuestions()
+  droppedLogCache = null
   const now = Date.now()
   const home = homeOrNone()
   const isWin = process.platform === 'win32'
   const source = read(path)
-  const updates = pending(text => redact(text, home, isWin))
+  // After the view, whose page state says which turns are already settled.
   const current = view(source, now)
+  const updates = pending(text => redact(text, home, isWin))
   const board = RELEASED.reduce((held, release) => {
     const next = release.version.split('.').map(Number)
     const previous = held.split('.').map(Number)

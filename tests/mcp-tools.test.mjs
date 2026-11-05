@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -546,4 +546,50 @@ test('board_status answers a board it cannot read with the error document, keepi
     assert.deepEqual(data, { schemaVersion: 1, error: 'unreadable' })
     assert.equal(level, 'unbound')
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('board_status stays the same document as agent-board --json on a later call, after the page settles a question', async () => {
+  const root = temp()
+  let child
+  try {
+    prepare(root)
+    const progress = join(root, 'progress.md'), name = `codex-turn-${Math.floor(Date.now() / 1000)}-1.json`
+    mkdirSync(join(root, 'progress-inbox'))
+    writeFileSync(join(root, 'progress-inbox', name), JSON.stringify({ session_id: 'demo-1', cwd: root, last_assistant_message: 'Use 100 or 300 a minute?' }))
+    writeFileSync(join(root, 'loader.mjs'), loader)
+    const command = ['--experimental-transform-types', '--import', pathToFileURL(join(root, 'loader.mjs')).href, cli]
+    const board = ['--messages-dir', join(root, 'messages'), '--progress-file', progress]
+    const printed = () => {
+      const result = spawnSync(process.execPath, [...command, '--json', ...board], { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 60_000 })
+      assert.equal(result.status, 0, result.stderr)
+      const { generatedAt: _at, ...document } = JSON.parse(result.stdout)
+      return document
+    }
+    child = spawn(process.execPath, [...command, '--mcp', '--serve', ...board], { cwd: root, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true })
+    child.stdout.setEncoding('utf8')
+    const lines = child.stdout[Symbol.asyncIterator]()
+    let held = ''
+    const status = async () => {
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'board_status', arguments: {} } })}\n`)
+      while (!held.includes('\n')) held += (await lines.next()).value
+      const { generatedAt: _at, ...document } = JSON.parse(JSON.parse(held).result.content[0].text)
+      held = ''
+      return document
+    }
+    const first = await status()
+    assert.deepEqual(first, printed())
+    assert.ok(first.needs.some(one => one.text.includes('Use 100 or 300')))
+    // Long enough for a long-running reader to think the file has settled, which a new process never does.
+    await new Promise(done => setTimeout(done, 1100))
+    writeFileSync(join(root, 'progress-page-state.json'), JSON.stringify({ version: 1, inboxDone: { [name]: `1:${Date.now()}` }, store: 0, pruned: {} }))
+    const second = await status()
+    assert.deepEqual(second, printed())
+    assert.ok(!second.needs.some(one => one.text.includes('Use 100 or 300')))
+    // Read-only even beside a flag that would write: the description says it changes nothing.
+    assert.deepEqual(readdirSync(root).filter(one => /seen|question/i.test(one)), [])
+    child.stdin.end()
+  } finally {
+    if (child && child.exitCode === null) { child.kill(); await once(child, 'exit') }
+    rmSync(root, { recursive: true, force: true })
+  }
 })

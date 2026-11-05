@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import type { Readable, Writable } from 'node:stream'
 import { address, deliveryText, messageId, senderLabel } from '../hooks/messaging'
@@ -20,7 +21,7 @@ export const processStart = (pid: number): string | null => {
     }
     const result = process.platform === 'darwin'
       ? spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 120 })
-      : spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`], { encoding: 'utf8', timeout: 120, windowsHide: true })
+      : spawnSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`], { encoding: 'utf8', timeout: 120, windowsHide: true })
     return result.status === 0 && !result.error ? result.stdout.trim() || null : null
   } catch { return null }
 }

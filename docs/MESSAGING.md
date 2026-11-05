@@ -646,3 +646,5 @@ also apply to a connected adapter's own sends. An unverified sender's message ca
 A message taken by a lease holder holds its session until `board_ack` or 30 minutes; a hook's does not.
 Inbox acceptance means the response write completed; ACK separately records acknowledgement.
 There is no parked wait, progress notification, host launcher or automatic MCP configuration yet.
+So for now no caller can hold a lease without its own launcher, and none on Windows, where the check takes too long:
+`board_ack` answers `NO_LEASE`, and a peer send answers `WORKSPACE_UNKNOWN` until a leased session enrolls its folder.
