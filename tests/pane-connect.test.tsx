@@ -50,6 +50,14 @@ import {
 
 
 
+// Keep this first so module loading is paid by a session without pane or connection work.
+test('starting a session registers the progress command', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, registered: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.registered).toContain('progress')
+})
+
 test('/progress connect hooks the installed agents into the pane once, keeps their own hooks, and takes ours back out', { options: { autoConnect: true } }, async ($, on) => {
   // Both written under the plugin's earlier name, claude-progress-pane: they go.
   const section = '<!-- claude-progress-pane:start -->\n## Report your progress\n<!-- claude-progress-pane:end -->\n'
@@ -273,8 +281,10 @@ for (const isAuto of [true, false]) test(`OpenCode connect uses its effective co
   const command = `${root}/commands/board.md`
   const skill = '/home/me/.agents/skills/agent-board/SKILL.md'
   expect(world.files.get(plugin)).toContain('export const AgentBoard')
-  expect(world.files.get(command)).toContain('--serve')
-  expect(world.files.get(skill)).toContain('--serve')
+  expect(world.files.get(command)).toContain('!`node "/home/me/.claude/agent-board.mjs"`')
+  expect(world.files.get(command)).not.toContain('--serve')
+  expect(world.files.get(skill)).toContain('--json')
+  expect(world.files.get(skill)).not.toContain('--serve')
   expect(world.files.get(`${root}/AGENTS.md`)).toBe('# My rules\n')
   expect(world.files.get(`${defaultRoot}/plugin/agent-board.js`)).toBe(foreign)
   expect(world.files.get(`${defaultRoot}/AGENTS.md`)).toBe(instructions)
@@ -302,7 +312,8 @@ test('OpenCode explicit config root wins over XDG when using the Windows reporte
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
   expect(world.files.get(`${root}/plugin/agent-board.js`)).toContain('export const AgentBoard')
-  expect(world.files.get(`${root}/commands/board.md`)).toContain('--serve')
+  expect(world.files.get(`${root}/commands/board.md`)).toContain('--json')
+  expect(world.files.get(`${root}/commands/board.md`)).not.toContain('--serve')
   expect(world.files.has('/xdg/opencode/plugin/agent-board.js')).toBe(false)
   expect(world.files.has('/xdg/opencode/commands/board.md')).toBe(false)
   expect(world.files.get(`${root}/opencode.json`)).toBe('{}')
@@ -351,7 +362,7 @@ test('connecting writes the board script and each installed agent’s board comm
   const board = world.files.get('/home/me/.claude/agent-board.mjs') ?? ''
   expect(board.split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
   const geminiPrompt = /^prompt = (.*)$/m.exec(world.files.get('/home/me/.gemini/commands/board.toml') ?? '')?.[1] ?? 'null'
-  expect(JSON.parse(geminiPrompt)).toContain('!{node "/home/me/.claude/agent-board.mjs" --serve}')
+  expect(JSON.parse(geminiPrompt)).toContain('!{node "/home/me/.claude/agent-board.mjs"}')
   expect(world.files.get('/home/me/.agents/skills/agent-board/SKILL.md')).toContain('node "/home/me/.claude/agent-board.mjs"')
   expect(world.files.has('/home/me/.config/opencode/commands/board.md')).toBe(false)
 
@@ -599,10 +610,13 @@ test('a hand-run connect names each approval it needs once', { options: { autoCo
   }
 })
 
-test('a file that cannot be read is named as unreadable, not as unwritable', { options: { autoConnect: false } }, async ($, on) => {
-  const board = '/home/me/.claude/agent-board.mjs'
-  const reporter = '/home/me/.claude/progress-report.sh'
-  const command = '/home/me/.gemini/commands/board.toml'
+for (const [kind, file] of [
+  ['board script', '/home/me/.claude/agent-board.mjs'],
+  ['reporter', '/home/me/.claude/progress-report.sh'],
+  ['board command', '/home/me/.gemini/commands/board.toml'],
+  ['configuration', '/home/me/.cursor/hooks.json'],
+  ['legacy hook', '/home/me/.grok/hooks/progress-pane.json'],
+] as const) test(`a ${kind} file that cannot be read is named as unreadable, not as unwritable`, { options: { autoConnect: false } }, async ($, on) => {
   const config = '/home/me/.cursor/hooks.json'
   const old = '/home/me/.grok/hooks/progress-pane.json'
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
@@ -610,23 +624,30 @@ test('a file that cannot be read is named as unreadable, not as unwritable', { o
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   for (const s of Object.values(STRINGS)) {
     await $.command.run({ ...TIDY, args: `lang ${s.lang}` })
-    for (const file of [board, reporter, command, config, old]) {
-      world.files.clear()
-      for (const [path, text] of [['/home/me/.gemini/settings.json', '{}'], ['/home/me/.grok/config.toml', ''], [file, 'unreadable bytes']]) world.files.set(path!, text!)
-      world.unreadable = new Set([file])
-      const connected = await $.command.run({ ...TIDY, args: 'connect' })
-      const expected = file === config ? s.connectReadFailed('Cursor', file) : file === old ? s.connectReadFailed('Grok Build', file) : s.connectBoardReadFailed(file)
-      expect(connected.text.split(expected)).toHaveLength(2)
-      expect(connected.text).not.toContain(s.connectBoardFailed(file))
-      expect(connected.text).not.toContain(s.connectReporterFailed(file))
-      expect(connected.text).not.toContain(s.connectFailed(file === config ? 'Cursor' : 'Grok Build', file))
-      if (file === config) expect(connected.text).not.toContain(s.connectSkipped('Cursor', file))
-      expect(connected.text).not.toContain(s.setupHookUnreadable)
-      expect(world.files.get(file)).toBe('unreadable bytes')
-      const status = await $.command.run({ ...TIDY, args: 'connect status' })
-      expect(status.text.split(expected)).toHaveLength(2)
-    }
-    world.unreadable = new Set()
+    world.files.clear()
+    for (const [path, text] of [['/home/me/.gemini/settings.json', '{}'], ['/home/me/.grok/config.toml', ''], [file, 'unreadable bytes']]) world.files.set(path!, text!)
+    world.unreadable = new Set([file])
+    const connected = await $.command.run({ ...TIDY, args: 'connect' })
+    const expected = file === config ? s.connectReadFailed('Cursor', file) : file === old ? s.connectReadFailed('Grok Build', file) : s.connectBoardReadFailed(file)
+    expect(connected.text.split(expected)).toHaveLength(2)
+    expect(connected.text).not.toContain(s.connectBoardFailed(file))
+    expect(connected.text).not.toContain(s.connectReporterFailed(file))
+    expect(connected.text).not.toContain(s.connectFailed(file === config ? 'Cursor' : 'Grok Build', file))
+    if (file === config) expect(connected.text).not.toContain(s.connectSkipped('Cursor', file))
+    expect(connected.text).not.toContain(s.setupHookUnreadable)
+    expect(world.files.get(file)).toBe('unreadable bytes')
+    const status = await $.command.run({ ...TIDY, args: 'connect status' })
+    expect(status.text.split(expected)).toHaveLength(2)
+  }
+})
+
+test('a Cursor configuration with invalid JSON is named as invalid, not as a read failure', { options: { autoConnect: false } }, async ($, on) => {
+  const config = '/home/me/.cursor/hooks.json'
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  for (const s of Object.values(STRINGS)) {
+    await $.command.run({ ...TIDY, args: `lang ${s.lang}` })
     world.files.clear()
     world.files.set(config, 'invalid json')
     const connected = await $.command.run({ ...TIDY, args: 'connect' })
@@ -1272,7 +1293,7 @@ test('automatic connection and removal preserve personal commands and skills, in
   await $.command.run({ ...TIDY, args: 'lang en' })
   await $.command.run({ ...TIDY, args: 'connect' })
   const gemini = files[0] ?? ''
-  expect(world.files.get(gemini)).toContain('Show me the Agent Board')
+  expect(world.files.get(gemini)).toContain('The command below opens Agent Board')
   const edited = `${world.files.get(gemini)}\n# my change\n`
   world.files.set(gemini, edited)
   await $.command.run({ ...TIDY, args: 'connect' })
@@ -1315,9 +1336,8 @@ test('a collision is announced even when all installed reporting hooks were alre
 })
 
 test('an installation from 0.20.5 with no record upgrades silently: its board script, every agent’s board command and skill, and its reporter, with no agent’s hook passed over', { options: { autoConnect: true } }, async ($, on) => {
-  // The reporter and OpenCode command remain unchanged. Gemini now escapes its TOML
-  // prompt; the skills gained chat-app guidance. Select the historical language by
-  // its description rather than assuming every command still matches byte for byte.
+  // Board commands now open the page and skills expose --json. Select the historical
+  // language by its description rather than requiring commands to match byte for byte.
   const { world, shared, written, notices } = await fromEarlierRelease($, on, (world, before) => {
     world.files.set(BOARD_SCRIPT_FILE, releasedBoard(RELEASE_0_20_5.board))
     world.files.set(REPORTER_FILE, here(RELEASE_0_20_5.reporterSh))
@@ -1325,9 +1345,9 @@ test('an installation from 0.20.5 with no record upgrades silently: its board sc
     for (const file of BOARD_FILES) {
       const kind = file.endsWith('.toml') ? 'gemini' : file.endsWith('board.md') ? 'opencode' : 'skill'
       const texts = RELEASE_0_20_5[kind].map(here)
-      const text = kind === 'opencode' ? texts.find(one => one === before.get(file)) : texts.find(one => one.includes(JSON.stringify(ZH_TW.boardCommandDescription)))
+      const text = texts.find(one => one.includes(JSON.stringify(ZH_TW.boardCommandDescription)))
       expect(text).toBeDefined()
-      if (kind !== 'opencode') expect(text).not.toBe(before.get(file))
+      expect(text).not.toBe(before.get(file))
       world.files.set(file, text ?? '')
     }
   })
@@ -1347,7 +1367,8 @@ test('board commands and skills written before --serve (0.17.1 to 0.18.1), with 
   })
   expect(notices).toEqual([])
   for (const file of BOARD_FILES) expect(world.files.get(file)).toBe(written.get(file))
-  expect(written.get('/home/me/.gemini/commands/board.toml')).toContain('--serve')
+  expect(written.get('/home/me/.gemini/commands/board.toml')).toContain('--json')
+  expect(written.get('/home/me/.gemini/commands/board.toml')).not.toContain('--serve')
 })
 
 test('a released file edited by hand, with no record, is still preserved byte for byte and named', { options: { autoConnect: true } }, async ($, on) => {

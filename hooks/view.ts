@@ -243,10 +243,16 @@ export type View = {
   active: TaskRow[]
   groups: RowGroup[]
   recent: DoneItem[]
+  recentAsking?: TaskRow[]
   finished?: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null }>
   unreadable?: string[]
   health?: string[]
 }
+
+// The questions an archive of `ref` left on the older shelves. A kept copy holds its project as the
+// file had it, so a block under no heading is ''; a hand-kept task has no session.
+export const keptQuestionCount = (view: View, ref: TaskRef, s: Strings): number =>
+  [...(view.reminder ?? []), ...(view.older ?? [])].filter(item => (item.project || s.uncategorized) === ref.project && item.task === ref.title && (item.session ?? '') === (ref.session ?? '')).length
 
 const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
@@ -1405,6 +1411,9 @@ export const buildView = (
     active: rows,
     groups,
     recent: shownRecent.map(({ at: _at, ...item }) => item),
+    // A finished task reaches `completed` only with a step that still asks, even a hidden one. It has
+    // nothing left to confirm, so it offers Archive alone. In the order Done recently draws them, so the cursor moves down the list.
+    recentAsking: shownRecent.flatMap(recent => completed.filter(item => item.recent === recent && item.row.archive !== null)).map(item => ({ ...item.row, confirm: null })),
     finished,
     ...(unreadable.size === 0 ? {} : { unreadable: [...unreadable] }),
   }

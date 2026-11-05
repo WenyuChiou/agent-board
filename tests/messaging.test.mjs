@@ -2069,21 +2069,32 @@ test('native ownership loss during poll recovery closes the exact binding', asyn
   })
 })
 
-test('a handoff reads its current progress baseline without depending on the last page poll', async () => fixture(async (board, dir) => {
-  await board.call('/api/board')
-  const future = Date.now() + 2000
+// Each process on Windows reads its own coarse clock, so a stamp from the test's
+// Date.now() can sit a few ms in the server's future. Take every stamp from the
+// server's own `now`, which the report gate compares against.
+const handoffBaselineCase = async (board, dir) => {
+  const future = (await board.call('/api/board')).body.now + 2000
   const progress = updated => `## Synthetic\n<!-- auto session=aabbccdd agent=codex state=working updated=${new Date(updated).toISOString()} resume=native-baseline -->\n### Existing report\n- [~] This report preceded the handoff\n<!-- /auto session=aabbccdd -->\n`
   writeFileSync(join(dir, 'progress.md'), progress(future))
   const result = await boardClient(board.address).expect({ id: 'baseline1', agent: 'codex', session: 'native-baseline', surface: 'Synthetic', timeoutMs: 10000 })
   assert.ok(future > result.deadline - 10000, 'the baseline report must be ahead of the handoff clock')
   await pause(Math.max(0, future - Date.now() + 20))
-  let row = (await board.call('/api/board')).body.messaging.sessions.find(one => one.id === result.id)
+  let page
+  await waitFor(async () => (page = (await board.call('/api/board')).body).now > future)
+  let row = page.messaging.sessions.find(one => one.id === result.id)
   assert.equal(row.status, 'waiting', 'a report present before the handoff must not count as its new response')
   assert.equal(row.progress, true)
-  writeFileSync(join(dir, 'progress.md'), progress(Date.now()))
+  writeFileSync(join(dir, 'progress.md'), progress(page.now))
   row = (await board.call('/api/board')).body.messaging.sessions.find(one => one.id === result.id)
   assert.equal(row.status, 'reported')
-}))
+}
+test('a handoff reads its current progress baseline without depending on the last page poll', async () => fixture(handoffBaselineCase))
+test('a handoff baseline holds when the server clock runs behind the test', async () => fixture(async (board, dir) => {
+  writeFileSync(join(dir, 'message-clock-offset'), '-15')
+  await handoffBaselineCase(board, dir)
+}, `const originalNow = Date.now
+Date.now = () => originalNow() + (fs.existsSync(path.join(directory, 'message-clock-offset')) ? Number(fs.readFileSync(path.join(directory, 'message-clock-offset'), 'utf8')) : 0)
+`))
 
 const handoffDeadlineCase = async () => fixture(async (board, dir) => {
   const client = boardClient(board.address)

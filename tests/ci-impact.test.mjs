@@ -443,6 +443,28 @@ test('a test part runs its share of the files in one Node run, and a bad part is
   assert.throws(() => runTestFiles(['tests/ci-impact.test.mjs'], '3/2'), /test part/)
 })
 
+test('a Windows job runs at most two test files at once, and a serial job still one', async () => {
+  const { testArgs, testRuns, runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const files = ['tests/a.test.mjs', 'tests/b.test.mjs', 'tests/c.test.mjs']
+  assert.deepEqual(testArgs(files, { isWindows: true }), ['--test', '--test-concurrency=2', ...files])
+  assert.deepEqual(testArgs(files, { isWindows: true, isSerial: true }), ['--test', '--test-concurrency=1', ...files])
+  assert.deepEqual(testRuns(files, { isWindows: true, part: '2/2' }), [['--test', '--test-concurrency=2', 'tests/b.test.mjs']])
+  const serial = process.env.CI_TEST_SERIAL
+  delete process.env.CI_TEST_SERIAL
+  try {
+    const seen = platform => {
+      const runs = []
+      runTestFiles(['tests/ci-impact.test.mjs'], '', (command, args) => { runs.push(args); return { status: 0 } }, platform)
+      return runs
+    }
+    assert.deepEqual(seen('win32'), [['--test', '--test-concurrency=2', 'tests/ci-impact.test.mjs']])
+    assert.deepEqual(seen('linux'), [['--test', 'tests/ci-impact.test.mjs']])
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+  }
+})
+
 test('a self-parted test file runs whole in every part and keeps its share, so the parts together run each of its tests once', async () => {
   const { testRuns, partTest, selfPartedTests } = await import('../scripts/ci-impact.mjs')
   const files = ['tests/a.test.mjs', 'tests/board.test.mjs', 'tests/b.test.mjs', 'tests/codex-local.test.mjs']
@@ -594,16 +616,21 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   // On a pull request the planner picks the plugin systems; an empty planner output falls through to both.
   assert.ok(text.includes(`plugin_os: \${{ ${onPr} && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}`))
   assert.match(text, /plugin_os:'\["ubuntu-latest","windows-latest"\]'/)
-  // The board job takes the same pairs with the Windows set in two parts, so each keeps ten minutes (#899).
-  const twoParts = '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]'
-  const sixParts = '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/2"},{"os":"windows-latest","node":22,"part":"2/2"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]'
-  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '${twoParts}' || '${sixParts}' }}`))
+  // The board job and the journeys take the same pairs, with the Windows sets in serial parts so each
+  // keeps ten minutes: the board in four, the journeys in two (#910).
+  const parts = (node, n) => Array.from({ length: n }, (_, i) => `{"os":"windows-latest","node":${node},"part":"${i + 1}/${n}"}`).join(',')
+  const ubuntu = '{"os":"ubuntu-latest","node":22,"part":"1/1"}', ubuntu24 = '{"os":"ubuntu-latest","node":24,"part":"1/1"}'
+  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 4)}]' || '[${ubuntu},${ubuntu24},${parts(22, 4)},${parts(24, 4)}]' }}`))
+  assert.ok(text.includes(`journeys_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 2)}]' || '[${ubuntu},${ubuntu24},${parts(22, 2)},${parts(24, 2)}]' }}`))
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
     assert.ok(block, group)
-    const matrix = group === 'board' ? 'board_matrix' : 'node_matrix'
+    const matrix = group === 'board' || group === 'journeys' ? `${group}_matrix` : 'node_matrix'
     assert.ok(block.includes(`include: \${{ fromJSON(needs.impact.outputs.${matrix}) }}`), group)
-    if (group === 'board') assert.ok(block.includes('CI_TEST_PART: ${{ matrix.part }}') && block.includes('timeout-minutes: 10'), group)
+    if (group === 'board' || group === 'journeys') {
+      assert.ok(block.includes('CI_TEST_PART: ${{ matrix.part }}') && block.includes('timeout-minutes: 10'), group)
+      assert.ok(block.includes("CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}"), group)
+    }
     assert.doesNotMatch(block, /node: \[/, group)
     assert.doesNotMatch(block, /^\s+os: \[/m, group)
     assert.match(block, /CI_TEST_FILES:/, group)
@@ -611,6 +638,13 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   }
   const plugin = text.split('\n  plugin:\n')[1]?.split(/\n  [\w-]+:\n/)[0]
   assert.match(plugin, /os: \$\{\{ fromJSON\(needs\.impact\.outputs\.plugin_os\) \}\}/)
+  // Every job that runs tests on Windows turns real-time scanning off first, on Windows only.
+  for (const group of ['board', 'messaging', 'tooling', 'npm', 'plugin', 'installers', 'remote', 'journeys', 'browser']) {
+    const steps = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]?.split('\n    steps:\n')[1] ?? ''
+    assert.ok(steps.startsWith('      # Real-time scanning'), group)
+    const first = steps.split('\n      - ')[1] ?? ''
+    assert.ok(first.includes("if: runner.os == 'Windows'") && first.includes('Set-MpPreference -DisableRealtimeMonitoring $true'), group)
+  }
 })
 
 test('workflow selection uses base rules and bootstraps with every group selected', async () => {

@@ -3,7 +3,7 @@
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -21,7 +21,7 @@ import { pickSurface, AGENT_ENV_VARS } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
-import { liveBoardScript } from '../hooks/live-page.ts'
+import { liveBoardScript, pageDonePath } from '../hooks/live-page.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
@@ -65,9 +65,9 @@ test('L5 torn tail: the board warns in one line and still shows every complete b
 process.stdout.write = (chunk, ...rest) => { const result = write(chunk, ...rest); if (String(chunk).includes('task may be hidden')) process.exit(0); return result }` })
   assert.equal(watched.status, 0, watched.stderr)
   assert.equal(watched.stdout.split(warning).length - 1, 1)
-  const html = htmlRun({ file, now: TORN_NOW })
-  assert.equal(html.split(warning).length - 1, 1)
-  for (let i = 1; i <= 7; i++) assert.ok(html.includes(`Day task ${i}`))
+  const document = jsonRun({ file, now: TORN_NOW })
+  assert.deepEqual(document.notices, [warning])
+  for (let i = 1; i <= 7; i++) assert.ok([...document.working, ...document.waiting, ...document.stopped].some(row => row.title === `Day task ${i}`))
   const board = await page(file, {}, [], TORN_NOW)
   try {
     const model = (await board.call('GET', '/api/board')).json().model
@@ -489,13 +489,13 @@ test('generated board commands pass literal shell-sensitive paths through Gemini
       const geminiRun = /!\{(.*)\}/.exec(prompt)?.[1]
       const opencodeRun = /^!\u0060(.*)\u0060$/m.exec(opencodeBoardCommand('Board: literal paths', 'Show the board.', run))?.[1]
       const isWindows = process.platform === 'win32'
-      for (const command of [run + ' --serve', geminiRun, opencodeRun]) {
+      for (const command of [run, geminiRun, opencodeRun]) {
         assert.ok(command)
         const result = spawnSync(isWindows ? process.env.ComSpec || 'cmd.exe' : '/bin/sh', isWindows ? ['/d', '/s', '/c', command] : ['-c', command], {
           env: { ...process.env, AB_PATH: 'expanded-wrong-path' }, input: 'AB-COMMAND-FIXTURE', encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: isWindows, timeout: 10000,
         })
         assert.equal(result.status, 0, result.stderr)
-        assert.deepEqual(JSON.parse(result.stdout), { url: pathToFileURL(script).href, args: ['--serve'], stdin: 'AB-COMMAND-FIXTURE' })
+        assert.deepEqual(JSON.parse(result.stdout), { url: pathToFileURL(script).href, args: [], stdin: 'AB-COMMAND-FIXTURE' })
       }
     }
   } finally { rmSync(root, { recursive: true, force: true }) }
@@ -532,7 +532,8 @@ const run = (lang, args = [], beside = {}, source = FILE, code = BOARD_SCRIPT) =
     const runtime = join(dir, 'run')
     mkdirSync(runtime, { mode: 0o700 })
     const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, XDG_RUNTIME_DIR: runtime }
-    return execFileSync(process.execPath, [script, ...args], { env, encoding: 'utf8' })
+    const hasMode = args.some(arg => ['--chat', '--serve', '--watch', '--html', '--keys', '--json', '--codex-event', '--codex-report', '--serve-child', '--help', '-h', 'stop'].includes(arg))
+    return execFileSync(process.execPath, [script, ...(hasMode ? args : ['--print', ...args])], { env, encoding: 'utf8' })
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
@@ -596,8 +597,8 @@ test('the board script leaves out a question a pane on this machine marked answe
   assert.ok(run('en', [], { 'progress-answered.json': '{' }).includes('Per-key limit'))
 })
 
-const htmlRun = ({ file = '', inbox = {}, age = 0, lang = 'en', home = dir => dir, beside = {}, now } = {}) => {
-  const dir = mkdtempSync(join(tmpdir(), 'board-html-'))
+const jsonRun = ({ file = '', inbox = {}, age = 0, lang = 'en', home = dir => dir, beside = {}, now } = {}) => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-json-'))
   try {
     const path = join(dir, 'progress.md')
     writeFileSync(path, file)
@@ -609,15 +610,13 @@ const htmlRun = ({ file = '', inbox = {}, age = 0, lang = 'en', home = dir => di
       const at = new Date(Date.now() - (typeof age === 'function' ? age(name) : age))
       utimesSync(target, at, at)
     }
-    // A static page is inspected from disk; the test never opens a browser.
-    assert.ok(BOARD_SCRIPT.includes('openInBrowser(html,'))
     const script = join(dir, 'agent-board.mjs')
-    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${now === undefined ? '' : `Date.now = () => ${now}\n`}${BOARD_SCRIPT.replace('openInBrowser(html,', '((target, done) => done(false))(html,')}`)
-    execFileSync(process.execPath, [script, '--html'], {
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${now === undefined ? '' : `Date.now = () => ${now}\n`}${BOARD_SCRIPT}`)
+    const output = execFileSync(process.execPath, [script, '--json'], {
       env: { ...process.env, CLAUDE_PROGRESS_FILE: path, HOME: home(dir), USERPROFILE: home(dir) },
       encoding: 'utf8',
     })
-    return readFileSync(join(dir, 'progress.html'), 'utf8')
+    return JSON.parse(output)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -627,108 +626,121 @@ const HTML_TURN = 'codex-turn-1792152000-1.json'
 const HTML_QUESTION = 'Use 100 or 300 a minute?'
 const htmlTurn = answer => JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', last_assistant_message: answer })
 
-test('the HTML board shows pending questions with an empty progress file and cannot send replies', () => {
-  for (const [lang, label, hint] of [
-    ['en', 'Needs you', 'codex'],
-    ['zh-TW', '需要你', 'codex'],
-    ['zh-CN', '需要你', 'codex'],
-  ]) {
-    const page = htmlRun({ inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) }, lang })
-    assert.ok(page.includes(label) && page.includes(hint), page)
-    assert.ok(page.includes('api-gateway') && page.includes('codex'), page)
-    // One list: the question is on the Needs you sheet once.
-    assert.equal(page.split(HTML_QUESTION).length - 1, 1)
-    assert.ok(page.includes('id="dash-needs"'), page)
-    assert.ok(!/<form|<textarea|fetch\(/.test(page), page)
-    // Its only buttons switch the theme, filter by agent or open a section; none sends a reply.
-    assert.ok([...page.matchAll(/<button[ >][^>]*>/g)].every(([tag]) => /data-theme-toggle|data-section=|data-agent=/.test(tag)), page)
-    assert.ok(/<b id="needs-n">1<\/b>/.test(page), page)
+test('the JSON board shows pending questions with an empty progress file', () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const document = jsonRun({ inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) }, lang })
+    assert.equal(document.lang, lang)
+    assert.equal(document.counts.needs, 1)
+    assert.deepEqual(document.needs.map(item => [item.text, item.project, item.agent]), [[HTML_QUESTION, 'api-gateway', 'codex']])
   }
 })
 
-test('the HTML board keeps a stale inbox question visible until it is processed', () => {
-  const page = htmlRun({ inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) }, age: 7 * 24 * 60 * 60 * 1000 })
-  assert.ok(page.includes(HTML_QUESTION) && page.includes('Needs you'), page)
+test('the JSON board keeps a stale inbox question visible until it is processed', () => {
+  const document = jsonRun({ inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) }, age: 7 * 24 * 60 * 60 * 1000 })
+  assert.equal(document.needs[0].text, HTML_QUESTION)
 })
 
-test('the HTML board shows only the newest thirty inbox files', () => {
+test('the JSON board shows only the newest thirty inbox files', () => {
   const inbox = Object.fromEntries(Array.from({ length: 35 }, (_, i) => [
     `codex-turn-1792152000-${i}.json`,
     JSON.stringify({ session_id: `demo-${i}`, cwd: '/work/api-gateway', last_assistant_message: `Use limit ${i}?` }),
   ]))
-  const page = htmlRun({ inbox, age: name => Number(name.match(/-(\d+)\.json$/)[1]) * 1000 })
-  for (let i = 0; i < 35; i++) assert.equal(page.includes(`Use limit ${i}?`), i < 30, page)
+  const document = jsonRun({ inbox, age: name => Number(name.match(/-(\d+)\.json$/)[1]) * 1000 })
+  const questions = document.needs.map(item => item.text)
+  for (let i = 0; i < 35; i++) assert.equal(questions.includes(`Use limit ${i}?`), i < 30, JSON.stringify(document))
 })
 
-test('the HTML board skips malformed inbox files without losing a valid question', () => {
-  const page = htmlRun({ inbox: { 'codex-turn-1792152000-2.json': '{ broken', [HTML_TURN]: htmlTurn(HTML_QUESTION) } })
-  assert.ok(page.includes(HTML_QUESTION) && !page.includes('{ broken'), page)
-  assert.ok(!htmlRun({ inbox: { [HTML_TURN]: '{ broken' } }).includes('data-key="section:inbox"'))
+test('the JSON board skips malformed inbox files without losing a valid question', () => {
+  const document = jsonRun({ inbox: { 'codex-turn-1792152000-2.json': '{ broken', [HTML_TURN]: htmlTurn(HTML_QUESTION) } })
+  assert.deepEqual(document.needs.map(item => item.text), [HTML_QUESTION])
+  assert.deepEqual(jsonRun({ inbox: { [HTML_TURN]: '{ broken' } }).needs, [])
 })
 
-test('the HTML board escapes pending turn text and project names', () => {
-  const page = htmlRun({ inbox: {
+test('the JSON board preserves pending turn text and project names as data', () => {
+  const document = jsonRun({ inbox: {
     [HTML_TURN]: JSON.stringify({ session_id: 'demo-1', cwd: '/work/<img "demo" &>', last_assistant_message: '<script>alert("demo")</script> & done?' }),
     'gemini-turn-1792152000-2.json': JSON.stringify({ session_id: 'demo-2', cwd: '/work/api-gateway', prompt_response: 'Use <demo> & "yes"?' }),
   } })
-  assert.ok(page.includes('&lt;scriptalert(&quot;demo&quot;)&lt;/script &amp; done?'), page)
-  assert.ok(page.includes('&lt;img &quot;demo&quot; &amp;&gt;'), page)
-  assert.ok(page.includes('&lt;demo') && page.includes('&amp; &quot;yes&quot;?'), page)
-  assert.ok(!/<script>alert|<img|<demo/.test(page), page)
+  assert.deepEqual(document.needs.map(item => [item.text, item.project]).sort(([a], [b]) => a.localeCompare(b)), [
+    ['<script>alert("demo")</script> & done?', '<img "demo" &>'],
+    ['Use <demo> & "yes"?', 'api-gateway'],
+  ].sort(([a], [b]) => a.localeCompare(b)))
+})
+
+test('the JSON board keeps a recent acknowledgement when an expired receipt names the same inbox file', () => {
+  const now = Date.parse('2026-11-04T12:00:00Z')
+  const receipt = (prefix, at) => {
+    const body = JSON.stringify({ version: 1, name: HTML_TURN, stamp: `${prefix}:${at}` })
+    const hash = createHash('sha256').update(body).digest('hex')
+    return { file: pageDonePath('progress.md', hash), body }
+  }
+  const ordered = (prefix, at) => Array.from({ length: 32 }, (_, i) => receipt(`${prefix}${i}`, at)).sort((a, b) => a.file.localeCompare(b.file))
+  const recent = ordered('recent', now)[0]
+  const expired = ordered('expired', now - 4 * 24 * 60 * 60 * 1000).at(-1)
+  // The old receipt sorts last, which would overwrite the recent stamp in a single map.
+  assert.ok(expired.file > recent.file)
+  const document = jsonRun({ inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) }, beside: { [recent.file]: recent.body, [expired.file]: expired.body }, now })
+  assert.equal(document.counts.needs, 0)
+  assert.deepEqual(document.needs, [])
 })
 
 // The CLI cannot read the plugin store's inboxDone; only a claimed file is excluded here.
-test('the HTML board skips claimed inbox files while keeping the question in progress.md', () => {
-  const page = htmlRun({
+test('the JSON board skips claimed inbox files while keeping the question in progress.md', () => {
+  const document = jsonRun({
     file: FILE.replace('Per-key limit — 100 or 300 a minute?', HTML_QUESTION),
     inbox: { [`${HTML_TURN}.deadbeef-abc-1.taking`]: htmlTurn(HTML_QUESTION) },
   })
-  assert.ok(!page.includes('data-key="section:inbox"'), page)
-  const waiting = page.match(/id="dash-needs"[\s\S]*?<\/section>/)?.[0] ?? ''
-  assert.equal(waiting.split(HTML_QUESTION).length - 1, 1, page)
+  assert.deepEqual(document.needs.map(item => item.text), [HTML_QUESTION])
 })
 
 // One question asked in a block and in the inbox is one card (#463), like the terminal board and --serve.
-test('the HTML board shows a question that is in both an agent block and the inbox once, like the terminal board and --serve', () => {
-  const page = htmlRun({
+test('the JSON board shows a question that is in both an agent block and the inbox once, like the terminal board and page', () => {
+  const document = jsonRun({
     file: FILE.replace('Per-key limit — 100 or 300 a minute?', HTML_QUESTION).replace('agent=codex ', 'agent=codex dir=%2Fwork%2Fapi-gateway '),
     inbox: { [HTML_TURN]: htmlTurn(HTML_QUESTION) },
   })
-  const pending = page.match(/data-key="section:inbox"[\s\S]*?<\/details>/)?.[0] ?? ''
-  const waiting = page.match(/id="dash-needs"[\s\S]*?<\/section>/)?.[0] ?? ''
-  assert.equal(pending.split(HTML_QUESTION).length - 1, 0, page)
-  assert.equal(waiting.split(HTML_QUESTION).length - 1, 1, page)
-  assert.ok(/<b id="needs-n">1<\/b>/.test(page), page)
+  assert.equal(document.counts.needs, 1)
+  assert.deepEqual(document.needs.map(item => item.text), [HTML_QUESTION])
 })
 
-test('the HTML board redacts home paths and credentials before clipping pending questions', () => {
+test('the JSON board redacts home paths and credentials before clipping pending questions', () => {
   const secret = `sk-${'a'.repeat(40)}`
-  const page = htmlRun({
+  const document = jsonRun({
     home: dir => join(dir, 'demo-home'),
     inbox: dir => ({ [HTML_TURN]: htmlTurn(`Use ${join(dir, 'demo-home', 'private')} with ${secret} or wait?`) }),
   })
-  assert.ok(page.includes('~') && page.includes('•••') && page.includes('or wait?'), page)
-  assert.ok(!page.includes('demo-home') && !page.includes(secret), page)
+  const output = JSON.stringify(document)
+  assert.ok(output.includes('~') && output.includes('•••') && output.includes('or wait?'), output)
+  assert.ok(!output.includes('demo-home') && !output.includes(secret), output)
 })
 
-test('the HTML board shows only the agent and project for a pending turn without a question', () => {
-  const page = htmlRun({ inbox: {
+const inboxPageModel = async inbox => {
+  const board = await page('', {}, [], undefined, BOARD_SCRIPT, (dir, path) => {
+    writeFileSync(path, '')
+    const folder = join(dir, 'progress-inbox')
+    mkdirSync(folder)
+    for (const [name, body] of Object.entries(inbox)) writeFileSync(join(folder, name), body)
+  })
+  try { return (await board.call('GET', '/api/board')).json().model } finally { await board.close() }
+}
+
+test('the board page shows only the agent and project for a pending turn without a question', async () => {
+  const model = await inboxPageModel({
     [HTML_TURN]: JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', prompt: 'Private prompt contents', last_assistant_message: '' }),
     'gemini-turn-1792152000-2.json': JSON.stringify({ session_id: 'demo-2', cwd: '/work/api-gateway', prompt_response: 'Private reply contents.' }),
-  } })
-  assert.ok(page.includes('api-gateway · codex') && page.includes('api-gateway · gemini'), page)
-  assert.ok(!page.includes('Private prompt contents') && !page.includes('Private reply contents'), page)
+  })
+  assert.deepEqual(model.turns.map(turn => [turn.project, turn.agent]).sort((a, b) => a[1].localeCompare(b[1])), [['api-gateway', 'codex'], ['api-gateway', 'gemini']])
+  const output = JSON.stringify(model.turns)
+  assert.ok(!output.includes('Private prompt contents') && !output.includes('Private reply contents'), output)
 })
 
-test('the HTML board does not count pending turns that are not questions in Needs you', () => {
-  const page = htmlRun({ inbox: {
+test('the board page does not count pending turns that are not questions in Needs you', async () => {
+  const model = await inboxPageModel({
     [HTML_TURN]: JSON.stringify({ session_id: 'demo-1', cwd: '/work/api-gateway', prompt: 'Private prompt contents', last_assistant_message: '' }),
-  } })
-  assert.match(page, /id="needs-n">0<\/b>/)
-  assert.match(page, /id="needs-empty"(?! hidden)/)
-  assert.match(page, /<div class="ask" data-agent="codex"><div class="where">/)
-  assert.match(page, /class="turn"/)
-  assert.match(page, /item\.querySelector\('\.turn'\)/)
+  })
+  assert.equal(model.counts.waiting, 0)
+  assert.deepEqual(model.asks, [])
+  assert.equal(model.turns.length, 1)
 })
 
 // `--chat` in a folder of its own, with the home folder, the temp folders and every XDG folder
@@ -767,7 +779,8 @@ const chatRun = (args, { file = () => FILE, beside = {}, lang = 'en', isFolder =
     }
     const prelude = join(dirs['.claude'], 'fault.cjs')
     if (preload) writeFileSync(prelude, preload)
-    const ran = spawnSync(process.execPath, [...(preload ? ['--require', prelude] : []), script, ...args], { env, cwd: isRelativePath ? home : undefined, encoding: 'utf8', timeout: 20000, input })
+    const hasMode = args.some(arg => ['--chat', '--serve', '--watch', '--html', '--keys', '--json', '--codex-event', '--codex-report', '--serve-child', '--help', '-h', 'stop'].includes(arg))
+    const ran = spawnSync(process.execPath, [...(preload ? ['--require', prelude] : []), script, ...(hasMode ? args : ['--print', ...args])], { env, cwd: isRelativePath ? home : undefined, encoding: 'utf8', timeout: 20000, input })
     const modified = [...unchanged].filter(([name, old]) => !existsSync(join(dirs['.claude'], name)) || !readFileSync(join(dirs['.claude'], name)).equals(old.bytes) || statSync(join(dirs['.claude'], name)).mtimeMs !== old.mtime).map(([name]) => name)
     return { ...ran, home, path, modified, answered: existsSync(join(dirs['.claude'], 'progress-answered.json')) ? readFileSync(join(dirs['.claude'], 'progress-answered.json'), 'utf8') : null, wrote: readdirSync(dirs['.claude']).filter(name => !before.includes(name)), served: readdirSync(dirs.run), ...inspect(dirs['.claude']) }
   } finally {
@@ -1924,7 +1937,7 @@ test('the terminal and served boards show only the newest thirty inbox files', {
       const at = new Date(now - i * 1000)
       utimesSync(file, at, at)
     }
-    const terminal = execFileSync(process.execPath, [join(board.dir, 'agent-board.mjs')], {
+    const terminal = execFileSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--print'], {
       env: { ...process.env, CLAUDE_PROGRESS_FILE: board.path, NO_COLOR: '1' },
       encoding: 'utf8',
     })
@@ -2053,12 +2066,9 @@ test('served questions keep hidden identities across reordered reports and a fre
       const run = flag => execFileSync(process.execPath, [script, flag, '--lang', lang], { encoding: 'utf8', env: { ...process.env, CLAUDE_PROGRESS_FILE: board.path, NO_COLOR: '1' } })
       const chat = run('--chat')
       assert.ok(!chat.includes('PDF  or') && !chat.includes('PDF or HTML?'), chat)
-      run('--html')
-      const html = readFileSync(join(board.dir, 'progress.html'), 'utf8')
-      const needs = html.match(/id="dash-needs"[\s\S]*?<\/section>/)?.[0] ?? ''
-      assert.ok(needs && !needs.includes('PDF or HTML?') && !needs.includes('PDF  or'), html)
-      assert.ok(html.includes('PDF  or') || html.includes('PDF or HTML?'), html)
-      assert.match(html, /id="needs-n">0<\/b>/)
+      const document = JSON.parse(run('--json'))
+      assert.equal(document.counts.needs, 0)
+      assert.deepEqual(document.needs, [])
       assert.equal(readFileSync(join(board.dir, 'progress-answered.json'), 'utf8'), saved['progress-answered.json'])
       assert.equal(readFileSync(join(board.dir, 'progress-questions.json'), 'utf8'), saved['progress-questions.json'])
     }
@@ -2457,7 +2467,7 @@ require('node:module').syncBuiltinESMExports()
         assert.equal(far.json().note, note)
       }
       rmSync(lock)
-      const printed = spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs')], {
+      const printed = spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--print'], {
         env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, NO_COLOR: '1' },
         encoding: 'utf8', timeout: 5000,
       })
@@ -3257,7 +3267,7 @@ const pressKeysFor = item => item.type === 'ask'
   : item.type === 'row' ? ['enter', ...(item.row.next === null ? [] : ['x']), ...(item.row.archive === null ? [] : ['a']), ...(item.row.confirm == null ? [] : ['d']), ...(item.row.resume === null ? [] : ['c'])] : ['enter']
 const pressExpected = (runtime, action) => action.type === 'copy' ? runtime.s.copied
   : action.type === 'tick' ? runtime.s.boardTicked(action.ref.step)
-    : action.type === 'archive' ? runtime.s.archivedOne(action.title)
+    : action.type === 'archive' ? action.title.startsWith('hand-kept ') ? runtime.s.archivedKeptQuestions(action.title, 1) : runtime.s.archivedOne(action.title)
       : action.type === 'done' ? runtime.s.confirmedDone(action.title)
         : action.type === 'hide' ? runtime.s.boardHidden(action.text) : runtime.s.boardShown
 
@@ -3758,81 +3768,50 @@ test('a question shown again from the terminal drops the Hidden notice on the pa
   } finally { await board.close() }
 })
 
-test('pressing o on the keys board when the page cannot open says why', () => {
-  const root = mkdtempSync(join(tmpdir(), 'board-opener-refused-'))
+test('pressing o on the keys board starts the live page with a link when no window is requested and writes no static page', async () => {
+  const board = serveIn()
+  const urls = []
   try {
-    const path = join(root, 'progress.md')
-    const script = join(root, 'agent-board.mjs')
-    writeFileSync(path, '# Progress\n')
-    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\nprocess.env.SystemRoot = ${JSON.stringify(root)}; process.env.PATH = ${JSON.stringify(root)};\n${BOARD_SCRIPT}`)
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !['PATH'].includes(key.toUpperCase())))
-    const result = spawnSync(process.execPath, [script, '--keys', 'o'], { encoding: 'utf8', timeout: 10000, windowsHide: true, env: { ...env, CLAUDE_PROGRESS_FILE: '', PATH: root, NO_COLOR: '1' } })
+    const result = spawnSync(process.execPath, [board.script, '--keys', 'o', '--no-open'], { encoding: 'utf8', timeout: 20000, windowsHide: true, env: board.env })
+    const url = board.urlOf(result.stdout)
+    if (url) urls.push(url)
     assert.equal(result.status, 0, result.stderr)
-    assert.match(result.stdout, /Could not open the board page: the browser could not be started\./)
-    assert.ok(!result.stdout.includes(root))
-    assert.ok(result.stdout.replace(/\s+/g, ' ').includes('Open progress.html, next to progress.md, yourself.'))
-    assert.ok(existsSync(join(root, 'progress.html')))
-  } finally { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
+    assert.ok(url, result.stdout)
+    assert.doesNotMatch(result.stdout, /browser could not be started|Opened Agent Board/)
+    assert.ok(!result.stdout.includes(board.dir))
+    assert.ok(!existsSync(join(board.dir, 'progress.html')))
+    assert.ok(existsSync(board.served), 'the live server address must be recorded')
+  } finally { await board.end(urls) }
 })
 
-test('a failed page write on the keys board names the file without its folder', () => {
-  const root = mkdtempSync(join(tmpdir(), 'board-page-write-refused-'))
-  try {
-    const path = join(root, 'progress.md')
-    const script = join(root, 'agent-board.mjs')
-    const html = join(root, 'progress.html')
-    writeFileSync(path, '# Progress\n')
-    mkdirSync(html)
-    for (const lang of ['en', 'zh-TW', 'zh-CN']) {
-      writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT}`)
-      const result = spawnSync(process.execPath, [script, '--keys', 'o'], { encoding: 'utf8', timeout: 10000, windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' } })
-      assert.equal(result.status, 1, result.stderr)
-      const words = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }[lang]
-      assert.ok(result.stdout.includes(words.fileNamed('progress.html')), result.stdout)
-      assert.ok(!result.stdout.includes(root), result.stdout)
-      assert.ok(!result.stderr.includes(root), result.stderr)
-      assert.ok(result.stdout.replace(/\s/g, '').includes(result.stderr.replace(/\s/g, '')), result.stdout)
-      assert.ok([words.storageIsFolder, words.storageReadOnly].some(reason => result.stderr.trim() === words.boardStorageFailed(words.fileNamed('progress.html'), reason)), result.stderr)
-    }
-  } finally { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
-})
-
-test('a failed page write on the watch board names the file without its folder', () => {
-  const root = mkdtempSync(join(tmpdir(), 'board-watch-page-write-refused-'))
-  try {
-    const path = join(root, 'progress.md')
-    const script = join(root, 'agent-board.mjs')
-    const preload = join(root, 'preload.mjs')
-    writeFileSync(path, '# Progress\n')
-    mkdirSync(join(root, 'progress.html'))
-    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
-    writeFileSync(preload, `Object.defineProperty(process.stdin, 'isTTY', { value: true })
-process.stdin.setRawMode = () => {}
-// The board draws only on a terminal; a pipe gets it once as plain text.
-Object.defineProperty(process.stdout, 'isTTY', { value: true })
-const write = process.stdout.write.bind(process.stdout)
-let drawn = false
-process.stdout.write = function (text, ...rest) {
-  const result = write(text, ...rest)
-  if (!drawn && String(text).startsWith('\\x1b[H')) {
-    drawn = true
-    queueMicrotask(() => {
-      process.stdin.emit('data', 'o')
-      process.stdin.emit('data', 'q')
-    })
+test('a browser that exits with an error at once is not reported as opened: the next opener is tried, then the link is printed', { skip: process.platform !== 'linux' }, async () => {
+  const board = serveIn()
+  const urls = []
+  const bin = mkdtempSync(join(tmpdir(), 'agent-board-browsers-'))
+  const log = join(bin, 'tried.log')
+  const openers = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'microsoft-edge', 'microsoft-edge-stable', 'xdg-open']
+  const fake = (name, code) => {
+    writeFileSync(join(bin, name), `#!/bin/sh\necho ${name} >> '${log}'\nexit ${code}\n`)
+    chmodSync(join(bin, name), 0o755)
   }
-  return result
-}
-`)
-    const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, script, '--watch'], { encoding: 'utf8', timeout: 10000, windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' } })
-    assert.equal(result.status, 1, result.stderr)
-    assert.ok(result.stdout.includes(EN.fileNamed('progress.html')), result.stdout)
-    assert.ok(!result.stdout.includes(root), result.stdout)
-    assert.ok(!result.stderr.includes(root), result.stderr)
-    // Each screen line ends with a clear-to-end code; the words are compared without them.
-    assert.ok(result.stdout.replace(/\u001b\[[\d;?]*[A-Za-z]/g, '').replace(/\s/g, '').includes(result.stderr.replace(/\s/g, '')), result.stdout)
-    assert.ok([EN.storageIsFolder, EN.storageReadOnly].some(reason => result.stderr.trim() === EN.boardStorageFailed(EN.fileNamed('progress.html'), reason)), result.stderr)
-  } finally { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
+  const press = () => {
+    const result = spawnSync(process.execPath, [board.script, '--keys', 'o'], { encoding: 'utf8', timeout: 20000, windowsHide: true, env: { ...board.env, PATH: bin } })
+    const url = board.urlOf(result.stdout)
+    if (url) urls.push(url)
+    assert.equal(result.status, 0, result.stderr)
+    assert.ok(url, result.stdout)
+    return result.stdout
+  }
+  try {
+    for (const name of openers) fake(name, 1)
+    assert.doesNotMatch(press(), /Opened Agent Board/)
+    assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), openers)
+    fake('google-chrome', 0)
+    assert.match(press(), /Opened Agent Board/)
+  } finally {
+    await board.end(urls)
+    rmSync(bin, { recursive: true, force: true })
+  }
 })
 
 test('in --watch a late browser-open note never shows under another card', () => {
@@ -3842,7 +3821,11 @@ test('in --watch a late browser-open note never shows under another card', () =>
     const script = join(root, 'agent-board.mjs')
     const preload = join(root, 'preload.mjs')
     writeFileSync(path, '# Progress\n## Demo\n### Synthetic task\n- [ ] Next step\n- [ ] Later step\n')
-    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const opening = BOARD_SCRIPT.indexOf('var openPage = async () => {')
+    const opened = BOARD_SCRIPT.indexOf('var openPageSurface =', opening)
+    assert.ok(opening > 0 && opened > opening)
+    const fixture = `${BOARD_SCRIPT.slice(0, opening)}var openPage = () => globalThis.fixturePage()\n${BOARD_SCRIPT.slice(opened)}`
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${fixture}`)
     writeFileSync(preload, `import childProcess from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { syncBuiltinESMExports } from 'node:module'
@@ -3850,19 +3833,19 @@ Object.defineProperty(process.stdin, 'isTTY', { value: true })
 process.stdin.setRawMode = () => {}
 // The board draws only on a terminal; a pipe gets it once as plain text.
 Object.defineProperty(process.stdout, 'isTTY', { value: true })
-let browser
-childProcess.spawn = () => { browser = new EventEmitter(); browser.unref = () => {}; return browser }
-syncBuiltinESMExports()
+let finishOpen
+globalThis.fixturePage = () => new Promise(done => { finishOpen = done })
 const write = process.stdout.write.bind(process.stdout)
 let drawn = false
 process.stdout.write = function (text, ...rest) {
   const result = write(text, ...rest)
   if (!drawn && String(text).startsWith('\\x1b[H')) {
     drawn = true
-    queueMicrotask(() => {
+    queueMicrotask(async () => {
       process.stdin.emit('data', 'o')
       process.stdin.emit('data', 'x')
-      browser.emit('spawn')
+      finishOpen({ note: ${JSON.stringify(EN.boardPageWindowOpened('http://127.0.0.1:34567/?t=synthetic'))}, isOpen: true })
+      await Promise.resolve()
       process.stdin.emit('data', 'q')
     })
   }
@@ -3873,8 +3856,8 @@ process.stdout.write = function (text, ...rest) {
     assert.equal(result.status, 0, result.stderr)
     const frame = result.stdout.split('\x1b[H').at(-1)
     assert.ok(frame.includes('Synthetic task'), frame)
-    assert.match(frame, /^Opened the board page/m)
-    assert.doesNotMatch(frame, /^\s+Opened the board page/m)
+    assert.match(frame, /^Opened Agent Board/m)
+    assert.doesNotMatch(frame, /^\s+Opened Agent Board/m)
   } finally { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
 
@@ -3911,25 +3894,6 @@ syncBuiltinESMExports()
     assert.ok(resolve(faults).startsWith(resolve(tmpdir()) + sep))
     rmSync(faults, { recursive: true, force: true })
   }
-})
-
-test('a refused browser open names a custom page without its folder', () => {
-  const root = mkdtempSync(join(tmpdir(), 'board-custom-page-'))
-  try {
-    const path = join(root, 'board.md')
-    const script = join(root, 'agent-board.mjs')
-    writeFileSync(path, '# Progress\n')
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PATH'))
-    for (const lang of ['en', 'zh-TW', 'zh-CN']) {
-      writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\nprocess.env.SystemRoot = ${JSON.stringify(root)}; process.env.PATH = ${JSON.stringify(root)};\n${BOARD_SCRIPT}`)
-      const result = spawnSync(process.execPath, [script, '--keys', 'o'], { encoding: 'utf8', timeout: 10000, windowsHide: true, env: { ...env, CLAUDE_PROGRESS_FILE: '', PATH: root, NO_COLOR: '1' } })
-      assert.equal(result.status, 0, result.stderr)
-      assert.ok(result.stdout.includes('board.html'), result.stdout)
-      assert.ok(result.stdout.includes('board.md'), result.stdout)
-      assert.ok(!result.stdout.includes('progress.html'), result.stdout)
-      assert.ok(!result.stdout.includes(root), result.stdout)
-    }
-  } finally { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }
 })
 
 test('a refused press on the page shows its reason in the alert colour next to its card', async () => {
@@ -4478,7 +4442,7 @@ const serveIn = () => {
   }
   const serve = (extra = []) =>
     new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
-  const urlOf = out => out.match(/answer\): (http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/)?.[1] ?? null
+  const urlOf = out => out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0] ?? null
   const served = servedAt(run, path)
   // Closes every page it was given, and the one its address file names when a test could not read
   // the address, and waits for each to take its address file away.
@@ -4507,19 +4471,19 @@ const serveIn = () => {
 }
 
 test('the board command picks text, the terminal board or the page from where it runs', () => {
-  assert.equal(pickSurface({ isTty: false }), 'text')
-  assert.equal(pickSurface({ isTty: false, platform: 'win32', env: {} }), 'text')
-  assert.equal(pickSurface({ isTty: false, platform: 'darwin', env: {} }), 'text')
-  assert.equal(pickSurface({ isTty: false, platform: 'linux', env: { DISPLAY: ':0' } }), 'text')
+  assert.equal(pickSurface({ isTty: false, env: {} }), 'page')
+  assert.equal(pickSurface({ isTty: false, platform: 'win32', env: {} }), 'page')
+  assert.equal(pickSurface({ isTty: false, platform: 'darwin', env: {} }), 'page')
+  assert.equal(pickSurface({ isTty: false, platform: 'linux', env: { DISPLAY: ':0' } }), 'page')
 
   assert.equal(pickSurface({ isTty: true, platform: 'win32', env: { CI: 'true' } }), 'text')
   assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: { CI: '1' } }), 'text')
   assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { CI: 'true', DISPLAY: ':0' } }), 'text')
 
   for (const name of AGENT_ENV_VARS) {
-    assert.equal(pickSurface({ isTty: true, platform: 'win32', env: { [name]: '1' } }), 'text', `${name} should pick text`)
-    assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: { [name]: '1' } }), 'text', `${name} should pick text`)
-    assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { [name]: '1', DISPLAY: ':0' } }), 'text', `${name} should pick text`)
+    assert.equal(pickSurface({ isTty: true, platform: 'win32', env: { [name]: '1' } }), 'page', `${name} should pick the page`)
+    assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: { [name]: '1' } }), 'page', `${name} should pick the page`)
+    assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { [name]: '1', DISPLAY: ':0' } }), 'page', `${name} should pick the page`)
   }
 
   for (const platform of ['win32', 'darwin', 'linux']) {
@@ -4536,7 +4500,7 @@ test('the board command picks text, the terminal board or the page from where it
   assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { WAYLAND_DISPLAY: 'wayland-0' } }), 'page')
 })
 
-test('a second agent-board reuses the running page and says it was already running', { timeout: 40_000 }, async () => {
+test('a second agent-board reuses the running page and prints the same bare URL', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const urls = []
   try {
@@ -4550,18 +4514,14 @@ test('a second agent-board reuses the running page and says it was already runni
     const url1 = board.urlOf(first)
     assert.ok(url1, 'first run should output address')
     urls.push(url1)
-    const firstLines = first.trim().split('\n').filter(Boolean)
-    assert.ok(firstLines.length <= 3, `first run should be at most 3 lines, got ${firstLines.length}`)
-    assert.ok(!first.includes('already running'), 'first run should not say already running')
+    assert.equal(first.trim(), url1)
 
     const second = await runBoard()
     const url2 = board.urlOf(second)
     assert.ok(url2, 'second run should output address')
     urls.push(url2)
     assert.equal(url1, url2, 'second run must reuse the same server and URL')
-    assert.ok(second.includes(EN.serveAlreadyRunning), 'second run must say it was already running')
-    const secondLines = second.trim().split('\n').filter(Boolean)
-    assert.ok(secondLines.length <= 3, `second run should be at most 3 lines, got ${secondLines.length}`)
+    assert.equal(second.trim(), url2)
   } finally {
     await board.end(urls)
   }
@@ -4641,26 +4601,31 @@ test('the SSH hint links to the page with its token', () => {
   assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshHost(), server.url)'))
 })
 
-test('an agent or a pipe running agent-board gets today\'s text and no window', async () => {
+test('an agent or a pipe running agent-board with no surface flag opens one page and prints one bare URL', async () => {
   const board = serveIn()
+  const urls = []
   try {
     const piped = await new Promise((done, fail) => {
-      execFile(process.execPath, [board.script], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
+      execFile(process.execPath, [board.script, '--no-open'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
     })
-    assert.ok(piped.startsWith('Progress'), 'piped run must output text board')
-    assert.ok(!existsSync(board.served), 'piped run must start no server')
+    const pipedUrl = board.urlOf(piped)
+    assert.ok(pipedUrl)
+    urls.push(pipedUrl)
+    assert.equal(piped.trim(), pipedUrl)
 
     const ttyShim = join(board.dir, 'tty-shim-agent.cjs')
     writeFileSync(ttyShim, 'process.stdout.isTTY = true; process.stdin.isTTY = true;\n')
     for (const envVar of ['CLAUDECODE', 'CODEX_THREAD_ID', 'CURSOR_AGENT']) {
       const agentRun = await new Promise((done, fail) => {
-        execFile(process.execPath, ['--require', ttyShim, board.script], { env: { ...board.env, [envVar]: '1' }, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
+        execFile(process.execPath, ['--require', ttyShim, board.script, '--no-open'], { env: { ...board.env, [envVar]: '1' }, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
       })
-      assert.ok(agentRun.startsWith('Progress'), `${envVar} must output text board`)
-      assert.ok(!existsSync(board.served), `${envVar} must start no server`)
+      const url = board.urlOf(agentRun)
+      assert.equal(url, pipedUrl, `${envVar} must reuse the page`)
+      assert.equal(agentRun.trim(), url, `${envVar} must print one bare URL`)
+      urls.push(url)
     }
   } finally {
-    await board.end([])
+    await board.end(urls)
   }
 })
 
@@ -7690,7 +7655,7 @@ test('a small page offers Clean up for its archive count and keeps the result af
   } finally { await board.close() }
 })
 
-test('terminal and HTML size warnings keep translated numbers in the details line without a Clean up button', () => {
+test('terminal and JSON size warnings keep translated numbers in the details line without a Clean up action', () => {
   const { source, seen } = largeManualBoard()
   for (const [lang, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
     const details = [s.progressLarge(Math.round(Buffer.byteLength(source) / 1024), 512), s.canArchive(2)].join(' · ')
@@ -7703,12 +7668,8 @@ test('terminal and HTML size warnings keep translated numbers in the details lin
       assert.deepEqual(result.modified, [])
       assert.deepEqual(result.wrote, [])
     }
-    const html = htmlRun({ file: source, lang, beside: { 'progress-seen.json': seen }, now: TIDY_NOW })
-    assert.ok(html.includes(s.boardLarge))
-    assert.ok(html.includes(details))
-    // The Chinese legend also uses 清理 as a verb; it must not appear as an action label.
-    assert.ok(!html.includes(`>${s.cleanUp}<`))
-    assert.ok(![...html.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)].some(match => match[1].includes(s.cleanUp)))
+    const document = jsonRun({ file: source, lang, beside: { 'progress-seen.json': seen }, now: TIDY_NOW })
+    assert.deepEqual(document.notices, [s.boardLarge, details])
   }
 })
 
@@ -7938,7 +7899,8 @@ test('the board script leaves idle tasks off the board, names how many, and list
   assert.equal(closed.status, 0, closed.stderr)
   assert.ok(closed.stdout.includes('2 idle 7+ days'), closed.stdout)
   assert.ok(closed.stdout.includes('● 0 waiting') && closed.stdout.includes('▸ 0 in progress'), closed.stdout)
-  assert.ok(!closed.stdout.includes('Quiet plan') && !closed.stdout.includes('Quiet block'), closed.stdout)
+  // --print keeps the older-questions shelf open while idle rows stay folded.
+  assert.ok(!closed.stdout.includes('Quiet block') && closed.stdout.includes('Publish, OK?'), closed.stdout)
   assert.deepEqual(closed.wrote, [])
   assert.deepEqual(closed.modified, [])
   const opened = idleRun(['--all'])
@@ -7966,9 +7928,11 @@ test('the CLI view ages manual completions from sidecar fingerprints without ren
     [key('Future completion', 'Future step')]: IDLE_NOW + 86400000,
   } })
   for (const held of [record, '{', JSON.stringify({ seen: {} })]) {
-    const html = htmlRun({ file, beside: { 'progress-seen.json': held }, now: IDLE_NOW })
-    assert.ok(!/Old completion|Unknown completion|Future completion|just now/.test(html), html)
-    assert.equal(html.includes('Fresh completion'), held === record, html)
+    const document = jsonRun({ file, beside: { 'progress-seen.json': held }, now: IDLE_NOW })
+    const output = JSON.stringify(document.doneRecently)
+    assert.ok(!/Unknown completion|Future completion|just now/.test(output), output)
+    assert.equal(output.includes('Fresh completion'), held === record, output)
+    assert.equal(output.includes('Old completion'), held === record, output)
   }
   // These surfaces currently omit recent completions; keep their existing output and
   // ensure chat never persists a new observation while constructing the shared view.
@@ -8053,7 +8017,6 @@ test('reopening a board replaces an explicit resume opt-in when that flag is rem
 })
 
 const redesignPage = () => run('en', ['--chat'], {}, FILE, `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`)
-const redesignSnapshot = () => htmlRun({ file: '## Synthetic\n### Plan\n- [ ] Continue\n' })
 const themeScript = html => html.match(/<head>[\s\S]*?<script[^>]*>([\s\S]*?)<\/script>/)[1]
 const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '' }, system = 'light') => {
   const attributes = {}
@@ -8063,7 +8026,7 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
     removeAttribute: name => { delete attributes[name] },
     classList: { add: name => classes.add(name), remove: name => classes.delete(name) },
   }
-  // One icon button switches the theme, on the live page and on progress.html alike.
+  // One icon button switches the theme on the live page.
   const buttons = [...html.matchAll(/<button\b([^>]*data-theme-toggle[^>]*)>/g)].map(found => {
     assert.match(found[1], /data-local/)
     const attrs = { ...Object.fromEntries([...found[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]])), 'data-theme-toggle': '' }
@@ -8135,45 +8098,8 @@ test('the serve page offers a light and a dark theme, follows the system until o
   assert.match(html, /prefers-reduced-motion:reduce/)
 })
 
-test('progress.html keeps the chosen theme through its 30-second reload', () => {
-  const html = redesignSnapshot()
-  const storage = new Map([['agent-board.theme', 'light']])
-  const dom = themeDom(html, storage)
-  assert.equal(dom.attributes['data-theme'], 'light')
-  let reloads = 0
-  let tick
-  const kept = new Map([['progress-open', '{"section:others":false}']])
-  const events = {}
-  const section = { id: '', open: true, getAttribute: () => 'section:others', addEventListener: (name, run) => { events[name] = run }, scrollIntoView: () => { section.scrolled = true } }
-  let jump
-  const button = { getAttribute: () => 'dash-others', addEventListener: (_, run) => { jump = run } }
-  const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].at(-1)[1]
-  runInNewContext(script, {
-    document: {
-      querySelectorAll: selector => selector === 'details[data-key]' ? [section] : selector === 'button[data-section]' ? [button] : [],
-      querySelector: () => null, cookie: '',
-      getElementById: id => id === 'dash-others' ? section : { textContent: '', hidden: false },
-    },
-    localStorage: { getItem: key => kept.get(key), setItem: (key, value) => kept.set(key, value) },
-    sessionStorage: { getItem: () => '28', setItem: (_, value) => assert.equal(value, '42') },
-    window: { scrollY: 42, scrollTo: (x, y) => assert.equal(y, 28) },
-    setTimeout: (fn, delay) => { assert.equal(delay, 30000); tick = fn },
-    location: { reload: () => { reloads += 1 } },
-  }, { timeout: 1000 })
-  assert.equal(section.id, 'dash-others')
-  assert.equal(section.open, false)
-  jump()
-  assert.equal(section.open, true)
-  assert.equal(section.scrolled, true)
-  events.toggle()
-  assert.equal(JSON.parse(kept.get('progress-open'))['section:others'], true)
-  tick()
-  assert.equal(reloads, 1)
-  assert.equal(themeDom(html, storage).attributes['data-theme'], 'light')
-})
-
 test('the theme is applied before the page paints and survives blocked browser storage', () => {
-  for (const html of [redesignPage(), redesignSnapshot()]) {
+  for (const html of [redesignPage()]) {
     const head = html.slice(html.indexOf('<head>'), html.indexOf('</head>'))
     assert.ok(head.indexOf('<script') < head.indexOf('<style'))
     assert.ok(!themeScript(html).includes('(function ()'))
@@ -8635,29 +8561,22 @@ test("the agent row shows each agent's counts and filters the page to that agent
   } finally { await board.close() }
 })
 
-test('progress.html follows the page\'s order', () => {
+test('the JSON board keeps working, waiting, stopped, and recently done work in distinct ordered lists', () => {
   const file = [
     groupedBlock('48000001', 'codex', 'working', 'Synthetic project', 'Working plan', ['- [~] Continue'], 5),
     groupedBlock('48000002', 'codex', 'done', 'Synthetic project', 'Finished plan', ['- [x] Finished'], 180),
     '## Hand project\n### Hand-kept plan\n- [ ] Compare the options\n',
   ].join('\n')
-  const html = htmlRun({ file, now: groupedNow })
-  const at = marker => html.indexOf(marker)
-  const order = ['id="dash-needs"', 'id="dash-working"', 'data-key="section:others"', 'data-key="section:recent"']
-  assert.ok(order.every(marker => at(marker) > 0), order.filter(marker => at(marker) < 0).join())
-  assert.deepEqual([...order].sort((a, b) => at(a) - at(b)), order)
+  const document = jsonRun({ file, now: groupedNow })
   // A task an agent touched five minutes ago is under Working now and counted there, not listed again with the projects.
-  const working = html.slice(at('id="dash-working"'), at('data-key="section:others"'))
-  assert.ok(working.includes('<span class="count">1</span>'), working)
-  assert.ok(working.includes('Working plan') && !working.includes(EN.pgNoWorking), working)
-  assert.ok(!html.slice(at('data-key="section:others"')).includes('Working plan'))
-  // The same headings the page uses, no pasting from a web chat, and no legend above the work.
-  for (const word of [EN.pgNeeds, EN.pgWorking, EN.pgDone]) assert.ok(html.includes(word), word)
-  assert.doesNotMatch(html, /<div class="legend">|id="paste"|data-theme-pick/)
-  assert.match(html, /data-theme-toggle/)
+  assert.equal(document.counts.working, 1)
+  assert.deepEqual(document.working.map(row => row.title), ['Working plan'])
+  assert.ok(![...document.waiting, ...document.stopped, ...document.doneRecently].some(row => row.title === 'Working plan'))
+  assert.deepEqual(document.waiting.map(row => row.title), ['Hand-kept plan'])
+  assert.deepEqual(document.doneRecently.map(row => row.title), ['Finished plan'])
 })
 
-// #612: an agent that asks, and one that stopped 2 minutes ago, are not "nothing"; the same made-up projects on the page and in progress.html.
+// #612: an agent that asks, and one that stopped 2 minutes ago, are not "nothing" on the page.
 const quietAsking = () => groupedBlock('61200001', 'codex', 'waiting', 'demo-garden', 'Choose the seed mix', ['- [x] Compare', '- [?] Clover or rye?'], 1)
 const quietStopped = () => groupedBlock('61200002', 'gemini', 'ended', 'demo-orchard', 'Prune the synthetic rows', ['- [x] Prune', '- [ ] Water'], 2)
 
@@ -8673,9 +8592,6 @@ test('Working now says an agent waits on you or just stopped, and that no agent 
       assert.ok(working.includes(expected), `${label}: ${working}`)
       if (label !== 'none') assert.ok(!working.includes(EN.pgNoWorking), `${label}: ${working}`)
     } finally { await board.close() }
-    const file = htmlRun({ file: source, now: groupedNow })
-    const dash = file.slice(file.indexOf('id="dash-working"'), file.indexOf('</section>', file.indexOf('id="dash-working"')))
-    assert.ok(dash.includes(expected.replace(/&/g, '&amp;')), `progress.html ${label}: ${dash}`)
   }
 })
 
@@ -8687,10 +8603,6 @@ test('a working Codex session with no block of its own names its project once an
     assert.equal(working.toLowerCase().split('demo-garden').length - 1, 1, working)
     assert.ok(!working.includes(EN.codexLifecycle), working)
   } finally { await board.close() }
-  const dash = htmlRun({ file: lifecycle('working'), now: groupedNow })
-  const row = dash.slice(dash.indexOf('id="dash-working"'), dash.indexOf('</section>', dash.indexOf('id="dash-working"'))).replace(/<[^>]*>/g, ' ')
-  assert.equal(row.toLowerCase().split('demo-garden').length - 1, 1, row)
-  assert.ok(!row.includes(EN.codexLifecycle), row)
   // Once it waits, the hook's words are true and the row says them.
   const waiting = await groupedPage(lifecycle('waiting'))
   try {
@@ -9588,8 +9500,7 @@ test('L2 page: a step circle either ticks the step or does not look clickable', 
     assert.notEqual(mark.textContent, '\u25cb')
   }
   assert.deepEqual(marks.map(mark => mark.textContent), ['\u2713', '\u25b8', '\u2022'])
-  const snapshot = htmlRun({ file: '## Synthetic\n### Plan\n- [x] Synthetic done\n- [~] Synthetic doing\n- [ ] Synthetic todo\n' })
-  for (const [page, selector] of [[html, /\.steps \.mk\s*\{([^}]*)\}/g], [snapshot, /\.steps \.g\s*\{([^}]*)\}/g]]) {
+  for (const [page, selector] of [[html, /\.steps \.mk\s*\{([^}]*)\}/g]]) {
     const rules = [...page.matchAll(selector)].map(match => match[1])
     assert.ok(rules.length > 0)
     for (const rule of rules) {
@@ -9597,19 +9508,12 @@ test('L2 page: a step circle either ticks the step or does not look clickable', 
       assert.doesNotMatch(rule, /cursor\s*:\s*pointer/i)
       assert.doesNotMatch(rule, /(?:^|;)\s*background(?:-[\w-]+)?\s*:/i)
     }
-    // Both pages give the mark its own 22px column in the step's row and centre it; it takes no border, background or pointer.
+    // The page gives the mark its own 22px column in the step's row and centres it; it takes no border, background or pointer.
     assert.match(page, /\.steps li\{[^}]*grid-template-columns:[^;}]*\b22px\b/)
     assert.ok(rules.some(rule => /text-align\s*:\s*center/.test(rule)))
   }
-  const stepMarks = [...snapshot.matchAll(/<span class="g"[^>]*>([^<]*)<\/span>/g)].map(match => match[1])
-  assert.ok(stepMarks.includes('\u2713'))
-  assert.ok(stepMarks.includes('\u25b8'))
-  assert.ok(stepMarks.includes('\u2022'))
-  assert.ok(!stepMarks.includes('\u25cb'))
-  assert.match(snapshot, /<span class="g"[^>]*>\u2022<\/span><span class="t">Synthetic todo<\/span>/)
-  // progress.html carries no legend of the marks any more; the empty circle appears nowhere on it.
-  assert.ok(!snapshot.includes('class="legend"'))
-  assert.ok(!snapshot.includes('\u25cb'))
+  assert.ok(!html.includes('class="legend"'))
+  assert.ok(!html.includes('\u25cb'))
 })
 
 test('a watch view that captured a question before progress.md was locked says files may have changed', () => {
@@ -9649,8 +9553,8 @@ const sourceBoard = async () => {
     },
   })
   try {
-    const [board, view, parse, serve, questions, blocks] = await Promise.all([import('../hooks/board.ts'), import('../hooks/view.ts'), import('../hooks/parse.ts'), import('../hooks/serve.ts'), import('../hooks/questions.ts'), import('../hooks/blocks.ts')])
-    return { ...board, ...view, ...parse, ...serve, ...questions, cutOffSpans: blocks.cutOffSpans }
+    const [board, view, parse, serve, questions, blocks, retention] = await Promise.all([import('../hooks/board.ts'), import('../hooks/view.ts'), import('../hooks/parse.ts'), import('../hooks/serve.ts'), import('../hooks/questions.ts'), import('../hooks/blocks.ts'), import('../hooks/retention.ts')])
+    return { ...board, ...view, ...parse, ...serve, ...questions, ...retention, cutOffSpans: blocks.cutOffSpans, cutOffBlocks: blocks.cutOffBlocks, cutBlockLines: blocks.cutBlockLines }
   } finally { loader.deregister() }
 }
 
@@ -10071,24 +9975,36 @@ test('a worktree whose repository was moved shows its own folder name again with
 const firstScreenText = node => node.hidden || node.inert === true ? '' : [node.text, ...node.childNodes.filter(child => node.tag !== 'details' || node.open || child.tag === 'summary').map(firstScreenText)].filter(Boolean).join('\n')
 
 test('the first screen of the synthetic big board shows nothing from the never-shown list', async () => {
+  const runtime = await sourceBoard()
   const extra = [
     ...Array.from({ length: 20 }, (_, index) => groupedBlock(String(47701000 + index), 'codex', 'working', 'cap-repo', `Synthetic cap open ${index}`, ['- [~] Continue the synthetic work'], 0)),
     ...Array.from({ length: 12 }, (_, index) => groupedBlock(String(47702000 + index), 'codex', 'done', 'cap-repo', `Synthetic cap done ${index}`, ['- [x] Finish the synthetic work'], 180)),
   ].join('\n')
-  const grouped = await groupedPage(bigBoard(460) + '\n' + extra, {}, bigBoardNow)
-  try {
-    const dom = await pageDom(grouped.html, grouped.model)
-    assert.deepEqual(neverShown(['board', 'chips', 'agent-note', 'versions'].map(id => firstScreenText(dom.node(id))).join('\n')), [])
-    // Working now draws the tasks with activity in the last half hour, and the Stopped and Done shelves start closed.
-    const working = pressWalk(dom.node('working-now')).filter(node => node.tag === 'li' && node.getAttribute('data-k') !== null)
-    assert.ok(working.length >= 20)
-    assert.equal(working.length, grouped.model.view.working.length)
-    const shelves = pressWalk(dom.node('board')).filter(node => node.tag === 'section' && node.className?.startsWith('shelf'))
-    assert.ok(shelves.length >= 2)
-    assert.ok(shelves.every(shelf => !shelf.className.includes('open')))
-    // The page never carries the retired agent grouping parameter.
-    assert.ok(!grouped.html.includes('"group":"agent"'))
-  } finally { await grouped.board.close() }
+  const source = bigBoard(460) + '\n' + extra
+  const projects = runtime.parseProgress(source)
+  const ledger = runtime.observeQuestions(runtime.emptyQuestions(), projects, null, [], bigBoardNow).ledger
+  const sizes = { progress: Buffer.byteLength(source), store: 0 }
+  const warnings = runtime.sizeWarnings(sizes, EN)
+  const health = runtime.cutBlockLines(runtime.cutOffBlocks(source), EN)
+  const view = {
+    ...runtime.buildView(projects, [], null, bigBoardNow, 0, {}, EN, [], {}, ledger),
+    ...(warnings.length === 0 ? {} : { warning: warnings.join(' · '), isLarge: true, isCleanable: true }),
+    details: runtime.storageDetails(sizes, 0, EN),
+    ...(health.length === 0 ? {} : { health }),
+  }
+  const model = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, { now: bigBoardNow, repoOf: () => null, versions: { board: '1.2.3', package: null }, unreadable: view.unreadable ?? [] })
+  const html = runtime.servePage(EN, 'synthetic', false, 0, true)
+  const dom = await pageDom(html, model)
+  assert.deepEqual(neverShown(['board', 'chips', 'agent-note', 'versions'].map(id => firstScreenText(dom.node(id))).join('\n')), [])
+  // Working now draws the tasks with activity in the last half hour, and the Stopped and Done shelves start closed.
+  const working = pressWalk(dom.node('working-now')).filter(node => node.tag === 'li' && node.getAttribute('data-k') !== null)
+  assert.ok(working.length >= 20)
+  assert.equal(working.length, model.view.working.length)
+  const shelves = pressWalk(dom.node('board')).filter(node => node.tag === 'section' && node.className?.startsWith('shelf'))
+  assert.ok(shelves.length >= 2)
+  assert.ok(shelves.every(shelf => !shelf.className.includes('open')))
+  // The page never carries the retired agent grouping parameter.
+  assert.ok(!html.includes('"group":"agent"'))
 })
 
 test('an agent whose block was cut off is named unreadable in the board view, the grouped model and the page', async () => {

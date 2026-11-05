@@ -150,6 +150,6 @@ export const boardDocument = (
     stopped,
     doneRecently,
     doneToday: done.map(clean),
-    notices: [model.warning, model.details].filter((line): line is string => !!line).map(clean),
+    notices: [model.warning, model.details, model.pruned, ...(model.health ?? [])].filter((line): line is string => !!line).map(clean),
   }
 }
