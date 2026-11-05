@@ -46,9 +46,13 @@ jobs:
       # plugin's runtime (the planner's plugin_os). main, the weekly run, a manual run and a release PR
       # run every pair, so a failure only one pair shows is still caught before a release.
       node_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22},{"os":"windows-latest","node":24}]' || '[{"os":"ubuntu-latest","node":22},{"os":"ubuntu-latest","node":24},{"os":"windows-latest","node":22},{"os":"windows-latest","node":24}]' }}
-      # The same pairs for the board job. Windows runs the board set in two parts, so each part
-      # keeps the ten-minute budget: the whole set took 8 to 10 minutes there (#899).
-      board_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]' || '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/2"},{"os":"windows-latest","node":22,"part":"2/2"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]' }}
+      # The same pairs for the board job and the journeys. On Windows each part runs its files one at a
+      # time (CI_TEST_SERIAL): three spawn-heavy files side by side on a 4-vCPU runner slowed every test
+      # about 1.35x and failed the tightest timing budgets in turn (#910). The board set takes about
+      # 21 minutes there one file at a time, so four parts keep the ten-minute budget; the journeys
+      # take about 7, so two.
+      board_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/4"},{"os":"windows-latest","node":24,"part":"2/4"},{"os":"windows-latest","node":24,"part":"3/4"},{"os":"windows-latest","node":24,"part":"4/4"}]' || '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/4"},{"os":"windows-latest","node":22,"part":"2/4"},{"os":"windows-latest","node":22,"part":"3/4"},{"os":"windows-latest","node":22,"part":"4/4"},{"os":"windows-latest","node":24,"part":"1/4"},{"os":"windows-latest","node":24,"part":"2/4"},{"os":"windows-latest","node":24,"part":"3/4"},{"os":"windows-latest","node":24,"part":"4/4"}]' }}
+      journeys_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]' || '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/2"},{"os":"windows-latest","node":22,"part":"2/2"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]' }}
       # An empty planner output (the base selector predates plugin_os) falls through to both systems.
       plugin_os: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}
       bundle: ${{ steps.plan.outputs.bundle }}
@@ -130,9 +134,18 @@ jobs:
         # 22.18 and in 24. Both lines run so an import Node cannot load fails here.
         include: ${{ fromJSON(needs.impact.outputs.board_matrix) }}
     runs-on: ${{ matrix.os }}
-    # Split board and messaging, and the Windows board set in two parts, so each job keeps the ten-minute budget.
+    # Split board and messaging, and the Windows board set in four serial parts, so each job keeps the ten-minute budget.
     timeout-minutes: 10
     steps:
+      # Real-time scanning of every file the tests write and every process they start slows the
+      # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          "real-time monitoring disabled: $((Get-MpPreference).DisableRealtimeMonitoring)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # github.sha: on a pull request, GitHub's merge of it into main, so the tests run what merging gives (#339).
@@ -147,6 +160,7 @@ jobs:
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.board_tests }}
           CI_TEST_PART: ${{ matrix.part }}
+          CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}
         run: node scripts/ci-impact.mjs run
 
   messaging:
@@ -163,6 +177,15 @@ jobs:
     # Split board and messaging so Windows keeps its existing ten-minute budget.
     timeout-minutes: 10
     steps:
+      # Real-time scanning of every file the tests write and every process they start slows the
+      # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          "real-time monitoring disabled: $((Get-MpPreference).DisableRealtimeMonitoring)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -188,6 +211,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
+      # Real-time scanning of every file the tests write and every process they start slows the
+      # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          "real-time monitoring disabled: $((Get-MpPreference).DisableRealtimeMonitoring)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -214,6 +246,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
+      # Real-time scanning of every file the tests write and every process they start slows the
+      # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          "real-time monitoring disabled: $((Get-MpPreference).DisableRealtimeMonitoring)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -237,6 +278,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
+      # Real-time scanning of every file the tests write and every process they start slows the
+      # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          "real-time monitoring disabled: $((Get-MpPreference).DisableRealtimeMonitoring)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -271,6 +321,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
+      # Real-time scanning of every file the tests write and every process they start slows the
+      # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          "real-time monitoring disabled: $((Get-MpPreference).DisableRealtimeMonitoring)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
@@ -296,6 +355,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
+      # Real-time scanning of every file the tests write and every process they start slows the
+      # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          "real-time monitoring disabled: $((Get-MpPreference).DisableRealtimeMonitoring)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
@@ -311,16 +379,25 @@ jobs:
     needs: impact
     if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.journeys == 'true' }}
     # Node 22 rows add their version to the name.
-    name: journeys (${{ matrix.os }}${{ matrix.node == 22 && ', Node 22' || '' }})
+    name: journeys (${{ matrix.os }}${{ matrix.node == 22 && ', Node 22' || '' }}${{ matrix.part != '1/1' && format(', part {0}', matrix.part) || '' }})
     strategy:
       fail-fast: false
       matrix:
         # Both lines run, as in the jobs above, so a journey that depends on one Node's behaviour
         # fails here.
-        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
+        include: ${{ fromJSON(needs.impact.outputs.journeys_matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
+      # Real-time scanning of every file the tests write and every process they start slows the
+      # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          "real-time monitoring disabled: $((Get-MpPreference).DisableRealtimeMonitoring)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -334,6 +411,8 @@ jobs:
       - name: Selected user journeys
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.journeys_tests }}
+          CI_TEST_PART: ${{ matrix.part }}
+          CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}
         run: node scripts/ci-impact.mjs run
 
   browser:
@@ -347,6 +426,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
+      # Real-time scanning of every file the tests write and every process they start slows the
+      # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          "real-time monitoring disabled: $((Get-MpPreference).DisableRealtimeMonitoring)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
