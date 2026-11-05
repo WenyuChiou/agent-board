@@ -2844,7 +2844,7 @@ const viewed = model => {
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
 // `width`: the window's width in pixels (the page folds and moves its sidebar by it); `storage`: a Map behind localStorage;
 // `motion`: 'reduce' or 'full', what the person's system asks for (left out: the page never moves, as in the other tests).
-const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion } = {}) => {
+const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -2970,12 +2970,14 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     querySelectorAll: selector => [...nodes.values()].flatMap(node => [...(matches(node, selector) ? [node] : []), ...node.querySelectorAll(selector)]),
     activeElement: null,
     title: '',
+    hidden: false,
     events: {},
     addEventListener(name, run) { this.events[name] = run },
     body: new Element('body'),
     execCommand: () => { copies.push(document.body.childNodes.find(node => node.tag === 'textarea')?.value); return copyAllowed },
   }
   let model = viewed(first)
+  let clockNow = now === undefined ? Date.now() : now
   let scheduled
   const delays = []
   const windowEvents = {}
@@ -2996,6 +2998,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     ...(storage === undefined ? {} : { localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { storage.set(key, value) }, removeItem: key => { storage.delete(key) } } }),
     ...(motion === undefined ? {} : { requestAnimationFrame: run => { run(); return 1 } }),
     crypto: { randomUUID: () => `synthetic-offline-attempt-${requests.length}` },
+    Date: { now: () => clockNow },
     setTimeout: (run, delay) => {
       delays.push(delay)
       // Only the board's own poll (every 3 seconds) is the next redraw; the short waits of a moving page are not.
@@ -3052,6 +3055,9 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     title: () => document.title,
     delays,
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
+    setNow: value => { clockNow = value },
+    hideTab: () => { document.hidden = true; document.events.visibilitychange?.() },
+    showTab: () => { document.hidden = false; document.events.visibilitychange?.() },
     flush,
     settle,
     redraw: async next => {
@@ -9437,6 +9443,137 @@ test('a hand-written own task with two open steps with the same text shows one D
   assert.equal(ticks.length, 2)
   assert.ok(ticks.every(request => request.body.text === 'Draft the notes'))
   assert.equal(new Set(ticks.map(request => request.body.line)).size, 2, 'each press names its own step by its file line')
+})
+
+const awayLine = dom => dom.node('away-line').textContent
+const awayAfter = async (base, later, minutes) => {
+  const dom = await pageDom(await sourcePage('en'), base, { now: ONE_LINE_NOW })
+  dom.hideTab()
+  dom.setNow(ONE_LINE_NOW + minutes * 60 * 1000)
+  dom.showTab()
+  await dom.redraw(later)
+  await dom.settle()
+  return dom
+}
+
+test('coming back after 5 minutes shows one line with what changed while away', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await awayAfter(base, later, 42)
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task finished')
+})
+
+test('the away lead counts whole hours from an hour', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await awayAfter(base, later, 130)
+  assert.equal(awayLine(dom), 'Away for 2 hours · Codex asked a question · 1 task finished')
+})
+
+test('no away line when the tab was hidden for less than 5 minutes', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
+  const dom = await awayAfter(base, later, 4)
+  assert.equal(awayLine(dom), '')
+})
+
+test('no away line when nothing changed while away', async () => {
+  const base = cardsModel('codex')
+  const dom = await awayAfter(base, base, 30)
+  assert.equal(awayLine(dom), '')
+})
+
+test('the away line is empty on the first load', async () => {
+  const dom = await pageDom(await sourcePage('en'), cardsModel('codex'))
+  assert.equal(awayLine(dom), '')
+})
+
+test('a new question from an agent the board does not know by name uses the generic form', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-mystery', agent: 'mystery', task: 'Mystery plan', text: 'Mystery, OK?' }] }
+  const dom = await awayAfter(base, later, 10)
+  assert.equal(awayLine(dom), 'Away for 10 min · 1 agent asked a question')
+})
+
+test('new questions from two agents show the agent count', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [
+      ...base.asks,
+      { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' },
+      { ...base.asks[0], key: 'ask-3', agent: 'claude', task: 'Third plan', text: 'Third, OK?' },
+    ],
+  }
+  const dom = await awayAfter(base, later, 6)
+  assert.equal(awayLine(dom), 'Away for 6 min · 2 agents asked 2 questions')
+})
+
+test('a question that changed agents while away is not a new question', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [{ ...base.asks[0], agent: 'claude' }] }
+  const dom = await awayAfter(base, later, 9)
+  assert.equal(awayLine(dom), '')
+})
+
+test('an agent coming online while away shows on the line', async () => {
+  const base = cardsModel('codex')
+  base.groups[0].rows[0] = { ...base.groups[0].rows[0], isClosed: true }
+  const later = cardsModel('codex')
+  later.groups[0].rows[0] = { ...later.groups[0].rows[0], send: 'open' }
+  const dom = await awayAfter(base, later, 7)
+  assert.equal(awayLine(dom), 'Away for 7 min · Codex is online')
+})
+
+test('an agent going offline while away shows as one agent offline', async () => {
+  const base = cardsModel('codex')
+  base.groups[0].rows[0] = { ...base.groups[0].rows[0], send: 'open' }
+  const later = cardsModel('codex')
+  later.groups[0].rows[0] = { ...later.groups[0].rows[0], isClosed: true }
+  const dom = await awayAfter(base, later, 8)
+  assert.equal(awayLine(dom), 'Away for 8 min · 1 agent is offline')
+})
+
+test('the away line hides when the filter changes', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await awayAfter(base, later, 42)
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task finished')
+  rowAgent(dom, 'codex').click()
+  assert.equal(awayLine(dom), '')
+})
+
+test('the away line hides when the tab is hidden a second time', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await awayAfter(base, later, 42)
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task finished')
+  dom.hideTab()
+  dom.setNow(ONE_LINE_NOW + 52 * 60 * 1000)
+  dom.showTab()
+  await dom.redraw(later)
+  await dom.settle()
+  assert.equal(awayLine(dom), '')
 })
 
 test('on a wide screen the sidebar lists views, agents and projects', async () => {
