@@ -169,7 +169,7 @@ export const assertWorking = (text, id) => {
   if (id) assert.ok(namesOf(id).some(name => text.includes(` · ${name}`)), `${id}: the working card names the agent`)
 }
 
-// The board names an agent by its display name (#545); --chat keeps the agent's own id.
+// The board names an agent by its display name (#545); explicit print keeps the agent's own id.
 const namesOf = id => [EN.agentNames[id] ?? id, id]
 
 export const assertWaiting = (text, id) => {

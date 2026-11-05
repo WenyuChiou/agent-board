@@ -217,7 +217,7 @@ test('removing the connector names OpenClaw once', () => withBothHooks('openclaw
   assert.deepEqual(run('remove').result.done.filter(label => label === 'OpenClaw'), ['OpenClaw'])
 }))
 
-test('a hook that cannot be taken out is named, and the other agents still connect', () => withBothHooks('codex', ({ f, run }) => {
+test('a hook that cannot be taken out is named, and the other agents still connect', { skip: process.getuid?.() === 0 ? 'root ignores the read-only folder this test needs' : false }, () => withBothHooks('codex', ({ f, run }) => {
   const config = join(f.home, '.codex', 'hooks.json')
   const lock = isLocked => process.platform === 'win32'
     ? execFileSync('attrib', [isLocked ? '+R' : '-R', config])

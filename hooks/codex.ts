@@ -7,6 +7,7 @@ import { scanBlocks } from './blocks'
 import type { BlockSpan } from './blocks'
 import { sha256 } from './sha256'
 import type { Origin } from './runs'
+import type { JournalEntry } from './journal'
 
 // `origin`, `parent` and `isWeak` say who started the session (#399): a run an agent started for
 // itself keeps only a session record; weak hints retain the legacy block mark and parent.
@@ -119,6 +120,26 @@ export const codexReport = (previous: CodexReport | null, session: string, input
     steps, updated: now,
     events: previous?.events ?? [], retiredTurns: previous?.retiredTurns ?? [],
     ...(previous?.activity === undefined ? {} : { activity: previous.activity }),
+  }
+}
+
+// Keep the full words available until the caller has saved them in the journal.
+export const limitReport = <T extends CodexReport>(report: T): { report: T; entries: Omit<JournalEntry, 'at'>[]; cut: number } => {
+  const short = (text: string): string => {
+    const chars = [...text]
+    return chars.length > 120 ? `${chars.slice(0, 119).join('')}…` : text
+  }
+  const title = short(report.title)
+  const steps = report.steps.map(step => `${step.slice(0, 6)}${short(step.slice(6))}`)
+  // Only a field that was shortened is journaled: the title once, and each cut step with
+  // its task. Journaling every step of a cut title would flood the journal on each resend.
+  const entries: Omit<JournalEntry, 'at'>[] = [
+    ...(title !== report.title ? [{ project: report.project, task: report.title, step: report.title }] : []),
+    ...report.steps.flatMap((step, index) => steps[index] !== step ? [{ project: report.project, task: report.title, step: step.slice(6) }] : []),
+  ]
+  return {
+    report: { ...report, title, steps }, entries,
+    cut: Number(title !== report.title) + steps.filter((step, index) => step !== report.steps[index]).length,
   }
 }
 
