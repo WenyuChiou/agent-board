@@ -24,7 +24,7 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, writePrivateRuntimeFile } from './runtime-folder'
+import { isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, readPrivateRuntimeFile, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
@@ -1263,9 +1263,22 @@ const paste = (text: string, reviewToken = '') => {
 // Windows temp folders can grant sandbox accounts access. Protect only our dedicated child,
 // never the caller's whole runtime directory, before a token can be written.
 // `name` is the address file: it is read in the same check as the folder when it is already there.
+let runtimeUnprotected = false
 const runFolder = (name: string): string => {
   const runtime = process.env.XDG_RUNTIME_DIR
-  if (process.platform === 'win32') return privateRuntimeFolder(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'), [name])
+  if (process.platform === 'win32') {
+    const folder = runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board')
+    try {
+      return privateRuntimeFolder(folder, [name])
+    } catch (error) {
+      if (!(error instanceof RuntimeFolderError)) throw error
+      // A process that cannot protect the folder (a read-only sandbox) may still read an
+      // address file a page started outside it left behind, and reuse that page. It must
+      // never start one: every later step checks this flag before writing anything.
+      runtimeUnprotected = true
+      return unprotectedRuntimeFolder(folder)
+    }
+  }
   if (runtime && isOwnFolder(runtime)) return runtime
   const own = join(homedir(), '.cache', 'agent-board')
   try {
@@ -1361,6 +1374,9 @@ const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unk
 const serveChild = (): void => {
   // Resolve the protected address before asynchronous callbacks can run.
   const file = serveFile()
+  // A child that could not protect the folder cannot start a page: its address file would
+  // be unprotected. The parent reuses a running page itself; a child on its own refuses.
+  if (runtimeUnprotected) throw new RuntimeFolderError()
   try {
     startServer({
       allowResume: args.includes('--allow-resume'),
@@ -1448,6 +1464,17 @@ const stays = async (running: Running, file: string): Promise<boolean> => {
   return false
 }
 
+// A page already running, found without asking it to close and without touching its file. A
+// process that cannot start a replacement reuses the link as it is, even when the page would
+// not match a new start: closing it would leave no page and no link.
+const keptPage = async (file: string): Promise<Running | null> => {
+  const running = readRunning(file)
+  if (running === null) return null
+  const answer = await ping(running)
+  if (answer === 'silent' ? isRunning(running.pid) : answer !== null) return running
+  return null
+}
+
 // The running page of this copy for this file, or null. Any other page found in the file (one
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
@@ -1503,12 +1530,21 @@ interface RunningServer {
 
 const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningServer | null> => {
   const file = serveFile()
-  if (process.platform === 'win32' && !existsSync(file)) {
+  // A folder that could not be protected is read-only: no legacy address is ever moved into
+  // it, and no page is ever started from it. Only a page already running is reused.
+  if (process.platform === 'win32' && !runtimeUnprotected && !existsSync(file)) {
     const runtime = process.env.XDG_RUNTIME_DIR
     const legacy = [runtime ? join(runtime, basename(file)) : '', join(tmpdir(), basename(file))]
     for (const previous of new Set(legacy.filter(value => value !== '' && value !== file))) {
       if (!existsSync(file)) migratePrivateRuntimeFile(previous, file, text => parseRunning(text) !== null)
     }
+  }
+  // A lookup that cannot start a replacement never asks a page to close: the page it finds
+  // is reused as it is, even when it would not match a new start.
+  if (runtimeUnprotected) {
+    const kept = (await keptPage(oldServeFile)) ?? (await keptPage(file))
+    if (kept !== null) return { url: kept.url, port: kept.port, isKept: true, isNew: false }
+    throw new RuntimeFolderError()
   }
   const old = readRunning(oldServeFile)
   if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }

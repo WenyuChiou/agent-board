@@ -13,6 +13,7 @@ import { pageDom, serve } from './surfaces.mjs'
 import { noMachineIds, noSilentPress, seenWithin } from './expect.mjs'
 import { knownFailure } from './known.mjs'
 import { PAGE_MS, RECEIPT_SLACK_MS } from './budget.mjs'
+import { receiptTrace } from './receipt-trace.mjs'
 import { EN } from '../../../hooks/strings-en.ts'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
@@ -198,7 +199,7 @@ export const receiptBudget = async hub => {
 // its tests opens it in before() and closes it in after().
 // prepare({ world, messages }) runs once the actors' blocks are written and before the server starts,
 // to put more on the board or in the message folder first; callers that pass none see no change.
-export const openHub = async (specs, { prepare } = {}) => {
+export const openHub = async (specs, { prepare, traceReceipt = false } = {}) => {
   const world = makeWorld()
   // Messaging leases and latency use real clocks in both parent and server; with no jump,
   // world.now is the real time too.
@@ -210,6 +211,8 @@ export const openHub = async (specs, { prepare } = {}) => {
     const messages = dirname(world.write('messages/.keep', ''))
     await prepare?.({ world, messages })
     server = await serve.start(world, ['--messages-dir', messages])
+    const trace = traceReceipt ? receiptTrace(server.url) : undefined
+    if (trace) world.cleanups.push(trace.close)
     let dom
     const hub = {
       world, server, actors, messages,
@@ -265,17 +268,36 @@ export const openHub = async (specs, { prepare } = {}) => {
       receipt: async (actor, sent, { extraMs = 0 } = {}) => {
         let receipt, card, received
         const budget = await receiptBudget(hub)
-        await seenWithin(async () => {
-          const snapshot = await hub.snapshot()
-          receipt = snapshot.messaging.messages.find(one => one.id === sent.id)
-          actor.refresh?.()
-          // The board shows the reply without the nonce its ACK line carries, so the store says which
-          // delivery was acknowledged.
-          const stored = receipt?.status === 'acknowledged' ? readStore(hub.messages).find(one => one.id === sent.id)?.reply ?? '' : ''
-          received = actor.received.find(one => stored === 'ACK ' + one.nonce || stored.startsWith('ACK ' + one.nonce + ' '))
-          card = (await hub.card(actor)).textContent
-          return card
-        }, text => receipt?.status === 'acknowledged' && received && text.includes(receiptText(receipt)), Math.max(1, budget.measuredMs + extraMs - budget.pagePollMs - (performance.now() - sent.started)))
+        try {
+          await seenWithin(async () => {
+            const snapshot = await hub.snapshot()
+            receipt = snapshot.messaging.messages.find(one => one.id === sent.id)
+            actor.refresh?.()
+            // The board shows the reply without the nonce its ACK line carries, so the store says which
+            // delivery was acknowledged.
+            const stored = receipt?.status === 'acknowledged' ? readStore(hub.messages).find(one => one.id === sent.id)?.reply ?? '' : ''
+            received = actor.received.find(one => stored === 'ACK ' + one.nonce || stored.startsWith('ACK ' + one.nonce + ' '))
+            card = (await hub.card(actor)).textContent
+            return card
+          }, text => receipt?.status === 'acknowledged' && received && text.includes(receiptText(receipt)), Math.max(1, budget.measuredMs + extraMs - budget.pagePollMs - (performance.now() - sent.started)))
+        } catch (error) {
+          if (trace) {
+            // These fields separate protocol progress from the page observation without
+            // dumping the synthetic message's prompt, nonce or connection credentials.
+            let durableStatus = 'unavailable'
+            try { durableStatus = readStore(hub.messages).find(one => one.id === sent.id)?.status ?? null } catch {}
+            const codes = new Set(['ACK_TIMEOUT', 'DELIVERY_UNCERTAIN', 'CONNECTION_EXPIRED', 'RECEIPT_CONFLICT', 'HOST_NOT_CONNECTED', 'SESSION_BUSY', 'INVALID_TURN_RESPONSE', 'CONNECTOR_NOT_CONNECTED'])
+            error.receiptDiagnostics = {
+              observedStatus: receipt?.status ?? null,
+              durableStatus,
+              transportReceived: actor.received.some(one => one.text === sent.text),
+              correlated: Boolean(received),
+              errors: actor.errors.map(one => codes.has(one) ? one : 'OTHER').slice(-4),
+              requests: trace.snapshot(),
+            }
+          }
+          throw error
+        }
         const elapsed = performance.now() - sent.started + budget.pagePollMs
         assert.ok(elapsed <= budget.measuredMs + extraMs, `${elapsed} ms including the page poll exceeds ${budget.measuredMs + extraMs} ms`)
         assert.ok(received, 'Native transport did not receive this message')
