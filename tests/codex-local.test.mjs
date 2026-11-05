@@ -985,14 +985,24 @@ test('a live hub takes hook mailbox calls over loopback and the hook does not wr
   try {
     writeFileSync(join(f.directory, 'server.lock'), String(process.pid))
     writeFileSync(join(f.directory, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token` }))
-    const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--codex-event'], { cwd: f.home, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
-    let out = '', err = ''
-    child.stdout.on('data', chunk => { out += chunk })
-    child.stderr.on('data', chunk => { err += chunk })
-    const exited = new Promise(done => child.once('close', done))
-    child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }))
-    assert.equal(await exited, 0, err)
-    assert.ok(out.includes('Synthetic mailbox payload'))
+    const hook = async () => {
+      const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--codex-event'], { cwd: f.home, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+      let out = '', err = ''
+      child.stdout.on('data', chunk => { out += chunk })
+      child.stderr.on('data', chunk => { err += chunk })
+      const exited = new Promise(done => child.once('close', done))
+      child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }))
+      assert.equal(await exited, 0, err)
+      return { out, err }
+    }
+    let { out, err } = await hook()
+    // A hub slower than the hook's 150 ms defers the turn by design, and the next turn delivers (#902).
+    if (!out.includes('Synthetic mailbox payload')) {
+      assert.equal(err, 'board: mailbox deferred\n')
+      calls.length = 0
+      ;({ out, err } = await hook())
+    }
+    assert.ok(out.includes('Synthetic mailbox payload'), err)
     assert.deepEqual(calls.map(one => one[0]), ['/api/messages/mailbox-turn', '/api/messages/mailbox-accept'])
     assert.ok(calls.every(one => one[2] === 'synthetic-token'))
     assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
