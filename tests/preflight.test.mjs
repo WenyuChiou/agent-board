@@ -13,9 +13,21 @@ const currentRegister = readFileSync(new URL('../hooks/register.tsx', import.met
 const tableFiles = [['hooks/i18n.ts', 'ZH_TW'], ['hooks/strings-en.ts', 'EN'], ['hooks/strings-zh-cn.ts', 'ZH_CN']]
 const homeNames = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_PROGRESS_FILE']
 const realTables = tableFiles.map(([path, name]) => ({ path, name, text: readFileSync(new URL(`../${path}`, import.meta.url), 'utf8') }))
+// Handover recovery must see only this suite's disposable temporary folders.
+const suiteTemp = mkdtempSync(join(tmpdir(), 'preflight-suite-'))
+const tempNames = ['TMPDIR', 'TMP', 'TEMP']
+const originalTemps = new Map(tempNames.map(name => [name, process.env[name]]))
+for (const name of tempNames) process.env[name] = suiteTemp
 const templateRoot = mkdtempSync(join(tmpdir(), 'preflight-template-'))
 const templateRepo = join(templateRoot, 'repo')
 after(() => rmSync(templateRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
+after(() => {
+  for (const [name, value] of originalTemps) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
+  rmSync(suiteTemp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+})
 
 const fixture = t => {
   const root = mkdtempSync(join(tmpdir(), 'preflight-fixture-'))
@@ -67,13 +79,13 @@ const fixture = t => {
 
 const has = (checks, state, text) => checks.some(item => item.state === state && item.message.includes(text))
 
-const mainFixture = (t, { isSame = false, hasImportFailure = false } = {}) => {
+const mainFixture = (t, { isSame = false, hasImportFailure = false, mainSource } = {}) => {
   const f = fixture(t)
   const local = readFileSync(script, 'utf8')
   for (const name of ['pr-check.mjs', 'changelog-fold.mjs', 'bundle-text.mjs']) {
     f.write(`scripts/${name}`, readFileSync(new URL(`../scripts/${name}`, import.meta.url), 'utf8'))
   }
-  const main = isSame ? local : `import { message } from './main-only-message.mjs'\n${local.replace("'the branch contains the base.'", 'message')}`
+  const main = mainSource ?? (isSame ? local : `import { message } from './main-only-message.mjs'\n${local.replace("'the branch contains the base.'", 'message')}`)
   f.write('scripts/preflight.mjs', `${hasImportFailure ? "throw new Error('synthetic private import details')\n" : ''}${main}`)
   f.write('scripts/main-only-message.mjs', "export const message = 'the branch contains the base (checked by main).'\n")
   f.commit()
@@ -144,6 +156,7 @@ test('preflight fetches main by default and warns once while keeping the local c
 
 test('an older preflight runs main once in a detached temporary checkout against the branch with one test lock', async t => {
   const f = mainFixture(t)
+  const signalListeners = new Map(['SIGINT', 'SIGTERM'].map(signal => [signal, process.listeners(signal)]))
   f.write('branch-only.txt', 'the working checkout')
   f.write('branch-body.md', 'a body from the working checkout')
   f.write('tests/branch-only.test.mjs', "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { readFileSync } from 'node:fs'\ntest('the working checkout is checked', () => assert.equal(readFileSync('branch-only.txt', 'utf8'), 'the working checkout'))\n")
@@ -207,7 +220,104 @@ test('an older preflight runs main once in a detached temporary checkout against
   assert.equal(existsSync(dirname(checkouts[0])), false)
   assert.deepEqual(readdirSync(f.lockPath), [])
   assert.equal(f.git('worktree', 'list', '--porcelain'), before)
+  for (const [signal, listeners] of signalListeners) assert.deepEqual(process.listeners(signal), listeners)
 })
+
+test('preflight hands over to a legacy main without fetching a second time', async t => {
+  const mainSource = `export const runPreflight = async ({ cwd, isNoFetch, run }) => {
+  if (!isNoFetch) {
+    const fetched = run('git', ['fetch', 'origin', 'main'], { cwd, encoding: 'utf8' })
+    if (fetched.error || fetched.status !== 0) return [{ state: 'FAIL', message: 'legacy main fetch failed' }]
+  }
+  return [{ state: 'PASS', message: 'legacy main ran' }]
+}\n`
+  const f = mainFixture(t, { mainSource })
+  let fetches = 0
+  const run = (program, args, options) => {
+    if (program === 'git' && args[0] === 'fetch' && ++fetches === 2) return { status: 1, stdout: '', stderr: 'synthetic second fetch failure' }
+    return f.run(program, args, options)
+  }
+  const checks = await f.check({ isNoFetch: false, run })
+  assert.equal(fetches, 1)
+  assert.ok(has(checks, 'PASS', 'legacy main ran'))
+  assert.equal(checks.some(item => item.state !== 'PASS'), false, JSON.stringify(checks))
+})
+
+test('preflight removes dead owners\' worktrees and folders while keeping live owners and other paths', async t => {
+  const f = mainFixture(t)
+  const dead = await startUnrelatedProcess()
+  const deadPid = dead.pid
+  await stopUnrelatedProcess(dead)
+  const live = await startUnrelatedProcess()
+  const orphan = mkdtempSync(join(tmpdir(), `agent-board-preflight-main-${deadPid}-`))
+  const folderOnly = mkdtempSync(join(tmpdir(), `agent-board-preflight-main-${deadPid}-`))
+  const liveFolder = mkdtempSync(join(tmpdir(), `agent-board-preflight-main-${live.pid}-`))
+  const other = mkdtempSync(join(tmpdir(), `unrelated-preflight-main-${deadPid}-`))
+  const orphanCheckout = join(orphan, 'repo')
+  const liveCheckout = join(liveFolder, 'repo')
+  try {
+    f.git('worktree', 'add', '--detach', orphanCheckout, f.sha)
+    f.git('worktree', 'add', '--detach', liveCheckout, f.sha)
+    writeFileSync(join(folderOnly, 'marker'), 'orphan')
+    writeFileSync(join(other, 'marker'), 'keep')
+    const checks = await f.check({ isNoFetch: false })
+    const listing = f.git('worktree', 'list', '--porcelain').replaceAll('\\', '/')
+    assert.equal(existsSync(orphan), false)
+    assert.equal(existsSync(folderOnly), false)
+    assert.equal(listing.includes(orphanCheckout.replaceAll('\\', '/')), false)
+    assert.equal(existsSync(liveCheckout), true)
+    assert.ok(listing.includes(liveCheckout.replaceAll('\\', '/')))
+    assert.equal(readFileSync(join(other, 'marker'), 'utf8'), 'keep')
+    assert.equal(checks.some(item => item.state === 'FAIL'), false, JSON.stringify(checks))
+  } finally {
+    for (const checkout of [orphanCheckout, liveCheckout]) f.run('git', ['worktree', 'remove', '--force', checkout], { cwd: f.cwd })
+    await stopUnrelatedProcess(live)
+    for (const folder of [orphan, folderOnly, liveFolder, other]) rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  }
+})
+
+test('preflight prunes a registration after its checkout removal fails', async t => {
+  const f = mainFixture(t)
+  const before = f.git('worktree', 'list', '--porcelain')
+  const checkouts = []
+  let folderAtPrune
+  const run = (program, args, options) => {
+    if (program === 'git' && args[0] === 'worktree' && args[1] === 'add') checkouts.push(args[3])
+    if (program === 'git' && args[0] === 'worktree' && args[1] === 'remove') return { status: 1, stdout: '', stderr: 'synthetic remove failure' }
+    if (program === 'git' && args[0] === 'worktree' && args[1] === 'prune') folderAtPrune = existsSync(dirname(checkouts[0]))
+    return f.run(program, args, options)
+  }
+  try {
+    const checks = await f.check({ isNoFetch: false, run })
+    assert.ok(has(checks, 'FAIL', 'preflight from origin/main could not finish'))
+    assert.equal(checkouts.length, 1)
+    assert.equal(existsSync(dirname(checkouts[0])), false)
+    assert.equal(folderAtPrune, false)
+    assert.equal(f.git('worktree', 'list', '--porcelain'), before)
+  } finally {
+    for (const checkout of checkouts) f.run('git', ['worktree', 'remove', '--force', checkout], { cwd: f.cwd })
+    f.git('worktree', 'prune')
+  }
+})
+
+for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  test(`preflight cleans up its checkout on ${signal} during handover`, t => {
+    const mainSource = `import { writeFileSync } from 'node:fs'\nimport { join } from 'node:path'\nimport { fileURLToPath } from 'node:url'\nexport const runPreflight = async ({ cwd }) => {\n  writeFileSync(join(cwd, 'signal-ready.json'), JSON.stringify({ script: fileURLToPath(import.meta.url) }))\n  if (process.platform === 'win32') process.emit(${JSON.stringify(signal)})\n  else {\n    process.kill(process.pid, ${JSON.stringify(signal)})\n    await new Promise(() => setInterval(() => {}, 1000))\n  }\n  return []\n}\n`
+    const f = mainFixture(t, { mainSource })
+    const before = f.git('worktree', 'list', '--porcelain')
+    const launcher = join(f.root, 'signal-launcher.mjs')
+    writeFileSync(launcher, `import { runPreflight } from ${JSON.stringify(pathToFileURL(script).href)}\nawait runPreflight({ cwd: ${JSON.stringify(f.cwd)}, lockPath: ${JSON.stringify(f.lockPath)}, fallbackLockPath: null })\n`)
+    const result = spawnSync(process.execPath, [launcher], { cwd: f.cwd, env: f.env, encoding: 'utf8', timeout: 15000 })
+    assert.equal(result.error, undefined)
+    assert.ok(existsSync(join(f.cwd, 'signal-ready.json')), result.stdout + result.stderr)
+    assert.equal(result.status, exitCode, result.stdout + result.stderr)
+    const { script: mainScript } = JSON.parse(readFileSync(join(f.cwd, 'signal-ready.json'), 'utf8'))
+    const temp = dirname(dirname(dirname(mainScript)))
+    assert.match(temp, new RegExp(`agent-board-preflight-main-\\d+-[^\\\\/]+$`))
+    assert.equal(existsSync(temp), false)
+    assert.equal(f.git('worktree', 'list', '--porcelain'), before)
+  })
+}
 
 test('preflight keeps an identical local checker after fetching without creating a temporary checkout', async t => {
   const f = mainFixture(t, { isSame: true })
