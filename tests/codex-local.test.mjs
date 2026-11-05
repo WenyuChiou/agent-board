@@ -104,6 +104,8 @@ const isolatedEnv = (home, pathValue) => {
     ...process.env,
     HOME: home, USERPROFILE: home,
     LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
+    // A board these tests start opens no window and stops once this test process is gone (#959).
+    AGENT_BOARD_TEST_PID: String(process.pid),
     LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
     CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
     CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
