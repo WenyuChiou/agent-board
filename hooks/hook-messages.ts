@@ -14,8 +14,18 @@ export const enrollMailbox = (state: MessageState, agent: string, session: strin
   const id = mailboxId(agent, session)
   const mailboxes = next.mailboxes ?? []
   if (!mailboxes.some(one => one.id === id) && mailboxes.length >= MAILBOX_CAP) throw new Error('MAILBOX_LIMIT')
-  const entry: Connection = { id, agent, session, surface, turn: 'session', scope: 'mailbox', expires: now + ttlMs, origin: 'local' }
+  const prior = mailboxes.find(one => one.id === id)
+  // A lease that ran out takes its owner and any contest with it: otherwise two owners that ever met block this mailbox for good.
+  const { mcpOwner: _owner, mcpLeaseUntil: _until, contested: _contested, ...kept } = prior ?? {}
+  const entry: Connection = { ...((prior?.mcpLeaseUntil ?? 0) > now ? prior : kept), id, agent, session, surface, turn: 'session', scope: 'mailbox', expires: now + ttlMs, origin: 'local' }
   return { ...next, mailboxes: [...mailboxes.filter(one => one.id !== id), entry] }
+}
+export const enrollMcp = (state: MessageState, agent: string, session: string, surface: string, owner: string, folderDigest: string, until: number, now: number, ttlMs: number): MessageState => {
+  const next = enrollMailbox(state, agent, session, surface, now, ttlMs)
+  return { ...next, mailboxes: next.mailboxes!.map(one => one.id !== mailboxId(agent, session) ? one
+    : (one.mcpLeaseUntil ?? 0) > now && (one.contested || one.mcpOwner !== undefined && one.mcpOwner !== owner)
+      ? { ...one, contested: true }
+      : { ...one, mcpOwner: owner, folderDigest, mcpLeaseUntil: until, contested: false }) }
 }
 export const takeMailboxMessage = (state: MessageState, agent: string, session: string, surface: string, now: number, ttlMs: number, nonce: string): { state: MessageState; message: Message | null } => {
   const next = enrollMailbox(state, agent, session, surface, now, ttlMs)

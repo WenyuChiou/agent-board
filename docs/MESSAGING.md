@@ -627,3 +627,27 @@ updating or sharing their message directory. Mixed-version reclaimers and networ
 filesystems are not covered by the current-writer exclusivity tests. Concurrent
 contenders may both refuse; retry once the failed starts have exited. This is an
 availability tradeoff, not permission to retry an uncertain message.
+
+## stdio MCP
+
+Run the board with `--mcp` for newline-delimited JSON-RPC on stdin and stdout.
+It offers `board_status`, `board_inbox`, `board_ack` and `board_send`.
+`board_status` returns the document `--json` prints ([BOARD-JSON.md](BOARD-JSON.md)); the caller's level is in the result's `_meta`.
+It uses an existing message folder and creates none.
+A named caller verified against its parent's PID and start time holds a 60-second lease.
+Each tool call renews it; after inactivity, verification runs again.
+A named caller without verification is restricted to its own inbox and unverified sending.
+An unbound caller can read status and send as unverified, but has no inbox.
+Acknowledgements require a lease (`NO_LEASE`); an unnamed inbox or ACK gets `NO_SESSION`.
+Sending requires the running board hub (`BOARD_NOT_RUNNING`) and a target enrolled by MCP
+in the same workspace (`WORKSPACE_UNKNOWN` or `WORKSPACE_MISMATCH` otherwise).
+Contested owners, peer pause, hop limit and pair budget can refuse delivery. Peer pause and pair budget
+also apply to a connected adapter's own sends. An unverified sender's message cannot be passed on.
+A message taken by a lease holder holds its session until `board_ack` or 30 minutes; a hook's does not.
+Inbox acceptance means the response write completed; ACK separately records acknowledgement.
+There is no parked wait, progress notification, host launcher or automatic MCP configuration yet.
+A lease needs a launcher that sets `AGENT_BOARD_AGENT`, `AGENT_BOARD_SESSION_ID`, `AGENT_BOARD_HOST_PID` and `AGENT_BOARD_HOST_STARTED`.
+None ships yet, so a host started from a config file runs without one: `board_ack` answers `NO_LEASE`, and a peer send
+answers `WORKSPACE_UNKNOWN` until a leased session enrolls its folder.
+The start time is looked up once, beside the server; on Windows that takes about a second. No tool call waits on it for
+more than 120 ms: a call that arrives sooner runs without the lease, and a later call has it.
