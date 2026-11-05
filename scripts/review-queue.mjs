@@ -53,13 +53,20 @@ const sameAgent = (reviewer, author) => {
   const own = identityOf(author), name = fullName(reviewer)
   const matches = other => Boolean(other && own && other.base === own.base && (!other.lane || !own.lane || other.lane === own.lane))
   if (matches(identityOf(name))) return true
-  if (!name || !own) return false
-  // Review lines may append these explicit prose forms to the complete name.
-  // Do not split arbitrary punctuation or words: "Dr. Agent" and "Agent — Helper"
-  // are legitimate bases, and embedded parentheses may also belong to a name.
-  const withoutVerdict = name.replace(/(?:[.:](?=\s|$)|[。！？：]|\s+[-–—](?=\s|$))\s*(?:no findings|ok)\b.*$/, '').trim()
-  const withoutProse = withoutVerdict.replace(/^(.*?\))\s+after\b.*$/, '$1').trim()
-  return matches(identityOf(withoutProse))
+  if (!name || !own || !name.startsWith(own.base)) return false
+  // Review prose has a boundary, not a vocabulary. A space alone after a bare
+  // base is not one: "Claude" and "Claude Code" must remain distinct names.
+  const boundary = tail => /^(?:$|[.:;!?。！？：；](?:\s|$)|\s[-–—]\s)/.test(tail)
+  const tail = name.slice(own.base.length)
+  // Ambiguous punctuation prefixes ("Dr" / "Dr. Agent") deliberately refuse
+  // approval conservatively, as settled in the round-2 review of #952.
+  if (boundary(tail)) return true
+  const lane = tail.match(/^\s*\(([^()]*)\)(.*)$/)
+  if (!lane) return false
+  const reviewLane = lane[1].trim()
+  if (reviewLane && own.lane && reviewLane !== own.lane) return false
+  // After a complete matching lane, ordinary words may begin the review prose.
+  return /^\s/.test(lane[2]) || boundary(lane[2])
 }
 // The built bundle and the string tables change in almost every pull request, so approved ones that touch them merge one at a time.
 const sharedPath = /^hooks\/(?:board-script(?:-[^/]+)?\.ts|i18n\.ts|strings-en\.ts|strings-zh-cn\.ts)$/
