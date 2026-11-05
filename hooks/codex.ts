@@ -4,9 +4,11 @@ import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
 import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
 import { scanBlocks } from './blocks'
+import { cutLine } from './step-words'
 import type { BlockSpan } from './blocks'
 import { sha256 } from './sha256'
 import type { Origin } from './runs'
+import type { JournalEntry } from './journal'
 
 // `origin`, `parent` and `isWeak` say who started the session (#399): a run an agent started for
 // itself keeps only a session record; weak hints retain the legacy block mark and parent.
@@ -14,6 +16,7 @@ export type CodexReport = Origin & {
   session: string
   folder?: string
   folderDigest?: string
+  folderCanonicalDigest?: string
   turn: string | null
   state: 'working' | 'waiting' | 'done' | 'ended'
   title: string
@@ -50,8 +53,12 @@ export const folderProject = (cwd: unknown): string => {
   return name.length > 500 ? '' : name
 }
 
-// This is the one place a new local session title comes from (#246).
-export const sessionTitle = (folder: string, fallback: string): string => line(folder || fallback)
+// This is the one place a new local session title comes from (#246). A session the
+// hook cannot file by folder still needs a title a person can tell from another
+// session's before either reports (#814): the fallback plus a human-readable
+// distinction the caller supplies (a start time), when the caller supplies one.
+export const sessionTitle = (folder: string, fallback: string, distinct = ''): string =>
+  line(folder || (distinct === '' ? fallback : `${fallback} · ${distinct}`))
 
 // The step a hook writes for a session that has reported none of its own (`codexLifecycle` here,
 // `localAgentLifecycle` in codex-local.ts). The view tells it from an agent's step by these words:
@@ -114,6 +121,23 @@ export const codexReport = (previous: CodexReport | null, session: string, input
     steps, updated: now,
     events: previous?.events ?? [], retiredTurns: previous?.retiredTurns ?? [],
     ...(previous?.activity === undefined ? {} : { activity: previous.activity }),
+  }
+}
+
+// Keep the full words available until the caller has saved them in the journal.
+export const limitReport = <T extends CodexReport>(report: T): { report: T; entries: Omit<JournalEntry, 'at'>[]; cut: number } => {
+  const short = (text: string): string => cutLine(text).text
+  const title = short(report.title)
+  const steps = report.steps.map(step => `${step.slice(0, 6)}${short(step.slice(6))}`)
+  // Only a field that was shortened is journaled: the title once, and each cut step with
+  // its task. Journaling every step of a cut title would flood the journal on each resend.
+  const entries: Omit<JournalEntry, 'at'>[] = [
+    ...(title !== report.title ? [{ project: report.project, task: report.title, step: report.title }] : []),
+    ...report.steps.flatMap((step, index) => steps[index] !== step ? [{ project: report.project, task: report.title, step: step.slice(6) }] : []),
+  ]
+  return {
+    report: { ...report, title, steps }, entries,
+    cut: Number(title !== report.title) + steps.filter((step, index) => step !== report.steps[index]).length,
   }
 }
 

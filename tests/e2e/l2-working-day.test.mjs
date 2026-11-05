@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { EN } from '../../hooks/strings-en.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block } from './lib/writers.mjs'
-import { inspectSurfaces, terminal, seenPageWithin, chat, serve, html, pageDom } from './lib/surfaces.mjs'
+import { inspectSurfaces, terminal, seenPageWithin, print, serve, pageDom } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
@@ -37,19 +37,16 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       for (const [surface, text] of Object.entries({ terminal: await terminal.screen(world), page: await server.page() })) {
         assert.ok(text.includes(question), surface)
         noMachineIds(text, world)
-        await knownFailure('hold:question-choice-options', () => {
-          assert.match(text, /Choose/, surface)
-          assert.match(text, /Merge FAQ into Troubleshooting/, surface)
-          assert.match(text, /keep separate/, surface)
-          assert.doesNotMatch(text, /Yes\s+No|\[Confirm\]/, surface)
-        })
+        // The current page shows the answer buttons directly, without a kind badge.
+        if (surface === 'terminal') assert.match(text, /Choose/, surface)
+        assert.match(text, /Merge FAQ into Troubleshooting/, surface)
+        assert.match(text, /keep separate/, surface)
+        assert.doesNotMatch(text, /Yes\s+No|\[Confirm\]/, surface)
       }
       const model = (await server.get('/api/board')).json().model
       assert.equal(model.asks.length, 1)
-      await knownFailure('hold:question-choice-options', () => {
-        assert.equal(model.asks[0].kind, 'choose')
-        assert.deepEqual(model.asks[0].options, ['Merge FAQ into Troubleshooting', 'keep separate'])
-      })
+      assert.equal(model.asks[0].kind, 'choose')
+      assert.deepEqual(model.asks[0].answers, ['Merge FAQ into Troubleshooting', 'keep separate'])
     } finally { await world.close() }
   })
 
@@ -66,7 +63,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const screens = await inspectSurfaces(world, server)
       for (const [surface, text] of Object.entries(screens)) {
         await knownFailure('hold:all-agent-done-today', () => assert.match(text, /(?:3\s+done today|done today\s*3)/i, surface))
-        if (surface === 'page' || surface === 'html') for (const agent of agents) assert.ok(text.includes(`Finish ${agent} report`), surface)
+        if (surface === 'page') for (const agent of agents) assert.ok(text.includes(`Finish ${agent} report`), surface)
       }
     } finally { await world.close() }
   })
@@ -243,19 +240,18 @@ describe('L2 a working day', { concurrency: 2 }, () => {
     } finally { await world.close() }
   })
 
-  test('L2 chat: --chat shows stuck steps and done recently like the terminal board', async () => {
+  test('L2 print: --print shows stuck steps and done recently like the terminal board', async () => {
     const world = makeWorld()
     try {
       block(world, { title: 'Review stuck route', steps: ['- [!] Waiting for synthetic credentials'] })
       block(world, { session: 'd1000001', title: 'Finished route review', state: 'done', steps: ['- [x] Check routes'] })
       const terminalText = await terminal.screen(world, ['--all'])
-      const result = await chat(world)
-      assert.equal(result.status, 0, result.stderr)
+      const printed = await print(world)
       noMachineIds(terminalText, world)
-      noMachineIds(result.stdout, world)
+      noMachineIds(printed, world)
       assert.match(terminalText, /Waiting for synthetic credentials/)
-      assert.match(result.stdout, /Waiting for synthetic credentials/)
-      for (const [surface, text] of Object.entries({ terminal: terminalText, chat: result.stdout })) await knownFailure('hold:done-recently-summary', () => {
+      assert.match(printed, /Waiting for synthetic credentials/)
+      for (const [surface, text] of Object.entries({ terminal: terminalText, print: printed })) await knownFailure('hold:done-recently-summary', () => {
         assert.match(text, /Done recently/, surface)
         assert.match(text, /Finished route review/, surface)
       })
@@ -344,20 +340,19 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       assert.match(world.read('progress.md'), /\[\?\] Ship the gateway/)
       const screens = await inspectSurfaces(world)
       assert.match(screens.terminal, /\b0 waiting\b/)
-      assert.match(screens.chat, /\b0 waiting\b/)
-      assert.match(screens.page, /Nothing needs you/)
+      assert.match(screens.print, /\b0 waiting\b/)
+      assert.ok(screens.page.includes(EN.pgNothing), screens.page)
     } finally { await world.close() }
   })
 
-  test('a working day: --chat shows the ask and says where to answer it', async () => {
+  test('a working day: --print shows the ask and says where to answer it', async () => {
     const world = makeWorld()
     try {
       ask(world)
-      const result = await chat(world)
-      assert.equal(result.status, 0, result.stderr)
-      assert.match(result.stdout, /Ship the gateway, OK\?/)
-      // The read-only chat names the owning agent and session beside its ask.
-      assert.match(result.stdout, /api-gateway · codex › Release the gateway/)
+      const printed = await print(world)
+      assert.match(printed, /Ship the gateway, OK\?/)
+      // The print uses the display name; --json keeps the agent's protocol name.
+      assert.match(printed, new RegExp(`api-gateway · ${EN.agentNames.codex} › Release the gateway`))
       await inspectSurfaces(world)
     } finally { await world.close() }
   })
@@ -370,7 +365,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       server = await serve.start(world)
       const press = await server.press('Ship the gateway', 'Already answered, hide')
       noSilentPress(press)
-      await seenPageWithin(server, text => text.includes('Nothing needs you'), PAGE_MS)
+      await seenPageWithin(server, text => text.includes(EN.pgNothing), PAGE_MS)
       assert.equal((await server.get('/api/board')).json().model.counts.waiting, 0)
       assert.match((await terminal.screen(world)), /\b0 waiting\b/)
       await inspectSurfaces(world, server)
@@ -379,7 +374,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
     }
   })
 
-  test('a working day: finished work appears on page and HTML, chat reads today’s journal, and hidden rows stay hidden', async () => {
+  test('a working day: finished work appears on the live page and print, and hidden rows stay hidden', async () => {
     const world = makeWorld()
     try {
       ask(world)
@@ -395,14 +390,14 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
       world.write(`progress-journal-${day.slice(0, 7)}.md`, `- ${day} ${pad(date.getHours())}:${pad(date.getMinutes())} · research-hub · Prepare research summary · Summarize findings\n`)
       const screens = await inspectSurfaces(world)
-      for (const surface of ['page', 'html']) {
-        assert.match(screens[surface], /Prepare research summary/, surface)
-        // The Done section replaced Done recently: the page counts the week's finished work, progress.html counts the shelf.
-        assert.ok(squash(screens[surface]).includes(surface === 'page' ? `${EN.pgDone} ${EN.pgDoneWeek(1)}` : `${EN.pgDone} 1`), screens[surface])
+      assert.match(screens.page, /Prepare research summary/, 'page')
+      assert.ok(squash(screens.page).includes(`${EN.pgDone} ${EN.pgDoneWeek(1)}`), screens.page)
+      assert.match(screens.print, /\b1 done today\b/)
+      assert.match(screens.print, /Prepare research summary/)
+      for (const [surface, text] of Object.entries(screens)) {
+        if (surface === 'page') assert.ok(text.includes(EN.pgNothing), surface)
+        else assert.match(text, /Nothing needs you|\b0 waiting\b/, surface)
       }
-      assert.match(screens.chat, /\b1 done today\b/)
-      assert.match(screens.chat, /Prepare research summary/)
-      for (const [surface, text] of Object.entries(screens)) assert.match(text, /Nothing needs you|\b0 waiting\b/, surface)
       assert.match(world.read('progress.md'), /\[\?\] Ship the gateway/)
     } finally { await world.close() }
   })
@@ -414,13 +409,99 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const before = await terminal.keys(world, 'i down')
       const after = await terminal.keys(world, 'i down a')
       noSilentPress({ surface: 'terminal', card: 'Publish the gateway', button: 'a', before, after })
-      // The question is never lost, archived or not; only the archive itself is the known gap.
+      assert.match(squash(after), /Archived .* Its unanswered question stays under Older unanswered questions/)
       const kept = [world.read('progress.md'), ...world.files().filter(name => /progress-(archive-.*\.md|questions.*\.json)$/.test(name)).map(name => world.read(name))].join('\n')
       assert.match(kept, /Notify the team, OK\?/)
-      await knownFailure(754, () => {
-        assert.ok(!world.read('progress.md').includes('Publish the gateway'), `The live file still holds Publish the gateway.\n${after}`)
-      })
+      assert.ok(!world.read('progress.md').includes('Publish the gateway'), `The live file still holds Publish the gateway.\n${after}`)
       await inspectSurfaces(world)
+    } finally { await world.close() }
+  })
+
+  test('a working day: archiving a stopped session that asks says its question stays, and hiding it clears the count', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'ended', title: 'Stopped gateway release', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?'] })
+      const after = await terminal.keys(world, 'i a')
+      assert.ok(!world.read('progress.md').includes('Stopped gateway release'), after)
+      assert.match(squash(after), /Its unanswered question stays under Older unanswered questions/)
+      assert.match(after, /1 unanswered in stopped sessions/)
+      const hidden = await terminal.keys(world, 'l h')
+      assert.doesNotMatch(hidden, /unanswered in stopped sessions/)
+      const server = await serve.start(world)
+      assert.doesNotMatch(await server.page(), /older question still unanswered/)
+    } finally { await world.close() }
+  })
+
+  test('a working day: archiving says the question stays for a task under no heading, and not for a task that never asked', async () => {
+    const noHeading = makeWorld()
+    try {
+      noHeading.write('progress.md', `<!-- auto session=a1000001 agent=codex state=ended updated=${new Date(noHeading.now).toISOString()} -->
+### Unfiled release
+- [?] Notify the team, OK?
+<!-- /auto session=a1000001 -->
+`)
+      const after = await terminal.keys(noHeading, 'i a')
+      assert.ok(!noHeading.read('progress.md').includes('Unfiled release'), after)
+      assert.match(squash(after), /Its unanswered question stays under Older unanswered questions/)
+    } finally { await noHeading.close() }
+    const twins = makeWorld()
+    try {
+      block(twins, { state: 'ended', title: 'Deploy', steps: ['- [?] Notify the team, OK?'] })
+      await terminal.keys(twins, 'i a')
+      twins.write('progress.md', `${twins.read('progress.md').trimEnd()}
+
+## api-gateway
+
+### Deploy
+- [x] Build
+- [ ] Ship
+`)
+      const after = await terminal.keys(twins, 'i a')
+      assert.match(squash(after), /Archived .Deploy.\./)
+      assert.doesNotMatch(squash(after), /Its unanswered question stays/)
+    } finally { await twins.close() }
+  })
+
+  test('a working day: a done task that still asks stays selectable under Done recently, tells its results there and offers no Confirm done', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'done', title: 'Publish the gateway', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?', '- [?] Tag the release, OK?'] })
+      const selected = await terminal.keys(world, 'i down')
+      assert.match(selected, /› ✓ api-gateway › Publish the gateway/)
+      assert.match(selected, /a archive/)
+      assert.doesNotMatch(selected, /d confirm done/)
+      const opened = await terminal.keys(world, 'i down enter')
+      assert.equal(opened.split('Notify the team, OK?').length, 2, opened)
+      const hidOne = await terminal.keys(world, 'l h')
+      assert.match(squash(hidOne), /Hidden: /)
+      await terminal.keys(world, 'l h')
+      const archived = await terminal.keys(world, 'a')
+      assert.ok(!world.read('progress.md').includes('Publish the gateway'), archived)
+    } finally { await world.close() }
+  })
+
+  test('a working day: the cursor walks finished tasks that still ask in the order the board draws them', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'done', session: 'a1000001', updated: new Date(world.now - 3_600_000).toISOString(), title: 'Older finished task', steps: ['- [?] Notify the team, OK?'] })
+      block(world, { state: 'done', session: 'a1000002', updated: new Date(world.now - 60_000).toISOString(), title: 'Newer finished task', steps: ['- [?] Tag the release, OK?'] })
+      const first = await terminal.keys(world, '')
+      assert.ok(first.indexOf('Newer finished task') < first.indexOf('Older finished task'), first)
+      assert.match(first, /› ✓ api-gateway › Newer finished task/)
+      assert.match(await terminal.keys(world, 'down'), /› ✓ api-gateway › Older finished task/)
+      assert.match(await terminal.keys(world, 'down up'), /› ✓ api-gateway › Newer finished task/)
+    } finally { await world.close() }
+  })
+
+  test("a working day: the page's archive result says a stopped session's question stays", async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'ended', title: 'Stopped gateway release', steps: ['- [x] Publish routes', '- [?] Notify the team, OK?'] })
+      const server = await serve.start(world)
+      const pressed = await server.press('Stopped gateway release', 'Archive')
+      assert.ok(pressed.requests.some(request => request.path === '/api/act' && request.body.type === 'archive'))
+      assert.match(squash(await server.visible()), /Its unanswered question stays under Older unanswered questions/)
+      assert.ok(!world.read('progress.md').includes('Stopped gateway release'))
     } finally { await world.close() }
   })
 
@@ -441,8 +522,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
         // Identifiers belong behind Copy. All default surfaces still get the
         // strict assertion, independently of the allowed copied command.
         noMachineIds((await terminal.screen(world, ['--all'])), world)
-        const visible = (await html(world)).visible
-        noMachineIds(visible, world)
+        noMachineIds(await print(world), world)
       }
       await inspectSurfaces(world)
     } finally { await world.close() }

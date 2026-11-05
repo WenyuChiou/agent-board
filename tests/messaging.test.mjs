@@ -38,6 +38,22 @@ const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
 const { computerName, isPrivateDacl, localAliases, privateFolder, runningAccount, whoamiAccount } = await import('../scripts/private-folder.ts')
 
 const nonceOf = prompt => prompt.match(/Reply first with this line alone: ACK ([0-9a-f]{6})/)[1]
+
+test('repeated page messaging snapshots check the store without starting Windows ACL commands', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'message-snapshot-acl-'))
+  let hub
+  try {
+    hub = createMessaging(dir)
+    for (const name of ['execFileSync', 'execFile', 'spawnSync', 'spawn']) t.mock.method(childProcess, name, () => assert.fail(`snapshot started ${name}`))
+    syncBuiltinESMExports()
+    for (let index = 0; index < 3; index++) assert.equal(hub.snapshot(Date.now() + index).enabled, true)
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+    hub?.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 // The board shows a reply without the nonce its ACK line carries; the store keeps the line as it came.
 const storedReply = (dir, id) => JSON.parse(readFileSync(join(dir, 'messages', 'messages.json'), 'utf8')).messages.find(one => one.id === id)?.reply
 const pause = ms => new Promise(done => setTimeout(done, ms))
@@ -2069,23 +2085,34 @@ test('native ownership loss during poll recovery closes the exact binding', asyn
   })
 })
 
-test('a handoff reads its current progress baseline without depending on the last page poll', async () => fixture(async (board, dir) => {
-  await board.call('/api/board')
-  const future = Date.now() + 2000
+// Each process on Windows reads its own coarse clock, so a stamp from the test's
+// Date.now() can sit a few ms in the server's future. Take every stamp from the
+// server's own `now`, which the report gate compares against.
+const handoffBaselineCase = async (board, dir) => {
+  const future = (await board.call('/api/board')).body.now + 2000
   const progress = updated => `## Synthetic\n<!-- auto session=aabbccdd agent=codex state=working updated=${new Date(updated).toISOString()} resume=native-baseline -->\n### Existing report\n- [~] This report preceded the handoff\n<!-- /auto session=aabbccdd -->\n`
   writeFileSync(join(dir, 'progress.md'), progress(future))
   const result = await boardClient(board.address).expect({ id: 'baseline1', agent: 'codex', session: 'native-baseline', surface: 'Synthetic', timeoutMs: 10000 })
   assert.ok(future > result.deadline - 10000, 'the baseline report must be ahead of the handoff clock')
   await pause(Math.max(0, future - Date.now() + 20))
-  let row = (await board.call('/api/board')).body.messaging.sessions.find(one => one.id === result.id)
+  let page
+  await waitFor(async () => (page = (await board.call('/api/board')).body).now > future)
+  let row = page.messaging.sessions.find(one => one.id === result.id)
   assert.equal(row.status, 'waiting', 'a report present before the handoff must not count as its new response')
   assert.equal(row.progress, true)
-  writeFileSync(join(dir, 'progress.md'), progress(Date.now()))
+  writeFileSync(join(dir, 'progress.md'), progress(page.now))
   row = (await board.call('/api/board')).body.messaging.sessions.find(one => one.id === result.id)
   assert.equal(row.status, 'reported')
-}))
+}
+test('a handoff reads its current progress baseline without depending on the last page poll', async () => fixture(handoffBaselineCase))
+test('a handoff baseline holds when the server clock runs behind the test', async () => fixture(async (board, dir) => {
+  writeFileSync(join(dir, 'message-clock-offset'), '-15')
+  await handoffBaselineCase(board, dir)
+}, `const originalNow = Date.now
+Date.now = () => originalNow() + (fs.existsSync(path.join(directory, 'message-clock-offset')) ? Number(fs.readFileSync(path.join(directory, 'message-clock-offset'), 'utf8')) : 0)
+`))
 
-test('handoffs time out visibly until exact fresh progress appears, independently of a live receiver', async () => fixture(async (board, dir) => {
+const handoffDeadlineCase = async () => fixture(async (board, dir) => {
   const client = boardClient(board.address)
   const request = { id: 'link1', agent: 'antigravity', session: 'native1', surface: 'Synthetic CLI', timeoutMs: 1000 }
   const progress = updated => `## Synthetic\n<!-- auto session=12345678 agent=antigravity state=working updated=${new Date(updated).toISOString()} resume=native1 -->\n### Fixture\n- [~] Explicit report\n<!-- /auto session=12345678 -->\n`
@@ -2102,7 +2129,12 @@ test('handoffs time out visibly until exact fresh progress appears, independentl
   try {
     await client.send({ id: 'setup1', target: receiver.id, turn: 'session', text: 'Synthetic setup request' })
     await waitFor(async () => (await board.call('/api/board')).body.messaging.messages[0]?.status === 'acknowledged')
-    row = (await board.call('/api/board')).body.messaging.sessions[0]
+    // An ACK can arrive during the initial poll, before the deadline. Observe
+    // the board's timeout independently instead of treating ACK latency as time.
+    await waitFor(async () => {
+      row = (await board.call('/api/board')).body.messaging.sessions[0]
+      return row.status === 'timed_out'
+    })
     assert.equal(row.status, 'timed_out'); assert.equal(row.receiving, true)
     writeFileSync(join(dir, 'progress.md'), progress(Date.now()).replace('resume=native1', 'resume=native10'))
     assert.equal((await board.call('/api/board')).body.messaging.sessions[0].status, 'timed_out')
@@ -2116,7 +2148,14 @@ test('handoffs time out visibly until exact fresh progress appears, independentl
   // No expectation or live receiver survives a board restart as a false connection.
   await board.close(); Object.assign(board, await start(dir))
   assert.deepEqual((await board.call('/api/board')).body.messaging.sessions, [])
-}))
+})
+
+test('handoffs time out visibly until exact fresh progress appears, independently of a live receiver', handoffDeadlineCase)
+// #692 requires twenty independent Windows samples. Every fresh fixture must
+// pass; a failing sample is never retried or hidden by a later success.
+if (process.platform === 'win32') for (let sample = 2; sample <= 20; sample++) {
+  test(`handoff deadline Windows sample ${sample}`, handoffDeadlineCase)
+}
 
 test('a live receiver without a progress card is visible and disappears on disconnect', async () => fixture(async board => {
   const receiver = await boardClient(board.address).attach({ agent: 'antigravity', session: 'native1', surface: 'Synthetic owned stream', scope: 'session', turn: 'session', verify: async () => true, deliver: async () => '' })
@@ -2297,14 +2336,21 @@ test('an adapter timeout becomes explicit uncertainty and never triggers another
 test('a mock Codex proxy keeps steering and native ACK separate and never answers approval RPCs', async () => fixture(async (board, dir) => {
   const thread = '11111111-2222-4333-8444-555555555555'
   const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log')
-  writeFileSync(fake, `import {createInterface} from 'node:readline';import{appendFileSync}from'node:fs';
-const emit=v=>console.log(JSON.stringify(v));
-createInterface({input:process.stdin}).on('line',line=>{const v=JSON.parse(line);appendFileSync(${JSON.stringify(log)},line+'\\n');
-if(v.method==='initialize')emit({id:v.id,result:{}});
-if(v.method==='thread/loaded/list')emit({id:v.id,result:{data:[${JSON.stringify(thread)}],nextCursor:null}});
-if(v.method==='turn/steer'){emit({id:v.id,result:{turnId:'turn1'}});emit({id:999,method:'item/commandExecution/requestApproval',params:{}});
-setTimeout(()=>emit({method:'item/completed',params:{threadId:${JSON.stringify(thread)},turnId:'turn1',item:{type:'agentMessage',text:'ACK '+v.params.input[0].text.match(/ACK ([0-9a-f]{6})/)[1]}}}),100);}
-});`)
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+import { appendFileSync } from 'node:fs'
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+  if (value.method === 'turn/steer') {
+    emit({ id: value.id, result: { turnId: 'turn1' } })
+    emit({ id: 999, method: 'item/commandExecution/requestApproval', params: {} })
+    setTimeout(() => emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'turn1', item: { type: 'agentMessage', text: 'ACK ' + value.params.input[0].text.match(/ACK ([0-9a-f]{6})/)[1] } } }), 100)
+  }
+} })
+`)
   const connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1', surface: 'Mock proxy' })
   try {
     await board.call('/api/messages/send', { ...input, target: connector.id })
@@ -2328,6 +2374,95 @@ setTimeout(()=>emit({method:'item/completed',params:{threadId:${JSON.stringify(t
     await pause(2200)
     assert.equal(readFileSync(log, 'utf8').split('"method":"turn/steer"').length - 1, 1)
   } finally { await connector.close() }
+}))
+
+test('the connector initializes, steers and reads the ACK through a WebSocket-only mock proxy', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log'), handshake = join(dir, 'handshake.txt')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import assert from 'node:assert/strict'
+import { appendFileSync, writeFileSync } from 'node:fs'
+import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+assert.deepEqual(process.argv.slice(2), ['app-server', 'proxy', '--sock', 'synthetic-owner'])
+let isInitialized = false, isListed = false, isSubscribed = false
+serveWebSocketProxy({
+  onHandshake: request => writeFileSync(${JSON.stringify(handshake)}, request),
+  onMessage: (value, emit) => {
+    appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
+    if (value.method === 'initialize') { emit({ id: value.id, result: {} }); return }
+    if (value.method === 'initialized') { isInitialized = true; return }
+    assert.ok(isInitialized)
+    if (value.method === 'thread/loaded/list') { isListed = true; emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } }) }
+    if (value.method === 'thread/resume') {
+      // Like the daemon: never resume a thread before checking it is loaded.
+      assert.ok(isListed)
+      assert.deepEqual(value.params, { threadId: ${JSON.stringify(thread)}, excludeTurns: true })
+      isSubscribed = true
+      emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+    }
+    if (value.method === 'turn/steer') {
+      assert.equal(value.params.expectedTurnId, 'turn1')
+      const nonce = value.params.input[0].text.match(/ACK ([0-9a-f]{6})/)[1]
+      emit({ id: value.id, result: { turnId: 'turn1' } })
+      // Like the daemon: a connection that never subscribed receives none of the turn's events.
+      if (!isSubscribed) return
+      const item = text => ({ type: 'agentMessage', text })
+      emit({ method: 'item/completed', params: { threadId: 'foreign', turnId: 'turn1', item: item('ACK ' + nonce + ' wrong thread') } })
+      emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'old-turn', item: item('ACK ' + nonce + ' wrong turn') } })
+      emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'turn1', item: item('ACK ' + nonce + ' received') } })
+      emit({ method: 'turn/completed', params: { threadId: ${JSON.stringify(thread)}, turn: { id: 'turn1' } } })
+    }
+  },
+})
+`)
+  const connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1', socket: 'synthetic-owner' })
+  try {
+    const sent = await board.call('/api/messages/send', { ...input, target: connector.id })
+    assert.equal(sent.status, 200)
+    const receipt = await waitFor(async () => {
+      const one = (await board.call('/api/board')).body.messaging.messages[0]
+      return one?.status === 'acknowledged' && one
+    })
+    assert.equal(receipt.reply, 'received')
+    assert.ok(readFileSync(handshake, 'utf8').startsWith('GET / HTTP/1.1\r\n'))
+    const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)
+    assert.deepEqual(calls.slice(0, 4).map(one => one.method), ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume'])
+    assert.equal(calls.filter(one => one.method === 'turn/steer').length, 1)
+  } finally { await connector.close() }
+}))
+
+test('the proxy connector never resumes a thread the running Codex has not loaded', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { appendFileSync } from 'node:fs'
+import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: ['99999999-2222-4333-8444-555555555555'], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+} })
+`)
+  await assert.rejects(connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1' }), { message: 'TARGET_MISMATCH' })
+  const methods = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line).method)
+  assert.deepEqual(methods, ['initialize', 'initialized', 'thread/loaded/list'])
+  assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
+}))
+
+test('the proxy connector does not attach when Codex refuses to subscribe it to the thread', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, error: { code: -32600, message: 'synthetic refusal' } })
+} })
+`)
+  await assert.rejects(connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1' }), { message: 'OWNER_REJECTED' })
+  assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
 }))
 
 test('an owned idle Codex session accepts only its actual new turn ACK and deduplicates self delivery', async () => fixture(async (board, dir) => {
@@ -3273,4 +3408,195 @@ test('a dead message claim changed during verification remains blocked and is no
     assert.deepEqual(storeClaims(dir), [name])
     assert.equal(readFileSync(file, 'utf8'), 'changed')
   } finally { process.kill = probe; rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('an owned Codex receiver catches up a poll tick held behind an empty response, within the unchanged receipt budget', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-poll-overlap-'))
+  const store = createMessaging(dir)
+  const thread = '00000001-2222-4333-8444-555555555555'
+  let release, began, listener, receiver, polls = 0, received = 0
+  const held = new Promise(done => { release = done })
+  const started = new Promise(done => { began = done })
+  const errors = []
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1000 })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const action = new URL(url).pathname.split('/').at(-1)
+    const result = store.act(action, JSON.parse(options.body), Date.now())
+    const isFirstPoll = action === 'poll' && ++polls === 1
+    return { ok: true, json: async () => {
+      if (isFirstPoll) { began(); await held }
+      return result
+    } }
+  })
+  const transport = {
+    listen: callback => { listener = callback; return () => { listener = null } },
+    request: async (method, params) => {
+      if (method === 'thread/loaded/list') return { data: [thread] }
+      assert.equal(method, 'turn/start')
+      assert.equal(params.threadId, thread)
+      received++
+      const nonce = nonceOf(params.input[0].text)
+      listener({ method: 'item/completed', params: { threadId: thread, turnId: 'owned-turn', item: { type: 'agentMessage', text: `ACK ${nonce} received` } } })
+      listener({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'owned-turn', status: 'completed' } } })
+      return { turn: { id: 'owned-turn' } }
+    },
+  }
+  try {
+    receiver = await attachCodexSession({ boardUrl: 'http://127.0.0.1:12345/?t=synthetic', transport, thread,
+      state: () => ({ thread, status: 'idle', turn: null }), verifyOwner: one => one === transport,
+      onError: error => errors.push(error.message) })
+    await started
+    const sentAt = Date.now()
+    store.act('send', { id: 'AB-overlap', target: receiver.id, turn: receiver.turn, text: 'Synthetic overlap control' }, Date.now())
+    // The response was already empty before this send. A due tick must not vanish
+    // merely because that response has not finished arriving at the receiver.
+    t.mock.timers.tick(2000)
+    release()
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(1999)
+    await new Promise(done => setImmediate(done))
+    assert.equal(Date.now() - sentAt, 3999)
+    const message = store.snapshot(Date.now()).messages.find(one => one.id === 'AB-overlap')
+    const pollsBeforeDeadline = polls
+    // The old implementation does eventually deliver, at the next full period.
+    // Prove that the control's transport and exact native ACK both work then.
+    t.mock.timers.tick(1)
+    await new Promise(done => setImmediate(done))
+    assert.equal(store.snapshot(Date.now()).messages.find(one => one.id === 'AB-overlap').status, 'acknowledged')
+    assert.equal(message.status, 'acknowledged', 'the skipped 2000 ms tick must run before the next 4000 ms tick')
+    assert.equal(message.reply, 'received')
+    assert.equal(received, 1)
+    assert.equal(pollsBeforeDeadline, 2)
+    assert.deepEqual(errors, [])
+  } finally {
+    release()
+    await receiver?.close()
+    assert.equal(listener, null)
+    store.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('overlapping poll ticks coalesce once and never survive closure, ownership loss or expiry', async t => {
+  for (const state of ['live', 'closed', 'ownership-lost', 'expired']) await t.test(state, async t => {
+    let began, release, receiver, polls = 0, disconnects = 0, deliveries = 0, isOwned = true
+    const started = new Promise(done => { began = done })
+    const held = new Promise(done => { release = done })
+    const errors = []
+    t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1000 })
+    t.mock.method(globalThis, 'fetch', async (url) => {
+      const action = new URL(url).pathname.split('/').at(-1)
+      if (action === 'disconnect') disconnects++
+      const isFirstPoll = action === 'poll' && ++polls === 1
+      return { ok: true, json: async () => {
+        if (isFirstPoll) { began(); await held }
+        return action === 'register' ? { id: 'synthetic', secret: 'synthetic', expires: Date.now() + 15000 }
+          : action === 'poll' ? { messages: [], leaseMs: 15000 } : { ok: true }
+      } }
+    })
+    try {
+      receiver = await boardClient('http://127.0.0.1:12345/?t=synthetic').attach({
+        agent: 'codex', session: 'synthetic', surface: 'Synthetic overlap control', turn: 'turn1',
+        verify: async () => isOwned, deliver: async () => { deliveries++; return 'ACK synthetic' },
+        onError: error => errors.push(error.message),
+      })
+      await started
+      t.mock.timers.tick(state === 'expired' ? 16000 : 6000)
+      if (state === 'closed') await receiver.close()
+      if (state === 'ownership-lost') isOwned = false
+      release()
+      await new Promise(done => setImmediate(done))
+      assert.equal(polls, state === 'live' ? 2 : 1, 'many overdue ticks coalesce, and a terminal binding does not poll again')
+      assert.equal(disconnects, state === 'live' ? 0 : 1)
+      assert.equal(deliveries, 0)
+      assert.deepEqual(errors, state === 'expired' ? ['CONNECTION_EXPIRED'] : [])
+    } finally { release(); await receiver?.close() }
+  })
+})
+
+test('an overlapping poll leaves the page waiting for a reply at the deadline despite a completed native ACK', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-poll-overlap-'))
+  const store = createMessaging(dir)
+  const thread = '00000001-2222-4333-8444-555555555555'
+  let release, began, listener, receiver, polls = 0, received = 0
+  const held = new Promise(done => { release = done })
+  const started = new Promise(done => { began = done })
+  const errors = []
+  t.mock.timers.enable({ apis: ['Date', 'setInterval', 'setTimeout'], now: 1000 })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const action = new URL(url).pathname.split('/').at(-1)
+    const body = JSON.parse(options.body)
+    const result = store.act(action, body, Date.now())
+    const isFirstPoll = action === 'poll' && ++polls === 1
+    return { ok: true, json: async () => {
+      if (isFirstPoll) { began(); await held }
+      if (action === 'receipt' && body.status === 'accepted') await new Promise(done => setTimeout(done, 15))
+      return result
+    } }
+  })
+  const transport = {
+    listen: callback => { listener = callback; return () => { listener = null } },
+    request: async (method, params) => {
+      if (method === 'thread/loaded/list') return { data: [thread] }
+      assert.equal(method, 'turn/start')
+      assert.equal(params.threadId, thread)
+      received++
+      const nonce = nonceOf(params.input[0].text)
+      listener({ method: 'item/completed', params: { threadId: thread, turnId: 'owned-turn', item: { type: 'agentMessage', text: `ACK ${nonce} received` } } })
+      listener({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'owned-turn', status: 'completed' } } })
+      return { turn: { id: 'owned-turn' } }
+    },
+  }
+  try {
+    receiver = await attachCodexSession({ boardUrl: 'http://127.0.0.1:12345/?t=synthetic', transport, thread,
+      state: () => ({ thread, status: 'idle', turn: null }), verifyOwner: one => one === transport,
+      onError: error => errors.push(error.message) })
+    await started
+    t.mock.timers.tick(10)
+    const sentAt = Date.now()
+    store.act('send', { id: 'AB-overlap', target: receiver.id, turn: receiver.turn, text: 'Synthetic overlap control' }, Date.now())
+    // Queue just after the empty request. Its response crosses the next due
+    // tick but finishes with almost two seconds still left in the budget.
+    t.mock.timers.tick(1990)
+    release()
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(15)
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(1984)
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(1)
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(9)
+    await new Promise(done => setImmediate(done))
+    assert.equal(Date.now() - sentAt, 3999)
+    const snapshot = store.snapshot(Date.now())
+    const message = snapshot.messages.find(one => one.id === 'AB-overlap')
+    assert.equal(received, 1, 'the actual native turn and its correlated ACK already completed')
+    const { servePage } = await import('../hooks/serve.ts')
+    const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+    const file = `## Synthetic
+<!-- auto session=abcdef01 agent=codex resume=${thread} state=working updated=${new Date(Date.now()).toISOString()} -->
+### Poll overlap
+- [~] Review the synthetic control
+<!-- /auto session=abcdef01 -->
+`
+    const view = buildView(parseProgress(file), [], null, Date.now(), 0, {}, EN)
+    const model = serveModel(view, [], EN, new Set(), false, snapshot, false, { now: Date.now(), repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+    const page = await pageDom(servePage(EN, 'synthetic'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    // At the old next tick the native ACK is immediate, but even a 15 ms
+    // accepted-response round trip now pushes acknowledgment past the budget.
+    t.mock.timers.tick(6)
+    await new Promise(done => setImmediate(done))
+    assert.equal(store.snapshot(Date.now()).messages.find(one => one.id === 'AB-overlap').status, 'acknowledged')
+    assert.equal(message.status, 'acknowledged', `deadline page: ${page.text()}`)
+    assert.ok(page.text().includes('Replied'), page.text())
+    assert.equal(message.reply, 'received')
+    assert.deepEqual(errors, [])
+  } finally {
+    release()
+    await receiver?.close()
+    assert.equal(listener, null)
+    store.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

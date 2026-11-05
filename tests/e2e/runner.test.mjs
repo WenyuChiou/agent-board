@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { makeWorld, modulePath } from './lib/world.mjs'
 import { ISOLATED_VARIABLES, spawnIsolated, within, worldOf } from './lib/spawn.mjs'
 import { block, turn, hook, hookHosts } from './lib/writers.mjs'
-import { terminal, chat, seenPageWithin, serve, html, run } from './lib/surfaces.mjs'
+import { terminal, chat, json, seenPageWithin, serve, run } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { killMidWrite, tear, lockFile, twoWriters, formatWriters, readOnly, diskFull, skew, updateMidSession, uninstall, reinstall } from './lib/faults.mjs'
@@ -122,7 +122,7 @@ describe('scenario runner', () => {
         assert.equal(modulePath([kept, ...leaks, shouted].join(';')), [kept, shouted].join(';'))
         if (modulePath()) assert.equal(a.env.PSModulePath, modulePath())
       }
-      assert.equal((a.read('agent-board.mjs').match(/\(\(target, done\) => done\(false\)\)\((?:html|url),/g) ?? []).length, 2)
+      assert.equal((a.read('agent-board.mjs').match(/\(\(target, done\) => done\(false\)\)\((?:address|url),/g) ?? []).length, 2)
       assert.doesNotMatch(a.read('agent-board.mjs'), /\bopenInBrowser\(/)
       assert.throws(() => a.write('../../../escaped', 'no'), /Outside world/)
       a.write('only-a', 'synthetic')
@@ -352,7 +352,7 @@ describe('scenario runner', () => {
       block(world)
       assert.match((await terminal.screen(world)), /Prepare the gateway/)
       assert.match((await chat(world)).stdout, /Prepare the gateway/)
-      assert.match((await html(world)).visible, /Prepare the gateway/)
+      assert.match(JSON.stringify(await json(world)), /Prepare the gateway/)
       assert.match((await terminal.keys(world, '')), /Prepare the gateway/)
       server = await serve.start(world)
       assert.match(await server.page(), /Prepare the gateway/)

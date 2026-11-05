@@ -48,7 +48,7 @@ export const themeHead = String.raw`
   var timer;
   var saved = '';
   // The live page starts on a new port each time, so its storage starts empty there; a cookie
-  // is shared across ports and keeps the pick. progress.html, a file, keeps it in storage.
+  // is shared across ports and keeps the pick.
   try {
     var kept = /(?:^|;\s*)agent-board\.theme=(light|dark)(?:;|$)/.exec(document.cookie || '');
     if (kept) saved = kept[1];
@@ -226,7 +226,7 @@ button:hover,.btn:hover,summary:hover{background-color:var(--hover)}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 `
 
-// The row of agent icons, shared by the live page and progress.html (the script that fills it differs).
+// The row of agent icons, used by the live page.
 export const agentRowCss = `
 .agents{position:sticky;top:var(--head-h,56px);z-index:4;background:var(--ground);border-bottom:1px solid var(--line)}
 .agents-in{display:flex;gap:var(--s2);overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity;padding-top:var(--s2);padding-bottom:var(--s2)}

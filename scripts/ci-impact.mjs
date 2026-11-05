@@ -229,6 +229,11 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
     for (const path of ['bin/agent-board.mjs', 'scripts/setup-agent.mjs', 'scripts/setup-codex.mjs', ...bundleFiles(root), 'hooks/released.ts']) {
       for (const dependency of await walkDependencies(root, [path])) deps.npm.add(dependency)
     }
+    // The browser journeys install the board with scripts/setup-agent.mjs, which runs setup-codex.mjs, both in child
+    // processes the import walk cannot see, so a page change alone selected no browser check (#942 reached main untested).
+    for (const path of ['scripts/setup-agent.mjs', 'scripts/setup-codex.mjs', ...bundleFiles(root), 'hooks/released.ts']) {
+      for (const dependency of await walkDependencies(root, [path])) deps.browser.add(dependency)
+    }
     for (const path of ['hooks/parse.ts', 'hooks/blocks.ts']) deps.remote.add(path)
     for (const path of ['README.md', 'README.zh-TW.md', 'README.zh-CN.md', 'docs/FORMAT.md']) deps.journeys.add(path)
     for (const path of ['hooks/register.tsx', 'hooks/hooks.json', 'types/index.d.ts']) {
@@ -295,11 +300,51 @@ const emitPlan = plan => {
     '\n\nFull plan: ' + plan.full + '\n\nSoak recommended: ' + plan.soakRecommended + '\n\nChanged paths:\n' + plan.files.map(path => '- ' + path).join('\n') + '\n')
 }
 
-export const runTestFiles = files => {
+// A part such as 2/4 lets a long set fit several jobs (#899, #910). Part i of n takes every nth file, but a file is
+// never split, so a file far longer than the rest splits its own tests instead: part i of n keeps every
+// nth test, and the parts together run each test once.
+const parsePart = part => {
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(part)
+  if (part !== '' && (!match || Number(match[1]) > Number(match[2]))) throw new Error('test part must be <index>/<total>, such as 1/2')
+  return match ? { index: Number(match[1]), total: Number(match[2]) } : { index: 1, total: 1 }
+}
+
+// The files that split their own tests with partTest: on Windows codex-local took about 8 minutes and
+// board about 5, each far longer than any other file (#899).
+export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs']
+
+export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
+  const { index, total } = parsePart(part)
+  let ordinal = 0
+  return Object.assign((...args) => (ordinal++ % total === index - 1 ? test(...args) : undefined), { skip: test.skip, only: test.only, todo: test.todo })
+}
+
+// A Windows job ran three spawn-heavy files at once on a 4-vCPU runner: every test slowed about 1.35x and the
+// tightest timing budgets failed in turn (#910). Two files at a time leaves them room; serial stays one.
+export const testArgs = (files, { isSerial = false, isWindows = false } = {}) => ['--test', ...(isSerial ? ['--test-concurrency=1'] : isWindows ? ['--test-concurrency=2'] : []), ...files]
+
+// The Node run of one part: every nth of the other files, and every self-parted file, which keeps its own
+// share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
+export const testRuns = (files, { isSerial = false, isWindows = false, part = '' } = {}) => {
+  const { index, total } = parsePart(part)
+  if (total === 1) return [testArgs(files, { isSerial, isWindows })]
+  const rest = files.filter(path => !selfPartedTests.includes(path)).filter((path, ordinal) => ordinal % total === index - 1)
+  const share = [...rest, ...files.filter(path => selfPartedTests.includes(path))]
+  return share.length ? [testArgs(share, { isSerial, isWindows })] : []
+}
+
+export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform) => {
   if (!Array.isArray(files) || !files.length || files.some(path => !/^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/.test(path) || !existsSync(path))) throw new Error('selected tests are empty, invalid or missing')
-  const result = spawnSync(process.execPath, ['--test', ...(process.env.CI_TEST_SERIAL === '1' ? ['--test-concurrency=1'] : []), ...files], { stdio: 'inherit' })
-  if (result.error) throw result.error
-  if (result.status !== 0) throw new Error('selected tests failed: ' + (result.status ?? result.signal))
+  // A self-parted file reads its part from CI_TEST_PART, so the child gets the part this run was given,
+  // not whatever part the environment holds.
+  const env = { ...process.env, CI_TEST_PART: part }
+  // Every run goes ahead even when an earlier one failed, so one job shows all of its failures.
+  const failures = testRuns(files, { isSerial: process.env.CI_TEST_SERIAL === '1', isWindows: platform === 'win32', part }).flatMap(args => {
+    const result = spawn(process.execPath, args, { stdio: 'inherit', env })
+    if (result.error) throw result.error
+    return result.status === 0 ? [] : [result.status ?? result.signal]
+  })
+  if (failures.length) throw new Error('selected tests failed: ' + failures.join(', '))
 }
 
 const main = async () => {

@@ -334,6 +334,7 @@ export const currentStepIndex = (task: ProgressTask): number => {
 // ending, a crash) still says working or waiting; after half a day it is treated as ended.
 export const DEFAULT_STALE_MS = 12 * 60 * 60 * 1000
 export const STALE_MS = DEFAULT_STALE_MS
+export const WORKING_MS = 30 * 60 * 1000
 
 // Parse a custom stale duration (milliseconds), enforcing a minimum 1 minute (60,000 ms) lower bound.
 export const parseStaleMs = (value: unknown, fallback: number = DEFAULT_STALE_MS): number => {

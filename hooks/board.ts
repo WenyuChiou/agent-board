@@ -10,6 +10,7 @@ import { agentLabel } from './strings'
 import { isSameName, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
+import type { TidyPreview } from './tidy'
 
 // The board as plain text, for agents other than Claude Code: the standalone script that
 // `/progress connect` writes beside progress.md prints it in a terminal (once, or live with
@@ -98,7 +99,7 @@ export type AnswerRoute = { mode: 'connected' | 'send'; agent: string; session: 
 // `depth` and `theme` pick the page's colours for a terminal; `routes` are the questions the
 // running page can answer into their session, by line key; `agents` the agents that reported to
 // this board, which an empty board names.
-export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; depth?: ColorDepth; theme?: Theme; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
+export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; isQuestionsOpen?: boolean; depth?: ColorDepth; theme?: Theme; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
 
 export const remainingInbox = (view: View, pending: readonly PendingTurn[]): readonly PendingTurn[] => view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
 
@@ -285,7 +286,7 @@ const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: 
   })),
 ]
 
-export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }): string => {
+export const boardText = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, o: BoardOptions = { width: 80, isColor: false }, done: readonly string[] = []): string => {
   const c = paint(o)
   const isWide = isWideLang(s)
   const cut = (raw: string, width: number): string => fit(raw, width, isWide)
@@ -297,8 +298,9 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
   for (const [title, items] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
     if (items.length === 0) continue
-    lines.push(`${title} (${items.length}) · --all`)
-    if (o.isIdleOpen) for (const item of items) lines.push(`  ${cut(`${item.project} › ${item.task} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
+    const isOpen = o.isIdleOpen || o.isQuestionsOpen
+    lines.push(`${title} (${items.length})${isOpen ? '' : ' · --all'}`)
+    if (isOpen) for (const item of items) lines.push(`  ${cut(`${item.project} › ${item.task} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
   }
   // Questions marked answered in a pane are left out, and counted so they are not lost.
   const hidden = view.hidden.length === 0 ? [] : [c('quiet', s.hiddenCount(view.hidden.length))]
@@ -330,11 +332,10 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
 
   for (const [rows, count] of [[view.idle, s.idleCount], [view.stopped, s.stoppedCount]] as const) {
     if (rows.length === 0) continue
-    lines.push(c('quiet', o.isIdleOpen ? count(rows.length) : `${count(rows.length)} · --all`))
-    if (o.isIdleOpen) {
-      for (const row of rows) {
-        lines.push(`  ${c('project', cut(row.project, o.width - 4), true)}`, ...rowLines(view, row, s, o, true))
-      }
+    const shown = o.isIdleOpen ? rows : o.isQuestionsOpen ? rows.filter(row => (row.questions?.length ?? 0) > 0) : []
+    lines.push(c('quiet', shown.length === rows.length ? count(rows.length) : `${count(rows.length)} · --all`))
+    for (const row of shown) {
+      lines.push(`  ${c('project', cut(row.project, o.width - 4), true)}`, ...rowLines(view, row, s, o, true))
     }
     lines.push('')
   }
@@ -358,6 +359,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   // Runs agents started for themselves, with no session known: one folded line, never in the counts (#399).
   if (view.background) lines.push(c('quiet', cut(view.background, o.width)), '')
   for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2, isWide).map(part => c('quiet', part)))
+  if (done.length > 0) lines.push('', ...done.map(words => c('done', `✓ ${cut(words, o.width - 2)}`)))
 
   return `${lines.join('\n').replace(/\n+$/, '')}\n`
 }
@@ -469,7 +471,7 @@ const withoutHomeStart = (text: string, home: string, isWindows: boolean): strin
   return text.slice(0, cut).replace(OTHER_HOME_START, '').trimEnd()
 }
 
-const clipped = (text: string, home: string, isWindows: boolean): string =>
+export const clipped = (text: string, home: string, isWindows: boolean): string =>
   text.length <= CHAT_CLIP ? text : withoutHomeStart(text.slice(0, CHAT_CLIP).replace(/\s*\S*$/, ''), home, isWindows)
 
 const chatLine = (text: string, indent: number, home: string, isWindows: boolean): string =>
@@ -585,7 +587,7 @@ export type BoardItem =
 
 // `key` is the chosen line's, so the choice stays on it when lines above it come or go. `seen`
 // holds each line's fingerprint as the last draw showed it (null before the first draw).
-export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean }
+export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean; bulkTidy?: { token: string; preview: TidyPreview } }
 
 export type BoardAction =
   | { type: 'tick'; ref: StepRef }
@@ -639,6 +641,7 @@ export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOp
     ...(isOlderOpen ? [...(view.reminder ?? []), ...(view.older ?? [])].map(ask => ({ type: 'ask' as const, key: olderKey(ask), ask })) : []),
     ...rows.map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
     ...remainingInbox(view, pending).map((turn, index) => ({ type: 'turn' as const, key: `turn:${turn.agent}:${turn.project}:${index}`, turn })),
+    ...(view.recentAsking ?? []).filter(row => !listed.some(one => one.key === row.key)).map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
   ]
 }
 
@@ -708,6 +711,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   const moved = (selected: number): { state: BoardState; action: null } => ({ state: { ...state, selected, key: items[selected]?.key ?? null, note: '' }, action: null })
   if (key === 'up' || key === 'k') return moved(Math.max(0, at - 1))
   if (key === 'down' || key === 'j') return moved(Math.min(last, at + 1))
+  // The legacy action name now opens the same live page as the desktop command.
   if (key === 'o') return { state, action: { type: 'html' } }
   if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: state.isIdleOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
   if (key === 'l') return { state: { ...state, isOlderOpen: !state.isOlderOpen, selected: 0, key: null, open: null, note: state.isOlderOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
@@ -894,6 +898,16 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
   const host = isOrphan ? items.find(item => item.type === 'row' && item.row.title === result.label)?.key ?? null : null
   let section = ''
   let focus: readonly [number, number] | null = null
+  const rowDetails = (row: TaskRow): void => {
+    if (row.question) lines.push(`    ${cut(row.question, o.width - 6)}`)
+    if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
+    for (const step of row.steps) {
+      const tone = step.status === 'waiting' ? 'waiting' : step.status === 'blocked' ? 'alert' : step.isCurrent ? 'accent' : step.status === 'done' ? 'quiet' : null
+      const line = cut(stepLine(step), o.width - 6)
+      lines.push(`    ${tone === null ? line : c(tone, line)}`)
+    }
+    if (row.handoff) lines.push(`    ${c('quiet', cut(row.handoff, o.width - 6))}`)
+  }
   const drawItem = (item: BoardItem, index: number): void => {
     const isHere = index === at
     const isOpen = state.open === item.key
@@ -955,16 +969,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const quiet = status.startsWith(lead) ? lead : ''
       lines.push(`    ${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
       if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
-      if (isOpen) {
-        if (row.question) lines.push(`    ${cut(row.question, o.width - 6)}`)
-        if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
-        for (const step of row.steps) {
-          const tone = step.status === 'waiting' ? 'waiting' : step.status === 'blocked' ? 'alert' : step.isCurrent ? 'accent' : step.status === 'done' ? 'quiet' : null
-          const line = cut(stepLine(step), o.width - 6)
-          lines.push(`    ${tone === null ? line : c(tone, line)}`)
-        }
-        if (row.handoff) lines.push(`    ${c('quiet', cut(row.handoff, o.width - 6))}`)
-      }
+      if (isOpen) rowDetails(row)
       return
     }
     const { turn } = item
@@ -972,6 +977,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
     if (result?.key === item.key) resultLines('    ')
   }
   items.forEach((item, index) => {
+    if (item.type === 'row' && view.recentAsking?.some(row => row.key === item.row.key)) return
     const from = lines.length
     drawItem(item, index)
     if (index === at) focus = [from, lines.length - 1]
@@ -986,8 +992,16 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
     if (lines.at(-1) !== '') lines.push('')
     lines.push(`${c('done', cut(heading, o.width), true)}${c('quiet', cut(`  ${s.boardKeyArchiveDone}`, o.width - cols(heading)))}`)
     for (const item of view.recent) {
-      lines.push(`  ${c('done', '✓')} ${titled(4, `${item.project} › ${item.title}`, item.when, false, 'quiet')}`)
-      for (const question of item.questions ?? []) lines.push(`    ${cut(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
+      const index = items.findIndex(one => one.type === 'row' && one.row.key === item.key && view.recentAsking?.some(row => row.key === one.row.key))
+      const selectable = items[index]
+      const isHere = index >= 0 && index === at
+      const from = lines.length
+      lines.push(`${isHere ? c('accent', '›', true) : ' '} ${c('done', '✓')} ${titled(4, `${item.project} › ${item.title}`, item.when, isHere, 'quiet')}`)
+      if (selectable !== undefined && (result?.key === selectable.key || host === selectable.key)) resultLines('    ')
+      // Open, its steps say the question themselves.
+      if (selectable?.type === 'row' && state.open === selectable.key) rowDetails({ ...selectable.row, question: null })
+      else for (const question of item.questions ?? []) lines.push(`    ${cut(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
+      if (isHere) focus = [from, lines.length - 1]
     }
   }
   if (isEmptyBoard(view, pending)) {
@@ -996,8 +1010,12 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
     lines.push(c('quiet', s.empty), ...muted(agents.length === 0 ? s.boardNoAgents : s.boardAgentsHere(agents.join(', ')), ''), ...muted(s.boardEmptyHow, ''))
   }
   // The line's own keys give way first, so the keys that move and quit always show.
+  // The bulk-archive key is not on that line: it would push the line's own keys off
+  // (the answer hints must stay complete), so it gets its own line, and only when the
+  // board has stopped rows to clean.
   const own = keysFor(items[at], s, routes).join(' · ')
   lines.push('', c('quiet', own === '' ? cut(s.boardKeysMove, o.width) : `${cut(own, o.width - cols(s.boardKeysMove) - cols(' · ') - 1)} · ${s.boardKeysMove}`))
+  if (view.stopped.length > 0) lines.push(c('quiet', s.boardKeyBulkArchive))
   if (result === undefined) resultLines('')
   for (const line of view.health ?? []) lines.push(...wrap(line, o.width - 2).map(part => c('quiet', part)))
 

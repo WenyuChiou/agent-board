@@ -11,9 +11,9 @@ import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, WORKING_MS } from './parse'
 import { sha256 } from './sha256'
-import { observeQuestions, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
+import { observeQuestions, partsKey2, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
 import { identity } from './grouping'
@@ -193,12 +193,14 @@ export const rowNeedsYou = (row: TaskRow, isShelved = false): { kind: 'stuck' | 
 
 // Whether a row needs the person now. A question counts while it has its card, by the page's own
 // match: copies of one question merge into one card and a later answer can cover an earlier copy,
-// so a row's own question may have no card left.
-export const rowNeedsNow = (row: TaskRow, cards: readonly WaitingItem[], isShelved = false): ReturnType<typeof rowNeedsYou> => {
+// so a row's own question may have no card left. `cardIds`, when given, is the cards' identities
+// worked out once by the caller, so checking every row does not rematch every card (#192).
+export const rowNeedsNow = (row: TaskRow, cards: readonly WaitingItem[], isShelved = false, cardIds?: ReadonlySet<string>): ReturnType<typeof rowNeedsYou> => {
   const needs = rowNeedsYou(row, isShelved)
   if (needs?.kind !== 'question') return needs
   const own = identity(row.agent, false, row.project, row.title, row.dir)
 
+  if (cardIds !== undefined) return cardIds.has(own) ? needs : null
   return cards.some(item => identity(item.agent, false, item.project, item.task, item.dir) === own) ? needs : null
 }
 
@@ -241,10 +243,16 @@ export type View = {
   active: TaskRow[]
   groups: RowGroup[]
   recent: DoneItem[]
+  recentAsking?: TaskRow[]
   finished?: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null }>
   unreadable?: string[]
   health?: string[]
 }
+
+// The questions an archive of `ref` left on the older shelves. A kept copy holds its project as the
+// file had it, so a block under no heading is ''; a hand-kept task has no session.
+export const keptQuestionCount = (view: View, ref: TaskRef, s: Strings): number =>
+  [...(view.reminder ?? []), ...(view.older ?? [])].filter(item => (item.project || s.uncategorized) === ref.project && item.task === ref.title && (item.session ?? '') === (ref.session ?? '')).length
 
 const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
@@ -798,6 +806,16 @@ const whereRank = (item: WaitingItem): number => (item.where === 'here' ? 0 : 1)
 const runAgents = (group: RunGroup, s: Strings): string => group.agents.map(agent => s.agentNames[agent] ?? agentName(agent)).join(' / ')
 const runsText = (group: RunGroup, now: number, s: Strings): string => s.runsLine(group.count, runAgents(group, s), relativeTime(group.last, now, s))
 
+// What one view build saved by count, for the budget test: the per-view indexes
+// answer lookups with one hash probe each instead of rescanning the ledger, and
+// the per-task memos answer a repeated question once instead of once per scan.
+// Only filled when the caller asks for it; nothing else reads it.
+export type ViewIndexCounts = {
+  indexRecords: number
+  indexLookups: number
+  memoReused: number
+}
+
 export const buildView = (
   projects: readonly ProgressProject[],
   here: readonly string[],
@@ -818,6 +836,7 @@ export const buildView = (
   frozen: ReadonlySet<string> = new Set(),
   observe: typeof observeQuestions = observeQuestions,
   staleMs: number = STALE_MS,
+  counts?: ViewIndexCounts,
 ): View => {
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
   // pair is no second row. What is left is what the rows, the questions and the counts read.
@@ -825,7 +844,19 @@ export const buildView = (
   const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
-  const recordsById = new Map((observed?.ledger.records ?? []).map(record => [record.id, record]))
+  const records = observed?.ledger.records ?? []
+  const recordsById = new Map(records.map(record => [record.id, record]))
+  if (counts !== undefined) counts.indexRecords += records.length
+  // The frozen-scope lookup, built once: filtering the whole ledger for every frozen task
+  // rescanned the ledger once per task (#192). Scope, like the other record keys, never
+  // changes during a view build, so the lists stay correct for the whole call.
+  const recordsByScope = frozen.size === 0 ? null : new Map<string, QuestionRecord[]>()
+  if (recordsByScope !== null) for (const record of records) {
+    const list = recordsByScope.get(record.scope)
+    if (list === undefined) recordsByScope.set(record.scope, [record])
+    else list.push(record)
+  }
+  if (counts !== undefined && recordsByScope !== null) counts.indexRecords += records.length
   const waiting: WaitingItem[] = []
   const inactiveHidden: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
@@ -859,7 +890,7 @@ export const buildView = (
   const twins = new Map<string, number>()
   for (const project of projects) {
     for (const task of project.tasks) {
-      const twin = JSON.stringify([project.name || s.uncategorized, task.title])
+      const twin = partsKey2(project.name || s.uncategorized, task.title)
       twins.set(twin, (twins.get(twin) ?? 0) + 1)
     }
   }
@@ -889,7 +920,8 @@ export const buildView = (
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
       const isManual = task.auto === null
       const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
-      const isFrozen = frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title))
+      // With nothing frozen, neither half can match, so the scope string is never built.
+      const isFrozen = frozen.size > 0 && (frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)))
       const lastActive = hasTime(updated) ? updated : seen[taskFingerprint(project.name, task)]
       const days = task.due === null ? null : dueDays(task.due, now)
       const isDue = task.due !== null && days !== null && days <= 14
@@ -897,19 +929,33 @@ export const buildView = (
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now, updated, staleMs)
-      const isInactive = !isManual && (isComplete || stale || task.auto?.state === 'ended')
+      const isSilence = task.auto?.state === 'working' && hasTime(lastActive) && now - lastActive > WORKING_MS && (task.steps.length === 0 || task.steps.every(step => isLifecycleStep(step.text)))
+      const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
       const taskQuestions: WaitingItem[] = []
+      // A step's slot string is built once per task and shared by the key list, the
+      // question id and the age lookup below, which each asked for it separately.
+      // Nothing they read changes during a view build, so sharing it stays correct.
+      const slots: (string | undefined)[] = []
+      const slotAt = (index: number): string => {
+        const held = slots[index]
+        if (held !== undefined) {
+          if (counts !== undefined) counts.memoReused += 1
+          return held
+        }
+        return slots[index] ??= questionSlot(scope, index)
+      }
       const keys = task.auto === null || observed === null
         ? blockKeys(task)
-        : task.steps.map((step, index) => step.status === 'waiting' ? observed.keys[questionSlot(scope, index)] ?? '' : '')
+        : task.steps.map((step, index) => step.status === 'waiting' ? observed.keys[slotAt(index)] ?? '' : '')
       // A cut-off block's question records stay as they were, but its steps still show. A step a
       // saved question of its scope covers (the same words, or the start of them the cut left) is
       // shown by that saved question in the loop over the ledger below, or not at all once it is
       // answered or hidden. Any other [?] step asks as written, with no question id, as before the
       // ledger first sees it.
-      const scopeRecords = isFrozen ? (observed?.ledger.records.filter(record => record.scope === scope) ?? []) : []
+      if (counts !== undefined && isFrozen) counts.indexLookups += 1
+      const scopeRecords = isFrozen ? (recordsByScope?.get(scope) ?? []) : []
       // A question that should show but does not is worse than one shown twice. Only one saved
       // candidate covers a step, and an answer needs the same token or saved source revisions.
       const savedFor = (index: number) => {
@@ -925,22 +971,69 @@ export const buildView = (
         const candidates = same.length > 0 || words === '' || index !== task.steps.length - 1 ? same : covering.filter(record => record.words.startsWith(words))
         return candidates.length === 1 ? candidates[0] : undefined
       }
-      const isAsked = (index: number): boolean => {
-        if (isFrozen) {
-          const saved = savedFor(index)
-          return saved === undefined ? true : saved.isUnresolved === true && saved.source !== undefined && !marked.has(saved.id)
+      // A step's saved record, asked state, age stage and prompt state are asked for
+      // again and again within one row — the phrase, the question finder and the step
+      // list each scan the steps — so each is worked out once per task rather than
+      // once per scan. Nothing they read (the keys, the records, the answered marks,
+      // the frozen set) changes during a view build, so the memos stay correct.
+      const savedMemo = new Map<number, QuestionRecord | undefined>()
+      const savedAt = (index: number): QuestionRecord | undefined => {
+        if (savedMemo.has(index)) {
+          if (counts !== undefined) counts.memoReused += 1
+          return savedMemo.get(index)
         }
-        return !marked.has(keys[index] ?? '') && observed?.ledger.records.find(record => record.id === keys[index])?.isUnresolved !== false
+        const saved = savedFor(index)
+        savedMemo.set(index, saved)
+        return saved
       }
+      const askedMemo: (boolean | undefined)[] = []
+      const isAsked = (index: number): boolean => {
+        const held = askedMemo[index]
+        if (held !== undefined) {
+          if (counts !== undefined) counts.memoReused += 1
+          return held
+        }
+        let value: boolean
+        if (isFrozen) {
+          const saved = savedAt(index)
+          value = saved === undefined ? true : saved.isUnresolved === true && saved.source !== undefined && !marked.has(saved.id)
+        } else if (marked.has(keys[index] ?? '')) {
+          value = false
+        } else {
+          if (counts !== undefined) counts.indexLookups += 1
+          value = recordsById.get(keys[index] ?? '')?.isUnresolved !== false
+        }
+        askedMemo[index] = value
+        return value
+      }
+      const stageMemo: (ReturnType<typeof questionAge>['stage'] | undefined)[] = []
       const stageOf = (index: number) => {
-        const id = observed?.keys[questionSlot(scope, index)]
-        return questionAge(observed?.ledger.records.find(record => record.id === id)?.firstObserved ?? 0, now).stage
+        const held = stageMemo[index]
+        if (held !== undefined) {
+          if (counts !== undefined) counts.memoReused += 1
+          return held
+        }
+        const id = observed?.keys[slotAt(index)]
+        if (counts !== undefined) counts.indexLookups += 1
+        const stage = questionAge(recordsById.get(id ?? '')?.firstObserved ?? 0, now).stage
+        stageMemo[index] = stage
+        return stage
       }
-      const isPrompt = (index: number): boolean => isFrozen ? savedFor(index) === undefined && isAsked(index) && stageOf(index) === 'pending' : isAsked(index) && stageOf(index) === 'pending'
+      const promptMemo: (boolean | undefined)[] = []
+      const isPrompt = (index: number): boolean => {
+        const held = promptMemo[index]
+        if (held !== undefined) {
+          if (counts !== undefined) counts.memoReused += 1
+          return held
+        }
+        const value = isFrozen ? savedAt(index) === undefined && isAsked(index) && stageOf(index) === 'pending' : isAsked(index) && stageOf(index) === 'pending'
+        promptMemo[index] = value
+        return value
+      }
 
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting') return
-        if (isFrozen && savedFor(index) !== undefined) return
+        if (isFrozen && savedAt(index) !== undefined) return
         const parts = splitNote(step.text)
         taskQuestions.push({
           key: `${key}::${index}`,
@@ -964,14 +1057,22 @@ export const buildView = (
           resumeVia: task.auto?.resume ? resumeVia(task.auto.agent) : null,
           reopen: task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
           hideKey: isFrozen ? '' : keys[index] ?? '',
-          questionId: isFrozen ? undefined : observed?.keys[questionSlot(scope, index)],
+          questionId: isFrozen ? undefined : observed?.keys[slotAt(index)],
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
           ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         })
       })
-      const unresolved = taskQuestions.filter(item => !marked.has(item.hideKey) && observed?.ledger.records.find(record => record.id === item.questionId)?.isUnresolved !== false)
-      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => marked.has(item.hideKey) && observed?.ledger.records.find(record => record.id === item.questionId)?.isUnresolved !== false))
+      const unresolved = taskQuestions.filter(item => {
+        if (marked.has(item.hideKey)) return false
+        if (counts !== undefined) counts.indexLookups += 1
+        return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
+      })
+      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => {
+        if (!marked.has(item.hideKey)) return false
+        if (counts !== undefined) counts.indexLookups += 1
+        return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
+      }))
       if (!isInactive) waiting.push(...taskQuestions)
 
       let completion: DoneItem & { at: number } | null = null
@@ -998,7 +1099,7 @@ export const buildView = (
         if (!isInactive || (unresolved.length === 0 && !task.steps.some(step => step.status === 'waiting'))) continue
       }
 
-      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || stale ? 'ended' : task.auto.state
+      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || stale || isSilence ? 'ended' : task.auto.state
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
@@ -1012,7 +1113,7 @@ export const buildView = (
         auto === 'working'
           ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
           : auto === 'ended'
-            ? { status: stale ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
+            ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
             : task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
               ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
               : stepPhrase(task, s, isPrompt)
@@ -1050,13 +1151,13 @@ export const buildView = (
         handoff: handoffOf(task),
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142).
-        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || auto === 'ended')
-          ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(JSON.stringify([name, task.title])) ?? 0) }
+        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || (auto === 'ended' && !isSilence))
+          ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
-            : auto === 'ended' && task.auto !== null
+            : auto === 'ended' && !isSilence && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               : null,
         target: targetOf(task.auto),
@@ -1228,6 +1329,7 @@ export const buildView = (
     for (const question of questions) {
       const id = question.questionId
       if (id === undefined || marked.has(id)) continue
+      if (counts !== undefined) counts.indexLookups += 1
       const record = recordsById.get(id)
       if (record?.isUnresolved === false) continue
       stoppedQuestions.add(id)
@@ -1244,6 +1346,8 @@ export const buildView = (
   // question list, and the row keeps its own.
   const merged = mergeCopies([...all.filter(item => !isMarked(item)), ...retained, ...onRows].map(item => ({ item, ...seenAs(item), isStopped: item.questionId !== undefined && stoppedQuestions.has(item.questionId) })), closedCopies(observed?.ledger.records ?? [], marked))
   const asks: WaitingItem[] = merged.filter(item => item.ageStage === 'pending')
+  // The pending cards' identities, worked out once for every row's needs check below (#192).
+  const askIds = new Set(asks.map(item => identity(item.agent, false, item.project, item.task, item.dir)))
   for (const group of groups) {
     const count = (test: (row: TaskRow) => boolean, word: (n: number) => string): string => {
       const n = group.rows.filter(test).length
@@ -1253,7 +1357,7 @@ export const buildView = (
       s.groupCount(group.rows.length),
       count(row => row.tone === 'warn', s.groupWaiting),
       count(row => row.tone === 'alert', s.groupStuck),
-      count(row => row.auto === 'working' && rowNeedsNow(row, asks) === null, s.groupWorking),
+      count(row => row.auto === 'working' && rowNeedsNow(row, asks, false, askIds) === null, s.groupWorking),
     ]
       .filter(part => part !== '')
       .join(' · ')
@@ -1307,6 +1411,9 @@ export const buildView = (
     active: rows,
     groups,
     recent: shownRecent.map(({ at: _at, ...item }) => item),
+    // A finished task reaches `completed` only with a step that still asks, even a hidden one. It has
+    // nothing left to confirm, so it offers Archive alone. In the order Done recently draws them, so the cursor moves down the list.
+    recentAsking: shownRecent.flatMap(recent => completed.filter(item => item.recent === recent && item.row.archive !== null)).map(item => ({ ...item.row, confirm: null })),
     finished,
     ...(unreadable.size === 0 ? {} : { unreadable: [...unreadable] }),
   }

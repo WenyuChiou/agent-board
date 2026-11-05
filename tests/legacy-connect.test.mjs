@@ -123,7 +123,10 @@ const setupThenProbe = agent => withSetup(agent, ({ f, run, owned, before }) => 
       assert.equal(text, before[file], `${mode}: unexpected host change ${file}`)
     }
   }
-  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+  // One agent proves every language; the others prove the same strings once, in
+  // English. Language rendering itself is covered by the string-table tests.
+  const langs = agent === 'codex' ? ['en', 'zh-TW', 'zh-CN'] : ['en']
+  for (const lang of langs) {
     const state = run('status', lang).state.setup
     assert.equal(state.agents.find(one => one.agent === agent).hook, 'setup')
     const { text } = run('connect', lang).result
@@ -217,7 +220,7 @@ test('removing the connector names OpenClaw once', () => withBothHooks('openclaw
   assert.deepEqual(run('remove').result.done.filter(label => label === 'OpenClaw'), ['OpenClaw'])
 }))
 
-test('a hook that cannot be taken out is named, and the other agents still connect', () => withBothHooks('codex', ({ f, run }) => {
+test('a hook that cannot be taken out is named, and the other agents still connect', { skip: process.getuid?.() === 0 ? 'root ignores the read-only folder this test needs' : false }, () => withBothHooks('codex', ({ f, run }) => {
   const config = join(f.home, '.codex', 'hooks.json')
   const lock = isLocked => process.platform === 'win32'
     ? execFileSync('attrib', [isLocked ? '+R' : '-R', config])

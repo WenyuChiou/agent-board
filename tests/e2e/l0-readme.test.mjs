@@ -45,16 +45,16 @@ const boardCommand = agent => BOARD_COMMANDS[agent] ?? '/agent-board'
 const NOT_RUN_LIVE = ['Antigravity', 'Cursor', 'Grok Build', 'Muse Code', 'DeepSeek Harness']
 // The agents whose only check is the synthetic home: their row in the table of checks has no host version or record.
 const SYNTHETIC_ONLY = ['Cursor', 'Muse Code']
-// Every command the single Key commands table held before #407 split it.
-const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/board', '/agent-board', 'node "$HOME/.agent-board/agent-board.mjs" --watch', '--html', 'node "$HOME/.agent-board/agent-board.mjs" --serve', 'node "$HOME/.agent-board/agent-board.mjs" --chat', 'node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']
-// The code each row of the surface table holds, in its order: terminal, browser, chat app, one agent's setup.
-const SURFACE_COMMANDS = [['node "$HOME/.agent-board/agent-board.mjs" --watch', '--html'], ['node "$HOME/.agent-board/agent-board.mjs" --serve'], ['node "$HOME/.agent-board/agent-board.mjs" --chat'], ['node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']]
+// The setup and board commands still offered after #865 made the page the default.
+const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/board', '/agent-board', 'node "$HOME/.agent-board/agent-board.mjs"', 'node "$HOME/.agent-board/agent-board.mjs" --serve', 'node "$HOME/.agent-board/agent-board.mjs" --json', 'node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']
+// The code each surface row holds: terminal or desktop, browser, agent read, one agent's setup.
+const SURFACE_COMMANDS = [['node "$HOME/.agent-board/agent-board.mjs"'], ['node "$HOME/.agent-board/agent-board.mjs" --serve'], ['node "$HOME/.agent-board/agent-board.mjs" --json'], ['node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']]
 // Per language: the strip's label, the two command subsections, the caveat on a command
 // not run live yet, the board's page heading, and how each surface row starts.
 const WORDS = {
-  en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', checked: 'How each agent was checked', old: ['Untested'], notLive: '(checked in a synthetic home, not run live yet)', page: "The board's page", surfaces: ['Any terminal', 'A browser', 'A chat app', "Check one agent's setup"] },
-  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', checked: '各個 agent 是怎麼驗證的', old: ['未驗證', '還沒驗證'], notLive: '（在測試環境檢查過，還沒實機執行）', page: '看板的網頁', surfaces: ['任何終端機', '瀏覽器', '聊天軟體', '檢查某個 agent 的設定'] },
-  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', checked: '每个 agent 是怎么验证的', old: ['未验证', '还没验证'], notLive: '（在测试环境检查过，还没实机运行）', page: '看板的网页', surfaces: ['任何终端', '浏览器', '聊天软件', '检查某个 agent 的设置'] },
+  en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', checked: 'How each agent was checked', old: ['Untested'], notLive: '(checked in a synthetic home, not run live yet)', page: "The board's page", surfaces: ['A terminal or desktop', 'A browser', 'An agent reading the board', "Check one agent's setup"] },
+  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', checked: '各個 agent 是怎麼驗證的', old: ['未驗證', '還沒驗證'], notLive: '（在測試環境檢查過，還沒實機執行）', page: '看板的網頁', surfaces: ['終端機或桌面', '瀏覽器', 'Agent 讀取看板', '檢查某個 agent 的設定'] },
+  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', checked: '每个 agent 是怎么验证的', old: ['未验证', '还没验证'], notLive: '（在测试环境检查过，还没实机运行）', page: '看板的网页', surfaces: ['终端或桌面', '浏览器', 'Agent 读取看板', '检查某个 agent 的设置'] },
 }
 // A piece of text as a pattern that matches it and nothing else.
 const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -160,6 +160,25 @@ describe('L0 discover and install from the README', () => {
         const restOfSentence = text.slice(match.index + match[0].length, installedAt)
         assert.ok(match[1] === 'agent-board' && /^[^.!?。！？\n]*$/.test(restOfSentence), `${name}: ${match[0]} precedes the global install`)
       }
+    }
+  })
+
+  test('the Quick start links to the uninstall steps in the guide in every language', () => {
+    const links = {
+      en: 'docs/GUIDE.md#update-and-uninstall',
+      'zh-TW': 'docs/GUIDE.zh-TW.md#更新與移除',
+      'zh-CN': 'docs/GUIDE.zh-CN.md#更新和卸载',
+    }
+    const words = {
+      en: /\b(?:remove|uninstall)\b/i,
+      'zh-TW': /移除/,
+      'zh-CN': /卸载/,
+    }
+    for (const [name, lang] of READMES) {
+      const quick = section(read(name), SECTIONS[lang][0])
+      assert.ok(quick, `${name}: Quick start exists`)
+      const line = quick.split('\n').find(l => words[lang].test(l) && l.includes(links[lang]))
+      assert.ok(line, `${name}: Quick start has a line on how to remove it linking to ${links[lang]}`)
     }
   })
 
@@ -516,7 +535,7 @@ describe('L0 discover and install from the README', () => {
     }
   })
 
-  test('L0 README: the key commands split into a table per agent and a table per surface, and every command of the old single table is still there', () => {
+  test('L0 README: the key commands have a table per agent and a table per surface with the current board commands', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const words = WORDS[lang]
@@ -537,13 +556,11 @@ describe('L0 discover and install from the README', () => {
       // One row per surface, in order, each beside its own board script command, so two swapped
       // commands fail.
       const surfaces = rows(anywhere, '|').slice(2)
-      assert.equal(surfaces.length, SURFACE_COMMANDS.length, `${name}: terminal, browser, chat app and one agent's setup`)
+      assert.equal(surfaces.length, SURFACE_COMMANDS.length, `${name}: terminal or desktop, browser, agent read and one agent's setup`)
       surfaces.forEach(([where, command], i) => {
         assert.ok(where.startsWith(words.surfaces[i]), `${name}: surface row ${i + 1} is "${words.surfaces[i]}"`)
         assert.deepEqual(codeSpans(command), SURFACE_COMMANDS[i], `${name}: "${words.surfaces[i]}" runs ${SURFACE_COMMANDS[i][0]}`)
       })
-      // A chat app is reached through an agent that answers there.
-      for (const agent of ['Hermes Agent', 'OpenClaw']) assert.ok(surfaces[2][0].includes(agent), `${name}: the chat app row names ${agent}`)
       // The steps after setup are a list under Quick start: Claude Code's plugin, Codex's hooks,
       // the plugin reloads and dot's merge.
       const quick = section(text, SECTIONS[lang][0])

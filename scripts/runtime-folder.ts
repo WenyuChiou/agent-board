@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import type { BigIntStats, Stats } from 'node:fs'
 import { hostname } from 'node:os'
@@ -34,68 +34,104 @@ const options = { encoding: 'utf8' as const, windowsHide: true, timeout: 10_000,
 // when it is the first since a restart. This only stops a start that hangs; icacls and whoami keep 10 s.
 const powerShellOptions = { ...options, timeout: 30_000 }
 
-const currentAccount = (): Account => {
-  if (account !== undefined) return account
-  const output = execFileSync(join(system(), 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], options)
-  const row = /"([^"\\]*)\\[^"]*","(S-\d+(?:-\d+)+)"\s*$/.exec(output)
-  const domain = row?.[1], sid = row?.[2]
-  if (domain === undefined || sid === undefined) throw new RuntimeFolderError()
-  const computer = process.env.COMPUTERNAME || hostname().slice(0, 15)
-  const base = /^(S-1-5-21-\d+-\d+-\d+)-\d+$/.exec(sid)?.[1]
-  const aliases: Record<string, string> = base !== undefined && domain.toLowerCase() === computer.toLowerCase() ? { LA: `${base}-500`, LG: `${base}-501` } : {}
-  return (account = { sid, aliases })
-}
+type Command = { file: string; args: string[]; options: typeof options & { env?: NodeJS.ProcessEnv } }
+type Check<T> = Generator<Command, T, string>
+const command = (file: string, args: string[], init: Command['options'] = options): Command => ({ file, args, options: init })
 
-// Owner, group and access list of each path, one PowerShell start for all of them, in order. The
-// first path must be readable, or the call fails. Each later path is an address file that may be
-// removed by an old page's shutdown, or be unreadable for this account, while the call runs: its
-// line is then '-', which no check accepts, and the later read of that file decides, as it did
-// when each file had a call of its own.
-const acls = (files: string[]): string[] => {
-  const lines = execFileSync(join(system(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
-    '-NoProfile', '-NonInteractive', '-Command',
-    "$ErrorActionPreference = 'Stop'; $PSModuleAutoLoadingPreference = 'None'; "
-      + "$sections = [System.Security.AccessControl.AccessControlSections]'Access,Owner,Group'; "
-      // A Windows path cannot hold a pipe, so it can separate the paths.
-      + "$targets = $env:AGENT_BOARD_RUNTIME_ACL_PATH.Split('|'); "
-      + 'for ($at = 0; $at -lt $targets.Length; $at++) { $target = $targets[$at]; '
-      + 'try { $security = if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::GetAccessControl($target, $sections) } else { [System.IO.File]::GetAccessControl($target, $sections) }; '
-      + '$security.GetSecurityDescriptorSddlForm($sections) } '
-      + "catch { if ($at -eq 0) { throw }; '-' } }",
-  ], {
-    ...powerShellOptions,
-    // Fresh isolated profiles need no command discovery, and a PowerShell parent's module
-    // path must not select an incompatible or user-supplied security implementation.
-    env: { ...process.env, PSModulePath: join(system(), 'WindowsPowerShell', 'v1.0', 'Modules'), AGENT_BOARD_RUNTIME_ACL_PATH: files.map(file => resolve(file)).join('|') },
-  }).trim().split(/\r?\n/).map(line => line.trim())
-  if (lines.length !== files.length) throw new RuntimeFolderError()
-  return lines
-}
-
-const acl = (file: string): string => acls([file])[0] ?? ''
-
-// The access list alone as SDDL, without starting PowerShell: icacls saves it to a file in a
-// folder made inside the file's own folder. It carries no owner, so it only follows a call that
-// set the owner. The folder is the private runtime folder, not %TEMP%, which grants other
-// accounts on this computer modify rights: one of them could rewrite or lock the saved list
-// between its write and its read.
-const dacl = (file: string): string => {
-  const holder = mkdtempSync(join(dirname(resolve(file)), '.acl-'))
-  const saved = join(holder, 'dacl.txt')
-  try {
-    execFileSync(join(system(), 'icacls.exe'), [resolve(file), '/save', saved, '/L'], options)
-    // UTF-16: the name of the path on the first line, its access list on the second.
-    const lines = readFileSync(saved).toString('utf16le').replace(/^\uFEFF/, '').split(/\r?\n/).filter(line => line !== '')
-    const found = lines[1]
-    if (lines.length !== 2 || found === undefined || !found.startsWith('D:')) throw new RuntimeFolderError()
-    return found
-  } finally {
-    // unlink and rmdir take away a link itself and never follow it. A folder left behind holds only
-    // a list of accounts; it is not worth failing the start.
-    try { unlinkSync(saved) } catch {}
-    try { rmdirSync(holder) } catch {}
+// Both runners drive the same checks. A failed command goes back through the check's own
+// catch/finally, including refusal and scratch-file cleanup, before the runner can finish.
+const runSync = <T>(check: Check<T>): T => {
+  let step = check.next()
+  while (!step.done) {
+    const job = step.value
+    let output: string
+    try { output = execFileSync(job.file, job.args, job.options) }
+    catch (error) { step = check.throw(error); continue }
+    step = check.next(output)
   }
+  return step.value
 }
+const runAsync = async <T>(check: Check<T>): Promise<T> => {
+  let step = check.next()
+  while (!step.done) {
+    const job = step.value
+    let output: string
+    try {
+      output = await new Promise<string>((resolve, reject) => {
+        execFile(job.file, job.args, job.options, (error, stdout) => error === null ? resolve(stdout) : reject(error))
+      })
+    } catch (error) { step = check.throw(error); continue }
+    step = check.next(output)
+  }
+  return step.value
+}
+
+const commands = {
+  *account(): Check<Account> {
+    if (account !== undefined) return account
+    const output = yield command(join(system(), 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'])
+    const row = /"([^"\\]*)\\[^"]*","(S-\d+(?:-\d+)+)"\s*$/.exec(output)
+    const domain = row?.[1], sid = row?.[2]
+    if (domain === undefined || sid === undefined) throw new RuntimeFolderError()
+    const computer = process.env.COMPUTERNAME || hostname().slice(0, 15)
+    const base = /^(S-1-5-21-\d+-\d+-\d+)-\d+$/.exec(sid)?.[1]
+    const aliases: Record<string, string> = base !== undefined && domain.toLowerCase() === computer.toLowerCase() ? { LA: `${base}-500`, LG: `${base}-501` } : {}
+    return (account = { sid, aliases })
+  },
+
+  // Owner, group and access list of each path, one PowerShell start for all of them, in order. The
+  // first path must be readable, or the call fails. Each later path is an address file that may be
+  // removed by an old page's shutdown, or be unreadable for this account, while the call runs: its
+  // line is then '-', which no check accepts, and the later read of that file decides, as it did
+  // when each file had a call of its own.
+  *acls(files: string[]): Check<string[]> {
+    const lines = (yield command(join(system(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+      '-NoProfile', '-NonInteractive', '-Command',
+      "$ErrorActionPreference = 'Stop'; $PSModuleAutoLoadingPreference = 'None'; "
+        + "$sections = [System.Security.AccessControl.AccessControlSections]'Access,Owner,Group'; "
+        // A Windows path cannot hold a pipe, so it can separate the paths.
+        + "$targets = $env:AGENT_BOARD_RUNTIME_ACL_PATH.Split('|'); "
+        + 'for ($at = 0; $at -lt $targets.Length; $at++) { $target = $targets[$at]; '
+        + 'try { $security = if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::GetAccessControl($target, $sections) } else { [System.IO.File]::GetAccessControl($target, $sections) }; '
+        + '$security.GetSecurityDescriptorSddlForm($sections) } '
+        + "catch { if ($at -eq 0) { throw }; '-' } }",
+    ], {
+      ...powerShellOptions,
+      // Fresh isolated profiles need no command discovery, and a PowerShell parent's module
+      // path must not select an incompatible or user-supplied security implementation.
+      env: { ...process.env, PSModulePath: join(system(), 'WindowsPowerShell', 'v1.0', 'Modules'), AGENT_BOARD_RUNTIME_ACL_PATH: files.map(file => resolve(file)).join('|') },
+    })).trim().split(/\r?\n/).map(line => line.trim())
+    if (lines.length !== files.length) throw new RuntimeFolderError()
+    return lines
+  },
+
+  // The access list alone as SDDL, without starting PowerShell: icacls saves it to a file in a
+  // folder made inside the file's own folder. It carries no owner, so it only follows a call that
+  // set the owner. The folder is the private runtime folder, not %TEMP%, which grants other
+  // accounts on this computer modify rights: one of them could rewrite or lock the saved list
+  // between its write and its read.
+  *dacl(file: string): Check<string> {
+    const holder = mkdtempSync(join(dirname(resolve(file)), '.acl-'))
+    const saved = join(holder, 'dacl.txt')
+    try {
+      yield command(join(system(), 'icacls.exe'), [resolve(file), '/save', saved, '/L'])
+      // UTF-16: the name of the path on the first line, its access list on the second.
+      const lines = readFileSync(saved).toString('utf16le').replace(/^\uFEFF/, '').split(/\r?\n/).filter(line => line !== '')
+      const found = lines[1]
+      if (lines.length !== 2 || found === undefined || !found.startsWith('D:')) throw new RuntimeFolderError()
+      return found
+    } finally {
+      // unlink and rmdir take away a link itself and never follow it. A folder left behind holds only
+      // a list of accounts; it is not worth failing the start.
+      try { unlinkSync(saved) } catch {}
+      try { rmdirSync(holder) } catch {}
+    }
+  },
+}
+
+const currentAccount = (): Account => runSync(commands.account())
+const acl = (file: string): string => runSync(commands.acls([file]))[0] ?? ''
+const dacl = (file: string): string => runSync(commands.dacl(file))
 
 // A sole full-control grant is deliberate: accepting a second principal or an inherited
 // folder grant would put a bearer token back within reach of a sandbox account.
@@ -185,90 +221,107 @@ const takeHandoff = (): { path: string; identity: string } | undefined => {
 
 // `names` are address files that may already sit in the folder: their owner and access list
 // are read in the same PowerShell start, so reading one later needs none of its own.
-export const privateRuntimeFolder = (dir: string, names: string[] = []): string => {
-  try {
-    const root = resolve(dir)
-    plainParents(root)
-    const handed = takeHandoff()
-    if (handed !== undefined && handed.path === root && isPlain(root, true) && identityOf(root) === handed.identity) {
-      remember(root, handed.identity)
+const checks = {
+  *folder(dir: string, names: string[]): Check<string> {
+    try {
+      const root = resolve(dir)
+      plainParents(root)
+      const handed = takeHandoff()
+      if (handed !== undefined && handed.path === root && isPlain(root, true) && identityOf(root) === handed.identity) {
+        remember(root, handed.identity)
+        return root
+      }
+      mkdirSync(root, { recursive: true, mode: 0o700 })
+      plainParents(root)
+      if (!isPlain(root, true)) throw new RuntimeFolderError()
+      const identity = identityOf(root)
+      if (identity === undefined) throw new RuntimeFolderError()
+      const { sid, aliases: own } = yield* commands.account()
+      const icacls = join(system(), 'icacls.exe')
+      // As in the message hub, /L never changes the destination of a planted link.
+      yield command(icacls, [root, '/setowner', `*${sid}`, '/L'])
+      yield command(icacls, [root, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '/L'])
+      // A file that is gone or not a plain file by now is left to the later read, which refuses it.
+      const present: string[] = []
+      const stamps: Stats[] = []
+      for (const name of names) {
+        const file = join(root, name)
+        try {
+          const found = lstatSync(file)
+          if (found.isFile() && !found.isSymbolicLink() && found.nlink === 1) { present.push(file); stamps.push(found) }
+        } catch {}
+      }
+      const read = yield* commands.acls([root, ...present])
+      let descriptor = read[0] ?? ''
+      const aliases: Record<string, string> = {
+        BA: 'S-1-5-32-544', BU: 'S-1-5-32-545', BG: 'S-1-5-32-546',
+        SY: 'S-1-5-18', LS: 'S-1-5-19', NS: 'S-1-5-20',
+        WD: 'S-1-1-0', AU: 'S-1-5-11', IU: 'S-1-5-4',
+        CO: 'S-1-3-0', CG: 'S-1-3-1', OW: 'S-1-3-4', ...own,
+      }
+      // Replacing this account's grant does not remove another explicit grant.
+      let hasRemoved = false
+      for (const match of descriptor.matchAll(/\([^()]*;;;([^;()]+)\)/g)) {
+        const trustee = match[1] ?? ''
+        const other = /^S-\d+(?:-\d+)+$/.test(trustee) ? trustee : aliases[trustee]
+        if (other === undefined) throw new RuntimeFolderError()
+        if (other === sid) continue
+        yield command(icacls, [root, '/remove', `*${other}`, '/L'])
+        hasRemoved = true
+      }
+      if (hasRemoved) descriptor = (yield* commands.acls([root]))[0] ?? ''
+      if (!isPlain(root, true) || identityOf(root) !== identity || !isPrivateRuntimeSddl(descriptor, sid, true, own)) throw new RuntimeFolderError()
+      // A file that passes is not read in full again while it stays as it was; one that does not
+      // pass is left out, and reading it later checks it in full and refuses it.
+      present.forEach((file, at) => {
+        const stamp = stamps[at]
+        try {
+          if (stamp !== undefined && isPrivateRuntimeSddl(read[at + 1] ?? '', sid, false, own) && sameFile(stamp, lstatSync(file))) checkedFiles.set(key(file), stamp)
+        } catch {}
+      })
+      remember(root, identity)
       return root
-    }
-    mkdirSync(root, { recursive: true, mode: 0o700 })
-    plainParents(root)
-    if (!isPlain(root, true)) throw new RuntimeFolderError()
-    const identity = identityOf(root)
-    if (identity === undefined) throw new RuntimeFolderError()
-    const { sid, aliases: own } = currentAccount()
-    const icacls = join(system(), 'icacls.exe')
-    // As in the message hub, /L never changes the destination of a planted link.
-    execFileSync(icacls, [root, '/setowner', `*${sid}`, '/L'], options)
-    execFileSync(icacls, [root, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '/L'], options)
-    // A file that is gone or not a plain file by now is left to the later read, which refuses it.
-    const present: string[] = []
-    const stamps: Stats[] = []
-    for (const name of names) {
-      const file = join(root, name)
-      try {
-        const found = lstatSync(file)
-        if (found.isFile() && !found.isSymbolicLink() && found.nlink === 1) { present.push(file); stamps.push(found) }
-      } catch {}
-    }
-    const read = acls([root, ...present])
-    let descriptor = read[0] ?? ''
-    const aliases: Record<string, string> = {
-      BA: 'S-1-5-32-544', BU: 'S-1-5-32-545', BG: 'S-1-5-32-546',
-      SY: 'S-1-5-18', LS: 'S-1-5-19', NS: 'S-1-5-20',
-      WD: 'S-1-1-0', AU: 'S-1-5-11', IU: 'S-1-5-4',
-      CO: 'S-1-3-0', CG: 'S-1-3-1', OW: 'S-1-3-4', ...own,
-    }
-    // Replacing this account's grant does not remove another explicit grant.
-    let hasRemoved = false
-    for (const match of descriptor.matchAll(/\([^()]*;;;([^;()]+)\)/g)) {
-      const trustee = match[1] ?? ''
-      const other = /^S-\d+(?:-\d+)+$/.test(trustee) ? trustee : aliases[trustee]
-      if (other === undefined) throw new RuntimeFolderError()
-      if (other === sid) continue
-      execFileSync(icacls, [root, '/remove', `*${other}`, '/L'], options)
-      hasRemoved = true
-    }
-    if (hasRemoved) descriptor = acl(root)
-    if (!isPlain(root, true) || identityOf(root) !== identity || !isPrivateRuntimeSddl(descriptor, sid, true, own)) throw new RuntimeFolderError()
-    // A file that passes is not read in full again while it stays as it was; one that does not
-    // pass is left out, and reading it later checks it in full and refuses it.
-    present.forEach((file, at) => {
-      const stamp = stamps[at]
-      try {
-        if (stamp !== undefined && isPrivateRuntimeSddl(read[at + 1] ?? '', sid, false, own) && sameFile(stamp, lstatSync(file))) checkedFiles.set(key(file), stamp)
-      } catch {}
-    })
-    remember(root, identity)
-    return root
-  } catch { throw new RuntimeFolderError() }
+    } catch { throw new RuntimeFolderError() }
+  },
+
+  // Check the existing file's owner and DACL before any token is read. The descriptor must
+  // still name the same single-link plain file after the read, including at a legacy location.
+  *read(file: string): Check<{ text: string; stamp: Stats } | null> {
+    let fd: number | undefined
+    try {
+      const before = lstatSync(file)
+      if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 16_384) return null
+      const { sid, aliases } = yield* commands.account()
+      const known = checkedFiles.get(key(file))
+      // The owner of a file seen unchanged since it was read in full is still that owner; its
+      // access list is read again, which needs no PowerShell.
+      const isPrivate = known !== undefined && sameFile(known, before)
+        ? isPrivateRuntimeDacl(yield* commands.dacl(file), sid, false, aliases)
+        : isPrivateRuntimeSddl((yield* commands.acls([file]))[0] ?? '', sid, false, aliases)
+      if (!isPrivate) return null
+      fd = openSync(file, 'r')
+      if (!sameFile(before, fstatSync(fd))) return null
+      const text = readFileSync(fd, 'utf8')
+      if (!isPlain(file, false) || !sameFile(before, fstatSync(fd)) || !sameFile(before, lstatSync(file))) return null
+      return { text, stamp: before }
+    } catch { return null }
+    finally { if (fd !== undefined) closeSync(fd) }
+  },
 }
 
-// Check the existing file's owner and DACL before any token is read. The descriptor must
-// still name the same single-link plain file after the read, including at a legacy location.
-export const readPrivateRuntimeFile = (file: string): { text: string; stamp: Stats } | null => {
-  let fd: number | undefined
-  try {
-    const before = lstatSync(file)
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 16_384) return null
-    const { sid, aliases } = currentAccount()
-    const known = checkedFiles.get(key(file))
-    // The owner of a file seen unchanged since it was read in full is still that owner; its
-    // access list is read again, which needs no PowerShell.
-    const isPrivate = known !== undefined && sameFile(known, before)
-      ? isPrivateRuntimeDacl(dacl(file), sid, false, aliases)
-      : isPrivateRuntimeSddl(acl(file), sid, false, aliases)
-    if (!isPrivate) return null
-    fd = openSync(file, 'r')
-    if (!sameFile(before, fstatSync(fd))) return null
-    const text = readFileSync(fd, 'utf8')
-    if (!isPlain(file, false) || !sameFile(before, fstatSync(fd)) || !sameFile(before, lstatSync(file))) return null
-    return { text, stamp: before }
-  } catch { return null }
-  finally { if (fd !== undefined) closeSync(fd) }
+export const privateRuntimeFolder = (dir: string, names: string[] = []): string => runSync(checks.folder(dir, names))
+export const privateRuntimeFolderAsync = (dir: string, names: string[] = []): Promise<string> => runAsync(checks.folder(dir, names))
+export const readPrivateRuntimeFile = (file: string): { text: string; stamp: Stats } | null => runSync(checks.read(file))
+export const readPrivateRuntimeFileAsync = (file: string): Promise<{ text: string; stamp: Stats } | null> => runAsync(checks.read(file))
+
+// The same folder, resolved for reading only, when the folder could not be protected: a
+// process that cannot write (a read-only sandbox) may still reuse a page that is already
+// running, but it must never write through this path, so nothing is created or changed here
+// and every parent must already be a plain folder, never a link.
+export const unprotectedRuntimeFolder = (dir: string): string => {
+  const root = resolve(dir)
+  plainParents(root)
+  return root
 }
 
 export const writePrivateRuntimeFile = (file: string, text: string): void => {

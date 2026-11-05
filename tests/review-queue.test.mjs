@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   classify, collaboratorLogins, fetchContext, fetchQueue, findStaleLanes, formatLanes, formatQueue, loadBundleSources, loadReviewers,
-  main, parseArgs, parseNotice, parseReviewers, parseWorktrees, readAway, readClaims,
+  main, parseArgs, parseReviewers, parseWorktrees, readAway, readClaims,
 } from '../scripts/review-queue.mjs'
 
 const head = 'abcdef0123456789abcdef0123456789abcdef01'
@@ -79,6 +79,39 @@ test('a Reviewing comment after the Ready names who took the review', () => {
   const queue = classify([pull(1)], comments, now)
   assert.equal(queue.needsReviewer[0].takenBy, 'bot-one')
   assert.match(formatQueue(queue), /taken by bot-one/)
+})
+
+test('a Reviewing comment from the pull request author does not count as taken, even from the shared login', () => {
+  const prs = [pull(1, { body: 'Author: codex (x), branch' })]
+  const own = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('codex (x)', '2026-10-20T09:00:00Z'))] }, now)
+  assert.equal(own.needsReviewer[0].takenBy, null)
+  assert.equal(own.needsReviewer[0].lapsedBy, null)
+  const other = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('claude', '2026-10-20T09:00:00Z'))] }, now)
+  assert.equal(other.needsReviewer[0].takenBy, 'claude')
+})
+
+test('an approval named for the pull request author does not count as approved', () => {
+  const prs = [pull(1, { body: 'Author: codex (x), branch', files: [] })]
+  const own = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('codex'))] }, now)
+  assert.deepEqual(own.approved, [])
+  assert.deepEqual(own.approvedNow, [])
+  assert.deepEqual(own.waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approval is by the author']])
+  const other = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('claude'))] }, now)
+  assert.deepEqual(other.approvedNow.map(item => item.number), [1])
+  assert.deepEqual(other.waitingForAuthor, [])
+})
+
+test('a different lane of the same base name is a different agent, not the author', () => {
+  const prs = [pull(1, { body: 'Author: codex (phase1), branch', files: [] })]
+  const other = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('codex (e2e)'))] }, now)
+  assert.deepEqual(other.approvedNow.map(item => item.number), [1])
+  assert.deepEqual(other.waitingForAuthor, [])
+  const same = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('codex (phase1)'))] }, now)
+  assert.deepEqual(same.approved, [])
+  assert.deepEqual(same.approvedNow, [])
+  assert.deepEqual(same.waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approval is by the author']])
+  const taken = classify([pull(1, { body: 'Author: codex (phase1), branch' })], { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('codex (e2e)', '2026-10-20T09:00:00Z'))] }, now)
+  assert.equal(taken.needsReviewer[0].takenBy, 'codex (e2e)')
 })
 
 test('drafts are counted, not listed', () => {
@@ -629,180 +662,13 @@ test('away notices and expired claims print after the queue and appear in the JS
   }
   const lines = run(['--repo', 'owner1/board']).split('\n')
   assert.deepEqual(lines.slice(lines.indexOf('Drafts: 0') + 1), ['Away: Bob until 2026-10-22', 'claim expired: #10 carol — relabel to ready (CONTRIBUTING rule 3)'])
-  // The owner does not count as a collaborator, so Bob being away leaves nobody besides the author and a notice is allowed.
-  assert.ok(lines.includes('    notice allowed outside the governance files (team-process, From claim to merge)'))
   const queue = JSON.parse(run(['--repo', 'owner1/board', '--json']))
   assert.deepEqual(queue.away, [{ login: 'Bob', until: '2026-10-22' }])
   assert.deepEqual(queue.expiredClaims, [{ number: 10, login: 'carol' }])
-  assert.deepEqual(queue.needsReviewer[0].notice, { state: 'allowed', at: null })
   assert.equal('notes' in queue, false)
 })
 
-// A notice is the pull request author's to give, and the pull requests of these tests are alice's.
-const notice = (time, sha = head, posted = '2026-10-20T10:00:00Z', id, login = 'alice') => by(login, comment(`Merging after ${time} unless someone objects\nHead: ${sha}`, posted, id))
-// The notice of pull request 1, Ready at readyAt for the current head, with the given comments after it.
-const noticeOf = (items, { readyAt = '2026-10-19T09:00:00Z', current = now, context, fields } = {}) => {
-  const queue = classify([pull(1, fields)], { 1: [ready(head, readyAt, 1), ...items] }, current, null, context)
-  return [...queue.needsReviewer, ...queue.approved, ...queue.waitingForAuthor][0].notice
-}
-
-test('a notice comment is read from its first words, a UTC time and the commit id it names', () => {
-  const at = Date.UTC(2026, 9, 22, 12)
-  assert.deepEqual(parseNotice('Merging after 2026-10-22 12:00 UTC unless someone objects\nHead: abcdef0'), { at, shas: ['abcdef0'] })
-  assert.deepEqual(parseNotice(`Merging after 2026-10-22T12:00:00Z unless someone objects (${head})`), { at, shas: [head] })
-  const unreadable = [
-    'Merging after 2026-10-22 12:00 UTC unless someone objects',
-    `Merging after tomorrow unless someone objects ${head}`,
-    `Merging after 2026-10-22 12:00 PST unless someone objects ${head}`,
-    `Merging after 2026-02-30 12:00 UTC unless someone objects ${head}`,
-    `I will say Merging after 2026-10-22 12:00 UTC unless someone objects ${head}`,
-    `Merging after 2026-10-22 12:00 UTC ${head}`,
-  ]
-  for (const body of unreadable) assert.equal(parseNotice(body), null, body)
-})
-
-test('a Ready pull request that nobody has taken for more than 24 hours may merge after a notice', () => {
-  assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z' }), { state: 'allowed', at: null })
-  assert.equal(noticeOf([], { readyAt: '2026-10-19T12:00:00Z' }), null)
-  assert.equal(noticeOf([], { readyAt: '2026-10-19T13:00:00Z' }), null)
-  // Only a Reviewing comment after the Ready means someone has it.
-  assert.equal(noticeOf([comment('Reviewing: bob', '2026-10-20T08:00:00Z', 2)], { readyAt: '2026-10-19T11:00:00Z' }), null)
-  assert.deepEqual(noticeOf([comment('Reviewing: bob', '2026-10-19T10:00:00Z', 0)], { readyAt: '2026-10-19T11:00:00Z' }), { state: 'allowed', at: null })
-  const text = formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T11:00:00Z')] }, now))
-  assert.match(text, /\n {4}notice allowed outside the governance files \(team-process, From claim to merge\)\n/)
-})
-
-test('a lapsed Reviewing comment still closes the notice path, so the queue never offers a notice its own check cancels', () => {
-  const taken = [comment('Reviewing: bob (desktop)', '2026-10-19T10:00:00Z', 2)]
-  // Past 24 hours of Ready, with the Reviewing long lapsed, no notice is offered.
-  assert.equal(noticeOf(taken, { current: '2026-10-20T10:00:00Z' }), null)
-  // A notice posted anyway is cancelled by that same Reviewing comment.
-  const posted = notice('2026-10-22 12:00 UTC', head, '2026-10-20T10:05:00Z', 3)
-  assert.equal(noticeOf([...taken, posted], { current: '2026-10-20T10:10:00Z' }).state, 'cancelled')
-})
-
-test('a notice is also allowed when every collaborator other than the author is away', () => {
-  const context = { collaborators: ['alice', 'bob', 'carol'], awayLogins: ['bob', 'carol'] }
-  const readyAt = '2026-10-20T09:00:00Z'
-  const allowed = { state: 'allowed', at: null }
-  assert.deepEqual(noticeOf([], { context, readyAt }), allowed)
-  assert.equal(noticeOf([], { context: { ...context, awayLogins: ['bob'] }, readyAt }), null)
-  assert.deepEqual(noticeOf([], { context, readyAt, fields: { author: { login: 'Alice' } } }), allowed)
-  assert.deepEqual(noticeOf([], { context: { collaborators: ['bob'], awayLogins: ['bob'] }, readyAt }), allowed)
-  // An unknown list, or one with nobody besides the author, never means everyone is away.
-  assert.equal(noticeOf([], { context: { collaborators: null, awayLogins: ['bob'] }, readyAt }), null)
-  assert.equal(noticeOf([], { context: { collaborators: ['alice'], awayLogins: [] }, readyAt }), null)
-  assert.equal(noticeOf([comment('Reviewing: bob', '2026-10-20T10:00:00Z', 2)], { context, readyAt }), null)
-})
-
-test('a notice posted before the head\'s Ready, or with no Ready for the head, is too early', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const at = '2026-10-23T12:00:00.000Z'
-  const context = { collaborators: ['alice', 'bob'], awayLogins: ['bob'] }
-  const current = '2026-10-24T12:00:00Z'
-  assert.deepEqual(noticeOf([posted], { readyAt: '2026-10-20T11:00:00Z', current, context }), { state: 'too-early', at })
-  const noReady = classify([pull(1)], { 1: [ready(oldHead, '2026-10-19T09:00:00Z'), posted] }, current, null, context)
-  assert.deepEqual(noReady.waitingForAuthor[0].notice, { state: 'too-early', at })
-  assert.deepEqual(noticeOf([posted], { readyAt: '2026-10-20T10:00:00Z', context }), { state: 'waiting', at })
-})
-
-test('a notice posted less than 24 hours after Ready is too early unless everyone else is away', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const at = '2026-10-23T12:00:00.000Z'
-  const context = { collaborators: ['alice', 'bob', 'carol'], awayLogins: ['bob', 'carol'] }
-  assert.deepEqual(noticeOf([posted], { readyAt: '2026-10-20T09:00:00Z' }), { state: 'too-early', at })
-  assert.deepEqual(noticeOf([posted], { readyAt: '2026-10-20T09:00:00Z', current: '2026-10-24T12:00:00Z' }), { state: 'too-early', at })
-  assert.deepEqual(noticeOf([posted], { readyAt: '2026-10-20T09:00:00Z', context }), { state: 'waiting', at })
-  assert.deepEqual(noticeOf([posted], { readyAt: '2026-10-20T09:00:00Z', context: { ...context, awayLogins: ['bob'] } }), { state: 'too-early', at })
-  assert.deepEqual(noticeOf([posted], { readyAt: '2026-10-19T10:00:00Z' }), { state: 'too-early', at })
-  assert.deepEqual(noticeOf([posted], { readyAt: '2026-10-19T09:59:59Z' }), { state: 'waiting', at })
-})
-
-test('a notice posted after someone else took the review does not stand', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const at = '2026-10-23T12:00:00.000Z'
-  const reviewing = login => by(login, comment(`Reviewing: ${login}`, '2026-10-20T09:30:00Z', 4))
-  const context = { collaborators: ['alice', 'bob'], awayLogins: ['bob'] }
-  assert.deepEqual(noticeOf([reviewing('bob'), posted], { current: '2026-10-24T12:00:00Z' }), { state: 'cancelled', at })
-  assert.deepEqual(noticeOf([reviewing('bob'), posted], { readyAt: '2026-10-20T09:00:00Z', context }), { state: 'cancelled', at })
-  assert.deepEqual(noticeOf([reviewing('Alice'), posted]), { state: 'waiting', at })
-  assert.deepEqual(noticeOf([by('bob', comment('Reviewing: bob', '2026-10-19T08:00:00Z', 0)), posted]), { state: 'waiting', at })
-})
-
-test('a Merging after notice for the current head waits until its time and is then due', () => {
-  const posted = notice('2026-10-22 12:00 UTC', head.slice(0, 7))
-  assert.deepEqual(noticeOf([posted]), { state: 'waiting', at: '2026-10-22T12:00:00.000Z' })
-  assert.equal(noticeOf([posted], { current: '2026-10-22T11:59:59Z' }).state, 'waiting')
-  assert.equal(noticeOf([posted], { current: '2026-10-22T12:00:00Z' }).state, 'due')
-  assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted] }, now)), /\n {4}notice: merges after 2026-10-22 12:00 UTC\n/)
-  const dueNow = '2026-10-23T08:00:00Z'
-  assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted] }, dueNow)), /\n {4}notice due: merge if checks are green, someone other than the author approved this head and no bot P0\/P1 is open\n/)
-  // An approval moves the pull request to the approved group, and the notice still shows there.
-  const approved = classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted, verdict('APPROVE', head, '2026-10-20T11:00:00Z', 3)] }, dueNow)
-  assert.deepEqual([approved.needsReviewer.length, approved.approved.length, approved.approved[0].notice.state], [0, 1, 'due'])
-  assert.match(formatQueue(approved), /One at a time.*\n#1 .*\n {4}codex: .*\n {4}notice due: /)
-})
-
-test('a notice is cancelled by a Reviewing comment from someone else, a REQUEST CHANGES or an Objection after it', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const after = body => comment(body, '2026-10-20T11:00:00Z', 5)
-  assert.equal(noticeOf([posted, after('Thanks for the notice')]).state, 'waiting')
-  // A Reviewing comment after Ready and before the notice also means it does not stand.
-  assert.equal(noticeOf([comment('Reviewing: bob', '2026-10-20T09:30:00Z', 4), posted]).state, 'cancelled')
-  for (const body of ['Reviewing: bob', `Review: REQUEST CHANGES ${head} by bob`, 'Objection: I need more time', 'objection from the owner']) {
-    assert.equal(noticeOf([posted, after(body)]).state, 'cancelled', body)
-  }
-  assert.deepEqual(noticeOf([posted, after('Reviewing: bob')]), { state: 'cancelled', at: '2026-10-23T12:00:00.000Z' })
-  assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), posted, after('Reviewing: bob')] }, now)), /\n {4}notice cancelled\n/)
-})
-
-test('a merge notice after an unresolved current-head change request is cancelled', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const at = '2026-10-23T12:00:00.000Z'
-  const changes = comment(`Review: REQUEST CHANGES ${head} by bob`, '2026-10-20T09:30:00Z', 4)
-  assert.deepEqual(noticeOf([changes, posted], { current: '2026-10-24T12:00:00Z' }), { state: 'cancelled', at })
-  assert.deepEqual(noticeOf([changes, posted], { current: '2026-10-21T12:00:00Z' }), { state: 'cancelled', at })
-  // A later approval on the same head resolves it.
-  const approval = comment(`Review: APPROVE ${head} by bob`, '2026-10-20T10:30:00Z', 5)
-  assert.deepEqual(noticeOf([changes, approval, posted], { current: '2026-10-24T12:00:00Z' }), { state: 'due', at })
-})
-
-test('reposting Ready on the same head does not revive a notice over a change request', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const at = '2026-10-23T12:00:00.000Z'
-  const changes = comment(`Review: REQUEST CHANGES ${head} by bob`, '2026-10-20T09:30:00Z', 4)
-  const repostedReady = ready(head, '2026-10-20T10:00:00Z', 5)
-  const dueNow = '2026-10-24T12:00:00Z'
-  assert.deepEqual(noticeOf([changes, repostedReady, posted], { current: dueNow }), { state: 'cancelled', at })
-  assert.deepEqual(noticeOf([changes, posted, repostedReady], { current: dueNow }), { state: 'cancelled', at })
-  const formatted = formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), changes, repostedReady, posted] }, dueNow))
-  assert.match(formatted, /\n {4}notice cancelled\n/)
-  assert.doesNotMatch(formatted, /notice due/)
-})
-
-test('an earlier-head change request does not cancel a current-head notice', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const at = '2026-10-23T12:00:00.000Z'
-  const oldChanges = comment(`Review: REQUEST CHANGES ${oldHead} by bob`, '2026-10-20T09:30:00Z', 4)
-  assert.deepEqual(noticeOf([oldChanges, posted], { current: '2026-10-24T12:00:00Z' }), { state: 'due', at })
-  const afterNoticeOldChanges = comment(`Review: REQUEST CHANGES ${oldHead} by bob`, '2026-10-20T11:00:00Z', 5)
-  assert.deepEqual(noticeOf([posted, afterNoticeOldChanges], { current: '2026-10-24T12:00:00Z' }), { state: 'due', at })
-})
-
-test('a notice naming a time less than 48 hours after the notice or after Ready is too early', () => {
-  assert.equal(noticeOf([notice('2026-10-22 09:59 UTC')]).state, 'too-early')
-  assert.equal(noticeOf([notice('2026-10-22 10:00 UTC')]).state, 'waiting')
-  // A notice posted before Ready is still too early when its named time is less than 48 hours after Ready.
-  assert.equal(noticeOf([notice('2026-10-20 20:00 UTC', head, '2026-10-18T10:00:00Z', 3)]).state, 'too-early')
-  // A time that was too early stays flagged after it has passed.
-  assert.equal(noticeOf([notice('2026-10-22 09:59 UTC')], { current: '2026-10-23T08:00:00Z' }).state, 'too-early')
-  assert.match(formatQueue(classify([pull(1)], { 1: [ready(head, '2026-10-19T09:00:00Z'), notice('2026-10-22 09:59 UTC')] }, now)), /\n {4}notice too early: post it once Ready is 24 hours old with nobody reviewing, or everyone else away, naming a time 48 hours after the notice and after Ready\n/)
-  // A comment that names no commit id, or no readable UTC time, is not a notice.
-  assert.equal(noticeOf([comment('Merging after 2026-10-22 12:00 UTC unless someone objects', '2026-10-20T10:00:00Z', 2)], { readyAt: '2026-10-20T09:00:00Z' }), null)
-  assert.equal(noticeOf([comment(`Merging after tomorrow unless someone objects ${head}`, '2026-10-20T10:00:00Z', 2)], { readyAt: '2026-10-20T09:00:00Z' }), null)
-})
-
-test('JSON lists the bots and the notice of each pull request', () => {
+test('JSON lists the bots of each pull request', () => {
   const output = []
   const status = main(['--json'], {
     fetch: () => ({
@@ -813,8 +679,8 @@ test('JSON lists the bots and the notice of each pull request', () => {
   })
   assert.equal(status, 0)
   const [first, second] = JSON.parse(output[0]).needsReviewer
-  assert.deepEqual([first.number, first.bots, first.notice], [1, { codex: 'clean', codexSecurity: 'none', greptile: false }, { state: 'allowed', at: null }])
-  assert.deepEqual([second.number, second.bots, second.notice], [2, { codex: 'none', codexSecurity: 'none', greptile: false }, null])
+  assert.deepEqual([first.number, first.bots], [1, { codex: 'clean', codexSecurity: 'none', greptile: false }])
+  assert.deepEqual([second.number, second.bots], [2, { codex: 'none', codexSecurity: 'none', greptile: false }])
 })
 
 test('a pull request touching a bundle source or the release table merges one at a time', () => {
@@ -891,100 +757,3 @@ test('a reviewers file that starts with a byte order mark is read', () => {
   assert.equal(loaded.map.maxOpenReviews, 2)
 })
 
-const backAt = (login, at) => ({ login, time: Date.parse(at) })
-
-test('a collaborator Back on the roadmap issue after the notice cancels it', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const collaborators = ['alice', 'bob', 'carol']
-  assert.equal(noticeOf([posted], { context: { collaborators, backs: [] } }).state, 'waiting')
-  assert.equal(noticeOf([posted], { context: { collaborators, backs: [backAt('bob', '2026-10-20T11:00:00Z')] } }).state, 'cancelled')
-  // A Back from someone who is not a collaborator does not end it, but with no collaborator list any Back besides the author's does.
-  assert.equal(noticeOf([posted], { context: { collaborators, backs: [backAt('dave', '2026-10-20T11:00:00Z')] } }).state, 'waiting')
-  assert.equal(noticeOf([posted], { context: { collaborators: null, backs: [backAt('dave', '2026-10-20T11:00:00Z')] } }).state, 'cancelled')
-  // readAway hands over every Back comment with its login and time, and main passes them on.
-  const comments = [away('Bob', 'Back', '2026-10-20T11:00:00Z', 1), away('carol', 'Away: until 2026-10-25', '2026-10-20T08:00:00Z', 2), away('dave', 'Back from the clinic', '2026-10-19T08:00:00Z', 3)]
-  assert.deepEqual(readAway(comments, now).backs.sort((a, b) => a.time - b.time), [backAt('dave', '2026-10-19T08:00:00Z'), backAt('bob', '2026-10-20T11:00:00Z')])
-  const output = []
-  const status = main(['--json'], {
-    fetch: () => ({ prs: [pull(1)], commentsByNumber: { 1: [ready(head, '2026-10-19T09:00:00Z'), posted] } }),
-    context: () => ({ roadmapComments: comments, collaborators: ['alice', 'bob'], claimed: [], notes: [] }), bundle: noBundle,
-    lanes: () => ({ stale: [], notes: [] }), now: () => now, log: text => output.push(text), error: text => assert.fail(text),
-  })
-  assert.equal(status, 0)
-  assert.equal(JSON.parse(output[0]).needsReviewer[0].notice.state, 'cancelled')
-})
-
-test('a Back posted before the notice does not cancel it', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const context = { collaborators: ['alice', 'bob'], backs: [backAt('bob', '2026-10-20T09:30:00Z')] }
-  assert.equal(noticeOf([posted], { context }).state, 'waiting')
-  // Posted at the same moment as the notice is not after it either.
-  assert.equal(noticeOf([posted], { context: { ...context, backs: [backAt('bob', '2026-10-20T10:00:00Z')] } }).state, 'waiting')
-  assert.equal(noticeOf([posted], { context: { collaborators: null, backs: context.backs } }).state, 'waiting')
-})
-
-test('a Back from the pull request author does not cancel its notice', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const backs = [backAt('alice', '2026-10-20T11:00:00Z')]
-  assert.equal(noticeOf([posted], { context: { collaborators: ['alice', 'bob'], backs } }).state, 'waiting')
-  assert.equal(noticeOf([posted], { context: { collaborators: null, backs } }).state, 'waiting')
-  // The login is compared without regard to case.
-  assert.equal(noticeOf([posted], { context: { collaborators: null, backs }, fields: { author: { login: 'Alice' } } }).state, 'waiting')
-})
-
-test('a governance, workflow or release pull request shows that a notice is not possible', () => {
-  const touching = (...paths) => ({ files: paths.map(path => ({ path, additions: 1, deletions: 0 })) })
-  const refusal = '    no notice: governance, workflow or release pull requests merge only with an approval (CONTRIBUTING rules 8 and 12)'
-  const refused = { state: 'not-allowed', at: null }
-  // A workflow change with a notice that has come due.
-  const due = classify([pull(1, touching('.github/workflows/test.yml'))], { 1: [ready(head, '2026-10-19T09:00:00Z'), notice('2026-10-22 12:00 UTC')] }, '2026-10-23T08:00:00Z')
-  assert.deepEqual(due.needsReviewer[0].notice, refused)
-  assert.ok(formatQueue(due).split('\n').includes(refusal))
-  // The same with no notice at all, Ready for more than 24 hours, for each kind of file the rule names.
-  const governed = ['.github/workflows/test.yml', '.github/pull_request_template.md', 'AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/RULES.md', 'docs/dev/team-process.md', 'docs/dev/universal-messaging-roadmap.md', 'CHANGELOG.md', 'package.json', '.claude-plugin/plugin.json']
-  for (const path of governed) {
-    assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z', fields: touching('scripts/a.mjs', path) }), refused, path)
-  }
-  // Ordinary documentation remains eligible for the notice path when the other conditions hold.
-  const ordinaryDocs = ['SECURITY.md', 'docs/RELEASING.md', 'docs/GUIDE.md']
-  for (const path of ordinaryDocs) {
-    assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z', fields: touching(path) }), { state: 'allowed', at: null }, path)
-  }
-  const text = formatQueue(classify([pull(1, touching('CONTRIBUTING.md'))], { 1: [ready(head, '2026-10-19T11:00:00Z')] }, now))
-  assert.ok(text.split('\n').includes(refusal))
-  // Everyone being away does not change it, and without a notice or a way to give one there is nothing to say.
-  const awayContext = { collaborators: ['alice', 'bob'], awayLogins: ['bob'] }
-  assert.deepEqual(noticeOf([], { readyAt: '2026-10-20T09:00:00Z', context: awayContext, fields: touching('AGENTS.md') }), refused)
-  assert.equal(noticeOf([], { readyAt: '2026-10-20T09:00:00Z', fields: touching('AGENTS.md') }), null)
-  assert.equal(noticeOf([notice('2026-10-22 12:00 UTC', head, undefined, undefined, 'bob')], { readyAt: '2026-10-20T09:00:00Z', fields: touching('AGENTS.md') }), null)
-  // Other pull requests keep the notice, with or without a file list.
-  assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z', fields: touching('docs/CONTRIBUTOR-PATH.md', 'scripts/review-queue.mjs') }), { state: 'allowed', at: null })
-  assert.deepEqual(noticeOf([], { readyAt: '2026-10-19T11:00:00Z' }), { state: 'allowed', at: null })
-})
-
-test('a push drops the old notice and a new Ready that nobody takes for 24 hours allows a new one', () => {
-  const other = 'fedcba9876543210fedcba9876543210fedcba98'
-  const fields = { headRefOid: other }
-  const items = [notice('2026-10-23 12:00 UTC'), ready(other, '2026-10-20T11:00:00Z', 6)]
-  // The old notice names the old head, so the new head has none yet.
-  assert.equal(noticeOf(items, { fields }), null)
-  assert.deepEqual(noticeOf(items, { fields, current: '2026-10-21T12:00:00Z' }), { state: 'allowed', at: null })
-  assert.match(formatQueue(classify([pull(1, fields)], { 1: [ready(head), ...items] }, '2026-10-21T12:00:00Z')), /\n {4}notice allowed outside the governance files /)
-  // A notice for the new head is read as usual.
-  const again = notice('2026-10-24 12:00 UTC', other, '2026-10-21T12:00:00Z', 7)
-  assert.deepEqual(noticeOf([...items, again], { fields, current: '2026-10-21T13:00:00Z' }), { state: 'waiting', at: '2026-10-24T12:00:00.000Z' })
-})
-
-test('only a Merging after comment from the pull request author counts and only a Reviewing from someone else cancels it', () => {
-  const posted = notice('2026-10-23 12:00 UTC')
-  const fromBob = notice('2026-10-23 12:00 UTC', head, '2026-10-20T10:00:00Z', undefined, 'bob')
-  assert.equal(noticeOf([fromBob], { readyAt: '2026-10-20T09:00:00Z' }), null)
-  assert.deepEqual(noticeOf([fromBob], { readyAt: '2026-10-19T11:00:00Z' }), { state: 'allowed', at: null })
-  assert.equal(noticeOf([{ body: fromBob.body, created_at: fromBob.created_at, id: 2 }], { readyAt: '2026-10-20T09:00:00Z' }), null)
-  assert.equal(noticeOf([posted]).state, 'waiting')
-  assert.equal(noticeOf([notice('2026-10-23 12:00 UTC', head, undefined, undefined, 'Alice')]).state, 'waiting')
-  const reviewing = login => by(login, comment(`Reviewing: ${login}`, '2026-10-20T11:00:00Z', 5))
-  assert.equal(noticeOf([posted, reviewing('alice')]).state, 'waiting')
-  assert.equal(noticeOf([posted, reviewing('Alice')]).state, 'waiting')
-  assert.equal(noticeOf([posted, reviewing('bob')]).state, 'cancelled')
-})
