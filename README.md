@@ -58,7 +58,7 @@ In the new session, open the board with its entry:
 - **I use Antigravity:** `/agent-board` (checked in a synthetic home, not run live yet)
 - **I use OpenCode:** `/board`
 
-To add a task of your own, type `+ project: title; step; step` in the pane's box, or `/progress add …` in an agent's chat.
+To add a task of your own, write a `### title` with `- [ ] step` lines in `progress.md` (a fresh install uses `~/.agent-board/progress.md`; [the format](docs/FORMAT.md)). With the Claude Code plugin, you can instead type `+ project: title; step; step` in the pane's box, or `/progress add …` in Claude Code's chat.
 
 <details>
 <summary><b>Without npm: install from a checkout</b></summary>
