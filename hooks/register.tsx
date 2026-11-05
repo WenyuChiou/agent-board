@@ -1165,6 +1165,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
 // Pending turns are optional: an unavailable inbox must not stop the board or its reminders.
 let pendingCache: TurnCache = null
 let pageStateFailure: string | null = null
+let pageBacklogDueAt: number | null = null
 let publishedPageDone: string | null = null
 let publishedPageState: string | null = null
 const verifiedPageDone = new Set<string>()
@@ -1173,7 +1174,8 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
     const path = await progressPath($)
     const dir = inboxPath(path)
     const done = await readInboxRecord($, 'inboxDone').catch(() => ({} as Record<string, string>))
-    if (publishedPageDone !== JSON.stringify(done) || pageStateFailure !== null) await syncPageState($, done)
+    const now = await $.clock.now()
+    if (publishedPageDone !== JSON.stringify(done) || pageStateFailure !== null || (pageBacklogDueAt !== null && now >= pageBacklogDueAt)) await syncPageState($, done)
     const entries = (await $.fs.list(dir))
       .filter(entry => entry.kind === 'file' && isInboxFile(entry.name) && done[entry.name] === undefined)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
@@ -1212,6 +1214,7 @@ let measuredPruned = { agent: 0, mirror: 0, turns: 0 }
 const syncPageState = async ($: EngineInterface, done?: Record<string, string>): Promise<void> => {
   try {
     const at = await $.clock.now()
+    if (pageStateFailure === null && pageBacklogDueAt !== null && at < pageBacklogDueAt) return
     const path = await progressPath($)
     const processed = done ?? await readInboxRecord($, 'inboxDone')
     const pruned = addPruned(await $.store.get('prunedCounts'), { agent: 0, mirror: 0 }, at)
@@ -1245,17 +1248,39 @@ const syncPageState = async ($: EngineInterface, done?: Record<string, string>):
       }
       verifiedPageDone.add(file)
     }
-    await rewrite($, pageStatePath(path), before => JSON.stringify({
-      version: 1,
-      inboxDone: keepInboxDone({ ...readPageState(before).inboxDone, ...kept }, at),
-      store: measuredStore,
-      pruned,
-    }))
-    const saved = readPageState(await readText($, pageStatePath(path)))
-    if (Object.entries(kept).some(([name, stamp]) => saved.inboxDone[name] !== stamp) || saved.store !== measuredStore || JSON.stringify(saved.pruned) !== JSON.stringify(pruned)) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
+    let before = ''
+    let hasLanded = false
+    await rewrite($, pageStatePath(path), text => {
+      before = text
+      const after = JSON.stringify({
+        version: 1,
+        inboxDone: keepInboxDone({ ...readPageState(before).inboxDone, ...kept }, at),
+        store: measuredStore,
+        pruned,
+      })
+      hasLanded = after === before
+      return after
+    }, (check, after) => {
+      const saved = readPageState(check).inboxDone
+      const times = Object.values(saved).map(stamp => Number(stamp.split(':')[1] ?? 0))
+      const oldest = times.length === 2000 ? Math.min(...times) : -Infinity
+      // A peer may replace stamps or prune older names at the cap; its own counts
+      // still describe a valid successor when every acknowledgement is accounted for.
+      hasLanded = check === after || (check !== before && Object.entries(kept).every(([name, stamp]) => {
+        const time = Number(stamp.split(':')[1] ?? 0)
+        return saved[name] !== undefined || at - time >= 3 * 24 * 60 * 60 * 1000 || oldest >= time
+      }))
+      return hasLanded
+    })
+    if (!hasLanded) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
     pageStateFailure = null
-    // More receipts wait: leave the publication unrecorded so the next poll writes the next batch.
-    if (receipts.length > 50) return
+    // A backlog migrates one batch per poll because session start calls this many times.
+    if (receipts.length > 50) {
+      pageBacklogDueAt = at + POLL_MS
+      publishedPageState = null
+      return
+    }
+    pageBacklogDueAt = null
     publishedPageDone = JSON.stringify(processed)
     publishedPageState = publication
   } catch (error) {

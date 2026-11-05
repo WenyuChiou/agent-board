@@ -26,6 +26,7 @@ const { sha256 } = await import('../hooks/sha256.ts')
 const { psQuote } = await import('../hooks/connect.ts')
 const { EN } = await import('../hooks/strings-en.ts')
 const NOW = Date.parse('2026-11-04T12:00:00Z')
+const POLL_MS = 2000
 const NAME = 'codex-turn-1793793600000-1.json'
 const turn = answer => JSON.stringify({ session_id: 'synthetic-turn', cwd: '/work/demo', prompt: 'Private prompt contents /home/demo/private', last_assistant_message: answer })
 
@@ -42,7 +43,8 @@ const publisher = () => {
     return source.slice(start, stop)
   }
   const selected = [
-    'const REWRITE_TRIES = 3; const AGAIN = Symbol("again"); let measuredStore = 0; let measuredPruned = { agent: 0, mirror: 0, turns: 0 }; let pendingCache = null; let pageStateFailure = null; let publishedPageDone = null; let publishedPageState = null; const verifiedPageDone = new Set(); let questionWrite = 0;',
+    'const REWRITE_TRIES = 3; const AGAIN = Symbol("again"); let measuredStore = 0; let measuredPruned = { agent: 0, mirror: 0, turns: 0 }; let pendingCache = null; let pageStateFailure = null; let pageBacklogDueAt = null; let publishedPageDone = null; let publishedPageState = null; const verifiedPageDone = new Set(); let questionWrite = 0;',
+    extract('const POLL_MS =', '\n'),
     extract('const PRUNED_PER_SWEEP =', '\n'),
     extract('const readText =', '\n\n// Every write this session'),
     extract('const removeFiles =', '\n\n// A rename either'),
@@ -67,9 +69,9 @@ const publisher = () => {
     s: EN, at: NOW,
   })
 }
-const publishingEngine = (f, { beforeWrite = async () => {}, isDenied = () => false, isDropped = () => false } = {}) => ({
+const publishingEngine = (f, { beforeWrite = async () => {}, afterWrite = async () => {}, isDenied = () => false, isDropped = () => false, clock = { at: NOW } } = {}) => ({
   taskPath: f.path,
-  clock: { now: async () => NOW },
+  clock: { now: async () => clock.at, advance: ms => { clock.at += ms } },
   session: { id: async () => 'synthetic-publisher' },
   process: { run: async (argv, options) => {
     const ran = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: options.timeoutMs, windowsHide: true })
@@ -84,7 +86,10 @@ const publishingEngine = (f, { beforeWrite = async () => {}, isDenied = () => fa
       assert.ok(resolve(path).startsWith(resolve(f.root) + sep))
       if (isDenied()) throw Object.assign(new Error('EACCES: synthetic publication denied'), { code: 'EACCES' })
       await beforeWrite(path, text)
-      if (!isDropped(path)) writeFileSync(path, text)
+      if (!isDropped(path)) {
+        writeFileSync(path, text)
+        await afterWrite(path, text)
+      }
     },
     list: async dir => readdirSync(dir).map(name => {
       const stat = statSync(join(dir, name))
@@ -114,7 +119,10 @@ test('a delayed page-state publisher cannot erase another session’s 51 process
     assert.equal(existsSync(fileOf(NAME)), false, 'the oldest receipt waits for the next batch')
     assert.equal(names.filter(name => existsSync(fileOf(name))).length, 50)
     assert.equal((await f.api()).counts.waiting, 0)
-    for (let n = 0; n < 3; n++) assert.deepEqual(await production.pendingTurns(engine), [])
+    for (let n = 0; n < 3; n++) {
+      engine.clock.advance(POLL_MS)
+      assert.deepEqual(await production.pendingTurns(engine), [])
+    }
     release()
     await stale
     for (const name of names) {
@@ -132,6 +140,141 @@ test('a delayed page-state publisher cannot erase another session’s 51 process
     await stale
     await f.close()
   }
+})
+
+test('a warmed publisher migrates all 51 peer acknowledgements after cleared counts change and then stays idle', async () => {
+  const f = await fixture()
+  const names = Array.from({ length: 51 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
+  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 51 + n}`]))
+  const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
+  const fileOf = name => livePage.pageDonePath(f.path, sha256(receipt(name)))
+  let pruned = {}
+  try {
+    const production = publisher()
+    const engine = publishingEngine(f)
+    engine.store.get = async key => key === 'prunedCounts' ? pruned : {}
+    const pageWork = []
+    for (const operation of ['read', 'write', 'exists', 'list']) {
+      const perform = engine.fs[operation]
+      engine.fs[operation] = async (path, ...args) => {
+        if (path === f.root || (operation !== 'list' && dirname(path) === f.root)) pageWork.push([operation, path])
+        return perform(path, ...args)
+      }
+    }
+    await production.syncPageState(engine, {})
+    assert.equal(production.warning(), undefined)
+    const previous = JSON.parse(readFileSync(pageStatePath(f.path), 'utf8'))
+    writeFileSync(pageStatePath(f.path), JSON.stringify({ ...previous, inboxDone: done }))
+    pruned = { '2026-11-04': { agent: 2, mirror: 3 } }
+    await production.syncPageState(engine, {})
+    assert.equal(names.filter(name => existsSync(fileOf(name))).length, 50)
+    assert.equal(existsSync(fileOf(names[0])), false, 'the oldest receipt waits for the next poll')
+    for (let n = 0; n < 3; n++) {
+      engine.clock.advance(POLL_MS)
+      assert.deepEqual(await production.pendingTurns(engine), [])
+    }
+    for (const name of names) assert.equal(readFileSync(fileOf(name), 'utf8'), receipt(name))
+    assert.equal(production.warning(), undefined)
+    assert.deepEqual(JSON.parse(readFileSync(pageStatePath(f.path), 'utf8')).pruned, pruned)
+    pageWork.length = 0
+    engine.clock.advance(POLL_MS)
+    assert.deepEqual(await production.pendingTurns(engine), [])
+    assert.deepEqual(pageWork, [], 'an unchanged poll after draining does no page-state file work')
+  } finally { await f.close() }
+})
+
+test('five publication calls inside one poll write only one batch of a 120-name backlog', async () => {
+  const names = Array.from({ length: 120 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
+  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 120 + n}`]))
+  const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
+  const f = await fixture('', {}, { version: 1, inboxDone: done, store: 0, pruned: {} })
+  const written = () => names.filter(name => existsSync(livePage.pageDonePath(f.path, sha256(receipt(name))))).length
+  try {
+    const production = publisher()
+    const engine = publishingEngine(f)
+    for (let n = 0; n < 5; n++) await production.syncPageState(engine, {})
+    assert.equal(written(), 50)
+    engine.clock.advance(POLL_MS)
+    assert.deepEqual(await production.pendingTurns(engine), [])
+    assert.equal(written(), 100)
+    for (let n = 0; n < 5; n++) await production.syncPageState(engine, {})
+    assert.equal(written(), 100)
+    engine.clock.advance(POLL_MS)
+    assert.deepEqual(await production.pendingTurns(engine), [])
+    assert.equal(written(), 120)
+    for (const name of names) assert.equal(readFileSync(livePage.pageDonePath(f.path, sha256(receipt(name))), 'utf8'), receipt(name))
+    assert.equal(production.warning(), undefined)
+  } finally { await f.close() }
+})
+
+test('a concurrent successor at the 2000-name cap may replace the oldest acknowledgement without a warning', async () => {
+  const names = Array.from({ length: 2000 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
+  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 2000 + n}`]))
+  const newer = 'codex-turn-1793793600000-2001.json'
+  const f = await fixture('', {}, { version: 1, inboxDone: done, store: 4096, pruned: {} })
+  let writes = 0
+  try {
+    for (const [name, stamp] of Object.entries(done)) {
+      const text = JSON.stringify({ version: 1, name, stamp })
+      writeFileSync(livePage.pageDonePath(f.path, sha256(text)), text)
+    }
+    const production = publisher()
+    const engine = publishingEngine(f, { afterWrite: async (file, text) => {
+      if (file !== pageStatePath(f.path)) return
+      writes += 1
+      const snapshot = JSON.parse(text)
+      writeFileSync(file, JSON.stringify({ ...snapshot, inboxDone: keepInboxDone({ ...snapshot.inboxDone, [newer]: `peer:${NOW + 1}` }, NOW) }))
+    } })
+    await production.syncPageState(engine, {})
+    assert.equal(production.warning(), undefined)
+    const saved = JSON.parse(readFileSync(pageStatePath(f.path), 'utf8'))
+    assert.equal(Object.keys(saved.inboxDone).length, 2000)
+    assert.equal(saved.inboxDone[names[0]], undefined)
+    assert.equal(saved.inboxDone[newer], `peer:${NOW + 1}`)
+    assert.equal(writes, 1, 'the successor must be accepted by the first read-back')
+  } finally { await f.close() }
+})
+
+test('a concurrent successor may acknowledge the same name with a different stamp without a warning', async () => {
+  const f = await fixture()
+  const done = { [NAME]: `synthetic:${NOW}` }
+  const peerReceipt = JSON.stringify({ version: 1, name: NAME, stamp: `peer:${NOW + 1}` })
+  let writes = 0
+  try {
+    const production = publisher()
+    const engine = publishingEngine(f, { afterWrite: async (file, text) => {
+      if (file !== pageStatePath(f.path)) return
+      writes += 1
+      const snapshot = JSON.parse(text)
+      writeFileSync(livePage.pageDonePath(f.path, sha256(peerReceipt)), peerReceipt)
+      writeFileSync(file, JSON.stringify({ ...snapshot, inboxDone: { ...snapshot.inboxDone, [NAME]: `peer:${NOW + 1}` } }))
+    } })
+    await production.syncPageState(engine, done)
+    assert.equal(production.warning(), undefined)
+    assert.equal(JSON.parse(readFileSync(pageStatePath(f.path), 'utf8')).inboxDone[NAME], `peer:${NOW + 1}`)
+    const ownReceipt = JSON.stringify({ version: 1, name: NAME, stamp: done[NAME] })
+    assert.equal(readFileSync(livePage.pageDonePath(f.path, sha256(ownReceipt)), 'utf8'), ownReceipt)
+    assert.equal(readFileSync(livePage.pageDonePath(f.path, sha256(peerReceipt)), 'utf8'), peerReceipt)
+    assert.equal(writes, 1)
+  } finally { await f.close() }
+})
+
+test('a concurrent successor may publish its own store size and cleared counts without a warning', async () => {
+  const f = await fixture()
+  const pruned = { '2026-11-04': { agent: 5, mirror: 7 } }
+  let writes = 0
+  try {
+    const production = publisher()
+    const engine = publishingEngine(f, { afterWrite: async (file, text) => {
+      if (file !== pageStatePath(f.path)) return
+      writes += 1
+      writeFileSync(file, JSON.stringify({ ...JSON.parse(text), store: 8192, pruned }))
+    } })
+    await production.syncPageState(engine, {})
+    assert.equal(production.warning(), undefined)
+    assert.deepEqual(JSON.parse(readFileSync(pageStatePath(f.path), 'utf8')), { version: 1, inboxDone: {}, store: 8192, pruned })
+    assert.equal(writes, 1)
+  } finally { await f.close() }
 })
 
 test('a fresh page and JSON reader keep valid receipts beside a partial receipt and retry its validation', async () => {
