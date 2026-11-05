@@ -653,6 +653,28 @@ test('#774 an empty message folder directly in the runtime folder goes, the runt
   assert.equal(existsSync(other), true)
 }))
 
+test('#774 a plugins key that is not an object in another agent config blocks neither setup nor removal', () => fixture(f => {
+  const settings = join(f.home, '.gemini', 'settings.json')
+  f.save(settings, '{"plugins":[]}\n')
+  const installed = f.install('--agent', 'gemini', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const removed = remove774(f, 'gemini')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')).plugins, [])
+}))
+
+test('#774 a --data-dir folder named agent-board the person made stays when empty', () => fixture(f => {
+  const own = join(f.home, 'agent-board')
+  mkdirSync(own)
+  const progress = join(f.home, 'history', 'progress.md')
+  const installed = f.install('--data-dir', own, '--progress-file', progress, '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const removed = spawnSync(process.execPath, [join(own, 'agent-board.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--data-dir', own, '--codex-remove', '--agent', 'codex', '--apply'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true })
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(join(own, 'agent-board.mjs')), false)
+  assert.equal(existsSync(own), true)
+}))
+
 test('#774 an unreadable trust file stays without a trust plan change', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   const toml = join(f.home, '.codex', 'config.toml')

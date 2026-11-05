@@ -1167,9 +1167,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
   nextConfigText ??= `${JSON.stringify(nextConfig, null, 2)}\n`
   if (hasNativeConfig && (!remove || Object.keys(manifest.groups).length)) {
-    const openclawPlugins = object(nextConfig.plugins ?? {})
-    const isHollowOpenclaw = Object.keys(nextConfig).every(key => key === 'plugins') && Object.keys(openclawPlugins).every(key => key === 'load' || key === 'entries' || key === 'allow' && Array.isArray(openclawPlugins.allow) && openclawPlugins.allow.length === 0) && isSame(openclawPlugins.load ?? { paths: [] }, { paths: [] }) && isSame(openclawPlugins.entries ?? {}, {})
-    const isEmptyCreatedConfig = loaded.createdConfig === true && (agent === 'deepseek' ? nextConfigText.trim() === '' : agent === 'openclaw' ? isHollowOpenclaw : agent === 'antigravity' ? Object.keys(nextConfig).length === 0 : Object.keys(nextHooks).length === 0 && Object.keys(nextConfig).every(key => key === 'hooks' || key === 'version' && agent === 'cursor' && nextConfig[key] === 1 || key === 'schema_version' && agent === 'muse' && nextConfig[key] === 1))
+    const isHollowOpenclaw = (): boolean => {
+      const plugins = object(nextConfig.plugins ?? {})
+      return Object.keys(nextConfig).every(key => key === 'plugins') && Object.keys(plugins).every(key => key === 'load' || key === 'entries' || key === 'allow' && Array.isArray(plugins.allow) && plugins.allow.length === 0) && isSame(plugins.load ?? { paths: [] }, { paths: [] }) && isSame(plugins.entries ?? {}, {})
+    }
+    const isEmptyCreatedConfig = loaded.createdConfig === true && (agent === 'deepseek' ? nextConfigText.trim() === '' : agent === 'openclaw' ? isHollowOpenclaw() : agent === 'antigravity' ? Object.keys(nextConfig).length === 0 : Object.keys(nextHooks).length === 0 && Object.keys(nextConfig).every(key => key === 'hooks' || key === 'version' && agent === 'cursor' && nextConfig[key] === 1 || key === 'schema_version' && agent === 'muse' && nextConfig[key] === 1))
     if (parsedConfig === null) conflicts.push(nativeConfig)
     else if (remove && initial(nativeConfig) === null) alreadyGone.push(nativeConfig)
     else if (remove && isReadable && isEmptyCreatedConfig) changes.push({ file: nativeConfig, action: 'remove' })
@@ -1191,7 +1193,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // A folder named by --data-dir may be the person's own: it goes only when setup recorded making it.
     const candidates = new Set([...createdDirs, ...(basename(root) === '.agent-board' ? [root] : [])])
     for (const change of changes) if (change.action === 'remove') {
-      for (let folder = dirname(change.file); basename(folder) === 'agent-board' || isBelow(folder, root); folder = dirname(folder)) {
+      for (let folder = dirname(change.file); folderKey(folder) !== folderKey(root) && (basename(folder) === 'agent-board' || isBelow(folder, root)); folder = dirname(folder)) {
         candidates.add(folder)
         if (folder === dirname(folder)) break
       }
