@@ -149,8 +149,13 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --apply
 
 Doctor checks generated file hashes and hook definitions, querying Codex trust when a binary is supplied or discovered on PATH/LOCALAPPDATA, or inspecting config.toml when Codex is not available.
 Reinstall repairs missing generated files; edited files or hooks require review. Removal
-takes only unchanged owned files and exact owned hook groups. It preserves progress,
-session records, archives, journals and foreign hooks. Close a test board with its Close
+takes unchanged owned files, exact owned hook groups, their Codex trust entries,
+an empty hooks config setup created, and empty folders setup made. Foreign hooks stay.
+Your history stays: `progress.md`, `progress-archive-*.md`, `progress-journal-*.md`, `sessions/`, `pending/`, `hook-recovery-*.json`, `hook-errors.log`, `progress-answered.json`, `progress-questions*.json`, `progress-seen.json`, `progress-run-cursor.txt`, `progress-page-state.json`, `progress-page-state-done-*.json`, `progress-inbox/` (`dropped.log`).
+You can delete these by hand. Non-empty runtime `*-messages/` folders stay too.
+Progress-based filenames follow your selected progress filename.
+Older installations keep an inert `{"hooks": {}}` file and empty parent folders such as
+`.agents/skills` because setup did not record creating them. Trust tables with extra lines stay. Codex's own `config.toml` stays. Close a test board with its Close
 button before removal. An interrupted write may leave a lock: inspect the owning process
 before removing that specific lock, rather than deleting the data directory.
 

@@ -7940,7 +7940,7 @@ export const LINES = [
 "      closeSync9(fd);",
 "      writeFileSync8(temp, after);",
 "      if (mode !== undefined)",
-"        chmodSync(temp, mode);",
+"        chmodSync2(temp, mode);",
 "      if (wasMissing) {",
 "        if (!placeOwnedQuestionFile(temp, file)) {",
 "          if (!existsSync6(file)) {",

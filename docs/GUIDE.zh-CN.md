@@ -169,7 +169,11 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
 node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 ```
 
-`--codex-remove`、`--codex-doctor` 是沿用的维护名称，可搭配各目标。先关闭该看板。只移除未修改的自有定义／文件；其他目标还需要的共享文件保留，进度、session 记录、归档、日志及用户修改也保留。
+`--codex-remove`、`--codex-doctor` 是沿用的维护名称，可搭配各目标。先关闭该看板。卸载会移除未修改的看板文件、自有 hook 定义、对应的 Codex 信任项、setup 创建且已空的 hooks 配置，以及 setup 创建的空目录。其他目标还需要的共享文件保留。用户修改保留。
+
+这些是你的历史，会保留：`progress.md`, `progress-archive-*.md`, `progress-journal-*.md`, `sessions/`, `pending/`, `hook-recovery-*.json`, `hook-errors.log`, `progress-answered.json`, `progress-questions*.json`, `progress-seen.json`, `progress-run-cursor.txt`, `progress-page-state.json`, `progress-page-state-done-*.json`, `progress-inbox/` (`dropped.log`)。可手动删除。运行目录中非空的 `*-messages/` 目录也保留。以 `progress.md` 为基础的文件名会随所选进度文件名变化。
+
+旧安装会保留不起作用的 `{"hooks": {}}` 文件和 `.agents/skills` 这类空的上级目录，因为 setup 没有记录它们是自己创建的。带额外行的信任表保留。Codex 自己的 `config.toml` 始终保留。
 
 可选 plugin 请先在仍安装时运行 `/progress connect remove`，完成报告的清理后，再运行 `claude plugin uninstall agent-board@agent-board`；marketplace 用 `claude plugin marketplace remove agent-board` 移除。更新用 `claude plugin marketplace update agent-board`、`claude plugin update agent-board@agent-board`，之后重新加载 plugin。
 
@@ -236,7 +240,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 
 ### 怎么卸载？
 
-独立安装：先关闭看板，预览 `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`，确认后加上 `--apply`。进度和历史会保留。可选 Claude 插件的卸载方式：
+独立安装：先关闭看板，预览 `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`，确认后加上 `--apply`。对每个已安装的 agent 重复此步骤。保留的历史文件见[更新和卸载](#更新和卸载)。可选 Claude 插件的卸载方式：
 
 ```sh
 claude -p "/progress connect remove"

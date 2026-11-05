@@ -169,7 +169,11 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
 node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 ```
 
-`--codex-remove` and `--codex-doctor` are retained maintenance names for all targets. Close that board before removal. Only unchanged owned definitions/files are removed; shared files stay while another target needs them. Progress, session records, archives, journals and user changes remain.
+`--codex-remove` and `--codex-doctor` are retained maintenance names for all targets. Close that board before removal. Removal takes unchanged board files, its hook definitions, Codex trust entries for those hooks, an empty hooks config setup created, and empty folders setup made. Shared files stay while another target needs them. User changes stay.
+
+Your history stays: `progress.md`, `progress-archive-*.md`, `progress-journal-*.md`, `sessions/`, `pending/`, `hook-recovery-*.json`, `hook-errors.log`, `progress-answered.json`, `progress-questions*.json`, `progress-seen.json`, `progress-run-cursor.txt`, `progress-page-state.json`, `progress-page-state-done-*.json`, `progress-inbox/` (`dropped.log`). You can delete these by hand. Non-empty runtime `*-messages/` folders also stay. Names based on `progress.md` follow your selected progress filename.
+
+Older installations keep an inert `{"hooks": {}}` file and empty parent folders such as `.agents/skills`: setup did not record that it created them. Trust tables with extra lines stay. Codex's own `config.toml` always stays.
 
 For the optional plugin, run `/progress connect remove` while it is still installed; finish reported cleanup, then `claude plugin uninstall agent-board@agent-board`. Remove its marketplace with `claude plugin marketplace remove agent-board`. Plugin marketplace updates use `claude plugin marketplace update agent-board` and `claude plugin update agent-board@agent-board`; reload the plugin afterward.
 
@@ -236,7 +240,7 @@ The plugin was renamed in 0.10.0 and doesn't move over by itself. Run the steps 
 
 ### How do I uninstall it?
 
-Independent setup: close the board, preview `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`, then add `--apply` after review. Progress and history remain. For the optional Claude plugin:
+Independent setup: close the board, preview `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`, then add `--apply` after review. Repeat for each installed agent. See [Update and uninstall](#update-and-uninstall) for the history files kept. For the optional Claude plugin:
 
 ```sh
 claude -p "/progress connect remove"
