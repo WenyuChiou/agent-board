@@ -3901,13 +3901,58 @@ test('a report step over 120 characters is cut on the board and kept in full in 
   const titleOnly = f.command(['--report'], { title, state: 'working', steps: ['- [~] Short step'] })
   assert.equal(titleOnly.status, 0, titleOnly.stderr)
   assert.equal(JSON.parse(titleOnly.stdout).cut, 1)
-  assert.ok(readFileSync(join(f.root, `progress-journal-${month}.md`), 'utf8').includes('Short step'))
+  assert.ok(!readFileSync(join(f.root, `progress-journal-${month}.md`), 'utf8').includes('Short step'))
   const blockedProgress = join(f.root, 'blocked.md')
   f.save(blockedProgress, '## Preserve this project\n')
   mkdirSync(join(f.root, `blocked-journal-${month}.md`))
   const blocked = f.command(['--report', '--progress-file', blockedProgress], { title: 'Blocked journal', state: 'working', steps: [`- [~] ${long}`] })
   assert.notEqual(blocked.status, 0)
   assert.equal(readFileSync(blockedProgress, 'utf8'), '## Preserve this project\n')
+}))
+
+const journalOf = (f, updated) => {
+  const day = new Date(updated)
+  return join(f.root, `progress-journal-${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}.md`)
+}
+
+test('the same long report sent again a minute later adds no journal line', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const long = 'Synthetic detail ' + 's'.repeat(130)
+  const payload = { title: 'Resent plan', project: 'Synthetic project', state: 'working', steps: [`- [~] ${long}`] }
+  const started = Math.floor(Date.now() / 60000) * 60000 - 600000
+  const first = f.command(['--report', '--hook-started', String(started)], payload)
+  assert.equal(first.status, 0, first.stderr)
+  const file = journalOf(f, JSON.parse(first.stdout).updated)
+  const before = readFileSync(file, 'utf8')
+  assert.ok(before.includes(long))
+  const again = f.command(['--report', '--hook-started', String(started + 60000)], payload)
+  assert.equal(again.status, 0, again.stderr)
+  assert.equal(readFileSync(file, 'utf8'), before)
+}))
+
+test('a cut title with uncut steps journals only the title, once', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const title = 'Synthetic title ' + 't'.repeat(130)
+  const payload = { title, project: 'Synthetic project', state: 'working', steps: ['- [~] First short step', '- [ ] Second short step'] }
+  const first = f.command(['--report'], payload)
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(JSON.parse(first.stdout).cut, 1)
+  const file = journalOf(f, JSON.parse(first.stdout).updated)
+  const text = readFileSync(file, 'utf8')
+  assert.equal(text.split(title).length - 1, 2, 'the title is the task and the step of its one line')
+  assert.equal(text.split(/\r?\n/).filter(line => line.startsWith('> - ')).length, 1)
+  assert.ok(!text.includes('short step'))
+}))
+
+test('a journal line written between the report read and its replace survives', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const long = 'Synthetic detail ' + 's'.repeat(130)
+  const other = '- 2000-01-01 00:00 · Other project · Other task · Finished by the board'
+  const result = f.command(['--report'], { title: 'Racing plan', project: 'Synthetic project', state: 'working', steps: [`- [~] ${long}`] }, { AGENT_BOARD_TEST_JOURNAL_RACE: other })
+  assert.equal(result.status, 0, result.stderr)
+  const text = readFileSync(journalOf(f, JSON.parse(result.stdout).updated), 'utf8')
+  assert.ok(text.includes(other))
+  assert.ok(text.includes(long))
 }))
 
 test('--report and --codex-report write the same block', () => fixture(f => {

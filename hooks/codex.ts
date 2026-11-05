@@ -130,9 +130,12 @@ export const limitReport = <T extends CodexReport>(report: T): { report: T; entr
   }
   const title = short(report.title)
   const steps = report.steps.map(step => `${step.slice(0, 6)}${short(step.slice(6))}`)
-  const entries = report.steps.flatMap((step, index) => title !== report.title || steps[index] !== step
-    ? [{ project: report.project, task: report.title, step: step.slice(6) }]
-    : [])
+  // Only a field that was shortened is journaled: the title once, and each cut step with
+  // its task. Journaling every step of a cut title would flood the journal on each resend.
+  const entries: Omit<JournalEntry, 'at'>[] = [
+    ...(title !== report.title ? [{ project: report.project, task: report.title, step: report.title }] : []),
+    ...report.steps.flatMap((step, index) => steps[index] !== step ? [{ project: report.project, task: report.title, step: step.slice(6) }] : []),
+  ]
   return {
     report: { ...report, title, steps }, entries,
     cut: Number(title !== report.title) + steps.filter((step, index) => step !== report.steps[index]).length,

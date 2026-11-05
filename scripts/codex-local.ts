@@ -653,12 +653,38 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             throw error
           }
         })
-        const past = readLocal(journal) ?? ''
-        // Overflow is evidence of the report, not a newly completed step.
-        const lines = entries.map(entry => `> ${journalLine(entry, now, s)}`).filter(line => !past.split(/\r?\n/).includes(line))
-        const next = appendJournal(past, lines, s)
-        if (next !== past) atomic(journal, next, checkDeadline)
-        if (readLocal(journal) !== next) throw new Error('JOURNAL_WRITE_CONFLICT')
+        // Everything after the minute stamp: the same overflow reported again is not new.
+        const tail = (line: string): string => line.replace(/^(?:> )?- \d{4}-\d{2}-\d{2} \d{2}:\d{2} · /, '')
+        const changed = new Error('JOURNAL_CHANGED')
+        let hasRaced = false
+        // The board's own writers (a done or tick press) share this file. Read it again just
+        // before the replace and again after it; when it moved, work from the new text so a
+        // line another writer added survives. checkDeadline bounds the retries.
+        for (;;) {
+          checkDeadline()
+          const past = readLocal(journal) ?? ''
+          // Test-only seam: lands one line from another writer between this read and the replace.
+          const racing = process.env.AGENT_BOARD_TEST_JOURNAL_RACE
+          if (racing !== undefined && !hasRaced) {
+            hasRaced = true
+            writeFileSync(journal, appendJournal(past, [racing], s))
+          }
+          const seen = new Set(past.split(/\r?\n/).map(tail))
+          // Overflow is evidence of the report, not a newly completed step.
+          const lines = entries.map(entry => `> ${journalLine(entry, now, s)}`).filter(line => !seen.has(tail(line)))
+          const next = appendJournal(past, lines, s)
+          if (next === past) return
+          try {
+            atomic(journal, next, () => {
+              checkDeadline()
+              if ((readLocal(journal) ?? '') !== past) throw changed
+            })
+          } catch (error) {
+            if (error === changed) continue
+            throw error
+          }
+          if (readLocal(journal) === next) return
+        }
       }
       if (isRun) {
         // A lazy history file can prove that a block written from a hint is a run.
