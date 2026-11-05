@@ -335,17 +335,27 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
   }
   // A finished task whose agent the model did not say is under no agent: it counts in All only.
   const repeats = new Map<string, number>()
+  const usedKeys = new Set<string>()
   for (const item of finished) {
     const base = `done::${item.project}::${item.title}`
-    const repeat = (repeats.get(base) ?? 0) + 1
-    repeats.set(base, repeat)
+    let key = item.key
+    if (key === undefined) {
+      let repeat = repeats.get(base) ?? 0
+      key = repeat === 0 && !usedKeys.has(base) ? base : `${base}#${Math.max(2, repeat + 1)}`
+      while (usedKeys.has(key)) {
+        repeat = Math.max(repeat + 1, Number(key.slice(key.lastIndexOf('#') + 1)) || 0) + 1
+        key = `${base}#${repeat}`
+      }
+      repeats.set(base, repeat || 1)
+    }
+    usedKeys.add(key)
     const tagged: Tagged =
       item.isOwn === true || item.agent !== undefined
         ? tag({ agent: item.agent ?? '', isOwn: item.isOwn === true }, item.project, item.dir, item.at)
         : { agent: '', isOwn: false, project: item.project, repo: repoName(item.project, item.dir), at: timeOf(item.at) }
     tasks.push({
       ...tagged,
-      key: item.key ?? (repeat === 1 ? base : `${base}#${repeat}`),
+      key,
       title: item.title,
       shelf: 'done',
       isIdle: false,
