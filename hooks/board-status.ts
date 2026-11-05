@@ -17,10 +17,10 @@ export const boardCounts = (
   view: View,
   pending: readonly PendingTurn[] = [],
   s: Strings = ZH_TW,
-  now?: number,
+  now = view.now,
 ): BoardCounts => {
   const model = serveModel(view, pending, s, new Set(), false, undefined, false, {
-    now: now ?? view.now ?? Date.now(),
+    now,
     repoOf: () => null,
     versions: { board: '', package: null },
     unreadable: [],
