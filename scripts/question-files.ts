@@ -15,6 +15,7 @@ export const immutableQuestionFiles = <T>(options: {
   isPersistent: boolean
   accepts: (name: string) => boolean
   parse: (text: string, name: string) => T | null
+  isValidationIndependent?: boolean
   watchFiles?: WatchFiles
 }) => {
   const known = new Map<string, { stamp: string; value: T }>()
@@ -98,7 +99,10 @@ export const immutableQuestionFiles = <T>(options: {
             const parsed = options.parse(readFileSync(file, 'utf8'), name)
             if (parsed === null) {
               dirty.add(name)
-              return null
+              if (!options.isValidationIndependent) return null
+              // Invalid independent evidence is omitted without caching its stamp, so every read retries it.
+              known.delete(name)
+              continue
             }
             // Validation of the same immutable name proves the previous value remains equivalent.
             known.set(name, { stamp, value: previous?.value ?? parsed })

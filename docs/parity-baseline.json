@@ -3,6 +3,7 @@
   "release": "agent-board--v0.23.5",
   "releaseCommit": "1b05ee12159a793b7786ac97b717384f5f9f03fe",
   "provenance": "Initial retrospective baseline: these exact test titles were inspected at the tagged release. No parity matrix shipped in that release. This file is a committed snapshot, never rewritten by tests. The release maintainer advances it only after reviewing evidence.",
+  "legacyAgentOnlySurfaces": ["--chat"],
   "cells": [
     {
       "host": "codex-cli",

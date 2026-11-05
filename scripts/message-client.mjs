@@ -53,7 +53,7 @@ export const boardClient = address => {
       if (typeof verify !== 'function' || typeof deliver !== 'function' || canReceive !== undefined && typeof canReceive !== 'function' || !await verify()) throw new Error('HOST_NOT_CONNECTED')
       const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }) })
       const credentials = { connection: registered.id, secret: registered.secret }
-      let isClosed = false, isPolling = false, leaseUntil = registered.expires
+      let isClosed = false, isPolling = false, isPollDue = false, leaseUntil = registered.expires
       const close = async () => {
         if (isClosed) return
         isClosed = true
@@ -79,7 +79,8 @@ export const boardClient = address => {
         }
       }
       const poll = async () => {
-        if (isClosed || isPolling) return
+        if (isClosed) return
+        if (isPolling) { isPollDue = true; return }
         isPolling = true
         try {
           // Ownership failures are terminal even if they happen to look like a
@@ -107,7 +108,13 @@ export const boardClient = address => {
             if (!error.isRetryable || Date.now() >= leaseUntil) await close()
             onError(error)
           }
-        } finally { isPolling = false }
+        } finally {
+          isPolling = false
+          // Coalesce a tick that arrived during this request instead of losing a
+          // whole poll period. This is fresh, ownership-checked polling, never a
+          // replay of a claimed delivery or a retry of a send/receipt.
+          if (isPollDue && !isClosed) { isPollDue = false; void poll() }
+        }
       }
       const timer = setInterval(() => { void poll() }, 2000)
       void poll()

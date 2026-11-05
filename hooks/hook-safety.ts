@@ -13,7 +13,7 @@ export const HOOK_WORKER_GRACE = 500
 // A worker that starts after its host's stop line still reads its input this long, then queues it.
 export const HOOK_LATE_INPUT_GRACE = 500
 export const HOOK_TIMEOUTS: Record<string, { timeout: number; events?: Record<string, number> }> = {
-  codex: { timeout: 3000, events: { Stop: 10000 } },
+  codex: { timeout: 3000, events: { Stop: 10000, UserPromptSubmit: 10000 } },
   cursor: { timeout: 3000 },
   gemini: { timeout: 5000 },
   grok: { timeout: 5000, events: { Stop: 10000 } },

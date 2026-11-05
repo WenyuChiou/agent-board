@@ -55,6 +55,27 @@ const success = result => {
   assert.equal(result.signal, null)
   assert.equal(result.status, 0, result.stderr)
 }
+
+test('the launcher falls back to the system language before setup', () => fixture(f => {
+  const env = { LANG: '', NODE_OPTIONS: `--require ${JSON.stringify(join(repo, 'tests/fixtures/system-lang-zh-tw.cjs'))}` }
+  const help = f.run(repo, ['--help'], env)
+  success(help)
+  assert.match(help.stdout, /給程式 agent 用的本機看板/)
+  assert.doesNotMatch(help.stdout, /a local board for coding agents/)
+  const missing = f.run(repo, [], env)
+  assert.equal(missing.status, 1, missing.stderr)
+  assert.match(missing.stderr, /這個帳號還沒設定 Agent Board/)
+  assert.doesNotMatch(missing.stderr, /not set up for this account/)
+}))
+
+test('every Quick start says how to choose the language', () => {
+  for (const [file, heading, language] of [['README.md', 'Quick start', 'en'], ['README.zh-TW.md', '快速開始', 'zh-TW'], ['README.zh-CN.md', '快速开始', 'zh-CN']]) {
+    const section = readFileSync(join(repo, file), 'utf8').split(`## ${heading}`)[1]?.split('\n## ')[0]
+    assert.ok(section, `${file} has its Quick start section`)
+    assert.ok(section.includes(`--lang ${language}`), `${file} explains its language flag`)
+  }
+})
+
 let packedResult
 const pack = () => {
   if (!packedResult) {

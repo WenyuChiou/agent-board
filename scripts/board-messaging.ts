@@ -354,6 +354,10 @@ export const createMessaging = (directory: string, isDefault = false) => {
 
 export const hookMailbox = (directory: string, budget: number) => {
   const root = resolve(directory)
+  let hasDeferred = false
+  // A claim Windows would not let go of is still this hook's own, checked again before every write.
+  // The next call reuses it, so the accept for a message already handed out is not refused by it.
+  let held: MessageStoreClaim | null = null
   const livePid = (): number | null => {
     try {
       const raw = readFileSync(join(root, 'server.lock'), 'utf8')
@@ -370,11 +374,15 @@ export const hookMailbox = (directory: string, budget: number) => {
     }
   }
   const call = async (action: string, body: Record<string, string>, now: number): Promise<Message | null> => {
+    hasDeferred = false
     const wait = Math.min(150, budget)
     try {
       const started = Date.now()
       const folder = lstatSync(root)
-      if (!folder.isDirectory() || folder.isSymbolicLink() || budget <= 0) return null
+      if (!folder.isDirectory() || folder.isSymbolicLink()) return null
+      // Only a real mailbox can hold a message back; with no folder there is nothing to defer.
+      hasDeferred = true
+      if (budget <= 0) return null
       const pid = livePid()
       if (pid !== null) {
         const owner = JSON.parse(readFileSync(join(root, 'server.owner'), 'utf8')) as { pid: number; url: string }
@@ -387,7 +395,12 @@ export const hookMailbox = (directory: string, budget: number) => {
             res.on('data', chunk => { text += chunk; if (text.length > 32_768) req.destroy() })
             res.on('end', () => {
               clearTimeout(timer)
-              try { done(res.statusCode === 200 ? (JSON.parse(text) as { message?: Message }).message ?? null : null) } catch { done(null) }
+              try {
+                if (res.statusCode !== 200) { done(null); return }
+                const saved = JSON.parse(text) as { message?: Message }
+                hasDeferred = false
+                done(saved.message ?? null)
+              } catch { done(null) }
             })
             res.on('error', () => { clearTimeout(timer); done(null) })
           })
@@ -396,10 +409,14 @@ export const hookMailbox = (directory: string, budget: number) => {
           req.end(JSON.stringify(action === 'mailbox-turn' ? { ...body, before: started + wait } : body))
         })
       }
-      const claim = claimMessageStore(root)
+      // A kept claim that is no longer on disk is gone, and a fresh one is taken.
+      const kept = held
+      held = null
+      const claim = kept !== null && (() => { try { kept.check(root); return true } catch { return false } })() ? kept : claimMessageStore(root)
       const file = join(root, 'messages.json'), temp = `${file}.${process.pid}.tmp`
       try {
-        if (Date.now() - started > Math.min(120, budget) || livePid() !== null) return null
+        // An accept acknowledges output already written, so a slow claim must not discard it.
+        if (action !== 'mailbox-accept' && Date.now() - started > Math.min(120, budget) || livePid() !== null) return null
         if (existsSync(file) && (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink())) return null
         let state = existsSync(file) ? parseMessageStore(readFileSync(file, 'utf8'), now) : { messages: [] }
         let message: Message | null = null
@@ -412,14 +429,17 @@ export const hookMailbox = (directory: string, budget: number) => {
         claim.check(root)
         writeFileSync(temp, JSON.stringify({ version: 2, ...pruneMessages(state, now) }), { flag: 'wx', mode: 0o600 })
         replaceFile(temp, file)
+        hasDeferred = false
         return message
       } finally {
         try { unlinkSync(temp) } catch {}
-        claim.release()
+        // Cleanup cannot take back a saved delivery that the host still needs to read.
+        try { claim.release() } catch { held = claim }
       }
     } catch { return null }
   }
   return {
+    get hasDeferred() { return hasDeferred },
     turn: (agent: string, session: string, surface: string, now: number) => call('mailbox-turn', { agent, session, surface }, now),
     accept: (agent: string, session: string, id: string, nonce: string, now: number) => call('mailbox-accept', { agent, session, id, nonce }, now),
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
