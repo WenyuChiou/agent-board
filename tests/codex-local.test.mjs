@@ -4203,22 +4203,25 @@ test('--codex-trust prints one plain line by default and the JSON only with --js
   try {
     const { codexTrustOutput } = await import('../scripts/codex-local.ts')
     const { STRINGS } = await import('../hooks/strings.ts')
+    // The step names config.toml under ~, the way the setup preview names its files (#812).
+    const home = resolve('synthetic home')
+    const shown = join('~', '.codex', 'config.toml')
     const examples = [
-      [{ changes: 6, applied: false }, STRINGS.en, "Codex: would trust the board's 6 hooks. Run the same command again with --apply."],
-      [{ changes: 6, applied: true }, STRINGS.en, "Codex: trusted the board's 6 hooks. Start a new Codex session."],
+      [{ changes: 6, applied: false }, STRINGS.en, `Codex: would trust the board's 6 hooks by writing their [hooks.state] entries in ${shown}. Run the same command again with --apply.`],
+      [{ changes: 6, applied: true }, STRINGS.en, `Codex: trusted the board's 6 hooks; their [hooks.state] entries are in ${shown}. Start a new Codex session.`],
       [{ changes: 0, applied: false }, STRINGS.en, "Codex: the board's hooks are already trusted. Start a new Codex session."],
       [{ changes: 0, applied: true }, STRINGS.en, "Codex: the board's hooks are already trusted. Start a new Codex session."],
-      [{ changes: 6, applied: false }, STRINGS['zh-TW'], 'Codex：將信任看板的 6 個 hooks。加上 --apply 再執行同一命令。'],
-      [{ changes: 6, applied: true }, STRINGS['zh-TW'], 'Codex：已信任看板的 6 個 hooks。開始新的 Codex 工作階段。'],
+      [{ changes: 6, applied: false }, STRINGS['zh-TW'], `Codex：將信任看板的 6 個 hooks，在 ${shown} 寫入它們的 [hooks.state] 信任項。加上 --apply 再執行同一命令。`],
+      [{ changes: 6, applied: true }, STRINGS['zh-TW'], `Codex：已信任看板的 6 個 hooks，它們的 [hooks.state] 信任項在 ${shown}。開始新的 Codex 工作階段。`],
       [{ changes: 0, applied: false }, STRINGS['zh-TW'], 'Codex：看板的 hooks 已受信任。開始新的 Codex 工作階段。'],
-      [{ changes: 6, applied: false }, STRINGS['zh-CN'], 'Codex：将信任看板的 6 个 hooks。加上 --apply 再运行同一命令。'],
-      [{ changes: 6, applied: true }, STRINGS['zh-CN'], 'Codex：已信任看板的 6 个 hooks。开始新的 Codex 会话。'],
+      [{ changes: 6, applied: false }, STRINGS['zh-CN'], `Codex：将信任看板的 6 个 hooks，在 ${shown} 中写入它们的 [hooks.state] 信任项。加上 --apply 再运行同一命令。`],
+      [{ changes: 6, applied: true }, STRINGS['zh-CN'], `Codex：已信任看板的 6 个 hooks，它们的 [hooks.state] 信任项在 ${shown} 中。开始新的 Codex 会话。`],
       [{ changes: 0, applied: false }, STRINGS['zh-CN'], 'Codex：看板的 hooks 已受信任。开始新的 Codex 会话。'],
     ]
     for (const [result, strings, expected] of examples) {
-      const output = codexTrustOutput(result, strings, false)
+      const output = codexTrustOutput({ ...result, file: join(home, '.codex', 'config.toml') }, strings, false, home)
       assert.equal(output, `${expected}\n`)
-      assert.doesNotMatch(output.slice(0, -1), /[\r\n{\\/]|sha256:/)
+      assert.doesNotMatch(output.slice(0, -1).replace(shown, ''), /[\r\n{\\/]|sha256:/)
     }
     const result = { file: 'synthetic/config.toml', hooks: [{ hash: 'sha256:synthetic' }], changes: 6, applied: false }
     const json = codexTrustOutput(result, STRINGS.en, true)
@@ -4295,6 +4298,56 @@ rl.on('line', line => {
 `
   return { stateFile, mockServerScript }
 }
+
+test('the Codex trust preview names the config.toml it would change and changes nothing, in every language', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const { stateFile, mockServerScript } = mockCodexServer(f)
+  const executable = join(f.home, 'bin', 'codex-mock.js')
+  f.save(executable, mockServerScript)
+  writeFileSync(stateFile, JSON.stringify({ trusted: false }))
+  const config = join(f.home, '.codex', 'config.toml')
+  f.save(config, '# synthetic user settings\n')
+  const shown = join('~', '.codex', 'config.toml')
+  for (const [lang, words] of [['en', `by writing their [hooks.state] entries in ${shown}.`], ['zh-TW', `在 ${shown} 寫入它們的 [hooks.state] 信任項`], ['zh-CN', `在 ${shown} 中写入它们的 [hooks.state] 信任项`]]) {
+    const preview = f.command(['--codex-trust', '--codex-bin', executable, '--lang', lang])
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.ok(preview.stdout.includes(words), preview.stdout)
+    assert.equal(readFileSync(config, 'utf8'), '# synthetic user settings\n')
+  }
+}))
+
+test('a repeat setup preview after the hooks are trusted does not ask to trust them again', { skip: process.platform === 'win32' && 'setup finds Codex on the PATH only as a native .exe or an npm shim on Windows' }, () => fixture(f => {
+  assert.equal(setupAgent(f, '--lang', 'en', '--agent', 'codex', '--apply').status, 0)
+  const bin = join(f.home, 'bin')
+  mkdirSync(bin, { recursive: true })
+  const { stateFile, mockServerScript } = mockCodexServer(f)
+  writeFileSync(join(bin, 'codex'), mockServerScript, { mode: 0o755 })
+  const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  f.env[pathKey] = [bin, f.env[pathKey]].filter(Boolean).join(delimiter)
+  const trusted = setupAgent(f, '--lang', 'en', '--agent', 'codex')
+  assert.equal(trusted.status, 0, trusted.stderr)
+  assert.match(trusted.stdout, /^Codex: already set up/m)
+  assert.doesNotMatch(trusted.stdout, /--codex-trust/)
+  assert.match(trusted.stdout, /--serve/)
+  // Codex saying no keeps the step.
+  writeFileSync(stateFile, JSON.stringify({ trusted: false }))
+  const untrusted = setupAgent(f, '--lang', 'en', '--agent', 'codex')
+  assert.equal(untrusted.status, 0, untrusted.stderr)
+  assert.match(untrusted.stdout, /--codex-trust/)
+}))
+
+test('a repeat setup preview keeps the trust step when Codex cannot be asked', () => fixture(f => {
+  assert.equal(setupAgent(f, '--lang', 'en', '--agent', 'codex', '--apply').status, 0)
+  const bin = join(f.home, 'synthetic bin')
+  mkdirSync(bin)
+  writeFileSync(join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex'), 'synthetic Codex', { mode: 0o755 })
+  const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  f.env[pathKey] = [bin, f.env[pathKey]].filter(Boolean).join(delimiter)
+  const result = setupAgent(f, '--lang', 'en', '--agent', 'codex')
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /^Codex: already set up/m)
+  assert.match(result.stdout, /--codex-trust/)
+}))
 
 test('a doctor that reached Codex prints a trust step that runs', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
