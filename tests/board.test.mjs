@@ -9333,6 +9333,38 @@ test('an agent whose only session ended in the last 30 minutes shows as offline'
   }
 })
 
+const claudeChip = async (state, minutesAgo) => {
+  const runtime = await sourceBoard()
+  const at = new Date(groupedNow - minutesAgo * 60_000).toISOString()
+  const source = `## Synthetic project\n<!-- auto session=aaaa1111 agent=claude state=${state} updated=${at} -->\n### Synthetic Claude task\n- [x] First step\n- [ ] Second step\n<!-- /auto session=aaaa1111 -->\n`
+  const options = { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null } }
+  const model = runtime.serveModel(runtime.buildView(runtime.parseProgress(source), [], null, groupedNow, 0, {}, EN), [], EN, new Set(), false, undefined, false, options)
+  const dom = await pageDom(runtime.servePage(EN, 'synthetic', false), model, { width: 1280 })
+  return { model, chip: rowAgent(dom, 'claude'), side: sideAgent(dom, 'claude') }
+}
+
+test('a Claude Code block that recorded state=ended shows its chip as offline, the way a Codex chip does', async () => {
+  for (const minutesAgo of [1, 45]) {
+    const { model, chip, side } = await claudeChip('ended', minutesAgo)
+    assert.ok([...model.stopped, ...model.idle, ...model.groups.flatMap(group => group.rows)].some(row => row.isClosed === true), JSON.stringify(model.stopped))
+    for (const node of [chip, side]) {
+      assert.equal(node.getAttribute('data-presence'), 'offline', `${minutesAgo} minutes after the end`)
+      assert.ok(node.getAttribute('aria-label').includes(EN.pgOffline), node.getAttribute('aria-label'))
+    }
+  }
+})
+
+test('a Claude Code block that is only quiet is not shown as offline', async () => {
+  const { model, chip, side } = await claudeChip('waiting', 45)
+  assert.ok(![...model.stopped, ...model.idle, ...model.groups.flatMap(group => group.rows)].some(row => row.isClosed === true))
+  for (const node of [chip, side]) assert.notEqual(node.getAttribute('data-presence'), 'offline')
+})
+
+test('a Claude Code block that is working keeps its chip open', async () => {
+  const { chip, side } = await claudeChip('working', 1)
+  for (const node of [chip, side]) assert.equal(node.getAttribute('data-presence'), 'open')
+})
+
 test('an agent with a recently finished task and no closed session shows as open', async () => {
   const base = redesignModel()
   base.asks = []
