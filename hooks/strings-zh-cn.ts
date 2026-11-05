@@ -500,10 +500,10 @@ export const ZH_CN: Strings = {
   nextStepLine: (text: string): string => `○ 下一步：${text}`,
   foldSteps: '▾ 收起步骤',
   allSteps: (n: number): string => `▸ 全部 ${n} 步`,
-  noTaskTools: '这个对话没有 Task 工具，进度不会自动同步。',
+  noTaskTools: '这个对话没有 Task 工具；工作回合结束时会自动摘要进度。',
   noTaskToolsHow:
-    '从终端打开的 claude：把 CLAUDE_CODE_ENABLE_TODO_TOOLS=1 加进 shell 的 profile（PowerShell 是 $PROFILE，重跑 setup 脚本就会加），开新窗口再启动就会同步。别放 settings.json，那里的 env 也会进桌面 app。',
-  noTaskToolsManual: '桌面 app、git-bash 这类没有它的对话，照常手动记在 progress.md。',
+    '若想逐步同步 Task 列表，可把 CLAUDE_CODE_ENABLE_TODO_TOOLS=1 加进 shell 的 profile（PowerShell 是 $PROFILE），开新窗口再启动。',
+  noTaskToolsManual: '桌面 app、git-bash 的工作回合也会自动摘要，不必手动记在 progress.md。',
   empty: '目前没有进行中的工作。',
   emptyHow: 'Claude 用 Task 清单开工后，这里会自动出现；也可以在下面输入“+ 项目：要做的事”自己加。',
   sectionWaiting: '等你处理',
