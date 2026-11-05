@@ -192,7 +192,9 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
 }
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string): { state: MessageState; messages: Message[] } => {
   if (target.contested || target.expires <= now) return { state, messages: [] }
-  const busy = state.messages.some(one => one.to === address(target.agent, target.session) && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isLapsed(one, now))
+  // A lapsed claim stops blocking only the binding that takes it again; any other still waits behind it.
+  const isRetaken = (one: Message): boolean => isLapsed(one, now) && one.target === target.id && one.turn === target.turn
+  const busy = state.messages.some(one => one.to === address(target.agent, target.session) && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isRetaken(one))
   const messages = busy ? [] : state.messages.filter(one => one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))).slice(0, 1)
   if (messages.length === 0) return { state, messages }
   // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.

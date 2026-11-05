@@ -110,6 +110,10 @@ test('a mailbox message a hook claimed but never accepted is handed out again af
   assert.doesNotMatch(deliveryText(taken.message), /Sent again/)
   // Inside the lease the session waits, and the message behind it does too.
   assert.equal(take(now + MAILBOX_LEASE_MS - 1, '111111').message, null)
+  // A live poller of the same session cannot take the lapsed claim, so it keeps waiting behind it.
+  const live = { id: 'live1', agent: 'codex', session: 'mailbox-session', surface: 'CLI', turn: 'turn1', expires: now + 10 * MAILBOX_LEASE_MS }
+  const withLive = queueMessage(state, { id: 'live-behind', target: live.id, turn: live.turn, text: 'live' }, 'gemini:live-sender', live, now).state
+  assert.deepEqual(claimMessages(withLive, live, now + MAILBOX_LEASE_MS, '666666').messages, [])
   for (let round = 1; round <= MAILBOX_REDELIVERIES; round++) {
     taken = take(now + round * MAILBOX_LEASE_MS, '222222')
     state = taken.state
