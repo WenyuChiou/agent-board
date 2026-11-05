@@ -700,7 +700,8 @@ test('PATH isolation preserves Node beside Codex without exposing Codex', () => 
     for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
     env.PATH = withoutCodexOnPath(shared, f.home)
     assert.equal(withoutCodexOnPath(shared, f.home), env.PATH, 'repeated isolation keeps the same fixture runtime')
-    const node = await nativeProcess('node', ['--version'], env, '', callback => setTimeout(callback, 5000), stopNativeTree, { cwd: f.home })
+    // `node --version` never reads its input and can exit before an empty write reaches it (EPIPE).
+    const node = await nativeProcess('node', ['--version'], env, '', callback => setTimeout(callback, 5000), stopNativeTree, { cwd: f.home, inputFd: 'ignore' })
     assert.equal(node.error, undefined, 'the preserved runtime launches without a process error')
     assert.equal(node.status, 0, `isolated Node failed: ${node.error?.code ?? 'none'}`)
     assert.equal(node.stdout.trim(), process.version)
