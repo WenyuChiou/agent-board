@@ -2103,8 +2103,8 @@ const PAGE_SCRIPT = String.raw`
     shell.setAttribute('data-view', name);
     VIEWS.forEach(function (one) { document.getElementById('view-' + one).setAttribute('aria-pressed', String(one === name)); });
     if (name === 'done' && pg.openShelf.done) pg.openShelf.done(true);
-    // A view picks a section; it leaves the agent and project filters as they were (#809).
-    layout();
+    // A view picks a section; it leaves the agent and project filters as they were (#809). Before the first draw there is nothing to lay out.
+    if (pg.sections) layout();
     enter(board);
     if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
   }
