@@ -14,6 +14,7 @@ export type CodexReport = Origin & {
   session: string
   folder?: string
   folderDigest?: string
+  folderCanonicalDigest?: string
   turn: string | null
   state: 'working' | 'waiting' | 'done' | 'ended'
   title: string
