@@ -4454,6 +4454,7 @@ export const register: Register = (on, options) => {
       resolveResult: await read($, resolveResult),
       path: snap.path,
       width: Math.max(8, Math.min(28, e.props.bodyColumns - 4)),
+      bodyColumns: e.props.bodyColumns,
       hasTaskTools: await read($, hasTaskTools),
       hasPendingQuestionsProblem: await read($, hasPendingQuestionsProblem),
       isNotifyOn: await read($, isNotifyOn),
