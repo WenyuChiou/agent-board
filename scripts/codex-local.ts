@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, planReport, putCodexBlock, sessionTitle } from '../hooks/codex'
@@ -252,9 +252,12 @@ const quote = (path: string): string => {
 export const localProgressPath = (explicit: string | undefined, fallback: string, stored?: unknown): string =>
   resolve(explicit ?? (process.env.CLAUDE_PROGRESS_FILE || (typeof stored === 'string' ? stored : fallback)))
 
-export const codexTrustOutput = (result: { changes: number; applied: boolean }, s: Strings, isJson: boolean): string => {
+// The trust step names the config.toml it writes, the way the setup preview names its files (#812).
+export const codexTrustOutput = (result: { changes: number; applied: boolean; file?: string }, s: Strings, isJson: boolean, home?: string): string => {
   if (isJson) return `${JSON.stringify(result, null, 2)}\n`
-  const line = result.changes === 0 ? s.codexTrustNone : result.applied ? s.codexTrustApplied(result.changes) : s.codexTrustPreview(result.changes)
+  const inHome = home === undefined || result.file === undefined ? '' : relative(resolve(home), result.file)
+  const file = inHome !== '' && inHome !== '..' && !inHome.startsWith(`..${sep}`) && !isAbsolute(inHome) ? join('~', inHome) : result.file ?? 'config.toml'
+  const line = result.changes === 0 ? s.codexTrustNone : result.applied ? s.codexTrustApplied(result.changes, file) : s.codexTrustPreview(result.changes, file)
   return `${line}\n`
 }
 
@@ -1242,7 +1245,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const executable = flag('--codex-bin')
     if (!executable) throw new Error('CODEX_BINARY_REQUIRED')
     const result = await trustCodex(executable, config, manifest.groups, args.includes('--apply'))
-    process.stdout.write(codexTrustOutput(result, s, args.includes('--json')))
+    process.stdout.write(codexTrustOutput(result, s, args.includes('--json'), home))
     return true
   }
   if (mode === '--codex-doctor') {

@@ -288,6 +288,15 @@ const main = () => {
   })
   if (hasClaude) lines.push(`Claude Code: ${words('claude')}`)
   const steps = []
+  const isTrusted = (plan, codex) => {
+    const own = []
+    for (let i = 0; i < common.length; i++) {
+      if (common[i] === '--agent') i++
+      else own.push(common[i])
+    }
+    const doctor = spawnSync(process.execPath, [plan.script ?? join(plan.data, 'agent-board.mjs'), '--codex-doctor', '--json', ...own, '--agent', 'codex', '--codex-bin', codex], { encoding: 'utf8', windowsHide: true })
+    try { return doctor.status === 0 && JSON.parse(doctor.stdout).hooksTrusted === true } catch { return false }
+  }
   const boardPlan = available.length ? results[selected.indexOf(available[0])] : null
   const boardCommand = boardPlan ? nodeCommand(boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs')) : ''
   if (!apply && available.some(agent => plans[selected.indexOf(agent)].changes.length)) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
@@ -296,6 +305,9 @@ const main = () => {
     if (plan.managedBy === 'connector') continue
     // Narrower than detection: this path goes to --codex-bin, which cannot start a .bat or .com.
     const codex = agent === 'codex' ? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
+    // A repeat run of an unchanged install asks Codex itself whether the board's hooks are trusted,
+    // and leaves out the trust step only on its yes; no answer or any other answer keeps it (#808).
+    if (codex && !plan.changes.length && isTrusted(plan, codex)) continue
     steps.push(words(agent === 'codex' ? codex ? 'codex' : 'codexMissing' : plan.capabilities.lifecycle === 'adapter-pending' ? 'skill' : 'reload', { host: names[agent], command: boardCommand, codex: codex ? quote(codex) : '' }))
   }
   for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
