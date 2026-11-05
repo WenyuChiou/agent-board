@@ -2067,12 +2067,11 @@ const PAGE_SCRIPT = String.raw`
   }
   // Next to an empty list while a filter is on: a filter kept from an earlier visit is plain to see and one press clears it (#809).
   function clearFiltersButton() {
-    var node = navButton(w('clearFilters'), function () {
+    // Local, so it works without the server, but not a navigation button: those are the sheet's own See all and Show all.
+    return button(w('clearFilters'), function () {
       pg.project = '';
       setFilter('');
-    });
-    node.className = 'btn';
-    return node;
+    }, 'btn', true, true);
   }
   function setProject(name) {
     pg.project = pg.project === name ? '' : name;
