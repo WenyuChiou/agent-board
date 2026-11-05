@@ -399,6 +399,193 @@ const fixture = async fn => {
   finally { if (isSafeToRemove) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 
+const tree774 = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+  const file = join(dir, entry.name)
+  return entry.isDirectory() ? [file, ...tree774(file)] : [file]
+}).sort()
+const trustKey774 = (f, event, index = 0) => `${resolve(f.hooks)}:${event.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()}:${index}:0`
+const trustTable774 = key => `\n[hooks.state.'${key}']\ntrusted_hash = "sha256:synthetic"\n`
+const remove774 = (f, agent, apply = true) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-remove', '--agent', agent, '--json', ...(apply ? ['--apply'] : [])], { cwd: f.home, env: { ...f.env, XDG_RUNTIME_DIR: join(f.home, 'runtime') }, encoding: 'utf8', windowsHide: true })
+
+for (const order of [['codex', 'cursor'], ['cursor', 'codex']]) test(`#774 removal in ${order.join(' then ')} order keeps exactly history and user trust`, () => fixture(f => {
+  const toml = join(f.home, '.codex', 'config.toml')
+  const original = '# User settings\nmodel = "synthetic"\n'
+  f.save(toml, original)
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const groups = JSON.parse(readFileSync(join(f.root, 'install-codex.json'), 'utf8')).groups
+  const foreign = '\n[hooks.state."foreign"]\ntrusted_hash = "foreign"\n\n[hooks.state.unrelated]\nenabled = true\n'
+  f.save(toml, original + '\n[hooks.state]\n' + Object.keys(groups).map(event => trustTable774(trustKey774(f, event))).join('') + foreign)
+  const kept = ['progress.md', 'progress-archive-2026-11.md', 'progress-journal-2026-11.md', 'sessions/synthetic.json', 'hook-errors.log', 'progress-answered.json', 'progress-questions.json', 'progress-questions-source-synthetic.json', 'progress-seen.json', 'progress-run-cursor.txt', 'progress-page-state.json', 'progress-page-state-done-synthetic.json', 'progress-inbox/synthetic.json']
+  for (const name of kept) f.save(join(f.root, name), name === 'progress.md' ? '' : 'synthetic history')
+  const runtime = join(f.home, '.cache', 'agent-board')
+  mkdirSync(join(runtime, 'synthetic-messages'), { recursive: true })
+  for (const agent of order) {
+    const result = remove774(f, agent)
+    assert.equal(result.status, 0, result.stderr)
+  }
+  assert.equal(readFileSync(toml, 'utf8'), original + '\n[hooks.state]\n' + foreign)
+  const files = [toml, ...kept.map(name => join(f.root, name))]
+  const expected = new Set(files)
+  for (const file of files) for (let folder = dirname(file); folder !== f.home; folder = dirname(folder)) expected.add(folder)
+  // PATH isolation may supply the fixture's runtime before setup starts.
+  if (existsSync(join(f.home, '.test-node-runtime'))) for (const file of [join(f.home, '.test-node-runtime'), ...tree774(join(f.home, '.test-node-runtime'))]) expected.add(file)
+  expected.add(join(f.home, '.cache'))
+  assert.deepEqual(tree774(f.home), [...expected].sort())
+}))
+
+test('#774 existing hooks, existing skill parents and user files survive', () => fixture(f => {
+  f.save(f.hooks, '{"hooks": {}}')
+  mkdirSync(dirname(dirname(f.skill)), { recursive: true })
+  assert.equal(f.install('--apply').status, 0)
+  f.save(join(dirname(f.skill), 'user.txt'), 'mine')
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')), { hooks: {} })
+  assert.equal(readFileSync(join(dirname(f.skill), 'user.txt'), 'utf8'), 'mine')
+  assert.ok(existsSync(dirname(dirname(f.skill))))
+}))
+
+test('#774 legacy manifest keeps hooks and skill parents but removes the owned skill folder', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const file = join(f.root, 'install-codex.json')
+  const manifest = JSON.parse(readFileSync(file, 'utf8'))
+  delete manifest.createdConfig
+  delete manifest.createdDirs
+  f.save(file, JSON.stringify(manifest))
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')), { hooks: {} })
+  assert.equal(existsSync(dirname(f.skill)), false)
+  assert.equal(existsSync(dirname(dirname(f.skill))), true)
+}))
+
+test('#774 setup is byte idempotent and removal preview writes nothing', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const files = tree774(f.home).filter(file => statSync(file).isFile())
+  const before = files.map(file => [file, readFileSync(file)])
+  const result = f.install('--apply')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout).changes, [])
+  assert.equal(remove774(f, 'codex', false).status, 0)
+  assert.deepEqual(tree774(f.home).filter(file => statSync(file).isFile()), files)
+  for (const [file, text] of before) assert.deepEqual(readFileSync(file), text)
+}))
+
+test('#774 foreign hooks keep their trust and board trust uses the actual group index', () => fixture(f => {
+  const foreign = { hooks: [{ type: 'command', command: 'synthetic-user-hook' }] }
+  f.save(f.hooks, JSON.stringify({ hooks: { SessionStart: [foreign] } }))
+  assert.equal(f.install('--apply').status, 0)
+  const toml = join(f.home, '.codex', 'config.toml')
+  const retained = '# user\n' + trustTable774(trustKey774(f, 'SessionStart'))
+  f.save(toml, retained + trustTable774(trustKey774(f, 'SessionStart', 1)))
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.equal(readFileSync(toml, 'utf8'), retained)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')), { hooks: { SessionStart: [foreign] } })
+}))
+
+test('#774 trust removal preserves TOML bytes and unrecognized table content', async () => {
+  const { removeCodexTrustEntries: clean } = await importTs('../scripts/codex-local.ts')
+  const key = 'C:\\synthetic\\hooks.json:session_start:0:0'
+  const original = '# user\r\nmodel = "synthetic"\r\n'
+  const basic = JSON.stringify(key)
+  const appended = `\r\n[hooks.state]\r\n\r\n[hooks.state.${basic}]\r\ntrusted_hash = "synthetic"\r\nenabled = true\r\n`
+  assert.deepEqual(clean(original + appended, [key]), { text: original, removed: 1 })
+  assert.equal(clean(original + trustTable774(key), [key]).text, original)
+  const comment = trustTable774(key) + '# user comment\n'
+  assert.deepEqual(clean(comment, [key]), { text: comment, removed: 0 })
+  const extra = trustTable774(key) + 'user_key = true\n'
+  assert.equal(clean(extra, [key]).text, extra)
+  const foreign = trustTable774('foreign')
+  assert.equal(clean(foreign, [key]).text, foreign)
+  const noMatch = '[hooks.state]\n\n' + foreign
+  assert.deepEqual(clean(noMatch, [key]), { text: noMatch, removed: 0 })
+  const other = '[hooks.state]\nenabled = true\n'
+  assert.equal(clean(other + trustTable774(key), [key]).text, other)
+  const quoteKey = 'synthetic"hooks.json:session_start:0:0'
+  assert.equal(clean(`\n[hooks.state.${JSON.stringify(quoteKey)}]\ntrusted_hash = "synthetic"\n`, [quoteKey]).text, '')
+  const changedCase = trustTable774(key.toUpperCase())
+  assert.equal(clean(changedCase, [key]).removed, process.platform === 'win32' ? 1 : 0)
+})
+
+for (const agent of ['codex', 'cursor', 'gemini', 'grok', 'muse', 'antigravity']) test(`#774 ${agent} removes its newly created empty config and folders`, () => fixture(f => {
+  const installed = f.install('--agent', agent, '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const manifest = JSON.parse(readFileSync(join(f.root, `install-${agent}.json`), 'utf8'))
+  assert.equal(manifest.createdConfig, true)
+  const removed = remove774(f, agent)
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(manifest.config), false)
+  for (const folder of manifest.createdDirs) {
+    if (folder === f.root) continue
+    assert.equal(existsSync(folder), false, folder)
+  }
+}))
+
+test('#774 removing the creator transfers shared directory ownership without a repair', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const runtime = join(f.home, '.cache', 'agent-board')
+  mkdirSync(runtime, { recursive: true })
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.equal(existsSync(runtime), true)
+  const file = join(f.root, 'install-cursor.json')
+  const before = readFileSync(file, 'utf8')
+  assert.ok(JSON.parse(before).createdDirs.includes(dirname(f.skill)))
+  const preview = f.install('--agent', 'cursor')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.deepEqual(JSON.parse(preview.stdout).changes, [])
+  assert.equal(readFileSync(file, 'utf8'), before)
+  assert.equal(remove774(f, 'cursor').status, 0)
+  assert.equal(existsSync(dirname(dirname(f.skill))), false)
+  assert.equal(existsSync(runtime), false)
+}))
+
+test('#774 a legacy install rerun leaves the manifest bytes unchanged', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const file = join(f.root, 'install-codex.json')
+  const manifest = JSON.parse(readFileSync(file, 'utf8'))
+  delete manifest.createdConfig
+  delete manifest.createdDirs
+  const before = `${JSON.stringify(manifest, null, 2)}\n`
+  f.save(file, before)
+  const result = f.install('--apply')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout).changes, [])
+  assert.equal(readFileSync(file, 'utf8'), before)
+}))
+
+test('#774 removal clears the board root when progress is stored elsewhere', () => fixture(f => {
+  const progress = join(f.home, 'history', 'progress.md')
+  const result = f.install('--progress-file', progress, '--apply')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.equal(existsSync(f.root), false)
+  assert.equal(readFileSync(progress, 'utf8'), '')
+  assert.equal(existsSync(dirname(f.skill)), false)
+}))
+
+test('#774 runtime cleanup removes only empty folders and keeps message history', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const runtime = join(f.home, 'runtime', 'agent-board')
+  const empty = join(runtime, 'empty-messages')
+  const occupied = join(runtime, 'history-messages')
+  mkdirSync(empty, { recursive: true })
+  f.save(join(occupied, 'messages.json'), 'synthetic message history')
+  const result = remove774(f, 'codex')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(empty), false)
+  assert.equal(readFileSync(join(occupied, 'messages.json'), 'utf8'), 'synthetic message history')
+  assert.equal(existsSync(runtime), true)
+}))
+
+test('#774 an unreadable trust file stays without a trust plan change', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const toml = join(f.home, '.codex', 'config.toml')
+  mkdirSync(toml)
+  const result = remove774(f, 'codex')
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(!JSON.parse(result.stdout).changes.some(change => change.file === toml))
+  assert.equal(statSync(toml).isDirectory(), true)
+}))
+
 test('PATH isolation preserves Node beside Codex without exposing Codex', () => fixture(async f => {
   const shared = join(f.home, 'shared tools')
   mkdirSync(shared)
@@ -1022,12 +1209,12 @@ test('setup on Windows counts every command spelling and not a bare name', { ski
   assert.deepEqual(targetsWith('gemini'), [])
 }))
 
-test('a removed Antigravity is not listed again although its emptied hooks file stays', () => fixture(f => {
+test('a removed Antigravity is not listed again once its emptied hooks file is gone', () => fixture(f => {
   const applied = setupAgent(f, '--lang', 'en', '--agent', 'antigravity', '--apply')
   assert.equal(applied.status, 0, applied.stderr)
   const removed = spawnSync(process.execPath, [join(f.root, 'agent-board.mjs'), '--home', f.home, '--codex-remove', '--agent', 'antigravity', '--apply'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
   assert.equal(removed.status, 0, removed.stderr)
-  assert.equal(existsSync(join(f.home, '.gemini', 'config', 'hooks.json')), true)
+  assert.equal(existsSync(join(f.home, '.gemini', 'config', 'hooks.json')), false)
   const result = setupAgent(f, '--lang', 'en')
   assert.equal(result.status, 0, result.stderr)
   assert.doesNotMatch(result.stdout, /^Antigravity:/m)

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -38,6 +38,42 @@ import { currentPart } from '../hooks/retention'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
+
+// Only Codex's known trust fields establish ownership of a whole table.
+export const removeCodexTrustEntries = (text: string, keys: string[]): { text: string; removed: number } => {
+  const lines = text.match(/[^\n]*\n|[^\n]+$/g) ?? []
+  const normalized = (key: string): string => process.platform === 'win32' ? key.toLowerCase() : key
+  const owned = new Set(keys.map(normalized))
+  const sections: { start: number; end: number; header: string }[] = []
+  for (let index = 0; index < lines.length; index++) {
+    const header = lines[index]!.trim()
+    if (!header.startsWith('[')) continue
+    if (sections.length) sections[sections.length - 1]!.end = index
+    sections.push({ start: index, end: lines.length, header })
+  }
+  const deleted = new Set<number>()
+  let removed = 0
+  const drop = (section: typeof sections[number]): void => {
+    let end = section.end
+    if (end < lines.length && lines[end - 1]!.trim() === '') end--
+    for (let index = section.start; index < end; index++) deleted.add(index)
+    // Codex appends tables with a separating blank line.
+    if (section.start > 0 && lines[section.start - 1]!.trim() === '') deleted.add(section.start - 1)
+  }
+  for (const section of sections) {
+    const match = /^\[hooks\.state\.(?:'([^']*)'|"((?:[^"\\]|\\[\\"])*)")\]$/.exec(section.header)
+    if (!match) continue
+    const key = match[1] ?? match[2]!.replace(/\\([\\"])/g, '$1')
+    if (!owned.has(normalized(key))) continue
+    if (!lines.slice(section.start + 1, section.end).every(line => /^\s*(?:(?:trusted_hash|enabled)\s*=[^\r\n]*)?\s*$/.test(line))) continue
+    drop(section)
+    removed++
+  }
+  if (removed && !sections.some(section => section.header.startsWith('[hooks.state.') && !deleted.has(section.start))) {
+    for (const section of sections) if (section.header === '[hooks.state]' && lines.slice(section.start + 1, section.end).every(line => line.trim() === '')) drop(section)
+  }
+  return { text: lines.filter((_, index) => !deleted.has(index)).join(''), removed }
+}
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
 
@@ -944,6 +980,22 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
   const changes: { file: string; action: string }[] = []
+  const trustConfig = join(resolve(process.env.CODEX_HOME || join(home, '.codex')), 'config.toml')
+  let nextTrust: string | undefined
+  if (remove && agent === 'codex') {
+    const keys = Object.entries(manifest.groups).flatMap(([event, group]) => {
+      const entries = hooks[event]
+      const index = Array.isArray(entries) ? entries.findIndex(entry => isSame(entry, group)) : -1
+      return index < 0 ? [] : [`${resolve(config)}:${event.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()}:${index}:0`]
+    })
+    try {
+      const text = initial(trustConfig)
+      if (text !== null) {
+        const result = removeCodexTrustEntries(text, keys)
+        if (result.text !== text) { nextTrust = result.text; changes.push({ file: trustConfig, action: 'update' }) }
+      }
+    } catch { before.delete(trustConfig) }
+  }
   const keptShared: { file: string; usedBy: string[] }[] = []
   const alreadyGone: string[] = []
   let hasMissingGroup = false
@@ -1096,13 +1148,57 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
   nextConfigText ??= `${JSON.stringify(nextConfig, null, 2)}\n`
   if (hasNativeConfig && (!remove || Object.keys(manifest.groups).length)) {
+    const isEmptyCreatedConfig = loaded.createdConfig === true && (agent === 'antigravity' ? Object.keys(nextConfig).length === 0 : Object.keys(nextHooks).length === 0 && Object.keys(nextConfig).every(key => key === 'hooks' || key === 'version' && agent === 'cursor' && nextConfig[key] === 1 || key === 'schema_version' && agent === 'muse' && nextConfig[key] === 1))
     if (parsedConfig === null) conflicts.push(nativeConfig)
     else if (remove && initial(nativeConfig) === null) alreadyGone.push(nativeConfig)
+    else if (remove && isReadable && isEmptyCreatedConfig) changes.push({ file: nativeConfig, action: 'remove' })
     else if (agent === 'deepseek' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig)) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
   }
   if (!remove && readLocal(progress) === null) { before.set(progress, null); changes.push({ file: progress, action: 'create' }) }
-  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }) }, null, 2)}\n`
+  const createdDirs = new Set(Array.isArray(loaded.createdDirs) ? loaded.createdDirs.filter((value): value is string => typeof value === 'string') : [])
+  const folderKey = (folder: string): string => process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)
+  const isBelow = (folder: string, parent: string): boolean => folderKey(folder).startsWith(`${folderKey(parent)}${process.platform === 'win32' ? '\\' : '/'}`)
+  if (!remove) for (const file of [...changes.filter(change => change.action === 'create').map(change => change.file), ...(initial(manifestFile) === null ? [manifestFile] : [])]) {
+    for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
+  }
+  const createdConfig = config !== '' && (initial(nativeConfig) === null || loaded.createdConfig === true)
+  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
+  const removedDirs = new Set<string>()
+  let handover: { file: string; text: string } | undefined
+  if (remove) {
+    const candidates = new Set([...createdDirs, root])
+    for (const change of changes) if (change.action === 'remove') {
+      for (let folder = dirname(change.file); basename(folder) === 'agent-board' || isBelow(folder, root); folder = dirname(folder)) {
+        candidates.add(folder)
+        if (folder === dirname(folder)) break
+      }
+    }
+    const siblingIndex = otherManifests.findIndex(one => one.files !== undefined)
+    const hasOtherManifest = otherAgents.some(other => initial(join(root, `install-${other}.json`)) !== null)
+    if (!hasOtherManifest) for (const runtime of [join(home, '.cache', 'agent-board'), ...(process.env.XDG_RUNTIME_DIR ? [join(process.env.XDG_RUNTIME_DIR, 'agent-board')] : [])]) {
+      candidates.add(runtime)
+      try { for (const name of readdirSync(runtime)) if (name.endsWith('-messages')) candidates.add(join(runtime, name)) } catch {}
+    }
+    const deletedFiles = new Set(changes.filter(change => change.action === 'remove').map(change => change.file))
+    for (const folder of [...candidates].sort((a, b) => b.split(/[\\/]/).length - a.split(/[\\/]/).length)) {
+      if (folderKey(folder) === folderKey(home) || isBelow(home, folder)) continue
+      try {
+        if (readdirSync(folder).every(name => deletedFiles.has(join(folder, name)) || removedDirs.has(join(folder, name)))) {
+          removedDirs.add(folder)
+          changes.push({ file: folder, action: 'remove' })
+        }
+      } catch {}
+    }
+    if (siblingIndex >= 0) {
+      const sibling = otherManifests[siblingIndex]!
+      const carried = [...createdDirs].filter(folder => !removedDirs.has(folder))
+      if (carried.length) {
+        const dirs = Array.isArray(sibling.createdDirs) ? sibling.createdDirs.filter((value): value is string => typeof value === 'string') : []
+        handover = { file: join(root, `install-${otherAgents[siblingIndex]}.json`), text: `${JSON.stringify({ ...sibling, createdDirs: [...new Set([...dirs, ...carried])].sort() }, null, 2)}\n` }
+      }
+    }
+  }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
     alreadyGone, ...(keptShared.length ? { keptShared } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
@@ -1184,8 +1280,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml.
     for (const change of changes) {
-      if (change.file === manifestFile) continue
-      if (change.file === nativeConfig) atomic(nativeConfig, nextConfigText!)
+      if (change.file === manifestFile || removedDirs.has(change.file)) continue
+      if (change.file === trustConfig && nextTrust !== undefined) atomic(trustConfig, nextTrust)
+      else if (change.file === nativeConfig) {
+        if (change.action === 'remove') unlinkSync(nativeConfig)
+        else atomic(nativeConfig, nextConfigText!)
+      }
       else if (change.file === progress) {
         mkdirSync(dirname(progress), { recursive: true })
         writeFileSync(progress, '', { flag: 'wx', mode: 0o600 })
@@ -1193,6 +1293,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       else atomic(change.file, files[change.file] ?? '')
     }
     if (remove) {
+      if (handover) atomic(handover.file, handover.text)
       if (readLocal(manifestFile) !== null) unlinkSync(manifestFile)
     } else {
       atomic(manifestFile, nextManifest)
@@ -1215,6 +1316,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
   })
+  // A folder that cannot go (something appeared in it, or Windows holds it) stays and is not reported as removed.
+  for (const folder of removedDirs) try { rmdirSync(folder) } catch (error) {
+    if ((error as { code?: string }).code !== 'ENOENT') changes.splice(changes.findIndex(change => change.file === folder), 1)
+  }
   outputPlan({ ...plan, applied: true })
   return true
 }
