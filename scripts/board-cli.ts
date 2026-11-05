@@ -44,7 +44,7 @@ import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire, runQuestionsClosed } from '../hooks/questions'
 import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 import { currentTidyCandidate, previewTidy, tidySelector, type TidyCandidate, type TidyPreview, type TidySelector } from '../hooks/tidy'
@@ -1059,7 +1059,10 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
   const cursor = read(cursorPath).trim()
   const lookupKey = (id: string): string => sha256(`${codexHome}\0${id}`)
   let nextCursor = cursor
+  // The run questions the try that wrote closes; written only once that try's write has landed (#511).
+  let closing: QuestionRecord[] = []
   const count = archiveOut((text, isLast) => {
+    closing = []
     const lines = text.split(/\r?\n/)
     const spans = scanBlocks(lines)
     const runs = new Set<number>()
@@ -1112,9 +1115,24 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
       : takeManualDone(blocks.text, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now), s, isNow)
     const entries = [...blocks.entries, ...manual.entries]
     if (entries.length === 0) return null
+    // A verified run goes without keeping its questions, so they close with its block (#511); the
+    // ledger would otherwise keep them open with no block left to hide them. A try that does not land
+    // (another session's write, a retry) closes none.
+    const ledger = runs.size > 0 ? readQuestions(questionsPath(path)) : null
+    if (ledger !== null) {
+      const projects = parseProgress(text)
+      for (const span of spans) {
+        if (!runs.has(span.start)) continue
+        const tasks = projects.filter(project => project.name === span.project).flatMap(project => project.tasks).filter(task => task.auto?.session === span.session)
+        const task = tasks[0]
+        if (tasks.length !== 1 || task === undefined) continue
+        closing.push(...runQuestionsClosed(ledger, { project: span.project, title: task.title, line: task.line, session: span.session }, task, now))
+      }
+    }
     for (const { span, text: lines } of asking) if (kept.has(span.start)) moved.set(span.session, lines)
     return { text: manual.text, entries }
   }, now)
+  if (count !== null && count > 0) for (const record of closing) keepQuestionCapture(record, 'resolved')
   if (nextCursor !== cursor) rewrite(cursorPath, () => `${nextCursor}\n`)
   return count
 }

@@ -367,6 +367,14 @@ export const resolveQuestion = (ledger: QuestionLedger, id: string, now: number)
     : record),
 })
 
+// The resolved copies of a removed run's open questions (#511): a tidy takes a verified run's block
+// without keeping its questions, so each record the block asked closes with it. Only the block
+// `ref` names counts, so another session's record with the same words stays open.
+export const runQuestionsClosed = (ledger: QuestionLedger, ref: TaskRef, task: ProgressTask | undefined, now: number): QuestionRecord[] => {
+  const ids = new Set(ledger.records.filter(record => record.isUnresolved && isAskedBy(record, ref, task)).map(record => record.id))
+  return [...ids].flatMap(id => resolveQuestion(ledger, id, now).records.filter(record => record.id === id))
+}
+
 export type QuestionCapture = { version: 1; disposition: 'unresolved' | 'resolved' | 'archived'; record: QuestionRecord }
 export const captureJson = (record: QuestionRecord, disposition: QuestionCapture['disposition']): string => `${JSON.stringify({ version: 1, disposition, record })}\n`
 export const capturePath = (path: string, hash: string): string => `${path.replace(/\.md$/i, '')}-questions-source-${hash}.json`
