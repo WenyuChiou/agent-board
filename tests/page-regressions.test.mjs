@@ -406,6 +406,27 @@ test('a silently dropped page-state snapshot keeps its warning until an unchange
   } finally { await f.close() }
 })
 
+test('a page-state snapshot torn after its write keeps its warning until a later poll publishes a valid one', async () => {
+  const initial = { version: 1, inboxDone: {}, store: 4096, pruned: { '2026-11-04': { agent: 2, mirror: 3 } } }
+  const f = await fixture('', { [NAME]: turn('Publish the synthetic build?') }, initial)
+  let isTorn = true
+  try {
+    const production = publisher()
+    const engine = publishingEngine(f, {
+      afterWrite: async file => { if (isTorn && file === pageStatePath(f.path)) writeFileSync(file, '{') },
+    })
+    assert.equal((await production.pendingTurns(engine)).length, 1)
+    assert.equal(readFileSync(pageStatePath(f.path), 'utf8'), '{')
+    assert.match(production.warning(), /PAGE_STATE_NOT_VERIFIED/)
+    isTorn = false
+    assert.equal((await production.pendingTurns(engine)).length, 1)
+    assert.deepEqual(JSON.parse(readFileSync(pageStatePath(f.path), 'utf8')), {
+      version: 1, inboxDone: {}, store: 0, pruned: addPruned({}, { agent: 0, mirror: 0 }, NOW),
+    })
+    assert.equal(production.warning(), undefined)
+  } finally { await f.close() }
+})
+
 test('immutable page acknowledgements validate their contents and sweep only expired receipts', async () => {
   const f = await fixture()
   try {

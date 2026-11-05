@@ -1261,12 +1261,15 @@ const syncPageState = async ($: EngineInterface, done?: Record<string, string>):
       hasLanded = after === before
       return after
     }, (check, after) => {
-      const saved = readPageState(check).inboxDone
+      // A torn or foreign read-back is no successor: readPageState would read it as an empty snapshot.
+      const invalid = { inboxDone: {}, store: 0, pruned: {} }
+      const parsed = readPageState(check, invalid)
+      const saved = parsed.inboxDone
       const times = Object.values(saved).map(stamp => Number(stamp.split(':')[1] ?? 0))
       const oldest = times.length === 2000 ? Math.min(...times) : -Infinity
       // A peer may replace stamps or prune older names at the cap; its own counts
       // still describe a valid successor when every acknowledgement is accounted for.
-      hasLanded = check === after || (check !== before && Object.entries(kept).every(([name, stamp]) => {
+      hasLanded = check === after || (check !== before && parsed !== invalid && Object.entries(kept).every(([name, stamp]) => {
         const time = Number(stamp.split(':')[1] ?? 0)
         return saved[name] !== undefined || at - time >= 3 * 24 * 60 * 60 * 1000 || oldest >= time
       }))
