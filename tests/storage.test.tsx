@@ -412,7 +412,8 @@ for (const bytes of [1048575, 1048576]) {
 }
 
 test('the board says when progress.md and the saved records pass their size limits, and keeps every task', async ($, on) => {
-  const source = `## synthetic-project\n### Synthetic task\n> Context: ${'synthetic '.repeat(60_000)}\n- [?] Synthetic step — Publish the synthetic page, OK?\n`
+  const source = `## synthetic-project\n### Synthetic task\n> Context: ${'synthetic '.repeat(53_000)}\n- [?] Synthetic step — Publish the synthetic page, OK?\n`
+  expect(new TextEncoder().encode(source).length).toBeGreaterThan(512 * 1024)
   const store = `${STORE_DIR}/agent-board_agent-board-0a1b2c3d4e5f.json`
   const world: World = { files: new Map([[FILE, source], [store, 'x'.repeat(1_300_000)]]), mtime: 1, hasTasks: true, store: { lang: 'en', inboxDone: {}, autoConnectOff: true, opened: ['others'] } }
   const clock = engineBeneath(on, world)
@@ -429,8 +430,9 @@ test('the board says when progress.md and the saved records pass their size limi
 
 test("the pane's size warning is one sentence with one Clean up button that archives what is due", async ($, on) => {
   const now = Date.parse('2026-10-16T12:00:00Z')
-  const open = `### Still open\n> Context: ${'synthetic '.repeat(60_000)}\n- [x] Prepared\n- [ ] Next step\n`
+  const open = `### Still open\n> Context: ${'synthetic '.repeat(53_000)}\n- [x] Prepared\n- [ ] Next step\n`
   const source = `## synthetic-project\n### Finished task\n- [x] Finished\n- [-] Cancelled\n${open}`
+  expect(new TextEncoder().encode(open).length).toBeGreaterThan(512 * 1024)
   const seen = seenJson(withSeen({}, parseProgress(source), now - 4 * DAY, {}, false, true))
   const world: World = { files: new Map([[FILE, source], [seenPath(FILE), seen]]), mtime: 1, hasTasks: true, store: { lang: 'en', inboxDone: {}, autoConnectOff: true } }
   const clock = engineBeneath(on, world)
@@ -440,7 +442,7 @@ test("the pane's size warning is one sentence with one Clean up button that arch
   const block = `<!-- auto session=464c0001 agent=codex state=done updated=${new Date(now - 13 * HOUR).toISOString()} -->\n### Finished agent block\n- [x] Finished\n<!-- /auto session=464c0001 -->\n`
   world.files.set(FILE, source + block)
   world.mtime += 1
-  await clock.advance(5000)
+  await clock.advance(2000)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
     const details = [EN.progressLarge(Math.round((source + block).length / 1024), 512), EN.canArchive(1)].join(' · ')
@@ -462,7 +464,7 @@ test("the pane's size warning is one sentence with one Clean up button that arch
     expect(world.files.get(FILE)).toBe(`## synthetic-project\n${open}`)
     expect(await ui.find({ type: 'Text', text: /can be archived/ })).toBeUndefined()
     // The next poll drops the moved task's entry from the seen record; the second press starts after it.
-    await clock.advance(5000)
+    await clock.advance(2000)
     const after = Object.fromEntries(world.files)
     await ui.press({ key: 'clean' })
     expect(await ui.find({ type: 'Text', text: EN.tidyScheduledNothing })).toBeDefined()
@@ -1534,7 +1536,8 @@ test('a store held over the cap skips full record reads for six hours, then retr
   store[mirror] = padded('0e0e0e01', 'working', AT, true)
   // Keep the separate bounded age walk in its hint segment, so these reads measure the cap pass.
   store.pruneAfter = 'agent:zzzzzzzz'
-  for (let i = 0; i < 5000; i += 1) store[`hinted:synthetic-${String(i).padStart(4, '0')}`] = AT
+  // Both session starts leave an hourly walk, so six hours need over 2,400 hints.
+  for (let i = 0; i < 2500; i += 1) store[`hinted:synthetic-${String(i).padStart(4, '0')}`] = AT
   const reads = () => (world.storeReads ?? []).filter(key => key === agent || key === mirror)
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/synthetic', surface: 'desktop', isInteractive: true })

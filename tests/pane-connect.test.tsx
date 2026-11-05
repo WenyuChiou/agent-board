@@ -50,6 +50,14 @@ import {
 
 
 
+// Keep this first so module loading is paid by a session without pane or connection work.
+test('starting a session registers the progress command', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, registered: [] }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.registered).toContain('progress')
+})
+
 test('/progress connect hooks the installed agents into the pane once, keeps their own hooks, and takes ours back out', { options: { autoConnect: true } }, async ($, on) => {
   // Both written under the plugin's earlier name, claude-progress-pane: they go.
   const section = '<!-- claude-progress-pane:start -->\n## Report your progress\n<!-- claude-progress-pane:end -->\n'

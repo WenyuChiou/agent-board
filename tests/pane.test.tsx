@@ -181,10 +181,12 @@ for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) test(`pane archive control
   for (const one of cases) {
     await ui.press({ key: `Demo::${one.title}` })
     const live = one.kind === 'working' || one.kind === 'waiting'
-    const button = await ui.find({ type: 'Button', key: `Demo::${one.title}::archive` })
+    // One drawn tree covers both checks without another host query for each live row.
+    const nodes = pressNodes(await ui.drawn() as PressNode)
+    const button = nodes.find(node => node.type === 'Button' && (node.key ?? node.props?.key) === `Demo::${one.title}::archive`)
     if (live) {
       expect(button).toBeUndefined()
-      expect(await ui.find({ type: 'Text', text: STRINGS[lang].archiveLive })).toBeDefined()
+      expect(nodes.find(node => node.type === 'Text' && pressTexts(node).join('') === STRINGS[lang].archiveLive)).toBeDefined()
     } else expect(button).toBeDefined()
   }
   const before = world.files.get(FILE)
@@ -1850,7 +1852,8 @@ test('a synthetic pending-store read failure without entries does not show a jou
 })
 
 test('a synthetic journal read failure preserves the count only until the local day changes', async ($, on) => {
-  const world: World = { files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]), mtime: 1, hasTasks: true, at: new Date(2026, 9, 16, 23, 59).getTime() }
+  // Starting just before midnight reaches the new day at the first 30-second count refresh.
+  const world: World = { files: new Map([[FILE, '## demo-1\n### Demo task\n- [?] Demo step\n']]), mtime: 1, hasTasks: true, at: new Date(2026, 9, 16, 23, 59, 59).getTime() }
   const clock = engineBeneath(on, world)
   await probeStart($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -1859,7 +1862,7 @@ test('a synthetic journal read failure preserves the count only until the local 
   world.unreadable = new Set([JOURNAL])
   await $.session.start({ cwd: '/work/demo-1', surface: 'desktop', isInteractive: true })
   expect(await ui.find({ type: 'Text', text: '✓ 1' })).toBeDefined()
-  await clock.advance(2 * 60 * 1000)
+  await clock.advance(30000)
   expect(await ui.find({ type: 'Text', text: '✓ 0' })).toBeDefined()
   await ui.unmount()
 })

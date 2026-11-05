@@ -74,9 +74,8 @@ test('an idle poll reads no file with piles of captures, proofs and inbox turns 
   const world = makeWorld([[FILE, board]])
   world.env = english
   const clock = engineBeneath(on, world)
-  // Forty answered questions, each with two copies and a retirement proof, twenty acknowledgement
-  // proofs and thirty turns that other agents left in the inbox.
-  const answered = Array.from({ length: 40 }, (_, n) => finished(n + 1))
+  // Each question has two copies and both proofs; 31 turns still exceed a 30-turn startup batch.
+  const answered = Array.from({ length: 31 }, (_, n) => finished(n + 1))
   put(world, LEDGER, questionsJson(ledgerOf(...answered)), 1)
   answered.forEach((record, n) => {
     putCapture(world, reopened(record), 'unresolved', 10 + n)
