@@ -3178,6 +3178,57 @@ test('the plugin registers /agent-board beside /progress', async ($, on) => {
   }
 })
 
+test('the plugin registers one agent-board tool for the agent, described from the string table in every language', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, registered: [], registeredTools: [], store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
+  engineBeneath(on, world)
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    world.store!.lang = lang
+    const before = world.registeredTools?.length ?? 0
+    const commands = world.registered?.length ?? 0
+    await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+    expect(world.registeredTools?.slice(before)).toEqual([{ name: 'agent-board', description: STRINGS[lang].liveBoardToolDescription }])
+    expect(STRINGS[lang].liveBoardToolDescription.length).toBeGreaterThan(0)
+    // One entry for the person (the command) and one for the agent (the tool); no skill, no second name.
+    expect(world.registered?.slice(commands).filter(name => name === 'agent-board')).toHaveLength(1)
+  }
+})
+
+test('the agent-board tool runs the /agent-board path and answers with the same text', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], liveCalls: [], registeredTools: [], store: { autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const url = `http://127.0.0.1:34567/?t=${lang.replace('-', '').padEnd(32, 'b')}`
+    const s = STRINGS[lang]
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    world.liveOutput = `${s.serveAt(url)}
+`
+    const viaCommand = await $.command.run({ ...TIDY, command: 'agent-board', args: '' })
+    const callsAfterCommand = world.liveCalls?.length ?? 0
+    const viaTool = await $.tool.call({ tool: 'mcp__plugin_synthetic__agent-board' })
+    expect(viaTool.result).toBe(viaCommand.text)
+    expect(viaTool.result).toBe(`${s.boardPageOpened}
+<${url}>`)
+    // The same path: the same --serve run, with the same options.
+    expect(world.liveCalls?.length).toBe(callsAfterCommand + 1)
+    expect(world.liveCalls?.at(-1)).toEqual(world.liveCalls?.at(callsAfterCommand - 1))
+  }
+  expect(world.ran?.some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
+})
+
+test('a refused /agent-board command or agent-board tool registration is logged, and the plugin still starts', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, registered: [], registeredTools: [], debugLog: [], commandRefusal: { 'agent-board': 'a skill named agent-board already exists' }, toolRefusal: 'no built-in tools', store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.debugLog).toEqual([
+    { text: 'agent-board: the /agent-board command was not registered: agent-board: $.command.register: a skill named agent-board already exists', to: 'debug' },
+    { text: 'agent-board: the agent-board tool was not registered: agent-board: $.tool.register: no built-in tools', to: 'debug' },
+  ])
+  // /progress was registered before, and the start went on to the end.
+  expect(world.registered).toEqual(['progress'])
+  expect(world.registeredTools).toEqual([])
+})
+
 test('a second press of continue before the first turn starts sends nothing', async ($, on) => {
   const fixture = paneEngineFixture({ agent: 'claude', source: 'this-session', kind: 'own-block', name: 'Pending continue' })
   const { world } = fixture

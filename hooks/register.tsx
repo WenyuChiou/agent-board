@@ -220,6 +220,8 @@ let hasNoPaneSurface = false
 let hasPaneOpenAnswer = false
 // /progress runs still starting the board page; the footer says so until each one answers.
 let startingPages = 0
+// The model's name for the board tool: the host prefixes the registered name, so it is the host's answer.
+let boardToolName: string | null = null
 let lastStatus: string | undefined
 let isCheckingPr = false
 // gh is tried until it fails to start (not installed) or says it is signed out.
@@ -1360,6 +1362,29 @@ const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, h
     startingPages -= 1
     // A footer that cannot be redrawn must not take away the link the person waited for.
     await refreshStatus($).catch(() => undefined)
+  }
+}
+
+// What /agent-board and the agent's board tool both run: start or reuse the board page, answer with its link.
+const openBoard = async ($: EngineInterface): Promise<{ text: string }> => {
+  const s = await wordsOf($)
+  const { path } = await read($, snapshot)
+  const progress = path || (await progressPath($))
+  return showBoardPage($, progress, s, s.boardPageOpened, true)
+}
+
+// A refused registration must not hide the entry (a name clash did, silently), nor stop the plugin
+// starting: it goes to the debug log, where the host's own refusal text says why.
+const registerOrLog = async <T,>($: EngineInterface, what: string, registering: Promise<T>): Promise<T | null> => {
+  try {
+    return await registering
+  } catch (error) {
+    try {
+      await $.ui.log(`agent-board: ${what} was not registered: ${messageOf(error)}`, { to: 'debug' })
+    } catch {
+      // Nowhere left to say it; the plugin still starts.
+    }
+    return null
   }
 }
 
@@ -3905,7 +3930,9 @@ export const register: Register = (on, options) => {
     await settleLang($, options)
     const words = await wordsOf($)
     await $.command.register({ name: 'progress', description: words.commandDescription, argumentHint: words.commandHint })
-    await $.command.register({ name: 'agent-board', description: words.liveBoardCommandDescription }).catch(() => undefined)
+    await registerOrLog($, 'the /agent-board command', $.command.register({ name: 'agent-board', description: words.liveBoardCommandDescription }))
+    boardToolName = null
+    await isDoneWithin($, registerOrLog($, 'the agent-board tool', $.tool.register({ name: 'agent-board', description: words.liveBoardToolDescription })).then(registered => { boardToolName = registered?.tool ?? null }), HUNG_MS)
     sendingOwn.clear()
     await detectHere($)
     await loadMine($, e.cwd)
@@ -4100,12 +4127,7 @@ export const register: Register = (on, options) => {
     return showBoardPage($, progress, s, s.livePageOpened)
   })
 
-  on('command.run', { command: 'agent-board' }, async $ => {
-    const s = await wordsOf($)
-    const { path } = await read($, snapshot)
-    const progress = path || (await progressPath($))
-    return showBoardPage($, progress, s, s.boardPageOpened, true)
-  })
+  on('command.run', { command: 'agent-board' }, async $ => openBoard($))
 
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers
   // what waits on them. A pane button's answer is marked when it is pressed.
@@ -4249,6 +4271,10 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', async ($, e, next) => {
+    // The agent's way to the same board (the Skill tool cannot run a command). The host names a
+    // registered tool itself, so the call is matched against the name register answered; the
+    // engine takes one hook without a matcher, so it is answered here.
+    if (boardToolName !== null && e.tool === boardToolName) return { result: (await openBoard($)).text }
     if (e.agentId !== undefined) return next(e)
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError === true) return ran
