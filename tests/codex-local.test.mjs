@@ -763,6 +763,17 @@ export const claimMessageStore = directory => (${wrap})(original(directory))`)
   try { return await importTs(url.href) } finally { resolver.deregister() }
 }
 
+// A claim that takes longer than the hook's 120 ms store limit (on Windows a scanner can hold the
+// new claim file) defers the turn by design, and the next turn delivers (#902). The limit is unchanged.
+const turnOrDeferred = async (f, mailbox, beforeNext = () => {}) => {
+  const first = await mailbox.turn('codex', session, 'CLI', Date.now())
+  if (first !== null) return first
+  assert.equal(mailbox.hasDeferred, true, 'a turn with no message was not deferred')
+  assert.equal(f.state().messages[0].status, 'queued')
+  beforeNext()
+  return mailbox.turn('codex', session, 'CLI', Date.now())
+}
+
 test('hookWorker preserves host timeouts above 3 seconds instead of clamping to 3000 ms', () => {
   const source = hookWorker('synthetic-home', 'synthetic-script', '')
   assert.ok(source.includes('started + hostTimeout - 1000'))
@@ -832,7 +843,7 @@ test('a mailbox turn returns its saved message when claim release throws', async
   })`)
   f.seed()
   const mailbox = hookMailbox(f.directory, Infinity)
-  const message = await mailbox.turn('codex', session, 'CLI', Date.now())
+  const message = await turnOrDeferred(f, mailbox)
   assert.equal(message?.id, 'hook-mailbox-message')
   assert.equal(message.text, 'Synthetic mailbox payload')
   assert.equal(f.state().messages[0].status, 'uncertain')
@@ -866,7 +877,8 @@ test('a mailbox claim that cannot be removed is reused, so the accept of a messa
   })`)
   f.seed()
   const mailbox = hookMailbox(f.directory, Infinity)
-  const message = await mailbox.turn('codex', session, 'CLI', Date.now())
+  // A deferred first turn used up the stuck release; the turn that delivers gets its own.
+  const message = await turnOrDeferred(f, mailbox, () => { globalThis.syntheticStuckReleases = 1 })
   assert.equal(message?.id, 'hook-mailbox-message')
   assert.equal(f.state().messages[0].status, 'uncertain')
   assert.equal(readdirSync(f.directory).filter(name => name.startsWith('.message-claim-')).length, 1)
