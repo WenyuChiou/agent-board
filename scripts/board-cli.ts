@@ -8,6 +8,7 @@
 // progress file and language the Claude Code session uses set on its first line. `--keys
 // "down x"` plays keys without a terminal and prints the board after them, for tests and checks.
 import { spawn, spawnSync } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
@@ -681,19 +682,36 @@ const copy = (text: string): boolean => {
   return isNative || isOsc
 }
 
+// A browser that starts and then exits with an error at once (no display, no sandbox) opened no
+// window, so a launch counts only when it exits cleanly or is still running a moment later.
+const LAUNCH_GRACE_MS = 750
+const watchLaunch = (child: ChildProcess, onResult: (isOpen: boolean) => void): void => {
+  let isSettled = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const finish = (isOpen: boolean) => {
+    if (isSettled) return
+    isSettled = true
+    if (timer !== undefined) clearTimeout(timer)
+    onResult(isOpen)
+  }
+  child.once('error', () => finish(false))
+  child.once('exit', code => finish(code === 0))
+  child.once('spawn', () => {
+    child.unref()
+    timer = setTimeout(() => finish(true), LAUNCH_GRACE_MS)
+  })
+}
+
 // A file or a page's address in the browser. The page's address holds only letters, digits,
 // `:/?=._-`, so cmd's `start` reads it as one word.
 const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = false): void => {
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) return done(false)
   const fallback = () => {
     const opener = process.platform === 'win32' ? [system32('cmd.exe'), ['/c', 'start', '', target]] : process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]]
-    // Not waited on: with no desktop, xdg-open can run a text browser that never returns, and the
-    // agent's command would wait with it.
+    // Waited on only for the launch grace: with no desktop, xdg-open can run a text browser that
+    // never returns, and the agent's command would wait with it.
     try {
-      const child = spawn(opener[0] as string, opener[1] as string[], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: true })
-      child.once('error', () => done(false))
-      child.once('spawn', () => done(true))
-      child.unref()
+      watchLaunch(spawn(opener[0] as string, opener[1] as string[], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: true }), done)
     } catch {
       done(false)
     }
@@ -739,20 +757,7 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
         if (!existsSync(bin)) return tryCandidate(index + 1)
       }
       const child = spawn(bin, [`--app=${target}`], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: false })
-      let settled = false
-      const onSpawn = () => {
-        if (settled) return
-        settled = true
-        child.unref()
-        done(true)
-      }
-      const onError = () => {
-        if (settled) return
-        settled = true
-        tryCandidate(index + 1)
-      }
-      child.once('spawn', onSpawn)
-      child.once('error', onError)
+      watchLaunch(child, isOpen => isOpen ? done(true) : tryCandidate(index + 1))
     } catch {
       tryCandidate(index + 1)
     }

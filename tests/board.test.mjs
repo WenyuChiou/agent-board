@@ -3,7 +3,7 @@
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -3782,6 +3782,36 @@ test('pressing o on the keys board starts the live page with a link when no wind
     assert.ok(!existsSync(join(board.dir, 'progress.html')))
     assert.ok(existsSync(board.served), 'the live server address must be recorded')
   } finally { await board.end(urls) }
+})
+
+test('a browser that exits with an error at once is not reported as opened: the next opener is tried, then the link is printed', { skip: process.platform !== 'linux' }, async () => {
+  const board = serveIn()
+  const urls = []
+  const bin = mkdtempSync(join(tmpdir(), 'agent-board-browsers-'))
+  const log = join(bin, 'tried.log')
+  const openers = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'microsoft-edge', 'microsoft-edge-stable', 'xdg-open']
+  const fake = (name, code) => {
+    writeFileSync(join(bin, name), `#!/bin/sh\necho ${name} >> '${log}'\nexit ${code}\n`)
+    chmodSync(join(bin, name), 0o755)
+  }
+  const press = () => {
+    const result = spawnSync(process.execPath, [board.script, '--keys', 'o'], { encoding: 'utf8', timeout: 20000, windowsHide: true, env: { ...board.env, PATH: bin } })
+    const url = board.urlOf(result.stdout)
+    if (url) urls.push(url)
+    assert.equal(result.status, 0, result.stderr)
+    assert.ok(url, result.stdout)
+    return result.stdout
+  }
+  try {
+    for (const name of openers) fake(name, 1)
+    assert.doesNotMatch(press(), /Opened Agent Board/)
+    assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), openers)
+    fake('google-chrome', 0)
+    assert.match(press(), /Opened Agent Board/)
+  } finally {
+    await board.end(urls)
+    rmSync(bin, { recursive: true, force: true })
+  }
 })
 
 test('in --watch a late browser-open note never shows under another card', () => {
