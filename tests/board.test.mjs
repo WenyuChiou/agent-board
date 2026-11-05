@@ -9487,6 +9487,27 @@ test('no away line when the tab was hidden for less than 5 minutes', async () =>
   assert.equal(awayLine(dom), '')
 })
 
+test('a refresh while the tab is still hidden keeps the away snapshot for the return', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await pageDom(await sourcePage('en'), base, { now: ONE_LINE_NOW })
+  dom.hideTab()
+  dom.setNow(ONE_LINE_NOW + 1 * 60 * 1000)
+  await dom.redraw(base)
+  await dom.settle()
+  assert.equal(awayLine(dom), '')
+  dom.setNow(ONE_LINE_NOW + 42 * 60 * 1000)
+  dom.showTab()
+  await dom.redraw(later)
+  await dom.settle()
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task finished')
+})
+
 test('no away line when nothing changed while away', async () => {
   const base = cardsModel('codex')
   const dom = await awayAfter(base, base, 30)

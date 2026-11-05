@@ -2044,6 +2044,8 @@ const PAGE_SCRIPT = String.raw`
   }
   function maybeShowAway() {
     if (!awaySnap) return;
+    // A background poll can run while the tab is hidden; the snapshot is only for the return, so leave it alone until the tab is visible again.
+    if (document.hidden) return;
     var snap = awaySnap;
     awaySnap = null;
     var minutes = Math.floor((Date.now() - snap.at) / 60000);
