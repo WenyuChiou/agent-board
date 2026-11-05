@@ -2821,6 +2821,8 @@ export const LINES = [
 "  }",
 "  const own = keysFor(items[at], s, routes).join(\" · \");",
 "  lines.push(\"\", c(\"quiet\", own === \"\" ? cut(s.boardKeysMove, o.width) : `${cut(own, o.width - cols(s.boardKeysMove) - cols(\" · \") - 1)} · ${s.boardKeysMove}`));",
+"  if (view.stopped.length > 0)",
+"    lines.push(c(\"quiet\", s.boardKeyBulkArchive));",
 "  if (result === undefined)",
 "    resultLines(\"\");",
 "  for (const line of view.health ?? [])",

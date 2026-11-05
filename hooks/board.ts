@@ -997,8 +997,12 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
     lines.push(c('quiet', s.empty), ...muted(agents.length === 0 ? s.boardNoAgents : s.boardAgentsHere(agents.join(', ')), ''), ...muted(s.boardEmptyHow, ''))
   }
   // The line's own keys give way first, so the keys that move and quit always show.
+  // The bulk-archive key is not on that line: it would push the line's own keys off
+  // (the answer hints must stay complete), so it gets its own line, and only when the
+  // board has stopped rows to clean.
   const own = keysFor(items[at], s, routes).join(' · ')
   lines.push('', c('quiet', own === '' ? cut(s.boardKeysMove, o.width) : `${cut(own, o.width - cols(s.boardKeysMove) - cols(' · ') - 1)} · ${s.boardKeysMove}`))
+  if (view.stopped.length > 0) lines.push(c('quiet', s.boardKeyBulkArchive))
   if (result === undefined) resultLines('')
   for (const line of view.health ?? []) lines.push(...wrap(line, o.width - 2).map(part => c('quiet', part)))
 
