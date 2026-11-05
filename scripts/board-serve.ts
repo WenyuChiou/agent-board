@@ -510,13 +510,6 @@ export const startServer = (o: ServeOptions): void => {
     try { messaging.close() } catch {}
     o.onStop()
   })
-  // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
-  // `idleMs` and no reply is on its way.
-  const idle = setInterval(() => {
-    if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
-    if (o.idleMs > 0 && sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
-  }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
-  server.on('close', () => clearInterval(idle))
   server.listen(o.port, '127.0.0.1', () => {
     port = (server.address() as AddressInfo).port
     const url = `http://127.0.0.1:${port}/?t=${token}`
@@ -526,6 +519,16 @@ export const startServer = (o: ServeOptions): void => {
     }
     // Preparing a private address can block; inactivity starts once that address is ready.
     lastSeen = Date.now()
+    // The idle timer starts only once the server is listening: a listen failure
+    // throws before this point, and a timer made earlier would keep the failed
+    // child alive instead of letting it exit.
+    // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
+    // `idleMs` and no reply is on its way.
+    const idle = setInterval(() => {
+      if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
+      if (o.idleMs > 0 && sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
+    }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
+    server.on('close', () => clearInterval(idle))
     if (o.isDefaultMessagesDirectory) {
       // A later --serve asks this address before moving a lock this hub left behind.
       try { messaging.recordOwner(port, url) } catch {}

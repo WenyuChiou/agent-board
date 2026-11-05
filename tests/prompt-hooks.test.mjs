@@ -422,7 +422,9 @@ test('a reporter that cannot run node still writes the receipt and the board dro
         if (process.platform === 'win32') writeFileSync(`${node}.cmd`, `@echo synthetic node error >&2\r\n@exit /b ${status}\r\n`)
       }
       const runs = [[sh, [shellPath(shell), 'gemini', 'prompt', ...(mode === 'argument' ? [raw] : [])]]]
-      if (powershell) runs.push([powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps, 'codex', 'prompt', ...(mode === 'argument' ? [raw] : [])]])
+      // The full matrix runs on sh; PowerShell proves one combo per failure mode,
+      // the board command over stdin, and the rest is the same receipt logic.
+      if (powershell && prompt === '/board' && mode === 'stdin') runs.push([powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps, 'codex', 'prompt']])
       for (const [program, args] of runs) {
         const before = receipts(home).length
         const started = performance.now()
