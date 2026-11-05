@@ -216,7 +216,7 @@ export type ServeRetained = { key: string; canHide: boolean; project: string; ag
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
 export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[] }
-type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number }
+type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
 type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
 type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
 type PageView = {
@@ -474,6 +474,17 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     })
   }
 
+  const askingByKey = new Map((view.recentAsking ?? []).map(one => [one.key, one]))
+  const askingFp = (itemKey: string): { canArchive?: boolean; fp?: string } => {
+    const asking = askingByKey.get(itemKey)
+    if (asking === undefined) return {}
+    const askingItem = items.find(one => one.type === 'row' && one.row.key === asking.key)
+    return {
+      canArchive: asking.archive !== null,
+      ...(askingItem === undefined ? {} : { fp: fingerprint(askingItem, items) }),
+    }
+  }
+
   const model: ServeModel = {
     counts: { ...view.overview, waiting: view.overview.waiting + remainingInbox(view, pending).filter(turn => turn.isQuestion).length },
     warning: view.warning,
@@ -492,17 +503,17 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     older: (view.older ?? []).map(retainedOf),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
-    recent: view.recent.map(item => ({ project: item.project, title: item.title, ...lined(item.title), when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) })),
+    recent: view.recent.map(item => ({ project: item.project, title: item.title, ...lined(item.title), when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')), ...askingFp(item.key) })),
   }
   if (group === undefined) return model
   const extra = (item: WaitingItem): ServeRetained => ({ ...retainedOf(item), ...(item.at === undefined ? {} : { at: item.at }), dir: item.dir ?? null })
   model.reminder = (view.reminder ?? []).map(extra)
   model.older = (view.older ?? []).map(extra)
-  model.finished = (view.finished ?? []).map(item => ({ ...item, key: `row:${item.key}`, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) }))
+  model.finished = (view.finished ?? []).map(item => ({ ...item, key: `row:${item.key}`, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')), ...askingFp(item.key) }))
   const finishedByKey = new Map((model.finished ?? []).map(one => [one.key, one]))
   model.recent = view.recent.map((item, index) => {
     const finished = finishedByKey.get(`row:${item.key}`)
-    return { ...model.recent[index]!, key: `row:${item.key}`, ...(finished === undefined ? {} : { agent: finished.agent, ...(finished.isOwn ? { isOwn: true as const } : {}), dir: finished.dir, at: finished.at }) }
+    return { ...model.recent[index]!, key: `row:${item.key}`, ...(finished === undefined ? {} : { agent: finished.agent, ...(finished.isOwn ? { isOwn: true as const } : {}), dir: finished.dir, at: finished.at }), ...askingFp(item.key) }
   })
   model.agents = [...new Set(group.unreadable)].map(agent => ({ agent, unreadable: true }))
   const grouped = groupBoard(model, group.now, group.repoOf, s)
@@ -1783,7 +1794,11 @@ const PAGE_SCRIPT = String.raw`
       if (acts.firstChild) add(inner, acts);
       if (row.receipt) add(inner, receiptLine(row.receipt, key, row.agent, !!row.delivery));
       if (row.info) add(inner, el('p', 'context', row.info));
-    } else (row.questions || []).forEach(function (question) { add(inner, el('p', 'context', clean(question))); });
+    } else {
+      (row.questions || []).forEach(function (question) { add(inner, el('p', 'context', clean(question))); });
+      if (row.canArchive || row.archiveNote) add(acts, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', row.fp); }));
+      if (acts.firstChild) add(inner, acts);
+    }
     var isExpandable = inner.childNodes.length > 0;
     if (isExpandable) resultSlot(inner, key, row.fp, row.title || row.task);
     var current = steps.filter(function (one) { return one.isCurrent; })[0] || steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled'; })[0];

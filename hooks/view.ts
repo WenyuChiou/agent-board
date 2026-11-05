@@ -1172,8 +1172,9 @@ export const buildView = (
         resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
         handoff: handoffOf(task),
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
-        // so the press could only say the line changed (#142).
-        confirm: (isManual && task.line >= 0 && task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') || (auto === 'ended' && !isSilence))
+        // so the press could only say the line changed (#142). Nor does a row whose block state is
+        // already done offer confirm (#876).
+        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && !isSilence)))
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) }
           : null,
         archive:

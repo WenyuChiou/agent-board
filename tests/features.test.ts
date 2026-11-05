@@ -342,6 +342,16 @@ test('a hand-kept task with no open step is not offered Confirm done on any surf
   expect(open.row.confirm).not.toBe(null)
 })
 
+test('a state=done block on the Stopped shelf offers no Confirm done', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  // Quiet for more than 1 day so it goes to stopped rather than recent, but still asks
+  const file = '## demo\n<!-- auto session=s1 agent=codex state=done updated=2026-10-17T12:00:00Z -->\n### Done task\n- [x] step 1\n- [?] ask\n<!-- /auto session=s1 -->\n'
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en)
+  const stoppedRow = view.stopped.find(row => row.title === 'Done task')
+  expect(stoppedRow).toBeDefined()
+  expect(stoppedRow?.confirm ?? null).toBe(null)
+})
+
 test('Confirm done changes only visible checkbox marks through comments and preserves CRLF', () => {
   const now = Date.parse('2026-10-19T12:00:00Z')
   const file = ['## Demo', '### Commented steps', '<!-- [ ] Hidden -->- [ ] Visible', '<!-- Multiline', '[ ] Hidden multiline', '-->- [~] Closing', '- <!-- Keep this note -->[>] Inline', '- [-] Canceled', ''].join('\r\n')
