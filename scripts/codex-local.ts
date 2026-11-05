@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -980,7 +980,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
   const changes: { file: string; action: string }[] = []
-  const trustConfig = join(resolve(process.env.CODEX_HOME || join(home, '.codex')), 'config.toml')
+  // Beside the hooks.json it trusts, as the doctor reads it, so --codex-dir finds the same installation.
+  const trustConfig = agent === 'codex' ? join(dirname(resolve(config)), 'config.toml') : ''
   let nextTrust: string | undefined
   if (remove && agent === 'codex') {
     const keys = Object.entries(manifest.groups).flatMap(([event, group]) => {
@@ -1148,7 +1149,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
   nextConfigText ??= `${JSON.stringify(nextConfig, null, 2)}\n`
   if (hasNativeConfig && (!remove || Object.keys(manifest.groups).length)) {
-    const isEmptyCreatedConfig = loaded.createdConfig === true && (agent === 'antigravity' ? Object.keys(nextConfig).length === 0 : Object.keys(nextHooks).length === 0 && Object.keys(nextConfig).every(key => key === 'hooks' || key === 'version' && agent === 'cursor' && nextConfig[key] === 1 || key === 'schema_version' && agent === 'muse' && nextConfig[key] === 1))
+    const openclawPlugins = object(nextConfig.plugins ?? {})
+    const isHollowOpenclaw = Object.keys(nextConfig).every(key => key === 'plugins') && Object.keys(openclawPlugins).every(key => key === 'load' || key === 'entries' || key === 'allow' && Array.isArray(openclawPlugins.allow) && openclawPlugins.allow.length === 0) && isSame(openclawPlugins.load ?? { paths: [] }, { paths: [] }) && isSame(openclawPlugins.entries ?? {}, {})
+    const isEmptyCreatedConfig = loaded.createdConfig === true && (agent === 'deepseek' ? nextConfigText.trim() === '' : agent === 'openclaw' ? isHollowOpenclaw : agent === 'antigravity' ? Object.keys(nextConfig).length === 0 : Object.keys(nextHooks).length === 0 && Object.keys(nextConfig).every(key => key === 'hooks' || key === 'version' && agent === 'cursor' && nextConfig[key] === 1 || key === 'schema_version' && agent === 'muse' && nextConfig[key] === 1))
     if (parsedConfig === null) conflicts.push(nativeConfig)
     else if (remove && initial(nativeConfig) === null) alreadyGone.push(nativeConfig)
     else if (remove && isReadable && isEmptyCreatedConfig) changes.push({ file: nativeConfig, action: 'remove' })
@@ -1161,13 +1164,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (!remove) for (const file of [...changes.filter(change => change.action === 'create').map(change => change.file), ...(initial(manifestFile) === null ? [manifestFile] : [])]) {
     for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
   }
-  const createdConfig = config !== '' && (initial(nativeConfig) === null || loaded.createdConfig === true)
+  const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
   const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   const removedDirs = new Set<string>()
   let handover: { file: string; text: string } | undefined
   if (remove) {
-    const candidates = new Set([...createdDirs, root])
+    // A folder named by --data-dir may be the person's own: it goes only when setup recorded making it.
+    const candidates = new Set([...createdDirs, ...(basename(root) === '.agent-board' ? [root] : [])])
     for (const change of changes) if (change.action === 'remove') {
       for (let folder = dirname(change.file); basename(folder) === 'agent-board' || isBelow(folder, root); folder = dirname(folder)) {
         candidates.add(folder)
@@ -1180,6 +1184,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       candidates.add(runtime)
       try { for (const name of readdirSync(runtime)) if (name.endsWith('-messages')) candidates.add(join(runtime, name)) } catch {}
     }
+    // Outside Windows the message folders sit directly in the runtime folder, which is not ours.
+    if (!hasOtherManifest && process.env.XDG_RUNTIME_DIR) try { for (const name of readdirSync(process.env.XDG_RUNTIME_DIR)) if (/^agent-board-.*-messages$/.test(name)) candidates.add(join(process.env.XDG_RUNTIME_DIR, name)) } catch {}
     const deletedFiles = new Set(changes.filter(change => change.action === 'remove').map(change => change.file))
     for (const folder of [...candidates].sort((a, b) => b.split(/[\\/]/).length - a.split(/[\\/]/).length)) {
       if (folderKey(folder) === folderKey(home) || isBelow(home, folder)) continue
@@ -1278,10 +1284,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // Compare the bytes used to build the plan, not a fresh snapshot taken after
     // planning: another installer or host may have changed them in that interval.
     for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
-    // Setup is deliberately explicit. It changes neither hook trust nor config.toml.
+    // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue
-      if (change.file === trustConfig && nextTrust !== undefined) atomic(trustConfig, nextTrust)
+      if (change.file === trustConfig && nextTrust !== undefined) {
+        // A linked config.toml stays a link, and the person's permissions stay.
+        const target = realpathSync(trustConfig)
+        const mode = statSync(target).mode & 0o777
+        atomic(target, nextTrust)
+        if (process.platform !== 'win32') chmodSync(target, mode)
+      }
       else if (change.file === nativeConfig) {
         if (change.action === 'remove') unlinkSync(nativeConfig)
         else atomic(nativeConfig, nextConfigText!)

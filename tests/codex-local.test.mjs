@@ -405,7 +405,7 @@ const tree774 = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry =
 }).sort()
 const trustKey774 = (f, event, index = 0) => `${resolve(f.hooks)}:${event.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()}:${index}:0`
 const trustTable774 = key => `\n[hooks.state.'${key}']\ntrusted_hash = "sha256:synthetic"\n`
-const remove774 = (f, agent, apply = true) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-remove', '--agent', agent, '--json', ...(apply ? ['--apply'] : [])], { cwd: f.home, env: { ...f.env, XDG_RUNTIME_DIR: join(f.home, 'runtime') }, encoding: 'utf8', windowsHide: true })
+const remove774 = (f, agent, apply = true, extra = []) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-remove', '--agent', agent, '--json', ...extra, ...(apply ? ['--apply'] : [])], { cwd: f.home, env: { ...f.env, XDG_RUNTIME_DIR: join(f.home, 'runtime') }, encoding: 'utf8', windowsHide: true })
 
 for (const order of [['codex', 'cursor'], ['cursor', 'codex']]) test(`#774 removal in ${order.join(' then ')} order keeps exactly history and user trust`, () => fixture(f => {
   const toml = join(f.home, '.codex', 'config.toml')
@@ -574,6 +574,83 @@ test('#774 runtime cleanup removes only empty folders and keeps message history'
   assert.equal(existsSync(empty), false)
   assert.equal(readFileSync(join(occupied, 'messages.json'), 'utf8'), 'synthetic message history')
   assert.equal(existsSync(runtime), true)
+}))
+
+for (const [agent, parts] of [['openclaw', ['.openclaw', 'openclaw.json']], ['deepseek', ['.dsh', 'cordis.patch.yml']]]) test(`#774 ${agent} removes the hollow config setup created`, () => fixture(f => {
+  const installed = f.install('--agent', agent, '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const native = join(f.home, ...parts)
+  assert.equal(existsSync(native), true)
+  assert.equal(JSON.parse(readFileSync(join(f.root, `install-${agent}.json`), 'utf8')).createdConfig, true)
+  const removed = remove774(f, agent)
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(dirname(native)), false)
+}))
+
+for (const [agent, parts, original] of [['openclaw', ['.openclaw', 'openclaw.json'], '{"user":true}\n'], ['deepseek', ['.dsh', 'cordis.patch.yml'], '# mine\n']]) test(`#774 ${agent} keeps a config it did not create`, () => fixture(f => {
+  const native = join(f.home, ...parts)
+  f.save(native, original)
+  const installed = f.install('--agent', agent, '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const removed = remove774(f, agent)
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(native), true)
+  assert.match(readFileSync(native, 'utf8'), agent === 'openclaw' ? /"user": true/ : /# mine/)
+}))
+
+test('#774 removal cleans the config.toml beside a --codex-dir hooks file', () => fixture(f => {
+  const dir = join(f.home, 'custom codex')
+  const toml = join(dir, 'config.toml')
+  const defaultToml = join(f.home, '.codex', 'config.toml')
+  mkdirSync(dir, { recursive: true })
+  const installed = spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', dir, '--apply'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true })
+  assert.equal(installed.status, 0, installed.stderr)
+  f.save(toml, `# mine\n${trustTable774(`${resolve(join(dir, 'hooks.json'))}:session_start:0:0`)}`)
+  f.save(defaultToml, '# default account\n')
+  const removed = remove774(f, 'codex', true, ['--codex-dir', dir])
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(toml, 'utf8'), '# mine\n')
+  assert.equal(readFileSync(defaultToml, 'utf8'), '# default account\n')
+}))
+
+test('#774 a linked config.toml stays a link and keeps its permissions', { skip: process.platform === 'win32' }, () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const target = join(f.home, 'dotfiles', 'config.toml')
+  const toml = join(f.home, '.codex', 'config.toml')
+  f.save(target, `# mine\n${trustTable774(trustKey774(f, 'SessionStart'))}`)
+  chmodSync(target, 0o644)
+  symlinkSync(target, toml)
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.equal(lstatSync(toml).isSymbolicLink(), true)
+  assert.equal(readFileSync(target, 'utf8'), '# mine\n')
+  assert.equal(statSync(target).mode & 0o777, 0o644)
+}))
+
+test('#774 a --data-dir folder the person made stays when empty', () => fixture(f => {
+  const own = join(f.home, 'my data')
+  mkdirSync(own)
+  const progress = join(f.home, 'history', 'progress.md')
+  const installed = f.install('--data-dir', own, '--progress-file', progress, '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const removed = spawnSync(process.execPath, [join(own, 'agent-board.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--data-dir', own, '--codex-remove', '--agent', 'codex', '--apply'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true })
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(join(own, 'agent-board.mjs')), false)
+  assert.equal(existsSync(own), true)
+}))
+
+test('#774 an empty message folder directly in the runtime folder goes, the runtime folder and a full one stay', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const runtime = join(f.home, 'runtime')
+  const empty = join(runtime, 'agent-board-abc-messages')
+  const full = join(runtime, 'agent-board-def-messages')
+  const other = join(runtime, 'other-messages')
+  mkdirSync(empty, { recursive: true })
+  mkdirSync(other)
+  f.save(join(full, 'messages.json'), 'synthetic')
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.equal(existsSync(empty), false)
+  assert.equal(existsSync(join(full, 'messages.json')), true)
+  assert.equal(existsSync(other), true)
 }))
 
 test('#774 an unreadable trust file stays without a trust plan change', () => fixture(f => {
