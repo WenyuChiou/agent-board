@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 import { formatWriter } from './e2e/lib/faults.mjs'
 import { neverShown } from './fixtures/never-shown.mjs'
+import { hookOrDeferred, turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { HOOK_INPUT_TIMEOUT, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
@@ -764,16 +765,8 @@ export const claimMessageStore = directory => (${wrap})(original(directory))`)
   try { return await importTs(url.href) } finally { resolver.deregister() }
 }
 
-// A claim that takes longer than the hook's 120 ms store limit (on Windows a scanner can hold the
-// new claim file) defers the turn by design, and the next turn delivers (#902). The limit is unchanged.
-const turnOrDeferred = async (f, mailbox, beforeNext = () => {}) => {
-  const first = await mailbox.turn('codex', session, 'CLI', Date.now())
-  if (first !== null) return first
-  assert.equal(mailbox.hasDeferred, true, 'a turn with no message was not deferred')
-  assert.equal(f.state().messages[0].status, 'queued')
-  beforeNext()
-  return mailbox.turn('codex', session, 'CLI', Date.now())
-}
+// On Windows a scanner can hold a new claim file past the hook's 120 ms store limit.
+const codexTurn = (f, mailbox, beforeNext) => turnOrDeferred(mailbox, ['codex', session, 'CLI', Date.now()], () => f.state().messages[0].status, beforeNext)
 
 test('hookWorker preserves host timeouts above 3 seconds instead of clamping to 3000 ms', () => {
   const source = hookWorker('synthetic-home', 'synthetic-script', '')
@@ -844,7 +837,7 @@ test('a mailbox turn returns its saved message when claim release throws', async
   })`)
   f.seed()
   const mailbox = hookMailbox(f.directory, Infinity)
-  const message = await turnOrDeferred(f, mailbox)
+  const message = await codexTurn(f, mailbox)
   assert.equal(message?.id, 'hook-mailbox-message')
   assert.equal(message.text, 'Synthetic mailbox payload')
   assert.equal(f.state().messages[0].status, 'uncertain')
@@ -879,7 +872,7 @@ test('a mailbox claim that cannot be removed is reused, so the accept of a messa
   f.seed()
   const mailbox = hookMailbox(f.directory, Infinity)
   // A deferred first turn used up the stuck release; the turn that delivers gets its own.
-  const message = await turnOrDeferred(f, mailbox, () => { globalThis.syntheticStuckReleases = 1 })
+  const message = await codexTurn(f, mailbox, () => { globalThis.syntheticStuckReleases = 1 })
   assert.equal(message?.id, 'hook-mailbox-message')
   assert.equal(f.state().messages[0].status, 'uncertain')
   assert.equal(readdirSync(f.directory).filter(name => name.startsWith('.message-claim-')).length, 1)
@@ -1027,10 +1020,10 @@ test('the hook finds the same default messages folder as --serve', async () => m
     const server = await serve.start(world)
     const directory = defaultMessagesDirectory(world.path, world.home, world.env, process.platform)
     assert.equal(existsSync(join(directory, 'server.lock')), true)
-    const hook = spawnSync(process.execPath, [world.script, '--codex-event', '--home', world.home, '--progress-file', world.path], { cwd: world.root, env: world.env, encoding: 'utf8', windowsHide: true, timeout: 15000, input: JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }) })
-    assert.equal(hook.status, 0, hook.stderr)
-    const snapshot = (await server.get('/api/board')).json()
-    assert.equal(snapshot.messaging.mailboxes[0].session, session)
+    const hook = () => spawnSync(process.execPath, [world.script, '--codex-event', '--home', world.home, '--progress-file', world.path], { cwd: world.root, env: world.env, encoding: 'utf8', windowsHide: true, timeout: 15000, input: JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }) })
+    const mailboxes = async () => (await server.get('/api/board')).json().messaging.mailboxes
+    const result = await hookOrDeferred(hook, async () => (await mailboxes()).length > 0)
+    assert.equal((await mailboxes())[0]?.session, session, result.stderr)
   } finally { await world.close() }
 }))
 
