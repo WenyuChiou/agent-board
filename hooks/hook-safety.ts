@@ -215,6 +215,7 @@ const run = async () => {
   if (isPlan && !result.error && result.status === 0) {
     const code = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
     if (code) hookError('REPORTER_FAILED ' + code)
+    else if ((result.stderr ?? '').trim()) hookError('REPORTER_FAILED UNKNOWN')
     return true
   }
   if (result.error?.code === 'ETIMEDOUT' || result.signal || (result.error || result.status !== 0) && Date.now() >= deadline) return queue()

@@ -9403,7 +9403,7 @@ export const LINES = [
 "    process.exitCode = args.includes(\"--plan-event\") ? 0 : 1;",
 "    const raw = String(error?.code ?? (error instanceof Error ? error.message : \"UNKNOWN\"));",
 "    const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : \"UNKNOWN\";",
-"    process.stderr.write(`${reason === \"UNBOUND_REPORT\" ? s.codexReportUnbound : reason === \"LOCK_DENIED\" ? s.reporterLockDenied : reason === \"INCOMPLETE_PROGRESS_TAIL\" ? s.tailRepairFailed : s.reporterFailed(reason)}",
+"    process.stderr.write(`${args.includes(\"--plan-event\") ? s.reporterFailed(reason) : reason === \"UNBOUND_REPORT\" ? s.codexReportUnbound : reason === \"LOCK_DENIED\" ? s.reporterLockDenied : reason === \"INCOMPLETE_PROGRESS_TAIL\" ? s.tailRepairFailed : s.reporterFailed(reason)}",
 "`);",
 "  } else if (args.some((arg) => [\"--codex-setup\", \"--codex-doctor\", \"--codex-remove\", \"--codex-trust\"].includes(arg))) {",
 "    process.exitCode = 1;",

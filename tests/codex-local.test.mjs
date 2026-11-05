@@ -9033,6 +9033,21 @@ test('a plan call that is not a plan, is bad JSON or is empty writes nothing, pr
   assertNoBlock(f, session)
 }))
 
+test('a plan call into a denied Windows folder exits 0, prints nothing and names LOCK_DENIED for the hook log', { skip: process.platform !== 'win32' && 'Windows ACLs only' }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const folder = join(f.home, 'denied-plan')
+  const progress = join(folder, 'progress.md')
+  f.save(progress, '## Synthetic denied plan\n')
+  const before = readFileSync(progress)
+  await withDeniedCreation(folder, () => {
+    const result = f.command(['--plan-event', '--progress-file', progress, '--lang', 'en'], planCall(session, 'update_plan', [{ step: 'Synthetic denied step', status: 'in_progress' }]))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, '')
+    assert.match(result.stderr, /\(LOCK_DENIED\)/)
+    assert.deepEqual(readFileSync(progress), before)
+  })
+}))
+
 test('setup writes the plan hook as a matcher group for Codex and Gemini, and remove leaves a person\'s own groups', () => fixture(async f => {
   const mine = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo mine' }] }
   const geminiConfig = join(f.home, '.gemini', 'settings.json')
