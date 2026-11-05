@@ -156,6 +156,18 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
+      # A Windows runner's first powershell.exe and Python start can take over 15 s (#902). It
+      # happens here, outside every test's time limit, and the step prints how long it took.
+      - name: First Windows PowerShell and Python start
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        run: |
+          "powershell.exe up after $([int]((Get-Date) - (Get-Process -Id $PID).StartTime).TotalMilliseconds) ms"
+          ConvertFrom-Json '{"a":1}' | ConvertTo-Json | Out-Null
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          python -B -c "import json, os, re, secrets, stat, sys, tempfile, datetime"
+          "python import took $($clock.ElapsedMilliseconds) ms"
       - name: Board script tests
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.board_tests }}
@@ -195,6 +207,17 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
+      # As in the board job (#902).
+      - name: First Windows PowerShell and Python start
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        run: |
+          "powershell.exe up after $([int]((Get-Date) - (Get-Process -Id $PID).StartTime).TotalMilliseconds) ms"
+          ConvertFrom-Json '{"a":1}' | ConvertTo-Json | Out-Null
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          python -B -c "import json, os, re, secrets, stat, sys, tempfile, datetime"
+          "python import took $($clock.ElapsedMilliseconds) ms"
       - name: Synthetic exchange and mock owner tests
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.messaging_tests }}
@@ -405,6 +428,17 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
+      # As in the board job (#902).
+      - name: First Windows PowerShell and Python start
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        run: |
+          "powershell.exe up after $([int]((Get-Date) - (Get-Process -Id $PID).StartTime).TotalMilliseconds) ms"
+          ConvertFrom-Json '{"a":1}' | ConvertTo-Json | Out-Null
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          python -B -c "import json, os, re, secrets, stat, sys, tempfile, datetime"
+          "python import took $($clock.ElapsedMilliseconds) ms"
 
       # `node --test` passes with zero tests when the pattern matches nothing, so a missing
       # journey folder fails here instead of passing silently.
