@@ -118,6 +118,10 @@ const readBody = (req: IncomingMessage): Promise<Record<string, unknown> | null>
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '')
 
+// A press names its step by its file line; anything else is no line, so the press ticks
+// the next step by text, as before.
+const lineOf = (value: unknown): number | undefined => (typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined)
+
 const isFile = (path: string): boolean => {
   try {
     return statSync(path).isFile()
@@ -436,7 +440,7 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/act') {
         const state = isLan ? undefined : messaging.snapshot(Date.now())
         // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
-        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, deliveryTargets(state?.connections ?? [], state?.mailboxes), true, o.allowResume)
+        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, deliveryTargets(state?.connections ?? [], state?.mailboxes), true, o.allowResume)
         if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})

@@ -2249,6 +2249,36 @@ test('ticking and tidying from the page write progress.md the way the pane does,
   }
 })
 
+test('ticking twin steps from the page ticks each line it showed', { timeout: 30_000 }, async () => {
+  const board = await page(`
+## home
+### Draft the notes
+- [ ] Draft the notes
+- [ ] Draft the notes
+`)
+  try {
+    const { path, call, rowOf } = board
+    const row = await rowOf('Draft the notes')
+    const lines = row.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.fileLine)
+    assert.equal(lines.length, 2)
+    assert.ok(lines.every(line => typeof line === 'number'), 'the board names each step by its file line')
+    // The second twin first: its press must not tick the first line.
+    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.fp } })
+    assert.equal(second.status, 200, second.body)
+    let left = readFileSync(path, 'utf8').split('\n')
+    assert.equal(left[lines[1]], '- [x] Draft the notes')
+    assert.equal(left[lines[0]], '- [ ] Draft the notes')
+    // Then the first twin, with the board drawn again.
+    const again = await rowOf('Draft the notes')
+    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.fp } })
+    assert.equal(first.status, 200, first.body)
+    left = readFileSync(path, 'utf8').split('\n')
+    assert.equal(left[lines[0]], '- [x] Draft the notes')
+  } finally {
+    await board.close()
+  }
+})
+
 const relayFragment = (at, state = 'waiting', step = '- [?] Ship it Friday, OK?') => `## launch\n<!-- auto session=c0ffee12 agent=muse state=${state} updated=${at} -->\n### Draft the launch post\n${step}\n<!-- /auto session=c0ffee12 -->`
 
 test('Connect a web chat copies the prompt in the guide, and a block filled in from it is accepted', { timeout: 30_000 }, async () => {
@@ -9340,6 +9370,19 @@ test('an own task with a finished step still shows Last: for the finished step',
   assert.ok(!board.includes('Last: Draft the notes'), board)
   assert.equal(dom.buttons().filter(button => button.textContent === 'Done: Draft the notes').length, 1)
   assert.equal(dom.buttons().filter(button => button.textContent === 'Done: Draft the outline').length, 0)
+})
+
+test('a hand-written own task with two open steps with the same text shows one Done button per step, and each press names its own step', async () => {
+  const text = `## home\n### Draft the notes\n- [ ] Draft the notes\n- [ ] Draft the notes\n`
+  const dom = await pageDom(await sourcePage('en'), await sourceModel(text, ONE_LINE_NOW))
+  const done = dom.buttons().filter(button => button.textContent === 'Done: Draft the notes')
+  assert.equal(done.length, 2, dom.buttons().map(button => button.textContent).join(' | '))
+  for (const button of done) button.click()
+  await dom.flush()
+  const ticks = dom.requests.filter(request => request.body.type === 'tick')
+  assert.equal(ticks.length, 2)
+  assert.ok(ticks.every(request => request.body.text === 'Draft the notes'))
+  assert.equal(new Set(ticks.map(request => request.body.line)).size, 2, 'each press names its own step by its file line')
 })
 
 test('on a wide screen the sidebar lists views, agents and projects', async () => {
