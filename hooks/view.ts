@@ -894,6 +894,18 @@ export const buildView = (
   const keptScopes = new Set(folded.projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [scopeOf(project.name, task.auto.agent, task.auto.session, task.auto.resume)])))
   const foldedScopes = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto === null || keptTasks.has(task) ? [] : [scopeOf(project.name, task.auto.agent, task.auto.session, task.auto.resume)])).filter(scope => !keptScopes.has(scope)))
   const repeats = new Map<string, number>()
+  const usedKeys = new Set<string>()
+  const nextKey = (base: string): string => {
+    let repeat = repeats.get(base) ?? 0
+    let key = repeat === 0 && !usedKeys.has(base) ? base : `${base}#${Math.max(2, repeat + 1)}`
+    while (usedKeys.has(key)) {
+      repeat = Math.max(repeat + 1, Number(key.slice(key.lastIndexOf('#') + 1)) || 0) + 1
+      key = `${base}#${repeat}`
+    }
+    repeats.set(base, repeat || 1)
+    usedKeys.add(key)
+    return key
+  }
   // How many tasks share each project and title, counted once rather than for every row (#371).
   const twins = new Map<string, number>()
   for (const project of projects) {
@@ -917,11 +929,9 @@ export const buildView = (
       }
       order += 1
       const title = task.title || s.unnamed
-      // A repeated title gets #2, #3, … so its row and buttons are its own.
+      // A repeated title gets #2, #3, … so its row and buttons are its own (#940).
       const base = `${name}::${title}`
-      const repeat = (repeats.get(base) ?? 0) + 1
-      repeats.set(base, repeat)
-      const key = repeat === 1 ? base : `${base}#${repeat}`
+      const key = nextKey(base)
       const clock = observedTime(task.auto, now, seen)
       const updated = clock.updated
       const when = clock.isFuture ? updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(updated, now, s)) : relativeTime(updated, now, s)
@@ -1207,14 +1217,13 @@ export const buildView = (
     const name = project.name || s.uncategorized
     const title = task.title || s.unnamed
     const base = `${name}::${title}`
-    const repeat = (repeats.get(base) ?? 0) + 1
-    repeats.set(base, repeat)
+    const key = nextKey(base)
     const updated = observedTime(auto, now, seen).updated
     const { done, total } = countSteps(task)
     stopped.push({
       updated,
       row: {
-        key: repeat === 1 ? base : `${base}#${repeat}`,
+        key,
         project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
         when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], left: [], next: null, due: null, pr: '',
         agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
