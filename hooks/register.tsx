@@ -3677,11 +3677,12 @@ const showCopied = async ($: EngineInterface, question: string, text: string, su
   return copied ? { text: s.copied } : { text: s.pressCopyFallback, copyText: text, tone: 'alert' }
 }
 
-// The language from the four places it can come from (strings.ts resolveLang).
+// The language from the five places it can come from (strings.ts resolveLang).
 const settleLang = async ($: EngineInterface, options: PluginOptions, preference?: Lang | null): Promise<void> => {
   const settings = (await $.settings.read().catch(() => ({}))) as { language?: unknown }
   const stored = preference === undefined ? await $.store.get('lang') : preference
-  const chosen = resolveLang(options.language, stored, settings.language, await $.env.get('LANG'))
+  const locale = (options as { locale?: unknown }).locale ?? (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().locale : undefined)
+  const chosen = resolveLang(options.language, stored, settings.language, await $.env.get('LANG'), locale)
   await update($, lang, () => chosen)
 }
 
