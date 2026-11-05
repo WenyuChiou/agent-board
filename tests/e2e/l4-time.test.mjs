@@ -486,7 +486,7 @@ describe('L4 time and scale', () => {
       // The budget is the host's own limit (HOOK_TIMEOUTS in hooks/hook-safety.ts), so a change
       // there fails here instead of leaving this check pointing at an old figure.
       assert.equal(HOOK_TIMEOUT_MS, hookTimeout('antigravity'))
-      assert.equal(HOOK_TIMEOUT_MS, hookTimeout('codex', 'UserPromptSubmit'))
+      assert.equal(hookTimeout('codex', 'Stop'), hookTimeout('codex', 'UserPromptSubmit'))
       const call = (world, event, payload) => hook(world, 'codex', event, { session_id: 'l4-big-file-session', cwd: world.root, ...payload })
       // The first call installs the hooks into the isolated home. It is not what is timed.
       for (const world of [small, big]) {

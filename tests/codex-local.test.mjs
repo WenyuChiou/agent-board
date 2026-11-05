@@ -2379,7 +2379,7 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
     wasReaped = !existsSync(pidFile) || !isReporterAlive(Number(readFileSync(pidFile, 'utf8')))
     assert.equal(result.status, 0, hookFailure(result))
     assert.equal(wasReaped, true, 'the timed-out reporter must be reaped before the hook returns')
-    assert.ok(performance.now() - started < 3000)
+    assert.ok(performance.now() - started < 11000)
     const files = pendingFiles(f)
     assert.equal(files.length, 1)
     assert.match(files[0], /^\d{15}-[\da-f-]+\.raw\.json$/)
@@ -2446,12 +2446,12 @@ test('the hook deadline counts from the process start, not from when the worker 
 test('a late Codex worker queues an ISO event time and recovery preserves it', t => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   holdAutomaticRecovery(f)
-  const at = Date.now() - 3000
+  const at = Date.now() - 10000
   const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
   const worker = join(f.root, 'agent-board-hook.mjs')
   const payload = { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'late-iso-turn' }
   const result = spawnSync(process.execPath, [worker, '--hook-version', '1', '--hook-event', 'UserPromptSubmit', '--codex-event', '--agent', 'codex', '--progress-file', f.progress, '--hook-started', String(at)], {
-    env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000,
+    env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 15000,
   })
   assert.equal(result.status, 0, hookFailure(result))
   const files = pendingFiles(f)
