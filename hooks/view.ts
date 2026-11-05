@@ -1315,8 +1315,8 @@ export const buildView = (
     groups,
     recent: shownRecent.map(({ at: _at, ...item }) => item),
     // A finished task reaches `completed` only with a step that still asks, even a hidden one. It has
-    // nothing left to confirm, so it offers Archive alone.
-    recentAsking: completed.filter(item => item.recent !== null && shownRecent.includes(item.recent) && item.row.archive !== null).map(item => ({ ...item.row, confirm: null })),
+    // nothing left to confirm, so it offers Archive alone. In the order Done recently draws them, so the cursor moves down the list.
+    recentAsking: shownRecent.flatMap(recent => completed.filter(item => item.recent === recent && item.row.archive !== null)).map(item => ({ ...item.row, confirm: null })),
     finished,
     ...(unreadable.size === 0 ? {} : { unreadable: [...unreadable] }),
   }

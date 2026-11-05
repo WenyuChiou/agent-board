@@ -2030,7 +2030,7 @@ export const LINES = [
 "    active: rows,",
 "    groups,",
 "    recent: shownRecent.map(({ at: _at, ...item }) => item),",
-"    recentAsking: completed.filter((item) => item.recent !== null && shownRecent.includes(item.recent) && item.row.archive !== null).map((item) => ({ ...item.row, confirm: null })),",
+"    recentAsking: shownRecent.flatMap((recent) => completed.filter((item) => item.recent === recent && item.row.archive !== null)).map((item) => ({ ...item.row, confirm: null })),",
 "    finished,",
 "    ...unreadable.size === 0 ? {} : { unreadable: [...unreadable] }",
 "  };",

@@ -480,6 +480,19 @@ describe('L2 a working day', { concurrency: 2 }, () => {
     } finally { await world.close() }
   })
 
+  test('a working day: the cursor walks finished tasks that still ask in the order the board draws them', async () => {
+    const world = makeWorld()
+    try {
+      block(world, { state: 'done', session: 'a1000001', updated: new Date(world.now - 3_600_000).toISOString(), title: 'Older finished task', steps: ['- [?] Notify the team, OK?'] })
+      block(world, { state: 'done', session: 'a1000002', updated: new Date(world.now - 60_000).toISOString(), title: 'Newer finished task', steps: ['- [?] Tag the release, OK?'] })
+      const first = await terminal.keys(world, '')
+      assert.ok(first.indexOf('Newer finished task') < first.indexOf('Older finished task'), first)
+      assert.match(first, /› ✓ api-gateway › Newer finished task/)
+      assert.match(await terminal.keys(world, 'down'), /› ✓ api-gateway › Older finished task/)
+      assert.match(await terminal.keys(world, 'down up'), /› ✓ api-gateway › Newer finished task/)
+    } finally { await world.close() }
+  })
+
   test("a working day: the page's archive result says a stopped session's question stays", async () => {
     const world = makeWorld()
     try {

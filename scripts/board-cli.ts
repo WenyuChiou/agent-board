@@ -985,7 +985,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
-    // Read, never written: view() may rewrite the question list, and a list another process holds
+    // Not through view(), which may rewrite the question list and throw: a list another process holds
     // for a moment must not change what is said about an archive that has already happened.
     try {
       const source = read(path)
