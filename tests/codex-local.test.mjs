@@ -113,18 +113,18 @@ const stopNativeTree = child => {
   }
 }
 
-const nativeProcess = (executable, args, env, input, after = setTimeout, stop = stopNativeTree, { isInputOpen = false, ...options } = {}) => new Promise((resolve, reject) => {
+const nativeProcess = (executable, args, env, input, after = setTimeout, stop = stopNativeTree, { isInputOpen = false, inputFd, stdoutFd, stderrFd, ...options } = {}) => new Promise((resolve, reject) => {
   const child = spawn(executable, args, {
-    env, ...options, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32',
+    env, ...options, stdio: [inputFd ?? 'pipe', stdoutFd ?? 'pipe', stderrFd ?? 'pipe'], windowsHide: true, detached: process.platform !== 'win32',
   })
   let stdout = '', stderr = '', error, termination
   let isClosed = false, isTimedOut = false
   let grace, notifyClosed
   const whenClosed = new Promise(done => { notifyClosed = done })
-  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
-  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  child.stdout?.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+  child.stderr?.setEncoding('utf8').on('data', chunk => { stderr += chunk })
   child.on('error', failure => { error ??= failure })
-  child.stdin.on('error', failure => { error ??= failure })
+  child.stdin?.on('error', failure => { error ??= failure })
   const timer = after(() => {
     if (isClosed || isTimedOut || child.pid === undefined) return
     isTimedOut = true
@@ -135,9 +135,9 @@ const nativeProcess = (executable, args, env, input, after = setTimeout, stop = 
       // An OS refusal cannot prove the descendants exited. Keep their fixture and
       // report the owned PID rather than hanging or deleting files they may use.
       const failure = Object.assign(new Error(`Native hook tree ${child.pid} did not close; fixture retained; ${JSON.stringify(termination)}`), { code: 'NATIVE_HOOK_UNREAPED', keepFixture: true, pid: child.pid, termination, whenClosed })
-      child.stdin.destroy()
-      child.stdout.destroy()
-      child.stderr.destroy()
+      child.stdin?.destroy()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
       child.unref()
       reject(failure)
     }, 2000)
@@ -146,12 +146,12 @@ const nativeProcess = (executable, args, env, input, after = setTimeout, stop = 
     isClosed = true
     clearTimeout(timer)
     clearTimeout(grace)
-    child.stdin.destroy()
+    child.stdin?.destroy()
     notifyClosed({ status, signal })
     resolve({ status, signal, error, termination, stdout, stderr })
   })
-  if (isInputOpen) child.stdin.write(input)
-  else child.stdin.end(input)
+  if (isInputOpen) child.stdin?.write(input)
+  else child.stdin?.end(input)
 })
 
 const nativeHook = (command, env, input, after = setTimeout, stop = stopNativeTree) => {
@@ -7974,6 +7974,119 @@ const reportPayload = { title: 'Synthetic work', project: 'demo', state: 'workin
 const folderReport = (f, cwd, payload = reportPayload, extra = []) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-report', ...extra], {
   cwd, env: { ...f.env, CODEX_THREAD_ID: undefined }, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 15000,
 })
+// Exercise the real standalone entry without a synchronous bootstrap child;
+// the test's own process helper waits for exit and reaps only its child tree.
+const folderIdentityFixture = fn => fixture(async f => {
+  const bootstrap = join(f.home, 'offline-board.mjs')
+  f.save(bootstrap, bundleFromDir(new URL('..', import.meta.url)))
+  const args = ['--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes')]
+  const invoke = async (flags, input, cwd = f.home, extra = {}, script = f.script) => {
+    const payload = join(f.home, 'offline-input.json')
+    const output = join(f.home, 'offline-stdout.txt'), errors = join(f.home, 'offline-stderr.txt')
+    f.save(payload, input === undefined ? '' : JSON.stringify(input))
+    // File-backed stdio makes the real CLI's bytes observable independently of
+    // parent pipe delivery; all descriptors remain owned by this fixture.
+    const inputFd = openSync(payload, 'r'), stdoutFd = openSync(output, 'w'), stderrFd = openSync(errors, 'w')
+    try {
+      const ran = await nativeProcess(process.execPath, [script, ...flags, ...args],
+        { ...f.env, CODEX_THREAD_ID: undefined, ...extra }, '', callback => setTimeout(callback, 15000), stopNativeTree, { cwd, inputFd, stdoutFd, stderrFd })
+      return { ...ran, stdout: readFileSync(output, 'utf8'), stderr: readFileSync(errors, 'utf8') }
+    } finally { closeSync(inputFd); closeSync(stdoutFd); closeSync(stderrFd) }
+  }
+  const installed = await invoke(['--codex-setup', '--apply'], undefined, f.home, {}, bootstrap)
+  assert.equal(installed.error, undefined, hookFailure(installed))
+  assert.equal(installed.status, 0, hookFailure(installed))
+  return fn({ ...f, invoke })
+})
+
+const aliasFolders = f => {
+  const physical = join(f.home, 'physical'), alias = join(f.home, 'alias')
+  mkdirSync(join(physical, 'demo'), { recursive: true })
+  symlinkSync(physical, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  return { real: join(physical, 'demo'), alias: join(alias, 'demo') }
+}
+const aliasEvent = (f, cwd, turn = 'alias-turn', id = session, extra = {}) => f.invoke(['--codex-event'], {
+  session_id: id, hook_event_name: 'UserPromptSubmit', turn_id: turn, cwd,
+  transcript_path: rollout(f, id, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' }),
+}, f.home, extra)
+const aliasReport = (f, cwd) => f.invoke(['--codex-report'], reportPayload, cwd)
+const folderCacheFile = (f, id = session) => join(f.root, 'sessions', createHash('sha256').update(`codex:${id}`).digest('hex') + '.json')
+const assertAliasRefused = async (f, cwd) => {
+  const before = everyFile(f.root).map(file => [file, readFileSync(file)])
+  const ran = await aliasReport(f, cwd)
+  assert.notEqual(ran.status, 0)
+  assert.equal(ran.stdout, '')
+  assert.equal(ran.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
+  assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file)]), before)
+}
+
+test('folder aliases bind one native owner without rebinding another same-named directory', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  const started = await aliasEvent(f, dirs.alias)
+  assert.equal(started.status, 0, hookFailure(started))
+  const history = rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  const historyBytes = readFileSync(history)
+  const other = join(f.home, 'other', 'demo')
+  mkdirSync(other, { recursive: true })
+  await assertAliasRefused(f, other)
+  const ran = await aliasReport(f, dirs.real)
+  assert.equal(ran.status, 0, hookFailure(ran))
+  assert.equal(JSON.parse(ran.stdout).session, session)
+  const record = sessionRecord(f, session)
+  assert.match(record.folderDigest, /^[a-f0-9]{64}$/)
+  assert.match(record.folderCanonicalDigest, /^[a-f0-9]{64}$/)
+  assert.ok(!JSON.stringify(record).includes(f.home))
+  assert.deepEqual(readFileSync(history), historyBytes)
+  assert.equal((await aliasEvent(f, dirs.real, 'real-turn')).status, 0)
+  assert.equal((await aliasReport(f, dirs.alias)).status, 0)
+}))
+
+test('folder aliases keep legacy exact digests and require a fresh hook for old alias hashes', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  assert.equal((await aliasEvent(f, dirs.real)).status, 0)
+  const { folderCanonicalDigest: discarded, ...legacy } = sessionRecord(f, session)
+  f.save(folderCacheFile(f), JSON.stringify(legacy))
+  const accepted = await aliasReport(f, dirs.real)
+  assert.equal(accepted.status, 0, hookFailure(accepted))
+  assert.equal(sessionRecord(f, session).folderDigest, legacy.folderDigest)
+  assert.equal((await aliasEvent(f, dirs.alias, 'old-alias-turn')).status, 0)
+  const { folderCanonicalDigest: omitted, ...oldAlias } = sessionRecord(f, session)
+  f.save(folderCacheFile(f), JSON.stringify(oldAlias))
+  await assertAliasRefused(f, dirs.real)
+  assert.equal((await aliasEvent(f, dirs.alias, 'fresh-alias-turn')).status, 0)
+  assert.equal((await aliasReport(f, dirs.real)).status, 0)
+}))
+
+test('folder aliases refuse ambiguous stale ended run and malformed canonical records', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  assert.equal((await aliasEvent(f, dirs.alias)).status, 0)
+  const original = sessionRecord(f, session)
+  for (const change of [
+    { state: 'ended' }, { origin: 'run' }, { updated: '2020-01-01T00:00:00Z' },
+    { updated: new Date(Date.now() + 60000).toISOString() }, { folderDigest: undefined },
+    { folderCanonicalDigest: 'malformed' }, { folderCanonicalDigest: '0'.repeat(64) },
+  ]) {
+    f.save(folderCacheFile(f), JSON.stringify({ ...original, ...change }))
+    await assertAliasRefused(f, dirs.real)
+  }
+  f.save(folderCacheFile(f), JSON.stringify(original))
+  assert.equal((await aliasEvent(f, dirs.real, 'second-owner-turn', secondSession)).status, 0)
+  await assertAliasRefused(f, dirs.real)
+}))
+
+test('folder aliases keep missing and unreadable paths on exact legacy matching only', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  assert.equal((await aliasEvent(f, join(f.home, 'missing', 'demo'))).status, 0)
+  assert.equal(sessionRecord(f, session).folderCanonicalDigest, undefined)
+  await assertAliasRefused(f, dirs.real)
+  const denied = join(f.home, 'deny-realpath.cjs')
+  f.save(denied, `const fs = require('node:fs')\nconst original = fs.realpathSync\nfs.realpathSync = (path, ...args) => { if (path === ${JSON.stringify(dirs.alias)}) throw Object.assign(new Error('SYNTHETIC_DENIED'), { code: 'EACCES' }); return original(path, ...args) }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  assert.equal((await aliasEvent(f, dirs.alias, 'unreadable-turn', session, { NODE_OPTIONS: `--require ${JSON.stringify(denied)}` })).status, 0)
+  assert.equal(sessionRecord(f, session).folderCanonicalDigest, undefined)
+  await assertAliasRefused(f, dirs.real)
+  assert.equal((await aliasEvent(f, dirs.alias, 'readable-turn')).status, 0)
+  assert.equal((await aliasReport(f, dirs.real)).status, 0)
+}))
 const oldBlock = (id, title, mark = '') => {
   const block = createHash('sha256').update(`codex:${id}`).digest('hex').slice(0, 8)
   return `<!-- auto session=${block} agent=codex state=waiting updated=${new Date().toISOString()} resume=${id}${mark} -->

@@ -51,6 +51,12 @@ Independent setup needs neither Claude Code nor another model. It creates one sh
 Use `--progress-file /absolute/path/progress.md` to select another existing local board.
 Each target has an ownership manifest; shared files remain while another target needs
 them. Only an agent's own proven native id may report its task steps.
+Folder-based reports keep the existing path digest and, when the directory can be
+resolved, an additional canonical-path digest. This lets a hook's directory alias and
+the report subprocess's directory identify the same owner without storing either path.
+Old records still match their exact path digest; an old alias-only record needs a fresh
+hook before a different spelling can match. Missing or unreadable directories do not
+gain alias matching, and ambiguous, stale, ended or background-run owners remain refused.
 With an active Claude Code plugin connector, setup keeps its selected board and leaves
 agents it already manages to that connector, without adding another hook or board script.
 
