@@ -33,6 +33,24 @@ export const parseArgs = argv => {
 const nameOf = text => (text ?? '').match(/[A-Za-z0-9][A-Za-z0-9_-]*/)?.[0].toLowerCase() ?? null
 const reviewingName = body => nameOf((body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1])
 const verdictName = body => nameOf((body ?? '').match(/^Review:[ \t]*(?:APPROVE|REQUEST CHANGES)\b[^\r\n]*?\bby[ \t]+(\S[^\r\n]*)/m)?.[1])
+// The full identity keeps the dispatching lane, like authorKey does: "codex (phase1)" and "codex (e2e)"
+// are distinct agents (CONTRIBUTING rule 7), so only the first word is not enough to tell them apart.
+// reviewingName and verdictName above stay first-word names: countOpenReviews keys its counts by them,
+// and the reviewers file lists first-word names. The author comparisons in classify use these instead.
+const fullName = text => (text ?? '').replace(/`/g, '').split(',')[0].replace(/\s+/g, ' ').trim().toLowerCase() || null
+const verdictFullName = body => fullName((body ?? '').match(/^Review:[ \t]*(?:APPROVE|REQUEST CHANGES)\b[^\r\n]*?\bby[ \t]+(\S[^\r\n]*)/m)?.[1])
+const identityOf = text => {
+  const match = (text ?? '').replace(/`/g, '').split(',')[0].replace(/\s+/g, ' ').trim().toLowerCase()
+    .match(/^([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s*\(([^)]*)\))?/)
+  return match ? { base: match[1], lane: (match[2] ?? '').trim() || null } : null
+}
+// Two names are the same agent when the base name matches and the lanes do not disagree: a name with no
+// lane is read as the same agent, so a bare "codex" still counts as the author "codex (x)" — the
+// conservative reading for self-approval, which can only ask for another reviewer, never merge early.
+const sameAgent = (a, b) => {
+  const x = identityOf(a), y = identityOf(b)
+  return Boolean(x && y && x.base === y.base && (!x.lane || !y.lane || x.lane === y.lane))
+}
 // The built bundle and the string tables change in almost every pull request, so approved ones that touch them merge one at a time.
 const sharedPath = /^hooks\/(?:board-script(?:-[^/]+)?\.ts|i18n\.ts|strings-en\.ts|strings-zh-cn\.ts)$/
 
@@ -174,17 +192,17 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     const comments = entriesOf(commentsFor(commentsByNumber, pr.number))
     const ready = comments.map((entry, index) => ({ ...entry, order: index }))
       .filter(entry => matchesHead(head, readySha(entry.comment.body))).at(-1)
-    const verdicts = comments.map((entry, index) => ({ ...entry, order: index, verdict: reviewOf(entry.comment.body), by: verdictName(entry.comment.body) }))
+    const verdicts = comments.map((entry, index) => ({ ...entry, order: index, verdict: reviewOf(entry.comment.body), by: verdictFullName(entry.comment.body) }))
       .filter(entry => entry.verdict)
     const headVerdicts = verdicts.filter(entry => matchesHead(head, entry.verdict.sha))
     const latestHeadVerdict = headVerdicts.at(-1)
     const reviewAfterReady = ready && headVerdicts.some(entry => entry.order > ready.order)
     // Agents share one GitHub login, so a Reviewing name is compared with the Author line's agent name, never the login:
-    // the author's own Reviewing does not count as a review taken.
-    const authorName = nameOf(item.author)
+    // the author's own Reviewing does not count as a review taken. The comparison keeps the dispatching lane:
+    // "codex (e2e)" taking a review of "codex (phase1)" is a different agent, not the author.
     const taking = ready ? comments.slice(ready.order + 1)
       .map(entry => ({ name: (entry.comment.body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1]?.trim(), time: entry.time }))
-      .filter(entry => entry.name && nameOf(entry.name) !== authorName).at(-1) ?? null : null
+      .filter(entry => entry.name && !sameAgent(entry.name, item.author)).at(-1) ?? null : null
     // A Reviewing comment past its 4 hours no longer holds the review; the queue names who let it lapse.
     const takenBy = taking && !isLapsed(taking.time, nowMs) ? taking.name : null
     const lapsedBy = taking && !takenBy ? taking.name : null
@@ -198,9 +216,10 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
       const isOverFourHours = hours > 4
       const suggestion = reviewers ? suggestReviewer(reviewers, { author: nameOf(item.author), isOverFourHours }, openCounts) : {}
       result.needsReviewer.push({ ...item, readyAt: ready.comment.created_at, hours, isOverFourHours, takenBy, lapsedBy, ...suggestion, ...extras })
-    } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && nameOf(latestHeadVerdict.by) === authorName) {
+    } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by, item.author)) {
       // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
-      // even when it arrives from the shared login. A verdict with no name keeps its old reading.
+      // even when it arrives from the shared login. The lane is part of the identity, so "codex (e2e)" approving
+      // "codex (phase1)" counts, while a verdict with no name keeps its old reading.
       result.waitingForAuthor.push({ ...item, detail: 'approval is by the author', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
