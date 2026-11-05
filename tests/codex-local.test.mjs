@@ -133,6 +133,9 @@ const stopNativeTree = child => {
   }
 }
 
+// A hard link is instant and is the same file for any scanner; a 110 MB copy is the fallback (EXDEV, denied link).
+const placeNode = destination => { try { linkSync(process.execPath, destination) } catch { copyFileSync(process.execPath, destination) } }
+
 const nativeProcess = (executable, args, env, input, after = setTimeout, stop = stopNativeTree, { isInputOpen = false, inputFd, stdoutFd, stderrFd, ...options } = {}) => new Promise((resolve, reject) => {
   const child = spawn(executable, args, {
     env, ...options, stdio: [inputFd ?? 'pipe', stdoutFd ?? 'pipe', stderrFd ?? 'pipe'], windowsHide: true, detached: process.platform !== 'win32',
@@ -5750,6 +5753,7 @@ test('Windows Antigravity binds its executable across PATH batch files and anoth
   for (const dir of [home, runtime, shadow, otherCwd]) mkdirSync(dir)
   const boundNode = join(runtime, 'node.exe')
   copyFileSync(process.execPath, boundNode)
+  // Both stay real copies: a hard link shares node.exe's inode with the Node on PATH and the decoy, and would hide a wrong pick.
   copyFileSync(process.execPath, join(otherCwd, 'node.exe'))
   const marker = join(shadow, 'ran.txt')
   writeFileSync(join(shadow, 'node.cmd'), `@echo off\r\n> "${marker}" echo SYNTHETIC_SHADOW_COMMAND\r\nexit /b 37\r\n`)
@@ -5810,7 +5814,7 @@ test('compact Antigravity fallback preserves hook arguments and Codex trust comm
     const runtime = join(f.home, 'n s')
     mkdirSync(runtime)
     const node = join(runtime, 'node.exe')
-    copyFileSync(process.execPath, node)
+    placeNode(node)
     const worker = join(root, 'agent-board-hook.mjs')
     const capture = join(root, 'synthetic-long-fallback.json')
     const stdout = 'synthetic compact stdout\n', stderr = 'synthetic compact stderr\n'
@@ -9420,4 +9424,13 @@ test('setup writes the plan hook as a matcher group for Codex and Gemini, and re
   assert.equal(f.command(['--codex-remove', '--agent', 'gemini', '--apply']).status, 0)
   assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')), { hooks: { PostToolUse: [mine] } })
   assert.deepEqual(JSON.parse(readFileSync(geminiConfig, 'utf8')), { hooks: { AfterTool: [mine] } })
+}))
+
+test('Windows fixture Node is a hard link to the running executable when linking works', { skip: process.platform !== 'win32' }, t => fixture(f => {
+  const node = join(f.home, 'linked node.exe')
+  placeNode(node)
+  const linked = statSync(node, { bigint: true }), original = statSync(process.execPath, { bigint: true })
+  // Where Windows refuses the link (node.exe under Program Files), the copy is used and the log says so.
+  if (linked.nlink < 2n) return t.skip('this computer refused a hard link to node.exe; the fixture copied it')
+  assert.equal(linked.ino, original.ino)
 }))
