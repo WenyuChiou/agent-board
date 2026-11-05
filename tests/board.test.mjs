@@ -10284,3 +10284,52 @@ test("a waiting card's note shows as one line with the full text on open", async
   await dom.redraw({ ...model, counts: { ...model.counts, active: 8 } })
   assert.equal(noteClip().open, false)
 })
+
+test('a Hidden notice restores that exact question directly, including after a refresh', async () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const html = await sourcePage(lang)
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const model = cardsModel()
+    model.asks[0].unhideKey = 'hidden:synthetic-restore-key'
+    const dom = await pageDom(html, model, { post: async ({ body }) => ({ ok: true, json: async () => ({ ok: true, note: body.type === 'hide' ? words.boardHidden?.replace('\u0001', 'Publish, OK?') || 'Synthetic hidden notice' : 'Synthetic shown notice' }) }) })
+    dom.buttons().find(button => button.textContent === words.answeredHide).click()
+    await dom.flush()
+    await dom.flush()
+    const hidden = { ...model, asks: [], hidden: [{ key: 'hidden:synthetic-restore-key', project: 'Demo', agent: 'codex', task: 'Plan', text: 'Publish, OK?' }] }
+    await dom.redraw(hidden)
+    const notice = pressWalk(dom.node('board')).find(node => node.className?.startsWith('press-result') && node.textContent.includes('hidden notice'))
+    assert.ok(notice, 'the hide result remains available')
+    const undo = pressWalk(notice).find(node => node.tag === 'button' && node.textContent === words.showAgain)
+    assert.ok(undo, 'Show again is on the Hidden notice itself')
+    undo.click()
+    await dom.flush()
+    await dom.flush()
+    assert.deepEqual(dom.requests.map(one => [one.body.key, one.body.type]), [['ask', 'hide'], ['hidden:synthetic-restore-key', 'unhide']])
+  }
+})
+
+test('after Send the hide button named by each README is visible without More', async () => {
+  const isVisible = node => {
+    for (let one = node; one; one = one.parentNode) if (one.hidden || one.inert || String(one.className || '').split(' ').includes('gone')) return false
+    return true
+  }
+  for (const [lang, readme] of [['en', 'README.md'], ['zh-TW', 'README.zh-TW.md'], ['zh-CN', 'README.zh-CN.md']]) {
+    const html = await sourcePage(lang)
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const model = cardsModel()
+    model.asks[0].send = 'send'
+    const dom = await pageDom(html, model, { confirm: () => true, post: async () => ({ ok: true, json: async () => ({ ok: true, note: 'Synthetic sent notice' }) }) })
+    const send = dom.buttons().find(button => button.textContent === words.pgSendReply.replace('\u0001', 'Yes'))
+    assert.ok(send)
+    send.click()
+    await dom.flush()
+    await dom.flush()
+    const card = pressWalk(dom.node('board')).find(node => node.getAttribute('data-ref-key') === 'ask')
+    const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
+    assert.ok(hide, 'the documented hide button is visible after sending')
+    assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), readme)
+    hide.click()
+    await dom.flush()
+    assert.equal(dom.requests.at(-1).body.type, 'hide')
+  }
+})
