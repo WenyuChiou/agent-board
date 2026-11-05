@@ -997,13 +997,15 @@ test('a live hub takes hook mailbox calls over loopback and the hook does not wr
     }
     let { out, err } = await hook()
     // A hub slower than the hook's 150 ms defers the turn by design, and the next turn delivers (#902).
-    if (!out.includes('Synthetic mailbox payload')) {
+    const isDeferred = !out.includes('Synthetic mailbox payload')
+    if (isDeferred) {
       assert.equal(err, 'board: mailbox deferred\n')
-      calls.length = 0
       ;({ out, err } = await hook())
     }
     assert.ok(out.includes('Synthetic mailbox payload'), err)
-    assert.deepEqual(calls.map(one => one[0]), ['/api/messages/mailbox-turn', '/api/messages/mailbox-accept'])
+    // The turn the hook gave up on may or may not have reached the hub before the one that delivered.
+    const expected = ['/api/messages/mailbox-turn', '/api/messages/mailbox-accept']
+    assert.deepEqual(calls.map(one => one[0]), isDeferred && calls.length === 3 ? [expected[0], ...expected] : expected)
     assert.ok(calls.every(one => one[2] === 'synthetic-token'))
     assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
   } finally { await new Promise(done => server.close(done)) }
