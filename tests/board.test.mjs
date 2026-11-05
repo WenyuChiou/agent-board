@@ -9333,6 +9333,49 @@ test('an agent whose only session ended in the last 30 minutes shows as offline'
   }
 })
 
+const countLineOf = text => {
+  const found = text.split('\n')[0].match(/● (\d+) .*?▸ (\d+) /)
+  assert.ok(found, text.split('\n')[0])
+  return { needs: Number(found[1]), working: Number(found[2]) }
+}
+
+test('the page, the terminal board and --status print the same needs-you and working numbers, with a hidden question left out (#832)', async () => {
+  const runtime = await sourceBoard()
+  const now = groupedNow
+  const at = minutes => new Date(now - minutes * 60_000).toISOString()
+  const source = '## Synthetic project\n' +
+    `<!-- auto session=aaaa1111 agent=codex state=waiting updated=${at(5)} -->\n### Asks first\n- [?] First choice, blue or green?\n<!-- /auto session=aaaa1111 -->\n` +
+    `<!-- auto session=bbbb2222 agent=codex state=waiting updated=${at(6)} -->\n### Asks second\n- [?] Second choice, red or white?\n<!-- /auto session=bbbb2222 -->\n` +
+    `<!-- auto session=cccc3333 agent=claude state=working updated=${at(4)} -->\n### Works now\n- [~] Write a test\n<!-- /auto session=cccc3333 -->\n` +
+    `<!-- auto session=dddd4444 agent=claude state=working updated=${at(120)} -->\n### Quiet for two hours\n- [~] Old work\n<!-- /auto session=dddd4444 -->\n` +
+    '### Hand-kept plan\n- [ ] Review\n'
+  const build = answered => runtime.buildView(runtime.parseProgress(source), [], null, now, 0, {}, EN, answered, {})
+  const surfaces = (answered) => {
+    const view = build(answered)
+    const options = { now, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] }
+    const page = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, options).view
+    const terminal = countLineOf(runtime.boardText(view, [], EN, { width: 100, isColor: false, counts: runtime.boardCounts(view, [], EN, now) }))
+    const line = runtime.boardStatus(source, now, EN, undefined, { answered })
+    const status = line.match(/^(\d+) need you · (\d+) working$/)
+    assert.ok(status, line)
+    return { page: { needs: page.n, working: page.working.length }, terminal, status: { needs: Number(status[1]), working: Number(status[2]) } }
+  }
+  const before = surfaces([])
+  assert.equal(before.page.needs, 2)
+  assert.deepEqual(before.terminal, before.page)
+  assert.deepEqual(before.status, before.page)
+  // One question is hidden on the board, as `h` does: all three leave it out, and agree.
+  const hideKey = build([]).waiting.find(item => item.text.includes('First choice')).hideKey
+  const after = surfaces([hideKey])
+  assert.equal(after.page.needs, 1)
+  assert.deepEqual(after.terminal, after.page)
+  assert.deepEqual(after.status, after.page)
+  // Working is the page's rule: the block whose question is hidden is back in it, and a block quiet
+  // for two hours and a hand-kept task are not.
+  assert.equal(before.page.working, 1)
+  assert.equal(after.page.working, 2)
+})
+
 const claudeChip = async (state, minutesAgo) => {
   const runtime = await sourceBoard()
   const at = new Date(groupedNow - minutesAgo * 60_000).toISOString()
@@ -10034,8 +10077,8 @@ const sourceBoard = async () => {
     },
   })
   try {
-    const [board, view, parse, serve, questions, blocks, retention] = await Promise.all([import('../hooks/board.ts'), import('../hooks/view.ts'), import('../hooks/parse.ts'), import('../hooks/serve.ts'), import('../hooks/questions.ts'), import('../hooks/blocks.ts'), import('../hooks/retention.ts')])
-    return { ...board, ...view, ...parse, ...serve, ...questions, ...retention, cutOffSpans: blocks.cutOffSpans, cutOffBlocks: blocks.cutOffBlocks, cutBlockLines: blocks.cutBlockLines }
+    const [board, view, parse, serve, questions, blocks, retention, counts, status] = await Promise.all([import('../hooks/board.ts'), import('../hooks/view.ts'), import('../hooks/parse.ts'), import('../hooks/serve.ts'), import('../hooks/questions.ts'), import('../hooks/blocks.ts'), import('../hooks/retention.ts'), import('../hooks/counts.ts'), import('../hooks/board-status.ts')])
+    return { ...board, ...view, ...parse, ...serve, ...questions, ...retention, boardCounts: counts.boardCounts, boardStatus: status.boardStatus, cutOffSpans: blocks.cutOffSpans, cutOffBlocks: blocks.cutOffBlocks, cutBlockLines: blocks.cutBlockLines }
   } finally { loader.deregister() }
 }
 

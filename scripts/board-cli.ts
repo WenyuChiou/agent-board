@@ -31,6 +31,8 @@ import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
 import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
 import { boardStatus } from '../hooks/board-status'
+import type { StatusSidecars } from '../hooks/board-status'
+import { boardCounts } from '../hooks/counts'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, clipped, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, plain, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
 import { BOARD_JSON_SCHEMA, boardDocument } from '../hooks/board-json'
 import { RELEASED } from '../hooks/released'
@@ -562,6 +564,10 @@ const options = () => ({
   routes,
 })
 
+// The terminal board's text, with its count line given the page's own two numbers (#832).
+const boardTextOf = (shown: ReturnType<typeof view>, turns: ReturnType<typeof pending>, extra: { isQuestionsOpen?: boolean } = {}, done?: readonly string[]): string =>
+  boardText(shown, turns, s, { ...options(), ...extra, counts: boardCounts(shown, turns, s, Date.now()) }, done)
+
 // How many times `rewrite` makes a change; it tells the change which try is the last.
 const REWRITE_TRIES = 3
 // What a change answers to have the file read again before it is made: another write landed
@@ -858,6 +864,38 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
 
 // How long ago the hidden list was written; 0 when that cannot be told, so a list that is not
 // JSON counts as a write caught half-way and a press never writes over the marks in it.
+// What `--status` reads beside progress.md: the answered file and the question ledger, each once,
+// read-only, and not past STATUS_SIDECAR_MAX. One it cannot read in full (too big, locked, not
+// valid) is left out, and the line counts as progress.md alone would (#832).
+const STATUS_SIDECAR_MAX = 4 * 1024 * 1024
+const readSidecar = (file: string): { text: string; age: number; isMissing: boolean } | null => {
+  let fd: number | undefined
+  try {
+    fd = openSync(file, 'r')
+    const { size, mtimeMs } = fstatSync(fd)
+    if (size > STATUS_SIDECAR_MAX) return null
+    const buffer = Buffer.alloc(size)
+    let got = 0
+    while (got < size) {
+      const n = readSync(fd, buffer, got, size - got, got)
+      if (n === 0) break
+      got += n
+    }
+    return { text: buffer.toString('utf8', 0, got), age: Date.now() - mtimeMs, isMissing: false }
+  } catch (error) {
+    return (error as { code?: string } | null)?.code === 'ENOENT' ? { text: '', age: 0, isMissing: true } : null
+  } finally {
+    if (fd !== undefined) try { closeSync(fd) } catch { /* nothing more to do */ }
+  }
+}
+const statusSidecars = (file: string): StatusSidecars => {
+  const answered = readSidecar(answeredPath(file))
+  const questions = readSidecar(questionsPath(file))
+  const list = answered === null ? null : parseAnswered(answered.text, answered.age)
+  const ledger = questions === null ? null : parseQuestions(questions.text, questions.isMissing)
+  return { ...(list === null ? {} : { answered: list }), ...(ledger === null ? {} : { questions: ledger }) }
+}
+
 const answeredAge = (file: string): number => {
   try {
     return Date.now() - statSync(file).mtimeMs
@@ -1342,7 +1380,7 @@ const agentsHere = (shown: ReturnType<typeof view>, turns: ReturnType<typeof pen
 const screen = (state: BoardState): string => {
   const shown = view()
   const turns = pending()
-  return boardScreen(shown, turns, state, s, { ...options(), agents: agentsHere(shown, turns) })
+  return boardScreen(shown, turns, state, s, { ...options(), counts: boardCounts(shown, turns, s, Date.now()), agents: agentsHere(shown, turns) })
 }
 
 // What the screen shows is what the next key acts on.
@@ -1857,7 +1895,7 @@ const serveBoard = async (): Promise<void> => {
   const failure: { storeCode?: string } = {}
   // Start server preparation concurrently so background process spawn does not wait for text board formatting (#862).
   const serverPromise = ensureServer(failure)
-  if (!args.includes('--quiet-board')) process.stdout.write(boardText(view(), pending(), s, options()))
+  if (!args.includes('--quiet-board')) process.stdout.write(boardTextOf(view(), pending()))
   // The note goes above the address, so the address stays the last line an agent shows.
   const show = async (url: string, isKept = false, actualIdle?: number): Promise<void> => {
     const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60_000)}\n` : ''
@@ -2091,7 +2129,7 @@ const run = async (): Promise<void> => {
     return
   }
   if (args.includes('--status')) {
-    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs())}\n`)
+    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), statusSidecars(path))}\n`)
     return
   }
   const request = flag('--legacy-connect-request')
@@ -2121,7 +2159,7 @@ const run = async (): Promise<void> => {
   } else if (args.includes('--print')) {
     // The explicit read-only print retains the questions and journal the old chat view showed.
     const at = Date.now()
-    process.stdout.write(boardText(view(undefined, at), pending(), s, { ...options(), isQuestionsOpen: true }, doneToday(journalToday(at), at, s)))
+    process.stdout.write(boardTextOf(view(undefined, at), pending(), { isQuestionsOpen: true }, doneToday(journalToday(at), at, s)))
   } else if (flag('--keys') !== undefined) {
     let state = emptyBoardState
     await refreshRoutes()
@@ -2146,7 +2184,7 @@ const run = async (): Promise<void> => {
     // Into a pipe or a log: the board once, as plain text with no control codes (FORCE_COLOR
     // still paints it, for `| less -R`).
     try {
-      process.stdout.write(boardText(view(), pending(), s, options()))
+      process.stdout.write(boardTextOf(view(), pending()))
     } catch (error) {
       process.stdout.write(`${failureNote(error)}\n`)
     }
@@ -2158,7 +2196,7 @@ const run = async (): Promise<void> => {
     const tick = () => {
       let text: string
       try {
-        text = `${boardText(freshView(), pending(), s, options())}\n${s.boardWatching}\n`
+        text = `${boardTextOf(freshView(), pending())}\n${s.boardWatching}\n`
       } catch (error) {
         text = `${failureNote(error)}\n`
       }
@@ -2178,7 +2216,7 @@ const run = async (): Promise<void> => {
     } else if (surface === 'terminal' && process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
       await runWatchTerminal()
     } else {
-      process.stdout.write(boardText(view(), pending(), s, options()))
+      process.stdout.write(boardTextOf(view(), pending()))
     }
   }
 }

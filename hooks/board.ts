@@ -99,7 +99,7 @@ export type AnswerRoute = { mode: 'connected' | 'send'; agent: string; session: 
 // `depth` and `theme` pick the page's colours for a terminal; `routes` are the questions the
 // running page can answer into their session, by line key; `agents` the agents that reported to
 // this board, which an empty board names.
-export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; isQuestionsOpen?: boolean; depth?: ColorDepth; theme?: Theme; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
+export type BoardOptions = { width: number; isColor: boolean; counts?: { needs: number; working: number }; isIdleOpen?: boolean; isQuestionsOpen?: boolean; depth?: ColorDepth; theme?: Theme; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
 
 export const remainingInbox = (view: View, pending: readonly PendingTurn[]): readonly PendingTurn[] => view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
 
@@ -250,11 +250,13 @@ const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelv
 
 // The line of counts at the top of the board.
 // It is bold throughout, as the page's is.
-const countLine = (view: View, pending: readonly PendingTurn[], s: Strings, c: ReturnType<typeof paint>): string => {
+// `counts` are the page's own two numbers (`boardCounts`), which the terminal board is given so its
+// line says what the page and `--status` say; a caller with none (the pane's text board) counts here.
+const countLine = (view: View, pending: readonly PendingTurn[], s: Strings, c: ReturnType<typeof paint>, counts?: { needs: number; working: number }): string => {
   const { due, today } = view.overview
   // A row that needs the person is counted as waiting, as the page does, and not as moving too.
-  const active = view.overview.active - liveRows(view).filter(row => boardNeeds(view, row) !== null).length
-  const waiting = view.overview.waiting + blockedRows(view).length + remainingInbox(view, pending).filter(turn => turn.isQuestion).length
+  const active = counts?.working ?? view.overview.active - liveRows(view).filter(row => boardNeeds(view, row) !== null).length
+  const waiting = counts?.needs ?? view.overview.waiting + blockedRows(view).length + remainingInbox(view, pending).filter(turn => turn.isQuestion).length
 
   return `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`, true)}  ${c('accent', `▸ ${active} ${s.countActive}`, true)}  ${c('alert', `⚑ ${due} ${s.countDue}`, true)}  ${c('done', `✓ ${today} ${s.countToday}`, true)}`
 }
@@ -290,7 +292,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   const c = paint(o)
   const isWide = isWideLang(s)
   const cut = (raw: string, width: number): string => fit(raw, width, isWide)
-  const lines: string[] = [countLine(view, pending, s, c), '']
+  const lines: string[] = [countLine(view, pending, s, c, o.counts), '']
   if (view.warning) lines.push(c('alert', view.warning), '')
   if (view.details) lines.push(c('quiet', view.details), '')
 
@@ -858,7 +860,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
   const shelved = new Set([...view.idle, ...view.stopped].map(row => row.key))
   const at = chosen(state, items)
   const lines: string[] = [
-    countLine(view, pending, s, c),
+    countLine(view, pending, s, c, o.counts),
     ...(view.warning ? [c('alert', view.warning)] : []),
     ...(view.details ? [c('quiet', view.details)] : []),
     ...((view.stoppedAsking ?? 0) > 0 ? [c('quiet', `${s.stoppedAsking(view.stoppedAsking!)} · ${s.boardKeyOlder}`)] : []),

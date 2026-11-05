@@ -99,7 +99,7 @@ The board:
   agent-board stop             stop the board's page
   agent-board --print          print the board as text
   agent-board --json           read the board as JSON for an agent
-  agent-board --status         one line for a status bar; reads only progress.md
+  agent-board --status         one line for a status bar: the page's needs-you and working counts, from progress.md and its answered and question files
   agent-board --watch          the board in this terminal, with keys
   agent-board --serve          the board's page in your browser
   agent-board --tidy           archive eligible completed tasks
@@ -126,7 +126,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board stop             停止看板網頁
   agent-board --print          印出純文字看板
   agent-board --json           供 agent 以 JSON 讀取看板
-  agent-board --status         狀態列的一行摘要，只讀 progress.md
+  agent-board --status         狀態列的一行摘要：網頁的等你與進行中數，讀 progress.md 和它的已回答檔、問題台帳
   agent-board --watch          在這個終端機開看板，可用按鍵操作
   agent-board --serve          在瀏覽器開看板網頁
   agent-board --tidy           封存符合條件的已完成工作
@@ -153,7 +153,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board stop             停止看板网页
   agent-board --print          打印纯文本看板
   agent-board --json           供 agent 以 JSON 读取看板
-  agent-board --status         状态栏的一行摘要，只读 progress.md
+  agent-board --status         状态栏的一行摘要：网页的等你与进行中数，读 progress.md 和它的已回答文件、问题台账
   agent-board --watch          在这个终端打开看板，可用按键操作
   agent-board --serve          在浏览器打开看板网页
   agent-board --tidy           归档符合条件的已完成工作

@@ -618,7 +618,7 @@ export const ZH_CN: Strings = {
   boardEmptyHow: 'agent 开始工作后，它的任务会出现在这里、它的名字下；它问你的事会放进“等你处理”。',
   boardStatusLine: (needs: number, working: number): string => `${needs} 项等你 · ${working} 项进行中`,
   boardUsage: '用法：agent-board | agent-board setup | agent-board stop | agent-board --json · --help all 查看所有选项（--watch、--serve、--tidy [--stopped | --agent 名称 | --older 天数]、--all...）',
-  boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <端口>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出闲置和已停止项目',
+  boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <端口>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出闲置和已停止项目 · --status 输出网页的等你与进行中数',
   boardHidden: (text: string): string => `已隐藏「${text}」；问题一改就会再出现。`,
   boardShown: '隐藏的问题都重新显示了。',
   hideFailed: '记不下「已回复」，这一项还留在清单上。',

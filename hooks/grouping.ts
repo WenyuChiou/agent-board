@@ -150,6 +150,11 @@ export type Grouping = {
   projects: Array<{ name: string; open: number }>
 }
 
+// The two numbers every surface prints for the board: what needs the person, and what is working.
+// The page's Needs you and Working now, the terminal board's count line and `--status` all read
+// them from here (#832), so a surface cannot count by a rule of its own.
+export const countsOf = (grouped: Grouping): { needs: number; working: number } => ({ needs: grouped.needs.n, working: grouped.working.length })
+
 export const WORKING_MS = 30 * 60 * 1000
 export const DONE_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_HOPS = 8

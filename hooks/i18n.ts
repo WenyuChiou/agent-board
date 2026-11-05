@@ -662,7 +662,7 @@ export const ZH_TW = {
   boardEmptyHow: 'agent 開始工作後，它的任務會出現在這裡、它的名字下；它問你的事會放進「等你處理」。',
   boardStatusLine: (needs: number, working: number): string => `${needs} 項等你 · ${working} 項進行中`,
   boardUsage: '用法：agent-board | agent-board setup | agent-board stop | agent-board --json · --help all 查看所有選項（--watch、--serve、--tidy [--stopped | --agent 名稱 | --older 天數]、--all...）',
-  boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <埠號>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出閒置和已停止項目',
+  boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <埠號>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出閒置和已停止項目 · --status 輸出網頁的等你與進行中數',
   boardHidden: (text: string): string => `已隱藏「${text}」；問題一改就會再出現。`,
   boardShown: '隱藏的問題都重新顯示了。',
   hideFailed: '記不下「已回覆」，這一項還留在清單上。',

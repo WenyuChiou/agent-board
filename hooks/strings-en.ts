@@ -624,7 +624,7 @@ export const EN: Strings = {
   boardEmptyHow: 'When an agent starts working, its tasks show up here under its name, and anything it asks you goes to Waiting on you.',
   boardStatusLine: (needs: number, working: number): string => `${needs} need you · ${working} working`,
   boardUsage: 'Usage: agent-board | agent-board setup | agent-board stop | agent-board --json · --help all for all options (--watch, --serve, --tidy [--stopped | --agent name | --older days], --all, ...)',
-  boardUsageAll: 'Usage: agent-board [--print] [--status] [--watch] [--serve] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <port>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all lists idle and stopped tasks',
+  boardUsageAll: 'Usage: agent-board [--print] [--status] [--watch] [--serve] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <port>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all lists idle and stopped tasks · --status prints the needs-you and working counts the page shows',
   boardHidden: (text: string): string => `Hidden: “${text}”; it comes back when the question changes.`,
   boardShown: 'The hidden questions are shown again.',
   hideFailed: "Couldn't save that it was answered; it stays on the list.",

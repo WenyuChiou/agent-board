@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { registerHooks } from 'node:module'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
@@ -21,8 +22,9 @@ const FILE = '## Synthetic project\n' +
   block('bbbb0000', 'working', '- [~] Background child', 5, 'codex', 'origin=run parent=cccc3333') +
   '### Hand-kept plan\n- [ ] Review\n'
 
-// The guard runs before the installed bundle: reading a sidecar, writing, polling or
-// launching anything fails the command rather than merely being absent in a snapshot.
+// The guard runs before the installed bundle: reading any file but the three the status line may
+// read (progress.md, its answered file and its question ledger, each once and only to read),
+// writing, polling or launching anything fails the command rather than merely being absent.
 const guard = `import { createRequire as statusCreateRequire } from 'node:module'
 {
 const require = statusCreateRequire(import.meta.url)
@@ -32,8 +34,11 @@ const cp = require('node:child_process')
 const { syncBuiltinESMExports } = require('node:module')
 const { resolve } = require('node:path')
 const read = fs.readFileSync
+const open = fs.openSync
 let reads = 0
 const violations = []
+const progress = resolve(process.env.STATUS_PROGRESS)
+const sidecars = new Map([[resolve(progress.replace(/[.]md$/i, '') + '-answered.json'), 0], [resolve(progress.replace(/[.]md$/i, '') + '-questions.json'), 0]])
 fs.readFileSync = (file, ...args) => {
   if (resolve(String(file)) !== resolve(process.env.STATUS_PROGRESS)) {
     violations.push(String(file))
@@ -44,7 +49,17 @@ fs.readFileSync = (file, ...args) => {
   return read(file, ...args)
 }
 const refused = () => { violations.push(new Error().stack); throw new Error('status must not write, inspect other files, poll or start anything') }
-for (const name of ['writeFileSync', 'appendFileSync', 'mkdirSync', 'renameSync', 'unlinkSync', 'rmSync', 'openSync', 'statSync', 'readdirSync', 'watch', 'watchFile']) fs[name] = refused
+for (const name of ['writeFileSync', 'appendFileSync', 'mkdirSync', 'renameSync', 'unlinkSync', 'rmSync', 'statSync', 'readdirSync', 'watch', 'watchFile']) fs[name] = refused
+fs.openSync = (file, flags, ...args) => {
+  const path = resolve(String(file))
+  if (!sidecars.has(path) || (flags !== undefined && flags !== 'r')) {
+    violations.push('open ' + path + ' ' + flags)
+    throw new Error('status opens only its answered file and question ledger, to read')
+  }
+  sidecars.set(path, sidecars.get(path) + 1)
+  if (process.env.STATUS_SIDECAR_DENIED) throw Object.assign(new Error('denied'), { code: 'EACCES' })
+  return open(file, 'r', ...args)
+}
 for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) cp[name] = refused
 for (const name of ['node:http', 'node:https', 'node:net']) require(name).createServer = refused
 global.setInterval = refused
@@ -53,26 +68,47 @@ syncBuiltinESMExports()
 process.on('exit', () => {
   assert.deepEqual(violations, [], 'no forbidden operation was attempted, even if its error was caught')
   assert.equal(reads, 1, 'progress.md is read exactly once')
+  for (const [file, opened] of sidecars) assert.ok(opened <= 1, file + ' is opened at most once, not ' + opened)
 })
 }
 `
 
-const run = (args = [], { file = FILE, lang = 'en', denied = false, launcher = false } = {}) => {
+// The key `h` marks a question hidden by: the answered file lists it.
+const hideKeyOf = async text => {
+  const loader = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL?.startsWith(new URL('../hooks/', import.meta.url).href) && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/i.test(specifier)) return nextResolve(`${specifier}.ts`, context)
+      return nextResolve(specifier, context)
+    },
+  })
+  try {
+    const [view, parse, i18n] = await Promise.all([import('../hooks/view.ts'), import('../hooks/parse.ts'), import('../hooks/strings-en.ts')])
+    return view.buildView(parse.parseProgress(text), [], null, NOW, 0, {}, i18n.EN, [], {}).waiting[0].hideKey
+  } finally { loader.deregister() }
+}
+
+const run = (args = [], { file = FILE, lang = 'en', denied = false, launcher = false, answered = null, questions = null, sidecarDenied = false } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'board-status-'))
   try {
     const path = join(root, 'progress.md')
     if (file !== null) writeFileSync(path, file)
+    const answeredFile = join(root, 'progress-answered.json')
+    const questionsFile = join(root, 'progress-questions.json')
+    if (answered !== null) writeFileSync(answeredFile, answered)
+    if (questions !== null) writeFileSync(questionsFile, questions)
     const script = join(root, 'agent-board.mjs')
     writeFileSync(script, `${guard}\nglobalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT}`)
     const before = readdirSync(root).sort()
     const command = launcher ? [fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url)), '--progress-file', path] : [script]
     const result = spawnSync(process.execPath, [...command, '--status', ...args], {
       cwd: root, encoding: 'utf8', timeout: 10_000,
-      env: { ...process.env, HOME: root, USERPROFILE: root, CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: root, CLAUDE_PROGRESS_FILE: '', XDG_CONFIG_HOME: root, XDG_RUNTIME_DIR: root, LOCALAPPDATA: root, APPDATA: root, HERMES_HOME: root, OPENCLAW_STATE_DIR: root, OPENCODE_CONFIG_DIR: root, DSH_HOME: root, GROK_HOME: root, STATUS_PROGRESS: path, STATUS_DENIED: denied ? '1' : '', NO_COLOR: undefined, FORCE_COLOR: '3' },
+      env: { ...process.env, HOME: root, USERPROFILE: root, CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: root, CLAUDE_PROGRESS_FILE: '', XDG_CONFIG_HOME: root, XDG_RUNTIME_DIR: root, LOCALAPPDATA: root, APPDATA: root, HERMES_HOME: root, OPENCLAW_STATE_DIR: root, OPENCODE_CONFIG_DIR: root, DSH_HOME: root, GROK_HOME: root, STATUS_PROGRESS: path, STATUS_DENIED: denied ? '1' : '', STATUS_SIDECAR_DENIED: sidecarDenied ? '1' : '', NO_COLOR: undefined, FORCE_COLOR: '3' },
     })
     assert.equal(result.error, undefined)
     assert.deepEqual(readdirSync(root).sort(), before)
     if (file !== null) assert.equal(readFileSync(path, 'utf8'), file)
+    if (answered !== null) assert.equal(readFileSync(join(root, 'progress-answered.json'), 'utf8'), answered)
+    if (questions !== null) assert.equal(readFileSync(join(root, 'progress-questions.json'), 'utf8'), questions)
     return result
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -130,4 +166,31 @@ test('the npm launcher forwards status without a build-comparison notice on ever
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.stdout, '2 need you · 3 working\n')
   assert.equal(result.stderr, '')
+})
+
+test('a question marked answered on the board is left out of the status line, and nothing is written', async () => {
+  const key = await hideKeyOf(FILE)
+  const result = run([], { answered: JSON.stringify({ answered: [key] }) })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stderr, '')
+  // The block whose question was hidden is no longer asking; it is moving work again.
+  assert.equal(result.stdout, '1 need you · 4 working\n')
+})
+
+test('a sidecar that cannot be read, is not valid or is past the size cap leaves the line as progress.md alone gives it', () => {
+  const alone = run().stdout
+  assert.equal(alone, '2 need you · 3 working\n')
+  for (const options of [{ sidecarDenied: true, answered: '{"answered":[]}' }, { answered: '{not json', questions: '{not json' }, { answered: ' '.repeat(4 * 1024 * 1024 + 1) }]) {
+    const result = run([], options)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, alone)
+    assert.equal(result.stderr, '')
+  }
+})
+
+test('status with flags that could write the question ledger still writes nothing and reads each file once', async () => {
+  const key = await hideKeyOf(FILE)
+  const result = run(['--watch', '--serve', '--keys', 'x'], { answered: JSON.stringify({ answered: [key] }) })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '1 need you · 4 working\n')
 })

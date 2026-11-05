@@ -2,7 +2,7 @@ import type { AskKind } from './ask'
 import { answersOf, boardItems, fingerprint, olderKey, remainingInbox } from './board'
 import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
-import { groupBoard } from './grouping'
+import { countsOf, groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, Quiet, RepoOf } from './grouping'
 import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead, themeToggle } from './page-look'
 import { ZH_TW } from './i18n'
@@ -530,7 +530,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const bucket = (one: Bucket): PageBucket => ({ counts: one.counts, cards: one.cards.map(ref), open: one.open.map(ref), stopped: one.stopped.map(ref), done: one.done.map(ref), older: one.older.map(ref) })
   model.view = {
     now: group.now,
-    n: grouped.needs.n,
+    n: countsOf(grouped).needs,
     questions: grouped.needs.questions,
     stuck: grouped.needs.stuck,
     versions: group.versions,
