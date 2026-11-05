@@ -2,7 +2,7 @@ import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -258,15 +258,19 @@ test('preflight removes dead owners\' worktrees and folders while keeping live o
   try {
     f.git('worktree', 'add', '--detach', orphanCheckout, f.sha)
     f.git('worktree', 'add', '--detach', liveCheckout, f.sha)
+    // Git lists the long path, while a Windows runner's TEMP can be an 8.3 short path (RUNNER~1).
+    const listed = path => realpathSync.native(path).replaceAll('\\', '/').toLowerCase()
+    const orphanListed = listed(orphanCheckout)
+    const liveListed = listed(liveCheckout)
     writeFileSync(join(folderOnly, 'marker'), 'orphan')
     writeFileSync(join(other, 'marker'), 'keep')
     const checks = await f.check({ isNoFetch: false })
-    const listing = f.git('worktree', 'list', '--porcelain').replaceAll('\\', '/')
+    const listing = f.git('worktree', 'list', '--porcelain').replaceAll('\\', '/').toLowerCase()
+    assert.ok(listing.includes(liveListed), listing)
     assert.equal(existsSync(orphan), false)
     assert.equal(existsSync(folderOnly), false)
-    assert.equal(listing.includes(orphanCheckout.replaceAll('\\', '/')), false)
+    assert.equal(listing.includes(orphanListed), false)
     assert.equal(existsSync(liveCheckout), true)
-    assert.ok(listing.includes(liveCheckout.replaceAll('\\', '/')))
     assert.equal(readFileSync(join(other, 'marker'), 'utf8'), 'keep')
     assert.equal(checks.some(item => item.state === 'FAIL'), false, JSON.stringify(checks))
   } finally {
