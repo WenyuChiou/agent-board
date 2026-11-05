@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isContinuationTurn, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionWords, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, copiesToKeep, emptyQuestions, isAskedBy, isContinuationTurn, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionWords, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionAnswerEvidence, QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
@@ -617,6 +617,22 @@ test('a stopped task whose question was resolved can still be archived', () => {
   expect(archiveQuestionsKept(projects, ref, restored)).toBe(true)
   expect(archiveQuestionsKept(parseProgress(text.replace('Publish?', 'Another ask?')), ref, restored)).toBe(false)
   expect(view(restored, text).stopped[0]?.questions).toEqual([])
+})
+
+// #921 R2: a capture still queued for the background flush counts as held —
+// the view passes the pending captures to copiesToKeep and withCaptures, so
+// no copy is queued twice and a record dropped from the ledger while its
+// capture is pending still appears.
+test('a pending capture counts as held: no copy is queued for it, and its record survives a dropped ledger', () => {
+  const text = file('- [?] Publish?')
+  const current = observe(emptyQuestions(), text).ledger
+  const record = current.records[0]!
+  const receipt = captureJson(record, 'unresolved')
+  const pending = parseCapture(receipt, sha256(receipt))!
+  expect(copiesToKeep(current, current, [])).toHaveLength(1)
+  expect(copiesToKeep(current, current, [pending])).toEqual([])
+  const dropped = { ...emptyQuestions(), next: current.next, records: [] }
+  expect(withCaptures(dropped, [pending]).records.map(one => one.id)).toEqual([record.id])
 })
 
 test('a resolution does not hide the same words in a later task of that session', () => {

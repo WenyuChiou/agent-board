@@ -349,6 +349,64 @@ const readQuestionProofs = (): QuestionProofs | null => {
   return proofs
 }
 const pendingQuestionProofs = new Map<string, { kind: keyof QuestionProofs; hash: string }>()
+// The captures a view queued but has not written yet. A first view of a big
+// board queues one capture per new question (500 on the synthetic big board);
+// writing them all inside the request blocks the page server for seconds
+// (#921), so the view enqueues them and a background flush writes a few per
+// tick. Keyed by the capture bytes, so a rewrite retry re-enqueueing the same
+// copies is a no-op; the ledger already holds the records, so a crash loses
+// at most the pending files and the next view re-derives them.
+const pendingQuestionCaptures = new Map<string, QuestionCapture>()
+// How many queued captures one background tick writes. One tick stays well
+// under the 150 ms mailbox budget: ~0.45 ms per file on this VM (T0), ~10 ms
+// per file on Windows under antivirus (the issue's figure), so 5 files are
+// ~2 ms here and ~50 ms there.
+const QUESTION_CAPTURE_FLUSH_PER_TICK = 5
+let questionCaptureFlushScheduled = false
+const scheduleQuestionCaptureFlush = (): void => {
+  if (questionCaptureFlushScheduled || pendingQuestionCaptures.size === 0) return
+  questionCaptureFlushScheduled = true
+  setImmediate(() => {
+    questionCaptureFlushScheduled = false
+    flushQuestionCaptures(QUESTION_CAPTURE_FLUSH_PER_TICK)
+  })
+}
+const queueQuestionCaptures = (copies: readonly { record: QuestionRecord; disposition: 'unresolved' | 'resolved' }[]): void => {
+  for (const copy of copies) {
+    const capture: QuestionCapture = { version: 1, disposition: copy.disposition, record: copy.record }
+    pendingQuestionCaptures.set(captureJson(copy.record, copy.disposition), capture)
+  }
+  scheduleQuestionCaptureFlush()
+}
+// Writes up to `budget` queued captures, in queue order, with the same
+// per-file semantics as a synchronous write (keepQuestionCapture also bumps
+// `writes` per landed file, so a locked read after a flush still says files
+// may have changed). A file that cannot be written is dropped and named on
+// stderr: the record stays in the ledger, so the next view re-derives the
+// capture, and the empty-copy cache is cleared so that view looks again
+// instead of trusting the earlier empty decision.
+const flushQuestionCaptures = (budget: number): void => {
+  let written = 0
+  for (const [key, capture] of [...pendingQuestionCaptures]) {
+    if (written >= budget) break
+    pendingQuestionCaptures.delete(key)
+    try {
+      keepQuestionCapture(capture.record, capture.disposition)
+    } catch (error) {
+      emptyCopyCache = null
+      process.stderr.write(`agent-board: could not write queued question capture ${basename(capturePath(path, sha256(key)))}: ${error instanceof Error ? error.message : String(error)}\n`)
+      continue
+    }
+    written += 1
+  }
+  if (pendingQuestionCaptures.size > 0) scheduleQuestionCaptureFlush()
+}
+// Drains the whole queued-capture backlog synchronously. Only deliberate acts
+// call this (archive, tidy, sweep): the view never waits for the queue, but a
+// block must not be taken while its durable copy is still pending (#921).
+const drainQuestionCaptures = (): void => {
+  flushQuestionCaptures(Number.POSITIVE_INFINITY)
+}
 const keepQuestionProof = (kind: keyof QuestionProofs, hash: string): void => {
   const file = questionProofPath(path, kind, hash)
   pendingQuestionProofs.set(file, { kind, hash })
@@ -379,6 +437,8 @@ const isCutSettledAt = (now: number): boolean => {
 // answered one) may not be in it yet: the sources are looked at as a settling pass would, and a
 // block with a question that pass would add stays.
 const keepAskedQuestions = (projects: ReturnType<typeof parseProgress>, ref: TaskRef, now: number, frozen: ReadonlySet<string>): boolean => {
+  // Archive must not take a block whose durable copy is still pending (#921).
+  drainQuestionCaptures()
   const latest = readQuestions(questionsPath(path))
   const proofs = readQuestionProofs()
   if (latest === null || proofs === null || !archiveQuestionsKept(projects, ref, latest)) return false
@@ -474,8 +534,10 @@ const readBoardView = (source: string, now: number) => {
       // Only a completed empty decision is reusable, with the same validated inputs and every
       // observed field unchanged. Missing or changed companions still force the durable-copy check.
       if (emptyCopyCache?.current !== current || emptyCopyCache.captures !== captures || emptyCopyCache.observed !== nextText) {
-        const copies = copiesToKeep(current, next, captures)
-        for (const copy of copies) keepQuestionCapture(copy.record, copy.disposition)
+        // Pending captures count as held: a copy already queued is not queued
+        // again, and the view returns without waiting for the flush (#921).
+        const copies = copiesToKeep(current, next, [...captures, ...pendingQuestionCaptures.values()])
+        queueQuestionCaptures(copies)
         if (copies.length === 0) emptyCopyCache = { current, captures, observed: nextText }
       }
       for (const id of identitiesToRetire(current, next, resolvedQuestionsToRetire(current, projects, null, turns, frozen), proofs?.retired)) keepQuestionProof('retired', sha256(id))
@@ -521,6 +583,11 @@ const readBoardView = (source: string, now: number) => {
     }
   }
   questions ??= observeWriterQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', previewProofs ?? undefined, turns, [], frozen).ledger
+  // A record that left the ledger while its capture is still pending (retired
+  // in a later pass) stays visible until the flush lands, as a synchronous
+  // write would have shown it. View-only: the persisted ledger never sees
+  // pending captures (#921).
+  const viewQuestions = pendingQuestionCaptures.size === 0 ? questions : withCaptures(questions, [...pendingQuestionCaptures.values()])
   // A question marked answered in a pane on this machine is kept off the board too.
   const tail = progressHealthCache.tail
   const sizes = { progress: Buffer.byteLength(source), store: pageState.store }
@@ -536,7 +603,7 @@ const readBoardView = (source: string, now: number) => {
   const dropped = inboxDropped(droppedLogCache.text, prunedSince(now))
   const pruned = prunedNote({ ...prunedTotal(pageState.pruned, now), turns: dropped.age + dropped.cap }, s)
   // Proof writes above refresh this snapshot; drawing need not list the directory again.
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, viewQuestions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const view = (source = read(path), now = Date.now()) => {
@@ -1038,6 +1105,8 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
 // Scheduled sweeps keep the plugin's age rules. An explicit interactive tidy may move
 // finished work at once; neither mode discards a stopped session before its three days.
 const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?: (finished: number) => void): number | null => {
+  // The sweep and the tidy take blocks; a pending capture must land first (#921).
+  drainQuestionCaptures()
   const now = Date.now()
   let seen: Record<string, number> = {}
   if (!isNow) {
