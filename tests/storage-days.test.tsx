@@ -15,7 +15,6 @@ import type { World } from './fixtures/pane-world'
 const HOUR = 3600000
 const DAY = 86400000
 const STORE = '/home/me/.claude/plugins/store/agent-board_agent-board-0123456789ab.json'
-const PAGE = '/home/me/.claude/progress.html'
 const QUESTIONS = '/home/me/.claude/progress-questions.json'
 const FIRST = '11111111-0000-4000-8000-000000000001'
 const SECOND = '22222222-0000-4000-8000-000000000002'
@@ -271,17 +270,17 @@ test('a day on the large board shows agent work, size warnings and cleared count
     const isButton = await ui.find({ type: 'Button', text: /Synthetic daily report/ }) !== undefined
     expect(isText || isButton).toBe(true)
     await $.command.run({ command: 'progress', args: 'open', origin: { kind: 'composer' } })
-    const page = world.files.get(PAGE) ?? ''
-    expect(page).toContain('Synthetic daily report')
-    expect(page).toContain(cleared)
+    expect(world.files.has('/home/me/.claude/progress.html')).toBe(false)
+    expect(await ui.find({ type: 'Text', text: cleared })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Synthetic daily report/ }) !== undefined || await ui.find({ type: 'Button', text: /Synthetic daily report/ }) !== undefined).toBe(true)
     const size = bytes(world.files.get(FILE) ?? '')
     const warning = lang === 'en' ? `progress.md is ${Math.round(size / 1024)} KB, over 512 KB` : `progress.md 已有 ${Math.round(size / 1024)} KB，超過 512 KB`
     expect(size).toBeGreaterThan(524288)
     if (await ui.find({ type: 'Text', text: new RegExp(warning.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) }) === undefined) throw new Error(`Pane missing progress warning: ${warning}`)
-    expect(page).toContain(warning)
+    expect(await ui.find({ type: 'Text', text: new RegExp(warning.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) })).toBeDefined()
     const storeWarning = lang === 'en' ? 'The board\'s saved records are 1.2 MB (limit 1.5 MB)' : '看板存的紀錄已有 1.2 MB（上限 1.5 MB）'
     if (await ui.find({ type: 'Text', text: /1\.2 MB/ }) === undefined) throw new Error(`Pane missing store warning at ${bytes(JSON.stringify(store))} bytes`)
-    expect(page.replace(/&#39;/g, "'")).toContain(storeWarning)
+    expect(await ui.find({ type: 'Text', text: storeWarning })).toBeDefined()
   }
   await ui.unmount()
 })

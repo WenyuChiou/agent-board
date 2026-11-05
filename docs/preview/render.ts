@@ -5,14 +5,11 @@
 // Writes docs/images/{tour,flow,promo}-<lang>.svg, docs/images/board/<agent>-<lang>-<light|dark>.svg,
 // docs/images/cover-<lang>-<light|dark>.svg (the README's animated cover), docs/images/agents/<agent>.svg,
 // docs/images/agents/chip-<agent>.svg (the README's Integrations strip; `bun docs/preview/render.ts chip-`),
-// and docs/preview/out/dashboard-<lang>.html for
-// docs/preview/png.mjs, which takes the progress.html screenshots and the social preview.
 import { mkdirSync, readdirSync, writeFileSync } from 'fs'
 import { basename, join } from 'path'
 import { upsertAutoBlock } from '../../hooks/blocks'
 import { boardItems, boardScreen, emptyBoardState, fit } from '../../hooks/board'
 import type { BoardState } from '../../hooks/board'
-import { dashboardHtml } from '../../hooks/dashboard'
 import { countDay, journalLine } from '../../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../../hooks/mirror'
 import { MARK_PATH } from '../../hooks/page-look'
@@ -39,9 +36,7 @@ import type { Theme } from './terminal'
 const { drawPane } = await import('../../hooks/pane')
 
 const OUT = join(import.meta.dir, '..', 'images')
-const PAGES = join(import.meta.dir, 'out')
 mkdirSync(OUT, { recursive: true })
-mkdirSync(PAGES, { recursive: true })
 const LANGS = ['en', 'zh-TW', 'zh-CN'] as const
 type Lang = (typeof LANGS)[number]
 type Mode = 'light' | 'dark'
@@ -85,7 +80,7 @@ const WORDS: Record<Lang, {
       file: 'One Markdown file, one block per session',
       outputs: [
         ['The pane', 'What needs you comes first'],
-        ['progress.html', 'Any browser, even your phone'],
+        ['The page', 'Any browser, even your phone'],
         ['Archive & report', 'Monthly files, weekly report'],
         ['Status line & alerts', 'Even with the pane closed'],
       ],
@@ -104,7 +99,7 @@ const WORDS: Record<Lang, {
       file: '一個 Markdown 檔，每個對話一塊',
       outputs: [
         ['面板', '等你的事排最前面'],
-        ['progress.html', '瀏覽器、手機都能看'],
+        ['網頁', '瀏覽器、手機都能看'],
         ['封存與週報', '每月存檔，每週報告'],
         ['狀態列與通知', '面板關著也知道'],
       ],
@@ -123,7 +118,7 @@ const WORDS: Record<Lang, {
       file: '一个 Markdown 文件，每个对话一块',
       outputs: [
         ['面板', '等你的事排最前面'],
-        ['progress.html', '浏览器、手机都能看'],
+        ['网页', '浏览器、手机都能看'],
         ['归档与周报', '每月存档，每周报告'],
         ['状态栏与通知', '面板关着也知道'],
       ],
@@ -732,14 +727,6 @@ ${timeline}
 </g>
 </svg>
 `
-}
-
-const dashboard = (lang: Lang): string => {
-  const s = STRINGS[lang]
-  const sample = SAMPLES[lang] as (typeof SAMPLES)[string]
-  const file = upsertAutoBlock(sample.file, mineOf(lang, false), s)
-  const view = buildView(parseProgress(file), [], null, NOW, today(lang), {}, s)
-  return dashboardHtml(view, s, sample.path, s.dashStamp('2026-10-16 09:40'), [], NOW)
 }
 
 // The promotional card, for GitHub's social preview and for sharing: a headline, the agents
@@ -1522,7 +1509,6 @@ for (const lang of LANGS) {
   for (const mode of ['light', 'dark'] as const) write(join(OUT, `cover-${lang}-${mode}.svg`), () => cover(lang, mode))
   write(join(OUT, `tour-${lang}.svg`), () => tour(lang))
   write(join(OUT, `flow-${lang}.svg`), () => flow(lang))
-  write(join(PAGES, `dashboard-${lang}.html`), () => dashboard(lang))
 }
 
 // Each SVG then gets the letters it draws from its fonts (fonts.py, which needs fontTools).
@@ -1535,4 +1521,4 @@ if (svgs.length === 0) throw new Error(`No image's name starts with ${only}`)
 const fonts = Bun.spawnSync([python, join(import.meta.dir, 'fonts.py'), ...svgs], { stdout: 'inherit', stderr: 'inherit' })
 if (fonts.exitCode !== 0) throw new Error(`fonts.py stopped with exit code ${fonts.exitCode}`)
 if (only !== undefined) console.log(`wrote ${written.length} image(s) starting with ${only} to ${OUT}`)
-else console.log(`wrote the pane top, tour, flow, promotional card, the README cover and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons and chips to ${OUT}, and ${LANGS.length} progress.html pages to ${PAGES}`)
+else console.log(`wrote the pane top, tour, flow, promotional card, the README cover and CLI boards in ${LANGS.length} languages and ${AGENT_ICONS.length} agent icons and chips to ${OUT}`)

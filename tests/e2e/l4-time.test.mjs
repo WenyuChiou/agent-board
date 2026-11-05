@@ -8,7 +8,7 @@ import { EN } from '../../hooks/strings-en.ts'
 import { hookTimeout } from '../../hooks/hook-safety.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
-import { chat, html, run, serve, terminal } from './lib/surfaces.mjs'
+import { print, run, serve, terminal } from './lib/surfaces.mjs'
 import { keptHookEvents } from './lib/faults.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { fileOpsPerPoll } from './lib/soak-report.mjs'
@@ -66,9 +66,8 @@ describe('L4 time and scale', () => {
       const screens = {
         // The stopped list is closed on the plain terminal print and opens with --all.
         terminal: await terminal.screen(world, ['--all']),
-        chat: (await chat(world)).stdout,
+        print: await print(world),
         page: await server.page(),
-        html: (await html(world)).visible,
       }
       const model = (await server.get('/api/board')).json().model
       assert.equal(model.stopped.length, 1, JSON.stringify(model.stopped))
@@ -92,12 +91,12 @@ describe('L4 time and scale', () => {
     try {
       const title = 'Future-clock worker'
       const stamp = new Date(world.now + DAY).toISOString()
-      // Chat expands a stopped row only when it retains a question; exercise that path too.
+      // Plain print expands a stopped row only when it retains a question; exercise that path too.
       block(world, { session: 'a4000382', state: 'working', updated: stamp, title, steps: ['- [~] Synthetic work', '- [?] Keep the synthetic worker, OK?'] })
       const before = world.read('progress.md')
       const files = world.files()
       assert.ok((await terminal.screen(world)).includes(EN.futureTimeUnknown))
-      assert.ok((await chat(world)).stdout.includes(EN.futureTimeUnknown))
+      assert.ok((await print(world)).includes(EN.futureTimeUnknown))
       assert.deepEqual(world.files(), files, 'read-only readers establish no clock observation or question baseline')
       const server = await serve.start(world)
       assert.ok((await server.get('/api/board')).json().model.groups.flatMap(group => group.rows).some(row => row.title === title))
@@ -117,8 +116,7 @@ describe('L4 time and scale', () => {
       const observed = world.read('progress-seen.json')
       const screens = {
         terminal: await terminal.screen(world, ['--all']),
-        chat: (await chat(world)).stdout,
-        html: (await html(world)).visible,
+        print: await print(world),
         page: await server.page(),
       }
       for (const [surface, screen] of Object.entries(screens)) {
@@ -185,7 +183,7 @@ describe('L4 time and scale', () => {
       // +4 d: the ask is 2 days old, so it still waits on the person, and nothing is idle yet.
       world.jump('2d')
       asking()
-      const early = { terminal: await terminal.screen(world, ['--all']), chat: (await chat(world)).stdout }
+      const early = { terminal: await terminal.screen(world, ['--all']), print: await print(world) }
       for (const [surface, text] of Object.entries(early)) {
         assert.ok(text.includes(ask) && text.includes(EN.sectionWaiting), `${surface} at +4 d must list the ask as waiting:\n${text}`)
         assert.ok(!text.includes(EN.sectionQuestionReminders), `${surface} at +4 d has a reminder too soon:\n${text}`)
@@ -196,7 +194,7 @@ describe('L4 time and scale', () => {
       // anywhere under 7 days would already list it.
       world.jump('2d')
       asking()
-      const nearly = { terminal: await terminal.screen(world, ['--all']), chat: (await chat(world)).stdout }
+      const nearly = { terminal: await terminal.screen(world, ['--all']), print: await print(world) }
       for (const [surface, text] of Object.entries(nearly)) {
         assert.ok(!text.includes(EN.idleCount(1)), `${surface} at +6 d has an idle task too soon:\n${text}`)
       }
@@ -208,9 +206,8 @@ describe('L4 time and scale', () => {
       const screens = {
         terminal: await terminal.screen(world),
         'terminal --all': await terminal.screen(world, ['--all']),
-        chat: (await chat(world)).stdout,
+        print: await print(world),
         page: await server.page(),
-        html: (await html(world)).visible,
       }
       const model = (await server.get('/api/board')).json().model
       // An age phrase that does not start inside a longer number, so "5 days ago" does not pass for "15 days ago".
@@ -233,8 +230,8 @@ describe('L4 time and scale', () => {
         const waiting = around(surface, text, task)
         assert.match(waiting, ageOf(EN.daysAgo(5)), `${surface}: the ask must say it is 5 days old`)
         assert.ok(text.includes(ask), `${surface} must show the ask:\n${text}`)
-        // Chat keeps the idle shelf to its count.
-        if (surface === 'chat') continue
+        // The plain print keeps the idle shelf to its count; --all opens it.
+        if (surface === 'print') continue
         const idle = around(surface, text, quiet)
         assert.ok(idle.includes(EN.sessionStopped(EN.daysAgo(7))), `${surface}: the idle task must say when it was last active: ${idle}`)
         assert.ok(!idle.includes(EN.justNow), `${surface} calls the idle task "just now": ${idle}`)
@@ -486,7 +483,7 @@ describe('L4 time and scale', () => {
       // The budget is the host's own limit (HOOK_TIMEOUTS in hooks/hook-safety.ts), so a change
       // there fails here instead of leaving this check pointing at an old figure.
       assert.equal(HOOK_TIMEOUT_MS, hookTimeout('antigravity'))
-      assert.equal(HOOK_TIMEOUT_MS, hookTimeout('codex', 'UserPromptSubmit'))
+      assert.equal(hookTimeout('codex', 'Stop'), hookTimeout('codex', 'UserPromptSubmit'))
       const call = (world, event, payload) => hook(world, 'codex', event, { session_id: 'l4-big-file-session', cwd: world.root, ...payload })
       // The first call installs the hooks into the isolated home. It is not what is timed.
       for (const world of [small, big]) {

@@ -8,7 +8,6 @@ import { buildView } from '../hooks/view'
 import { boardItems, boardKey, boardScreen, boardText, chatText, emptyBoardState, peekInbox, pinned } from '../hooks/board'
 import { sha256 } from '../hooks/sha256'
 import { serveAction, serveModel, servePage } from '../hooks/serve'
-import { dashboardHtml } from '../hooks/dashboard'
 import { STRINGS } from '../hooks/strings'
 import { remindersOf } from '../hooks/remind'
 
@@ -189,7 +188,7 @@ test('own, live external, manual and inbox questions share exact age shelves and
         expect(boardItems(view, pending, false, true).filter(item => item.type === 'ask').length).toBe(4)
         expect(boardText(view, pending, s, { width: 3000, isColor: false, isIdleOpen: true }).includes(pending[0]!.text)).toBe(true)
         expect(chatText(view, pending, [], s, '/home/me', false).includes(s.sectionOlderQuestions)).toBe(true)
-        expect(dashboardHtml(view, s, '/tmp/progress.md', '', pending).includes(pending[0]!.text)).toBe(true)
+        expect(serveModel(view, pending, s).older.some(item => item.text === pending[0]!.text)).toBe(true)
       }
     }
   }

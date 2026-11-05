@@ -3,6 +3,24 @@ import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, ope
 import type { BigIntStats, Stats } from 'node:fs'
 import { hostname } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { sha256 } from '../hooks/sha256.ts'
+
+// A folder only this account can use: on a shared one, another account could take the file's
+// name first and keep every page from starting.
+export const isOwnFolder = (dir: string): boolean => {
+  try {
+    const found = lstatSync(dir)
+    return found.isDirectory() && (process.getuid === undefined || (found.uid === process.getuid() && (found.mode & 0o077) === 0))
+  } catch {
+    return false
+  }
+}
+
+export const defaultMessagesDirectory = (progress: string, home: string, env: Record<string, string | undefined>, platform: string): string => {
+  const runtime = env.XDG_RUNTIME_DIR
+  const folder = platform === 'win32' ? (runtime ? join(runtime, 'agent-board') : join(home, '.cache', 'agent-board')) : runtime && isOwnFolder(runtime) ? runtime : join(home, '.cache', 'agent-board')
+  return join(folder, `agent-board-${sha256(resolve(progress)).slice(0, 16)}-messages`)
+}
 
 export class RuntimeFolderError extends Error {
   constructor() { super('BOARD_RUNTIME_PRIVATE') }
@@ -227,6 +245,16 @@ export const privateRuntimeFolder = (dir: string, names: string[] = []): string 
     remember(root, identity)
     return root
   } catch { throw new RuntimeFolderError() }
+}
+
+// The same folder, resolved for reading only, when the folder could not be protected: a
+// process that cannot write (a read-only sandbox) may still reuse a page that is already
+// running, but it must never write through this path, so nothing is created or changed here
+// and every parent must already be a plain folder, never a link.
+export const unprotectedRuntimeFolder = (dir: string): string => {
+  const root = resolve(dir)
+  plainParents(root)
+  return root
 }
 
 // Check the existing file's owner and DACL before any token is read. The descriptor must

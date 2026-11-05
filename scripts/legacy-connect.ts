@@ -1,4 +1,4 @@
-import { reporterPs1, reporterSh, agentHooks, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
+import { reporterPs1, reporterSh, agentHooks, setupOwnership, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
 import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
@@ -130,7 +130,53 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     warn(`removeFailed:${folder}`, { message: 'connectRemoveFailed', args: [folder] })
     failedLabels.add(label)
   }
-  for (const hook of agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, node: nodePath, antigravityNode, progress: path, s: STRINGS[fileLang] })) {
+  const hooks = agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, node: nodePath, antigravityNode, progress: path, s: STRINGS[fileLang] })
+  const { managed: setupManaged, skillOnly: setupSkillOnly, held: setupHeld } = setupOwnership(hooks, home, sep, existsSync, readMaybe)
+  // A file with none of ours is left as it is: taking nothing out could still reformat it.
+  // OpenClaw's config names our plugin, not the reporter, and its edit checks for that itself;
+  // Antigravity's hook runs the worker, and is looked for as text so a config that can't be
+  // parsed is still named.
+  const retireHook = (hook: (typeof hooks)[number]): void => {
+    for (const file of [hook.file, ...(hook.old === undefined ? [] : [hook.old])]) {
+      let isReading = true
+      try {
+        if (!existsSync(file)) continue
+        const before = readLocal(file)
+        isReading = false
+        if (before === '' || (!hook.generated && hook.agent !== 'openclaw' && !(hook.agent === 'antigravity' ? before.includes('"agent-board"') : hasOurHook(before)))) continue
+        const after = hook.edit(before, true, previousOutput(file))
+        if (after === COLLISION) preserve(file)
+        else if (after === null) warn(`removeFailed:${file}`, { message: 'connectRemoveFailed', args: [file] })
+        else if (after !== before) {
+          if (after === DELETE) removeFile(file)
+          else writeFile(file, after, hook.generated)
+          if (remove && !done.includes(hook.label)) done.push(hook.label)
+          continue
+        }
+        if (after === COLLISION || after === null) failedLabels.add(hook.label)
+      } catch (error) {
+        if (error instanceof Error && error.message === 'RECOVERY_CONFLICT') throw error
+        failedLabels.add(hook.label)
+        if (isReading) warn(`unreadable:${file}`, { message: 'connectReadFailed', args: [hook.label, file] })
+        else warn(`removeFailed:${file}`, { message: 'connectRemoveFailed', args: [file] })
+      }
+    }
+  }
+  // A board command our connect wrote still runs our board script, which remove then deletes.
+  // One naming setup's data folder is setup's and stays; one still naming ours but edited keeps the script.
+  const retireCommand = (hook: (typeof hooks)[number]): void => {
+    try {
+      if (!existsSync(hook.file)) return
+      const before = readLocal(hook.file)
+      if (hook.edit(before, true, previousOutput(hook.file)) === DELETE) removeFile(hook.file)
+      else if (connectDataRoots(before, true).some(root => connectPath(root, isWin) === connectPath(folder, isWin))) canRemoveBoard = false
+    } catch (error) {
+      if (error instanceof Error && error.message === 'RECOVERY_CONFLICT') throw error
+      canRemoveBoard = false
+      warn(`removeFailed:${hook.file}`, { message: 'connectRemoveFailed', args: [hook.file] })
+    }
+  }
+  for (const hook of hooks) {
     let isInstalled = false
     for (const dir of hook.dirs ?? [hook.dir]) isInstalled = isInstalled || (existsSync(dir))
     // Taking the hooks out goes by our own files, so one an earlier connect left where the
@@ -139,6 +185,28 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     const skillDir = skillFolder(hook.file)
     if (remove) for (const file of [hook.file, ...(hook.old === undefined ? [] : [hook.old]), ...(skillDir === null ? [] : [skillDir])]) isInstalled = isInstalled || (existsSync(file))
     if (!isInstalled) continue
+    // Setup owns this agent's hooks, commands and fallback instructions. A probe must
+    // not install a second reporter, even when this connector already serves others, and a
+    // reporter an earlier probe added beside setup's comes out.
+    if (setupManaged.has(hook.agent)) {
+      if (hook.label !== '') {
+        mark(hook, 'setup')
+        retireHook(hook)
+      } else if (remove) retireCommand(hook)
+      continue
+    }
+    if (hook.label === '' && setupSkillOnly.has(hook.agent)) {
+      if (remove) retireCommand(hook)
+      continue
+    }
+    const heldBy = setupHeld.get(hook.agent)
+    if (heldBy !== undefined) {
+      if (hook.label !== '') {
+        failedLabels.add(hook.label)
+        warn(`setupRecord:${heldBy}`, { message: 'connectReadFailed', args: [hook.label, heldBy] })
+      } else if (remove) retireCommand(hook)
+      continue
+    }
     // Found, but its reporter or the board script is not ours to run: the problem with that
     // file is named above, and the agent is named as not set up.
     // Antigravity's commands need the board and its worker, not the reporter; where setup-agent
@@ -239,7 +307,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         tidyFolder(skillDir, hook.label)
       } else if (after !== before) {
         writeFile(hook.file, after, hook.generated)
-      } else if (!remove && hook.generated && !(hook.agent === 'antigravity' && isInstallerSkill(after))) {
+      } else if (!remove && hook.generated && !isInstallerSkill(after)) {
         // setup-agent's skill, left as it is, is never recorded as ours: a later connect or
         // remove would take it for its own output.
         transaction.own(hook.file, after)
@@ -282,27 +350,29 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   let codexTrusted = decision.trusted
   if (remove || decision.approval === undefined) delete transaction.state.codexApproval
   else transaction.state.codexApproval = decision.approval
-  if (existsSync(codexHome)) {
+  const setupOwnsCodex = !remove && setupManaged.has('codex')
+  if (existsSync(codexHome) && (remove || !setupHeld.has('codex'))) {
     const instructions = [[codexHome, 'AGENTS.md'].join(sep), [codexHome, 'AGENTS.override.md'].join(sep)]
     const effective = existsSync(instructions[1]!) && readMaybe(instructions[1]!)?.trim() !== '' ? instructions[1]! : instructions[0]!
-    if (!remove && !codexTrusted) warn('codex:approval', { message: 'setupCodexApproval', args: [] })
+    if (!remove && !setupOwnsCodex && !codexTrusted) warn('codex:approval', { message: 'setupCodexApproval', args: [] })
     for (const file of instructions) {
       try {
         const before = readLocal(file)
         // Instruction reads can yield to an external editor. Recheck source and
         // owned executables at each retirement, not only when the lock was taken.
-        if (codexTrusted && (decision.approval?.sourceHash !== sha256(readLocal(codexSource)) || decision.approval?.configHash !== configHashViaTransaction())) {
+        if (!setupOwnsCodex && codexTrusted && (decision.approval?.sourceHash !== sha256(readLocal(codexSource)) || decision.approval?.configHash !== configHashViaTransaction())) {
           codexTrusted = false
           warn('codex:approval', { message: 'setupCodexApproval', args: [] })
         }
         const ownsBoard = !remove && transaction.previous(board) !== undefined
         const canRetireFallback = codexTrusted && hasReporter && hasBoard && ownsBoard && transaction.previous(script) !== undefined
         const canRestore = !remove && !canRetireFallback && file === effective && ownsBoard
-        const after = managedFallback(before, remove || canRetireFallback ? null : canRestore ? s.codexFallbackInstructions(codexFallbackCommand(board, path)) : '')
+        // Setup reports for Codex now, and these words would keep sending it to the connector's board.
+        const after = managedFallback(before, remove || setupOwnsCodex || canRetireFallback ? null : canRestore ? s.codexFallbackInstructions(codexFallbackCommand(board, path)) : '')
         if (after === null) { preserve(file); continue }
         // An empty content sentinel retains existing text without creating instructions
         // when the board is foreign or this is the overridden file.
-        if (after !== before && (remove || canRetireFallback || canRestore)) writeFile(file, after)
+        if (after !== before && (remove || setupOwnsCodex || canRetireFallback || canRestore)) writeFile(file, after)
       } catch (error) {
         if (error instanceof Error && error.message === 'RECOVERY_CONFLICT') throw error
         warn(`fallback:${file}`, { message: remove ? 'connectRemoveFailed' : 'connectBoardFailed', args: [file] })
@@ -348,7 +418,10 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   }
 
   // Connecting by hand also shows where each agent stands, with the problems below it.
-  const status = mode === 'connect' && state.agents.length > 0 ? setupLines(state, s) : problems.map(one => setupProblemText(one, s))
+  const status = mode === 'connect' && state.agents.length > 0 ? setupLines(state, s) : [
+    ...state.agents.filter(one => one.hook === 'setup').map(one => s.setupAgent(one.label, [s.setupManaged])),
+    ...problems.map(one => setupProblemText(one, s)),
+  ]
 
   return { text: [...lines, ...status].join('\n'), lines, done: completed, problems }
 }

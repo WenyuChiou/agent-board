@@ -16,45 +16,22 @@ try {
   source = await Promise.all([
     import('../hooks/page-look.ts'),
     import('../hooks/serve.ts'),
-    import('../hooks/dashboard.ts'),
-    import('../hooks/parse.ts'),
-    import('../hooks/view.ts'),
     import('../hooks/strings.ts'),
     import('../hooks/agent-icons.ts'),
     import('../hooks/page-fonts.ts'),
   ])
 } finally { loader.deregister() }
 
-const [{ pageTokens, boardMark }, { servePage, pagePolicy }, { dashboardHtml }, { parseProgress }, { buildView }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
+const [{ pageTokens, boardMark }, { servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
 const SANS = '"Atkinson Hyperlegible Next",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
 const MARK_PATH = 'M 51 14.5 V 36 C 51 46 52 54 57.5 59 C 50.6 59 43.71 56.77 40.01 51.67 Q 34.7 55 28 55 Q 18.47 55 11.74 48.26 Q 5 41.53 5 32 Q 5 22.47 11.74 15.74 Q 18.47 9 28 9 Q 34.9 9 40.34 12.54 Q 40.74 11.48 41.61 10.61 Q 43.22 9 45.5 9 Q 47.78 9 49.39 10.61 Q 51 12.22 51 14.5 Z M 40 32 Q 40 27.03 36.49 23.51 Q 32.97 20 28 20 Q 23.03 20 19.51 23.51 Q 16 27.03 16 32 Q 16 36.97 19.51 40.49 Q 23.03 44 28 44 Q 32.97 44 36.49 40.49 Q 40 36.97 40 32 Z'
 const SHAPES = `<path class="lg-mark" d="${MARK_PATH}"/>`
 const PRIVACY = /\b[\da-f]{8}\b|\b[\da-f]{40}\b|\b[\da-f]{64}\b|(?<![A-Za-z])[A-Za-z]:[\\/]|\/home\/|\/Users\//i
-const NOW = 1_700_000_000_000
-const FIXTURE = `## Synthetic
-### Choose the release
-- [?] Publish the preview, OK?
-- [ ] Finish the review
-### Choose a schedule
-- [?] One day or one week?
-### Running plan
-> due 11-15
-- [x] Read the notes
-- [~] Check the examples
-- [ ] Finish the draft
-### Completed plan
-- [x] Checked the sample
-`
-
 const renders = (lang = 'en') => {
   const s = STRINGS[lang]
-  const view = buildView(parseProgress(FIXTURE), [], null, NOW, 0, {}, s)
-  assert.ok(view.waiting.length >= 2, 'the fixture must render waiting question colours')
-  assert.ok(view.groups.some(group => group.rows.length > 0), 'the fixture must render running plan colours')
   return [
     { name: 'page', lang, html: servePage(s, 'n') },
-    { name: 'dashboard', lang, html: dashboardHtml(view, s, '/synthetic/progress.md', 'updated 12:00', [], NOW) },
   ]
 }
 
@@ -132,7 +109,7 @@ const isMobile = rule => rule.ancestors.some(ancestor => /@media\s*\([^)]*max-wi
 const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input)(?=$|[:[\s])/.test(selector) || /(?:^|\s)\.sheet$/.test(selector) ||
   /(?:^|\s)(?:\.btn|\.shelf-head|button[\w.:-]*|#close)(?=$|[:\s])/.test(selector) || /\.cards>li$/.test(selector)
 
-test('the page and the dashboard use only colour, size, radius, spacing and motion tokens from page-look', () => {
+test('the page uses only colour, size, radius, spacing and motion tokens from page-look', () => {
   const expected = {
     text: { 'text-xs': 'max(14px,.875rem)', 'text-sm': 'max(16px,1rem)', 'text-md': 'max(18px,1.125rem)', 'text-lg': 'max(22px,1.375rem)' },
     radius: { 'radius-s': '6px', 'radius-m': '10px', 'radius-round': '999px' },

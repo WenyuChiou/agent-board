@@ -1,11 +1,45 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
-import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isFinished, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, shownMessage, textHash } from '../hooks/messaging'
-import type { Connection, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
+import { acceptMailboxMessage, endMailbox, expireMailboxes, MAILBOX_CAP, mailboxId, takeMailboxMessage } from '../hooks/hook-messages'
+import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isFinished, isMailboxTarget, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, shownMessage, textHash } from '../hooks/messaging'
+import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
+import { STALE_MS } from '../hooks/parse'
 import { privateFolder } from './private-folder'
 import { claimMessageStore } from './message-store-claim'
 import type { MessageStoreClaim } from './message-store-claim'
+
+export const parseMessageStore = (text: string, now: number): MessageState => {
+  const saved = JSON.parse(text) as { version: unknown; messages: MessageState['messages']; mailboxes?: Connection[] }
+  if (saved.version !== 1 && saved.version !== 2 || !Array.isArray(saved.messages) || saved.messages.length > OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('INVALID_MESSAGE_STORE')
+  // A store written before origins and hashes reads as local, with the hash of the text it kept.
+  const messages = saved.messages.map(one => saved.version === 1 ? { ...one, hops: 1, claimed: 0, nonce: '' } : { ...one })
+    .map(one => ({ ...one, origin: one.origin ?? 'local', hash: one.hash ?? (typeof one.text === 'string' && one.text !== '' ? textHash(one.text) : '') }))
+  for (const one of messages) {
+    messageId(one.id)
+    messageId(one.target)
+    messageId(one.turn)
+    messageText(one.from, 300)
+    if (/[\r\n]/.test(one.from)) throw new Error('INVALID_MESSAGE_STORE')
+    messageText(one.to, 300)
+    if (!['queued', 'uncertain', 'accepted', 'acknowledged', 'rejected'].includes(one.status) || typeof one.reply !== 'string' || typeof one.error !== 'string' || !Number.isFinite(one.updated)) throw new Error('INVALID_MESSAGE_STORE')
+    // Only a finished message may have lost its text.
+    if (!isFinished(one) || one.text !== '') messageText(one.text)
+    if (one.origin !== 'local' || typeof one.hash !== 'string' || !/^[0-9a-f]{64}$/.test(one.hash) || one.text !== '' && one.hash !== textHash(one.text)) throw new Error('INVALID_MESSAGE_STORE')
+    if (!Number.isSafeInteger(one.hops) || one.hops < 1 || one.hops > HOP_LIMIT || !Number.isSafeInteger(one.claimed) || one.claimed < 0 || typeof one.nonce !== 'string' || !/^(?:[0-9a-f]{6})?$/.test(one.nonce)) throw new Error('INVALID_MESSAGE_STORE')
+  }
+  if (new Set(messages.map(one => one.id)).size !== messages.length) throw new Error('INVALID_MESSAGE_STORE')
+  if (saved.mailboxes !== undefined) {
+    if (!Array.isArray(saved.mailboxes) || saved.mailboxes.length > MAILBOX_CAP) throw new Error('INVALID_MESSAGE_STORE')
+    for (const one of saved.mailboxes) {
+      if (!one || !isMailboxTarget(one.id) || one.id !== mailboxId(messageId(one.agent), messageId(one.session)) || one.scope !== 'mailbox' || one.turn !== 'session' || !Number.isFinite(one.expires)) throw new Error('INVALID_MESSAGE_STORE')
+      messageText(one.surface, 100)
+    }
+    if (new Set(saved.mailboxes.map(one => one.id)).size !== saved.mailboxes.length) throw new Error('INVALID_MESSAGE_STORE')
+  }
+  return pruneMessages({ messages, ...(saved.mailboxes === undefined ? {} : { mailboxes: saved.mailboxes }) }, now)
+}
 
 const LEASE_MS = 15_000
 const LOCK_WRITE_MS = 5_000
@@ -150,27 +184,9 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
     }
     if (existsSync(file)) {
       if (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_FILE')
-      const saved = JSON.parse(readFileSync(file, 'utf8')) as { version: unknown; messages: MessageState['messages'] }
-      if (saved.version !== 1 && saved.version !== 2 || !Array.isArray(saved.messages) || saved.messages.length > OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('INVALID_MESSAGE_STORE')
-      // A store written before origins and hashes reads as local, with the hash of the text it kept.
-      const messages = saved.messages.map(one => saved.version === 1 ? { ...one, hops: 1, claimed: 0, nonce: '' } : { ...one })
-        .map(one => ({ ...one, origin: one.origin ?? 'local', hash: one.hash ?? (typeof one.text === 'string' && one.text !== '' ? textHash(one.text) : '') }))
-      for (const one of messages) {
-        messageId(one.id)
-        messageId(one.target)
-        messageId(one.turn)
-        messageText(one.from, 300)
-        messageText(one.to, 300)
-        if (!['queued', 'uncertain', 'accepted', 'acknowledged', 'rejected'].includes(one.status) || typeof one.reply !== 'string' || typeof one.error !== 'string' || !Number.isFinite(one.updated)) throw new Error('INVALID_MESSAGE_STORE')
-        // Only a finished message may have lost its text.
-        if (!isFinished(one) || one.text !== '') messageText(one.text)
-        if (one.origin !== 'local' || typeof one.hash !== 'string' || !/^[0-9a-f]{64}$/.test(one.hash) || one.text !== '' && one.hash !== textHash(one.text)) throw new Error('INVALID_MESSAGE_STORE')
-        if (!Number.isSafeInteger(one.hops) || one.hops < 1 || one.hops > HOP_LIMIT || !Number.isSafeInteger(one.claimed) || one.claimed < 0 || typeof one.nonce !== 'string' || !/^(?:[0-9a-f]{6})?$/.test(one.nonce)) throw new Error('INVALID_MESSAGE_STORE')
-      }
-      if (new Set(messages.map(one => one.id)).size !== messages.length) throw new Error('INVALID_MESSAGE_STORE')
-      state = { messages }
-      state = pruneMessages(state, Date.now())
-      for (const id of new Set(state.messages.map(one => one.target))) state = disconnectMessages(state, id, Date.now())
+      state = parseMessageStore(readFileSync(file, 'utf8'), Date.now())
+      state = expireMailboxes(state, Date.now())
+      for (const id of new Set(state.messages.map(one => one.target))) if (!state.mailboxes?.some(one => one.id === id)) state = disconnectMessages(state, id, Date.now())
       // Persist reconciliation even if a server closes before a browser polls it again.
       const next = state
       state = { messages: [] }
@@ -183,7 +199,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
   // A connection goes only once its messages' new states are on disk.
   const expire = (now: number): void => {
     const gone = [...connections.values()].filter(one => one.expires <= now)
-    save(gone.reduce((next, one) => disconnectMessages(next, one.id, now), state), now)
+    save(expireMailboxes(gone.reduce((next, one) => disconnectMessages(next, one.id, now), state), now), now)
     for (const one of gone) connections.delete(one.id)
   }
   const authenticated = (id: unknown, secret: unknown, now: number): Live => {
@@ -216,7 +232,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       expire(now)
       for (const [id, one] of expectations) expectations.set(id, observeSession(one, reports, now))
       return {
-        enabled: true, connections: [...connections.values()].map(({ secret: _secret, ...one }) => one), messages: state.messages.map(shownMessage),
+        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, ...one }) => one), messages: state.messages.map(shownMessage),
         sessions: [
           ...[...expectations.values()].map(one => ({
             id: one.id, agent: one.agent, session: one.session, surface: one.surface,
@@ -277,7 +293,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         if (source === undefined && secret !== undefined) throw new Error('UNKNOWN_FIELD')
         const sender = source === undefined ? undefined : authenticated(source, secret, now)
         const from = sender === undefined ? 'board' : address(sender.agent, sender.session)
-        const queued = queueMessage(state, input, from, connections.get(String(input.target)), now, sender?.origin ?? 'local')
+        const queued = queueMessage(state, input, from, connections.get(String(input.target)) ?? state.mailboxes?.find(one => one.id === input.target), now, sender?.origin ?? 'local')
         save(queued.state, now)
         // The nonce is the receiver's alone; a retried send never learns it.
         return shownMessage(queued.message)
@@ -285,6 +301,19 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       if (action === 'dismiss') {
         messageFields(body, ['id'])
         save(dismissMessage(state, messageId(body.id), now), now)
+        return { ok: true }
+      }
+      if (['mailbox-turn', 'mailbox-accept', 'mailbox-end'].includes(action)) {
+        messageFields(body, action === 'mailbox-turn' ? ['agent', 'session', 'surface', 'before'] : action === 'mailbox-accept' ? ['agent', 'session', 'id', 'nonce'] : ['agent', 'session'])
+        const agent = messageId(body.agent), session = messageId(body.session)
+        if (action === 'mailbox-turn') {
+          // A hook that gave up on a stalled hub is gone: claiming for it would lose the message.
+          if (body.before !== undefined && (typeof body.before !== 'number' || now > body.before)) return { message: null }
+          const next = takeMailboxMessage(state, agent, session, messageText(body.surface, 100), now, STALE_MS, randomBytes(3).toString('hex'))
+          save(next.state, now)
+          return { message: next.message }
+        }
+        save(action === 'mailbox-end' ? endMailbox(state, agent, session, now) : acceptMailboxMessage(state, agent, session, messageId(body.id), messageText(body.nonce, 6), now), now)
         return { ok: true }
       }
       messageFields(body, action === 'receipt' ? ['connection', 'secret', 'id', 'nonce', 'status', 'reply', 'error'] : action === 'poll' ? ['connection', 'secret', 'turn', 'receive'] : ['connection', 'secret', 'turn'])
@@ -320,5 +349,99 @@ export const createMessaging = (directory: string, isDefault = false) => {
       throw Object.assign(new Error(code, { cause: error }), { code })
     }
     throw error
+  }
+}
+
+export const hookMailbox = (directory: string, budget: number) => {
+  const root = resolve(directory)
+  let hasDeferred = false
+  // A claim Windows would not let go of is still this hook's own, checked again before every write.
+  // The next call reuses it, so the accept for a message already handed out is not refused by it.
+  let held: MessageStoreClaim | null = null
+  const livePid = (): number | null => {
+    try {
+      const raw = readFileSync(join(root, 'server.lock'), 'utf8')
+      if (!/^[1-9][0-9]*$/.test(raw)) throw new Error('MESSAGE_STORE_IN_USE')
+      const pid = Number(raw)
+      try { process.kill(pid, 0); return pid } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return null
+        if ((error as NodeJS.ErrnoException).code === 'EPERM') return pid
+        throw error
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+  }
+  const call = async (action: string, body: Record<string, string>, now: number): Promise<Message | null> => {
+    hasDeferred = false
+    const wait = Math.min(150, budget)
+    try {
+      const started = Date.now()
+      const folder = lstatSync(root)
+      if (!folder.isDirectory() || folder.isSymbolicLink()) return null
+      // Only a real mailbox can hold a message back; with no folder there is nothing to defer.
+      hasDeferred = true
+      if (budget <= 0) return null
+      const pid = livePid()
+      if (pid !== null) {
+        const owner = JSON.parse(readFileSync(join(root, 'server.owner'), 'utf8')) as { pid: number; url: string }
+        if (owner.pid !== pid || typeof owner.url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url)) return null
+        return await new Promise<Message | null>(done => {
+          const url = new URL(owner.url)
+          const req = request(new URL(`/api/messages/${action}`, url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t')!, 'content-type': 'application/json' } }, res => {
+            let text = ''
+            res.setEncoding('utf8')
+            res.on('data', chunk => { text += chunk; if (text.length > 32_768) req.destroy() })
+            res.on('end', () => {
+              clearTimeout(timer)
+              try {
+                if (res.statusCode !== 200) { done(null); return }
+                const saved = JSON.parse(text) as { message?: Message }
+                hasDeferred = false
+                done(saved.message ?? null)
+              } catch { done(null) }
+            })
+            res.on('error', () => { clearTimeout(timer); done(null) })
+          })
+          const timer = setTimeout(() => { req.destroy(); done(null) }, wait)
+          req.on('error', () => { clearTimeout(timer); done(null) })
+          req.end(JSON.stringify(action === 'mailbox-turn' ? { ...body, before: started + wait } : body))
+        })
+      }
+      // A kept claim that is no longer on disk is gone, and a fresh one is taken.
+      const kept = held
+      held = null
+      const claim = kept !== null && (() => { try { kept.check(root); return true } catch { return false } })() ? kept : claimMessageStore(root)
+      const file = join(root, 'messages.json'), temp = `${file}.${process.pid}.tmp`
+      try {
+        // An accept acknowledges output already written, so a slow claim must not discard it.
+        if (action !== 'mailbox-accept' && Date.now() - started > Math.min(120, budget) || livePid() !== null) return null
+        if (existsSync(file) && (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink())) return null
+        let state = existsSync(file) ? parseMessageStore(readFileSync(file, 'utf8'), now) : { messages: [] }
+        let message: Message | null = null
+        const agent = messageId(body.agent), session = messageId(body.session)
+        if (action === 'mailbox-turn') {
+          const taken = takeMailboxMessage(state, agent, session, messageText(body.surface, 100), now, STALE_MS, randomBytes(3).toString('hex'))
+          state = taken.state
+          message = taken.message
+        } else state = action === 'mailbox-end' ? endMailbox(state, agent, session, now) : acceptMailboxMessage(state, agent, session, messageId(body.id), messageText(body.nonce, 6), now)
+        claim.check(root)
+        writeFileSync(temp, JSON.stringify({ version: 2, ...pruneMessages(state, now) }), { flag: 'wx', mode: 0o600 })
+        replaceFile(temp, file)
+        hasDeferred = false
+        return message
+      } finally {
+        try { unlinkSync(temp) } catch {}
+        // Cleanup cannot take back a saved delivery that the host still needs to read.
+        try { claim.release() } catch { held = claim }
+      }
+    } catch { return null }
+  }
+  return {
+    get hasDeferred() { return hasDeferred },
+    turn: (agent: string, session: string, surface: string, now: number) => call('mailbox-turn', { agent, session, surface }, now),
+    accept: (agent: string, session: string, id: string, nonce: string, now: number) => call('mailbox-accept', { agent, session, id, nonce }, now),
+    end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
   }
 }

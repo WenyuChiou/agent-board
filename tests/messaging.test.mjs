@@ -27,6 +27,8 @@ registerHooks({ resolve(specifier, context, next) {
   }
 } })
 const { createMessaging, moveLockAside } = await import('../scripts/board-messaging.ts')
+const { hookMailbox, parseMessageStore } = await import('../scripts/board-messaging.ts')
+const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
 const { serveModel } = await import('../hooks/serve.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
@@ -41,6 +43,227 @@ const storedReply = (dir, id) => JSON.parse(readFileSync(join(dir, 'messages', '
 const pause = ms => new Promise(done => setTimeout(done, ms))
 const target = { id: 'binding1', agent: 'codex', session: 'session1', turn: 'turn1', surface: 'fixture', expires: 2000 }
 const input = { id: 'AB-TEST-001', target: target.id, turn: target.turn, text: '收到後請回覆 ACK AB-TEST-001，並回報目前任務狀態；不要修改檔案或執行其他動作。' }
+
+const mailboxSeed = (now = Date.now()) => enrollMailbox({ messages: [] }, 'codex', 'mailbox-session', 'CLI', now, 43_200_000)
+const mailboxQueue = (state, id, from = 'board', now = Date.now()) => queueMessage(state, { id, target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: id }, from, state.mailboxes[0], now).state
+const mailboxTake = (state, now = Date.now()) => takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', now, 43_200_000, 'abcdef')
+
+test('mailbox targets survive hub restart while ephemeral poller connections disconnect', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-restart-'))
+  let hub
+  try {
+    const now = Date.now()
+    hub = createMessaging(dir)
+    hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI' }, now)
+    const poller = hub.act('register', { agent: 'gemini', session: 'poller-session', surface: 'CLI', turn: 'turn1' }, now)
+    hub.act('send', { id: 'mailbox-queued', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'wait' }, now)
+    hub.act('send', { id: 'poller-queued', target: poller.id, turn: 'turn1', text: 'disconnect' }, now)
+    hub.close()
+    hub = createMessaging(dir)
+    const snapshot = hub.snapshot(now + 1)
+    assert.equal(snapshot.mailboxes.length, 1)
+    assert.deepEqual(snapshot.messages.map(one => [one.id, one.status]), [['mailbox-queued', 'queued'], ['poller-queued', 'rejected']])
+    assert.equal(snapshot.messages[1].error, 'DISCONNECTED')
+  } finally { hub?.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('claimed mailbox messages transition to accepted after turn-start delivery and never replay on later turns', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-claim-'))
+  try {
+    const state = mailboxQueue(mailboxSeed(), 'mailbox-delivery')
+    writeFileSync(join(dir, 'messages.json'), JSON.stringify({ version: 2, ...state }))
+    const mailbox = hookMailbox(dir, 500)
+    const message = await mailbox.turn('codex', 'mailbox-session', 'CLI', Date.now())
+    assert.equal(message.id, 'mailbox-delivery')
+    assert.equal(parseMessageStore(readFileSync(join(dir, 'messages.json'), 'utf8'), Date.now()).messages[0].status, 'uncertain')
+    await mailbox.accept('codex', 'mailbox-session', message.id, message.nonce, Date.now())
+    assert.equal(JSON.parse(readFileSync(join(dir, 'messages.json'), 'utf8')).messages[0].status, 'accepted')
+    assert.equal(await mailbox.turn('codex', 'mailbox-session', 'CLI', Date.now()), null)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('ending a session rejects queued mailbox messages with DISCONNECTED and frees the open cap', () => {
+  const now = Date.now()
+  const queued = mailboxQueue(mailboxSeed(now), 'mailbox-ending', 'board', now)
+  const ended = endMailbox(queued, 'codex', 'mailbox-session', now + 1)
+  assert.equal(ended.mailboxes.length, 0)
+  assert.equal(ended.messages[0].status, 'rejected')
+  assert.equal(ended.messages[0].error, 'DISCONNECTED')
+  const expired = expireMailboxes(queued, now + 43_200_000)
+  assert.equal(expired.messages[0].error, 'DISCONNECTED')
+  assert.equal(mailboxQueue(enrollMailbox(ended, 'codex', 'mailbox-session', 'CLI', now + 2, 1000), 'mailbox-new').messages.length, 2)
+})
+
+test('concurrent hub and mailbox writes enforce OPEN_CAP inside one store claim', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-cap-'))
+  let hub, server
+  try {
+    const now = Date.now()
+    const seed = enrollMailbox(mailboxQueue(mailboxSeed(now), 'mailbox-cap'), 'gemini', 'other-session', 'CLI', now, 43_200_000)
+    seed.messages = Array.from({ length: OPEN_CAP - 1 }, (_, index) => ({ ...seed.messages[0], id: `mail-${index}`, status: 'accepted', claimed: now, nonce: 'abcdef' }))
+    writeFileSync(join(dir, 'messages.json'), JSON.stringify({ version: 2, ...seed }))
+    const claim = claimMessageStore(dir)
+    try { assert.equal(await hookMailbox(dir, 500).turn('codex', 'mailbox-session', 'CLI', now), null) } finally { claim.release() }
+    hub = createMessaging(dir)
+    server = createServer(async (req, res) => {
+      let text = ''
+      for await (const chunk of req) text += chunk
+      try { res.end(JSON.stringify(hub.act(req.url.split('/').at(-1), JSON.parse(text), Date.now()))) }
+      catch (error) { res.statusCode = 409; res.end(JSON.stringify({ error: error.message })) }
+    })
+    await new Promise(done => server.listen(0, '127.0.0.1', done))
+    const url = `http://127.0.0.1:${server.address().port}`
+    hub.recordOwner(server.address().port, `${url}/?t=synthetic`)
+    const sends = seed.mailboxes.map((target, index) => fetch(`${url}/api/messages/send`, { method: 'POST', body: JSON.stringify({ id: `cap-send-${index}`, target: target.id, turn: 'session', text: 'cap message' }) }).then(response => response.json()))
+    const [first, second] = await Promise.all([...sends, hookMailbox(dir, 500).turn('codex', 'mailbox-session', 'CLI', now)])
+    assert.equal([first, second].filter(one => one.error === 'MESSAGE_LIMIT').length, 1)
+    assert.equal(hub.snapshot(now).messages.length, OPEN_CAP)
+    assert.equal(JSON.parse(readFileSync(join(dir, 'messages.json'), 'utf8')).messages.length, OPEN_CAP)
+  } finally { if (server) await new Promise(done => server.close(done)); hub?.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a hook-only target takes one message per turn, oldest first, and an accepted one never makes a send PAIR_BUSY', () => {
+  const now = Date.now()
+  let state = mailboxQueue(mailboxQueue(mailboxSeed(now), 'first', 'board', now), 'second', 'gemini:sender', now + 1)
+  const first = mailboxTake(state, now + 2)
+  assert.equal(first.message.id, 'first')
+  state = acceptMailboxMessage(first.state, 'codex', 'mailbox-session', 'first', 'abcdef', now + 3)
+  state = mailboxQueue(state, 'third', 'board', now + 4)
+  const second = mailboxTake(state, now + 5)
+  assert.equal(second.message.id, 'second')
+  state = acceptMailboxMessage(second.state, 'codex', 'mailbox-session', 'second', 'abcdef', now + 6)
+  assert.equal(mailboxTake(state, now + 7).message.id, 'third')
+})
+
+test('an uncertain mailbox message still blocks its target and is never handed out again', () => {
+  const now = Date.now()
+  const first = mailboxTake(mailboxQueue(mailboxSeed(now), 'uncertain-first'), now + 1)
+  const state = mailboxQueue(first.state, 'uncertain-next', 'gemini:sender', now + 2)
+  assert.equal(mailboxTake(state, now + 3).message, null)
+  assert.equal(state.messages[0].status, 'uncertain')
+  assert.equal(mailboxTake(pruneMessages(state, now + OPEN_LIMIT_MS + 2), now + OPEN_LIMIT_MS + 2).message.id, 'uncertain-next')
+})
+
+test('every state change keeps the mailboxes field', () => {
+  const now = Date.now(), state = mailboxSeed(now)
+  assert.equal(pruneMessages(state, now), state)
+  const queued = mailboxQueue(state, 'preserve', 'board', now)
+  const claimed = mailboxTake(queued, now).state
+  for (const next of [queued, claimed, dismissMessage(queued, 'preserve', now + 2), disconnectMessages(queued, state.mailboxes[0].id, now + 2), acceptMailboxMessage(claimed, 'codex', 'mailbox-session', 'preserve', 'abcdef', now + 2), pruneMessages(claimed, now + OPEN_LIMIT_MS + 2)]) assert.deepEqual(next.mailboxes, state.mailboxes)
+  assert.throws(() => parseMessageStore(JSON.stringify({ version: 2, ...queued, messages: [{ ...queued.messages[0], from: 'board\nforged' }] }), now), /INVALID_MESSAGE_STORE/)
+  assert.throws(() => parseMessageStore(JSON.stringify({ version: 2, ...state, mailboxes: [{ ...state.mailboxes[0], id: 'mailbox_bad' }] }), now), /INVALID_MESSAGE_STORE/)
+})
+
+test('a hub that reads a mailbox claim after the hook gave up leaves the message queued', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-late-'))
+  let hub
+  try {
+    const now = Date.now()
+    hub = createMessaging(dir)
+    hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI', before: now }, now)
+    hub.act('send', { id: 'mailbox-late', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'wait' }, now)
+    assert.equal(hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI', before: now }, now + 1).message, null)
+    assert.equal(hub.snapshot(now + 1).messages[0].status, 'queued')
+    assert.equal(hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI', before: now + 2 }, now + 1).message.id, 'mailbox-late')
+  } finally { hub?.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('an ended session offers no mailbox, is not called contested, and can still resume with --allow-resume', async () => {
+  const { serveAction } = await import('../hooks/serve.ts')
+  const { boardItems } = await import('../hooks/board.ts')
+  const now = Date.now(), session = '11111111-2222-4333-8444-555555555555', mailbox = enrollMailbox({ messages: [] }, 'codex', session, 'CLI', now, 43_200_000).mailboxes[0]
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${session} dir=${encodeURIComponent(tmpdir())} state=ended updated=${new Date(now).toISOString()} -->\n### Mailbox ended\n- [~] Continue\n<!-- /auto session=abcdef01 -->\n`
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+  const rowOf = model => [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)].find(one => one.title === 'Mailbox ended')
+  const messaging = { connections: [], mailboxes: [mailbox], messages: [] }
+  const shut = rowOf(serveModel(view, [], EN, new Set(), false, messaging, false))
+  assert.equal(shut.delivery, undefined)
+  assert.equal(shut.send, 'open')
+  assert.equal(shut.hasCopyBox, true)
+  const resume = rowOf(serveModel(view, [], EN, new Set(), false, messaging, true))
+  assert.equal(resume.delivery, undefined)
+  assert.equal(resume.send, 'send')
+  const action = serveAction(boardItems(view, [], true), { key: resume.key, type: 'send', text: 'Resume this', session: resume.session, asked: '', fp: resume.fp }, EN, false, deliveryTargets([], [mailbox]), true, true)
+  assert.notEqual(action.note, EN.messagesContested)
+})
+
+test('a Cursor mailbox card says the message waits for the chat to open, not for its next turn', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now(), mailbox = enrollMailbox({ messages: [] }, 'cursor', 'mailbox-session', 'IDE (Composer)', now, 43_200_000).mailboxes[0]
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=cursor resume=mailbox-session state=waiting updated=${new Date(now).toISOString()} -->\n### Mailbox page\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+  const model = serveModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), false, { connections: [], mailboxes: [mailbox], messages: [] }, false, { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+  assert.equal(model.asks[0].send, 'mailbox')
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  const labels = page.cards().flatMap(card => page.buttons(card)).map(one => one.textContent)
+  assert.ok(labels.includes(EN.serveQueueNextOpen('Cursor')))
+  assert.ok(!labels.includes(EN.serveQueueNextTurn('Cursor')))
+  page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
+  assert.ok(page.text().includes(EN.serveNextOpenHint))
+  assert.ok(!page.text().includes(EN.serveNextTurnHint))
+})
+
+test('the same text queued again after the first was handed over is a new message', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now(), seed = mailboxSeed(now), mailbox = seed.mailboxes[0]
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=mailbox-session state=working updated=${new Date(now).toISOString()} -->\n### Mailbox page\n- [~] Keep going\n<!-- /auto session=abcdef01 -->\n`
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  const model = messages => serveModel(view, [], EN, new Set(), false, { connections: [], mailboxes: [mailbox], messages }, false, group)
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model([]), async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  const press = async () => {
+    const card = page.cards().find(one => page.buttons(one).some(button => button.textContent === EN.serveQueueNextTurn('Codex')))
+    page.inputs(card)[0].value = 'Continue'
+    page.buttons(card).find(button => button.textContent === EN.serveQueueNextTurn('Codex')).click()
+    await page.flush()
+  }
+  await press()
+  const first = page.requests.at(-1).body.id
+  const handed = acceptMailboxMessage(mailboxTake(mailboxQueue(seed, first)).state, 'codex', 'mailbox-session', first, 'abcdef', now + 2)
+  await page.redraw(model(handed.messages))
+  await press()
+  assert.notEqual(page.requests.at(-1).body.id, first)
+})
+
+test('the page offers Queue for next turn beside Copy, prefers a live poller, and shows neither on the local network', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now(), seed = mailboxSeed(now)
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=mailbox-session state=waiting updated=${new Date(now).toISOString()} -->\n### Mailbox page\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+  const mailbox = seed.mailboxes[0]
+  const messaging = { connections: [], mailboxes: [mailbox], messages: [] }
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  const model = serveModel(view, [], EN, new Set(), false, messaging, false, group)
+  assert.equal(model.asks[0].send, 'mailbox')
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  const labels = page.cards().flatMap(card => page.buttons(card)).map(one => one.textContent)
+  assert.ok(labels.includes(EN.serveQueueNextTurn('Codex')))
+  assert.ok(labels.includes(EN.pgCopyAnswer))
+  const queueButton = page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.serveQueueNextTurn('Codex'))
+  assert.ok(page.buttons(queueButton.parentNode).some(one => one.textContent === EN.pgCopyAnswer))
+  page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
+  assert.ok(page.text().includes(EN.serveNextTurnHint))
+  page.inputs(page.cards()[0])[0].value = 'Queue this answer'
+  queueButton.click()
+  await page.flush()
+  assert.equal(page.requests[0].body.type, 'message')
+  assert.ok(!page.text().includes('Sent to'))
+  assert.ok(!page.text().includes('Delivered'))
+  const live = { ...mailbox, id: 'poller-live', scope: 'session' }
+  assert.deepEqual(deliveryTargets([live], [mailbox]), [live])
+  assert.equal(serveModel(view, [], EN, new Set(), false, { ...messaging, connections: [live] }).asks[0].send, 'connected')
+  const lan = serveModel(view, [], EN, new Set(), true, messaging)
+  assert.equal(lan.asks[0].delivery, undefined)
+  assert.notEqual(lan.asks[0].send, 'mailbox')
+  const accepted = acceptMailboxMessage(mailboxTake(mailboxQueue(seed, 'page-accepted')).state, 'codex', 'mailbox-session', 'page-accepted', 'abcdef', now + 2)
+  const received = serveModel(view, [], EN, new Set(), false, { ...messaging, messages: accepted.messages }, false, group)
+  assert.equal(received.asks[0].isSending, false)
+  assert.equal(received.asks[0].receipt.isMailbox, true)
+  await page.redraw(received)
+  assert.ok(page.text().includes(EN.messagesHandedNextTurn))
+})
 
 test('a private folder check accepts only a protected folder with one full-control entry for the current user', () => {
   const sid = 'S-1-5-21-123-456-789-1001'
@@ -1862,7 +2085,7 @@ test('a handoff reads its current progress baseline without depending on the las
   assert.equal(row.status, 'reported')
 }))
 
-test('handoffs time out visibly until exact fresh progress appears, independently of a live receiver', async () => fixture(async (board, dir) => {
+const handoffDeadlineCase = async () => fixture(async (board, dir) => {
   const client = boardClient(board.address)
   const request = { id: 'link1', agent: 'antigravity', session: 'native1', surface: 'Synthetic CLI', timeoutMs: 1000 }
   const progress = updated => `## Synthetic\n<!-- auto session=12345678 agent=antigravity state=working updated=${new Date(updated).toISOString()} resume=native1 -->\n### Fixture\n- [~] Explicit report\n<!-- /auto session=12345678 -->\n`
@@ -1879,7 +2102,12 @@ test('handoffs time out visibly until exact fresh progress appears, independentl
   try {
     await client.send({ id: 'setup1', target: receiver.id, turn: 'session', text: 'Synthetic setup request' })
     await waitFor(async () => (await board.call('/api/board')).body.messaging.messages[0]?.status === 'acknowledged')
-    row = (await board.call('/api/board')).body.messaging.sessions[0]
+    // An ACK can arrive during the initial poll, before the deadline. Observe
+    // the board's timeout independently instead of treating ACK latency as time.
+    await waitFor(async () => {
+      row = (await board.call('/api/board')).body.messaging.sessions[0]
+      return row.status === 'timed_out'
+    })
     assert.equal(row.status, 'timed_out'); assert.equal(row.receiving, true)
     writeFileSync(join(dir, 'progress.md'), progress(Date.now()).replace('resume=native1', 'resume=native10'))
     assert.equal((await board.call('/api/board')).body.messaging.sessions[0].status, 'timed_out')
@@ -1893,7 +2121,14 @@ test('handoffs time out visibly until exact fresh progress appears, independentl
   // No expectation or live receiver survives a board restart as a false connection.
   await board.close(); Object.assign(board, await start(dir))
   assert.deepEqual((await board.call('/api/board')).body.messaging.sessions, [])
-}))
+})
+
+test('handoffs time out visibly until exact fresh progress appears, independently of a live receiver', handoffDeadlineCase)
+// #692 requires twenty independent Windows samples. Every fresh fixture must
+// pass; a failing sample is never retried or hidden by a later success.
+if (process.platform === 'win32') for (let sample = 2; sample <= 20; sample++) {
+  test(`handoff deadline Windows sample ${sample}`, handoffDeadlineCase)
+}
 
 test('a live receiver without a progress card is visible and disappears on disconnect', async () => fixture(async board => {
   const receiver = await boardClient(board.address).attach({ agent: 'antigravity', session: 'native1', surface: 'Synthetic owned stream', scope: 'session', turn: 'session', verify: async () => true, deliver: async () => '' })
@@ -2074,14 +2309,21 @@ test('an adapter timeout becomes explicit uncertainty and never triggers another
 test('a mock Codex proxy keeps steering and native ACK separate and never answers approval RPCs', async () => fixture(async (board, dir) => {
   const thread = '11111111-2222-4333-8444-555555555555'
   const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log')
-  writeFileSync(fake, `import {createInterface} from 'node:readline';import{appendFileSync}from'node:fs';
-const emit=v=>console.log(JSON.stringify(v));
-createInterface({input:process.stdin}).on('line',line=>{const v=JSON.parse(line);appendFileSync(${JSON.stringify(log)},line+'\\n');
-if(v.method==='initialize')emit({id:v.id,result:{}});
-if(v.method==='thread/loaded/list')emit({id:v.id,result:{data:[${JSON.stringify(thread)}],nextCursor:null}});
-if(v.method==='turn/steer'){emit({id:v.id,result:{turnId:'turn1'}});emit({id:999,method:'item/commandExecution/requestApproval',params:{}});
-setTimeout(()=>emit({method:'item/completed',params:{threadId:${JSON.stringify(thread)},turnId:'turn1',item:{type:'agentMessage',text:'ACK '+v.params.input[0].text.match(/ACK ([0-9a-f]{6})/)[1]}}}),100);}
-});`)
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+import { appendFileSync } from 'node:fs'
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+  if (value.method === 'turn/steer') {
+    emit({ id: value.id, result: { turnId: 'turn1' } })
+    emit({ id: 999, method: 'item/commandExecution/requestApproval', params: {} })
+    setTimeout(() => emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'turn1', item: { type: 'agentMessage', text: 'ACK ' + value.params.input[0].text.match(/ACK ([0-9a-f]{6})/)[1] } } }), 100)
+  }
+} })
+`)
   const connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1', surface: 'Mock proxy' })
   try {
     await board.call('/api/messages/send', { ...input, target: connector.id })
@@ -2105,6 +2347,95 @@ setTimeout(()=>emit({method:'item/completed',params:{threadId:${JSON.stringify(t
     await pause(2200)
     assert.equal(readFileSync(log, 'utf8').split('"method":"turn/steer"').length - 1, 1)
   } finally { await connector.close() }
+}))
+
+test('the connector initializes, steers and reads the ACK through a WebSocket-only mock proxy', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log'), handshake = join(dir, 'handshake.txt')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import assert from 'node:assert/strict'
+import { appendFileSync, writeFileSync } from 'node:fs'
+import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+assert.deepEqual(process.argv.slice(2), ['app-server', 'proxy', '--sock', 'synthetic-owner'])
+let isInitialized = false, isListed = false, isSubscribed = false
+serveWebSocketProxy({
+  onHandshake: request => writeFileSync(${JSON.stringify(handshake)}, request),
+  onMessage: (value, emit) => {
+    appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
+    if (value.method === 'initialize') { emit({ id: value.id, result: {} }); return }
+    if (value.method === 'initialized') { isInitialized = true; return }
+    assert.ok(isInitialized)
+    if (value.method === 'thread/loaded/list') { isListed = true; emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } }) }
+    if (value.method === 'thread/resume') {
+      // Like the daemon: never resume a thread before checking it is loaded.
+      assert.ok(isListed)
+      assert.deepEqual(value.params, { threadId: ${JSON.stringify(thread)}, excludeTurns: true })
+      isSubscribed = true
+      emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+    }
+    if (value.method === 'turn/steer') {
+      assert.equal(value.params.expectedTurnId, 'turn1')
+      const nonce = value.params.input[0].text.match(/ACK ([0-9a-f]{6})/)[1]
+      emit({ id: value.id, result: { turnId: 'turn1' } })
+      // Like the daemon: a connection that never subscribed receives none of the turn's events.
+      if (!isSubscribed) return
+      const item = text => ({ type: 'agentMessage', text })
+      emit({ method: 'item/completed', params: { threadId: 'foreign', turnId: 'turn1', item: item('ACK ' + nonce + ' wrong thread') } })
+      emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'old-turn', item: item('ACK ' + nonce + ' wrong turn') } })
+      emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'turn1', item: item('ACK ' + nonce + ' received') } })
+      emit({ method: 'turn/completed', params: { threadId: ${JSON.stringify(thread)}, turn: { id: 'turn1' } } })
+    }
+  },
+})
+`)
+  const connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1', socket: 'synthetic-owner' })
+  try {
+    const sent = await board.call('/api/messages/send', { ...input, target: connector.id })
+    assert.equal(sent.status, 200)
+    const receipt = await waitFor(async () => {
+      const one = (await board.call('/api/board')).body.messaging.messages[0]
+      return one?.status === 'acknowledged' && one
+    })
+    assert.equal(receipt.reply, 'received')
+    assert.ok(readFileSync(handshake, 'utf8').startsWith('GET / HTTP/1.1\r\n'))
+    const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)
+    assert.deepEqual(calls.slice(0, 4).map(one => one.method), ['initialize', 'initialized', 'thread/loaded/list', 'thread/resume'])
+    assert.equal(calls.filter(one => one.method === 'turn/steer').length, 1)
+  } finally { await connector.close() }
+}))
+
+test('the proxy connector never resumes a thread the running Codex has not loaded', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { appendFileSync } from 'node:fs'
+import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n')
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: ['99999999-2222-4333-8444-555555555555'], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+} })
+`)
+  await assert.rejects(connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1' }), { message: 'TARGET_MISMATCH' })
+  const methods = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line).method)
+  assert.deepEqual(methods, ['initialize', 'initialized', 'thread/loaded/list'])
+  assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
+}))
+
+test('the proxy connector does not attach when Codex refuses to subscribe it to the thread', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const fake = join(dir, 'proxy.mjs')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, error: { code: -32600, message: 'synthetic refusal' } })
+} })
+`)
+  await assert.rejects(connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1' }), { message: 'OWNER_REJECTED' })
+  assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
 }))
 
 test('an owned idle Codex session accepts only its actual new turn ACK and deduplicates self delivery', async () => fixture(async (board, dir) => {
@@ -3050,4 +3381,195 @@ test('a dead message claim changed during verification remains blocked and is no
     assert.deepEqual(storeClaims(dir), [name])
     assert.equal(readFileSync(file, 'utf8'), 'changed')
   } finally { process.kill = probe; rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('an owned Codex receiver catches up a poll tick held behind an empty response, within the unchanged receipt budget', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-poll-overlap-'))
+  const store = createMessaging(dir)
+  const thread = '00000001-2222-4333-8444-555555555555'
+  let release, began, listener, receiver, polls = 0, received = 0
+  const held = new Promise(done => { release = done })
+  const started = new Promise(done => { began = done })
+  const errors = []
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1000 })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const action = new URL(url).pathname.split('/').at(-1)
+    const result = store.act(action, JSON.parse(options.body), Date.now())
+    const isFirstPoll = action === 'poll' && ++polls === 1
+    return { ok: true, json: async () => {
+      if (isFirstPoll) { began(); await held }
+      return result
+    } }
+  })
+  const transport = {
+    listen: callback => { listener = callback; return () => { listener = null } },
+    request: async (method, params) => {
+      if (method === 'thread/loaded/list') return { data: [thread] }
+      assert.equal(method, 'turn/start')
+      assert.equal(params.threadId, thread)
+      received++
+      const nonce = nonceOf(params.input[0].text)
+      listener({ method: 'item/completed', params: { threadId: thread, turnId: 'owned-turn', item: { type: 'agentMessage', text: `ACK ${nonce} received` } } })
+      listener({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'owned-turn', status: 'completed' } } })
+      return { turn: { id: 'owned-turn' } }
+    },
+  }
+  try {
+    receiver = await attachCodexSession({ boardUrl: 'http://127.0.0.1:12345/?t=synthetic', transport, thread,
+      state: () => ({ thread, status: 'idle', turn: null }), verifyOwner: one => one === transport,
+      onError: error => errors.push(error.message) })
+    await started
+    const sentAt = Date.now()
+    store.act('send', { id: 'AB-overlap', target: receiver.id, turn: receiver.turn, text: 'Synthetic overlap control' }, Date.now())
+    // The response was already empty before this send. A due tick must not vanish
+    // merely because that response has not finished arriving at the receiver.
+    t.mock.timers.tick(2000)
+    release()
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(1999)
+    await new Promise(done => setImmediate(done))
+    assert.equal(Date.now() - sentAt, 3999)
+    const message = store.snapshot(Date.now()).messages.find(one => one.id === 'AB-overlap')
+    const pollsBeforeDeadline = polls
+    // The old implementation does eventually deliver, at the next full period.
+    // Prove that the control's transport and exact native ACK both work then.
+    t.mock.timers.tick(1)
+    await new Promise(done => setImmediate(done))
+    assert.equal(store.snapshot(Date.now()).messages.find(one => one.id === 'AB-overlap').status, 'acknowledged')
+    assert.equal(message.status, 'acknowledged', 'the skipped 2000 ms tick must run before the next 4000 ms tick')
+    assert.equal(message.reply, 'received')
+    assert.equal(received, 1)
+    assert.equal(pollsBeforeDeadline, 2)
+    assert.deepEqual(errors, [])
+  } finally {
+    release()
+    await receiver?.close()
+    assert.equal(listener, null)
+    store.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('overlapping poll ticks coalesce once and never survive closure, ownership loss or expiry', async t => {
+  for (const state of ['live', 'closed', 'ownership-lost', 'expired']) await t.test(state, async t => {
+    let began, release, receiver, polls = 0, disconnects = 0, deliveries = 0, isOwned = true
+    const started = new Promise(done => { began = done })
+    const held = new Promise(done => { release = done })
+    const errors = []
+    t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1000 })
+    t.mock.method(globalThis, 'fetch', async (url) => {
+      const action = new URL(url).pathname.split('/').at(-1)
+      if (action === 'disconnect') disconnects++
+      const isFirstPoll = action === 'poll' && ++polls === 1
+      return { ok: true, json: async () => {
+        if (isFirstPoll) { began(); await held }
+        return action === 'register' ? { id: 'synthetic', secret: 'synthetic', expires: Date.now() + 15000 }
+          : action === 'poll' ? { messages: [], leaseMs: 15000 } : { ok: true }
+      } }
+    })
+    try {
+      receiver = await boardClient('http://127.0.0.1:12345/?t=synthetic').attach({
+        agent: 'codex', session: 'synthetic', surface: 'Synthetic overlap control', turn: 'turn1',
+        verify: async () => isOwned, deliver: async () => { deliveries++; return 'ACK synthetic' },
+        onError: error => errors.push(error.message),
+      })
+      await started
+      t.mock.timers.tick(state === 'expired' ? 16000 : 6000)
+      if (state === 'closed') await receiver.close()
+      if (state === 'ownership-lost') isOwned = false
+      release()
+      await new Promise(done => setImmediate(done))
+      assert.equal(polls, state === 'live' ? 2 : 1, 'many overdue ticks coalesce, and a terminal binding does not poll again')
+      assert.equal(disconnects, state === 'live' ? 0 : 1)
+      assert.equal(deliveries, 0)
+      assert.deepEqual(errors, state === 'expired' ? ['CONNECTION_EXPIRED'] : [])
+    } finally { release(); await receiver?.close() }
+  })
+})
+
+test('an overlapping poll leaves the page waiting for a reply at the deadline despite a completed native ACK', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-poll-overlap-'))
+  const store = createMessaging(dir)
+  const thread = '00000001-2222-4333-8444-555555555555'
+  let release, began, listener, receiver, polls = 0, received = 0
+  const held = new Promise(done => { release = done })
+  const started = new Promise(done => { began = done })
+  const errors = []
+  t.mock.timers.enable({ apis: ['Date', 'setInterval', 'setTimeout'], now: 1000 })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const action = new URL(url).pathname.split('/').at(-1)
+    const body = JSON.parse(options.body)
+    const result = store.act(action, body, Date.now())
+    const isFirstPoll = action === 'poll' && ++polls === 1
+    return { ok: true, json: async () => {
+      if (isFirstPoll) { began(); await held }
+      if (action === 'receipt' && body.status === 'accepted') await new Promise(done => setTimeout(done, 15))
+      return result
+    } }
+  })
+  const transport = {
+    listen: callback => { listener = callback; return () => { listener = null } },
+    request: async (method, params) => {
+      if (method === 'thread/loaded/list') return { data: [thread] }
+      assert.equal(method, 'turn/start')
+      assert.equal(params.threadId, thread)
+      received++
+      const nonce = nonceOf(params.input[0].text)
+      listener({ method: 'item/completed', params: { threadId: thread, turnId: 'owned-turn', item: { type: 'agentMessage', text: `ACK ${nonce} received` } } })
+      listener({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'owned-turn', status: 'completed' } } })
+      return { turn: { id: 'owned-turn' } }
+    },
+  }
+  try {
+    receiver = await attachCodexSession({ boardUrl: 'http://127.0.0.1:12345/?t=synthetic', transport, thread,
+      state: () => ({ thread, status: 'idle', turn: null }), verifyOwner: one => one === transport,
+      onError: error => errors.push(error.message) })
+    await started
+    t.mock.timers.tick(10)
+    const sentAt = Date.now()
+    store.act('send', { id: 'AB-overlap', target: receiver.id, turn: receiver.turn, text: 'Synthetic overlap control' }, Date.now())
+    // Queue just after the empty request. Its response crosses the next due
+    // tick but finishes with almost two seconds still left in the budget.
+    t.mock.timers.tick(1990)
+    release()
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(15)
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(1984)
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(1)
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(9)
+    await new Promise(done => setImmediate(done))
+    assert.equal(Date.now() - sentAt, 3999)
+    const snapshot = store.snapshot(Date.now())
+    const message = snapshot.messages.find(one => one.id === 'AB-overlap')
+    assert.equal(received, 1, 'the actual native turn and its correlated ACK already completed')
+    const { servePage } = await import('../hooks/serve.ts')
+    const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+    const file = `## Synthetic
+<!-- auto session=abcdef01 agent=codex resume=${thread} state=working updated=${new Date(Date.now()).toISOString()} -->
+### Poll overlap
+- [~] Review the synthetic control
+<!-- /auto session=abcdef01 -->
+`
+    const view = buildView(parseProgress(file), [], null, Date.now(), 0, {}, EN)
+    const model = serveModel(view, [], EN, new Set(), false, snapshot, false, { now: Date.now(), repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+    const page = await pageDom(servePage(EN, 'synthetic'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    // At the old next tick the native ACK is immediate, but even a 15 ms
+    // accepted-response round trip now pushes acknowledgment past the budget.
+    t.mock.timers.tick(6)
+    await new Promise(done => setImmediate(done))
+    assert.equal(store.snapshot(Date.now()).messages.find(one => one.id === 'AB-overlap').status, 'acknowledged')
+    assert.equal(message.status, 'acknowledged', `deadline page: ${page.text()}`)
+    assert.ok(page.text().includes('Replied'), page.text())
+    assert.equal(message.reply, 'received')
+    assert.deepEqual(errors, [])
+  } finally {
+    release()
+    await receiver?.close()
+    assert.equal(listener, null)
+    store.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

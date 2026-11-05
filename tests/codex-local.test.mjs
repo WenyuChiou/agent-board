@@ -4,11 +4,12 @@ import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
-import { beforeEach, test } from 'node:test'
+import { beforeEach, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 import { formatWriter } from './e2e/lib/faults.mjs'
+import { neverShown } from './fixtures/never-shown.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { HOOK_INPUT_TIMEOUT, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
@@ -17,6 +18,11 @@ import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/nat
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
 import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { partTest } from '../scripts/ci-impact.mjs'
+
+// The Windows board job runs this file in two parts, and each part runs its share of the tests: the
+// file alone took about 8 minutes there against a ten-minute limit (#899).
+const test = partTest(nodeTest)
 
 test('native cleanup diagnostics keep watchdog failures bounded and private', () => {
   const error = Object.assign(new Error('PRIVATE_ERROR'), { code: 'ETIMEDOUT', path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] })
@@ -179,6 +185,107 @@ const hookLog = f => existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(
 
 const hookFailure = result => JSON.stringify({ status: result.status, signal: result.signal, error: result.error && { code: result.error.code, message: result.error.message }, termination: result.termination, stdout: result.stdout, stderr: result.stderr })
 
+const setupObservations = new WeakMap()
+const setupChildSummary = (result, elapsedMs) => ({
+  status: Number.isSafeInteger(result.status) ? result.status : 'none',
+  signal: result.signal == null ? 'none' : ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGSEGV'].includes(result.signal) ? result.signal : 'other',
+  code: result.error == null ? 'none' : ['ENOENT', 'EACCES', 'ETIMEDOUT', 'ENOBUFS', 'E2BIG'].includes(result.error.code) ? result.error.code : 'other',
+  elapsedMs: Number.isFinite(elapsedMs) && elapsedMs >= 0 ? Math.round(elapsedMs) : 'unknown',
+})
+const observeSetupResult = invoke => {
+  const started = performance.now()
+  const result = invoke()
+  setupObservations.set(result, setupChildSummary(result, performance.now() - started))
+  return result
+}
+// A null status cannot distinguish launch failure from a deadline or a signal.
+// Keep only fixed fields; raw child output may contain commands and paths.
+const assertSetupStatus = (result, expected) => assert.equal(result.status, expected,
+  result.status === expected ? undefined : 'setup child failed: ' + JSON.stringify(setupObservations.get(result) ?? setupChildSummary(result, NaN)))
+
+test('setup status failures distinguish launch errors signals and deadlines without private output', () => {
+  const failure = (code, signal = null) => ({ status: null, signal, error: Object.assign(new Error('PRIVATE_ERROR'), { code, path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] }), stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR', pid: 123456789 })
+  const cases = [
+    [failure('ETIMEDOUT', 'SIGTERM'), 'none', 'SIGTERM', 'ETIMEDOUT'],
+    ...['ENOENT', 'EACCES', 'ENOBUFS', 'E2BIG'].map(code => [failure(code), 'none', 'none', code]),
+    [{ status: null, signal: 'SIGKILL', stdout: 'PRIVATE_STDOUT' }, 'none', 'SIGKILL', 'none'],
+    [{ status: 7, signal: null, stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR' }, 7, 'none', 'none'],
+    [failure('PRIVATE_CODE', 'PRIVATE_SIGNAL'), 'none', 'other', 'other'],
+  ]
+  for (const [result, status, signal, code] of cases) {
+    const before = inspect(result)
+    assert.equal(observeSetupResult(() => result), result)
+    assert.equal(inspect(result), before)
+    assert.throws(() => assertSetupStatus(result, 0), error => {
+      assert.equal(error.code, 'ERR_ASSERTION')
+      const summary = JSON.parse(/^setup child failed: (\{.*\})/m.exec(error.message)?.[1] ?? 'null')
+      assert.notEqual(summary, null, 'the failed child needs an allowlisted summary')
+      assert.deepEqual(Object.keys(summary), ['status', 'signal', 'code', 'elapsedMs'])
+      assert.deepEqual({ status: summary.status, signal: summary.signal, code: summary.code }, { status, signal, code })
+      assert.ok(Number.isSafeInteger(summary.elapsedMs) && summary.elapsedMs >= 0)
+      assert.ok(!/PRIVATE_|123456789/.test(inspect(error)))
+      assert.ok(error.message.length < 512)
+      return true
+    })
+  }
+  for (const status of [0, 1]) {
+    const result = { status, signal: null, stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR' }
+    assert.equal(observeSetupResult(() => result), result)
+    assert.doesNotThrow(() => assertSetupStatus(result, status))
+  }
+  assert.throws(() => assertSetupStatus(failure('ETIMEDOUT'), 0), error => {
+    assert.match(error.message, /"elapsedMs":"unknown"/)
+    assert.ok(!/PRIVATE_|123456789/.test(inspect(error)))
+    return true
+  })
+})
+
+const nativeReportContext = (result, label, readLog = () => '') => {
+  const context = JSON.parse(result.stdout).injectSteps?.[0]?.systemMessage?.systemMessage
+  if (typeof context !== 'string') {
+    // Read only on failure, and keep fixed codes instead of commands or log text.
+    const known = new Set(['UNSUPPORTED_AGENT', 'HOOK_WORKER_UNAVAILABLE', 'REPORTER_UPGRADE_REQUIRED', 'REPORTER_TIMEOUT', 'INPUT_TOO_LARGE', 'INPUT_TIMEOUT', 'INCOMPLETE_INPUT', 'REPORTER_FAILED', 'REPORTER_QUEUED'])
+    let log = '', hasLog = true
+    try { log = readLog() } catch { hasLog = false }
+    const codes = log.split(/\r?\n/).flatMap(line => {
+      const code = /^\S+ antigravity ([A-Z][A-Z0-9_]*)(?: |$)/.exec(line)?.[1]
+      return known.has(code) ? [code] : []
+    }).slice(-4)
+    const status = Number.isInteger(result.status) ? result.status : 'unknown'
+    assert.equal(typeof context, 'string', `${label}: missing native report context; status=${status}; hook codes=${hasLog ? codes.join(',') || 'none' : 'unavailable'}`)
+  }
+  return context
+}
+
+test('native report context failures keep hook codes without exposing command output', () => {
+  const log = [
+    '2026-11-02T00:00:00Z antigravity REPORTER_TIMEOUT',
+    '2026-11-02T00:00:01Z antigravity REPORTER_QUEUED',
+    '2026-11-02T00:00:02Z antigravity PRIVATE_LOG',
+  ].join('\n')
+  const result = { status: 0, stdout: '{"unrelated":"PRIVATE_COMMAND"}', stderr: 'PRIVATE_STDERR', signal: 'PRIVATE_SIGNAL' }
+  assert.throws(() => nativeReportContext(result, 'setup zh-CN', () => log), error => {
+    assert.match(error.message, /REPORTER_TIMEOUT,REPORTER_QUEUED/)
+    assert.match(error.message, /status=0/)
+    assert.ok(!error.message.includes('PRIVATE_'))
+    return true
+  })
+  assert.throws(() => nativeReportContext(result, 'setup zh-CN', () => { throw Error('PRIVATE_READ') }), error => {
+    assert.match(error.message, /missing native report context.*hook codes=unavailable/)
+    assert.ok(!error.message.includes('PRIVATE_'))
+    return true
+  })
+  assert.throws(() => nativeReportContext({ ...result, stdout: '{}' }, 'setup en', () => '2026-11-03T00:00:00Z antigravity HOOK_WORKER_UNAVAILABLE PRIVATE_LOG'), error => {
+    assert.match(error.message, /status=0; hook codes=HOOK_WORKER_UNAVAILABLE/)
+    assert.ok(!error.message.includes('PRIVATE_'))
+    return true
+  })
+  let isLogRead = false
+  const started = { stdout: JSON.stringify({ injectSteps: [{ systemMessage: { systemMessage: 'Bound command' } }] }) }
+  assert.equal(nativeReportContext(started, 'setup en', () => { isLogRead = true; return log }), 'Bound command')
+  assert.equal(isLogRead, false)
+})
+
 // Windows soon hands a freed pid to another process, so a pid this test has seen
 // exit is never stopped by number afterwards. Tests in this file run one at a time.
 const exitedPids = new Set()
@@ -246,7 +353,7 @@ const fixture = async fn => {
   const hooks = join(home, '.codex', 'hooks.json')
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
   const env = { ...isolatedEnv(home), CODEX_THREAD_ID: session, NO_COLOR: '1' }
-  const run = (file, args, input, extraEnv = {}) => spawnSync(process.execPath, [file, ...args], { env: { ...env, ...extraEnv }, input: input === undefined ? undefined : JSON.stringify(input), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const run = (file, args, input, extraEnv = {}) => observeSetupResult(() => spawnSync(process.execPath, [file, ...args], { env: { ...env, ...extraEnv }, input: input === undefined ? undefined : JSON.stringify(input), encoding: 'utf8', windowsHide: true, timeout: 15000 }))
   const isolated = ['--home', home, '--codex-dir', join(home, '.codex'), '--grok-dir', join(home, '.grok'), '--hermes-dir', join(home, '.hermes')]
   const install = (...args) => run(setup, [...isolated, ...args])
   const command = (args, input, extraEnv = {}) => run(script, [...isolated, ...args], input, extraEnv)
@@ -274,6 +381,291 @@ const fixture = async fn => {
   // persistent cleanup failures still fail the test.
   finally { if (isSafeToRemove) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
+
+const mailboxFixture = async fn => fixture(async f => {
+  const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
+  const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  const script = join(f.home, 'mailbox-board.mjs')
+  f.save(script, bundleFromDir(new URL('..', import.meta.url)))
+  const progress = join(f.home, 'mailbox-progress.md')
+  f.save(progress, '')
+  const env = { ...f.env, XDG_RUNTIME_DIR: join(f.home, 'runtime') }
+  const directory = defaultMessagesDirectory(progress, f.home, env, process.platform)
+  const call = (agent, event, extra = {}, flags = []) => spawnSync(process.execPath, [script,
+    '--home', f.home, '--data-dir', f.root, '--progress-file', progress, '--agent', agent,
+    ...(['codex', 'cursor'].includes(agent) ? ['--codex-event'] : ['--agent-status', '--state', /SessionEnd|sessionEnd/.test(event) ? 'ended' : /SessionStart|Stop|AfterAgent/.test(event) ? 'waiting' : 'working']),
+    ...(agent === 'antigravity' ? ['--event', event] : []), ...flags,
+  ], { cwd: f.home, env, input: JSON.stringify({ session_id: session, conversation_id: session, conversationId: session, hook_event_name: event, turn_id: 'mailbox-turn', generation_id: 'mailbox-turn', ...extra }), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const seed = (agent = 'codex') => {
+    const now = Date.now()
+    const state = enrollMailbox({ messages: [] }, agent, session, 'CLI', now, 43_200_000)
+    const target = state.mailboxes[0]
+    const queued = queueMessage(state, { id: 'hook-mailbox-message', target: target.id, turn: 'session', text: 'Synthetic mailbox payload' }, 'board', target, now).state
+    f.save(join(directory, 'messages.json'), JSON.stringify({ version: 2, ...queued }))
+  }
+  const state = () => JSON.parse(readFileSync(join(directory, 'messages.json'), 'utf8'))
+  await fn({ ...f, script, progress, env, directory, call, seed, state, mailboxId })
+})
+
+// Inject only the claim boundary so the real mailbox write and cleanup still run.
+const importMailboxWithClaim = async (name, wrap) => {
+  const url = new URL('../scripts/board-messaging.ts', import.meta.url)
+  url.searchParams.set('claim', name)
+  const claim = new URL('../scripts/message-store-claim.ts', import.meta.url)
+  const injected = 'data:text/javascript,' + encodeURIComponent(`import { claimMessageStore as original } from ${JSON.stringify(claim.href)}
+export const claimMessageStore = directory => (${wrap})(original(directory))`)
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    return next(specifier === './message-store-claim' && context.parentURL === url.href ? injected : specifier, context)
+  } })
+  try { return await importTs(url.href) } finally { resolver.deregister() }
+}
+
+test('hookWorker preserves host timeouts above 3 seconds instead of clamping to 3000 ms', () => {
+  const source = hookWorker('synthetic-home', 'synthetic-script', '')
+  assert.ok(source.includes('started + hostTimeout - 1000'))
+  assert.ok(!source.includes('Math.min(3000, hostTimeout - 1000)'))
+})
+
+test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, Gemini, Muse, and Cursor sessionStart only', async () => mailboxFixture(async f => {
+  const { turnStartEnvelope } = await importTs('../hooks/hook-messages.ts')
+  assert.equal(turnStartEnvelope('codex', 'SessionStart', 'message', 'note').hookSpecificOutput.additionalContext, 'note\n\nmessage')
+  assert.equal(turnStartEnvelope('codex', 'UserPromptSubmit', 'message', 'note').hookSpecificOutput.additionalContext, 'message')
+  for (const [agent, events] of Object.entries({ codex: ['SessionStart', 'UserPromptSubmit'], antigravity: ['SessionStart', 'PreInvocation'], gemini: ['SessionStart', 'BeforeAgent'], muse: ['UserPromptSubmit'], cursor: ['sessionStart'] })) {
+    for (const event of events) {
+      f.seed(agent)
+      let result = f.call(agent, event)
+      assert.equal(result.status, 0, result.stderr)
+      if (!result.stdout.includes('Synthetic mailbox payload')) {
+        assert.equal(result.stderr, 'board: mailbox deferred\n', agent + ' ' + event)
+        assert.equal(f.state().messages[0].status, 'queued')
+        result = f.call(agent, event)
+        assert.equal(result.status, 0, result.stderr)
+      }
+      const output = JSON.parse(result.stdout)
+      assert.ok(JSON.stringify(output).includes('Synthetic mailbox payload'), agent + ' ' + event + ': ' + result.stdout)
+      if (agent === 'codex' || agent === 'gemini' || agent === 'muse') assert.equal(output.hookSpecificOutput.hookEventName, event)
+      if (agent === 'antigravity') assert.ok((event === 'SessionStart' ? output.injectSteps[0].systemMessage.systemMessage : output.injectSteps[0].ephemeralMessage).includes('Synthetic mailbox payload'))
+      if (agent === 'cursor') assert.ok(output.additional_context.includes('Synthetic mailbox payload'))
+      assert.equal(f.state().messages[0].status, 'accepted')
+      const again = f.call(agent, event)
+      assert.equal(again.status, 0, again.stderr)
+      assert.ok(!again.stdout.includes('Synthetic mailbox payload'))
+      if (agent === 'cursor') assert.equal(output.env.AGENT_BOARD_SESSION_ID, session)
+      if (agent === 'gemini') assert.equal(output.decision, 'allow')
+    }
+  }
+}))
+
+test('a held mailbox store claim reports deferral and the next turn delivers after release', async () => mailboxFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  f.seed()
+  const before = readFileSync(join(f.directory, 'messages.json'), 'utf8')
+  const claim = claimMessageStore(f.directory)
+  const nonce = 'a'.repeat(32)
+  const pending = join(f.directory, `.message-pending-${process.pid}-${nonce}.json`)
+  f.save(pending, JSON.stringify({ version: 1, pid: process.pid, nonce }) + '\n')
+  try {
+    assert.ok(existsSync(pending))
+    const deferred = f.call('codex', 'UserPromptSubmit')
+    assert.equal(deferred.status, 0, deferred.stderr)
+    assert.equal(deferred.stdout, '')
+    assert.equal(deferred.stderr, 'board: mailbox deferred\n')
+    assert.equal(f.state().messages[0].status, 'queued')
+    assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
+  } finally {
+    claim.release()
+    unlinkSync(pending)
+  }
+  const delivered = f.call('codex', 'UserPromptSubmit')
+  assert.equal(delivered.status, 0, delivered.stderr)
+  assert.ok(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext.includes('Synthetic mailbox payload'))
+  assert.equal(f.state().messages[0].status, 'accepted')
+}))
+
+test('a mailbox turn returns its saved message when claim release throws', async () => mailboxFixture(async f => {
+  const { hookMailbox } = await importMailboxWithClaim('release-failure', `claim => ({
+    check: directory => claim.check(directory),
+    release: () => { claim.release(); throw new Error('SYNTHETIC_RELEASE_FAILURE') },
+  })`)
+  f.seed()
+  const mailbox = hookMailbox(f.directory, Infinity)
+  const message = await mailbox.turn('codex', session, 'CLI', Date.now())
+  assert.equal(message?.id, 'hook-mailbox-message')
+  assert.equal(message.text, 'Synthetic mailbox payload')
+  assert.equal(f.state().messages[0].status, 'uncertain')
+  assert.equal(mailbox.hasDeferred, false)
+  await mailbox.accept('codex', session, message.id, message.nonce, Date.now())
+  assert.equal(f.state().messages[0].status, 'accepted')
+  assert.equal(await mailbox.turn('codex', session, 'CLI', Date.now()), null)
+  assert.equal(mailbox.hasDeferred, false, 'an empty mailbox is not deferred')
+  assert.equal(readdirSync(f.directory).some(name => name.startsWith('.message-claim-') || name.endsWith('.tmp')), false)
+
+  const { hookMailbox: beforeWrite } = await importMailboxWithClaim('check-failure', `claim => ({
+    check: () => { throw new Error('SYNTHETIC_CHECK_FAILURE') },
+    release: () => { claim.release(); throw new Error('SYNTHETIC_RELEASE_FAILURE') },
+  })`)
+  f.seed()
+  const failed = beforeWrite(f.directory, Infinity)
+  assert.equal(await failed.turn('codex', session, 'CLI', Date.now()), null)
+  assert.equal(failed.hasDeferred, true)
+  assert.equal(f.state().messages[0].status, 'queued')
+}))
+
+test('a mailbox claim that cannot be removed is reused, so the accept of a message handed out still saves', async () => mailboxFixture(async f => {
+  globalThis.syntheticClaims = 0
+  globalThis.syntheticStuckReleases = 1
+  const { hookMailbox } = await importMailboxWithClaim('stuck-release', `claim => (globalThis.syntheticClaims++, {
+    check: directory => claim.check(directory),
+    release: () => {
+      if (globalThis.syntheticStuckReleases-- > 0) throw Object.assign(new Error('SYNTHETIC_STUCK_RELEASE'), { code: 'EPERM' })
+      claim.release()
+    },
+  })`)
+  f.seed()
+  const mailbox = hookMailbox(f.directory, Infinity)
+  const message = await mailbox.turn('codex', session, 'CLI', Date.now())
+  assert.equal(message?.id, 'hook-mailbox-message')
+  assert.equal(f.state().messages[0].status, 'uncertain')
+  assert.equal(readdirSync(f.directory).filter(name => name.startsWith('.message-claim-')).length, 1)
+  await mailbox.accept('codex', session, message.id, message.nonce, Date.now())
+  assert.equal(f.state().messages[0].status, 'accepted')
+  assert.equal(globalThis.syntheticClaims, 1)
+  assert.equal(readdirSync(f.directory).some(name => name.startsWith('.message-claim-')), false)
+}))
+
+test('a mailbox accept saves after a slow successful claim while turns still defer', async () => mailboxFixture(async f => {
+  const { hookMailbox } = await importMailboxWithClaim('slow-claim', `claim => {
+    const started = Date.now()
+    Date.now = () => started + 121
+    return claim
+  }`)
+  const { takeMailboxMessage } = await importTs('../hooks/hook-messages.ts')
+  f.seed()
+  const now = Date.now()
+  const taken = takeMailboxMessage(f.state(), 'codex', session, 'CLI', now, 43_200_000, 'abcdef')
+  assert.ok(taken.message)
+  f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, ...taken.state }))
+  const clock = Date.now
+  Date.now = () => now
+  try {
+    const mailbox = hookMailbox(f.directory, Infinity)
+    await mailbox.accept('codex', session, taken.message.id, taken.message.nonce, now)
+    assert.equal(f.state().messages[0].status, 'accepted')
+    f.seed()
+    assert.equal(await mailbox.turn('codex', session, 'CLI', Date.now()), null)
+    assert.equal(mailbox.hasDeferred, true)
+    assert.equal(f.state().messages[0].status, 'queued')
+  } finally { Date.now = clock }
+}))
+
+test('a turn-start hook with an empty mailbox prints exactly what it printed before', async () => mailboxFixture(async f => {
+  f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, messages: [] }))
+  const expected = { codex: [['UserPromptSubmit', '']], gemini: [['BeforeAgent', '{}\n'], ['SessionStart', '{}\n']], muse: [['UserPromptSubmit', '']], antigravity: [['PostInvocation', '{}\n']] }
+  for (const [agent, events] of Object.entries(expected)) for (const [event, output] of events) {
+    const result = f.call(agent, event)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.replace(/\r\n/g, '\n'), output, agent + ' ' + event)
+  }
+  assert.deepEqual(JSON.parse(f.call('cursor', 'sessionStart').stdout), { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: 'cursor' } })
+  assert.equal(f.state().messages.length, 0)
+}))
+
+test('Cursor beforeSubmitPrompt and terminal hooks leave mailbox messages queued', async () => mailboxFixture(async f => {
+  const { isSessionEnd, isTurnStart } = await importTs('../hooks/hook-messages.ts')
+  for (const agent of ['codex', 'antigravity', 'gemini', 'muse', 'cursor', 'grok', 'hermes', 'other']) {
+    for (const event of ['beforeSubmitPrompt', 'Stop', 'stop', 'afterAgentResponse', 'AfterAgent', 'PostInvocation', 'PermissionRequest', 'Interrupt', 'SessionEnd', 'sessionEnd']) assert.equal(isTurnStart(agent, event), false, agent + ' ' + event)
+    assert.equal(isSessionEnd(agent, 'SessionEnd'), ['codex', 'gemini', 'muse'].includes(agent))
+    assert.equal(isSessionEnd(agent, 'sessionEnd'), agent === 'cursor')
+  }
+  for (const [agent, event] of [['cursor', 'beforeSubmitPrompt'], ['cursor', 'stop'], ['codex', 'Stop'], ['gemini', 'AfterAgent'], ['muse', 'Stop'], ['antigravity', 'PostInvocation']]) {
+    const start = f.call(agent, agent === 'cursor' ? 'beforeSubmitPrompt' : agent === 'gemini' ? 'BeforeAgent' : agent === 'antigravity' ? 'PreInvocation' : 'UserPromptSubmit')
+    assert.equal(start.status, 0, agent + ': ' + start.stderr)
+    f.seed(agent)
+    const result = f.call(agent, event)
+    assert.equal(result.status, 0, agent + ' ' + event + ': ' + result.stderr)
+    assert.equal(f.state().messages[0].status, 'queued', agent + ' ' + event)
+  }
+}))
+
+test('a corrupt or busy message store fails open without failing progress hooks or --codex-report', async () => mailboxFixture(async f => {
+  for (const busy of [false, true]) {
+    f.seed()
+    if (busy) writeFileSync(join(f.directory, 'server.lock'), String(process.pid))
+    else writeFileSync(join(f.directory, 'messages.json'), '{broken')
+    const before = readFileSync(join(f.directory, 'messages.json'), 'utf8')
+    const hook = f.call('codex', 'SessionStart')
+    assert.equal(hook.status, 0, hook.stderr)
+    const report = spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--codex-report', '--session', session], {
+      cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, input: JSON.stringify({ title: 'Synthetic report', state: 'working', steps: ['- [~] Check'] }), timeout: 15000,
+    })
+    assert.equal(report.status, 0, report.stderr)
+    assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
+  }
+}))
+
+test('a replayed hook event never claims a mailbox message', async () => mailboxFixture(async f => {
+  f.seed()
+  const pending = join(f.root, 'pending', '000000000000001-replay.json')
+  f.save(pending, JSON.stringify({ version: 1, progress: f.progress, mode: '--codex-event', agent: 'codex', session, now: new Date().toISOString(), at: Date.now(), isPrompt: false, isBoardPrompt: false, payload: { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'replay-turn' } }))
+  const result = spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--recover-hooks'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).processed, 1)
+  assert.equal(f.state().messages[0].status, 'queued')
+}))
+
+test('a live hub takes hook mailbox calls over loopback and the hook does not write the store itself', async () => mailboxFixture(async f => {
+  const { createServer } = await import('node:http')
+  f.seed()
+  const before = readFileSync(join(f.directory, 'messages.json'), 'utf8'), calls = []
+  const message = { ...f.state().messages[0], nonce: 'abcdef', status: 'uncertain' }
+  const server = createServer(async (req, res) => {
+    let body = ''
+    for await (const chunk of req) body += chunk
+    calls.push([req.url, JSON.parse(body), req.headers['x-board-token']])
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify(req.url.endsWith('mailbox-turn') ? { message } : { ok: true }))
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  try {
+    writeFileSync(join(f.directory, 'server.lock'), String(process.pid))
+    writeFileSync(join(f.directory, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token` }))
+    const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--codex-event'], { cwd: f.home, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = '', err = ''
+    child.stdout.on('data', chunk => { out += chunk })
+    child.stderr.on('data', chunk => { err += chunk })
+    const exited = new Promise(done => child.once('close', done))
+    child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }))
+    assert.equal(await exited, 0, err)
+    assert.ok(out.includes('Synthetic mailbox payload'))
+    assert.deepEqual(calls.map(one => one[0]), ['/api/messages/mailbox-turn', '/api/messages/mailbox-accept'])
+    assert.ok(calls.every(one => one[2] === 'synthetic-token'))
+    assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
+  } finally { await new Promise(done => server.close(done)) }
+}))
+
+test('a hook never creates the messages folder', async () => mailboxFixture(async f => {
+  assert.equal(existsSync(f.directory), false)
+  const result = f.call('codex', 'SessionStart')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(f.directory), false)
+}))
+
+test('the hook finds the same default messages folder as --serve', async () => mailboxFixture(async f => {
+  const { serve } = await import('./e2e/lib/surfaces.mjs')
+  const { makeWorld } = await import('./e2e/lib/world.mjs')
+  const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
+  const world = makeWorld()
+  try {
+    const server = await serve.start(world)
+    const directory = defaultMessagesDirectory(world.path, world.home, world.env, process.platform)
+    assert.equal(existsSync(join(directory, 'server.lock')), true)
+    const hook = spawnSync(process.execPath, [world.script, '--codex-event', '--home', world.home, '--progress-file', world.path], { cwd: world.root, env: world.env, encoding: 'utf8', windowsHide: true, timeout: 15000, input: JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }) })
+    assert.equal(hook.status, 0, hook.stderr)
+    const snapshot = (await server.get('/api/board')).json()
+    assert.equal(snapshot.messaging.mailboxes[0].session, session)
+  } finally { await world.close() }
+}))
 
 test('the codex-local fixture removes its own prefix\'s folders older than six hours and keeps newer ones', async () => {
   const older = mkdtempSync(join(tmpdir(), 'codex local-'))
@@ -425,7 +817,50 @@ test('setup preserves malformed BOM-prefixed Codex hooks when it refuses install
   assert.equal(existsSync(f.root), false)
 }))
 
-const setupAgent = (f, ...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+const setupAgent = (f, ...args) => observeSetupResult(() => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 }))
+
+const systemLanguageEnv = () => ({ LANG: '', NODE_OPTIONS: `--require ${JSON.stringify(resolve('tests/fixtures/system-lang-zh-tw.cjs'))}` })
+
+test('setup on a zh-TW system with no LANG previews in zh-TW and bakes zh-TW', () => fixture(f => {
+  const system = { ...f, env: { ...f.env, ...systemLanguageEnv() } }
+  const preview = setupAgent(system, '--agent', 'codex')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.match(preview.stdout, /將更新/)
+  assert.ok(!preview.stdout.includes('would update'))
+  const applied = setupAgent(system, '--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.match(readFileSync(f.script, 'utf8').split('\n')[0], /"lang":"zh-TW"/)
+  assert.match(readFileSync(f.skill, 'utf8'), /實際任務進度/)
+}))
+
+test('after setup on a zh-TW system a plain run and stop speak zh-TW with no flag', () => fixture(f => {
+  const applied = setupAgent({ ...f, env: { ...f.env, ...systemLanguageEnv() } }, '--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  for (const [args, expected] of [[[], /進度/], [['--stop'], /這個檔案沒有正在執行的看板網頁/]]) {
+    const result = spawnSync(process.execPath, [f.script, ...args], { cwd: f.home, env: { ...f.env, LANG: '', NODE_OPTIONS: '', XDG_RUNTIME_DIR: join(f.home, 'runtime') }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    assert.equal(result.status, 0, `${JSON.stringify(args)}\n${result.stderr}\n${result.stdout}`)
+    assert.match(result.stdout, expected)
+    assert.doesNotMatch(result.stdout, /Progress|Stopped the board page|No board page is running/)
+  }
+}))
+
+test('a hook on a zh-TW install writes its step in zh-TW', () => fixture(f => {
+  const applied = setupAgent({ ...f, env: { ...f.env, ...systemLanguageEnv() } }, '--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  const result = f.event('SessionStart', 'language-turn', {}, { LANG: '', NODE_OPTIONS: '' })
+  assert.equal(result.status, 0, result.stderr)
+  const progress = readFileSync(f.progress, 'utf8')
+  assert.match(progress, /等待下一個工作指令/)
+  assert.ok(!progress.includes('Waiting for the next instruction'))
+}))
+
+test('--lang and LANG still win over a zh-TW system', () => fixture(f => {
+  for (const [args, LANG, expected] of [[['--lang', 'en'], '', /would update/], [[], 'en_US.UTF-8', /would update/], [['--lang', 'zh-CN'], '', /将更新/]]) {
+    const result = setupAgent({ ...f, env: { ...f.env, ...systemLanguageEnv(), LANG } }, '--agent', 'codex', ...args)
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, expected, JSON.stringify({ args, LANG }))
+  }
+}))
 
 const homeSnapshot = home => Object.fromEntries(readdirSync(home, { recursive: true, withFileTypes: true }).map(entry => {
   const path = join(entry.parentPath, entry.name)
@@ -663,7 +1098,7 @@ test('a second setup says everything is already set up and writes nothing', () =
 
 test('setup on a computer with only Claude Code prints guidance and exits 0 without a stack trace', () => fixture(f => {
   mkdirSync(join(f.home, '.claude'))
-  const english = { ...f, env: { ...f.env, LANG: '' } }
+  const english = { ...f, env: { ...f.env, LANG: 'en' } }
   const guidance = setupAgent(english)
   assert.equal(guidance.status, 0, guidance.stderr)
   assert.equal(guidance.stderr, '')
@@ -928,6 +1363,52 @@ test('removal preview and apply print plain changes and one next step unless JSO
     assert.equal(result.applied, true)
     assert.equal(jsonApply.stdout, `${JSON.stringify(result, null, 2)}\n`)
     assert.equal(existsSync(join(f.root, 'install-antigravity.json')), false)
+  }
+}))
+
+test('a removal preview names the shared files it keeps while another agent uses them', () => fixture(f => {
+  const runner = join(f.home, 'kept-shared-cli.mjs')
+  f.save(runner, bundleFromDir(new URL('..', import.meta.url)))
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const shared = [f.script, worker, f.skill]
+  const remove = (agent, lang, ...args) => spawnSync(process.execPath, [runner, '--home', f.home, '--codex-remove', '--agent', agent, '--lang', lang, ...args], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  for (const [lang, removeWord, next] of [
+    ['en', 'Would remove: ', 'Next:'],
+    ['zh-TW', '將移除：', '下一步：'],
+    ['zh-CN', '将移除：', '下一步：'],
+  ]) {
+    assert.equal(f.install('--agent', 'codex', '--lang', lang, '--apply').status, 0)
+    assert.equal(f.install('--agent', 'antigravity', '--lang', lang, '--apply').status, 0)
+    const snapshot = homeSnapshot(f.home)
+    const preview = remove('antigravity', lang)
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.equal(preview.stdout.split(next).length - 1, 1, preview.stdout)
+    for (const file of shared) {
+      const keptLine = lang === 'en' ? `Keeps ${file}; still in use by Codex` : `保留 ${file}；Codex 仍在使用`
+      assert.ok(preview.stdout.includes(keptLine), preview.stdout)
+      assert.ok(!preview.stdout.includes(`${removeWord}${file}`), preview.stdout)
+    }
+    assert.deepEqual(homeSnapshot(f.home), snapshot)
+    const jsonPreview = remove('antigravity', lang, '--json')
+    assert.equal(jsonPreview.status, 0, jsonPreview.stderr)
+    const plan = JSON.parse(jsonPreview.stdout)
+    assert.equal(plan.mode, 'remove')
+    assert.equal(plan.applied, undefined)
+    assert.deepEqual(plan.keptShared, shared.map(file => ({ file, usedBy: ['codex'] })), jsonPreview.stdout)
+    assert.ok(!plan.changes.some(change => shared.includes(change.file)), jsonPreview.stdout)
+    // Applying the removal leaves the shared files for Codex.
+    const applied = remove('antigravity', lang, '--apply')
+    assert.equal(applied.status, 0, applied.stderr)
+    assert.equal(existsSync(join(f.root, 'install-antigravity.json')), false)
+    for (const file of shared) assert.equal(existsSync(file), true, file)
+    // Codex is now the last agent: its preview names the shared files as removed.
+    const lastPreview = remove('codex', lang)
+    assert.equal(lastPreview.status, 0, lastPreview.stderr)
+    for (const file of shared) assert.ok(lastPreview.stdout.includes(`${removeWord}${file}`), lastPreview.stdout)
+    const lastPlan = JSON.parse(remove('codex', lang, '--json').stdout)
+    assert.equal(lastPlan.keptShared, undefined)
+    assert.ok(shared.every(file => lastPlan.changes.some(change => change.file === file && change.action === 'remove')), JSON.stringify(lastPlan.changes))
+    assert.equal(remove('codex', lang, '--apply').status, 0)
   }
 }))
 
@@ -1430,7 +1911,7 @@ test('setup still refuses a malformed host config that starts with a BOM', async
     const original = Buffer.from('\uFEFF{"hooks":\r\n')
     f.save(config, original)
     const preview = f.install('--agent', host)
-    assert.equal(preview.status, 0, preview.stderr)
+    assertSetupStatus(preview, 0)
     assert.ok(JSON.parse(preview.stdout).conflicts.includes(config))
     assert.deepEqual(readFileSync(config), original)
     const applied = f.install('--agent', host, '--apply')
@@ -1438,7 +1919,7 @@ test('setup still refuses a malformed host config that starts with a BOM', async
     assert.deepEqual(readFileSync(config), original)
     assert.equal(existsSync(f.root), false)
     const common = setupAgent(f, '--lang', 'en', '--agent', host, '--json')
-    assert.equal(common.status, 1)
+    assertSetupStatus(common, 1)
     assert.equal(common.stderr, '')
     assert.equal(JSON.parse(common.stdout).applied, false)
     assert.deepEqual(readFileSync(config), original)
@@ -1452,7 +1933,7 @@ test('setup names the host with an unreadable config and still previews the othe
     f.save(cursor, '\uFEFF{"hooks":\r\n')
     f.save(f.hooks, '{}')
     const result = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', '--json')
-    assert.equal(result.status, 0, result.stderr)
+    assertSetupStatus(result, 0)
     const preview = JSON.parse(result.stdout)
     assert.deepEqual(preview.targets, ['codex', 'cursor'])
     assert.equal(preview.applied, false)
@@ -1471,7 +1952,7 @@ test('setup names the host with an unreadable config and still previews the othe
     const config = join(f.home, relative)
     f.save(config, original)
     const result = setupAgent(f, '--lang', 'en', '--agent', `codex,${agent}`, '--json')
-    assert.equal(result.status, 0, result.stderr)
+    assertSetupStatus(result, 0)
     const preview = JSON.parse(result.stdout)
     assert.deepEqual(preview.targets, ['codex', agent])
     assert.equal(preview.applied, false)
@@ -2020,7 +2501,7 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
     wasReaped = !existsSync(pidFile) || !isReporterAlive(Number(readFileSync(pidFile, 'utf8')))
     assert.equal(result.status, 0, hookFailure(result))
     assert.equal(wasReaped, true, 'the timed-out reporter must be reaped before the hook returns')
-    assert.ok(performance.now() - started < 3000)
+    assert.ok(performance.now() - started < 11000)
     const files = pendingFiles(f)
     assert.equal(files.length, 1)
     assert.match(files[0], /^\d{15}-[\da-f-]+\.raw\.json$/)
@@ -2066,7 +2547,7 @@ test('the hook deadline counts from the process start, not from when the worker 
   const worker = join(f.root, 'agent-board-hook.mjs')
   const argv = ['--hook-version', '1', '--hook-event', 'BeforeAgent', '--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
   const payload = { session_id: session }
-  const at = Date.now() - 3050
+  const at = Date.now() - 4050
   const result = spawnSync(process.execPath, [worker, ...argv, '--hook-started', String(at)], { env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000 })
   assert.equal(result.status, 0, result.stderr)
   assert.equal(readFileSync(f.progress, 'utf8').includes('agent=gemini'), false)
@@ -2087,12 +2568,12 @@ test('the hook deadline counts from the process start, not from when the worker 
 test('a late Codex worker queues an ISO event time and recovery preserves it', t => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   holdAutomaticRecovery(f)
-  const at = Date.now() - 3000
+  const at = Date.now() - 10000
   const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
   const worker = join(f.root, 'agent-board-hook.mjs')
   const payload = { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'late-iso-turn' }
   const result = spawnSync(process.execPath, [worker, '--hook-version', '1', '--hook-event', 'UserPromptSubmit', '--codex-event', '--agent', 'codex', '--progress-file', f.progress, '--hook-started', String(at)], {
-    env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000,
+    env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 15000,
   })
   assert.equal(result.status, 0, hookFailure(result))
   const files = pendingFiles(f)
@@ -2181,6 +2662,79 @@ test('an older live lifecycle event cannot replace a newer state or its update t
   assert.equal(report('working', 'PreInvocation', newer + 1).status, 0)
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'working')
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).appliedAt, newer + 1)
+}))
+
+test('two Antigravity sessions in one folder show different titles before either reports (#814)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  // No folder reaches the board for Antigravity: its hook binds only the
+  // conversation id, so both sessions arrive with the same fixture folder.
+  const first = 'synthetic-first-antigravity-814'
+  const second = 'synthetic-second-antigravity-814'
+  const report = (conversationId, state, event) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId })
+  for (const conversationId of [first, second]) {
+    assert.equal(report(conversationId, 'waiting', 'SessionStart').status, 0)
+    assert.equal(report(conversationId, 'working', 'PreInvocation').status, 0)
+  }
+  const ownerOf = id => createHash('sha256').update(`antigravity:${id}`).digest('hex')
+  const firstRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(first)}.json`), 'utf8'))
+  const secondRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(second)}.json`), 'utf8'))
+  assert.notEqual(firstRecord.title, secondRecord.title)
+  // No hash in the title: a default view shows no session id, hash or file
+  // path (parity checklist; dot's Question on #849). The distinction is the
+  // session's start time, to the millisecond — second precision would let two
+  // sessions started in the same second share a title.
+  for (const [record, id] of [[firstRecord, first], [secondRecord, second]]) {
+    assert.ok(!record.title.includes(ownerOf(id).slice(0, 8)), record.title)
+    assert.match(record.title, / · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, record.title)
+  }
+  const text = readFileSync(f.progress, 'utf8')
+  assert.ok(text.includes(`### ${firstRecord.title}`), text)
+  assert.ok(text.includes(`### ${secondRecord.title}`), text)
+  // Both distinct titles reach the default terminal view in every language, and
+  // the rendered output passes the never-shown check.
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardText, boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { LANGS } = await importTs('../hooks/i18n.ts')
+  for (const lang of LANGS) {
+    const s = STRINGS[lang]
+    const view = buildView(parseProgress(text), [], null, Date.now(), 0, {}, s)
+    for (const drawn of [boardText(view, [], s, { width: 80, isColor: false }), boardScreen(view, [], emptyBoardState, s, { width: 80, isColor: false })]) {
+      assert.ok(drawn.includes(firstRecord.title), `${lang}: first title drawn`)
+      assert.ok(drawn.includes(secondRecord.title), `${lang}: second title drawn`)
+      assert.deepEqual(neverShown(drawn), [], lang)
+    }
+  }
+  // An explicit report still supplies its own title: distinct only until the agent reports.
+  const reported = f.command(['--codex-report', '--agent', 'antigravity', '--session', first], { title: 'Reported summary', project: 'antigravity', state: 'working', steps: ['- [~] Reported step'] })
+  assert.equal(reported.status, 0, reported.stderr)
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(first)}.json`), 'utf8')).title, 'Reported summary')
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(second)}.json`), 'utf8')).title, secondRecord.title)
+}))
+
+test('an Antigravity session created before the distinct title still gets one on its next event (#814)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const conversationId = 'synthetic-legacy-antigravity-814'
+  const report = (state, event) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId })
+  assert.equal(report('waiting', 'SessionStart').status, 0)
+  const owner = createHash('sha256').update(`antigravity:${conversationId}`).digest('hex')
+  const recordFile = join(f.root, 'sessions', `${owner}.json`)
+  const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+  // Rewrite the record and its block heading as the pre-fix shape: the generic title.
+  const before = readFileSync(f.progress, 'utf8')
+  writeFileSync(recordFile, `${JSON.stringify({ ...record, title: 'Local antigravity task' }, null, 2)}\n`)
+  writeFileSync(f.progress, before.replace(`### ${record.title}`, '### Local antigravity task'))
+  assert.equal(report('working', 'PreInvocation').status, 0)
+  const after = JSON.parse(readFileSync(recordFile, 'utf8'))
+  // The re-title is a start time, not the old hash suffix: it differs from the
+  // first event's title, carries no hash, and then stays put on later events.
+  assert.notEqual(after.title, 'Local antigravity task')
+  assert.ok(!after.title.includes(owner.slice(0, 8)), after.title)
+  assert.match(after.title, / · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, after.title)
+  assert.ok(readFileSync(f.progress, 'utf8').includes(`### ${after.title}`))
+  assert.equal(report('working', 'PostInvocation').status, 0)
+  assert.equal(JSON.parse(readFileSync(recordFile, 'utf8')).title, after.title)
 }))
 
 test('a hook worker that starts after the host would stop it still reads its input and queues the event', () => fixture(f => {
@@ -2376,7 +2930,7 @@ test('raw replay classifies board requests and ordinary prompts like live events
   holdAutomaticRecovery(f)
   const worker = join(f.root, 'agent-board-hook.mjs')
   for (const [index, prompt] of ['/agent-board', 'Continue the task'].entries()) {
-    const at = Date.now() - 3050
+    const at = Date.now() - 4050
     const sessions = [`live-prompt-session-${index}`, `raw-prompt-session-${index}`]
     for (const session_id of sessions) {
       const report = f.command(['--codex-report', '--agent', 'gemini', '--session', session_id, '--hook-started', String(at - 1000)], { title: 'Question', state: 'waiting', steps: ['- [?] Choose a path'] })
@@ -6682,8 +7236,7 @@ test('Antigravity reports its own waiting question with the command bound by nat
     const fire = event => fireCommand(f, hooks[event][0].command, JSON.stringify(payload))
     const started = await fire('SessionStart')
     assert.equal(started.status, 0, hookFailure(started))
-    const context = JSON.parse(started.stdout).injectSteps?.[0]?.systemMessage?.systemMessage
-    assert.equal(typeof context, 'string', `${connector} ${lang}: missing native report context`)
+    const context = nativeReportContext(started, `${connector} ${lang}`, () => hookLog(f))
     assert.ok(!context.includes('PRIVATE_'))
     const command = context.match(/`(node [^`\r\n]+)`/)?.[1]
     assert.ok(command, context)
