@@ -101,13 +101,16 @@ const markerOf = (mirror: ProgressMirror, parent?: string): string => {
 // A task's step line after its mark: what the block holds, and what a reader of the file gets
 // back (trimmed). The pane keys a question on it too, so its key is the one every other reader
 // of the block works out.
-export const stepWords = (task: ProgressMirrorTask, s: Strings = ZH_TW): string => {
-  const subject = cutLine(oneLine(task.subject)).text
-  if (task.handoffTo) return `${subject} — ${s.transferredTo(oneLine(task.handoffTo))}`
+// The whole line is cut, note included (#922): an answered step folds its note into the subject
+// (answeredStep), so cutting only the subject would change its key once the combined line is over
+// 120 and leave the question listed as waiting. A handoff keeps its suffix whole and cuts the subject.
+const fullStepWords = (task: ProgressMirrorTask): string => {
   const note = task.blocked !== null && task.blocked !== '' ? task.blocked : task.status === 'completed' ? '' : (task.why ?? '')
-  const reason = note === '' ? '' : ` — ${oneLine(note)}`
-
-  return `${subject}${reason}`
+  return `${oneLine(task.subject)}${note === '' ? '' : ` — ${oneLine(note)}`}`
+}
+export const stepWords = (task: ProgressMirrorTask, s: Strings = ZH_TW): string => {
+  if (task.handoffTo) return `${cutLine(oneLine(task.subject)).text} — ${s.transferredTo(oneLine(task.handoffTo))}`
+  return cutLine(fullStepWords(task)).text
 }
 
 const titleOf = (mirror: ProgressMirror, s: Strings): string => oneLine(mirror.title) || oneLine(fallbackTitle(mirror)) || s.unnamed
@@ -119,8 +122,8 @@ export const cutEntries = (mirror: ProgressMirror, s: Strings = ZH_TW): Omit<Jou
   return [
     ...(cutLine(title).isCut ? [{ project: mirror.project, task: title, step: title }] : []),
     ...mirror.tasks.flatMap(task => {
-      const subject = oneLine(task.subject)
-      return cutLine(subject).isCut ? [{ project: mirror.project, task: title, step: subject }] : []
+      const full = task.handoffTo ? oneLine(task.subject) : fullStepWords(task)
+      return cutLine(full).isCut ? [{ project: mirror.project, task: title, step: full }] : []
     }),
   ]
 }

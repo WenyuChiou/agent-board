@@ -1588,8 +1588,9 @@ const saveCutText = ($: EngineInterface): Promise<void> => {
   return run
 }
 
-// A journal that failed to save stops this write: the block must not be shortened first.
-const queueWrite = ($: EngineInterface): Promise<void> => saveCutText($).then(() => enqueue(() => writeMine($))).catch(() => undefined)
+// The full words are handed to the journal before the shortened block is written. journal() keeps
+// lines it could not save pending for a retry, and a failing check here never stops the block write.
+const queueWrite = ($: EngineInterface): Promise<void> => saveCutText($).catch(() => undefined).then(() => enqueue(() => writeMine($))).catch(() => undefined)
 
 const notify = async ($: EngineInterface, text: string, project: string): Promise<void> => {
   if (!(await read($, isNotifyOn))) return

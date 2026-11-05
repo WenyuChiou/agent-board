@@ -2,7 +2,8 @@ import { emptyQuestions, observeQuestions } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror } from '../types'
-import { archivableAsking, countManualDone, confirmTask, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, takeManualDone, takeTask, upsertAutoBlock, cutEntries } from '../hooks/blocks'
+import { archivableAsking, countManualDone, confirmTask, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, takeManualDone, takeTask, upsertAutoBlock, cutEntries, stepWords } from '../hooks/blocks'
+import { answeredStep } from '../hooks/step-words'
 import { ZH_TW } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { answerAgentPrompt } from '../hooks/inbox'
@@ -1148,6 +1149,15 @@ test('a step of exactly 120 characters is not cut and a title over 120 is', () =
   expect(file).toContain(`- [ ] ${exact}\n`)
   expect(file).toContain(`### ${'c'.repeat(119)}…\n`)
   expect(cutEntries({ ...mirror, title: longTitle }).map(entry => entry.step)).toEqual([longTitle])
+})
+
+test('a waiting step whose note makes the line over 120 keeps the same words once it is answered', () => {
+  const task = { ...applyTaskCreate(emptyMirror('2be48af2-6193-5040', 'persona_framework', NOW), { subject: 'd'.repeat(100) }, '1', NOW).tasks[0]!, why: 'e'.repeat(60) }
+  const waiting = stepWords(task)
+  expect([...waiting].length).toBe(120)
+  expect(waiting.endsWith('…')).toBe(true)
+  expect(stepWords(answeredStep(task))).toBe(waiting)
+  expect(cutEntries({ ...emptyMirror('2be48af2-6193-5040', 'persona_framework', NOW), title: 'Synthetic title', tasks: [task] }).map(entry => entry.step)).toEqual([`${'d'.repeat(100)} — ${'e'.repeat(60)}`])
 })
 
 test('CJK characters and emoji each count as one code point when a step is cut', () => {
