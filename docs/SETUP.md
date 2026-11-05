@@ -9,10 +9,17 @@ node scripts/setup-agent.mjs
 node scripts/setup-agent.mjs --apply
 ```
 
-Auto detection checks host-specific configuration paths, not conversations or credentials.
-It reports candidates, not active sessions or account access. A `.gemini` directory alone
-does not identify Gemini CLI: Antigravity uses that parent too. If the current host has
-not created its configuration yet, select its known target with `--agent <name>`.
+Auto detection checks five signs: host-specific configuration paths, an earlier setup's
+install record in the data folder (`--data-dir`, else `~/.agent-board`), Grok Build's own
+`~/.grok/bin` program, commands on the PATH, and installed apps. On Windows a command counts
+as `.exe`, `.cmd`, `.bat`, `.com` or `.ps1`. With `--home`, it checks only the first three,
+since commands and apps belong to the account running setup. It does not read
+conversations or credentials. A found command or app is a candidate, not an active
+session or account access. Run setup without `--apply` first: its preview lists each file;
+a bare `--apply` writes to the same agents and prints only how many files changed.
+A `.gemini` directory alone does not identify Gemini CLI: Antigravity uses that parent
+too. Finding nothing exits 0 without writing anything and names the next command to
+run. You can also select a known target with `--agent <name>`.
 `--agent all` previews all supported targets; it does not install the AI applications.
 
 Setup prints a short summary in the board's language (`--lang en`, `zh-TW` or `zh-CN`):
@@ -25,15 +32,16 @@ says each agent is already set up and writes nothing.
 
 Without `--lang`, setup uses `LANG`, then the system language, else English, and writes that language into the files it installs.
 
-Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`),
+Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`), or
+`claude` is on the PATH and `--home` was not given,
 the next steps include both `claude plugin` commands to connect it, even alongside other
 agents. If only Claude Code is found, setup prints its plugin guidance and exits 0.
 
 Add `--json` for the existing machine-readable output, with the same `targets`, `plans`
 and `applied` fields. An apply run that skips an agent for a conflict but sets up another
 still reports `applied: true`, so scripts should check `plans[].conflicts`. Claude-only
-detection keeps empty `targets` and `plans` and
-`applied` false. Other setup errors give one sentence with a next step; `--json` prints
+detection, and finding no agent, keep empty `targets` and `plans` and
+`applied` false, with exit 0. Other setup errors give one sentence with a next step; `--json` prints
 them as one JSON line on stderr, `{"error":{"code":"...","message":"..."}}`, with
 codes `INVALID_TARGETS`, `MISSING_ARGUMENT`, `INVALID_CONNECT_RECORD`, `SETUP_FAILED`
 (with the failing `agent` and its `cause`) or `UNKNOWN` (with the system error's `cause` when there is one, or a `reason` in words when there is none). Conflicts stay in `plans` on stdout with no JSON stderr
