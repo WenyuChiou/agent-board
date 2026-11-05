@@ -313,6 +313,11 @@ const captureFiles = immutableQuestionFiles<QuestionCapture>({
     const hash = captureHashOf(path, name)
     return hash === null ? null : parseCapture(text, hash)
   },
+  // A partial capture left by a process killed mid-flush cannot invalidate
+  // the captures that did land: the record stays in the ledger, so the next
+  // view re-derives the missing copy instead of stalling the writer path
+  // (#921 T6). A genuine read failure still returns null.
+  isValidationIndependent: true,
 })
 const readQuestionCaptures = (): QuestionCapture[] | null => captureFiles.read(!isViewQuestionRead)
 const proofFiles = immutableQuestionFiles<{ kind: keyof QuestionProofs; hash: string }>({
@@ -328,15 +333,27 @@ let questionProofCache: { files: { kind: keyof QuestionProofs; hash: string }[];
 const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCapture['disposition']): void => {
   const text = captureJson(record, disposition)
   const file = capturePath(path, sha256(text))
-  try {
-    const fd = openSync(file, 'wx', 0o600)
-    try { writeFileSync(fd, text) } finally { closeSync(fd) }
-    writes += 1
-  } catch (error) {
-    if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
+  // The name is the hash of the bytes, so a file whose bytes differ is a
+  // partial write from a process killed mid-flush (#921 T6): no valid capture
+  // can mismatch its own name. Remove it and write the capture again instead
+  // of failing the flush for a record the ledger still holds. A live writer's
+  // in-flight write goes through its own descriptor and holds the same bytes,
+  // so removing the name cannot corrupt it.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = openSync(file, 'wx', 0o600)
+      try { writeFileSync(fd, text) } finally { closeSync(fd) }
+      writes += 1
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
+    }
+    if (read(file) === text) {
+      captureFiles.invalidate(basename(file))
+      return
+    }
+    try { unlinkSync(file) } catch {}
   }
-  if (read(file) !== text) throw fileError(file, { code: 'EAGAIN' })
-  captureFiles.invalidate(basename(file))
+  throw fileError(file, { code: 'EAGAIN' })
 }
 const readQuestionProofs = (): QuestionProofs | null => {
   if (pendingQuestionProofs.size > 0) return null
