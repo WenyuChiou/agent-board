@@ -6,6 +6,7 @@ import { buildView, questionHead, relativeTime } from '../hooks/view'
 import type { View } from '../hooks/view'
 import type { PendingTurn } from '../hooks/board'
 import { boardItems, boardText, olderKey } from '../hooks/board'
+import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../hooks/mirror'
 import { folderOf } from '../hooks/question-merge'
 import { serveModel } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
@@ -118,6 +119,76 @@ test("a capture with no task takes the title its session's review-only copy knew
   expect(rows).toHaveLength(1)
   expect(rows[0]?.key.startsWith('inbox::')).toBe(true)
   expect(rows[0]?.task).toBe('Task aaaa1111')
+})
+
+test('a same-session review-only copy takes no second row in its own pane or for a block with no folder', () => {
+  const words = 'Blue or green?'
+  const askedNoDir = block('aaaa1111', 'codex', 'demo', words, NOW, null)
+  const quietNoDir = askedNoDir.replace(`- [?] ${words}`, '- [~] Keep going')
+  const ledgerNoDir = ledgerOf([
+    { text: askedNoDir, at: START },
+    { text: quietNoDir, at: START + 1 },
+    { text: askedNoDir, at: START + HOUR },
+  ])
+  const viewNoDir = viewOf(askedNoDir, ledgerNoDir)
+  const rowsNoDir = [...viewNoDir.waiting, ...(viewNoDir.reminder ?? []), ...(viewNoDir.older ?? [])].filter(item => item.text === words)
+  expect(rowsNoDir).toHaveLength(1)
+
+  let mirror = emptyMirror('aaaa1111-session', 'demo', NOW, '/work/demo')
+  mirror = { ...mirror, agent: 'claude' }
+  mirror = applyTaskCreate(mirror, { subject: words }, '1', NOW)
+  mirror = applyTaskUpdate(mirror, { taskId: '1', metadata: { waiting: 'you' } }, NOW)
+  const askedClaude = block('aaaa1111', 'claude', 'demo', words)
+  const quietClaude = askedClaude.replace(`- [?] ${words}`, '- [~] Keep going')
+  const ledgerClaude = ledgerOf([
+    { text: askedClaude, at: START },
+    { text: quietClaude, at: START + 1 },
+    { text: askedClaude, at: START + HOUR },
+  ])
+  const viewMine = buildView(parseProgress(quietClaude), [], mirror, NOW, 0, {}, EN, [], {}, ledgerClaude)
+  const rowsMine = [...viewMine.waiting, ...(viewMine.reminder ?? []), ...(viewMine.older ?? [])].filter(item => item.text === words)
+  expect(rowsMine).toHaveLength(1)
+  expect(rowsMine[0]?.where).toBe('here')
+})
+
+test('a capture with no task takes the newest title its session knew', () => {
+  const words = 'Blue or green?'
+  const askedA = block('aaaa1111', 'codex', 'demo', words).replace('Task aaaa1111', 'Task A')
+  const askedB = block('aaaa1111', 'codex', 'demo', words).replace('Task aaaa1111', 'Task B')
+  const quietB = askedB.replace(`- [?] ${words}`, '- [~] Keep going')
+  const pending = [capture('aaaa1111', 'codex', 'demo', words, START + 2 * HOUR)]
+  const ledger = ledgerOf([
+    { text: askedA, at: START },
+    { text: askedB, at: START + HOUR },
+    { text: quietB, at: START + HOUR + 1 },
+    { text: quietB, at: START + 2 * HOUR, pending },
+  ])
+  const view = viewOf(quietB, ledger, pending)
+  const rows = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.key.startsWith('inbox::')).toBe(true)
+  expect(rows[0]?.task).toBe('Task B')
+})
+
+test('hiding a card beside an archived copy leaves no review-only row behind', () => {
+  const words = 'Blue or green?'
+  const asked = block('aaaa1111', 'codex', 'demo', words)
+  const quiet = asked.replace(`- [?] ${words}`, '- [~] Keep going')
+  const ledger = ledgerOf([
+    { text: asked, at: START },
+    { text: quiet, at: START + 1 },
+    { text: asked, at: START + HOUR },
+    { text: quiet, at: START + HOUR + 1 },
+  ])
+  ledger.records[0]!.isArchived = true
+  const view = viewOf(quiet, ledger)
+  const rows = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.canHide).toBe(true)
+
+  const hidden = viewOf(quiet, ledger, [], [rows[0]!.hideKey])
+  const hiddenRows = [...hidden.waiting, ...(hidden.reminder ?? []), ...(hidden.older ?? [])].filter(item => item.text === words)
+  expect(hiddenRows).toHaveLength(0)
 })
 
 test('the same question in a block and in an inbox capture shows as one card', () => {
