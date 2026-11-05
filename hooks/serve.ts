@@ -594,8 +594,15 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
     // text are told apart; a press without a line ticks the next step, as before.
     if (request.line !== undefined) {
       const step = item.row.steps.find(one => one.line === request.line)
-      if (step === undefined || step.line === null || request.text !== step.text) return { type: 'refuse', note: s.boardLineChanged }
-      return { type: 'tick', ref: { project: item.row.project, title: item.row.title, step: step.text, line: step.line, raw: step.raw } }
+      if (step !== undefined && step.line !== null && request.text === step.text) {
+        return { type: 'tick', ref: { project: item.row.project, title: item.row.title, step: step.text, line: step.line, raw: step.raw } }
+      }
+      // The primary Done button still names the next step when the step list folded it
+      // out of view: the page then sends the next step's line and its full text, which
+      // the folded list does not hold, so the next step's own ref answers the press.
+      const next = item.row.next
+      if (next !== null && next.line === request.line && request.text === next.step) return { type: 'tick', ref: next }
+      return { type: 'refuse', note: s.boardLineChanged }
     }
     const ref = item.row.next
     // A task keeps its key while its next step moves on: only the step the page showed is ticked.

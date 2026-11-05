@@ -2279,6 +2279,35 @@ test('ticking twin steps from the page ticks each line it showed', { timeout: 30
   }
 })
 
+test('ticking the next step from the page still works when the step list folded it out of view', { timeout: 30_000 }, async () => {
+  const board = await page(`
+## home
+### Long haul
+- [ ] Step one
+- [ ] Step two
+- [ ] Step three
+- [ ] Step four
+- [ ] Step five
+- [~] Step six
+- [ ] Step seven
+`)
+  try {
+    const { path, call, rowOf } = board
+    const row = await rowOf('Long haul')
+    // The doing step is the next one, and the list shows only the first five open steps.
+    assert.equal(row.next, 'Step six')
+    assert.equal(typeof row.nextFileLine, 'number')
+    assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the next step is folded out of the shown steps')
+    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.fp } })
+    assert.equal(ticked.status, 200, ticked.body)
+    const left = readFileSync(path, 'utf8').split('\n')
+    assert.equal(left[row.nextFileLine], '- [x] Step six')
+    assert.equal(left[row.steps[0].fileLine], '- [ ] Step one')
+  } finally {
+    await board.close()
+  }
+})
+
 const relayFragment = (at, state = 'waiting', step = '- [?] Ship it Friday, OK?') => `## launch\n<!-- auto session=c0ffee12 agent=muse state=${state} updated=${at} -->\n### Draft the launch post\n${step}\n<!-- /auto session=c0ffee12 -->`
 
 test('Connect a web chat copies the prompt in the guide, and a block filled in from it is accepted', { timeout: 30_000 }, async () => {
