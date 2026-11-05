@@ -81,6 +81,26 @@ test('a Reviewing comment after the Ready names who took the review', () => {
   assert.match(formatQueue(queue), /taken by bot-one/)
 })
 
+test('a Reviewing comment from the pull request author does not count as taken, even from the shared login', () => {
+  const prs = [pull(1, { body: 'Author: codex (x), branch' })]
+  const own = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('codex (x)', '2026-10-20T09:00:00Z'))] }, now)
+  assert.equal(own.needsReviewer[0].takenBy, null)
+  assert.equal(own.needsReviewer[0].lapsedBy, null)
+  const other = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('claude', '2026-10-20T09:00:00Z'))] }, now)
+  assert.equal(other.needsReviewer[0].takenBy, 'claude')
+})
+
+test('an approval named for the pull request author does not count as approved', () => {
+  const prs = [pull(1, { body: 'Author: codex (x), branch', files: [] })]
+  const own = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('codex'))] }, now)
+  assert.deepEqual(own.approved, [])
+  assert.deepEqual(own.approvedNow, [])
+  assert.deepEqual(own.waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approval is by the author']])
+  const other = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('claude'))] }, now)
+  assert.deepEqual(other.approvedNow.map(item => item.number), [1])
+  assert.deepEqual(other.waitingForAuthor, [])
+})
+
 test('drafts are counted, not listed', () => {
   const queue = classify([pull(1, { isDraft: true }), pull(2, { isDraft: true, mergeStateStatus: 'DIRTY' })], { 1: [ready()] }, now)
   assert.equal(queue.drafts, 2)

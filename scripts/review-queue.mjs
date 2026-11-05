@@ -174,14 +174,17 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     const comments = entriesOf(commentsFor(commentsByNumber, pr.number))
     const ready = comments.map((entry, index) => ({ ...entry, order: index }))
       .filter(entry => matchesHead(head, readySha(entry.comment.body))).at(-1)
-    const verdicts = comments.map((entry, index) => ({ ...entry, order: index, verdict: reviewOf(entry.comment.body) }))
+    const verdicts = comments.map((entry, index) => ({ ...entry, order: index, verdict: reviewOf(entry.comment.body), by: verdictName(entry.comment.body) }))
       .filter(entry => entry.verdict)
     const headVerdicts = verdicts.filter(entry => matchesHead(head, entry.verdict.sha))
     const latestHeadVerdict = headVerdicts.at(-1)
     const reviewAfterReady = ready && headVerdicts.some(entry => entry.order > ready.order)
+    // Agents share one GitHub login, so a Reviewing name is compared with the Author line's agent name, never the login:
+    // the author's own Reviewing does not count as a review taken.
+    const authorName = nameOf(item.author)
     const taking = ready ? comments.slice(ready.order + 1)
       .map(entry => ({ name: (entry.comment.body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1]?.trim(), time: entry.time }))
-      .filter(entry => entry.name).at(-1) ?? null : null
+      .filter(entry => entry.name && nameOf(entry.name) !== authorName).at(-1) ?? null : null
     // A Reviewing comment past its 4 hours no longer holds the review; the queue names who let it lapse.
     const takenBy = taking && !isLapsed(taking.time, nowMs) ? taking.name : null
     const lapsedBy = taking && !takenBy ? taking.name : null
@@ -195,6 +198,10 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
       const isOverFourHours = hours > 4
       const suggestion = reviewers ? suggestReviewer(reviewers, { author: nameOf(item.author), isOverFourHours }, openCounts) : {}
       result.needsReviewer.push({ ...item, readyAt: ready.comment.created_at, hours, isOverFourHours, takenBy, lapsedBy, ...suggestion, ...extras })
+    } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && nameOf(latestHeadVerdict.by) === authorName) {
+      // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
+      // even when it arrives from the shared login. A verdict with no name keeps its old reading.
+      result.waitingForAuthor.push({ ...item, detail: 'approval is by the author', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
       const isOneAtATime = !Array.isArray(pr.files) || pr.files.some(file => isSharedPath(file?.path ?? ''))
