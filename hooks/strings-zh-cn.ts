@@ -832,6 +832,8 @@ export const ZH_CN: Strings = {
   pgCopyAgain: '再复制一次',
   pgCancel: '取消',
   pgNoQuestions: (name: string): string => `${name} 在当前“需要你”列表没有项目。`,
+  pgNoOthers: '没有其他工作。',
+  pgNoOthersFor: (name: string): string => `${name} 没有其他工作。`,
   pgOthers: '其他工作',
   pgDoneWeek: (n: number): string => `本周 ${n} 个`,
   pgChipEmpty: '没有工作',

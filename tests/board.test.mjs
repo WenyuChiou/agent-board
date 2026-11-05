@@ -9614,6 +9614,60 @@ test('the tab title, the Needs you flag, the agent badges and the sidebar show t
   } finally { await board.close() }
 })
 
+test('the Other work view shows its rows or says there are none', async () => {
+  const model = redesignModel()
+  model.groups = []
+  model.stopped = []
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const others = () => dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others')
+  // Overview leaves an empty Other work out; the view says there is none.
+  assert.equal(String(others().className).split(' ').includes('gone'), true)
+  dom.node('view-others').click()
+  await dom.settle()
+  assert.equal(dom.node('shell').getAttribute('data-view'), 'others')
+  assert.equal(String(others().className).split(' ').includes('gone'), false)
+  assert.ok(shownWords(others()).includes(EN.pgNoOthers), shownWords(others()))
+  // With no filter on, there is nothing to clear.
+  assert.ok(!shownWords(others()).includes(EN.clearFilters), shownWords(others()))
+  // With rows, the view lists them and no empty line.
+  const full = await pageDom(await sourcePage(), redesignModel(), { width: 1280 })
+  full.node('view-others').click()
+  await full.settle()
+  const sec = full.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes('Due plan'))
+  assert.ok(sec)
+  assert.ok(!shownWords(sec).includes(EN.pgNoOthers))
+})
+
+test('opening a view leaves the own-tasks filter as it was', async () => {
+  const model = redesignModel()
+  // Gemini's only work is the question; nothing of it is in Other work or on the Stopped shelf.
+  model.stopped = []
+  const storage = new Map([['agent-board.filter', 'gemini']])
+  const dom = await pageDom(await sourcePage(), model, { width: 1280, storage })
+  const pressed = () => dom.node('chips').querySelectorAll('[data-agent]').filter(node => node.getAttribute('aria-pressed') === 'true').map(node => node.getAttribute('data-agent'))
+  // A filter kept from an earlier visit is shown as on, and the tab title counts what the page shows.
+  assert.deepEqual(pressed(), ['gemini'])
+  const shownNeeds = Number(dom.node('count-needs').textContent || 0)
+  assert.equal(dom.title(), shownNeeds ? EN.pgTabTitle(shownNeeds) : 'Agent Board')
+  for (const view of ['others', 'working', 'done', 'needs', 'all']) {
+    dom.node(`view-${view}`).click()
+    await dom.settle()
+    assert.deepEqual(pressed(), ['gemini'], view)
+    assert.equal(storage.get('agent-board.filter'), 'gemini', view)
+  }
+  // Next to an empty list, one press clears it.
+  dom.node('view-others').click()
+  await dom.settle()
+  const others = dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others')
+  assert.ok(shownWords(others).includes(EN.pgNoOthersFor(EN.agentNames.gemini)), shownWords(others))
+  const clear = others.querySelectorAll('button').find(button => button.textContent === EN.clearFilters)
+  assert.ok(clear)
+  clear.click()
+  await dom.settle()
+  assert.deepEqual(pressed(), [])
+  assert.equal(storage.has('agent-board.filter'), false)
+})
+
 test('a sent answer stops counting as waiting for you', async () => {
   const model = redesignModel()
   const ask = (agent, text, project) => ({ key: text, project, agent, task: 'Plan', text, answers: ['Yes'], kind: 'confirm', chip: 'Confirm', send: 'send', session: `${agent}-session`, fp: text, where: `in ${agent}`, canHide: true })
