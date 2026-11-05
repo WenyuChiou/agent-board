@@ -1,8 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { join } from 'node:path'
-import { performance } from 'node:perf_hooks'
 import type { Readable, Writable } from 'node:stream'
 import { address, deliveryText, messageId, senderLabel } from '../hooks/messaging'
 import type { Message } from '../hooks/messaging'
@@ -12,27 +11,45 @@ import type { McpLevel } from '../hooks/mcp-tools'
 import { folderIdentity } from './folder-identity'
 import { mcpMailbox } from './board-messaging'
 
-export const processStart = (pid: number): string | null => {
-  try {
-    if (!Number.isSafeInteger(pid) || pid < 1) return null
-    if (process.platform === 'linux') {
+// How long a tool call may wait on the lookup below, the budget roadmap invariant 5 names.
+export const MCP_VERIFY_WAIT_MS = 120
+// PowerShell, the only stock way to read this on every Windows, takes most of a second to start.
+// So the lookup never blocks: it runs beside the server, and a call waits MCP_VERIFY_WAIT_MS at most.
+export const processStart = (pid: number, signal?: AbortSignal): Promise<string | null> => new Promise(done => {
+  if (!Number.isSafeInteger(pid) || pid < 1) { done(null); return }
+  if (process.platform === 'linux') {
+    try {
       const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-      return stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19] ?? null
-    }
-    const result = process.platform === 'darwin'
-      ? spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 120 })
-      : spawnSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`], { encoding: 'utf8', timeout: 120, windowsHide: true })
-    return result.status === 0 && !result.error ? result.stdout.trim() || null : null
-  } catch { return null }
-}
+      done(stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19] ?? null)
+    } catch { done(null) }
+    return
+  }
+  const [file, args] = process.platform === 'darwin'
+    ? ['/bin/ps', ['-o', 'lstart=', '-p', String(pid)]] as const
+    : [join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`]] as const
+  try {
+    execFile(file, args, { encoding: 'utf8', timeout: 30_000, windowsHide: true, signal }, (error, stdout) => { done(error ? null : stdout.trim() || null) })
+  } catch { done(null) }
+})
 type Options = {
   directory: string; cwd: string; version: string; s: Strings
   // What agent-board --json prints: the board's document, or its error document when the board cannot be read.
   document: () => object
-  env?: Record<string, string | undefined>; parentPid?: number; processStart?: typeof processStart; elapsed?: () => number
+  env?: Record<string, string | undefined>; parentPid?: number; processStart?: (pid: number, signal?: AbortSignal) => Promise<string | null> | string | null
 }
 export const createMcpServer = (o: Options) => {
-  const env = o.env ?? process.env, parent = o.parentPid ?? process.ppid
+  const env = o.env ?? process.env
+  const parentPid = () => o.parentPid ?? process.ppid
+  // A process's start time never changes, so one lookup per parent serves every later lease.
+  const stopLookup = new AbortController()
+  let lookup: { parent: number; started: string | null | undefined } | null = null
+  const look = (parent: number) => {
+    if (lookup?.parent === parent) return lookup
+    const current: { parent: number; started: string | null | undefined; settled?: Promise<void> } = { parent, started: undefined }
+    lookup = current
+    current.settled = (async () => { try { current.started = await (o.processStart ?? processStart)(parent, stopLookup.signal) } catch { current.started = null } })()
+    return current
+  }
   let agent = '', session = '', level: McpLevel = 'unbound', until = 0, isRevoked = false
   try {
     agent = messageId(env.AGENT_BOARD_AGENT)
@@ -48,10 +65,20 @@ export const createMcpServer = (o: Options) => {
     if (level === 'unbound' || isRevoked) return
     if (until <= now) {
       level = 'restricted'
-      const clock = o.elapsed ?? (() => performance.now()), start = clock()
-      let started: string | null = null
-      try { if (env.AGENT_BOARD_HOST_PID === String(parent)) started = (o.processStart ?? processStart)(parent) } catch {}
-      if (clock() - start > 120 || !started || started !== env.AGENT_BOARD_HOST_STARTED) {
+      const parent = parentPid()
+      if (env.AGENT_BOARD_HOST_PID !== String(parent)) {
+        isRevoked = true
+        return
+      }
+      const current = look(parent) as { started: string | null | undefined; settled?: Promise<void> }
+      if (current.started === undefined) {
+        let timer: NodeJS.Timeout | undefined
+        await Promise.race([current.settled, new Promise(done => { timer = setTimeout(done, MCP_VERIFY_WAIT_MS) })])
+        clearTimeout(timer)
+      }
+      // Still looking: this call goes on without a lease, and a later one finds the answer.
+      if (current.started === undefined) return
+      if (!current.started || current.started !== env.AGENT_BOARD_HOST_STARTED) {
         isRevoked = true
         return
       }
@@ -59,7 +86,7 @@ export const createMcpServer = (o: Options) => {
     }
     if (level === 'leased') {
       try {
-        const result = await access('mcp-enroll', { ...binding(), owner: `${parent}:${env.AGENT_BOARD_HOST_STARTED}`, folderDigest, until: now + MCP_LEASE_MS }, now)
+        const result = await access('mcp-enroll', { ...binding(), owner: `${parentPid()}:${env.AGENT_BOARD_HOST_STARTED}`, folderDigest, until: now + MCP_LEASE_MS }, now)
         until = now + MCP_LEASE_MS
         if (result.contested) {
           level = 'restricted'
@@ -74,6 +101,7 @@ export const createMcpServer = (o: Options) => {
   const start = async (now: number) => { try { await renew(now) } catch {} }
   return {
     start,
+    stop: () => stopLookup.abort(),
     revokeLease: () => {
       isRevoked = true
       level = level === 'unbound' ? level : 'restricted'
@@ -147,6 +175,7 @@ export const runMcp = async (o: Options, input: Readable = process.stdin, output
     }
   } catch { process.stderr.write('MCP_TRANSPORT_FAILED\n') }
   finally {
+    server.stop()
     await new Promise(done => setImmediate(done))
     output.removeListener('error', onError)
   }

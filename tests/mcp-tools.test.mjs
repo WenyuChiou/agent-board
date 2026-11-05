@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -18,7 +18,7 @@ const resolveLocal = (s, c, next) => {
 }
 const loader = `import { registerHooks } from 'node:module'\nregisterHooks({ resolve: ${resolveLocal.toString()} })\n`
 registerHooks({ resolve: resolveLocal })
-const { createMcpServer, runMcp, processStart } = await import('../scripts/board-mcp.ts')
+const { createMcpServer, runMcp, processStart, MCP_VERIFY_WAIT_MS } = await import('../scripts/board-mcp.ts')
 const { MCP_LEASE_MS, MCP_TOOLS } = await import('../hooks/mcp-tools.ts')
 const { sha256 } = await import('../hooks/sha256.ts')
 const { BOARD_JSON_SCHEMA } = await import('../hooks/board-json.ts')
@@ -191,17 +191,21 @@ test('lease lapses after MCP_LEASE_MS and re-verification failure drops to restr
   try {
     prepare(root)
     let isValid = true
-    const server = createMcpServer(options(root, { processStart: () => isValid ? 'start' : null }))
+    const opts = options(root, { processStart: () => isValid ? 'start' : null })
+    const server = createMcpServer(opts)
     await server.start(1000)
     assert.equal((await call(server, 'board_status')).level, 'leased')
     isValid = false
     assert.equal((await call(server, 'board_status', {}, 1000 + MCP_LEASE_MS - 1)).level, 'leased')
-    assert.equal((await call(server, 'board_status', {}, 1000 + 2 * MCP_LEASE_MS)).level, 'restricted')
-    await t.test('an over-budget or failing processStart means no lease', async () => {
-      let ticks = 0
-      for (const extra of [{ elapsed: () => ticks++ * 121 }, { processStart: () => { throw new Error('fail') } }, { env: { ...binding, AGENT_BOARD_HOST_PID: '999' } }]) assert.equal((await call(createMcpServer(options(root, extra)), 'board_status')).level, 'restricted')
+    // A start time does not change: a lapsed lease comes back from the lookup it already has.
+    assert.equal((await call(server, 'board_status', {}, 1000 + 2 * MCP_LEASE_MS)).level, 'leased')
+    // A different parent is a different process, whatever the file says.
+    opts.parentPid = 456
+    assert.equal((await call(server, 'board_status', {}, 1000 + 4 * MCP_LEASE_MS)).level, 'restricted')
+    await t.test('a failing processStart means no lease', async () => {
+      for (const extra of [{ processStart: () => { throw new Error('fail') } }, { processStart: async () => null }, { env: { ...binding, AGENT_BOARD_HOST_PID: '999' } }]) assert.equal((await call(createMcpServer(options(root, extra)), 'board_status')).level, 'restricted')
     })
-    assert.equal(processStart(-1), null)
+    assert.equal(await processStart(-1), null)
     server.revokeLease()
     isValid = true
     assert.equal((await call(server, 'board_status')).level, 'restricted')
@@ -590,6 +594,126 @@ test('board_status stays the same document as agent-board --json on a later call
     child.stdin.end()
   } finally {
     if (child && child.exitCode === null) { child.kill(); await once(child, 'exit') }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a slow start-time lookup holds no call past its budget, and a later call has the lease', async () => {
+  const root = temp()
+  try {
+    prepare(root)
+    let finish
+    const server = createMcpServer(options(root, { processStart: () => new Promise(done => { finish = done }) }))
+    const before = performance.now()
+    const first = await call(server, 'board_status', {}, 1000)
+    assert.equal(first.level, 'restricted')
+    // Scheduling can stretch the wait, never the budget: the lookup here does not finish at all.
+    assert.ok(performance.now() - before < 2000)
+    assert.equal(MCP_VERIFY_WAIT_MS, 120)
+    finish('start')
+    assert.equal((await call(server, 'board_status', {}, 1001)).level, 'leased')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('without a lease the next message comes on the next call and board_ack answers NO_LEASE, as the tool text says', async () => {
+  const root = temp()
+  let board
+  try {
+    prepare(root)
+    board = await hub(root)
+    const now = Date.now()
+    const server = createMcpServer(options(root, { env: { AGENT_BOARD_AGENT: 'codex', AGENT_BOARD_SESSION_ID: 'alpha' } }))
+    assert.deepEqual((await call(server, 'board_inbox', {}, now)).data, { message: null })
+    const target = board.store.snapshot(now).mailboxes[0].id
+    board.store.act('send', { id: 'one', target, turn: 'session', text: 'first' }, now)
+    const first = await call(server, 'board_inbox', {}, now)
+    await first.accepted()
+    assert.equal(first.data.message.id, 'one')
+    board.store.act('send', { id: 'two', target, turn: 'session', text: 'second' }, now)
+    assert.equal((await call(server, 'board_ack', { id: 'one', nonce: first.data.message.nonce }, now)).data.code, 'NO_LEASE')
+    assert.equal((await call(server, 'board_inbox', {}, now)).data.message.id, 'two')
+    for (const s of [EN, ZH_TW, ZH_CN]) {
+      assert.match(s.mcpToolAck, /NO_LEASE/)
+      assert.match(s.mcpToolInbox, s === EN ? /Without a lease the next one comes on the next call/ : /(沒有租約|没有租约)/)
+    }
+  } finally {
+    await board?.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a launcher-bound caller gets its lease on this system, and board_ack and a peer send succeed', async () => {
+  const root = temp()
+  const children = []
+  let board
+  try {
+    prepare(root)
+    board = await hub(root)
+    writeFileSync(join(root, 'loader.mjs'), loader)
+    // The real lookup, as a launcher would run it: on Windows this is the path that took too long.
+    const started = await processStart(process.pid)
+    assert.ok(started)
+    const open = (session) => {
+      const child = spawn(process.execPath, ['--experimental-transform-types', '--import', pathToFileURL(join(root, 'loader.mjs')).href, cli, '--mcp', '--messages-dir', join(root, 'messages'), '--progress-file', join(root, 'progress.md')], {
+        cwd: root, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+        env: { ...process.env, AGENT_BOARD_AGENT: 'codex', AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_HOST_PID: String(process.pid), AGENT_BOARD_HOST_STARTED: started },
+      })
+      children.push(child)
+      child.stdout.setEncoding('utf8')
+      const lines = child.stdout[Symbol.asyncIterator]()
+      let held = ''
+      return async (name, args = {}) => {
+        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } })}\n`)
+        while (!held.includes('\n')) held += (await lines.next()).value
+        const { result } = JSON.parse(held)
+        held = ''
+        return { level: result._meta?.level, isError: result.isError, data: JSON.parse(result.content[0].text) }
+      }
+    }
+    const leased = async ask => {
+      // The lookup is under 30 s or it has failed: this bound only ends a run that will never get a lease.
+      for (const end = Date.now() + 35_000; Date.now() < end; await new Promise(done => setTimeout(done, 100))) if ((await ask('board_status')).level === 'leased') return
+      assert.fail('no lease')
+    }
+    const alpha = open('alpha'), beta = open('beta')
+    await Promise.all([leased(alpha), leased(beta)])
+    const sent = await alpha('board_send', { agent: 'codex', session: 'beta', text: 'hello', id: 'peer-one' })
+    assert.equal(sent.isError, false, JSON.stringify(sent.data))
+    assert.equal(sent.data.from, 'codex:alpha')
+    const inbox = await beta('board_inbox')
+    assert.equal(inbox.data.message.id, 'peer-one')
+    assert.match(inbox.data.message.from, /^agent:codex#[0-9a-f]{8}$/)
+    // A later call settles after the write above, so the acceptance is in before the ack is read.
+    const ack = await beta('board_ack', { id: 'peer-one', nonce: inbox.data.message.nonce, summary: 'seen' })
+    assert.equal(ack.isError, false, JSON.stringify(ack.data))
+    assert.equal(board.store.snapshot(Date.now()).messages.find(one => one.id === 'peer-one').status, 'acknowledged')
+  } finally {
+    for (const child of children) {
+      child.stdin.end()
+      if (child.exitCode === null) { child.kill(); await once(child, 'exit') }
+    }
+    await board?.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('two names for one folder are one workspace for a peer send', async () => {
+  const root = temp()
+  let board
+  try {
+    prepare(root)
+    const alias = join(root, 'alias')
+    symlinkSync(root, alias, 'junction')
+    board = await hub(root)
+    const now = Date.now()
+    const target = createMcpServer(options(root, { env: { ...binding, AGENT_BOARD_SESSION_ID: 'beta' } }))
+    await target.start(now)
+    const sender = createMcpServer(options(root, { cwd: alias }))
+    await sender.start(now)
+    const sent = await call(sender, 'board_send', { agent: 'codex', session: 'beta', text: 'hello', id: 'alias-one' }, now)
+    assert.equal(sent.data.id, 'alias-one', JSON.stringify(sent.data))
+  } finally {
+    await board?.close()
     rmSync(root, { recursive: true, force: true })
   }
 })
