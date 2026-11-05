@@ -128,6 +128,8 @@ export const mergeCopies = (copies: readonly Copy[], closed: ReadonlyMap<string,
     const reviewOnly = sessionCopies.filter(copy => copy.item.canHide === false)
     if (sessionCopies.length === 1 || reviewOnly.length === 0) continue
     const answerable = sessionCopies.filter(copy => copy.item.canHide !== false)
+    const hasFolder = sessionCopies.some(copy => copy.item.dir !== null && copy.item.dir !== undefined && copy.item.dir.trim() !== '')
+    if (answerable.length === 0 && !hasFolder) continue
     const kept = answerable.length > 0 ? answerable : [reviewOnly.reduce((best, copy) => (isBefore(best, copy) ? copy : best))]
     for (const copy of reviewOnly) if (!kept.includes(copy)) gone.add(copy.item)
     const withTask = sessionCopies.filter(copy => copy.item.task !== '')
