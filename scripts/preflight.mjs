@@ -744,7 +744,8 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     if (ancestor.error || ![0, 1].includes(ancestor.status)) add('FAIL', 'the main merged check could not read the base or HEAD.')
     else {
       // main does not require an up-to-date branch, so a branch behind main can merge as it is; main is merged only for a conflict.
-      if (ancestor.status === 1) add('WARN', 'the branch does not contain the latest main; that is fine unless GitHub shows a conflict, then merge origin/main (no rebase, no force-push).')
+      if (ancestor.status === 1 && /^chore\(release\):/.test(title ?? '')) add('WARN', 'a release pull request needs current main before it merges: merge origin/main, add a CHANGELOG line for each fix or feature it brought, and run the simulated user again (docs/RELEASING.md, step 5).')
+      else if (ancestor.status === 1) add('WARN', 'the branch does not contain the latest main; that is fine unless GitHub shows a conflict, then merge origin/main (no rebase, no force-push).')
       else if (!hasFetchFailed) add('PASS', 'the branch contains the base.')
     }
     mergeBase = git('merge-base', base, 'HEAD').trim()

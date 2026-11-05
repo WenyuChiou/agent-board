@@ -65,6 +65,30 @@ test('a pull request that is only behind main is queued for review like any othe
   assert.deepEqual(queue.approved.map(item => item.number), [2])
 })
 
+test('an approved release pull request that is behind main waits for main instead of being listed to merge', () => {
+  const comments = { 1: [ready(), verdict('APPROVE', head, '2026-10-20T10:00:00Z')], 2: [ready(), verdict('APPROVE', head, '2026-10-20T10:00:00Z')] }
+  const release = { title: 'chore(release): Agent Board 9.9.9' }
+  const queue = classify([pull(1, { ...release, behindBy: 3 }), pull(2, { ...release, behindBy: 0 })], comments, now)
+  assert.deepEqual(queue.approved.map(item => item.number), [2])
+  assert.deepEqual(queue.needsMain.map(item => item.number), [1])
+  assert.match(queue.needsMain[0].detail, /merge main first/)
+  // An ordinary pull request that is behind main is unchanged.
+  assert.deepEqual(classify([pull(3, { behindBy: 3 })], { 3: comments[1] }, now).approved.map(item => item.number), [3])
+})
+
+test('fetching compares only a release pull request with main to learn how far behind it is', () => {
+  const calls = []
+  const run = (program, args) => {
+    calls.push(args)
+    if (args[0] === 'pr') return JSON.stringify([pull(1, { title: 'chore(release): Agent Board 9.9.9' }), pull(2)])
+    if (args.includes('--jq') && args.includes('.behind_by')) return '4\n'
+    return ''
+  }
+  const data = fetchQueue({ repo: 'alice/board' }, { run })
+  assert.deepEqual(data.prs.map(pr => pr.behindBy), [4, undefined])
+  assert.equal(calls.filter(args => args.at(-1)?.includes('/compare/')).length, 1)
+})
+
 test('the reviewer queue lists the smallest pull request first and marks one Ready for more than four hours', () => {
   const prs = [pull(1, { additions: 30 }), pull(2, { additions: 3 }), pull(3, { additions: 3 })]
   const comments = { 1: [ready(head, '2026-10-20T06:00:00Z')], 2: [ready(head, '2026-10-20T08:00:00Z')], 3: [ready(head, '2026-10-20T07:59:59Z')] }
