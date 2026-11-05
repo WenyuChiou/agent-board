@@ -293,21 +293,25 @@ const infoOf = (mode: SendMode, agent: string, task: string, session: string, s:
 }
 
 // The text folded to one line and capped at `room` characters, or undefined when that is the text itself.
-const clipped = (text: string, room: number): string | undefined => {
+const clipped = (text: string | undefined, room: number): string | undefined => {
+  if (!text) return undefined
   const { line } = clipLine(text, room)
   return line === text ? undefined : line
 }
-const lined = (text: string): { line?: string } => {
+const lined = (text?: string): { line?: string } => {
+  if (!text) return {}
   const line = clipped(text, LINE_ROOM)
 
   return line === undefined ? {} : { line }
 }
-const contextLined = (text: string): { contextLine?: string } => {
+const contextLined = (text?: string): { contextLine?: string } => {
+  if (!text) return {}
   const line = clipped(text, LINE_ROOM)
 
   return line === undefined ? {} : { contextLine: line }
 }
-const noteLined = (text: string): { noteLine?: string } => {
+const noteLined = (text?: string): { noteLine?: string } => {
+  if (!text) return {}
   const line = clipped(text, LINE_ROOM)
 
   return line === undefined ? {} : { noteLine: line }
@@ -321,15 +325,15 @@ const noteLined = (text: string): { noteLine?: string } => {
 const retainedOf = (item: WaitingItem): ServeRetained => ({
   key: olderKey(item),
   canHide: item.hideKey !== '' && item.canHide !== false,
-  project: item.project,
-  agent: item.agent,
+  project: item.project ?? '',
+  agent: item.agent ?? '',
   ...(item.where === 'manual' ? { isOwn: true as const } : {}),
-  task: item.task,
-  text: item.text,
+  task: item.task ?? '',
+  text: item.text ?? '',
   note: item.note,
   context: item.context,
   ...contextLined(item.context),
-  when: item.when,
+  when: item.when ?? '',
   ...(item.questionId === undefined ? {} : { questionId: item.questionId }),
 })
 
