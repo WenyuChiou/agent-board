@@ -1302,6 +1302,21 @@ test('a denied board write immediately names the retained claim and persistence 
   expect(world.files.get(FILE)).toBe('# Progress\n')
 })
 
+test('a long task subject puts its full text in the journal once, however often the block is written again', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '# 專案進度\n']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await start($, 'Synthetic long request')
+  const long = `${'x'.repeat(130)}`
+
+  await $.tool.call({ tool: 'TaskCreate', subject: long, description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Short step', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress' })
+
+  expect(world.files.get(FILE)).toContain(`- [ ] ${'x'.repeat(119)}…\n`)
+  const saved = world.files.get('/home/me/.claude/progress-journal-2026-10.md') ?? ''
+  expect(saved.split(long).length - 1).toBe(1)
+})
+
 test('Claude’s task calls fill the file and the pane by themselves', async ($, on) => {
   const world: World = { files: new Map([[FILE, '# 專案進度\n\n## 求職\n### Google 暑期實習\n- [?] 推薦信 — 等教授回覆\n']]), mtime: 1, hasTasks: true }
   engineBeneath(on, world)
