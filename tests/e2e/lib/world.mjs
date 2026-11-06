@@ -45,7 +45,8 @@ export const makeWorld = ({ lang = 'en' } = {}) => {
   }
   const modules = process.platform === 'win32' && modulePath()
   if (modules) env.PSModulePath = modules
-  Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1' })
+  // AGENT_BOARD_TEST_PID: a board this world starts opens no window and stops once this test process is gone (#959).
+  Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid) })
   const inside = file => {
     const rel = relative(root, resolve(file))
     assert.ok(rel && rel !== '..' && !rel.startsWith('..\\') && !rel.startsWith('../') && !isAbsolute(rel), `Outside world: ${file}`)

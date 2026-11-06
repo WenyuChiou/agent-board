@@ -40,6 +40,8 @@ export type ServeOptions = {
   act: (action: BoardAction) => string
   // Every finished task to the archive now: the line to show.
   tidy: () => string
+  // A bulk archive in two steps: a preview names the count, a confirm archives it.
+  bulkTidy?: (request: { kind: 'preview'; selector: import('../hooks/tidy').TidySelector } | { kind: 'confirm'; token: string; preview: import('../hooks/tidy').TidyPreview } | { kind: 'cancel'; token: string }) => { ok: boolean; note: string; token?: string; preview?: import('../hooks/tidy').TidyPreview; count?: number }
   // The Clean up button: the sweep `--tidy` runs (agent blocks by age; hand-kept tasks only once the
   // move is on, #464), the line to show.
   clean: () => string
@@ -78,7 +80,7 @@ const isNewerVersion = (candidate: string, current: string): boolean => {
   }
   return false
 }
-const boardVersion = RELEASED.reduce((highest, release) => {
+export const boardVersion = RELEASED.reduce((highest, release) => {
   return isNewerVersion(release.version, highest) ? release.version : highest
 }, '0.0.0')
 const packageVersionValue = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
@@ -115,6 +117,10 @@ const readBody = (req: IncomingMessage): Promise<Record<string, unknown> | null>
   })
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '')
+
+// A press names its step by its file line; anything else is no line, so the press ticks
+// the next step by text, as before.
+const lineOf = (value: unknown): number | undefined => (typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined)
 
 const isFile = (path: string): boolean => {
   try {
@@ -434,7 +440,7 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/act') {
         const state = isLan ? undefined : messaging.snapshot(Date.now())
         // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
-        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, deliveryTargets(state?.connections ?? [], state?.mailboxes), true, o.allowResume)
+        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, deliveryTargets(state?.connections ?? [], state?.mailboxes), true, o.allowResume)
         if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})
@@ -459,6 +465,11 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/tidy') {
         const note = o.tidy()
         return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
+      }
+      if (url.pathname === '/api/tidy-bulk') {
+        if (o.bulkTidy === undefined) return json(res, 400, { note: o.s.pressFailed })
+        const result = o.bulkTidy(body as unknown as Parameters<Exclude<typeof o.bulkTidy, undefined>>[0])
+        return json(res, result.ok ? 200 : 409, result)
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()
@@ -503,13 +514,6 @@ export const startServer = (o: ServeOptions): void => {
     try { messaging.close() } catch {}
     o.onStop()
   })
-  // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
-  // `idleMs` and no reply is on its way.
-  const idle = setInterval(() => {
-    if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
-    if (o.idleMs > 0 && sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
-  }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
-  server.on('close', () => clearInterval(idle))
   server.listen(o.port, '127.0.0.1', () => {
     port = (server.address() as AddressInfo).port
     const url = `http://127.0.0.1:${port}/?t=${token}`
@@ -519,6 +523,16 @@ export const startServer = (o: ServeOptions): void => {
     }
     // Preparing a private address can block; inactivity starts once that address is ready.
     lastSeen = Date.now()
+    // The idle timer starts only once the server is listening: a listen failure
+    // throws before this point, and a timer made earlier would keep the failed
+    // child alive instead of letting it exit.
+    // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
+    // `idleMs` and no reply is on its way.
+    const idle = setInterval(() => {
+      if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
+      if (o.idleMs > 0 && sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
+    }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
+    server.on('close', () => clearInterval(idle))
     if (o.isDefaultMessagesDirectory) {
       // A later --serve asks this address before moving a lock this hub left behind.
       try { messaging.recordOwner(port, url) } catch {}

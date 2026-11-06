@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
+import { RULES } from '../hooks/rule'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor } from '../hooks/board'
 import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
@@ -339,6 +340,16 @@ test('a hand-kept task with no open step is not offered Confirm done on any surf
   // The pane, the terminal's d key and the page all offer Confirm done from row.confirm.
   expect(empty.row.confirm ?? null).toBe(null)
   expect(open.row.confirm).not.toBe(null)
+})
+
+test('a state=done block on the Stopped shelf offers no Confirm done', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  // Quiet for more than 1 day so it goes to stopped rather than recent, but still asks
+  const file = '## demo\n<!-- auto session=s1 agent=codex state=done updated=2026-10-17T12:00:00Z -->\n### Done task\n- [x] step 1\n- [?] ask\n<!-- /auto session=s1 -->\n'
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, STRINGS.en)
+  const stoppedRow = view.stopped.find(row => row.title === 'Done task')
+  expect(stoppedRow).toBeDefined()
+  expect(stoppedRow?.confirm ?? null).toBe(null)
 })
 
 test('Confirm done changes only visible checkbox marks through comments and preserves CRLF', () => {
@@ -832,7 +843,17 @@ test('options the agent gave win over options found in the question or the note'
   expect(askOf('win rate or Elo?', 'A or B?', { options: [' X ', 'Y', '', null] })).toMatchObject({ kind: 'choose', options: ['X', 'Y'] })
   expect(askOf('win rate or Elo?', 'A or B?', { ask: 'choose', options: ['X'] }).options).toEqual(['X'])
   expect(askOf('Which one?', 'A or B?', { options: 'X or Y?' })).toMatchObject({ kind: 'choose', options: ['A', 'B'] })
-  expect(askOf('Pick', `A or ${'B'.repeat(25)}?`, { ask: 'choose' }).options).toEqual(['A'])
+})
+
+test('inferred choices retain complete long options with and without an explicit choose kind', () => {
+  for (const [first, second] of [['A', 'B'.repeat(25)], ['A'.repeat(25), 'B'], ['A'.repeat(25), 'B'.repeat(25)]]) {
+    const question = `${first} or ${second}?`
+    for (const given of [{}, { ask: 'choose' }]) {
+      expect(askOf(question, '', given)).toMatchObject({ kind: 'choose', options: [first, second] })
+      expect(askOf('Pick', question, given)).toMatchObject({ kind: 'choose', options: [first, second] })
+    }
+    expect(askOf('Pick', question, { ask: 'choose', options: ['Only'] }).options).toEqual(['Only'])
+  }
 })
 
 test('a question with no choice still takes its options from the note', () => {
@@ -1153,6 +1174,42 @@ test('the board page shows the whole file: counts, questions, folded work, steps
   expect(html).toContain("call('/api/board')")
   expect(html).toContain('timer = setTimeout(refresh, 3000)')
   expect(servePage(STRINGS.en, 'synthetic')).toContain('<html lang="en">')
+})
+
+test('the away line sits above the can\'t-read line in the same block, and its words are in all three languages', () => {
+  const page = servePage(STRINGS.en, 'synthetic')
+  const at = (id: string) => page.indexOf(`id="${id}"`)
+  expect(at('away-line')).toBeGreaterThan(0)
+  expect(at('away-line')).toBeLessThan(at('agent-note'))
+  expect(page).toContain("document.addEventListener('visibilitychange'")
+  expect(page).toContain('awaySnapshot()')
+  expect(page).toContain('maybeShowAway()')
+  for (const s of Object.values(STRINGS)) {
+    expect(s.awayForMinutes(42)).toContain('42')
+    expect(s.awayAskedNamedOne('Codex')).toContain('Codex')
+    expect(s.awayAskedGeneric(2, 3)).toContain('2')
+    expect(s.awayFinished(2)).toContain('2')
+    expect(s.awayOfflineNamed('Codex')).toContain('Codex')
+    expect(s.awayUnreadableNamed('Codex')).toContain('Codex')
+    expect(s.awayDismiss).toBeTruthy()
+    expect(s.awayOfflineOne(1)).toContain('1')
+  }
+  expect(STRINGS.en.awayForMinutes(42)).toBe('Away for 42 min')
+  expect(STRINGS.en.awayAskedNamedOne('Codex')).toBe('Codex asked a question')
+  expect(STRINGS.en.awayAskedGeneric(2, 3)).toBe('2 agents asked 3 questions')
+  expect(STRINGS.en.awayFinishedOne(1)).toBe('1 task done')
+  expect(STRINGS.en.awayOfflineNamed('Codex')).toBe('Codex is offline')
+  expect(STRINGS.en.awayUnreadableNamed('Codex')).toBe('Codex still can\'t be read')
+  expect(STRINGS.en.awayDismiss).toBe('Dismiss')
+  expect(STRINGS.en.awayOfflineOne(1)).toBe('1 agent is offline')
+  expect(STRINGS['zh-TW'].awayForMinutes(42)).toBe('你離開 42 分鐘')
+  expect(STRINGS['zh-TW'].awayAskedNamedOne('Codex')).toBe('Codex 問了 1 個問題')
+  expect(STRINGS['zh-TW'].awayFinishedOne(1)).toBe('做完 1 件')
+  expect(STRINGS['zh-TW'].awayOfflineNamed('Codex')).toBe('Codex 離線中')
+  expect(STRINGS['zh-TW'].awayUnreadableNamed('Codex')).toBe('Codex 還是讀不到')
+  expect(STRINGS['zh-TW'].awayDismiss).toBe('收起這行')
+  expect(STRINGS['zh-CN'].awayFinishedOne(1)).toBe('完成了 1 件')
+  expect(STRINGS['zh-CN'].awayDismiss).toBe('收起这行')
 })
 
 test('可以 / 能不能 opening a question make a confirm; a date that does not exist is no due date; the journal speaks the pane language', () => {
@@ -3186,7 +3243,7 @@ test('the serve action contract covers every card kind from every agent and sour
     }
   }
   expect(cells.size).toBe(192)
-  expect(offered).toBe(440)
+  expect(offered).toBe(398)
 })
 
 test('the terminal key contract covers every card kind from every agent and source', () => {
@@ -4539,7 +4596,7 @@ test('the idle shelf keeps terminal and page row actions without putting its que
   expect(grouped?.needs.cards).toEqual([])
   const page = servePage(STRINGS.en, 'nonce')
   expect(page).toContain("shelf('stopped', w('pgStopped')")
-  expect(page).toContain("act(key, 'tick', row.next")
+  expect(page).toContain("act(key, 'tick', nextStep ? nextStep.text : row.next")
   expect(page).toContain("act(key, 'archive'")
 })
 
@@ -4670,4 +4727,17 @@ test('a pending archive note distinguishes crash-recovery retries from distinct 
       { entry, held: 0, boardHash: 'hash2' },
     ],
   })
+})
+
+test('the rule in every language asks for one-line steps of at most 120 characters and keeps hand-kept tasks for the person', () => {
+  for (const rule of Object.values(RULES)) {
+    expect(rule).toContain('120')
+    expect(rule).toContain('TaskCreate')
+    // A due date stays possible, but only on a task the person asked to note for themselves.
+    expect(rule).toContain('10-31')
+  }
+  expect(RULES.en).toContain('Otherwise never edit that file by hand')
+  expect(RULES['zh-TW']).toContain('其他時候不要手改這個檔')
+  expect(RULES['zh-CN']).toContain('其他时候不要手改这个文件')
+  expect(RULES.en).not.toContain('goes into progress.md by hand')
 })

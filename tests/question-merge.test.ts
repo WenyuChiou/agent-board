@@ -1,11 +1,12 @@
 import { test, expect } from 'claude-code/testing'
-import { emptyQuestions, observeQuestions, resolveQuestion, withCaptures } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, questionWords, resolveQuestion, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { parseProgress } from '../hooks/parse'
-import { buildView, relativeTime } from '../hooks/view'
+import { buildView, questionHead, relativeTime } from '../hooks/view'
 import type { View } from '../hooks/view'
 import type { PendingTurn } from '../hooks/board'
-import { boardItems, olderKey } from '../hooks/board'
+import { boardItems, boardText, olderKey } from '../hooks/board'
+import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../hooks/mirror'
 import { folderOf } from '../hooks/question-merge'
 import { serveModel } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
@@ -29,6 +30,167 @@ const ledgerOf = (passes: ReadonlyArray<{ text: string; at: number; pending?: Pe
 const viewOf = (text: string, ledger: QuestionLedger, pending: PendingTurn[] = [], answered: string[] = [], now = NOW): View =>
   buildView(parseProgress(text), [], null, now, 0, {}, EN, answered, {}, ledger, undefined, pending)
 
+test('one question from one turn is one row with its own time', () => {
+  const words = 'Blue or green?'
+  // One turn's question: its capture, then its block, then the block is rewritten with no question
+  // and the turn asks again. Each pass leaves a record of the same session and the same words.
+  const asked = block('aaaa1111', 'codex', 'demo', words)
+  const quiet = asked.replace(`- [?] ${words}`, '- [~] Keep going')
+  const captured = [capture('aaaa1111', 'codex', 'demo', words, START)]
+  const ledger = ledgerOf([
+    { text: quiet, at: START, pending: captured },
+    { text: quiet, at: START + HOUR },
+    { text: asked, at: START + 2 * HOUR },
+    { text: quiet, at: START + 2 * HOUR + 1 },
+    { text: asked, at: NOW - 10 * 60 * 1000 },
+  ])
+  expect(ledger.records.filter(record => record.isUnresolved).length).toBeGreaterThan(1)
+  const view = viewOf(asked, ledger)
+  const rows = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.task).toBe('Task aaaa1111')
+  expect(rows[0]?.when).toBe(relativeTime(NOW - 10 * 60 * 1000, NOW, EN))
+  // Every surface reads the same list: the page's model and the terminal board's lines.
+  const model = serveModel(view, [], EN)
+  expect([...model.asks, ...model.reminder, ...model.older].filter(item => item.text === words)).toHaveLength(1)
+  expect(boardItems(view, [], true, true).filter(item => item.type === 'ask' && item.ask.text === words)).toHaveLength(1)
+  expect(boardText(view, [], EN, { width: 200, isColor: false, isIdleOpen: true }).split(words)).toHaveLength(2)
+})
+
+test('a question from a turn with no task names no empty title on the terminal board or in its text', () => {
+  const words = 'Blue or green?'
+  const pending = [capture('aaaa1111', 'codex', 'demo', words, START)]
+  const ledger = ledgerOf([{ text: '', at: START, pending }])
+  const view = viewOf('', ledger, [], [], START + 8 * 24 * HOUR)
+  const row = view.older?.[0] ?? view.reminder?.[0]
+  expect(row?.task).toBe('')
+  expect(questionHead(row?.project ?? '', row?.task ?? '')).toBe('demo')
+  expect(questionHead('demo', 'A task')).toBe('demo › A task')
+  const text = boardText(view, [], EN, { width: 200, isColor: false, isIdleOpen: true })
+  expect(text).toContain(words)
+  expect(text).not.toContain('›  ·')
+})
+
+test('a review-only copy answered in its own session leaves with the card it joined', () => {
+  const words = 'Blue or green?'
+  const asked = block('aaaa1111', 'codex', 'demo', words)
+  const quiet = asked.replace(`- [?] ${words}`, '- [~] Keep going')
+  const ledger = ledgerOf([
+    { text: asked, at: START },
+    { text: quiet, at: START + 1 },
+    { text: asked, at: START + HOUR },
+  ])
+  const live = ledger.records.filter(record => record.isUnresolved).at(-1)!
+  const resolved = resolveQuestion(ledger, live.id, START + 2 * HOUR)
+  const view = viewOf(quiet, resolved)
+  expect([...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)).toHaveLength(0)
+})
+
+test('a session with only review-only copies of a question keeps one row, the newest, with its own time', () => {
+  const words = 'Blue or green?'
+  const asked = block('aaaa1111', 'codex', 'demo', words)
+  const quiet = asked.replace(`- [?] ${words}`, '- [~] Keep going')
+  const ledger = ledgerOf([
+    { text: asked, at: START },
+    { text: quiet, at: START + 1 },
+    { text: asked, at: START + HOUR },
+    { text: quiet, at: START + HOUR + 1 },
+  ])
+  expect(ledger.records.filter(record => record.isUnresolved && record.words === questionWords(words)).length).toBeGreaterThan(1)
+  const view = viewOf(quiet, ledger)
+  const rows = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.canHide).toBe(false)
+  expect(rows[0]?.when).toBe(relativeTime(START + HOUR, NOW, EN))
+})
+
+test("a capture with no task takes the title its session's review-only copy knew", () => {
+  const words = 'Blue or green?'
+  const asked = block('aaaa1111', 'codex', 'demo', words)
+  const quiet = asked.replace(`- [?] ${words}`, '- [~] Keep going')
+  const pending = [capture('aaaa1111', 'codex', 'demo', words, START + HOUR)]
+  const ledger = ledgerOf([
+    { text: asked, at: START },
+    { text: quiet, at: START + 1 },
+    { text: quiet, at: START + HOUR, pending },
+  ])
+  const view = viewOf(quiet, ledger, pending)
+  const rows = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.key.startsWith('inbox::')).toBe(true)
+  expect(rows[0]?.task).toBe('Task aaaa1111')
+})
+
+test('a same-session review-only copy takes no second row in its own pane or for a block with no folder', () => {
+  const words = 'Blue or green?'
+  const askedNoDir = block('aaaa1111', 'codex', 'demo', words, NOW, null)
+  const quietNoDir = askedNoDir.replace(`- [?] ${words}`, '- [~] Keep going')
+  const ledgerNoDir = ledgerOf([
+    { text: askedNoDir, at: START },
+    { text: quietNoDir, at: START + 1 },
+    { text: askedNoDir, at: START + HOUR },
+  ])
+  const viewNoDir = viewOf(askedNoDir, ledgerNoDir)
+  const rowsNoDir = [...viewNoDir.waiting, ...(viewNoDir.reminder ?? []), ...(viewNoDir.older ?? [])].filter(item => item.text === words)
+  expect(rowsNoDir).toHaveLength(1)
+
+  let mirror = emptyMirror('aaaa1111-session', 'demo', NOW, '/work/demo')
+  mirror = { ...mirror, agent: 'claude' }
+  mirror = applyTaskCreate(mirror, { subject: words }, '1', NOW)
+  mirror = applyTaskUpdate(mirror, { taskId: '1', metadata: { waiting: 'you' } }, NOW)
+  const askedClaude = block('aaaa1111', 'claude', 'demo', words)
+  const quietClaude = askedClaude.replace(`- [?] ${words}`, '- [~] Keep going')
+  const ledgerClaude = ledgerOf([
+    { text: askedClaude, at: START },
+    { text: quietClaude, at: START + 1 },
+    { text: askedClaude, at: START + HOUR },
+  ])
+  const viewMine = buildView(parseProgress(quietClaude), [], mirror, NOW, 0, {}, EN, [], {}, ledgerClaude)
+  const rowsMine = [...viewMine.waiting, ...(viewMine.reminder ?? []), ...(viewMine.older ?? [])].filter(item => item.text === words)
+  expect(rowsMine).toHaveLength(1)
+  expect(rowsMine[0]?.where).toBe('here')
+})
+
+test('a capture with no task takes the newest title its session knew', () => {
+  const words = 'Blue or green?'
+  const askedA = block('aaaa1111', 'codex', 'demo', words).replace('Task aaaa1111', 'Task A')
+  const askedB = block('aaaa1111', 'codex', 'demo', words).replace('Task aaaa1111', 'Task B')
+  const quietB = askedB.replace(`- [?] ${words}`, '- [~] Keep going')
+  const pending = [capture('aaaa1111', 'codex', 'demo', words, START + 2 * HOUR)]
+  const ledger = ledgerOf([
+    { text: askedA, at: START },
+    { text: askedB, at: START + HOUR },
+    { text: quietB, at: START + HOUR + 1 },
+    { text: quietB, at: START + 2 * HOUR, pending },
+  ])
+  const view = viewOf(quietB, ledger, pending)
+  const rows = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.key.startsWith('inbox::')).toBe(true)
+  expect(rows[0]?.task).toBe('Task B')
+})
+
+test('hiding a card beside an archived copy leaves no review-only row behind', () => {
+  const words = 'Blue or green?'
+  const asked = block('aaaa1111', 'codex', 'demo', words)
+  const quiet = asked.replace(`- [?] ${words}`, '- [~] Keep going')
+  const ledger = ledgerOf([
+    { text: asked, at: START },
+    { text: quiet, at: START + 1 },
+    { text: asked, at: START + HOUR },
+    { text: quiet, at: START + HOUR + 1 },
+  ])
+  ledger.records[0]!.isArchived = true
+  const view = viewOf(quiet, ledger)
+  const rows = [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => item.text === words)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.canHide).toBe(true)
+
+  const hidden = viewOf(quiet, ledger, [], [rows[0]!.hideKey])
+  const hiddenRows = [...hidden.waiting, ...(hidden.reminder ?? []), ...(hidden.older ?? [])].filter(item => item.text === words)
+  expect(hiddenRows).toHaveLength(0)
+})
+
 test('the same question in a block and in an inbox capture shows as one card', () => {
   const text = block('aaaa1111', 'codex', 'demo', QUESTION)
   const pending = [capture('cccc3333', 'codex', 'demo', `  ${QUESTION} `, START + HOUR)]
@@ -37,16 +199,16 @@ test('the same question in a block and in an inbox capture shows as one card', (
   expect(ledger.records.filter(record => record.isUnresolved)).toHaveLength(2)
   const view = viewOf(text, ledger, pending)
   expect(view.waiting).toHaveLength(1)
-  // The newest source, with the age of the oldest copy.
+  // The newest source, with its own time.
   expect(view.waiting[0]?.key.startsWith('inbox::')).toBe(true)
-  expect(view.waiting[0]?.when).toBe(relativeTime(START, NOW, EN))
+  expect(view.waiting[0]?.when).toBe(relativeTime(START + HOUR, NOW, EN))
   expect(serveModel(view, pending, EN).asks).toHaveLength(1)
   expect(serveModel(view, pending, EN).turns).toHaveLength(0)
   // The other copy stays in the question list.
   expect(ledger.records.filter(record => record.isUnresolved)).toHaveLength(2)
 })
 
-test('the same question in two blocks of one agent and folder shows as one card with the oldest age', () => {
+test('the same question in two blocks of one agent and folder shows as one card with the newest ask\'s time', () => {
   const files = [
     block('aaaa1111', 'codex', 'demo', QUESTION) + block('bbbb2222', 'codex', 'demo', `  Ship the   synthetic plan,  OK? `),
     // A Windows folder reads the same with either slash.
@@ -57,7 +219,7 @@ test('the same question in two blocks of one agent and folder shows as one card 
     const view = viewOf(text, ledger)
     expect(view.waiting).toHaveLength(1)
     expect(view.waiting[0]?.key).toContain('Task bbbb2222')
-    expect(view.waiting[0]?.when).toBe(relativeTime(START, NOW, EN))
+    expect(view.waiting[0]?.when).toBe(relativeTime(START + HOUR, NOW, EN))
     expect(view.overview.waiting).toBe(1)
   }
   expect(folderOf('C:\\a\\b')).toBe(folderOf('c:/a/b/'))
@@ -163,11 +325,11 @@ test('a stopped session\'s copy joins the live card instead of listing the quest
   // Before the live copy came, the stopped session's task held the question.
   expect(viewOf(stopped, ledgerOf([{ text: stopped, at: old }])).stopped[0]?.question).toBe(QUESTION)
   const view = viewOf(text, ledger)
-  // One card for the live session, with the age of the stopped session's copy; Older does not list
-  // the stopped copy a second time, and the stopped task keeps its own.
+  // One card for the live session, with its own time; Older does not list the stopped copy a second
+  // time, and the stopped task keeps its own.
   expect(view.waiting).toHaveLength(1)
   expect(view.waiting[0]?.key).toContain('Task bbbb2222')
-  expect(view.waiting[0]?.when).toBe(relativeTime(old, NOW, EN))
+  expect(view.waiting[0]?.when).toBe(relativeTime(START, NOW, EN))
   expect(view.older ?? []).toHaveLength(0)
   expect(view.stoppedAsking).toBeUndefined()
   expect(view.stopped).toHaveLength(1)
@@ -224,8 +386,9 @@ test('a copy cut off in the middle of a write neither makes a card vanish nor ch
   expect(kept[0]?.key).toBe(view.waiting[0]?.key)
   expect(mid.waiting.filter(item => item.questionId === undefined)).toHaveLength(1)
   const whole = viewOf(second, ledgerOf([{ text, at: START }, { text: second, at: START + HOUR }]))
+  // Once recorded it is the newer ask, and the one card shows that ask's time.
   expect(whole.waiting).toHaveLength(1)
-  expect(whole.waiting[0]?.when).toBe(view.waiting[0]?.when)
+  expect(whole.waiting[0]?.when).toBe(relativeTime(START + HOUR, NOW, EN))
 })
 
 test("a question stays on the board when another session's copy of it is renewed", () => {
@@ -238,9 +401,9 @@ test("a question stays on the board when another session's copy of it is renewed
   // The second session's first ask was replaced by its renewal; nobody answered or hid it.
   expect(ledger.records.filter(record => record.isUnresolved === false)).toHaveLength(1)
   const view = viewOf(renewed, ledger)
-  // The question is one card, and it still carries the age of the first session's copy, which is open.
+  // The question is one card, with the time of the renewal, the ask a reply goes to.
   expect(view.waiting).toHaveLength(1)
-  expect(view.waiting[0]?.when).toBe(relativeTime(START, NOW, EN))
+  expect(view.waiting[0]?.when).toBe(relativeTime(START + 2 * HOUR, NOW, EN))
   // The first session's copy is not covered, so Hide on the card closes both sessions' copies.
   const hidden = viewOf(renewed, ledger, [], [view.waiting[0]!.hideKey])
   expect(hidden.waiting).toHaveLength(0)

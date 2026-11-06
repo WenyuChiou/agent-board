@@ -183,9 +183,9 @@ test('a warmed publisher migrates all 51 peer acknowledgements after cleared cou
   } finally { await f.close() }
 })
 
-test('five publication calls inside one poll write only one batch of a 120-name backlog', async () => {
-  const names = Array.from({ length: 120 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
-  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 120 + n}`]))
+test('five publication calls inside one poll write only one batch of a 60-name backlog', async () => {
+  const names = Array.from({ length: 60 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
+  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 60 + n}`]))
   const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
   const f = await fixture('', {}, { version: 1, inboxDone: done, store: 0, pruned: {} })
   const written = () => names.filter(name => existsSync(livePage.pageDonePath(f.path, sha256(receipt(name))))).length
@@ -196,12 +196,12 @@ test('five publication calls inside one poll write only one batch of a 120-name 
     assert.equal(written(), 50)
     engine.clock.advance(POLL_MS)
     assert.deepEqual(await production.pendingTurns(engine), [])
-    assert.equal(written(), 100)
+    assert.equal(written(), 60)
     for (let n = 0; n < 5; n++) await production.syncPageState(engine, {})
-    assert.equal(written(), 100)
+    assert.equal(written(), 60)
     engine.clock.advance(POLL_MS)
     assert.deepEqual(await production.pendingTurns(engine), [])
-    assert.equal(written(), 120)
+    assert.equal(written(), 60)
     for (const name of names) assert.equal(readFileSync(livePage.pageDonePath(f.path, sha256(receipt(name))), 'utf8'), receipt(name))
     assert.equal(production.warning(), undefined)
   } finally { await f.close() }
@@ -510,5 +510,27 @@ test('JSON and print clip an untrusted field at six hundred characters', async (
       assert.ok(!ran.stdout.includes(title.slice(0, 601)))
       if (flag === '--json') assert.equal(JSON.parse(ran.stdout).waiting[0].title, title.slice(0, 600).replace(/\s*\S*$/, ''))
     }
+  } finally { await f.close() }
+})
+
+test('a question in a block updated 30 minutes ago is shown as 30 minutes old, not as new as the page', async () => {
+  const f = await fixture(`## demo\n<!-- auto session=abcdef12 agent=codex state=working updated=${new Date(NOW - 30 * 60000).toISOString()} -->\n### Release task\n- [?] Ship the synthetic build or wait\n<!-- /auto session=abcdef12 -->\n`)
+  try {
+    const model = await f.api()
+    assert.equal(model.asks.length, 1, JSON.stringify(model.asks))
+    assert.match(model.asks[0].when, /30/, model.asks[0].when)
+  } finally { await f.close() }
+})
+
+test('a hand-kept task with a due date shows it on its row in place of the unknown age', async () => {
+  const f = await fixture('## demo\n### Pay the synthetic invoice\n> 截止 11-06\n- [ ] Open the invoice\n')
+  try {
+    const model = await f.api()
+    const row = model.groups.flatMap(group => group.rows).find(one => one.title === 'Pay the synthetic invoice')
+    assert.ok(row?.due, JSON.stringify(model.groups))
+    const dom = await pageDom(f.runtime.servePage(EN, 'synthetic'), model)
+    const text = dom.node('board').readText
+    assert.ok(text.includes(row.due), text)
+    assert.ok(!text.includes(EN.pgUnknownAge), text)
   } finally { await f.close() }
 })

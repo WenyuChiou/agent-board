@@ -81,6 +81,11 @@ type World = {
   paneOpenCalls?: number
   registered?: string[]
   registeredDescriptions?: string[]
+  registeredTools?: Array<{ name: string; description: string }>
+  // A refusal the host gives instead of registering (a name clash, a session without tools).
+  commandRefusal?: Record<string, string>
+  toolRefusal?: string
+  debugLog?: Array<{ text: string; to: string | undefined }>
   liveOutput?: string
   liveFailure?: 'exit' | 'timeout' | 'truncated'
   liveCalls?: Array<{ argv: string[]; init: unknown }>
@@ -264,9 +269,21 @@ const engineBeneath = (on: On, world: World): MockClock => {
     },
   }))
   on('command.register', ($, e) => {
+    const refusal = world.commandRefusal?.[e.name]
+    if (refusal !== undefined) return { deny: refusal }
     world.registered?.push(e.name)
     world.registeredDescriptions?.push(e.description ?? '')
     return { value: { command: e.name } }
+  })
+  on('tool.register', ($, e) => {
+    if (world.toolRefusal !== undefined) return { deny: world.toolRefusal }
+    world.registeredTools?.push({ name: e.name, description: e.description })
+    // The host puts its own prefix before the name the plugin chose.
+    return { value: { tool: `mcp__plugin_synthetic__${e.name}` } }
+  })
+  on('ui.log', ($, e) => {
+    world.debugLog?.push({ text: e.text, to: e.to })
+    return { value: undefined }
   })
   on('ui.open', () => {
     world.paneOpenCalls = (world.paneOpenCalls ?? 0) + 1

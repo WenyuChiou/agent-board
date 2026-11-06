@@ -243,3 +243,32 @@ test('agent-board --json on an unreadable board prints a JSON error and exits 1'
   assert.ok(!failed.stdout.includes(failed.home) && !failed.stdout.includes('sk-test') && !failed.stdout.includes('Jane Doe'))
   assert.deepEqual(failed.after, failed.before)
 })
+
+test('#224 a blocked step shows beside an open question on the same task: the question card stays and the stuck row appears', () => {
+  const source = `## synthetic-api
+${block('a2000001', 'codex', 'waiting', 'Synthetic card', '- [x] Synthetic step finished\n- [?] Synthetic ask: blue or green?\n- [!] Synthetic blocker: waiting on a fake license key', NOW - MINUTE)}`
+  const view = viewOf(source)
+  assert.equal(view.waiting.length, 1, 'the question still has its card')
+  const rows = view.groups.flatMap(group => group.rows)
+  assert.equal(rows.length, 1, 'the task keeps its row under the project')
+  assert.match(rows[0].status, /fake license key/)
+  assert.equal(rows[0].tone, 'alert')
+  const document = documentOf(view)
+  assert.deepEqual(document.needs.map(one => one.kind).sort(), ['question', 'stuck'])
+  assert.equal(document.counts.stuck, 1)
+  assert.match(JSON.stringify(document), /fake license key/)
+})
+
+test('#224 the page model and --json agree on a task that asks and is stuck, in every language', () => {
+  const source = `## synthetic-api
+${block('a2000002', 'codex', 'waiting', 'Synthetic card', '- [?] Synthetic ask: blue or green?\n- [!] Synthetic blocker: waiting on a fake license key', NOW - MINUTE)}`
+  for (const s of Object.values(STRINGS)) {
+    const view = viewOf(source, s)
+    const model = serveModel(view, [], s, new Set(), false, undefined, false, groupOptions())
+    assert.equal(model.view.needs.stuck, 1)
+    assert.equal(model.view.needs.questions, 1)
+    assert.equal(model.groups.flatMap(group => group.rows).length, 1)
+    assert.match(model.groups[0].rows[0].status, /fake license key/)
+    assert.equal(boardDocument(view, [], [], s, '', false, NOW, groupOptions()).counts.stuck, 1)
+  }
+})

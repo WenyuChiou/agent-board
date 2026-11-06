@@ -974,7 +974,7 @@ test('pr-check fails an outside pull request whose claim was written by someone 
   // A release title from outside fails.
   const release = problemsOf(outsidePr({ title: 'chore(release): Agent Board 9.9.9' })).filter(item => item.check === 'outside')
   assert.equal(release.length, 1)
-  assert.match(release[0].message, /release pull request comes from the maintainer/)
+  assert.match(release[0].message, /release pull request comes from the team/)
   // In CI the association and login come from the event, and the labels and comment authors from the API.
   const setup = fixture(t)
   const originalFetch = globalThis.fetch

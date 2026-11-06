@@ -269,7 +269,7 @@ export const inspectCodexHooks = async (executable: string, config: string, expe
 export const trustCodex = async (executable: string, config: string, groups: Record<string, unknown>, apply: boolean) => {
   const before = readFileSync(config, 'utf8')
   const expected = Object.entries(groups).map(([event, group]) => ({ event: event[0]!.toLowerCase() + event.slice(1), command: (group as { hooks: { command: string }[] }).hooks[0]!.command }))
-  if (expected.length !== 6) throw new Error('SIX_OWNED_HOOKS_REQUIRED')
+  if (expected.length !== 7) throw new Error('SEVEN_OWNED_HOOKS_REQUIRED')
   const control = client(executable)
   try {
     await control.initialize()
