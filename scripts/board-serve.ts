@@ -268,6 +268,8 @@ export const startServer = (o: ServeOptions): void => {
   const replies = new Map<string, Result & { at: number; key: string }>()
   let port = 0
   let lastSeen = Date.now()
+  // When the board page itself (not a script pinging it) last loaded or asked for the board; 0 once it said it left (#265).
+  let pageAt = 0
   let isStopping = false
   // The page on the local network: its own server, address and token, so the computer's token
   // never crosses the network.
@@ -372,6 +374,7 @@ export const startServer = (o: ServeOptions): void => {
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
+    if (!isLan && (isPage || req.method === 'GET' && url.pathname === '/api/board')) pageAt = Date.now()
     if (!url.pathname.startsWith('/api/messages/')) {
       lastSeen = Date.now()
       if (side !== null) side.lastSeen = lastSeen
@@ -415,11 +418,15 @@ export const startServer = (o: ServeOptions): void => {
         }
       }
       // Only the board script on the computer asks; the answer names progress.md's path.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size })
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size, pageAgo: pageAt === 0 ? null : Date.now() - pageAt })
       return json(res, 404, {})
     }
     const body = await readBody(req)
     if (body === null) return json(res, 400, {})
+    if (url.pathname === '/api/page-gone' && !isLan) {
+      pageAt = 0
+      return json(res, 200, {})
+    }
     if (url.pathname.startsWith('/api/messages/')) {
       if (isLan) return json(res, 403, {})
       const action = url.pathname.slice('/api/messages/'.length)

@@ -1277,6 +1277,10 @@ const PAGE_SCRIPT = String.raw`
       });
     }).catch(function (error) { unreachable(); throw error; });
   }
+  // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
+  if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
+    try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
+  });
   // onCopied: what to do once the text is on the clipboard; the card then says where to paste it. Without it the
   // result line says Copied. That line, and the card's after-copy line, show only after a copy was confirmed
   // (the clipboard promise resolved, or the older copy command on a page the clipboard is closed to, such as

@@ -5,7 +5,6 @@ import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { inspectSurfaces, terminal, seenPageWithin, serve, run, command } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
-import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
 
 const seedAsk = (world, agent, extra = {}) => block(world, { agent, state: 'waiting', title: `Publish ${agent} report`, steps: ['- [?] Publish the synthetic report, OK?'], ...extra })
@@ -57,7 +56,7 @@ describe('L3 across agents and sessions', () => {
     } finally { await world.close() }
   })
 
-  test('L3 serve: starting --serve twice reuses the open tab', async () => {
+  test('L3 serve: opening the page twice reuses the open tab', async () => {
     const world = makeWorld()
     try {
       block(world)
@@ -69,11 +68,21 @@ describe('L3 across agents and sessions', () => {
       world.write('agent-board.mjs', before.split(seam).join('((target, done) => { process.stdout.write("E2E_BROWSER_REQUEST\\n"); done(true) })('))
       const server = await serve.start(world)
       const outputs = []
-      for (let index = 0; index < 2; index++) outputs.push(await command(world, ['--serve', '--idle-minutes', '1']))
-      for (const output of outputs) assert.ok(output.includes(server.url), 'The same isolated server address must be reused')
+      outputs.push(await command(world, ['--serve', '--idle-minutes', '1']))
+      // The opened window loads the page and asks for the board, as a real page does.
       assert.equal((await server.get('/api/board')).status, 200)
+      outputs.push(await command(world, ['--serve', '--idle-minutes', '1']))
+      for (const output of outputs) assert.ok(output.includes(server.url), 'The same isolated server address must be reused')
       assert.equal((outputs[0].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1)
-      await knownFailure('hold:serve-tab-reuse', () => assert.equal((outputs[1].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, outputs[1]))
+      assert.equal((outputs[1].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, outputs[1])
+      // The agent's own way to open the page (--html, the same code /agent-board uses) points at the open window too.
+      const html = await command(world, ['--html'])
+      assert.equal((html.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, html)
+      assert.ok(html.includes(server.url), html)
+      // A page that says it is leaving is no longer an open window: the next open starts one.
+      assert.equal((await server.post('/api/page-gone', {})).status, 200)
+      const third = await command(world, ['--serve', '--idle-minutes', '1'])
+      assert.equal((third.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1, third)
       noMachineIds(await server.page(), world)
     } finally { await world.close() }
   })

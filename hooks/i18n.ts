@@ -626,6 +626,7 @@ export const ZH_TW = {
   boardOpenPage: '開啟看板網頁',
   boardPageWindowOpened: (url: string): string => `已在瀏覽器開啟 Agent Board：${url}`,
   boardPageLink: (url: string): string => url,
+  boardPageAlreadyOpen: (url: string): string => `Agent Board 已在瀏覽器開著：${url}`,
   boardInbox: '收件匣裡還沒整理的回合（開一個 Claude Code 對話就會整理進來）',
   boardWatching: '每 2 秒更新，Ctrl+C 結束',
   boardCommandDescription: 'Agent Board：每個 agent 在做什麼、什麼在等你',

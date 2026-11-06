@@ -585,6 +585,7 @@ export const EN: Strings = {
   boardOpenPage: 'Open board page',
   boardPageWindowOpened: (url: string): string => `Opened Agent Board in your browser: ${url}`,
   boardPageLink: (url: string): string => url,
+  boardPageAlreadyOpen: (url: string): string => `Agent Board is already open in your browser: ${url}`,
   boardInbox: 'Turns in the inbox not summed up yet (open a Claude Code session to take them in)',
   boardWatching: 'Updates every 2 seconds; Ctrl+C to stop',
   boardCommandDescription: 'Agent Board: what every agent is doing, and what waits on you',
