@@ -4005,7 +4005,7 @@ export const LINES = [
 "#away-line .away-lead{color:var(--muted)}",
 "#away-line .away-bold{font-weight:600;color:var(--ink)}",
 "#away-line .away-x{flex:none;width:28px;height:28px;display:inline-grid;place-items:center;vertical-align:middle;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer}",
-"#away-line .away-x::before{content:\"×\";font-size:18px;line-height:1}",
+"#away-line .away-x::before{content:\"×\";font-size:var(--text-md);line-height:1}",
 "#offline:not(:empty)::before{content:'!';display:inline-grid;place-items:center;width:20px;height:20px;border:1px solid currentColor;border-radius:var(--radius-round);margin-right:var(--s3);font-weight:600}",
 "button,.btn{font:inherit;color:inherit}",
 "button:hover,.btn:hover,summary:hover{background-color:var(--hover)}",
