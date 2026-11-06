@@ -242,7 +242,7 @@ test('the plain launcher help no longer lists --serve, and --help all marks it o
 })
 
 // The first run of a person: no board script anywhere, a keyboard to answer on.
-const firstRun = async (answer, check) => {
+const firstRun = async (answer, check, extraEnv = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'board-first-'))
   try {
     const shim = join(root, 'tty-shim.cjs')
@@ -251,7 +251,7 @@ const firstRun = async (answer, check) => {
     mkdirSync(home)
     const env = {
       ...Object.fromEntries(['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
-      CI: '', LANG: 'en_US.UTF-8', HOME: home, USERPROFILE: home, TEMP: root, TMP: root, TMPDIR: root, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid),
+      CI: '', LANG: 'en_US.UTF-8', HOME: home, USERPROFILE: home, TEMP: root, TMP: root, TMPDIR: root, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid), ...extraEnv,
     }
     const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
     const result = await new Promise(done => {
@@ -267,7 +267,9 @@ const firstRun = async (answer, check) => {
 
 test('the first plain agent-board in a terminal with nothing set up asks one question, and no changes nothing (#868)', { timeout: 40_000 }, async () => {
   await firstRun('n\n', ({ status, stdout, stderr }, home) => {
-    assert.match(stdout, /Set it up now for the agents found here\? \[y\/N\]/)
+    const asked = stdout.indexOf('Apply these changes? [y/N]')
+    assert.ok(asked > 0, stdout)
+    assert.ok(stdout.includes('would update') && stdout.indexOf('--apply') < asked, 'the preview is printed before the question')
     assert.equal(status, 1)
     assert.match(stderr, /not set up for this account yet/)
     assert.equal(existsSync(join(home, '.agent-board')), false, 'nothing was written')
@@ -275,8 +277,15 @@ test('the first plain agent-board in a terminal with nothing set up asks one que
 })
 
 test('the first plain agent-board in a terminal with nothing set up applies setup on one yes (#868)', { timeout: 60_000 }, async () => {
-  await firstRun('y\n', ({ stdout }, home) => {
-    assert.match(stdout, /Set it up now for the agents found here\? \[y\/N\]/)
+  await firstRun('y\n', ({ status, stdout, stderr }, home) => {
+    const asked = stdout.indexOf('Apply these changes? [y/N]')
+    assert.ok(asked > 0 && stdout.indexOf('--apply') < asked, 'the preview is printed before the question')
     assert.ok(existsSync(join(home, '.agent-board', 'agent-board.mjs')), stdout)
-  })
+    assert.doesNotMatch(stderr, /not set up for this account yet/)
+    assert.equal(status, 0, stderr)
+    // CI picks the text board, so no window opens; the same run shows the board after setup.
+    const after = stdout.slice(asked)
+    assert.match(after, /Nothing needs you|No work in progress|Progress/, after.slice(-400))
+    assert.ok(!stdout.includes('--serve'), 'setup output names the plain command')
+  }, { CI: '1' })
 })

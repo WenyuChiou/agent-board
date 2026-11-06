@@ -236,7 +236,7 @@ const candidates = [
     join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'agent-board.mjs'),
   ]),
 ]
-const installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
+let installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
 // One yes in place of "setup, then setup --apply": only the plain command, in a terminal someone is typing at.
 const askYes = question => {
   process.stdout.write(question)
@@ -247,9 +247,17 @@ const askYes = question => {
   } catch {}
   return /^\s*(y|yes|是|好|對|对)\s*$/i.test(answer.split(/\r?\n/)[0])
 }
+// Setup edits other agents' files, so the person sees its preview first and then answers one question.
 if (!installed && args.length === 0 && process.stdin.isTTY && process.stdout.isTTY) {
-  if (askYes(message('Agent Board is not set up on this computer yet. Set it up now for the agents found here? [y/N] ', 'Agent Board 還沒在這台電腦設定。現在替找到的 agent 設定嗎？[y/N] ', 'Agent Board 还没在这台电脑设置。现在为找到的 agent 设置吗？[y/N] '))) {
-    run(join(pkg, 'scripts/setup-agent.mjs'), ['--apply'], { isSetup: true })
+  const setup = [join(pkg, 'scripts/setup-agent.mjs')]
+  const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name} setup` }
+  const preview = spawnSync(process.execPath, setup, { stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8', env: setupEnv, windowsHide: true })
+  process.stdout.write(preview.stdout ?? '')
+  // The preview offers its --apply step only when something would change; with nothing to do, nothing is asked.
+  if (preview.status === 0 && (preview.stdout ?? '').includes('--apply') && askYes(message('Apply these changes? [y/N] ', '套用這些變更嗎？[y/N] ', '应用这些变更吗？[y/N] '))) {
+    const applied = spawnSync(process.execPath, [...setup, '--apply'], { stdio: ['inherit', 'inherit', 'inherit'], env: setupEnv, windowsHide: true })
+    if (applied.status !== 0) process.exit(applied.status ?? 1)
+    installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
   }
 }
 if (!installed) {
