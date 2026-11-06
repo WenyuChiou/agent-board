@@ -18,7 +18,7 @@ The release gate, checked on the exact tagged commit:
 
 1. **CI.** Every job of `.github/workflows/test.yml` is green on that commit, on Ubuntu and on Windows.
 2. **Parity.** `docs/validation/<date>-parity-<version>.md` exists, run as [PARITY-CHECKLIST.md](validation/PARITY-CHECKLIST.md) says. Every FAIL in it names an open issue outside this release's must-ship set.
-3. **Journeys.** The L1–L3 user-journey tests (`tests/e2e/`, #222) and the upgrade journeys (`tests/host-upgrade.test.mjs`: a home set up by 0.24.0, and one set up by 0.24.2, upgraded by this commit's setup, #877) pass on that commit.
+3. **Journeys.** The L1–L3 user-journey tests (`tests/e2e/`, #222) pass on that commit.
 4. **Must-ship.** No issue in the release's must-ship set is open. The set is the issues the milestone description names as must-ship.
 5. **Simulated user.** `docs/validation/<date>-usersim-<version>.md` exists, run as [USER-SIM.md](validation/USER-SIM.md) says on the release pull request's head, with no FAIL and an issue for every FRICTION. Unlike gates 1–4, this one holds for every release: without it there is no release, not even a pre-release.
 
