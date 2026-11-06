@@ -205,7 +205,7 @@ dependencies and no install scripts. Pre-releases are on the `next` tag
 | Cursor | Conversation/generation lifecycle hooks | Native CLI/IDE execution and turn binding |
 | OpenCode | Session event plugin and context-bound progress tool | Plugin reload; status events lack a turn id |
 | Antigravity | Four named native hooks plus shared skill | Native CLI/App/IDE events; no session-end event or turn fence |
-| Grok Build | SessionStart, UserPromptSubmit, Stop, SessionEnd | Prompt/idle/end status; native execution unverified |
+| Grok Build | SessionStart, UserPromptSubmit, Stop, SessionEnd, and a plan mirror on `todo_write` | Prompt/idle/end status; native execution unverified |
 | Muse Code | Stop, SessionEnd | Coarse status and native execution unverified |
 | Hermes Agent | Board and skill | Independent native hook adapter pending |
 | OpenClaw | Independent metadata plugin and native skill | Native host execution unverified; requires sanitized lifecycle subscription API |
@@ -230,7 +230,7 @@ the current one. It explicitly denies conversation access. Hosts lacking the sub
 API fail visibly rather than falling back to transcript access. Reload the plugin in each
 host; installation cannot enumerate every previously open session. When OpenClaw's
 `progress_card` (or the older `update_plan`) call succeeds with a plan, the plugin copies each
-step's text and status into the board's steps; OpenCode's plugin does the same with its todo list.
+step's text and status into the board's steps; OpenCode's plugin does the same with its todo list, and Grok Build's `PostToolUse` hook (matcher `^todo_write$`, timeout 5 s, prints nothing) copies the full list from the tool's result.
 
 DeepSeek uses `agent/created`, `agent/status` (running/idle) and `agent/disposed`, retaining
 its own agent identity. Its owned entry is appended to a plain root YAML patch sequence;

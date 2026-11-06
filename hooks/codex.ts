@@ -33,19 +33,24 @@ export const codexEvents = ['SessionStart', 'UserPromptSubmit', 'PermissionReque
 
 // The plan a tool call carries, as a report input (#922). Codex's update_plan sends
 // `plan: [{step, status}]` and Gemini's write_todos `todos: [{description, status}]`; nothing else of
-// the call is read. Null when it is another tool, no session id, or no usable step.
+// the call is read. Grok Build's todo_write may carry only the changed items, so its list is read from
+// the result, which holds the whole list after the merge (camelCase payload). Null when it is another
+// tool, no session id, or no usable step.
 const PLAN_MARKS: Record<string, string> = { completed: 'x', in_progress: '~', pending: ' ', cancelled: '-', blocked: '!' }
+const asRecord = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
 export const planReport = (raw: Record<string, unknown>): { session: string; input: { state: 'working'; steps: string[]; planTitle: string } } | null => {
-  const call = raw.tool_input
-  const body = typeof call === 'object' && call !== null && !Array.isArray(call) ? call as Record<string, unknown> : {}
+  const isGrok = raw.toolName === 'todo_write'
   const isCodex = raw.tool_name === 'update_plan'
-  const list = isCodex ? body.plan : raw.tool_name === 'write_todos' ? body.todos : undefined
-  if (typeof raw.session_id !== 'string' || !Array.isArray(list)) return null
+  // A truncated result is half a list, and a DuplicateId or InvalidArgument result has none.
+  const list = isGrok ? (raw.toolResultTruncated === true ? undefined : asRecord(asRecord(raw.toolResult).TodosUpdated).todos)
+    : isCodex ? asRecord(raw.tool_input).plan : raw.tool_name === 'write_todos' ? asRecord(raw.tool_input).todos : undefined
+  const session = isGrok ? raw.sessionId : raw.session_id
+  if (typeof session !== 'string' || !Array.isArray(list)) return null
   const items: { mark: string; text: string }[] = []
   for (const item of list) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) continue
     const one = item as Record<string, unknown>
-    const words = one[isCodex ? 'step' : 'description']
+    const words = one[isGrok ? 'content' : isCodex ? 'step' : 'description']
     if (typeof words !== 'string') continue
     let text = words.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()
     // The report check refuses a step line over 500 characters, its `- [m] ` marker included: a longer
@@ -58,7 +63,7 @@ export const planReport = (raw: Record<string, unknown>): { session: string; inp
   }
   if (items.length === 0) return null
   return {
-    session: raw.session_id,
+    session,
     input: { state: 'working', steps: items.map(one => `- [${one.mark}] ${one.text}`), planTitle: (items.find(one => one.mark === '~') ?? items[0]!).text },
   }
 }
