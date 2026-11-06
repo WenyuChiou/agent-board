@@ -628,8 +628,8 @@ export const ZH_CN: Strings = {
   boardNoAgents: '还没有 agent 向这个看板汇报。用这行接上一个：npx @wenyuchiou/agent-board setup',
   boardEmptyHow: 'agent 开始工作后，它的任务会出现在这里、它的名字下；它问你的事会放进“等你处理”。',
   boardStatusLine: (needs: number, working: number): string => `${needs} 项等你 · ${working} 项进行中`,
-  boardUsage: '用法：agent-board | agent-board setup | agent-board stop | agent-board --json · --help all 查看所有选项（--watch、--serve、--tidy [--stopped | --agent 名称 | --older 天数]、--all...）',
-  boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <端口>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出闲置和已停止项目',
+  boardUsage: '用法：agent-board | agent-board setup | agent-board stop | agent-board --json · --help all 查看所有选项（--watch、--tidy [--stopped | --agent 名称 | --older 天数]、--all...）',
+  boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve（旧）] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <端口>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出闲置和已停止项目',
   boardHidden: (text: string): string => `已隐藏「${text}」；问题一改就会再出现。`,
   boardShown: '隐藏的问题都重新显示了。',
   hideFailed: '记不下「已回复」，这一项还留在清单上。',
@@ -683,7 +683,7 @@ export const ZH_CN: Strings = {
   serveSshHint: (port: number, host: string, url: string): string => `转发端口以打开网页：ssh -L ${port}:127.0.0.1:${port} ${host} 并打开 ${url}`,
   serveBrowserNone: (url: string): string => `找不到浏览器。请在浏览器打开这个网址：${url}`,
   serveIdle: '本地看板会持续运行；关掉标签页后可在终端运行 agent-board 或在 agent 对话中输入 /agent-board 再打开，按“关闭看板”才停止服务。',
-  serveIdleTimed: (minutes: number): string => `此看板已设置闲置 ${minutes} 分钟后自动关闭；可用 --serve 再打开。`,
+  serveIdleTimed: (minutes: number): string => `此看板已设置闲置 ${minutes} 分钟后自动关闭；可运行 agent-board 再打开。`,
   serveLanIdle: '在你的网络上，10 分钟没人用就会自己关掉。',
   invalidStaleMs: '闲置判定时间必须为大于零的毫秒数。',
   serveFailed: (why: string): string => `打不开看板网页：${why}`,
@@ -700,7 +700,7 @@ export const ZH_CN: Strings = {
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `看板无法打开消息文件夹（${code}）：${folder}。请先停止所有看板 server，一并检查 server.lock、server.owner 与 .message-claim-*.json。确认没有 hub 运行后，仅移除已核实过期的持有者数据。请保留 messages.json 与不确定是否送达的记录，不要重发这些消息。`
     : code === 'MESSAGE_STORE_CLOSED'
-      ? `看板已停止（${code}）：${folder}。请用 --serve 重新启动；不确定是否送达的消息没有重新发送。`
+      ? `看板已停止（${code}）：${folder}。请运行 agent-board 重新启动；不确定是否送达的消息没有重新发送。`
       : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
         ? `看板无法确认消息持有者（${code}）：${folder}。请先停止所有看板 server，再检查该文件夹里的 .message-claim-*.json。确认没有 hub 运行后，才能移除损坏的 claim。请保留 messages.json，不要重发不确定是否送达的消息。`
         : code === 'ACL_CHECK_TIMEOUT'
@@ -708,8 +708,8 @@ export const ZH_CN: Strings = {
           : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
             ? `看板无法打开消息文件夹（${code}）：${folder}。请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。`
             : `看板无法打开消息文件夹（${code}）：${folder}。消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。`,
-  serveOffline: '连不上看板。请用 --serve 重新启动看板；新页面会自动打开，这个标签页可以关闭。',
-  serveOfflineLan: '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
+  serveOffline: '连不上看板。请再运行一次 agent-board；新页面会自动打开，这个标签页可以关闭。',
+  serveOfflineLan: '连不上看板。请在电脑上再运行一次 agent-board --lan，再打开新地址。',
   themeToDark: '切换成深色',
   themeToLight: '切换成浅色',
   serveLive: '实时',

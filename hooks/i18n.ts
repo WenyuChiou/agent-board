@@ -672,8 +672,8 @@ export const ZH_TW = {
   boardNoAgents: '還沒有 agent 回報到這個看板。用這行接上一個：npx @wenyuchiou/agent-board setup',
   boardEmptyHow: 'agent 開始工作後，它的任務會出現在這裡、它的名字下；它問你的事會放進「等你處理」。',
   boardStatusLine: (needs: number, working: number): string => `${needs} 項等你 · ${working} 項進行中`,
-  boardUsage: '用法：agent-board | agent-board setup | agent-board stop | agent-board --json · --help all 查看所有選項（--watch、--serve、--tidy [--stopped | --agent 名稱 | --older 天數]、--all...）',
-  boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <埠號>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出閒置和已停止項目',
+  boardUsage: '用法：agent-board | agent-board setup | agent-board stop | agent-board --json · --help all 查看所有選項（--watch、--tidy [--stopped | --agent 名稱 | --older 天數]、--all...）',
+  boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve（舊）] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <埠號>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出閒置和已停止項目',
   boardHidden: (text: string): string => `已隱藏「${text}」；問題一改就會再出現。`,
   boardShown: '隱藏的問題都重新顯示了。',
   hideFailed: '記不下「已回覆」，這一項還留在清單上。',
@@ -727,7 +727,7 @@ export const ZH_TW = {
   serveSshHint: (port: number, host: string, url: string): string => `轉發埠號以開啟網頁：ssh -L ${port}:127.0.0.1:${port} ${host} 並打開 ${url}`,
   serveBrowserNone: (url: string): string => `找不到瀏覽器。請在瀏覽器打開這個網址：${url}`,
   serveIdle: '本機看板會持續執行；關掉分頁後可在終端機執行 agent-board 或在 agent 對話中輸入 /agent-board 再開啟，按「關閉看板」才停止服務。',
-  serveIdleTimed: (minutes: number): string => `此看板已設定閒置 ${minutes} 分鐘後自動關閉；可用 --serve 再開啟。`,
+  serveIdleTimed: (minutes: number): string => `此看板已設定閒置 ${minutes} 分鐘後自動關閉；可執行 agent-board 再開啟。`,
   serveLanIdle: '在你的網路上，10 分鐘沒人用就會自己關掉。',
   invalidStaleMs: '閒置判定時間必須為大於零的毫秒數。',
   serveFailed: (why: string): string => `開不了看板網頁：${why}`,
@@ -744,7 +744,7 @@ export const ZH_TW = {
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `看板無法開啟訊息資料夾（${code}）：${folder}。請先停止所有看板 server，一併檢查 server.lock、server.owner 與 .message-claim-*.json。確認沒有 hub 執行後，僅移除已核實過期的持有者資料。請保留 messages.json 與不確定是否送達的紀錄，勿重送這些訊息。`
     : code === 'MESSAGE_STORE_CLOSED'
-      ? `看板已停止（${code}）：${folder}。請用 --serve 重新啟動；不確定是否送達的訊息沒有重新送出。`
+      ? `看板已停止（${code}）：${folder}。請執行 agent-board 重新啟動；不確定是否送達的訊息沒有重新送出。`
       : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
         ? `看板無法確認訊息持有者（${code}）：${folder}。請先停止所有看板 server，再檢查該資料夾裡的 .message-claim-*.json。確認沒有 hub 執行後，才能移除損壞的 claim。請保留 messages.json，勿重送不確定是否送達的訊息。`
         : code === 'ACL_CHECK_TIMEOUT'
@@ -752,8 +752,8 @@ export const ZH_TW = {
           : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
             ? `看板無法開啟訊息資料夾（${code}）：${folder}。請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。`
             : `看板無法開啟訊息資料夾（${code}）：${folder}。訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。`,
-  serveOffline: '連不上看板。請用 --serve 重新啟動看板；新的頁面會自動開啟，這個分頁可以關閉。',
-  serveOfflineLan: '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
+  serveOffline: '連不上看板。請再執行一次 agent-board；新的頁面會自動開啟，這個分頁可以關閉。',
+  serveOfflineLan: '連不上看板。請在電腦上再執行一次 agent-board --lan，再開啟新的網址。',
   themeToDark: '切換成深色',
   themeToLight: '切換成淺色',
   serveLive: '即時',

@@ -340,7 +340,7 @@ const main = () => {
   for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
   if (hasClaude) steps.push(words('plugin'))
   if (available.length) {
-    steps.push(words('board', { command: `${boardCommand} --serve` }))
+    steps.push(words('board', { command: boardCommand }))
   }
   if (steps.length) lines.push('', words('next'), ...steps.map((step, i) => `${i + 1}. ${step}`))
   process.stdout.write(`${lines.join('\n')}\n`)
