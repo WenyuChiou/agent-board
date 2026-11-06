@@ -186,7 +186,7 @@ test('connect status: a host config that names a missing board script is reporte
   const plain = join(f.home, 'removed plain', 'agent-board.mjs')
   const files = new Map([
     [f.override, '<!-- agent-board:start -->\n' + codexFallbackCommand(missing, progress) + '\n<!-- agent-board:end -->\n'],
-    [join(f.home, '.gemini', 'commands', 'board.toml'), geminiBoardCommand('Synthetic board', 'Run the board', boardRun(missing))],
+    [join(f.home, '.gemini', 'commands', 'agent-board.toml'), geminiBoardCommand('Synthetic board', 'Run the board', boardRun(missing))],
     [join(f.home, '.cursor', 'hooks.json'), JSON.stringify({ hooks: { stop: [{ command: `"${process.execPath}" "${plain}" --codex-event` }] } })],
     [join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md'), `Run \`node "${plain}" --chat\`.\n`],
   ])

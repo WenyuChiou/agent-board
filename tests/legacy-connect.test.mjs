@@ -381,7 +381,7 @@ test('a setup record that cannot be read leaves Codex without fallback instructi
   assert.ok(existsSync(join(f.home, '.codex', 'AGENTS.md')))
 }))
 
-for (const [agent, parts] of [['gemini', ['.gemini', 'commands', 'board.toml']], ['opencode', ['.config', 'opencode', 'commands', 'board.md']]]) test(`${agent} remove leaves no board command naming the script it deleted`, () => withSetup(agent, ({ f, run, recordFile, owned, before }) => {
+for (const [agent, parts] of [['gemini', ['.gemini', 'commands', 'agent-board.toml']], ['opencode', ['.config', 'opencode', 'commands', 'agent-board.md']]]) test(`${agent} remove leaves no board command naming the script it deleted`, () => withSetup(agent, ({ f, run, recordFile, owned, before }) => {
   // A record from setup beside a /board command the connector wrote.
   const command = join(f.home, ...parts)
   const record = readFileSync(recordFile, 'utf8')
@@ -399,8 +399,31 @@ for (const [agent, parts] of [['gemini', ['.gemini', 'commands', 'board.toml']],
   for (const file of owned) if (file !== command) assert.equal(readFileSync(file, 'utf8'), before[file], file)
 }))
 
+for (const [agent, sign, parts] of [['gemini', '.gemini', ['commands', 'board.toml']], ['opencode', '.config/opencode', ['commands', 'board.md']]]) test(`a connect takes the unchanged 0.24.2 /board file of ${agent} away and leaves an edited one`, () => fixture(async f => {
+  mkdirSync(join(f.home, sign), { recursive: true })
+  f.run(f.request('connect'))
+  const now = join(f.home, sign, 'commands', parts[1].replace('board', 'agent-board'))
+  const old = join(f.home, sign, ...parts)
+  assert.ok(existsSync(now), 'the connect writes /agent-board')
+  // 0.24.2's connect wrote the same bytes under the old name.
+  const text = readFileSync(now, 'utf8')
+  writeFileSync(old, text)
+  const upgraded = f.run(f.request('connect'))
+  assert.deepEqual(upgraded.state.setup.problems.filter(one => one.key !== 'codex:approval'), [])
+  assert.equal(existsSync(old), false)
+  assert.equal(readFileSync(now, 'utf8'), text)
+  writeFileSync(old, `${text}# mine\n`)
+  const kept = f.run(f.request('connect'))
+  assert.deepEqual(kept.state.setup.problems.filter(one => one.key !== 'codex:approval'), [])
+  assert.equal(readFileSync(old, 'utf8'), `${text}# mine\n`)
+  assert.equal(readFileSync(now, 'utf8'), text)
+  f.run(f.request('remove'))
+  assert.equal(existsSync(now), false)
+  assert.equal(readFileSync(old, 'utf8'), `${text}# mine\n`)
+}))
+
 test('remove keeps a board command naming setup, and an edited one keeps the board script it runs', () => withSetup('gemini', ({ f, run, recordFile, before }) => {
-  const command = join(f.home, '.gemini', 'commands', 'board.toml')
+  const command = join(f.home, '.gemini', 'commands', 'agent-board.toml')
   const script = join(dirname(f.progress), 'agent-board.mjs')
   assert.deepEqual(run('remove').result.problems, [])
   assert.equal(readFileSync(command, 'utf8'), before[command])

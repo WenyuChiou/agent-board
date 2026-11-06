@@ -1074,8 +1074,8 @@ const BOARD_SCRIPT_FILE = '/home/me/.claude/agent-board.mjs'
 const REPORTER_FILE = '/home/me/.claude/progress-report.sh'
 const BOARD_FILES = [
   '/home/me/.agents/skills/agent-board/SKILL.md',
-  '/home/me/.gemini/commands/board.toml',
-  '/home/me/.config/opencode/commands/board.md',
+  '/home/me/.gemini/commands/agent-board.toml',
+  '/home/me/.config/opencode/commands/agent-board.md',
   '/home/me/.hermes/skills/agent-board/SKILL.md',
   '/home/me/.gemini/config/skills/agent-board/SKILL.md',
 ]

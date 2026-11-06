@@ -1166,6 +1166,9 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
   const file = (kind: keyof typeof current) =>
     generatedFile(current[kind], text => known.some(one => one[kind] === text) || isReleased(kind === 'hermes' ? 'skill' : kind, text, { board: ctx.board ?? '' }))
 
+  const retired = (kind: 'gemini' | 'opencode'): AgentHook['edit'] => text =>
+    text === '' ? null : known.some(one => one[kind] === text) || isReleased(kind, text, { board: ctx.board ?? '' }) ? DELETE : text
+
   return [
     {
       agent: 'skills',
@@ -1176,8 +1179,11 @@ export const boardCommands = (ctx: ConnectContext): AgentHook[] => {
       generated: true,
       edit: (text, remove, previous) => isInstallerSkill(text) ? text : file('skill')(text, remove, previous),
     },
-    { agent: 'gemini', label: '', dir: join(ctx, '.gemini'), file: join(ctx, '.gemini', 'commands', 'board.toml'), generated: true, edit: file('gemini') },
-    { agent: 'opencode', label: '', dir: opencodeHome, file: [opencodeHome, 'commands', 'board.md'].join(ctx.sep), generated: true, edit: file('opencode') },
+    { agent: 'gemini', label: '', dir: join(ctx, '.gemini'), file: join(ctx, '.gemini', 'commands', 'agent-board.toml'), generated: true, edit: file('gemini') },
+    // 0.24.2 and earlier wrote /board here. It goes when it is still exactly what a release wrote; one the person edited stays (#868).
+    { agent: 'gemini', label: '', dir: join(ctx, '.gemini'), file: join(ctx, '.gemini', 'commands', 'board.toml'), generated: true, edit: retired('gemini') },
+    { agent: 'opencode', label: '', dir: opencodeHome, file: [opencodeHome, 'commands', 'agent-board.md'].join(ctx.sep), generated: true, edit: file('opencode') },
+    { agent: 'opencode', label: '', dir: opencodeHome, file: [opencodeHome, 'commands', 'board.md'].join(ctx.sep), generated: true, edit: retired('opencode') },
     { agent: 'hermes', label: '', dir: ctx.hermesHome, file: [ctx.hermesHome, 'skills', SKILL, 'SKILL.md'].join(ctx.sep), generated: true, edit: file('hermes') },
     {
       // Antigravity reads its skills here; its hook is in agentHooks. The installer

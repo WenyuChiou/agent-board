@@ -5472,7 +5472,7 @@ test('OpenCode honors its config override for installation, doctor and removal',
   assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
   const plugin = join(f.env.OPENCODE_CONFIG_DIR, 'plugins', 'agent-board-local.js')
   assert.ok(existsSync(plugin))
-  assert.ok(existsSync(join(f.env.OPENCODE_CONFIG_DIR, 'commands', 'board.md')))
+  assert.ok(existsSync(join(f.env.OPENCODE_CONFIG_DIR, 'commands', 'agent-board.md')))
   assert.ok(!existsSync(join(f.home, '.config', 'opencode')))
   assert.equal(JSON.parse(f.command(['--codex-doctor', '--agent', 'opencode', '--json']).stdout).installed, true)
   f.env.OPENCODE_CONFIG_DIR = join(f.home, 'changed-root')
@@ -5664,7 +5664,7 @@ test('all targets initialize one shared board and explicitly name unfinished nat
   assert.equal(plans.find(plan => plan.agent === 'hermes').capabilities.lifecycle, 'adapter-pending')
   for (const agent of ['openclaw', 'deepseek']) assert.equal(plans.find(plan => plan.agent === agent).capabilities.lifecycle, 'adapter-installed-unverified')
   assert.equal(plans.find(plan => plan.agent === 'antigravity').capabilities.lifecycle, 'adapter-installed-unverified')
-  assert.ok(existsSync(join(f.home, '.gemini', 'commands', 'board.toml')))
+  assert.ok(existsSync(join(f.home, '.gemini', 'commands', 'agent-board.toml')))
   assert.ok(existsSync(join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')))
   for (const agent of ['gemini', 'grok', 'muse']) {
     const response = f.command(['--agent-status', '--agent', agent, '--state', 'waiting'], { session_id: `shared-${agent}-session-123`, prompt: 'PRIVATE_PAYLOAD' })
@@ -9787,3 +9787,81 @@ test('#922 a plan event keeps the project of an existing block', () => fixture(f
   assert.match(text, /^## Kept project\r?$/m)
   assert.ok(!text.includes('## other-folder'), text)
 }))
+
+// 0.24.2 wrote /board for Gemini CLI and OpenCode, with --serve; #868 renames it to /agent-board and runs no flag.
+const commandOf0242 = (f, agent) => {
+  const kind = agent === 'gemini' ? { old: join(f.home, '.gemini', 'commands', 'board.toml'), now: join(f.home, '.gemini', 'commands', 'agent-board.toml') }
+    : { old: join(f.home, '.config', 'opencode', 'commands', 'board.md'), now: join(f.home, '.config', 'opencode', 'commands', 'agent-board.md') }
+  const written = readFileSync(kind.now, 'utf8')
+  const text = agent === 'gemini' ? written.replace("}\n'''\n", " --serve}\n'''\n") : written.replace(/`\n$/, ' --serve`\n')
+  assert.notEqual(text, written)
+  // The 0.24.2 install: the old file on disk, listed in its record, and no new one.
+  const record = join(f.root, `install-${agent}.json`)
+  const manifest = JSON.parse(readFileSync(record, 'utf8'))
+  delete manifest.files[kind.now]
+  manifest.files[kind.old] = createHash('sha256').update(text).digest('hex')
+  rmSync(kind.now)
+  writeFileSync(kind.old, text)
+  writeFileSync(record, `${JSON.stringify(manifest, null, 2)}\n`)
+  return { ...kind, text, record }
+}
+
+for (const agent of ['gemini', 'opencode']) {
+  test(`${agent} setup writes /agent-board that opens the page with no flag`, () => fixture(f => {
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const file = join(f.home, ...(agent === 'gemini' ? ['.gemini', 'commands', 'agent-board.toml'] : ['.config', 'opencode', 'commands', 'agent-board.md']))
+    const text = readFileSync(file, 'utf8')
+    assert.ok(text.includes(f.script), text)
+    assert.ok(!text.includes('--serve'), text)
+    assert.equal(existsSync(join(file, '..', agent === 'gemini' ? 'board.toml' : 'board.md')), false)
+  }))
+
+  test(`${agent} setup on a 0.24.2 install retires the unchanged /board file, names it and writes /agent-board`, () => fixture(f => {
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const old = commandOf0242(f, agent)
+    const preview = f.install('--agent', agent, '--json')
+    assert.equal(preview.status, 0, preview.stderr)
+    const plan = JSON.parse(preview.stdout)
+    assert.deepEqual(plan.conflicts, [])
+    assert.deepEqual(plan.changes.filter(change => change.file === old.old), [{ file: old.old, action: 'remove' }])
+    assert.deepEqual(plan.changes.filter(change => change.file === old.now), [{ file: old.now, action: 'create' }])
+    assert.equal(existsSync(old.old), true, 'a preview changes nothing')
+    const applied = f.install('--agent', agent, '--apply', '--json')
+    assert.equal(applied.status, 0, applied.stderr)
+    assert.equal(existsSync(old.old), false)
+    assert.equal(existsSync(old.now), true)
+    assert.equal(Object.hasOwn(JSON.parse(readFileSync(old.record, 'utf8')).files, old.old), false)
+    assert.deepEqual(JSON.parse(f.install('--agent', agent, '--json').stdout).changes, [])
+  }))
+
+  test(`${agent} setup on a 0.24.2 install keeps an edited /board file and names it, with no INSTALL_CONFLICT`, () => fixture(f => {
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const old = commandOf0242(f, agent)
+    writeFileSync(old.old, `${old.text}\nMy own line\n`)
+    const plan = JSON.parse(f.install('--agent', agent, '--json').stdout)
+    assert.deepEqual(plan.conflicts, [])
+    assert.deepEqual(plan.keptEdited, [old.old])
+    assert.equal(plan.changes.some(change => change.file === old.old), false)
+    const applied = f.install('--agent', agent, '--apply', '--json')
+    assert.equal(applied.status, 0, applied.stderr)
+    assert.equal(readFileSync(old.old, 'utf8'), `${old.text}\nMy own line\n`)
+    assert.equal(existsSync(old.now), true)
+  }))
+
+  test(`${agent} removal of a 0.24.2 install also takes the unchanged /board file, and leaves an edited one`, () => fixture(f => {
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const old = commandOf0242(f, agent)
+    const removed = remove774(f, agent)
+    assert.equal(removed.status, 0, removed.stderr)
+    assert.deepEqual(JSON.parse(removed.stdout).conflicts, [])
+    assert.equal(existsSync(old.old), false)
+    assert.equal(existsSync(old.now), false)
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const edited = commandOf0242(f, agent)
+    writeFileSync(edited.old, `${edited.text}\nMy own line\n`)
+    const kept = remove774(f, agent)
+    assert.equal(kept.status, 0, kept.stderr)
+    assert.deepEqual(JSON.parse(kept.stdout).keptEdited, [edited.old])
+    assert.equal(readFileSync(edited.old, 'utf8'), `${edited.text}\nMy own line\n`)
+  }))
+}
