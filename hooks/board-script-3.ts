@@ -8177,7 +8177,7 @@ export const LINES = [
 "  const address = server.url;",
 "  const isShape = !args.includes(\"--no-open\") && /^http:\\/\\/127\\.0\\.0\\.1:\\d+\\/\\?t=[\\w-]+$/.test(address);",
 "  if (isShape && await pageIsOpen(server))",
-"    return { note: s.boardPageAlreadyOpen(address), isOpen: true };",
+"    return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address };",
 "  const isOpen = isShape ? await new Promise((done) => openInBrowser(address, done, true)) : false;",
 "  return { note: isOpen ? s.boardPageWindowOpened(address) : s.boardPageLink(address), isOpen, url: address };",
 "};",

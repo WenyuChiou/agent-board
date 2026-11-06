@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { registerHooks } from 'node:module'
@@ -229,6 +229,20 @@ test('--lan without --serve opens the page and shows the network address, as --s
   })
 })
 
+test('--lan with the board page already open still shows the network address (#868)', { timeout: 30_000 }, async () => {
+  await withBoard(async ({ script, env }) => {
+    const first = await run(script, ['--no-open'], env)
+    const local = first.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
+    assert.ok(local, first.stdout)
+    // A page loading the address is what makes the board count it as open.
+    await new Promise((done, fail) => request(local, res => { res.resume(); res.on('end', done) }).on('error', fail).end())
+    const result = await run(script, ['--lan'], env)
+    assert.equal(result.stderr, '')
+    assert.match(result.stdout, /already open in your browser/)
+    assert.match(result.stdout, /open http:\/\/[\d.]+:\d+\/\?t=[\w-]+ or scan this code:|This computer has no address on a local network/)
+  })
+})
+
 test('the plain launcher help no longer lists --serve, and --help all marks it old (#868)', async () => {
   const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
   for (const lang of ['en', 'zh-TW', 'zh-CN']) {
@@ -249,8 +263,11 @@ const firstRun = async (answer, check, extraEnv = {}) => {
     writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true;\n')
     const home = join(root, 'home')
     mkdirSync(home)
+    // One synthetic agent folder and a PATH with only Node on it, so setup finds the same agent on every machine.
+    mkdirSync(join(home, '.cursor'))
     const env = {
-      ...Object.fromEntries(['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
+      ...Object.fromEntries(['SystemRoot', 'SystemDrive', 'windir', 'ComSpec'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
+      PATH: dirname(process.execPath),
       CI: '', LANG: 'en_US.UTF-8', HOME: home, USERPROFILE: home, TEMP: root, TMP: root, TMPDIR: root, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid), ...extraEnv,
     }
     const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
