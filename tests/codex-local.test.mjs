@@ -1542,7 +1542,7 @@ test('setup prints a plain summary with each agent and the next steps, and --jso
     assert.ok(codexStep.includes(`--codex-bin '${codex}'`), codexStep)
     assert.match(result.stdout, /--apply/)
     assert.match(result.stdout, /agent-board/)
-    assert.match(result.stdout, /--serve/)
+    assert.doesNotMatch(result.stdout, /--serve/)
     assert.match(result.stdout, /^1\. /m)
     summaries.push(result.stdout)
   }
@@ -4352,7 +4352,7 @@ test('a repeat setup preview after the hooks are trusted does not ask to trust t
   assert.equal(trusted.status, 0, trusted.stderr)
   assert.match(trusted.stdout, /^Codex: already set up/m)
   assert.doesNotMatch(trusted.stdout, /--codex-trust/)
-  assert.match(trusted.stdout, /--serve/)
+  assert.doesNotMatch(trusted.stdout, /--serve/)
   // Codex saying no keeps the step.
   writeFileSync(stateFile, JSON.stringify({ trusted: false }))
   const untrusted = setupAgent(f, '--lang', 'en', '--agent', 'codex')

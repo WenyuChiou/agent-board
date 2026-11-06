@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { makeWorld, modulePath } from './lib/world.mjs'
 import { ISOLATED_VARIABLES, spawnIsolated, within, worldOf } from './lib/spawn.mjs'
 import { block, turn, hook, hookHosts } from './lib/writers.mjs'
-import { terminal, chat, json, seenPageWithin, serve, run } from './lib/surfaces.mjs'
+import { terminal, print, json, seenPageWithin, serve, run } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { killMidWrite, tear, lockFile, twoWriters, formatWriters, readOnly, diskFull, skew, updateMidSession, uninstall, reinstall } from './lib/faults.mjs'
@@ -351,7 +351,7 @@ describe('scenario runner', () => {
     try {
       block(world)
       assert.match((await terminal.screen(world)), /Prepare the gateway/)
-      assert.match((await chat(world)).stdout, /Prepare the gateway/)
+      assert.match(await print(world), /Prepare the gateway/)
       assert.match(JSON.stringify(await json(world)), /Prepare the gateway/)
       assert.match((await terminal.keys(world, '')), /Prepare the gateway/)
       server = await serve.start(world)

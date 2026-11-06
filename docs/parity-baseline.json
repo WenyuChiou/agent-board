@@ -20,7 +20,7 @@
     },
     {
       "host": "grok-build",
-      "surface": "--serve",
+      "surface": "page",
       "capability": "answer-question",
       "level": "opt-in resume",
       "evidence": [

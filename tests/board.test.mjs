@@ -4545,9 +4545,9 @@ test('the terminal board prints one final result for repeated empty actions and 
 
 test('the phone page explains how to open a new address in every language without LAN access', async () => {
   const lines = {
-    en: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
-    'zh-TW': '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
-    'zh-CN': '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
+    en: "Can't reach the board. On the computer, run agent-board --lan again and open the new address.",
+    'zh-TW': '連不上看板。請在電腦上再執行一次 agent-board --lan，再開啟新的網址。',
+    'zh-CN': '连不上看板。请在电脑上再运行一次 agent-board --lan，再打开新地址。',
   }
   for (const [lang, line] of Object.entries(lines)) {
     const source = `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS[${JSON.stringify(lang)}], 'synthetic', true))\n`
@@ -4692,14 +4692,14 @@ test('the page helper flush leaves a pending press available to resolve', async 
 
 test('L5 restarted server: an old page tab disables its buttons and says how to reconnect', { timeout: 30_000 }, async () => {
   const lines = {
-    en: "Can't reach the board. Run the board with --serve again; it opens a new page, and you can close this one.",
-    'zh-TW': '連不上看板。請用 --serve 重新啟動看板；新的頁面會自動開啟，這個分頁可以關閉。',
-    'zh-CN': '连不上看板。请用 --serve 重新启动看板；新页面会自动打开，这个标签页可以关闭。',
+    en: "Can't reach the board. Run agent-board again; it opens a new page, and you can close this one.",
+    'zh-TW': '連不上看板。請再執行一次 agent-board；新的頁面會自動開啟，這個分頁可以關閉。',
+    'zh-CN': '连不上看板。请再运行一次 agent-board；新页面会自动打开，这个标签页可以关闭。',
   }
   const phoneLines = {
-    en: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
-    'zh-TW': '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
-    'zh-CN': '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
+    en: "Can't reach the board. On the computer, run agent-board --lan again and open the new address.",
+    'zh-TW': '連不上看板。請在電腦上再執行一次 agent-board --lan，再開啟新的網址。',
+    'zh-CN': '连不上看板。请在电脑上再运行一次 agent-board --lan，再打开新地址。',
   }
   for (const [lang, line] of Object.entries(lines)) {
     const board = await page('', {}, ['--lang', lang])
@@ -4858,7 +4858,7 @@ test('a press that finds the board gone keeps the typed reply', async () => {
       const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
       // A message that did not go carries Send again and Copy message under its line.
       assert.ok(pageCardResults(dom, model.asks[0].key).some(node => node.textContent.startsWith(mode === 'connected' ? words.messagesFailed : words.serveOffline)), mode)
-      assert.ok(dom.node('offline').textContent.includes('--serve'))
+      assert.ok(dom.node('offline').textContent.includes('agent-board'))
       assert.equal(dom.requests.length, 1)
       isReachable = true
       await dom.redraw(model)
@@ -5011,13 +5011,13 @@ test('--serve --quiet-board prints only the page address lines', { timeout: 40_0
     assert.equal(first.trim(), address)
     const again = await board.serve(['--quiet-board', '--idle-minutes', '20'])
     assert.deepEqual(again.trim().split('\n'), [
-      'This board is configured to close after 10 minutes unused. Reopen with --serve.',
+      'This board is configured to close after 10 minutes unused. Reopen with agent-board.',
       address,
     ])
     writeFileSync(board.path, FILE)
     const ordinary = await board.serve()
-    assert.ok(ordinary.startsWith('Progress'), ordinary.slice(0, 200))
-    assert.ok(ordinary.includes('Rate-limit the public endpoints'))
+    assert.ok(ordinary.includes('The board you can click'), ordinary.slice(0, 200))
+    assert.ok(!ordinary.includes('Rate-limit the public endpoints'), 'no text board before the address')
   } finally { await board.end([url]) }
 })
 
@@ -5030,7 +5030,7 @@ test('--serve starts the page in the background once, and the next --serve bring
     const first = await board.serve()
     url = board.urlOf(first)
     assert.ok(url, first)
-    assert.ok(first.startsWith('Progress  ● 1 waiting'), first)
+    assert.ok(first.trimStart().startsWith('The board you can click'), first)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
     const again = await board.serve()
     assert.ok(again.includes(url), again)
@@ -5150,6 +5150,30 @@ test('the board command picks text, the terminal board or the page from where it
   assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: {} }), 'page')
   assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { DISPLAY: ':0' } }), 'page')
   assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { WAYLAND_DISPLAY: 'wayland-0' } }), 'page')
+})
+
+test('over SSH, in a terminal with no browser, plain agent-board runs the live terminal board as a real process (#810)', { timeout: 30_000 }, async () => {
+  const board = serveIn()
+  let child
+  try {
+    const shim = join(board.dir, 'ssh-terminal-shim.cjs')
+    // A terminal on both ends, with no display and no BROWSER, as an SSH login has.
+    writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
+    const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '' }
+    for (const name of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[name]
+    child = spawn(process.execPath, ['--require', shim, board.script], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    let out = ''
+    child.stdout.on('data', chunk => { out += chunk })
+    for (let tries = 0; tries < 150 && !(out.includes('\u001b[?1049h') && out.includes('Forward port')); tries++) await new Promise(done => setTimeout(done, 100))
+    assert.ok(out.startsWith('\u001b[?1049h'), `it draws on the alternate screen like --watch: ${JSON.stringify(out.slice(0, 80))}`)
+    assert.ok(out.includes('Rate-limit the public endpoints'), 'the live board shows the work')
+    assert.ok(out.includes('Forward port to open the page'), 'the page is offered through a forwarded port, not opened')
+    assert.doesNotMatch(out, /Opened Agent Board|window opened/i)
+    assert.equal(child.exitCode, null, 'the live board keeps running')
+  } finally {
+    if (child && child.exitCode === null) child.kill()
+    await board.end([])
+  }
 })
 
 test('a second agent-board reuses the running page and prints the same bare URL', { timeout: 40_000 }, async () => {

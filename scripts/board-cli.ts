@@ -2098,9 +2098,9 @@ const serveBoard = async (): Promise<void> => {
   const requestedIdle = idleMs()
   const requestedStale = staleTimeoutMs()
   const failure: { storeCode?: string } = {}
-  // Start server preparation concurrently so background process spawn does not wait for text board formatting (#862).
+  // `--serve` is what older command files and scripts still run: it opens the page like the plain
+  // command and prints no text board before the address (#868). `--quiet-board` is now a no-op.
   const serverPromise = ensureServer(failure)
-  if (!args.includes('--quiet-board')) process.stdout.write(boardText(view(), pending(), s, options()))
   // The note goes above the address, so the address stays the last line an agent shows.
   const show = async (url: string, isKept = false, actualIdle?: number, isPageOpen = false): Promise<void> => {
     const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60_000)}\n` : ''
@@ -2118,7 +2118,7 @@ const serveBoard = async (): Promise<void> => {
   await show(server.url, server.isKept, server.idleMs, await pageIsOpen(server))
 }
 
-const openPage = async (): Promise<{ note: string; isOpen: boolean }> => {
+const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string }> => {
   const failure: { storeCode?: string } = {}
   const server = await ensureServer(failure)
   if (server === null) {
@@ -2128,13 +2128,16 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean }> => {
   const address = server.url
   const isShape = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
   // The page is already in a window: point at it rather than opening another one that would poll too.
-  if (isShape && await pageIsOpen(server)) return { note: s.boardPageAlreadyOpen(address), isOpen: true }
+  if (isShape && await pageIsOpen(server)) return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
   const isOpen = isShape ? await new Promise<boolean>(done => openInBrowser(address, done, true)) : false
-  return { note: isOpen ? s.boardPageWindowOpened(address) : s.boardPageLink(address), isOpen }
+  return { note: isOpen ? s.boardPageWindowOpened(address) : s.boardPageLink(address), isOpen, url: address }
 }
 
 const openPageSurface = async (): Promise<void> => {
-  process.stdout.write(`${(await openPage()).note}\n`)
+  const opened = await openPage()
+  process.stdout.write(`${opened.note}\n`)
+  // `--lan` without `--serve`: the page opens here and the phone's address follows it (#868).
+  if (args.includes('--lan') && opened.url !== undefined) await showLan(opened.url)
 }
 
 const stopBoard = async (): Promise<void> => {
@@ -2426,7 +2429,8 @@ const run = async (): Promise<void> => {
     tick()
     setInterval(tick, 2000)
   } else {
-    const surface = pickSurface({ env: process.env, isTty: Boolean(process.stdout.isTTY && process.stdin.isTTY), platform: process.platform })
+    // `--lan` is for a phone, which only the page serves, so it picks the page everywhere.
+    const surface = args.includes('--lan') ? 'page' : pickSurface({ env: process.env, isTty: Boolean(process.stdout.isTTY && process.stdin.isTTY), platform: process.platform })
     if (surface === 'page') {
       await openPageSurface()
     } else if (surface === 'terminal' && process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
