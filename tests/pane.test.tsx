@@ -1507,7 +1507,8 @@ test('the pane acts: tick a step, hand a task to Claude, take over, ask aside', 
 
   // 完成 on a waiting step ticks it in the file, and the journal has it for the report.
   await ui.press({ key: '求職::Google 暑期實習::1::done' })
-  expect(world.files.get(FILE)).toContain('- [x] 推薦信 — 等教授回覆')
+  // The tick carries the hidden done date the 7-day history counts from (#922).
+  expect(world.files.get(FILE)).toMatch(/- \[x\] 推薦信 — 等教授回覆 <!-- done \d{4}-\d\d-\d\d -->\r?\n/)
   expect(world.files.get('/home/me/.claude/progress-journal-2026-10.md')).toMatch(/ · 求職 · Google 暑期實習 · 推薦信 — 等教授回覆\n$/)
 
   // Other work is folded to one line until opened; a row then opens to its steps and

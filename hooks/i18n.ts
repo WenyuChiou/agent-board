@@ -684,6 +684,7 @@ export const ZH_TW = {
   cleanUp: '清理',
   cleanSeenUnreadable: '沒有封存任何項目，因為讀不到任務完成時間的紀錄。',
   canArchive: (n: number): string => `可封存 ${n} 個已完成的任務`,
+  historyLine: (n: number, from: string, to: string): string => `已封存 ${n} 個較早的步驟（${from} 至 ${to}）`,
   prunedAgents: (n: number): string => `${n} 筆舊的 agent 紀錄`,
   prunedSessions: (n: number): string => `${n} 份舊的 session 工作清單`,
   prunedTurns: (n: number): string => `${n} 則還沒讀的收件匣回合`,
