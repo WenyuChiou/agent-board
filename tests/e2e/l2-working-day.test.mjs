@@ -207,7 +207,7 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       const card = page.cards().find(one => one.textContent.includes('Stopped route review'))
       assert.ok(card)
       noMachineIds(page.text(), world)
-      await knownFailure('hold:stopped-answer-box', () => assert.equal(page.inputs(card).length, 0, card.textContent))
+      assert.equal(page.inputs(card).length, 0, card.textContent)
     } finally { await world.close() }
   })
 
