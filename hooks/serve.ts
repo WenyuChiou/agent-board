@@ -772,7 +772,7 @@ const PAGE_WORDS = [
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
   'archiveNow', 'cleanUp', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
-  'serveClosed', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
+  'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
@@ -980,11 +980,12 @@ ${CLIP_CSS}
 .side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
 .side .pfoot .set-row{order:-1;flex-basis:100%;margin-left:calc(var(--s2) * -1)}
 .side .pfoot .grow{display:none}
-.side .pfoot #close,.side .pfoot .btn{min-height:32px;padding-inline:8px;border-color:transparent;background:transparent;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
+.side .pfoot #close,.side .pfoot .btn{min-height:24px;padding-inline:var(--s2);font-size:var(--text-xs);color:var(--muted)}
+.side .pfoot #close:hover,.side .pfoot .btn:hover{color:var(--ink)}
 .side .pfoot p{order:3;flex-basis:100%}
-.ver-link{display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-size:var(--text-xs);text-decoration:none;border-radius:var(--radius-s);white-space:nowrap}
+.ver-link{display:inline-flex;align-items:center;gap:var(--s1);color:color-mix(in srgb,var(--muted) 75%,var(--surface));font-size:var(--text-xs);line-height:1.2;text-decoration:none;border-radius:var(--radius-s);white-space:nowrap}
 .ver-link:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
-.ver-link svg.i{width:14px;height:14px}
+.ver-link svg.i{width:12px;height:12px}
 .set-row{display:inline-flex;align-items:center;gap:var(--s1)}
 .pfoot .grow{flex:1 1 auto}
 
@@ -1277,9 +1278,11 @@ const PAGE_SCRIPT = String.raw`
     // Redraw even an unchanged model to restore each action's own sending state.
     last = '';
   }
+  // Names this page to the board, so it can tell one open page from another (#265).
+  var pageId = (function () { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } })();
   function call(path, body) {
     if (isUnreachable && body !== undefined) return Promise.reject();
-    var headers = { 'x-board-token': token };
+    var headers = { 'x-board-token': token, 'x-board-page': pageId, 'x-board-visible': document.hidden ? '0' : '1' };
     if (path === '/api/board' && body === undefined && boardEtag) headers['if-none-match'] = boardEtag;
     if (body !== undefined) headers['content-type'] = 'application/json';
     return fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' }).then(function (res) {
@@ -1291,6 +1294,10 @@ const PAGE_SCRIPT = String.raw`
       });
     }).catch(function (error) { unreachable(); throw error; });
   }
+  // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
+  if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
+    try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
+  });
   // onCopied: what to do once the text is on the clipboard; the card then says where to paste it. Without it the
   // result line says Copied. That line, and the card's after-copy line, show only after a copy was confirmed
   // (the clipboard promise resolved, or the older copy command on a page the clipboard is closed to, such as
@@ -1829,6 +1836,8 @@ const PAGE_SCRIPT = String.raw`
     // "Last:" names the last finished step, not the next one: a task with nothing finished yet shows no Last: line.
     var lastDone = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
     var lastFinished = lastDone.length ? clean(lastDone[lastDone.length - 1].text) : '';
+    // A plan-tool block with no title takes its current step as the title; the step is then said once.
+    if (sameName(step, clean(fullTitle(ref)))) step = '';
     var detail = section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
     var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
@@ -2727,6 +2736,15 @@ const PAGE_SCRIPT = String.raw`
     if (isClosed) return;
     clearTimeout(timer);
     call('/api/board').then(function (data) {
+      // A newer page took over: this one stops asking and says so, once (#265).
+      if (data.moved) {
+        isClosed = true;
+        var movedMain = document.querySelector('main');
+        movedMain.textContent = '';
+        add(movedMain, el('p', '', w('serveMoved')));
+        document.getElementById('side').hidden = true;
+        return;
+      }
       if (data.unchanged) { reachable(); maybeShowAway(); return; }
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }

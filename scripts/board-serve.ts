@@ -268,6 +268,28 @@ export const startServer = (o: ServeOptions): void => {
   const replies = new Map<string, Result & { at: number; key: string }>()
   let port = 0
   let lastSeen = Date.now()
+  // Which board pages are open (#265). A page names itself in x-board-page on every poll; loading the page counts until its
+  // first poll. The terminal board and other scripts read GET /api/board without that header and do not count. A page that
+  // says it left is dropped alone, so another page that is still open stays counted. Only a page that reported itself visible
+  // counts as a window the person can see; a hidden or minimized one does not. When a newer page has asked, an older page is
+  // told it was replaced and stops asking.
+  const pages = new Map<string, { seq: number; at: number; visible: boolean }>()
+  let loadedAt = 0
+  let pageSeq = 0
+  // Pages told they were replaced. They stay replaced: a poll already on its way when the page stopped must not make it the newest again.
+  const retired = new Set<string>()
+  // A page that has not asked for this long no longer stands for a newer page (a backgrounded tab asks about once a minute).
+  const PAGE_STALE_MS = 150_000
+  const pageIdOf = (headers: IncomingMessage['headers']): string => {
+    const id = text(headers['x-board-page'])
+    return /^[\w-]{1,64}$/.test(id) ? id : ''
+  }
+  // How long ago a visible page last loaded or asked; null when none did.
+  const pageAgo = (now: number): number | null => {
+    let latest = loadedAt
+    for (const one of pages.values()) if (one.visible && one.at > latest) latest = one.at
+    return latest === 0 ? null : now - latest
+  }
   let isStopping = false
   // The page on the local network: its own server, address and token, so the computer's token
   // never crosses the network.
@@ -372,6 +394,22 @@ export const startServer = (o: ServeOptions): void => {
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
+    if (!isLan && isPage) loadedAt = Date.now()
+    let isReplaced = false
+    if (!isLan && req.method === 'GET' && url.pathname === '/api/board' && pageIdOf(req.headers) !== '') {
+      const now = Date.now()
+      const id = pageIdOf(req.headers)
+      const mine = pages.get(id)?.seq ?? ++pageSeq
+      isReplaced = retired.has(id) || [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)
+      if (isReplaced) {
+        pages.delete(id)
+        retired.add(id)
+        // A bound on the memory: the oldest ids are forgotten first.
+        if (retired.size > 256) retired.delete(retired.values().next().value as string)
+      } else pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
+      // Pages that stopped asking long ago (a crashed window) are forgotten.
+      if (pages.size > 32) for (const [other, one] of pages) if (now - one.at > 300_000) pages.delete(other)
+    }
     if (!url.pathname.startsWith('/api/messages/')) {
       lastSeen = Date.now()
       if (side !== null) side.lastSeen = lastSeen
@@ -384,6 +422,8 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (req.method === 'GET') {
       if (url.pathname === '/api/board') {
+        // An older page stops asking: it shows one line that the board moved to the newer page (#265).
+        if (isReplaced) return json(res, 200, { moved: true })
         // A file the board cannot read is named on the page, which would otherwise say it is offline. The page
         // is always the grouped one; the old ?group=agent address asks for what every address gets now.
         try {
@@ -415,11 +455,22 @@ export const startServer = (o: ServeOptions): void => {
         }
       }
       // Only the board script on the computer asks; the answer names progress.md's path.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size })
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size, pageAgo: pageAgo(Date.now()) })
       return json(res, 404, {})
     }
     const body = await readBody(req)
     if (body === null) return json(res, 400, {})
+    if (url.pathname === '/api/page-gone' && !isLan) {
+      // The page is gone for good: a poll of it that was already on its way must not bring it back as an open page.
+      const gone = pageIdOf(req.headers)
+      pages.delete(gone)
+      if (gone !== '') {
+        retired.add(gone)
+        if (retired.size > 256) retired.delete(retired.values().next().value as string)
+      }
+      loadedAt = 0
+      return json(res, 200, {})
+    }
     if (url.pathname.startsWith('/api/messages/')) {
       if (isLan) return json(res, 403, {})
       const action = url.pathname.slice('/api/messages/'.length)

@@ -585,6 +585,7 @@ export const EN: Strings = {
   boardOpenPage: 'Open board page',
   boardPageWindowOpened: (url: string): string => `Opened Agent Board in your browser: ${url}`,
   boardPageLink: (url: string): string => url,
+  boardPageAlreadyOpen: (url: string): string => `Agent Board is already open in your browser: ${url}`,
   boardInbox: 'Turns in the inbox not summed up yet (open a Claude Code session to take them in)',
   boardWatching: 'Updates every 2 seconds; Ctrl+C to stop',
   boardCommandDescription: 'Agent Board: what every agent is doing, and what waits on you',
@@ -646,6 +647,7 @@ export const EN: Strings = {
   cleanUp: 'Clean up',
   cleanSeenUnreadable: 'Nothing was archived because the record of when tasks were done cannot be read.',
   canArchive: (n: number): string => `${n} finished ${n === 1 ? 'task' : 'tasks'} can be archived`,
+  historyLine: (n: number, from: string, to: string): string => `${n} earlier ${n === 1 ? 'step' : 'steps'} archived (from ${from} to ${to})`,
   prunedAgents: (n: number): string => `${n} old agent ${n === 1 ? 'record' : 'records'}`,
   prunedSessions: (n: number): string => `${n} old session ${n === 1 ? 'task list' : 'task lists'}`,
   prunedTurns: (n: number): string => `${n} unread inbox ${n === 1 ? 'turn' : 'turns'}`,
@@ -690,6 +692,7 @@ export const EN: Strings = {
   serveLanFailed: "Couldn't open the board to the local network.",
   serveClose: 'Close the board',
   serveClosed: 'The board is closed; you can close this tab. To open it again, run agent-board in a terminal or /agent-board in an agent\'s chat.',
+  serveMoved: 'The board moved to a newer tab, so this tab stopped updating; you can close it. To open the board again, run /agent-board in an agent\'s chat or agent-board in a terminal.',
   serveCloseBusy: 'A message is still on its way to an agent; close the board once it replies.',
   serveNotStarted: 'its server did not start.',
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'

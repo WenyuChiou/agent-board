@@ -37,6 +37,10 @@ const fixture = fn => {
     APPDATA: join(home, 'AppData/Roaming'), LOCALAPPDATA: join(home, 'AppData/Local'),
     LANG: 'en_US.UTF-8', NO_COLOR: '1', npm_config_update_notifier: 'false',
     npm_config_cache: cache, npm_config_userconfig: join(box, 'npmrc'), npm_config_globalconfig: join(box, 'global-npmrc'),
+    // A board these runs start opens no window and stops once this test process is gone (#959, #1016).
+    // Without it a desktop run opens an Edge window per plain call, whose profile under this home is
+    // locked while the private-path scan reads it.
+    AGENT_BOARD_TEST_PID: String(process.pid),
   }
   const run = (pkg, args = [], extraEnv = {}) => spawnSync(process.execPath, [join(pkg, 'bin/agent-board.mjs'), ...args], {
     cwd: box, env: { ...env, ...extraEnv }, encoding: 'utf8', windowsHide: true, timeout: 30000,
@@ -293,6 +297,8 @@ test('after setup --apply from the packed files, agent-board runs the installed 
     success(result)
     assert.ok(result.stdout.trim())
     assert.equal(result.stderr, '')
+    // A test never opens a window on the tester's screen (#1016).
+    assert.doesNotMatch(result.stdout, /Opened Agent Board in your browser/)
   }
   for (const path of filesUnder(f.home)) {
     const text = readFileSync(path, 'utf8')

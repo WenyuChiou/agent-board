@@ -320,6 +320,74 @@ test('--tidy beside a block cut off in the middle of the file archives the finis
   assert.equal(ran.board, cutBoard().replace('<!-- auto session=9a9a9a9a agent=codex state=done updated=2026-10-10T04:12:58.831Z -->\n### A finished plan\n- [x] Did it\n<!-- /auto session=9a9a9a9a -->\n\n', ''))
 })
 
+// Seven days of history in an open hand-kept task (#922 items 2 and 6), through the board script's
+// sweep (--tidy) and its terminal board. Made-up data; the clock is the script's Date.now.
+const HIST_NOW = Date.parse('2026-10-16T12:00:00.000Z')
+const histDay = (() => {
+  const date = new Date(HIST_NOW)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+})()
+const histRun = (args, file, beside = {}) => chatRun(args, {
+  file: () => file,
+  beside,
+  change: text => `Date.now = () => ${HIST_NOW}\n${text}`,
+  inspect: dir => ({
+    board: readFileSync(join(dir, 'progress.md'), 'utf8'),
+    archive: readdirSync(dir).filter(name => name.includes('-archive-')).map(name => readFileSync(join(dir, name), 'utf8')).join(''),
+  }),
+})
+const HIST_TASK = '## synthetic-project\n### Synthetic long task\n- [x] Old one <!-- done 2026-10-01 -->\n- [-] Old cancelled <!-- done 2026-10-05 -->\n- [x] Recent one <!-- done 2026-10-14 -->\n- [ ] Still open\n'
+
+test('an open hand-kept task moves steps done more than 7 days ago to the archive and keeps one summary line', () => {
+  const ran = histRun(['--tidy'], HIST_TASK)
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, '## synthetic-project\n### Synthetic long task\n2 earlier steps archived (from 10-01 to 10-05)\n- [x] Recent one <!-- done 2026-10-14 -->\n- [ ] Still open\n')
+  assert.ok(ran.archive.includes(`## synthetic-project · ${histDay}\n### Synthetic long task\n- [x] Old one <!-- done 2026-10-01 -->\n- [-] Old cancelled <!-- done 2026-10-05 -->`), ran.archive)
+  assert.ok(!ran.archive.includes('Recent one'), ran.archive)
+})
+
+test('open, waiting and blocked steps and owner lines never move, however old', () => {
+  const kept = '## synthetic-project\n### Synthetic old task\n> Owner words <!-- done 2020-01-01 -->\n- [ ] Todo <!-- done 2020-01-01 -->\n- [~] Doing <!-- done 2020-01-01 -->\n- [?] Waiting, OK? <!-- done 2020-01-01 -->\n- [>] Running <!-- done 2020-01-01 -->\n- [!] Blocked — why <!-- done 2020-01-01 -->\n- [x] Fresh <!-- done 2026-10-16 -->\n'
+  // A second task shows the sweep did run: its old finished step moves while the first is untouched.
+  const ran = histRun(['--tidy'], `${kept}### Synthetic other task\n- [x] Long gone <!-- done 2020-01-01 -->\n- [ ] Open\n`)
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, `${kept}### Synthetic other task\n1 earlier step archived (from 01-01 to 01-01)\n- [ ] Open\n`)
+  assert.ok(ran.archive.includes('- [x] Long gone'), ran.archive)
+  for (const word of ['Todo', 'Doing', 'Waiting', 'Running', 'Blocked', 'Owner words']) assert.ok(!ran.archive.includes(word), word)
+})
+
+test('a done step with no date is stamped with today and is not archived on the first pass', () => {
+  const ran = histRun(['--tidy'], '## synthetic-project\n### Synthetic task\n- [x] Undated done\n- [-] Undated cancelled\n- [ ] Still open\n')
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, `## synthetic-project\n### Synthetic task\n- [x] Undated done <!-- done ${histDay} -->\n- [-] Undated cancelled <!-- done ${histDay} -->\n- [ ] Still open\n`)
+  assert.equal(ran.archive, '')
+})
+
+test('a second pass adds to the summary line instead of writing another', () => {
+  // The first pass wrote its line in zh-TW; this pass speaks English and still finds it.
+  const board = '## synthetic-project\n### Synthetic long task\n已封存 2 個較早的步驟（10-01 至 10-05）\n- [x] Older still <!-- done 2026-09-28 -->\n- [ ] Still open\n'
+  const ran = histRun(['--tidy'], board)
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, '## synthetic-project\n### Synthetic long task\n3 earlier steps archived (from 09-28 to 10-05)\n- [ ] Still open\n')
+})
+
+test('a step ticked on the board is stamped that day, and a press on a stamped line still finds it', () => {
+  const board = '## Job search\n### Fabrikam fellowship\n- [x] Draft the statement <!-- done 2026-10-10 -->\n- [ ] Ask two referees\n'
+  const ran = histRun(['--keys', 'x'], board)
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.stdout.includes('Done: “Ask two referees”.'), ran.stdout)
+  assert.equal(ran.board, `## Job search\n### Fabrikam fellowship\n- [x] Draft the statement <!-- done 2026-10-10 -->\n- [x] Ask two referees <!-- done ${histDay} -->\n`)
+})
+
+test('historyDays in progress-settings.json changes the 7 days, and a missing file means 7', () => {
+  const board = '## synthetic-project\n### Synthetic task\n- [x] Four days old <!-- done 2026-10-12 -->\n- [ ] Still open\n'
+  assert.equal(histRun(['--tidy'], board).board, board)
+  assert.equal(histRun(['--tidy'], board, { 'progress-settings.json': 'not json' }).board, board)
+  const ran = histRun(['--tidy'], board, { 'progress-settings.json': '{"historyDays": 3}\n' })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, '## synthetic-project\n### Synthetic task\n1 earlier step archived (from 10-12 to 10-12)\n- [ ] Still open\n')
+})
+
 test('a reporter for another session writes below a block cut off in the middle of the file, and one for its own session writes its block in place of the marker line', () => {
   for (const [args, payload] of [
     [['--codex-event'], { session_id: 'synthetic-cut-239', hook_event_name: 'SessionStart' }],
@@ -2675,14 +2743,14 @@ test('ticking twin steps from the page ticks each line it showed', { timeout: 30
     const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.fp } })
     assert.equal(second.status, 200, second.body)
     let left = readFileSync(path, 'utf8').split('\n')
-    assert.equal(left[lines[1]], '- [x] Draft the notes')
+    assert.match(left[lines[1]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
     assert.equal(left[lines[0]], '- [ ] Draft the notes')
     // Then the first twin, with the board drawn again.
     const again = await rowOf('Draft the notes')
     const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.fp } })
     assert.equal(first.status, 200, first.body)
     left = readFileSync(path, 'utf8').split('\n')
-    assert.equal(left[lines[0]], '- [x] Draft the notes')
+    assert.match(left[lines[0]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
   } finally {
     await board.close()
   }
@@ -2710,7 +2778,7 @@ test('ticking the next step from the page still works when the step list folded 
     const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.fp } })
     assert.equal(ticked.status, 200, ticked.body)
     const left = readFileSync(path, 'utf8').split('\n')
-    assert.equal(left[row.nextFileLine], '- [x] Step six')
+    assert.match(left[row.nextFileLine], /^- \[x\] Step six <!-- done \d{4}-\d\d-\d\d -->$/)
     assert.equal(left[row.steps[0].fileLine], '- [ ] Step one')
   } finally {
     await board.close()
@@ -3396,6 +3464,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     ...(motion === undefined ? {} : { matchMedia: () => ({ matches: motion === 'reduce', addEventListener: () => {} }) }),
   }
   const requests = []
+  // What each request carried besides its path and body, kept apart so `requests` keeps its shape.
+  const sent = []
   const pending = new Set()
   const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(found => found[1]).find(code => code.includes('(function ()'))
   runInNewContext(script, {
@@ -3423,6 +3493,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
           return { ...answer, json: async () => { const data = await answer.json(); return data.model ? { ...data, model: viewed(data.model) } : data } }
         }
         requests.push({ path: target, body: JSON.parse(options.body) })
+        sent.push({ path: target, headers: options.headers, keepalive: options.keepalive })
         if (post) return post(requests.at(-1))
         return { ok: true, json: async () => ({ note: '' }) }
       })()
@@ -3464,6 +3535,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     title: () => document.title,
     delays,
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
+    leave: () => windowEvents.pagehide?.(),
+    sent,
     setNow: value => { clockNow = value },
     hideTab: () => { document.hidden = true; document.events.visibilitychange?.() },
     showTab: () => { document.hidden = false; document.events.visibilitychange?.() },
@@ -4476,6 +4549,51 @@ test('the phone page explains how to open a new address in every language withou
     await dom.settle()
     assert.equal(dom.node('offline').textContent, line)
   }
+})
+
+test('the board page marks its polls as the page and tells the board when it leaves (#265)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  const polls = []
+  const dom = await pageDom(html, null, { width: 1000, getBoard: async options => { polls.push(options.headers); return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], now: 1 }, now: 1 }) } } })
+  await dom.settle()
+  assert.ok(polls.length > 0, 'the page polls the board')
+  const named = polls[0]['x-board-page']
+  assert.match(named, /^[\w-]{1,64}$/, 'the page names itself in a form the board accepts')
+  for (const headers of polls) assert.equal(headers['x-board-page'], named, 'every poll names the same page, so scripts reading the board do not count as one and two pages stay apart')
+  assert.equal(dom.sent.length, 0)
+  assert.ok(polls.every(headers => headers['x-board-visible'] === '1'), 'a shown page says it is visible')
+  // A tab put in the background says so with its next poll, so it no longer counts as a window the person can see.
+  dom.hideTab()
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+  assert.equal(polls.at(-1)['x-board-visible'], '0', 'a hidden page says it is hidden')
+  dom.showTab()
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+  assert.equal(polls.at(-1)['x-board-visible'], '1')
+  dom.leave()
+  await dom.settle()
+  const gone = dom.sent.filter(one => one.path === '/api/page-gone')
+  assert.equal(gone.length, 1, 'leaving tells the board once')
+  assert.equal(gone[0].keepalive, true, 'the request outlives the closing page')
+  assert.equal(gone[0].headers['x-board-token'], 'x')
+  assert.equal(gone[0].headers['x-board-page'], named, 'the page that leaves is the one that was polling')
+})
+
+test('a page the board says was replaced stops asking and shows one line (#265)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  let polls = 0
+  const dom = await pageDom(html, null, { width: 1000, getBoard: async () => { polls += 1; return { ok: true, json: async () => ({ moved: true }) } } })
+  await dom.settle()
+  assert.equal(polls, 1, 'the page asked once')
+  assert.match(dom.node('main').textContent, /The board moved to a newer tab/)
+  const before = polls
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }).catch(() => {})
+  assert.equal(polls, before, 'a replaced page asks no more')
 })
 
 test('an old page rejected by a restarted server shows the offline line', async () => {
@@ -10644,6 +10762,46 @@ test('buttons keep desktop size in a narrow window with a mouse', async () => {
   // At 640px and below the width block changes layout only.
   const narrow = mediaBlocks(html, '(max-width:640px)').join('\n')
   assert.ok(narrow.includes('.col{padding-left') && !/\.btn|\.answers button/.test(narrow))
+})
+
+test('the actions at the foot of the sidebar look like buttons, not underlined links', () => {
+  const html = redesignPage()
+  // The owner's rule (product principles): an action is a button. Only GitHub stays a link.
+  const rules = [...html.matchAll(/([^{}]*\.side \.pfoot[^{}]*)\{([^}]*)\}/g)].map(found => ({ selector: found[1], body: found[2] }))
+  const actions = rules.filter(rule => /#close|\.btn\b/.test(rule.selector))
+  assert.ok(actions.length > 0)
+  for (const rule of actions) assert.doesNotMatch(rule.body, /underline|background:transparent|border-color:transparent/, rule.selector)
+  assert.match(html, /\.btn,[^{}]*\.pfoot #close[^{}]*\{[^}]*border:1px solid var\(--btn-line\)/)
+  const foot = html.match(/<footer class="pfoot"[\s\S]*?<\/footer>/)[0]
+  for (const id of ['connect-web-chat', 'import-clipboard', 'close']) assert.match(foot, new RegExp('<button type="button"[^>]*id="' + id + '"'))
+})
+
+test('the sidebar foot actions are small quiet buttons and the version line is quieter', () => {
+  const html = redesignPage()
+  const rule = html.match(/\.side \.pfoot #close,\.side \.pfoot \.btn\{([^}]*)\}/)[1]
+  // The page's smallest text size, a token and not a number; at least 24px tall; still a button.
+  assert.match(rule, /font-size:var\(--text-xs\)/)
+  assert.match(rule, /color:var\(--muted\)/)
+  const height = Number(rule.match(/min-height:(\d+)px/)[1])
+  assert.ok(height >= 24 && height <= 28, rule)
+  assert.doesNotMatch(rule, /font-size:\d/)
+  // The version line takes the smallest size and a colour fainter than the muted one, in both themes (the colour mixes tokens).
+  const ver = html.match(/\.ver-link\{([^}]*)\}/)[1]
+  assert.match(ver, /font-size:var\(--text-xs\)/)
+  assert.match(ver, /color:color-mix\(in srgb,var\(--muted\) \d+%,var\(--surface\)\)/)
+  assert.match(html, /\.ver-link svg\.i\{width:12px;height:12px\}/)
+})
+
+test('a row whose title is its current step shows the step once', async () => {
+  const text = [
+    groupedBlock('48800001', 'codex', 'ended', 'shared-repo', 'Run tests', ['- [~] Run tests']),
+    groupedBlock('48800002', 'codex', 'ended', 'shared-repo', 'Build the page', ['- [~] Run tests']),
+  ].join('\n')
+  const dom = await pageDom(await sourcePage('en'), await sourceModel(text, groupedNow))
+  const rows = pressWalk(dom.node('board')).filter(node => node.tag === 'li' && pressWalk(node).some(one => one.className === 'r-title'))
+  const metaOf = title => pressWalk(rows.find(row => pressWalk(row).some(one => one.className === 'r-title' && one.textContent === title))).filter(one => one.className === 'r-meta').flatMap(pressWalk).map(one => one.textContent ?? '').join(' ')
+  assert.doesNotMatch(metaOf('Run tests'), /Run tests/)
+  assert.match(metaOf('Build the page'), /Run tests/)
 })
 
 test('the sidebar folds to a rail at the docked width', async () => {

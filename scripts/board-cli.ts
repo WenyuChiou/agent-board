@@ -16,6 +16,7 @@ import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstat
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
@@ -962,7 +963,9 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
     const currentBoardHash = createHash('sha256').update(text).digest('hex')
     const taken = take(text, isLast)
     if (taken === AGAIN) return AGAIN
-    if (taken === null || taken.entries.length === 0) return text
+    if (taken === null) return text
+    // Text changed with nothing to archive (a hidden date added to a finished step, #922).
+    if (taken.entries.length === 0) return taken.text
     didRemove = true
     const fresh = unwrittenEntries(taken.entries, archived)
     if (fresh.length > 0 || archived.size > 0) {
@@ -1099,7 +1102,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     let wrote: string | null
     try {
       wrote = rewrite(path, text => {
-        const after = setManualStep(text, action.ref, 'x')
+        const after = setManualStep(text, action.ref, 'x', now)
         if (after !== text) {
           // Save history before ticking: a journal failure must leave the step available
           // to retry. A failed board replacement removes only this press's journal line.
@@ -1239,6 +1242,13 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
   // write closes them (#511), even when its read-back then fails and a later try finds no block.
   let closing: QuestionRecord[] = []
   const landed = new Map<string, QuestionRecord>()
+  // Read on the sweep only, never on a poll; a missing or unreadable file means the default.
+  let historyDays = HISTORY_DAYS
+  if (!isNow && !isCleanUp) {
+    try {
+      historyDays = historyDaysOf(read(settingsPath(path)))
+    } catch {}
+  }
   const count = archiveOut((text, isLast) => {
     closing = []
     const lines = text.split(/\r?\n/)
@@ -1291,8 +1301,11 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
     const manual = !isNow && !isCleanUp && !isHandKeptMoveOn
       ? { text: blocks.text, entries: [], keys: [] }
       : takeManualDone(blocks.text, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now), s, isNow)
-    const entries = [...blocks.entries, ...manual.entries]
-    if (entries.length === 0) return null
+    // The unattended sweep also dates the finished steps of hand-kept tasks it has not seen done,
+    // and moves the ones dated more than the history days ago (#922).
+    const history = isNow || isCleanUp ? null : sweepHistory(manual.text, now, historyDays, s)
+    const entries = [...blocks.entries, ...manual.entries, ...(history?.entries ?? [])]
+    if (entries.length === 0) return history === null || history.text === manual.text ? null : { text: history.text, entries: [] }
     // A verified run goes without keeping its questions, so they close with its block (#511); the
     // ledger would otherwise keep them open with no block left to hide them. A try that does not land
     // (another session's write, a retry) closes none.
@@ -1314,7 +1327,7 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
       }
     }
     for (const { span, text: lines } of asking) if (kept.has(span.start)) moved.set(span.session, lines)
-    return { text: manual.text, entries }
+    return { text: history?.text ?? manual.text, entries }
   }, now, () => { for (const record of closing) landed.set(record.id, record) })
   if (count !== null && count > 0) for (const record of landed.values()) keepQuestionCapture(record, 'resolved')
   if (nextCursor !== cursor) rewrite(cursorPath, () => `${nextCursor}\n`)
@@ -1751,6 +1764,16 @@ const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unk
   }
 }
 
+// A board page counts as an open window only if it reported itself visible within this long. A visible page asks every
+// 3 seconds; a hidden or minimized one does not count, so opening the board then shows a window (#265). Only a test
+// process may shorten it.
+const PAGE_OPEN_MS = (): number => (process.env.AGENT_BOARD_TEST_PID && Number(process.env.AGENT_BOARD_PAGE_OPEN_MS) > 0 ? Math.min(Number(process.env.AGENT_BOARD_PAGE_OPEN_MS), 10_000) : 10_000)
+const pageIsOpen = async (server: RunningServer): Promise<boolean> => {
+  if (server.isNew) return false
+  const answer = await ping({ pid: 0, port: server.port, url: server.url, path: '', built: '' })
+  return answer !== null && answer !== 'silent' && typeof answer.pageAgo === 'number' && answer.pageAgo >= 0 && answer.pageAgo < PAGE_OPEN_MS()
+}
+
 const serveChild = (): void => {
   // Resolve the protected address before asynchronous callbacks can run.
   const file = serveFile()
@@ -2079,12 +2102,12 @@ const serveBoard = async (): Promise<void> => {
   const serverPromise = ensureServer(failure)
   if (!args.includes('--quiet-board')) process.stdout.write(boardText(view(), pending(), s, options()))
   // The note goes above the address, so the address stays the last line an agent shows.
-  const show = async (url: string, isKept = false, actualIdle?: number): Promise<void> => {
+  const show = async (url: string, isKept = false, actualIdle?: number, isPageOpen = false): Promise<void> => {
     const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60_000)}\n` : ''
     process.stdout.write(`\n${isKept ? `${s.serveKept}\n` : ''}${idleNote}${s.serveAt(url)}\n`)
     // The address comes from a file and goes to a shell on Windows: only the shape this server
     // writes is opened.
-    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)) await new Promise<void>(done => openInBrowser(url, () => done()))
+    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && !isPageOpen) await new Promise<void>(done => openInBrowser(url, () => done()))
     if (args.includes('--lan')) await showLan(url)
   }
   const server = await serverPromise
@@ -2092,7 +2115,7 @@ const serveBoard = async (): Promise<void> => {
     process.stdout.write(`\n${failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted)}\n`)
     return
   }
-  await show(server.url, server.isKept, server.idleMs)
+  await show(server.url, server.isKept, server.idleMs, await pageIsOpen(server))
 }
 
 const openPage = async (): Promise<{ note: string; isOpen: boolean }> => {
@@ -2103,9 +2126,10 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean }> => {
     return { note: failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted), isOpen: false }
   }
   const address = server.url
-  const isOpen = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
-    ? await new Promise<boolean>(done => openInBrowser(address, done, true))
-    : false
+  const isShape = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
+  // The page is already in a window: point at it rather than opening another one that would poll too.
+  if (isShape && await pageIsOpen(server)) return { note: s.boardPageAlreadyOpen(address), isOpen: true }
+  const isOpen = isShape ? await new Promise<boolean>(done => openInBrowser(address, done, true)) : false
   return { note: isOpen ? s.boardPageWindowOpened(address) : s.boardPageLink(address), isOpen }
 }
 
