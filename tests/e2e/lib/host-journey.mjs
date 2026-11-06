@@ -72,7 +72,7 @@ export const fixture = signs => {
 }
 
 // Runs node with the given arguments in the fixture's world and collects what it printed.
-const run = (f, args, { input, timeoutMs, env }) => new Promise((resolveRun, reject) => {
+export const run = (f, args, { input, timeoutMs, env }) => new Promise((resolveRun, reject) => {
   const child = spawnIsolated(process.execPath, args, { env: env ? { ...f.env, ...env } : f.env, cwd: f.world.root, stdio: ['pipe', 'pipe', 'pipe'] })
   let stdout = '', stderr = '', failure
   const timer = setTimeout(() => {
