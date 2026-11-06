@@ -73,10 +73,16 @@ describe('L3 across agents and sessions', () => {
       const leave = id => fetch(new URL('/api/page-gone', page), { method: 'POST', headers: { 'x-board-token': page.searchParams.get('t'), 'x-board-page': id, 'content-type': 'application/json' }, body: '{}' })
       // A real page asks every 3 seconds, so while a command runs the pages named here keep asking (every second); the window is never stretched for a slow machine.
       const keeping = async (pages, run) => {
-        const tick = () => Promise.all(pages.map(([id, visible]) => poll(id, visible)))
+        const inFlight = new Set()
+        const tick = () => {
+          const one = Promise.all(pages.map(([id, visible]) => poll(id, visible))).catch(() => {}).finally(() => inFlight.delete(one))
+          inFlight.add(one)
+          return one
+        }
         await tick()
-        const timer = setInterval(() => { void tick().catch(() => {}) }, 1000)
-        try { return await run() } finally { clearInterval(timer) }
+        const timer = setInterval(() => { void tick() }, 1000)
+        // A poll still on its way when the command ends must land before the test goes on, or it could arrive after the next step.
+        try { return await run() } finally { clearInterval(timer); await Promise.all([...inFlight]) }
       }
       const windows = output => (output.match(/E2E_BROWSER_REQUEST/g) ?? []).length
       const serving = () => command(world, ['--serve', '--idle-minutes', '1'])

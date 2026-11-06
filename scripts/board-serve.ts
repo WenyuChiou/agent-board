@@ -461,8 +461,13 @@ export const startServer = (o: ServeOptions): void => {
     const body = await readBody(req)
     if (body === null) return json(res, 400, {})
     if (url.pathname === '/api/page-gone' && !isLan) {
-      pages.delete(pageIdOf(req.headers))
-      retired.delete(pageIdOf(req.headers))
+      // The page is gone for good: a poll of it that was already on its way must not bring it back as an open page.
+      const gone = pageIdOf(req.headers)
+      pages.delete(gone)
+      if (gone !== '') {
+        retired.add(gone)
+        if (retired.size > 256) retired.delete(retired.values().next().value as string)
+      }
       loadedAt = 0
       return json(res, 200, {})
     }
