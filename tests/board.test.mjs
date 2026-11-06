@@ -9498,11 +9498,11 @@ test("the page opens on Needs you, then Working now, then projects, with each ca
     // The page opens on the Overview, and the board holds the sections in this order.
     assert.match(html, /id="shell" data-view="all"/)
     const dom = await pageDom(html, model)
-    // (Other work and the Stopped list under it are both the projects' section.)
-    assert.deepEqual([...new Set(dom.node('board').childNodes.map(node => node.getAttribute('data-sec')))], ['needs', 'working', 'others', 'done'])
+    // (Idle and stopped sessions fold under one count in the projects' section; the summary line above it is not a section.)
+    assert.deepEqual([...new Set(dom.node('board').childNodes.map(node => node.getAttribute('data-sec')).filter(Boolean))], ['needs', 'working', 'others', 'done'])
     const words = shownWords(dom.node('board'))
     assert.ok(words.indexOf(EN.pgNeeds) >= 0 && words.indexOf(EN.pgNeeds) < words.indexOf(EN.pgWorking), words)
-    assert.ok(words.indexOf(EN.pgWorking) < words.indexOf(EN.pgOthers), words)
+    assert.ok(words.indexOf(EN.pgWorking) < words.indexOf(EN.pgIdleFold(Number(dom.node('count-others').textContent))), words)
     // Every question card carries its own agent's mark.
     const cards = dom.node('needs').querySelectorAll('[data-ref-key]')
     assert.equal(cards.length, model.view.needs.cards.length)
@@ -10604,6 +10604,93 @@ test('the Other work view shows its rows or says there are none', async () => {
   const sec = full.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes('Due plan'))
   assert.ok(sec)
   assert.ok(!shownWords(sec).includes(EN.pgNoOthers))
+})
+
+test('an empty Needs you says nothing needs you and when it last checked', async () => {
+  const model = redesignModel()
+  model.asks = []
+  const now = 1000000000000
+  const dom = await pageDom(await sourcePage(), model, { now })
+  const words = () => shownWords(dom.node('board'))
+  assert.ok(words().includes(EN.pgNothing), words())
+  assert.ok(words().includes(EN.pgChecked(EN.justNow)), words())
+  assert.ok(words().includes(EN.pgUpdated(EN.justNow)), words())
+  dom.setNow(now + 5000)
+  dom.node('view-all').click()
+  assert.ok(words().includes(EN.pgChecked(EN.pgSecondsAgo(5))), words())
+  assert.ok(words().includes(EN.pgUpdated(EN.pgSecondsAgo(5))), words())
+})
+
+test('a page whose poll has failed for 10 s says its data may be stale', async () => {
+  const now = 1000000000000
+  let polls = 0
+  const model = redesignModel()
+  const dom = await pageDom(await sourcePage(), model, { now, getBoard: async () => {
+    polls += 1
+    if (polls === 2) throw new Error('Synthetic offline')
+    return { ok: true, json: async () => ({ model, now: 1 }) }
+  } })
+  const walk = node => node.childNodes.flatMap(child => [child, ...walk(child)])
+  const fresh = () => walk(dom.node('board')).find(node => String(node.className).split(' ').includes('fresh-line'))
+  const isStale = () => String(dom.node('board').className).split(' ').includes('stale')
+  assert.equal(fresh().textContent, EN.pgUpdated(EN.justNow))
+  assert.equal(isStale(), false)
+  dom.setNow(now + 11000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(fresh().textContent, EN.pgStale)
+  assert.equal(isStale(), true)
+  // The next good poll says so again and undims the rows.
+  dom.setNow(now + 12000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(fresh().textContent, EN.pgUpdated(EN.justNow))
+  assert.equal(isStale(), false)
+})
+
+test('the summary line counts what the tabs count', async () => {
+  const model = viewed(redesignModel())
+  const due = model.view.all.open.find(ref => ref.key === 'Due plan')
+  model.view.working = [due]
+  model.view.all.open = model.view.all.open.filter(ref => ref.key !== 'Due plan')
+  const dom = await pageDom(await sourcePage(), model)
+  const walk = node => node.childNodes.flatMap(child => [child, ...walk(child)])
+  const summary = node => walk(node).find(one => String(one.className).split(' ').includes('summary'))
+  assert.equal(summary(dom.node('board')).textContent, EN.pgSummary(2, 1, 1))
+  assert.equal(dom.node('count-needs').textContent, '2')
+  assert.equal(dom.node('count-working').textContent, '1')
+  assert.equal(dom.node('count-done').textContent, '1')
+  assert.equal(dom.node('count-others').textContent, '1')
+  // Under an agent filter the summary follows the same counts as the tabs.
+  const filtered = await pageDom(await sourcePage(), model, { storage: new Map([['agent-board.filter', 'gemini']]) })
+  assert.equal(summary(filtered.node('board')).textContent, EN.pgSummary(1, 0, 0))
+  assert.equal(filtered.node('count-needs').textContent, '1')
+})
+
+test('idle and stopped sessions fold under a count and one press opens them', async () => {
+  const dom = await pageDom(await sourcePage(), redesignModel())
+  const walk = node => node.childNodes.flatMap(child => [child, ...walk(child)])
+  const others = () => dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others')
+  const fold = () => walk(others()).find(node => String(node.className).split(' ').includes('fold'))
+  const head = n => walk(others()).find(node => node.tag === 'button' && node.textContent.includes(EN.pgIdleFold(n)))
+  assert.ok(head(2), 'the idle fold head counts the quiet and stopped rows')
+  assert.equal(fold().inert, true)
+  assert.equal(String(fold().parentNode.className).split(' ').includes('open'), false)
+  // The rows sit in the fold, each naming its project, before it is opened.
+  assert.ok(shownWords(others()).includes('Due plan'))
+  assert.ok(shownWords(others()).includes('Stopped plan'))
+  head(2).click()
+  assert.equal(fold().inert, false)
+  assert.equal(String(fold().parentNode.className).split(' ').includes('open'), true)
+  assert.equal(head(2).getAttribute('aria-expanded'), 'true')
+  // The choice survives the next poll, and the fold recounts when a row arrives.
+  const next = redesignModel()
+  next.stopped = [...next.stopped, { key: 'Stopped second plan', project: 'Beta', agent: 'gemini', title: 'Stopped second plan', due: '', steps: [], total: 1, done: 0, status: 'Stopped', tone: 'muted', send: 'open' }]
+  await dom.redraw(next)
+  await dom.settle()
+  assert.equal(fold().inert, false)
+  assert.equal(String(fold().parentNode.className).split(' ').includes('open'), true)
+  assert.ok(head(3), 'the fold counts the new stopped row')
 })
 
 test('opening a view leaves the own-tasks filter as it was', async () => {

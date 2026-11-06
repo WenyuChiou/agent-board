@@ -766,7 +766,7 @@ Rules:
   again, done when every step is [x] or [-], ended if you stop for good with steps
   left. updated= is the time of this update in UTC, ending in Z.`
 
-// The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
+// The words the page's script fills in itself, each with its blanks as \u0001, \u0002 and \u0003.
 const PAGE_WORDS = [
   'webChatConnect', 'webChatCopied', 'importClipboard', 'importNoBlock', 'importUseKeys', 'pasteReview',
   'claudeSendNow', 'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
@@ -778,7 +778,7 @@ const PAGE_WORDS = [
   'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
-  'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
+  'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint', 'pgSummary', 'pgChecked', 'pgSecondsAgo', 'pgUpdated', 'pgStale', 'pgIdleFold', 'justNow', 'minutesAgo', 'hoursAgo', 'daysAgo',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
@@ -792,7 +792,7 @@ export const pageWords = (s: Strings): Record<string, string> => ({
   ...Object.fromEntries(
     PAGE_WORDS.map(key => {
       const value = s[key] as unknown
-      return [key, typeof value === 'function' ? String((value as (...blanks: string[]) => unknown)('\u0001', '\u0002')) : String(value)]
+      return [key, typeof value === 'function' ? String((value as (...blanks: string[]) => unknown)('\u0001', '\u0002', '\u0003')) : String(value)]
     }),
   ),
 })
@@ -923,6 +923,12 @@ div.row-btn .r-chev{visibility:hidden}
 .s-waiting,.k-confirm,.k-choose,.n-waiting{color:var(--waiting-text)}
 .s-blocked{color:var(--alert)}.n-today{color:var(--done)}.s-running{color:var(--alive)}.s-done,.s-todo,.s-cancelled{color:var(--muted)}
 .shelf{display:block}
+/* The first screen's summary and freshness lines sit above every section; a stale poll dims the rows, not the lines. */
+.top{display:grid;gap:var(--s1);padding-bottom:var(--s2)}
+.top p{margin:0}
+.summary{font-size:var(--text-lg);line-height:1.4;font-weight:600}
+.fresh-line{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums}
+#board.stale .rows,#board.stale .cards{opacity:.55}
 .shelf-head{display:flex;gap:var(--s2);width:100%;border-width:1px 0;border-radius:0;min-height:48px;padding:var(--s3) var(--s2);font-size:var(--text-md);line-height:1.4;font-weight:600}
 .shelf-head .count{font-size:var(--text-xs);font-weight:400;color:var(--muted);font-variant-numeric:tabular-nums}
 .shelf .rows{border-top:0}
@@ -1023,7 +1029,8 @@ ${CLIP_CSS}
   /* Overview in two columns: Needs you on the left, the rest stacked on the right; the last row takes the slack */
   .shell[data-view="all"] #board{display:grid;grid-template-columns:minmax(460px,5fr) minmax(0,6fr);column-gap:var(--s6);row-gap:0;grid-template-rows:repeat(12,auto) 1fr;align-items:start}
   .shell[data-view="all"] #board>*{grid-column:2;margin-bottom:var(--s6)}
-  .shell[data-view="all"] #board>#needs{grid-column:1;grid-row:1 / -1;margin-bottom:0}
+  .shell[data-view="all"] #board>#needs{grid-column:1;grid-row:2 / -1;margin-bottom:0}
+  .shell[data-view="all"] #board>.top{grid-column:1 / -1;grid-row:1}
   .shell[data-view="all"] #board>.fresh{grid-column:1 / -1}
   /* Needs you on its own: the questions sit side by side, each its own sheet */
   .shell[data-view="needs"] .sheet{background:none;border:0}
@@ -1037,7 +1044,7 @@ ${CLIP_CSS}
   .shell[data-view="all"] #board{grid-template-columns:repeat(3,minmax(0,1fr))}
   .shell[data-view="all"] #board>*{grid-column:3}
   .shell[data-view="all"] #board>#needs{grid-column:1}
-  .shell[data-view="all"] #board>[data-sec="working"]{grid-column:2;grid-row:1 / -1;margin-bottom:0}
+  .shell[data-view="all"] #board>[data-sec="working"]{grid-column:2;grid-row:2 / -1;margin-bottom:0}
   .shell[data-view="all"] #board>.fresh{grid-column:1 / -1}
 }
 @media (max-width:640px){
@@ -1132,6 +1139,8 @@ const PAGE_SCRIPT = String.raw`
   var presence = null;
   var GLYPH = { done: '✓', doing: '▸', todo: '•', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
+  // The last poll that reached the server, so the page can say whether its rows are current.
+  var lastGood = Date.now();
   var boardEtag = '';
   var opened = {};
   var timer = null;
@@ -1146,9 +1155,9 @@ const PAGE_SCRIPT = String.raw`
   ${filterStore}
   ${agentFade}
   var fadeChips = agentFade(document.getElementById('chips'));
-  function w(key, a, b) {
+  function w(key, a, b, c) {
     var template = String(W[key]);
-    return template.split('\u0001').join(a === undefined ? '' : String(a)).split('\u0002').join(b === undefined ? '' : String(b));
+    return template.split('\u0001').join(a === undefined ? '' : String(a)).split('\u0002').join(b === undefined ? '' : String(b)).split('\u0003').join(c === undefined ? '' : String(c));
   }
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -1276,6 +1285,7 @@ const PAGE_SCRIPT = String.raw`
     isUnreachable = true;
     if (offline.textContent !== w('serveOffline')) offline.textContent = w('serveOffline');
     document.querySelectorAll('button:not([data-local])').forEach(function (node) { node.disabled = true; });
+    paintFresh();
   }
   function reachable() {
     if (!isUnreachable) return;
@@ -1288,6 +1298,31 @@ const PAGE_SCRIPT = String.raw`
     Object.keys(results).forEach(function (key) { if (results[key].text === w('serveOffline')) { results[key].text = w('pressFailed'); paintResult(key); } });
     // Redraw even an unchanged model to restore each action's own sending state.
     last = '';
+  }
+  // Seconds, not minutes, under a minute: the line must read "updated 2 s ago", not "just now".
+  function ageWords(ms) {
+    // A day as hours, never as one long number: the page must hold no eight-digit run a session id could hide in.
+    var day = 24 * 3600000;
+    if (ms < 1000) return w('justNow');
+    if (ms < 60000) return w('pgSecondsAgo', Math.floor(ms / 1000));
+    if (ms < 3600000) return w('minutesAgo', Math.floor(ms / 60000));
+    if (ms < day) return w('hoursAgo', Math.floor(ms / 3600000));
+    return w('daysAgo', Math.floor(ms / day));
+  }
+  // The freshness line and the empty Needs you line share one clock: both say when the page last heard from the server.
+  function paintFresh() {
+    var age = Date.now() - lastGood;
+    var isStale = age >= 10000;
+    if (pg.nodes.summary) pg.nodes.summary.textContent = w('pgSummary', pg.count.cards, pg.count.working, pg.count.done);
+    if (pg.nodes.fresh) pg.nodes.fresh.textContent = isStale ? w('pgStale') : w('pgUpdated', ageWords(age));
+    toggleClass(board, 'stale', isStale);
+    if (pg.nodes.needsText && !pg.filter && !pg.project && pg.count.cards === 0 && pg.sections.length > 0) pg.nodes.needsText.textContent = w('pgNothing') + ' · ' + w('pgChecked', ageWords(age));
+  }
+  // The freshness line moves every second, but never under reduced motion: a waiting page must not keep waking a still one.
+  function tickFresh() {
+    if (isClosed) return;
+    paintFresh();
+    setTimeout(tickFresh, 1000);
   }
   // Names this page to the board, so it can tell one open page from another (#265).
   function newPageId() { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } }
@@ -1562,7 +1597,7 @@ const PAGE_SCRIPT = String.raw`
     node.setAttribute('aria-hidden', 'true');
     return node;
   }
-  var pg = { filter: '', project: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
+  var pg = { filter: '', project: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {}, count: { cards: 0, shown: 0, older: 0, working: 0, others: 0, stopped: 0, done: 0 } };
   var cardState = {};
   var cardParts = {};
   // The first screen describes work, so diagnostic identifiers and logs stay out of its labels.
@@ -2223,13 +2258,16 @@ const PAGE_SCRIPT = String.raw`
         if (!(one.list === 'cards' && one.sent)) count[one.list] += 1;
       }
       reveal(one.block, one.show);
-      // the sidebar lists every project with something open, and counts it for the agent that is pressed
-      if (one.project && !one.sent && (one.list === 'cards' || one.list === 'working' || one.list === 'others')) {
+      // the sidebar lists every project with something open, and counts it for the agent that is pressed;
+      // a stopped row sits in the idle fold but is not open, so it stays out of the count
+      if (one.project && !one.sent && (one.list === 'cards' || one.list === 'working' || (one.list === 'others' && one.section !== 'stopped'))) {
         var held = byProject['p:' + one.project];
         if (!held) { held = byProject['p:' + one.project] = { name: one.project, n: 0 }; projects.push(held); }
         if (matchesAgent(one.id)) held.n += 1;
       }
     });
+    // The summary and the freshness line read these same counts, so every number on the page agrees.
+    pg.count = count;
     pg.groups.forEach(function (group) {
       var any = group.entries.some(function (one) { return one.show; });
       reveal(group.block, any);
@@ -2260,6 +2298,10 @@ const PAGE_SCRIPT = String.raw`
       var isOthersView = section.list === 'others' && pg.view === 'others' && count.stopped === 0;
       reveal(section.block, count[section.list] > 0 || section.list === 'working' && !pg.filter && !pg.project || isOthersView);
     });
+    // The fold head counts the idle rows the filters allow; an empty fold leaves only the empty line.
+    setText(pg.nodes.idleLabel, w('pgIdleFold', count.others));
+    reveal(pg.nodes.idleBox, count.others > 0);
+    paintFresh();
     drawSide(count, projects);
   }
   // The sidebar's numbers come from the same counts as the headings, so every number on the page agrees.
@@ -2379,14 +2421,14 @@ const PAGE_SCRIPT = String.raw`
     pg.order[name] = ordered.map(function (ref) { return ref.key; });
     return ordered;
   }
-  function entry(li, block, ref, list) {
-    var one = { li: li, block: block, id: agentOf(ref), project: projectOf(ref), list: list, show: true, key: ref.key, sent: list === 'cards' && isSent(ref) };
+  function entry(li, block, ref, list, section) {
+    var one = { li: li, block: block, id: agentOf(ref), project: projectOf(ref), list: list, section: section || list, show: true, key: ref.key, sent: list === 'cards' && isSent(ref) };
     pg.lis.push(one);
     return one;
   }
   function rowItem(ref, list, section, showProject) {
     var built = buildRow(ref, section, showProject);
-    return entry(built.li, built.block, ref, list);
+    return entry(built.li, built.block, ref, list, section);
   }
   function sectionHead(title, name) {
     var count = el('span', 'count');
@@ -2487,34 +2529,46 @@ const PAGE_SCRIPT = String.raw`
     add(sec, sectionHead(w('pgWorking'), 'working'), list, pg.nodes.workingEmpty);
     return sec;
   }
-  function othersSection(view, workingKeys) {
-    var refs = settle('others', view.all.open.concat(view.own.open).filter(function (ref) { return !workingKeys[ref.key]; }).sort(byTime));
-    var order = [];
-    var by = {};
-    refs.forEach(function (ref) {
-      var name = clean(ref.repo || source(ref).project || '');
-      if (!by[name]) { by[name] = []; order.push(name); }
-      by[name].push(ref);
-    });
+  // Idle and stopped sessions fold under one count, so only Needs you and Working stay open.
+  // The rows stay flat and newest first, each naming its project; the fold head counts them.
+  function idleFold(view, workingKeys) {
+    var quiet = view.all.open.concat(view.own.open).filter(function (ref) { return !workingKeys[ref.key]; });
+    var stopped = view.all.stopped.concat(view.own.stopped);
+    var stoppedKeys = {};
+    stopped.forEach(function (ref) { stoppedKeys[ref.key] = true; });
+    var refs = settle('others', quiet.concat(stopped).sort(byTime));
     var sec = el('section', 'sec');
-    add(sec, sectionHead(w('pgOthers'), 'others'));
-    pg.nodes.othersText = el('p', '');
-    pg.nodes.othersEmpty = fx(add(el('div', 'empty'), pg.nodes.othersText));
-    order.forEach(function (name) {
+    if (refs.length) {
+      var box = el('section', 'shelf' + (opened['shelf:idle'] ? ' open' : ''));
+      pg.nodes.idleBox = box;
+      var fold = el('div', 'fold');
+      fold.inert = opened['shelf:idle'] !== true;
+      var setOpen = function (now) {
+        toggleClass(box, 'open', now);
+        head.setAttribute('aria-expanded', String(now));
+        fold.inert = !now;
+        opened['shelf:idle'] = now;
+      };
+      var head = navButton('', function () { setOpen(!hasClass(box, 'open')); });
+      pg.openShelf.idle = setOpen;
+      head.className = 'shelf-head';
+      head.setAttribute('aria-expanded', String(opened['shelf:idle'] === true));
+      pg.nodes.idleLabel = el('span', '', '');
+      add(head, el('span', 'chev'), pg.nodes.idleLabel);
+      head.firstChild.setAttribute('aria-hidden', 'true');
       var list = el('ul', 'rows');
-      var group = { ul: list, entries: [], block: null };
-      by[name].forEach(function (ref) {
-        var one = rowItem(ref, 'others', 'others', false);
+      var group = { ul: list, entries: [] };
+      refs.forEach(function (ref) {
+        var one = rowItem(ref, 'others', stoppedKeys[ref.key] ? 'stopped' : 'others', true);
         group.entries.push(one);
         add(list, one.li);
       });
-      if (name) {
-        group.block = fx(el('p', 'proj', name));
-        add(sec, group.block);
-      }
       pg.groups.push(group);
-      add(sec, list);
-    });
+      add(box, head, add(fold, add(el('div', 'fold-in'), list)));
+      add(sec, box);
+    }
+    pg.nodes.othersText = el('p', '');
+    pg.nodes.othersEmpty = fx(add(el('div', 'empty'), pg.nodes.othersText));
     add(sec, pg.nodes.othersEmpty);
     return sec;
   }
@@ -2673,11 +2727,15 @@ const PAGE_SCRIPT = String.raw`
     if (!view.agents.length && !hasOwn) parts.push(freshPage(view));
     else {
       var workingKeys = {};
+      // The first screen answers in one look whether anything needs the person and whether the page is current.
+      var top = el('div', 'top');
+      pg.nodes.summary = el('p', 'summary', '');
+      pg.nodes.fresh = el('p', 'fresh-line', '');
+      add(top, pg.nodes.summary, pg.nodes.fresh);
+      parts.push(top);
       parts.push(needsSection(view));
       parts.push(sectionBlock(workingSection(view, workingKeys), 'working'));
-      parts.push(sectionBlock(othersSection(view, workingKeys), 'others'));
-      var stopped = shelf('stopped', w('pgStopped'), view.all.stopped.concat(view.own.stopped).sort(byTime), 'stopped');
-      if (stopped) parts.push(sectionBlock(stopped, 'stopped'));
+      parts.push(sectionBlock(idleFold(view, workingKeys), 'others'));
       var finished = view.all.done.concat(view.own.done).sort(byTime);
       var done = shelf('done', w('pgDone'), finished, 'done', finished.length ? doneExtra() : null);
       if (done) parts.push(sectionBlock(done, 'done'));
@@ -2769,13 +2827,15 @@ const PAGE_SCRIPT = String.raw`
         document.getElementById('side').hidden = true;
         return;
       }
-      if (data.unchanged) { reachable(); maybeShowAway(); return; }
+      if (data.unchanged) { reachable(); lastGood = Date.now(); paintFresh(); maybeShowAway(); return; }
       if (!data.ok || !data.model) {
-        if (data.note) { reachable(); say(data.note, 'alert'); }
+        if (data.note) { reachable(); lastGood = Date.now(); paintFresh(); say(data.note, 'alert'); }
         else unreachable();
         return;
       }
       reachable();
+      lastGood = Date.now();
+      paintFresh();
       connections = data.messaging && data.messaging.connections || [];
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; })], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
       if (text !== last) {
@@ -2998,5 +3058,7 @@ const PAGE_SCRIPT = String.raw`
     say(w('tidyCancelled'), '', 'tidy');
   });
   refresh();
+  // The freshness line ticks once a second; reduced motion leaves it to the next poll or press.
+  if (!reduce || !reduce.matches) setTimeout(tickFresh, 1000);
 })();
 `

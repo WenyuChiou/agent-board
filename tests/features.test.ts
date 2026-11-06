@@ -4483,10 +4483,11 @@ test('the board page shows stopped tasks in a closed shelf', () => {
   expect(boardScreen(view, [], toggled, STRINGS.en)).toContain('Stopped <plan>')
   expect(boardScreen(view, [], emptyBoardState, STRINGS.en)).not.toContain('Stopped <plan>')
   expect(boardScreen(view, [], emptyBoardState, STRINGS.en)).not.toContain(STRINGS.en.empty)
-  // The page keeps them on a shelf that stays closed until it is opened, one row each, under the Stopped word.
+  // The page keeps them in the idle fold, closed until it is opened, one row each, under the idle count.
   const page = servePage(STRINGS.en, 'nonce')
   // page-titles.test.mjs checks this fixture's rendered title through the production page reader.
-  expect(page).toContain("shelf('stopped', w('pgStopped')")
+  expect(page).toContain("sectionBlock(idleFold(view, workingKeys), 'others')")
+  expect(page).toContain("fold.inert = opened['shelf:idle'] !== true;")
   expect(page).toContain("fold.inert = opened['shelf:' + name] !== true;")
   expect(page).toContain('var one = rowItem(ref, name, section, true);')
   const grouped = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] }).view
@@ -4592,12 +4593,12 @@ test('the idle shelf keeps terminal and page row actions without putting its que
   expect(row?.canArchive).toBe(true)
   expect(serveAction(boardItems(view, []), { key: row?.key ?? '', type: 'tick', text: row?.next ?? '', session: '', fp: row?.fp }, STRINGS.en).type).toBe('tick')
   expect(serveAction(boardItems(view, []), { key: row?.key ?? '', type: 'archive', text: '', session: '', fp: row?.fp }, STRINGS.en).type).toBe('archive')
-  // The page lists an idle task on its closed Stopped shelf, not among the questions, and draws it with the same row buttons.
+  // The page lists an idle task in its closed idle fold, not among the questions, and draws it with the same row buttons.
   const grouped = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] }).view
   expect([...(grouped?.all.stopped ?? []), ...(grouped?.own.stopped ?? [])].map(one => one.key)).toEqual([row?.key])
   expect(grouped?.needs.cards).toEqual([])
   const page = servePage(STRINGS.en, 'nonce')
-  expect(page).toContain("shelf('stopped', w('pgStopped')")
+  expect(page).toContain("sectionBlock(idleFold(view, workingKeys), 'others')")
   expect(page).toContain("act(key, 'tick', nextStep ? nextStep.text : row.next")
   expect(page).toContain("act(key, 'archive'")
 })
