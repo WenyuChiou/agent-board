@@ -9464,6 +9464,59 @@ test('setup writes the plan hook as a matcher group for Codex and Gemini, and re
   assert.deepEqual(JSON.parse(readFileSync(geminiConfig, 'utf8')), { hooks: { AfterTool: [mine] } })
 }))
 
+// Grok Build's todo_write may carry only the changed items; the whole list is in the result (#922).
+const grokCall = (id, todos, extra = {}) => ({
+  sessionId: id, hookEventName: 'PostToolUse', toolName: 'todo_write', toolResultTruncated: false,
+  toolInput: { merge: true, todos: [{ id: 'b', status: 'in_progress' }] },
+  toolResult: { type: 'Todo', TodosUpdated: { summary_for_prompt: 'synthetic', todos, state: {} } }, ...extra,
+})
+
+test('a Grok todo_write merge call with one changed item reports the whole list from its result', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const ran = f.command(['--plan-event', '--agent', 'grok'], grokCall('grok-plan-session-1', [
+    { content: 'Grok first', priority: 'high', status: 'completed' }, { content: 'Grok second', priority: 'medium', status: 'in_progress' },
+    { content: 'Grok third', priority: 'low', status: 'pending' }, { content: 'Grok dropped', priority: 'low', status: 'cancelled' },
+  ]))
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=grok/)
+  assert.match(text, /^- \[x\] Grok first$/m)
+  assert.match(text, /^- \[~\] Grok second$/m)
+  assert.match(text, /^- \[ \] Grok third$/m)
+  assert.match(text, /^- \[-\] Grok dropped$/m)
+}))
+
+test('a Grok todo_write call with a truncated result, a DuplicateId result, an empty list or another tool writes nothing', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const one = [{ content: 'Grok never written', priority: 'low', status: 'pending' }]
+  // A good call first, so the refusals below are shown to leave its steps alone.
+  assert.equal(f.command(['--plan-event', '--agent', 'grok'], grokCall('grok-plan-session-2', [{ content: 'Grok kept', priority: 'low', status: 'in_progress' }])).status, 0)
+  for (const input of [
+    grokCall('grok-plan-session-2', one, { toolResultTruncated: true }),
+    grokCall('grok-plan-session-2', one, { toolResult: { type: 'Todo', DuplicateId: { id: 'a' } } }),
+    grokCall('grok-plan-session-2', []),
+    grokCall('grok-plan-session-2', one, { toolName: 'shell' }),
+    grokCall('grok-plan-session-2', one, { sessionId: undefined }),
+  ]) {
+    const ran = f.command(['--plan-event', '--agent', 'grok'], input)
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.equal(ran.stdout, '')
+  }
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^- \[~\] Grok kept$/m)
+  assert.ok(!text.includes('Grok never written'))
+}))
+
+test('setup installs the Grok PostToolUse plan hook with the todo_write matcher and a 5 second timeout', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const grok = JSON.parse(readFileSync(join(f.home, '.grok', 'hooks', 'agent-board-local.json'), 'utf8')).hooks
+  assert.equal(grok.PostToolUse.length, 1)
+  assert.equal(grok.PostToolUse[0].matcher, '^todo_write$')
+  assert.equal(grok.PostToolUse[0].hooks[0].timeout, 5)
+  assert.match(grok.PostToolUse[0].hooks[0].command, /--plan-event/)
+}))
+
 test('Windows fixture Node is a hard link to the running executable when linking works', { skip: process.platform !== 'win32' }, t => fixture(f => {
   const node = join(f.home, 'linked node.exe')
   placeNode(node)
