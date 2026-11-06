@@ -53,7 +53,7 @@ export const boardClient = address => {
       if (typeof verify !== 'function' || typeof deliver !== 'function' || canReceive !== undefined && typeof canReceive !== 'function' || !await verify()) throw new Error('HOST_NOT_CONNECTED')
       const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }) })
       const credentials = { connection: registered.id, secret: registered.secret }
-      let isClosed = false, isPolling = false, isPollDue = false, leaseUntil = registered.expires
+      let isClosed = false, isPolling = false, isPollDue = false, isRetried = false, leaseUntil = registered.expires
       const close = async () => {
         if (isClosed) return
         isClosed = true
@@ -103,9 +103,13 @@ export const boardClient = address => {
             // start plus its duration. Failed polls never renew this deadline.
             leaseUntil = started + result.leaseMs
             if (Date.now() >= leaseUntil) throw new Error('CONNECTION_EXPIRED')
+            isRetried = false
             if (!isClosed) for (const message of result.messages) void processMessage(message)
           } catch (error) {
             if (!error.isRetryable || Date.now() >= leaseUntil) await close()
+            // A busy store (#914) costs one short wait, not a whole poll period: one quick retry until a
+            // poll succeeds again, so a store that stays busy is polled at the usual interval.
+            else if (!isRetried) { isRetried = true; setTimeout(() => { void poll() }, 250).unref?.() }
             onError(error)
           }
         } finally {
