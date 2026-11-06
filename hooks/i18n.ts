@@ -736,9 +736,11 @@ export const ZH_TW = {
       ? `看板已停止（${code}）：${folder}。請用 --serve 重新啟動；不確定是否送達的訊息沒有重新送出。`
       : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
         ? `看板無法確認訊息持有者（${code}）：${folder}。請先停止所有看板 server，再檢查該資料夾裡的 .message-claim-*.json。確認沒有 hub 執行後，才能移除損壞的 claim。請保留 messages.json，勿重送不確定是否送達的訊息。`
-        : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
-          ? `看板無法開啟訊息資料夾（${code}）：${folder}。請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。`
-          : `看板無法開啟訊息資料夾（${code}）：${folder}。訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。`,
+        : code === 'ACL_CHECK_TIMEOUT'
+          ? `Windows 檢查誰能開啟看板的訊息資料夾時花了太久（${code}）：${folder}。電腦可能正忙，例如正在掃毒。請稍後再試一次。`
+          : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
+            ? `看板無法開啟訊息資料夾（${code}）：${folder}。請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。`
+            : `看板無法開啟訊息資料夾（${code}）：${folder}。訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。`,
   serveOffline: '連不上看板。請用 --serve 重新啟動看板；新的頁面會自動開啟，這個分頁可以關閉。',
   serveOfflineLan: '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
   themeToDark: '切換成深色',

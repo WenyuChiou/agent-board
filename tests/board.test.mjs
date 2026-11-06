@@ -28,7 +28,7 @@ import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { immutableQuestionFiles } from '../scripts/question-files.ts'
 import { recentInboxFiles } from '../scripts/inbox-files.ts'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from '../scripts/server-runtime.ts'
-import { isPrivateRuntimeDacl, isPrivateRuntimeSddl, privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
+import { identityOf, isPrivateRuntimeDacl, isPrivateRuntimeSddl, MESSAGE_FOLDER_ENV, privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
 import { AGENT_ICONS } from '../hooks/agent-icons.ts'
 import { partTest } from '../scripts/ci-impact.mjs'
 import { bigBoard, bigBoardNow } from './fixtures/big-board.mjs'
@@ -5546,10 +5546,45 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
+// #799's older face: the server child checked its message folder with whoami and four or more
+// icacls starts inside the 10 s it has to print its address, and on a busy runner a few slow
+// exits used that up, twice, so the start failed after 20 s. The command now checks the folder
+// and hands it over, as it does the runtime folder, and the child starts none of them.
+test('a Windows page start opens the page when each message-folder access command in the server child would take 3 s', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 80_000 }, async () => {
+  const board = serveIn()
+  const messages = resolve(board.served.replace(/\.json$/, '-messages'))
+  const log = join(board.dir, 'message-folder-acl.log')
+  const preload = join(board.dir, 'slow-child-message-acl.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+const role = process.argv.includes('--serve-child') ? 'child' : 'parent'
+const folder = ${JSON.stringify(messages.toLowerCase())}
+cp.execFileSync = function (file, args, options) {
+  if (/icacls\\.exe$/i.test(String(file)) && Array.isArray(args) && String(args[0]).toLowerCase() === folder) {
+    fs.appendFileSync(${JSON.stringify(log)}, role + ' ' + args.slice(1).join(' ') + '\\n')
+    if (role === 'child') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000)
+  }
+  return original.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    const out = await board.serve(['--quiet-board'])
+    url = board.urlOf(out)
+    assert.ok(url, out)
+    const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean)
+    assert.ok(calls.some(line => line.startsWith('parent /setowner ')), `the command checked the message folder:\n${calls.join('\n')}`)
+    assert.deepEqual(calls.filter(line => line.startsWith('child ')), [], 'the server child checked it again')
+    const acl = windowsAcl(messages, board.env)
+    assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the message folder is private')
+  } finally { await board.end([url]) }
+})
+
 // The server child is told which folder the command just checked. It starts the page on that
 // folder when it is still the same plain folder, and checks in full when it is not.
-const startChild = (board, handoff) => new Promise(done => {
-  const env = { ...board.env }
+const startChild = (board, handoff, extra = {}) => new Promise(done => {
+  const env = { ...board.env, ...extra }
   if (handoff !== undefined) env[RUNTIME_FOLDER_ENV] = handoff
   const child = spawn(process.execPath, [board.script, '--serve-child'], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
   let out = '', err = ''
@@ -5644,6 +5679,90 @@ test('a Windows server child refuses a runtime junction even when it is handed t
     assert.equal(refused.err.trim(), EN.serveRuntimePrivate)
     assert.equal(readFileSync(sentinel, 'utf8'), 'Synthetic file must stay unchanged')
     assert.deepEqual(readdirSync(other), ['keep.txt'])
+  } finally { await board.end([]) }
+})
+
+// The message folder is handed over the same way (#799): the child trusts only the same plain
+// folder at the same path, and checks any other in full.
+test('a Windows server child checks its message folder in full unless it is handed that same folder', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 120_000 }, async () => {
+  const board = serveIn()
+  const starts = countPowerShell(board)
+  const log = board.env.AGENT_BOARD_TEST_PS_LOG
+  const messages = resolve(board.served.replace(/\.json$/, '-messages'))
+  let url = null
+  try {
+    privateRuntimeFolder(join(board.env.XDG_RUNTIME_DIR, 'agent-board'))
+    const runtime = runtimeFolderHandoff()
+    // The first start makes and checks the folder; each later one is handed it as the command would.
+    const handed = () => ({ path: messages, identity: identityOf(messages), isCreated: false })
+    const variants = {
+      'no variable': [() => undefined, true],
+      'the same folder': [() => JSON.stringify(handed()), false],
+      'not JSON': [() => '{"path":', true],
+      'another identity': [() => JSON.stringify({ ...handed(), identity: '1:2:3' }), true],
+      'another path': [() => JSON.stringify({ ...handed(), path: join(board.dir, 'elsewhere') }), true],
+      'no isCreated': [() => JSON.stringify({ path: messages, identity: identityOf(messages) }), true],
+    }
+    for (const [name, [valueOf, isChecked]] of Object.entries(variants)) {
+      rmSync(`${log}.detail`, { force: true })
+      const value = valueOf()
+      const started = await startChild(board, runtime, value === undefined ? {} : { [MESSAGE_FOLDER_ENV]: value })
+      url = started.url
+      assert.ok(url, `${name}: ${started.err}`)
+      assert.equal(starts.detail().includes(`child icacls ${messages} /setowner `), isChecked, `${name}${starts.detail()}`)
+      await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': new URL(url).searchParams.get('t'), 'content-type': 'application/json' }, body: '{}' })
+      for (let tries = 0; existsSync(board.served) && tries < 50; tries++) await delay(100)
+      assert.ok(!existsSync(board.served), name)
+      url = null
+    }
+  } finally { await board.end([url]) }
+})
+
+test('a Windows server child names a message-folder access check that ran out of time ACL_CHECK_TIMEOUT', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const messages = resolve(board.served.replace(/\.json$/, '-messages'))
+  const preload = join(board.dir, 'timed-out-acl.cjs')
+  // Thrown the way Node reports an execFileSync its timeout stopped.
+  writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+const folder = ${JSON.stringify(messages.toLowerCase())}
+cp.execFileSync = function (file, args) {
+  if (/icacls\\.exe$/i.test(String(file)) && Array.isArray(args) && String(args[0]).toLowerCase() === folder) throw Object.assign(new Error('spawnSync icacls.exe ETIMEDOUT'), { code: 'ETIMEDOUT', signal: 'SIGTERM' })
+  return original.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    privateRuntimeFolder(join(board.env.XDG_RUNTIME_DIR, 'agent-board'))
+    const refused = await startChild(board, runtimeFolderHandoff())
+    assert.equal(refused.url, null)
+    assert.match(refused.err, /^MESSAGE_STORE_FAILED ACL_CHECK_TIMEOUT\r?$/m)
+  } finally { await board.end([]) }
+})
+
+// The child that checks in full after the command's own check ran out of time is cut off at
+// its 10 s before its own 10 s limit can say why, so the command says it.
+test('a Windows page start whose message-folder check runs out of time says the computer may be busy', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 80_000 }, async () => {
+  const board = serveIn()
+  const messages = resolve(board.served.replace(/\.json$/, '-messages'))
+  const preload = join(board.dir, 'busy-acl.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+const role = process.argv.includes('--serve-child') ? 'child' : 'parent'
+const folder = ${JSON.stringify(messages.toLowerCase())}
+cp.execFileSync = function (file, args) {
+  if (/icacls\\.exe$/i.test(String(file)) && Array.isArray(args) && String(args[0]).toLowerCase() === folder) {
+    if (role === 'parent') throw Object.assign(new Error('spawnSync icacls.exe ETIMEDOUT'), { code: 'ETIMEDOUT', signal: 'SIGTERM' })
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 11_000)
+  }
+  return original.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
+    assert.equal(board.urlOf(out), null, out)
+    assert.equal(out.trim(), EN.serveStoreFailed('ACL_CHECK_TIMEOUT', messages), out)
   } finally { await board.end([]) }
 })
 

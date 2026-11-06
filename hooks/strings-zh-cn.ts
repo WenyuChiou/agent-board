@@ -692,9 +692,11 @@ export const ZH_CN: Strings = {
       ? `看板已停止（${code}）：${folder}。请用 --serve 重新启动；不确定是否送达的消息没有重新发送。`
       : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
         ? `看板无法确认消息持有者（${code}）：${folder}。请先停止所有看板 server，再检查该文件夹里的 .message-claim-*.json。确认没有 hub 运行后，才能移除损坏的 claim。请保留 messages.json，不要重发不确定是否送达的消息。`
-        : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
-          ? `看板无法打开消息文件夹（${code}）：${folder}。请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。`
-          : `看板无法打开消息文件夹（${code}）：${folder}。消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。`,
+        : code === 'ACL_CHECK_TIMEOUT'
+          ? `Windows 检查谁能打开看板的消息文件夹时用时太长（${code}）：${folder}。电脑可能正忙，例如正在扫描病毒。请稍后再试。`
+          : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
+            ? `看板无法打开消息文件夹（${code}）：${folder}。请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。`
+            : `看板无法打开消息文件夹（${code}）：${folder}。消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。`,
   serveOffline: '连不上看板。请用 --serve 重新启动看板；新页面会自动打开，这个标签页可以关闭。',
   serveOfflineLan: '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
   themeToDark: '切换成深色',
