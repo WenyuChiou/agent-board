@@ -1,11 +1,11 @@
 import { test, expect } from 'claude-code/testing'
 import { renderAutoBlock } from '../hooks/blocks'
-import { codexEvent, codexReport, putCodexBlock } from '../hooks/codex'
+import { boardConfirmedReport, codexEvent, codexReport, putCodexBlock } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
-import { clearApproval, closeApproval, markApproval } from '../hooks/digest'
+import { clearApproval, closeApproval, markApproval, retainApproval } from '../hooks/digest'
 import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
 import { parseProgress } from '../hooks/parse'
-import { emptyQuestions, observeQuestions } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, resolveQuestion } from '../hooks/questions'
 import { STRINGS } from '../hooks/strings'
 import { buildView } from '../hooks/view'
 import type { ProgressMirror } from '../types'
@@ -67,18 +67,117 @@ test('a Codex session end closes an approval but leaves its last question waitin
   expect(endedQuestion.steps[endedQuestion.asked!]).toBe('- [?] Which folder?')
 })
 
-test('Codex reports carry owned steps as closed within the forty step limit', () => {
+test('Codex reports carry both owned closures independently of the forty user step limit', () => {
   const started = event(null, 'UserPromptSubmit', 'turn-1')
   const approval = event(started, 'PermissionRequest', 'turn-1')
   const question = event(approval, 'Stop', 'turn-1', { question: 'Which folder?' })
+  const first = observeQuestions(emptyQuestions(), codexProjects(approval), null, [], NOW, true).ledger
+  const open = observeQuestions(first, codexProjects(question), null, [], NOW + 1, true).ledger
   for (const count of [38, 39, 40]) {
     const steps = Array.from({ length: count }, (_, index) => `- [ ] Task ${index}`)
-    const report = codexReport(question, session, { title: 'Task', state: 'working', steps }, new Date(NOW).toISOString(), words)
-    expect(report.steps).toHaveLength(40)
-    if (count < 40) expect(report.steps[report.approval!]).toBe(`- [x] ${words.codexApprovalStep}`)
-    else expect(report.approval).toBe(undefined)
-    if (count === 38) expect(report.steps[report.asked!]).toBe('- [x] Which folder?')
-    else expect(report.asked).toBe(undefined)
-    expect(putCodexBlock('', report, owner)).not.toContain('native=codex')
+    let report = codexReport(question, session, { title: 'Task', state: 'working', steps }, new Date(NOW).toISOString(), words)
+    for (let repeat = 0; repeat < 3; repeat++) {
+      expect(report.steps).toHaveLength(count + 2)
+      expect(report.steps.slice(0, count)).toEqual(steps)
+      expect(report.steps[report.approval!]).toBe(`- [x] ${words.codexApprovalStep}`)
+      expect(report.steps[report.asked!]).toBe('- [x] Which folder?')
+      expect(report.approvalRevision).toBe(approval.approvalRevision)
+      expect(report.askedRevision).toBe(question.askedRevision)
+      expect(putCodexBlock('', report, owner)).not.toContain('native=codex')
+      const projects = codexProjects(report)
+      const closed = observeQuestions(open, projects, null, [], NOW + 2, true).ledger
+      expect(closed.records.filter(record => record.isUnresolved)).toEqual([])
+      expect(buildView(projects, [], null, NOW + 2, 0, {}, words, [], {}, closed).waiting).toEqual([])
+      report = codexReport(JSON.parse(JSON.stringify(report)), session, { title: 'Task', state: 'working', steps }, new Date(NOW).toISOString(), words)
+    }
   }
+})
+
+test('a delayed completion of the old Codex approval cannot hide its replacement', () => {
+  const first = event(event(null, 'UserPromptSubmit', 'turn-1'), 'PermissionRequest', 'turn-1')
+  const open = observeQuestions(emptyQuestions(), codexProjects(first), null, [], NOW, true).ledger
+  const oldId = open.records[0]!.id
+  const closed = codexReport(first, session, { title: 'Task', state: 'working', steps: ['- [~] Work'] }, new Date(NOW).toISOString(), words)
+  const second = event(JSON.parse(JSON.stringify(closed)), 'PermissionRequest', 'turn-1')
+  expect(second.approvalRevision).toBe(String(BigInt(first.approvalRevision!) + 1n))
+  const resumed = event(second, 'SessionStart', 'turn-1')
+  expect(resumed.steps).toEqual(second.steps)
+  expect(resumed.approvalRevision).toBe(second.approvalRevision)
+  const projects = codexProjects(resumed)
+  const newer = observeQuestions(open, projects, null, [], NOW + 1, true).ledger
+  expect(newer.records.find(record => record.isUnresolved)?.id).not.toBe(oldId)
+  const delayed = resolveQuestion(newer, oldId, NOW + 2)
+  expect(delayed.records.filter(record => record.isUnresolved)).toHaveLength(1)
+  expect(buildView(projects, [], null, NOW + 2, 0, {}, words, [], {}, delayed).waiting).toHaveLength(1)
+})
+
+test('Codex approval and question producers stay independent and legacy rows remain conservative', () => {
+  const approval = event(event(null, 'UserPromptSubmit', 'turn-1'), 'PermissionRequest', 'turn-1')
+  const pending = event(approval, 'Stop', 'turn-1', { question: 'Which folder?' })
+  const open = observeQuestions(emptyQuestions(), codexProjects(pending), null, [], NOW, true).ledger
+  // A synthetic snapshot isolates identity from the separately owned host-question lifecycle.
+  const replacement = { ...pending, approvalRevision: String(BigInt(approval.approvalRevision!) + 1n),
+    steps: pending.steps.map((step, index) => index === pending.approval ? `- [?] ${words.codexApprovalStep}` : step) }
+  const projects = codexProjects(replacement)
+  const retained = observeQuestions(open, projects, null, [], NOW + 1, true).ledger
+  expect(retained.records.filter(record => record.isUnresolved)).toHaveLength(2)
+  expect(buildView(projects, [], null, NOW + 1, 0, {}, words, [], {}, retained).waiting).toHaveLength(2)
+  const tokens = projects[0]!.tasks[0]!.steps.flatMap(step => step.questionToken ? [step.questionToken] : [])
+  expect(new Set(tokens.map(token => token.split(':')[0])).size).toBe(2)
+  const peer = parseProgress(putCodexBlock('', replacement, 'b'.repeat(64)))
+  expect(peer[0]!.tasks[0]!.steps[replacement.asked!]!.questionToken).not.toBe(tokens.find(token => token.endsWith(':1')))
+  const legacy = { ...approval, approvalRevision: undefined }
+  expect(putCodexBlock('', legacy, owner)).not.toContain('question=')
+  const legacyLedger = observeQuestions(emptyQuestions(), codexProjects(legacy), null, [], NOW, true).ledger
+  const missing = observeQuestions(legacyLedger, [], null, [], NOW + 1, true).ledger
+  expect(missing.records.filter(record => record.isUnresolved)).toHaveLength(1)
+})
+
+test('board-confirmed Codex completion checks the exact token-bearing rendering', () => {
+  const approval = event(event(null, 'UserPromptSubmit', 'turn-1'), 'PermissionRequest', 'turn-1')
+  const block = putCodexBlock('', approval, owner).replace('state=waiting', 'state=done').replace(/^- \[[ ?]\]/gm, '- [x]')
+  expect(boardConfirmedReport(block, approval, owner).state).toBe('done')
+  expect(boardConfirmedReport(block.replace(/question=[a-f0-9]{64}:1/, `question=${'b'.repeat(64)}:1`), approval, owner)).toBe(approval)
+})
+
+
+test('retainApproval preserves pending closure and unrelated unanswered tasks without mutating inputs', () => {
+  const base = applyTaskCreate(emptyMirror('a1b2c3d4-claude-session', 'demo', NOW), { subject: 'Real task' }, '1', NOW)
+  const previous = closeApproval(markApproval(base, 'Approve the tool?'))
+  const next = applyTaskCreate(clearApproval(previous), { subject: 'Which folder?', metadata: { waiting: 'you' } }, 'unrelated', NOW + 1)
+  const before = JSON.stringify({ previous, next })
+  const retained = retainApproval(previous, next)
+  expect(retained.tasks.find(one => one.id === 'approval')).toBe(previous.tasks.find(one => one.id === 'approval'))
+  expect(retained.tasks.find(one => one.id === 'unrelated')).toBe(next.tasks.find(one => one.id === 'unrelated'))
+  expect(retained.tasks.find(one => one.id === 'unrelated')?.waiting).toBe('you')
+  expect(retained.updated).toBe(next.updated)
+  expect(JSON.stringify({ previous, next })).toBe(before)
+  expect(retainApproval(previous, retained)).toBe(retained)
+})
+
+test('retainApproval never overwrites a newer approval or invents an absent approval', () => {
+  const base = applyTaskCreate(emptyMirror('a1b2c3d4-claude-session', 'demo', NOW), { subject: 'Real task' }, '1', NOW)
+  const previous = closeApproval(markApproval(base, 'Approve the old tool?'))
+  const next = markApproval(clearApproval(previous), 'Approve the new tool?')
+  const before = JSON.stringify({ previous, next, base })
+  expect(retainApproval(previous, next)).toBe(next)
+  expect(retainApproval(next, clearApproval(next)).tasks.find(one => one.id === 'approval')).toBe(next.tasks.find(one => one.id === 'approval'))
+  expect(retainApproval(base, next)).toBe(next)
+  expect(retainApproval(base, base)).toBe(base)
+  expect(retainApproval(base, clearApproval(next)).tasks.some(one => one.id === 'approval')).toBe(false)
+  expect(JSON.stringify({ previous, next, base })).toBe(before)
+})
+
+test('Codex producer counters remain distinct beyond safe integer precision after reload', () => {
+  const approval = event(event(null, 'UserPromptSubmit', 'turn-1'), 'PermissionRequest', 'turn-1')
+  const large = { ...approval, approvalRevision: '9007199254740992', askedRevision: '9007199254740993' }
+  const second = event(JSON.parse(JSON.stringify(large)), 'PermissionRequest', 'turn-1')
+  expect(second.approvalRevision).toBe('9007199254740993')
+  expect(second.askedRevision).toBe(large.askedRevision)
+  expect(putCodexBlock('', second, owner)).toContain(':9007199254740993 -->')
+  const third = event(JSON.parse(JSON.stringify(second)), 'PermissionRequest', 'turn-1')
+  expect(third.approvalRevision).toBe('9007199254740994')
+  const question = event(third, 'Stop', 'turn-1', { question: 'Which folder?' })
+  expect(question.askedRevision).toBe('9007199254740994')
+  expect(question.approvalRevision).toBe(third.approvalRevision)
 })

@@ -4768,6 +4768,80 @@ test('a second Codex PermissionRequest after a report reuses the approval step',
   assert.ok(!stopped.includes('native=codex'))
 }))
 
+test('bundled Codex approval identities survive reload and missed closure observations', async () => {
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { emptyQuestions, observeQuestions, resolveQuestion } = await importTs('../hooks/questions.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  return fixture(f => {
+    f.install('--apply')
+    const now = Date.now()
+    const projects = () => parseProgress(readFileSync(f.progress, 'utf8'))
+    assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+    assert.equal(f.event('PermissionRequest', 'turn-1').status, 0)
+    const original = sessionRecord(f, session)
+    const open = observeQuestions(emptyQuestions(), projects(), null, [], now, true).ledger
+    const oldId = open.records.find(record => record.isUnresolved).id
+    assert.equal(f.event('SessionStart', null).status, 0)
+    assert.equal(sessionRecord(f, session).approvalRevision, original.approvalRevision)
+    assert.equal(f.event('UserPromptSubmit', 'board-turn', { prompt: '/agent-board' }).status, 0)
+    assert.equal(sessionRecord(f, session).approvalRevision, original.approvalRevision)
+    assert.ok(sessionRecord(f, session).steps[original.approval].startsWith('- [?]'))
+    assert.equal(f.report('working', ['- [~] Synthetic work']).status, 0)
+    assert.equal(f.event('PermissionRequest', 'board-turn').status, 0)
+    const replacement = sessionRecord(f, session)
+    assert.equal(replacement.approvalRevision, String(BigInt(original.approvalRevision) + 1n))
+    const newer = observeQuestions(open, projects(), null, [], now + 1, true).ledger
+    const current = newer.records.find(record => record.isUnresolved)
+    assert.notEqual(current.id, oldId)
+    const delayed = resolveQuestion(newer, oldId, now + 2)
+    assert.equal(delayed.records.filter(record => record.isUnresolved).length, 1)
+    assert.equal(buildView(projects(), [], null, now + 2, 0, {}, STRINGS.en, [], {}, delayed).waiting.length, 1)
+  })
+})
+
+test('bundled Codex full reports preserve every user step and both durable closures after reload', async () => {
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { emptyQuestions, observeQuestions } = await importTs('../hooks/questions.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  return fixture(f => {
+    f.install('--apply')
+    const now = Date.now()
+    const projects = () => parseProgress(readFileSync(f.progress, 'utf8'))
+    assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+    assert.equal(f.event('PermissionRequest', 'turn-1').status, 0)
+    let open = observeQuestions(emptyQuestions(), projects(), null, [], now, true).ledger
+    assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which synthetic folder?' }).status, 0)
+    open = observeQuestions(open, projects(), null, [], now + 1, true).ledger
+    assert.equal(f.command(['--keys', 'j']).status, 0)
+    const ledgerFile = f.progress.replace(/\.md$/, '-questions.json')
+    assert.equal(JSON.parse(readFileSync(ledgerFile, 'utf8')).records.filter(record => record.isUnresolved).length, 1)
+    const original = sessionRecord(f, session)
+    for (const count of [39, 40, 40]) {
+      const steps = Array.from({ length: count }, (_, index) => `- [ ] Synthetic task ${index}`)
+      assert.equal(f.report('working', steps).status, 0)
+      // Every command is a fresh process and reads the persisted report cache.
+      assert.equal(f.event('SessionStart', null).status, 0)
+      const saved = sessionRecord(f, session)
+      assert.deepEqual(saved.steps.slice(0, count), steps)
+      assert.equal(saved.steps.length, count + 2)
+      assert.equal(saved.approval, count)
+      assert.equal(saved.asked, count + 1)
+      assert.equal(saved.approvalRevision, original.approvalRevision)
+      assert.equal(saved.askedRevision, original.askedRevision)
+      const parsed = projects()
+      assert.equal(parsed.flatMap(project => project.tasks).flatMap(task => task.steps).filter(step => step.questionToken).length, 2)
+      const closed = observeQuestions(open, parsed, null, [], now + 2, true).ledger
+      assert.equal(closed.records.filter(record => record.isUnresolved).length, 0)
+      assert.equal(buildView(parsed, [], null, now + 2, 0, {}, STRINGS.en, [], {}, closed).waiting.length, 0)
+      assert.equal(f.command(['--keys', 'j']).status, 0)
+      const ledgerFile = f.progress.replace(/\.md$/, '-questions.json')
+      assert.equal(JSON.parse(readFileSync(ledgerFile, 'utf8')).records.filter(record => record.isUnresolved).length, 0)
+    }
+  })
+})
+
 test('a Codex report after an approval keeps the approval closed, not waiting', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
@@ -4800,13 +4874,16 @@ test('a Codex question stays owned through a board prompt, and the next prompt c
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
   assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which folder should I use?' }).status, 0)
+  const original = sessionRecord(f, session)
   assert.equal(f.event('UserPromptSubmit', 'turn-2', { prompt: '/agent-board' }).status, 0)
+  assert.equal(sessionRecord(f, session).askedRevision, original.askedRevision)
   assert.ok(readFileSync(f.progress, 'utf8').includes('- [?] Which folder should I use?'))
   assert.equal(f.event('UserPromptSubmit', 'turn-3').status, 0)
   const answered = readFileSync(f.progress, 'utf8')
   assert.ok(answered.includes('- [x] Which folder should I use?'))
   assert.ok(!/- \[\?\]/.test(answered))
   assert.ok(!answered.includes('native=codex'))
+  assert.equal(sessionRecord(f, session).askedRevision, original.askedRevision)
 }))
 
 test('a Codex Stop whose last message ends on a statement adds no waiting step', () => fixture(f => {

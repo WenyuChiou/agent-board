@@ -1,6 +1,9 @@
 import { EN, FILE, SESSION, buildView, engineBeneath, expect, parseProgress, serveModel, start, test, type World } from './pane-helpers'
 import { boardText } from '../hooks/board'
-import { emptyQuestions, parseQuestions } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, parseQuestions, questionsJson } from '../hooks/questions'
+import { closeApproval, markApproval } from '../hooks/digest'
+import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
+import { renderAutoBlock } from '../hooks/blocks'
 
 const worldOf = (): World => ({ files: new Map(), mtime: 1, hasTasks: false, store: { lang: 'en', autoConnectOff: true }, reply: () => 'TITLE: Update colors\nCONTEXT: -\nDONE: Checked the palette and updated colors\nNEXT: -\nASK: -' })
 
@@ -165,7 +168,7 @@ test('AskUserQuestion writes its question once with the options on a native line
 const approval = { tool: 'Bash', input: { command: 'synthetic' }, approver: 'person' } as never
 
 test('a tool approval the person has waited on for 3 seconds shows a waiting step with a native line, and the tool finishing takes it back', async ($, on) => {
-  const world = { ...worldOf(), hasTasks: true }
+  const world: World = { ...worldOf(), hasTasks: true }
   const clock = engineBeneath(on, world)
   on('tool.check', () => ({ decision: 'ask' as const }))
   let release!: () => void
@@ -192,7 +195,7 @@ test('a tool approval the person has waited on for 3 seconds shows a waiting ste
 })
 
 test('a tool approval answered within 3 seconds never reaches the board', async ($, on) => {
-  const world = { ...worldOf(), hasTasks: true }
+  const world: World = { ...worldOf(), hasTasks: true }
   const clock = engineBeneath(on, world)
   on('tool.check', () => ({ decision: 'ask' as const }))
   on('tool.call', { tool: 'Bash' }, () => ({ result: 'done' }))
@@ -205,7 +208,7 @@ test('a tool approval answered within 3 seconds never reaches the board', async 
 })
 
 test('a tool approval in a subagent or for AskUserQuestion shows no approval step', async ($, on) => {
-  const world = { ...worldOf(), hasTasks: true }
+  const world: World = { ...worldOf(), hasTasks: true }
   const clock = engineBeneath(on, world)
   on('tool.check', () => ({ decision: 'ask' as const }))
   await start($, 'Update colors')
@@ -214,4 +217,119 @@ test('a tool approval in a subagent or for AskUserQuestion shows no approval ste
   await $.tool.check({ tool: 'AskUserQuestion', input: {}, approver: 'person', tool_use_id: 'synthetic-ask' } as never)
   await clock.advance(5000)
   expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+})
+
+for (const fault of ['capture', 'mirror'] as const) test(`a failed approval ${fault} write preserves its evidence until a later successful pass`, async ($, on) => {
+  const world: World = { ...worldOf(), hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('tool.call', { tool: 'TodoWrite' }, () => ({ result: {} }))
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  let release!: () => void
+  const answered = new Promise<void>(resolve => { release = resolve })
+  on('tool.call', { tool: 'Bash' }, async () => { await answered; return { result: 'done' } })
+  await start($, 'Update synthetic colors')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check synthetic palette', description: '' })
+  await $.tool.check({ ...(approval as object), tool_use_id: 'synthetic-approval-fault' } as never)
+  const call = $.tool.call({ tool: 'Bash', tool_use_id: 'synthetic-approval-fault', command: 'synthetic' })
+  await clock.advance(3500)
+  const ledgerPath = FILE.replace('.md', '-questions.json')
+  const open = parseQuestions(world.files.get(ledgerPath) ?? '')!
+  expect(open.records.some(record => record.isUnresolved)).toBe(true)
+  if (fault === 'capture') world.failQuestionCapture = 'write'
+  else world.failStore = (operation, key) => operation === 'set' && key === `mirror:${SESSION}`
+  release()
+  await call
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('Claude asks to run Bash')
+  expect(parseQuestions(world.files.get(ledgerPath) ?? '')?.records.some(record => record.isUnresolved)).toBe(true)
+  await $.tool.call({ tool: 'TodoWrite', todos: [{ content: 'Continue synthetic work', status: 'in_progress', activeForm: 'Continuing synthetic work' }] })
+  // A task-list refresh must not drop the pending closure either.
+  expect(world.files.get(FILE) ?? '').toContain('Claude asks to run Bash')
+  // A missing mutable index must still recover the unanswered capture while writes fail.
+  world.files.delete(ledgerPath)
+  await clock.advance(2100)
+  expect(world.files.get(FILE) ?? '').toContain('Claude asks to run Bash')
+  world.failQuestionCapture = undefined
+  world.failStore = undefined
+  await clock.advance(4100)
+  const recovered = parseQuestions(world.files.get(ledgerPath) ?? '') ?? emptyQuestions()
+  expect(recovered.records.some(record => record.isUnresolved)).toBe(false)
+  expect(world.files.get(FILE) ?? '').not.toContain('Claude asks to run Bash')
+  const view = buildView(parseProgress(world.files.get(FILE) ?? ''), [], null, Date.parse('2026-10-16T12:00:10Z'), 0, {}, EN, [], {}, recovered)
+  expect(view.waiting).toEqual([])
+  // The durable terminal capture also prevents resurrection if the index is lost again.
+  world.files.delete(ledgerPath)
+  await clock.advance(4100)
+  expect(parseQuestions(world.files.get(ledgerPath) ?? '')?.records.some(record => record.isUnresolved)).toBe(false)
+})
+
+test('a delayed completion does not clear an approval opened during closure persistence', async ($, on) => {
+  const world: World = { ...worldOf(), hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('tool.call', { tool: 'TodoWrite' }, () => ({ result: {} }))
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  let releaseFirst!: () => void
+  let releaseSecond!: () => void
+  const firstAnswer = new Promise<void>(resolve => { releaseFirst = resolve })
+  const secondAnswer = new Promise<void>(resolve => { releaseSecond = resolve })
+  on('tool.call', { tool: 'Bash' }, async ($, e) => {
+    await (e.tool_use_id === 'synthetic-first' ? firstAnswer : secondAnswer)
+    return { result: 'done' }
+  })
+  await start($, 'Update synthetic colors')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check synthetic palette', description: '' })
+  await $.tool.check({ ...(approval as object), tool_use_id: 'synthetic-first' } as never)
+  const firstCall = $.tool.call({ tool: 'Bash', tool_use_id: 'synthetic-first', command: 'synthetic' })
+  await clock.advance(3500)
+  const ledgerPath = FILE.replace('.md', '-questions.json')
+  const firstId = parseQuestions(world.files.get(ledgerPath) ?? '')!.records.find(record => record.isUnresolved)!.id
+  let reached!: () => void
+  let releaseStore!: () => void
+  const held = new Promise<void>(resolve => { reached = resolve })
+  world.holdStore = { key: `mirror:${SESSION}`, reached, release: new Promise<void>(resolve => { releaseStore = resolve }) }
+  releaseFirst()
+  await held
+  await $.tool.check({ ...(approval as object), tool_use_id: 'synthetic-second' } as never)
+  const secondCall = $.tool.call({ tool: 'Bash', tool_use_id: 'synthetic-second', command: 'synthetic' })
+  await clock.advance(3500)
+  try {
+    releaseStore()
+    await firstCall
+    await clock.advance(2100)
+    expect(world.files.get(FILE) ?? '').toContain('- [?] Claude asks to run Bash')
+    const ledger = parseQuestions(world.files.get(ledgerPath) ?? '')!
+    const current = ledger.records.filter(record => record.isUnresolved)
+    expect(current).toHaveLength(1)
+    expect(current[0]!.id === firstId).toBe(false)
+  } finally {
+    releaseStore()
+    releaseSecond()
+    await secondCall
+  }
+  await clock.advance(2100)
+  expect(parseQuestions(world.files.get(ledgerPath) ?? '')?.records.some(record => record.isUnresolved)).toBe(false)
+})
+
+test('a restarted session retries a stored approval closure before a task refresh can drop it', async ($, on) => {
+  const at = Date.parse('2026-10-16T12:00:00Z')
+  const task = applyTaskCreate(emptyMirror(SESSION, 'demo', at), { subject: 'Check synthetic palette' }, '1', at)
+  const waiting = markApproval(task, EN.claudeApprovalStep('Bash'))
+  const source = `## demo\n${renderAutoBlock(waiting, EN).join('\n')}\n`
+  const open = observeQuestions(emptyQuestions(), parseProgress(source), waiting, [], at, true).ledger
+  const ledgerPath = FILE.replace('.md', '-questions.json')
+  const world: World = {
+    ...worldOf(), hasTasks: true, failQuestionCapture: 'write',
+    files: new Map([[FILE, source], [ledgerPath, questionsJson(open)]]),
+    store: { lang: 'en', autoConnectOff: true, [`mirror:${SESSION}`]: closeApproval(waiting) },
+  }
+  const clock = engineBeneath(on, world)
+  on('tool.call', { tool: 'TodoWrite' }, () => ({ result: {} }))
+  await start($, 'Continue synthetic colors')
+  await $.tool.call({ tool: 'TodoWrite', todos: [{ content: 'Continue synthetic work', status: 'in_progress', activeForm: 'Continuing synthetic work' }] })
+  expect(world.files.get(FILE) ?? '').toContain('Claude asks to run Bash')
+  world.failQuestionCapture = undefined
+  await clock.advance(4100)
+  const closed = parseQuestions(world.files.get(ledgerPath) ?? '')!
+  expect(closed.records.some(record => record.isUnresolved)).toBe(false)
+  expect(world.files.get(FILE) ?? '').not.toContain('Claude asks to run Bash')
 })

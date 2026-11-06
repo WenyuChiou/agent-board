@@ -97,7 +97,7 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, markApproval, toolQuestions, turnTools } from './digest'
+import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, retainApproval, markApproval, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
 import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
@@ -215,25 +215,44 @@ const showApproval = async ($: EngineInterface, id: string, tool: string): Promi
   // so a turn ending during the save still takes the step back.
   if (!pendingApprovals.has(id)) return
   hasApprovalStep = true
+  approvalRevision += 1
   await saveMine($, one => pendingApprovals.has(id) ? markApproval(one, step) : one)
   await settle($)
 }
 
-// The step goes once no approval is pending (no id = the turn or session ended, whatever is pending).
+// A failed closure must leave its source available to the next ledger pass. Retry outside
+// the write queue, since settling the mirror itself queues a write and a poll.
+const finishApproval = async ($: EngineInterface): Promise<void> => {
+  if (!hasApprovalStep || pendingApprovals.size > 0 || isClosingApproval) return
+  const revision = approvalRevision
+  const isCurrent = (): boolean => approvalRevision === revision && pendingApprovals.size === 0
+  isClosingApproval = true
+  try {
+    await saveMine($, one => isCurrent() ? closeApproval(one) : one)
+    await settle($)
+    if (!isCurrent()) return
+    const path = await progressPath($)
+    if (!(await pollQuestions($, path, parseProgress(await readText($, path))))) return
+    // A new approval can arrive during any engine call, including the mirror update.
+    if (!isCurrent()) return
+    await saveMine($, one => {
+      if (!isCurrent()) return one
+      hasApprovalStep = false
+      return clearApproval(one)
+    })
+    await settle($)
+  } catch {
+    // The stored or rendered closure and the retry flag survive a denied write.
+  } finally {
+    isClosingApproval = false
+  }
+}
+
+// No id means the turn or session ended, whatever approvals were pending.
 const dropApproval = async ($: EngineInterface, id?: string): Promise<void> => {
   if (id === undefined) pendingApprovals.clear()
   else pendingApprovals.delete(id)
-  if (!hasApprovalStep || pendingApprovals.size > 0) return
-  hasApprovalStep = false
-  // The ledger keeps a question whose step only vanished, so it must read the step
-  // as closed before the step goes away.
-  await saveMine($, closeApproval).catch(() => undefined)
-  await settle($).catch(() => undefined)
-  await progressPath($).then(async path => pollQuestions($, path, parseProgress(await readText($, path)))).catch(() => false)
-  // A new approval can be shown during the waits above; its step must stay.
-  if (hasApprovalStep || pendingApprovals.size > 0) return
-  await saveMine($, clearApproval).catch(() => undefined)
-  await settle($).catch(() => undefined)
+  await finishApproval($)
 }
 
 // Module state: reset by a reload, which only happens between turns.
@@ -245,6 +264,8 @@ let isTurnRunning = false
 const APPROVAL_MS = 3000
 const pendingApprovals = new Map<string, string>()
 let hasApprovalStep = false
+let approvalRevision = 0
+let isClosingApproval = false
 let receiver: Receiver | null = null
 let receiverTimer: { cancel: () => void } | null = null
 // A hub that does not answer within this holds no tick up: it is a poll that failed.
@@ -1883,7 +1904,10 @@ const saveMine = async (
   change: (mirror: ProgressMirror) => ProgressMirror,
   quiet = false,
 ): Promise<void> => {
-  const { current, next } = await updateBackgroundMirror($, change)
+  const { current, next } = await updateBackgroundMirror($, one => {
+    const changed = change(one)
+    return hasApprovalStep ? retainApproval(one, changed) : changed
+  })
   if (next === null || current === null) return
   await $.store.set(`mirror:${next.sessionId}`, { ...next, board: boardTag(await progressPath($)) })
   if (!quiet) {
@@ -1949,7 +1973,10 @@ const detectHere = async ($: EngineInterface): Promise<void> => {
 const loadMine = async ($: EngineInterface, cwd: string): Promise<void> => {
   const sessionId = await $.session.id()
   const held = await read($, mine)
-  if (held !== null && held.sessionId === sessionId) return
+  if (held !== null && held.sessionId === sessionId) {
+    hasApprovalStep ||= held.tasks.some(one => one.id === 'approval')
+    return
+  }
   const key = `mirror:${sessionId}`
   const raw = await $.store.get(key) as ProgressMirror | undefined
   const stored = (await completedMirror($, key, raw)).mirror
@@ -1958,6 +1985,8 @@ const loadMine = async ($: EngineInterface, cwd: string): Promise<void> => {
   // A print-mode session (`claude -p`) is a run an agent started for itself, not a conversation a person
   // typed into (#501); its mirror stays local and writeMine writes no block.
   await update($, mine, () => withRunMark(stored === undefined ? fresh : { ...clearBackgroundJobs({ ...fresh, ...stored }), isTurnRunning: false, cwd: stored.cwd || cwd }, !isInteractiveSession))
+  // Reloads happen between turns: a retained approval is closure work left by the old host.
+  hasApprovalStep = stored?.tasks.some(one => one.id === 'approval') === true
 }
 
 const completedMirror = async ($: EngineInterface, key: string, raw: ProgressMirror | undefined): Promise<{ mirror: ProgressMirror | undefined; barrier: number }> => {
@@ -4072,7 +4101,7 @@ export const register: Register = (on, options) => {
     // Work left running past a dispatch can outlive the module (a reload, the end): its
     // rejections are dropped rather than left unhandled.
     $.clock.every(POLL_MS, () => {
-      poll($, true).catch(() => undefined).then(() => retainInboxQuestions($)).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
+      finishApproval($).then(() => poll($, true)).catch(() => undefined).then(() => retainInboxQuestions($)).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
     })
     const startArchive = enqueue(() => archiveOld($)).catch(() => undefined)
     let isFirstInboxLook = true
