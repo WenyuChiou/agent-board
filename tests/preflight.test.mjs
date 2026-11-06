@@ -123,6 +123,16 @@ test('preflight warns once and uses the local copy when fetching is disabled', a
   ])
 })
 
+test('preflight warns that a release branch behind main needs current main, with the PR title given', async t => {
+  const f = fixture(t)
+  const tree = f.git('rev-parse', 'HEAD^{tree}')
+  f.git('update-ref', 'refs/remotes/origin/main', f.git('commit-tree', tree, '-p', 'HEAD', '-m', 'New main'))
+  f.write('body.md', 'Synthetic body\n')
+  const checks = await f.check({ bodyFile: 'body.md', title: 'chore(release): Agent Board 9.9.9' })
+  assert.ok(has(checks, 'WARN', 'release pull request needs current main'))
+  assert.equal(has(checks, 'WARN', 'does not contain the latest main'), false)
+})
+
 test('preflight only warns when the branch is behind main, since a branch behind main can merge as it is', async t => {
   const f = fixture(t)
   const tree = f.git('rev-parse', 'HEAD^{tree}')

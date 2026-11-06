@@ -240,6 +240,11 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
       result.waitingForAuthor.push({ ...item, detail: 'approval is by the author', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
+      // A release must contain current main before it merges (docs/RELEASING.md, step 5), so an approved one that is behind waits.
+      if (/^chore\(release\):/.test(item.title) && (pr.mergeStateStatus === 'BEHIND' || pr.behindBy > 0 || pr.behindBy === null)) {
+        result.needsMain.push({ ...item, detail: pr.behindBy === null ? 'approved; could not check whether it contains current main, so merge main first if unsure' : 'approved; merge main first (a release must contain current main)' })
+        continue
+      }
       const isOneAtATime = !Array.isArray(pr.files) || pr.files.some(file => isSharedPath(file?.path ?? ''))
       result.approved.push({ ...item, detail: 'ready to merge once checks pass', readyAt: ready?.comment.created_at ?? null, isOneAtATime, ...extras })
     } else {
@@ -263,6 +268,14 @@ export const fetchQueue = ({ repo }, { run = execFileSync } = {}) => {
   for (const pr of prs) {
     const output = run('gh', ['api', '--paginate', '--jq', '.[] | tojson', `repos/${repo}/issues/${pr.number}/comments?per_page=100`], options)
     commentsByNumber[pr.number] = output.split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line))
+  }
+  // GitHub reports BEHIND only when main requires an up-to-date branch, which it does not, so a release pull request is
+  // compared with main directly.
+  for (const pr of prs) {
+    if (!/^chore\(release\):/.test(pr.title ?? '') || pr.mergeStateStatus === 'BEHIND') continue
+    try {
+      pr.behindBy = Number(run('gh', ['api', '--jq', '.behind_by', `repos/${repo}/compare/main...${pr.headRefOid}`], options).trim()) || 0
+    } catch { pr.behindBy = null }
   }
   return { prs, commentsByNumber }
 }

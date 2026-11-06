@@ -608,7 +608,7 @@ export const checkPr = data => {
   add(issue)
   add(author)
   if (isOutside && isRelease) {
-    output.problems.push(problem('outside', 'a release pull request comes from the maintainer, not from outside the team.', 'open a fix or feature pull request; only the maintainer raises the version (CONTRIBUTING.md, Releases).'))
+    output.problems.push(problem('outside', 'a release pull request comes from the team (the maintainer, or a collaborator while the maintainer is away), not from outside it.', 'open a fix or feature pull request; only the team raises the version (CONTRIBUTING.md, Releases).'))
   }
   add(naming(data.title, data.branch))
   add(sections(data.body, data.template))
