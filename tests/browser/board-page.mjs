@@ -29,6 +29,12 @@ export class BoardPage {
 
   // The agent's button is in the icon row on a phone and in the sidebar from the rail up; press the one that shows.
   async selectAgent(agent) {
+    // Below 560 px the sidebar is a closed drawer, so the agent button in it is off screen; open it first.
+    const size = this.page.viewportSize()
+    if (size && size.width < 560) {
+      await this.page.locator('#drawer-btn').click()
+      await this.page.locator('#shell[data-drawer="1"]').waitFor()
+    }
     await this.page.locator(`[data-agent="${agent}"]:visible`).first().click()
   }
 
