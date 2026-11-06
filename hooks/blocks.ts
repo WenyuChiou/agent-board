@@ -60,6 +60,13 @@ const headingOf = (project: string, s: Strings): string => cleanProject(project)
 const projectSection = (lines: readonly string[], project: string, heading: string): { heading: number; end: number } | null =>
   sectionRange(lines, heading) ?? (heading !== project.trim() ? sectionRange(lines, project) : null)
 
+// The section a block the board writes joins (hooks/codex.ts): the same heading, letter case aside.
+// Never the first-word match a hand-kept task gets, or `my project` would join `## my other`.
+export const sectionOfProject = (lines: readonly string[], project: string): { heading: number; end: number } | null => {
+  const heading = cleanProject(project) || project.trim()
+  return sectionRange(lines, heading, true) ?? (heading !== project.trim() ? sectionRange(lines, project, true) : null)
+}
+
 const markOf = (task: ProgressMirrorTask): string => {
   if (task.handoffTo) return '-'
   if (task.status === 'completed') return 'x'
@@ -298,7 +305,7 @@ const trimBlankEdges = (lines: string[], at: number): void => {
   if (to - from > 1) lines.splice(from, to - from, '')
 }
 
-const sectionRange = (raws: readonly string[], project: string): { heading: number; end: number } | null => {
+const sectionRange = (raws: readonly string[], project: string, exact = false): { heading: number; end: number } | null => {
   const lines = seenOf(raws)
   const head = projectHead(project)
   // A name that starts with a bracket (`（未分類）`, `(PFC) notes`) has no first word to match
@@ -309,6 +316,7 @@ const sectionRange = (raws: readonly string[], project: string): { heading: numb
     const cand = match[1].trim()
     const target = project.trim()
     if (cand.toLowerCase() === target.toLowerCase()) return true
+    if (exact) return false
     return head === '' ? cand === target : projectHead(cand) === head
   })
   if (heading < 0) return null
