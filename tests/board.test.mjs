@@ -10714,6 +10714,46 @@ test('buttons keep desktop size in a narrow window with a mouse', async () => {
   assert.ok(narrow.includes('.col{padding-left') && !/\.btn|\.answers button/.test(narrow))
 })
 
+test('the actions at the foot of the sidebar look like buttons, not underlined links', () => {
+  const html = redesignPage()
+  // The owner's rule (product principles): an action is a button. Only GitHub stays a link.
+  const rules = [...html.matchAll(/([^{}]*\.side \.pfoot[^{}]*)\{([^}]*)\}/g)].map(found => ({ selector: found[1], body: found[2] }))
+  const actions = rules.filter(rule => /#close|\.btn\b/.test(rule.selector))
+  assert.ok(actions.length > 0)
+  for (const rule of actions) assert.doesNotMatch(rule.body, /underline|background:transparent|border-color:transparent/, rule.selector)
+  assert.match(html, /\.btn,[^{}]*\.pfoot #close[^{}]*\{[^}]*border:1px solid var\(--btn-line\)/)
+  const foot = html.match(/<footer class="pfoot"[\s\S]*?<\/footer>/)[0]
+  for (const id of ['connect-web-chat', 'import-clipboard', 'close']) assert.match(foot, new RegExp('<button type="button"[^>]*id="' + id + '"'))
+})
+
+test('the sidebar foot actions are small quiet buttons and the version line is quieter', () => {
+  const html = redesignPage()
+  const rule = html.match(/\.side \.pfoot #close,\.side \.pfoot \.btn\{([^}]*)\}/)[1]
+  // The page's smallest text size, a token and not a number; at least 24px tall; still a button.
+  assert.match(rule, /font-size:var\(--text-xs\)/)
+  assert.match(rule, /color:var\(--muted\)/)
+  const height = Number(rule.match(/min-height:(\d+)px/)[1])
+  assert.ok(height >= 24 && height <= 28, rule)
+  assert.doesNotMatch(rule, /font-size:\d/)
+  // The version line takes the smallest size and a colour fainter than the muted one, in both themes (the colour mixes tokens).
+  const ver = html.match(/\.ver-link\{([^}]*)\}/)[1]
+  assert.match(ver, /font-size:var\(--text-xs\)/)
+  assert.match(ver, /color:color-mix\(in srgb,var\(--muted\) \d+%,var\(--surface\)\)/)
+  assert.match(html, /\.ver-link svg\.i\{width:12px;height:12px\}/)
+})
+
+test('a row whose title is its current step shows the step once', async () => {
+  const text = [
+    groupedBlock('48800001', 'codex', 'ended', 'shared-repo', 'Run tests', ['- [~] Run tests']),
+    groupedBlock('48800002', 'codex', 'ended', 'shared-repo', 'Build the page', ['- [~] Run tests']),
+  ].join('\n')
+  const dom = await pageDom(await sourcePage('en'), await sourceModel(text, groupedNow))
+  const rows = pressWalk(dom.node('board')).filter(node => node.tag === 'li' && pressWalk(node).some(one => one.className === 'r-title'))
+  const metaOf = title => pressWalk(rows.find(row => pressWalk(row).some(one => one.className === 'r-title' && one.textContent === title))).filter(one => one.className === 'r-meta').flatMap(pressWalk).map(one => one.textContent ?? '').join(' ')
+  assert.doesNotMatch(metaOf('Run tests'), /Run tests/)
+  assert.match(metaOf('Build the page'), /Run tests/)
+})
+
 test('the sidebar folds to a rail at the docked width', async () => {
   const html = await sourcePage()
   const { board, model } = await groupedPage()
