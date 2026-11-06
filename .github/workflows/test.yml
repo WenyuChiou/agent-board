@@ -174,6 +174,12 @@ jobs:
           CI_TEST_PART: ${{ matrix.part }}
           CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}
         run: node scripts/ci-impact.mjs run
+      # The time check (#902 step 4): a file over its CI budget, or a part over its budget, fails
+      # here and names the slow files. It reads the times the run above recorded. It runs only
+      # when the tests passed: the check guards creep on green runs, and a red run already fails
+      # the job.
+      - name: Board time budgets
+        run: node scripts/ci-impact.mjs check
 
   messaging:
     needs: impact

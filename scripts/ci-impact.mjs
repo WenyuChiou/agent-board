@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, appendFileSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, appendFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BUNDLE_ENTRY, bundleFiles, isBundleFile } from './bundle-text.mjs'
@@ -125,6 +126,59 @@ export const checkResults = (plan, results) => {
   for (const [group, status] of Object.entries(results)) if (!GROUPS.includes(group) && (plan.full ? status !== 'success' : !['success', 'skipped'].includes(status))) errors.push(group + ': ' + status)
   return { ok: errors.length === 0, errors }
 }
+
+// The time check (#902 step 4): a board part that takes longer than its budget, or one of its files
+// longer than its own budget, fails the plan check and names the slow files. The file budgets come
+// from step 1's Windows board job logs (run 41985005370, main 63c29bb): a file's total there is summed
+// across the eight board jobs, so one job's share is the total / 8 for a self-parted file (a quarter
+// of its tests in every job) and / 2 for a file that runs in one part per Node version. Each budget
+// is that share x 1.5, rounded up to five seconds, with a sixty-second floor: the floor covers the
+// board files step 1 never measured (added since) and keeps a small file from tripping on runner
+// jitter — the slowest unmeasured file, mcp-tools, took 12.6 s on a Linux VM. Step 1 predates #957's
+// speedups, so the budgets are upper bounds for the four files it touched, not tight fits.
+export const BOARD_FILE_BUDGETS_MS = Object.freeze({
+  'tests/codex-local.test.mjs': 170_000,
+  'tests/board.test.mjs': 140_000,
+  'tests/legacy-connect.test.mjs': 185_000,
+  'tests/page-regressions.test.mjs': 90_000,
+  'tests/codex-fallback.test.mjs': 80_000,
+  'tests/prompt-hooks.test.mjs': 65_000,
+})
+export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
+// Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
+// (3485740, 4617bc1, e30fe0a, 01cdc5a) run 206-504 s, the slowest part (1/4) 347-504 s, so a 420 s
+// threshold on the job wall already fails on main. Checkout, Node setup and the first PowerShell and
+// Python starts take roughly 60-90 s of the wall, which puts part 1/4 test execution at
+// 414-444 s at worst (504 s wall minus 60-90 s setup); 480 s is about 8-16% above that
+// and keeps the job wall under the ten-minute timeout.
+export const BOARD_PART_BUDGET_MS = 480_000
+
+const seconds = ms => (ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)
+
+export const checkBoardTimes = timings => {
+  const errors = []
+  if (!timings || typeof timings !== 'object' || !Array.isArray(timings.files) || typeof timings.totalMs !== 'number') return { ok: false, errors: ['missing or invalid board timings'] }
+  const boardFiles = timings.files.filter(file => groupForTest(file.path) === 'board')
+  const timed = boardFiles.filter(file => typeof file.ms === 'number')
+  for (const file of timed) {
+    const budget = BOARD_FILE_BUDGETS_MS[file.path] ?? BOARD_FILE_BUDGET_DEFAULT_MS
+    if (file.ms > budget) errors.push(file.path + ' took ' + seconds(file.ms) + 's, over its ' + seconds(budget) + 's budget')
+  }
+  if (boardFiles.length && timings.totalMs > BOARD_PART_BUDGET_MS) {
+    const slowest = [...timed].sort((a, b) => b.ms - a.ms).slice(0, 5)
+    errors.push('board part ' + (timings.part || '1/1') + ' took ' + seconds(timings.totalMs) + 's, over its ' + seconds(BOARD_PART_BUDGET_MS) + 's budget' + (slowest.length ? '; slowest files: ' + slowest.map(file => file.path + ' ' + seconds(file.ms) + 's').join(', ') : ''))
+  }
+  return { ok: errors.length === 0, errors }
+}
+
+// Where one run leaves its per-file times for the time check step below: the runner's temp folder
+// on CI, the OS temp folder elsewhere. A run outside CI records nothing unless CI_TEST_TIMINGS
+// names a file, so a local run leaves no stray file behind.
+export const timingsPath = () => process.env.CI_TEST_TIMINGS
+  || (process.env.RUNNER_TEMP ? join(process.env.RUNNER_TEMP, 'agent-board-test-timings.json') : null)
+  || join(tmpdir(), 'agent-board-test-timings.json')
+
+export const readBoardTimings = (path = timingsPath()) => JSON.parse(readFileSync(path, 'utf8'))
 
 // Keep literals as tokens so braces and helper names inside prose cannot become code.
 const codeTokens = text => {
@@ -325,11 +379,17 @@ export const testArgs = (files, { isSerial = false, isWindows = false } = {}) =>
 
 // The Node run of one part: every nth of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
-export const testRuns = (files, { isSerial = false, isWindows = false, part = '' } = {}) => {
+export const partFiles = (files, part = '') => {
   const { index, total } = parsePart(part)
-  if (total === 1) return [testArgs(files, { isSerial, isWindows })]
+  if (total === 1) return [...files]
   const rest = files.filter(path => !selfPartedTests.includes(path)).filter((path, ordinal) => ordinal % total === index - 1)
-  const share = [...rest, ...files.filter(path => selfPartedTests.includes(path))]
+  return [...rest, ...files.filter(path => selfPartedTests.includes(path))]
+}
+
+export const testRuns = (files, { isSerial = false, isWindows = false, part = '' } = {}) => {
+  const { total } = parsePart(part)
+  if (total === 1) return [testArgs(files, { isSerial, isWindows })]
+  const share = partFiles(files, part)
   return share.length ? [testArgs(share, { isSerial, isWindows })] : []
 }
 
@@ -338,24 +398,63 @@ export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn
   // A self-parted file reads its part from CI_TEST_PART, so the child gets the part this run was given,
   // not whatever part the environment holds.
   const env = { ...process.env, CI_TEST_PART: part }
+  const isSerial = process.env.CI_TEST_SERIAL === '1'
+  const isWindows = platform === 'win32'
+  const started = Date.now()
+  // A serial run times one file at a time: the files already run one at a time there, so one Node run
+  // per file costs one extra process start each and gives the time check a time per file. A parallel
+  // run keeps its single run: timing one file at a time there would serialize the whole set.
+  const runs = isSerial
+    ? partFiles(files, part).map(file => testArgs([file], { isSerial: true, isWindows }))
+    : testRuns(files, { isSerial, isWindows, part })
   // Every run goes ahead even when an earlier one failed, so one job shows all of its failures.
-  const failures = testRuns(files, { isSerial: process.env.CI_TEST_SERIAL === '1', isWindows: platform === 'win32', part }).flatMap(args => {
+  const timed = []
+  const failures = []
+  for (const args of runs) {
+    const fileStarted = Date.now()
     const result = spawn(process.execPath, args, { stdio: 'inherit', env })
     if (result.error) throw result.error
-    return result.status === 0 ? [] : [result.status ?? result.signal]
-  })
+    if (isSerial) timed.push({ path: args.at(-1), ms: Date.now() - fileStarted })
+    if (result.status !== 0) failures.push(result.status ?? result.signal)
+  }
+  const totalMs = Date.now() - started
+  if (process.env.CI_TEST_TIMINGS || process.env.CI === 'true') {
+    try {
+      writeFileSync(timingsPath(), JSON.stringify({ version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }, null, 2) + '\n')
+    } catch (error) {
+      console.error('agent-board: could not record test timings: ' + error.message)
+    }
+  }
   if (failures.length) throw new Error('selected tests failed: ' + failures.join(', '))
 }
 
 const main = async () => {
   if (process.argv[2] === 'run') { runTestFiles(JSON.parse(process.env.CI_TEST_FILES)); return }
+  if (process.argv[2] === 'check') {
+    let timings
+    try {
+      timings = readBoardTimings()
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        console.log('no test timings recorded; nothing to check')
+        return
+      }
+      throw error
+    }
+    const result = checkBoardTimes(timings)
+    const slowest = (timings.files ?? []).filter(file => typeof file.ms === 'number').sort((a, b) => b.ms - a.ms).slice(0, 3)
+    console.log('board part ' + (timings.part || '1/1') + ': total ' + seconds(timings.totalMs) + 's of ' + seconds(BOARD_PART_BUDGET_MS) + 's budget' + (slowest.length ? '; slowest files: ' + slowest.map(file => file.path + ' ' + seconds(file.ms) + 's').join(', ') : '; per-file times are recorded on serial runs only'))
+    for (const error of result.errors) console.log('time budget: ' + error)
+    if (!result.ok) process.exitCode = 1
+    return
+  }
   if (process.argv[2] === 'verify') {
     const result = checkResults(JSON.parse(process.env.CI_PLAN), JSON.parse(process.env.CI_RESULTS))
     console.log(JSON.stringify(result, null, 2))
     if (!result.ok) process.exitCode = 1
     return
   }
-  if (process.argv[2] !== 'plan') throw new Error('use plan, run or verify')
+  if (process.argv[2] !== 'plan') throw new Error('use plan, run, check or verify')
   const roots = JSON.parse(process.env.CI_SOURCE_ROOTS)
   const files = process.env.CI_CHANGED_FILES ? JSON.parse(process.env.CI_CHANGED_FILES) : process.env.CI_FORCE_FULL === 'true' ? [] : gitPaths(roots.at(-1), process.env.CI_BASE_SHA, process.env.CI_HEAD_SHA)
   emitPlan(await buildPlan(files, { roots, forceFull: process.env.CI_FORCE_FULL === 'true' }))

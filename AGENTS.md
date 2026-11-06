@@ -170,6 +170,8 @@ The command uses the installed board's selected progress path. Native reporters 
 
 Keep the title and each step to one line of at most 120 characters, with a link for detail. Never extend a finished step; add new work as a new step. The writer shortens longer text to 120 characters including `…`, saves the full text to this month's journal, and returns `cut`, the number of titles and steps shortened. `--codex-report` remains an alias for installed integrations.
 
+Where setup installed it, your own plan tool already reaches the board through the same writer, with no model call: Codex `update_plan`, Gemini CLI `write_todos`, OpenCode's todo list and OpenClaw `progress_card`. Keep that plan current. A title you report with the command stays; without one, the step in progress names the task. Each plan update replaces the steps, so report a `[?]` step again after it.
+
 Hand-edit your own block only when the report command is missing. Fresh independent setups use `~/.agent-board/progress.md`; existing installations retain their selected path. The optional Claude plugin defaults to `~/.claude/progress.md` and respects `$CLAUDE_PROGRESS_FILE` / `$CLAUDE_CONFIG_DIR`. The format below is the fallback for a missing command. Format: https://github.com/WenyuChiou/agent-board/blob/main/docs/FORMAT.md
 
 ```markdown

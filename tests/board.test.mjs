@@ -21,6 +21,7 @@ import { pickSurface, AGENT_ENV_VARS } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
+import { makeFolderCommand, moveFileCommand } from '../hooks/old-months-run.ts'
 import { liveBoardScript, pageDonePath } from '../hooks/live-page.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
@@ -11676,4 +11677,102 @@ test("a waiting card's note shows as one line with the full text on open", async
   noteClip().events.toggle()
   await dom.redraw({ ...model, counts: { ...model.counts, active: 8 } })
   assert.equal(noteClip().open, false)
+})
+
+// Old archive and journal months move to an archives folder (#922).
+test('--tidy moves archive and journal months older than 3 months to the archives folder, skips a taken name and deletes nothing', () => {
+  tidyFixture(f => {
+    writeFileSync(f.path, '## Synthetic\n')
+    const name = { old: 'progress-archive-2026-05.md', oldJournal: 'progress-journal-2026-06.md', taken: 'progress-archive-2026-07.md' }
+    const kept = ['progress-archive-2026-08.md', 'progress-journal-2026-09.md', 'progress-archive-2026-10.md']
+    for (const one of [...Object.values(name), ...kept]) writeFileSync(join(f.dir, one), `synthetic ${one}\n`)
+    mkdirSync(join(f.dir, 'archives'))
+    writeFileSync(join(f.dir, 'archives', name.taken), 'older words that must survive\n')
+    const result = f.command(['--tidy'])
+    assert.equal(result.status, 0, result.stderr)
+    for (const one of [name.old, name.oldJournal]) {
+      assert.ok(!existsSync(join(f.dir, one)), `${one} stays behind`)
+      assert.equal(readFileSync(join(f.dir, 'archives', one), 'utf8'), `synthetic ${one}\n`)
+    }
+    assert.equal(readFileSync(join(f.dir, name.taken), 'utf8'), `synthetic ${name.taken}\n`)
+    assert.equal(readFileSync(join(f.dir, 'archives', name.taken), 'utf8'), 'older words that must survive\n')
+    for (const one of kept) assert.equal(readFileSync(join(f.dir, one), 'utf8'), `synthetic ${one}\n`)
+    assert.equal(readdirSync(join(f.dir, 'archives')).length, 3)
+  })
+})
+
+test('the pane makes the archives folder and moves an old month with this system’s own commands, never over a taken name, in a folder named with brackets and a quote', { timeout: 60_000 }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-board [months] o'k-"))
+  try {
+    const isWin = process.platform === 'win32'
+    const run = argv => spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 30_000 })
+    const folder = join(dir, 'archives')
+    // A second run finds the folder there and still succeeds.
+    for (let n = 0; n < 2; n++) assert.equal(run(makeFolderCommand(isWin, folder)).status, 0)
+    assert.ok(statSync(folder).isDirectory())
+    const from = join(dir, 'progress-archive-2026-05.md')
+    writeFileSync(from, '## synthetic May\n')
+    assert.equal(run(moveFileCommand(isWin, from, join(folder, 'progress-archive-2026-05.md'))).status, 0)
+    assert.equal(existsSync(from), false)
+    assert.equal(readFileSync(join(folder, 'progress-archive-2026-05.md'), 'utf8'), '## synthetic May\n')
+    writeFileSync(from, '## synthetic May again\n')
+    run(moveFileCommand(isWin, from, join(folder, 'progress-archive-2026-05.md')))
+    assert.equal(readFileSync(from, 'utf8'), '## synthetic May again\n')
+    assert.equal(readFileSync(join(folder, 'progress-archive-2026-05.md'), 'utf8'), '## synthetic May\n')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+const pageLoadReads = async (sessions, projects, taskBytes) => {
+  const board = serveIn()
+  const urls = []
+  try {
+    const stamp = new Date().toISOString()
+    const step = '- [x] Synthetic finished step of some length to fill the line\n'
+    const text = Array.from({ length: projects }, (_, p) => {
+      const blocks = Array.from({ length: sessions }, (__, n) => n).filter(n => n % projects === p).map(n => {
+        const id = `s${String(n).padStart(7, '0')}`
+        return `<!-- auto session=${id} agent=codex state=working updated=${stamp} -->\n### Synthetic plan ${n}\n- [~] Work\n<!-- /auto session=${id} -->\n`
+      }).join('')
+      return `## project-${p}\n${blocks}### Hand-kept ${p}\n${step.repeat(Math.ceil(taskBytes / projects / step.length))}`
+    }).join('\n')
+    writeFileSync(board.path, text)
+    const probe = join(board.dir, 'load-reads.json')
+    const preload = join(board.dir, 'load-reads.cjs')
+    writeFileSync(preload, `if (process.argv.includes('--serve-child')) {
+  const fs = require('node:fs')
+  const read = fs.readFileSync
+  let reads = 0
+  let seen = false
+  fs.readFileSync = (file, ...args) => { if (!seen) reads += 1; return read(file, ...args) }
+  const http = require('node:http')
+  const emit = http.Server.prototype.emit
+  http.Server.prototype.emit = function (event, ...args) {
+    if (event === 'request' && String(args[0].url).startsWith('/api/board') && !seen) {
+      const end = args[1].end
+      args[1].end = function (...values) { seen = true; fs.writeFileSync(${JSON.stringify(probe)}, String(reads)); return end.apply(this, values) }
+    }
+    return emit.call(this, event, ...args)
+  }
+  require('node:module').syncBuiltinESMExports()
+}`)
+    board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+    const output = await board.serve()
+    const url = board.urlOf(output)
+    assert.ok(url)
+    urls.push(url)
+    const response = await fetch(new URL('/api/board', url), { headers: { 'x-board-token': new URL(url).searchParams.get('t') } })
+    assert.equal(response.status, 200)
+    await response.arrayBuffer()
+    return { reads: Number(readFileSync(probe, 'utf8')), bytes: text.length }
+  } finally { await board.end(urls) }
+}
+
+test('a board with 100 sessions in 70 projects keeps the page load read count of the normal board', { timeout: 60_000 }, async () => {
+  const normal = await pageLoadReads(10, 7, 60_000)
+  const scale = await pageLoadReads(100, 70, 600_000)
+  assert.ok(scale.bytes > 600_000)
+  console.log(`PAGE LOAD READS normal=${normal.reads} scale=${scale.reads}`)
+  assert.equal(scale.reads, normal.reads)
 })

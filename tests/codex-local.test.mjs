@@ -5542,7 +5542,7 @@ test('OpenClaw native metadata callbacks fence stale runs and never request conv
     const hooks = new Map()
     let subscription
     plugin.register({ on: (name, fn) => hooks.set(name, fn), agent: { events: { registerAgentEventSubscription: value => { subscription = value } } } })
-    assert.deepEqual([...hooks.keys()], ['session_start', 'session_end'])
+    assert.deepEqual([...hooks.keys()], ['session_start', 'session_end', 'after_tool_call'])
     assert.equal(subscription.payload, 'metadata')
     assert.deepEqual(subscription.streams, ['lifecycle'])
     const sessionId = 'openclaw-native-session-123'
@@ -9464,6 +9464,59 @@ test('setup writes the plan hook as a matcher group for Codex and Gemini, and re
   assert.deepEqual(JSON.parse(readFileSync(geminiConfig, 'utf8')), { hooks: { AfterTool: [mine] } })
 }))
 
+// Grok Build's todo_write may carry only the changed items; the whole list is in the result (#922).
+const grokCall = (id, todos, extra = {}) => ({
+  sessionId: id, hookEventName: 'PostToolUse', toolName: 'todo_write', toolResultTruncated: false,
+  toolInput: { merge: true, todos: [{ id: 'b', status: 'in_progress' }] },
+  toolResult: { type: 'Todo', TodosUpdated: { summary_for_prompt: 'synthetic', todos, state: {} } }, ...extra,
+})
+
+test('a Grok todo_write merge call with one changed item reports the whole list from its result', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const ran = f.command(['--plan-event', '--agent', 'grok'], grokCall('grok-plan-session-1', [
+    { content: 'Grok first', priority: 'high', status: 'completed' }, { content: 'Grok second', priority: 'medium', status: 'in_progress' },
+    { content: 'Grok third', priority: 'low', status: 'pending' }, { content: 'Grok dropped', priority: 'low', status: 'cancelled' },
+  ]))
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=grok/)
+  assert.match(text, /^- \[x\] Grok first$/m)
+  assert.match(text, /^- \[~\] Grok second$/m)
+  assert.match(text, /^- \[ \] Grok third$/m)
+  assert.match(text, /^- \[-\] Grok dropped$/m)
+}))
+
+test('a Grok todo_write call with a truncated result, a DuplicateId result, an empty list or another tool writes nothing', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const one = [{ content: 'Grok never written', priority: 'low', status: 'pending' }]
+  // A good call first, so the refusals below are shown to leave its steps alone.
+  assert.equal(f.command(['--plan-event', '--agent', 'grok'], grokCall('grok-plan-session-2', [{ content: 'Grok kept', priority: 'low', status: 'in_progress' }])).status, 0)
+  for (const input of [
+    grokCall('grok-plan-session-2', one, { toolResultTruncated: true }),
+    grokCall('grok-plan-session-2', one, { toolResult: { type: 'Todo', DuplicateId: { id: 'a' } } }),
+    grokCall('grok-plan-session-2', []),
+    grokCall('grok-plan-session-2', one, { toolName: 'shell' }),
+    grokCall('grok-plan-session-2', one, { sessionId: undefined }),
+  ]) {
+    const ran = f.command(['--plan-event', '--agent', 'grok'], input)
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.equal(ran.stdout, '')
+  }
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^- \[~\] Grok kept$/m)
+  assert.ok(!text.includes('Grok never written'))
+}))
+
+test('setup installs the Grok PostToolUse plan hook with the todo_write matcher and a 5 second timeout', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const grok = JSON.parse(readFileSync(join(f.home, '.grok', 'hooks', 'agent-board-local.json'), 'utf8')).hooks
+  assert.equal(grok.PostToolUse.length, 1)
+  assert.equal(grok.PostToolUse[0].matcher, '^todo_write$')
+  assert.equal(grok.PostToolUse[0].hooks[0].timeout, 5)
+  assert.match(grok.PostToolUse[0].hooks[0].command, /--plan-event/)
+}))
+
 test('Windows fixture Node is a hard link to the running executable when linking works', { skip: process.platform !== 'win32' }, t => fixture(f => {
   const node = join(f.home, 'linked node.exe')
   placeNode(node)
@@ -9505,4 +9558,130 @@ test('codex: every turn of one interactive session claims its mailbox message (#
     assert.equal(f.call('codex', 'Stop', { turn_id: turn }).status, 0, turn)
   }
   assert.deepEqual(f.state().messages.map(one => one.status), ['accepted', 'accepted', 'accepted'])
+}))
+
+// The plan mirror for OpenCode and OpenClaw (#922): each plugin sends its agent's own plan to the
+// worker as a --plan-event, and the worker turns it into the session's steps. The plugin is loaded
+// here with a spawnSync that keeps the call, which then runs against the real installed worker.
+const planPlugin = async (f, agent, build, exercise) => {
+  assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const { opencodePlugin } = await importTs('../hooks/local-agents.ts')
+  const { openclawLocalPlugin } = await importTs('../hooks/portable-agents.ts')
+  const saved = []
+  const source = agent === 'opencode' ? opencodePlugin(process.execPath, worker, f.progress, 'Progress', f.home) : openclawLocalPlugin(process.execPath, worker, f.progress, f.home)
+  const load = new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\n${build}`)
+  const spawn = (_node, args, options) => { saved.push({ args: [...args], input: options.input }); return { status: 0, stdout: '' } }
+  const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })
+  const exitListeners = process.listeners('exit')
+  try { await exercise(load(createRequire, spawn, tool), saved) } finally { dropExitReports(exitListeners) }
+  return {
+    saved,
+    // Runs a kept call the way the host would: the worker, with the plugin's own arguments and input.
+    deliver: call => spawnSync(process.execPath, [worker, ...call.args.slice(1)], { env: f.env, input: call.input, encoding: 'utf8', windowsHide: true, timeout: 15000 }),
+  }
+}
+
+test('an OpenCode todo.updated event becomes the session steps; a child session, another event, no session, no todos or a failed session lookup write nothing', () => fixture(async f => {
+  const id = 'ses_opencode_plan_1', child = 'ses_opencode_child_1'
+  const todos = [
+    { content: 'Read the spec', status: 'completed', priority: 'high' }, { content: 'Write the code', status: 'in_progress', priority: 'high' },
+    { content: 'Ship it', status: 'pending', priority: 'low' }, { content: 'Dropped idea', status: 'cancelled', priority: 'low' },
+  ]
+  const got = await planPlugin(f, 'opencode', 'return AgentBoardLocal', async (factory, saved) => {
+    const hooks = await factory({ client: { session: { get: async ({ path }) => path.id === 'ses_lookup_fails' ? { error: 'synthetic lookup failure' } : ({ data: { id: path.id, ...(path.id === child ? { parentID: id } : {}) } }) } }, directory: f.home })
+    await hooks.event({ event: { type: 'todo.updated', properties: { sessionID: child, todos } } })
+    await hooks.event({ event: { type: 'message.updated', properties: { sessionID: id, todos } } })
+    await hooks.event({ event: { type: 'todo.updated', properties: { todos } } })
+    await hooks.event({ event: { type: 'todo.updated', properties: { sessionID: id, todos: [] } } })
+    await hooks.event({ event: { type: 'todo.updated', properties: { sessionID: 'ses_lookup_fails', todos } } })
+    assert.equal(saved.length, 0)
+    await hooks.event({ event: { type: 'todo.updated', properties: { sessionID: id, todos } } })
+  })
+  assert.equal(got.saved.length, 1)
+  assert.ok(got.saved[0].args.includes('--plan-event'))
+  const sent = JSON.parse(got.saved[0].input)
+  assert.equal(sent.session_id, id)
+  assert.equal(JSON.stringify(sent).includes('high'), false, 'only text and status leave the plugin')
+  const ran = got.deliver(got.saved[0])
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=opencode/)
+  assert.match(text, /^### Write the code$/m)
+  assert.match(text, /^- \[x\] Read the spec$/m)
+  assert.match(text, /^- \[~\] Write the code$/m)
+  assert.match(text, /^- \[ \] Ship it$/m)
+  assert.match(text, /^- \[-\] Dropped idea$/m)
+}))
+
+test('an OpenClaw progress_card or update_plan call becomes the session steps; an error, no plan or another tool writes nothing', () => fixture(async f => {
+  const id = 'openclaw-plan-session-1'
+  const plan = [{ step: 'Read the spec', status: 'completed' }, { step: 'Write the code', status: 'in_progress' }, { step: 'Ship it', status: 'pending' }]
+  const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }, saved) => {
+    const handlers = new Map()
+    plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
+    const fire = (event, ctx = { sessionId: id }) => handlers.get('after_tool_call')?.(event, ctx)
+    fire({ toolName: 'progress_card', params: { plan }, error: 'tool failed' })
+    fire({ toolName: 'progress_card', params: { markdown: 'only text' } })
+    fire({ toolName: 'progress_card', params: { plan: [] } })
+    fire({ toolName: 'read_file', params: { plan } })
+    fire({ toolName: 'update_plan', params: { plan } }, {})
+    assert.equal(saved.length, 0)
+    fire({ toolName: 'progress_card', params: { plan } })
+  })
+  assert.equal(got.saved.length, 1)
+  assert.ok(got.saved[0].args.includes('--plan-event'))
+  assert.equal(JSON.parse(got.saved[0].input).session_id, id)
+  const ran = got.deliver(got.saved[0])
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=openclaw/)
+  assert.match(text, /^- \[x\] Read the spec$/m)
+  assert.match(text, /^- \[~\] Write the code$/m)
+  assert.match(text, /^- \[ \] Ship it$/m)
+}))
+
+// The plugins pass at most 200 items and the worker keeps the first 40 as steps.
+test('a plan of 250 items reaches the board as its first 40 steps, from OpenCode and from OpenClaw', async () => {
+  const many = Array.from({ length: 250 }, (_, index) => 'Item ' + (index + 1))
+  const fortySteps = progress => {
+    const text = readFileSync(progress, 'utf8')
+    assert.equal((text.match(/^- \[[ x~!?-]\] Item \d+$/gm) ?? []).length, 40)
+    assert.match(text, /^- \[ \] Item 40$/m)
+    assert.doesNotMatch(text, /^- \[ \] Item 41$/m)
+  }
+  await fixture(async f => {
+    const got = await planPlugin(f, 'opencode', 'return AgentBoardLocal', async factory => {
+      const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } }, directory: f.home })
+      await hooks.event({ event: { type: 'todo.updated', properties: { sessionID: 'ses_opencode_many', todos: many.map(content => ({ content, status: 'pending', priority: 'low' })) } } })
+    })
+    assert.equal(got.saved.length, 1)
+    assert.equal(JSON.parse(got.saved[0].input).tool_input.todos.length, 200)
+    assert.equal(got.deliver(got.saved[0]).status, 0)
+    fortySteps(f.progress)
+  })
+  await fixture(async f => {
+    const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }) => {
+      const handlers = new Map()
+      plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
+      handlers.get('after_tool_call')?.({ toolName: 'progress_card', params: { plan: many.map(step => ({ step, status: 'pending' })) } }, { sessionId: 'openclaw-plan-session-many' })
+    })
+    assert.equal(got.saved.length, 1)
+    assert.equal(JSON.parse(got.saved[0].input).tool_input.plan.length, 200)
+    assert.equal(got.deliver(got.saved[0]).status, 0)
+    fortySteps(f.progress)
+  })
+})
+
+test('the older OpenClaw update_plan name reaches the board too', () => fixture(async f => {
+  const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }) => {
+    const handlers = new Map()
+    plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
+    handlers.get('after_tool_call')?.({ toolName: 'update_plan', params: { plan: [{ step: 'Old name step', status: 'in_progress' }] } }, { sessionId: 'openclaw-plan-session-2' })
+  })
+  assert.equal(got.saved.length, 1)
+  assert.equal(got.deliver(got.saved[0]).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[~\] Old name step$/m)
 }))

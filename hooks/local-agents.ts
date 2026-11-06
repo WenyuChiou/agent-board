@@ -49,7 +49,12 @@ export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> =
 export const planEvents: Partial<Record<LocalAgent, { event: string; matcher: string }>> = {
   codex: { event: 'PostToolUse', matcher: 'update_plan' },
   gemini: { event: 'AfterTool', matcher: '^write_todos$' },
+  // Grok runs PostToolUse as a gate (600 s by default) and reads stdout: the hook prints nothing, timeout 5.
+  grok: { event: 'PostToolUse', matcher: '^todo_write$' },
 }
+// Plugin hosts have no hook groups: OpenCode's plugin sends todo.updated and OpenClaw's after_tool_call,
+// each as a --plan-event with the plan in the same shape as Codex's or Gemini's (#922).
+export const planPlugins: readonly LocalAgent[] = ['opencode', 'openclaw']
 export const lifecycleCapability = (agent: LocalAgent): string =>
   agent === 'hermes' ? 'adapter-pending' : 'adapter-installed-unverified'
 
@@ -216,6 +221,17 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
   }),
   event: async ({ event }) => withHook(async (current, deadline) => {
     const p = event.properties ?? {}
+    // The plan mirror (#922): OpenCode's own todo list, in full each time. Only the top-level session
+    // is mirrored, as for status; only each todo's text and status are sent.
+    if (event.type === 'todo.updated') {
+      const id = p.sessionID
+      if (!id || !Array.isArray(p.todos) || p.todos.length === 0) return
+      const info = current(await client.session.get({ path: { id } }))
+      if (info.error) throw Error('HOST_METADATA_FAILED')
+      if (!info.data || info.data.id !== id || info.data.parentID) return
+      run('--plan-event', { session_id: id, tool_name: 'write_todos', tool_input: { todos: p.todos.slice(0, 200).map(todo => ({ description: todo?.content, status: todo?.status })) } }, undefined, deadline)
+      return
+    }
     const session = p.sessionID ?? p.info?.id
     if (!session || !['session.created', 'session.status', 'session.idle', 'session.deleted'].includes(event.type)) return
     if (event.type === 'session.status' && !['busy', 'retry', 'idle'].includes(p.status?.type)) return
