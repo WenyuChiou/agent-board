@@ -413,7 +413,7 @@ export const ZH_TW = {
   copiedSuffix: '（已複製到剪貼簿）',
   notifyOn: '桌面通知已打開：需要你、別的對話在問、今天到期、做完、CI 跑完時會通知。',
   notifyOff: '桌面通知已關掉。',
-  paneOpened: (path: string): string => `進度面板已開啟：${path}`,
+  paneOpened: '進度面板已開啟',
   paneNotOpened: (reason: string): string => `進度面板開不了：${reason}`,
   livePageOpened: '這個應用程式無法顯示面板。請開啟看板網頁，回覆問題或封存工作：',
   livePageFallback: '看板網頁無法啟動。',

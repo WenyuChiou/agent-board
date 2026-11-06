@@ -4121,7 +4121,7 @@ export const register: Register = (on, options) => {
     await refreshStatus($)
     const { path } = await read($, snapshot)
 
-    if (opened.isPlaced) return { text: s.paneOpened(path) }
+    if (opened.isPlaced) return { text: s.paneOpened }
     // This open's own answer decides; the footer's flag may already follow a newer roster.
     if (!hasNoPaneSurfaceIn(opened)) return { text: s.paneNotOpened(opened.reason) }
     const progress = path || (await progressPath($))
