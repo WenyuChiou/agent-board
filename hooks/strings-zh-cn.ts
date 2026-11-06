@@ -640,6 +640,7 @@ export const ZH_CN: Strings = {
   cleanUp: '清理',
   cleanSeenUnreadable: '没有归档任何项目，因为读不到任务完成时间的记录。',
   canArchive: (n: number): string => `可归档 ${n} 个已完成的任务`,
+  historyLine: (n: number, from: string, to: string): string => `已归档 ${n} 个较早的步骤（${from} 至 ${to}）`,
   prunedAgents: (n: number): string => `${n} 条旧的 agent 记录`,
   prunedSessions: (n: number): string => `${n} 份旧的 session 工作清单`,
   prunedTurns: (n: number): string => `${n} 条还没读的收件箱回合`,

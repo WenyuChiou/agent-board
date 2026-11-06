@@ -320,6 +320,74 @@ test('--tidy beside a block cut off in the middle of the file archives the finis
   assert.equal(ran.board, cutBoard().replace('<!-- auto session=9a9a9a9a agent=codex state=done updated=2026-10-10T04:12:58.831Z -->\n### A finished plan\n- [x] Did it\n<!-- /auto session=9a9a9a9a -->\n\n', ''))
 })
 
+// Seven days of history in an open hand-kept task (#922 items 2 and 6), through the board script's
+// sweep (--tidy) and its terminal board. Made-up data; the clock is the script's Date.now.
+const HIST_NOW = Date.parse('2026-10-16T12:00:00.000Z')
+const histDay = (() => {
+  const date = new Date(HIST_NOW)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+})()
+const histRun = (args, file, beside = {}) => chatRun(args, {
+  file: () => file,
+  beside,
+  change: text => `Date.now = () => ${HIST_NOW}\n${text}`,
+  inspect: dir => ({
+    board: readFileSync(join(dir, 'progress.md'), 'utf8'),
+    archive: readdirSync(dir).filter(name => name.includes('-archive-')).map(name => readFileSync(join(dir, name), 'utf8')).join(''),
+  }),
+})
+const HIST_TASK = '## synthetic-project\n### Synthetic long task\n- [x] Old one <!-- done 2026-10-01 -->\n- [-] Old cancelled <!-- done 2026-10-05 -->\n- [x] Recent one <!-- done 2026-10-14 -->\n- [ ] Still open\n'
+
+test('an open hand-kept task moves steps done more than 7 days ago to the archive and keeps one summary line', () => {
+  const ran = histRun(['--tidy'], HIST_TASK)
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, '## synthetic-project\n### Synthetic long task\n2 earlier steps archived (from 10-01 to 10-05)\n- [x] Recent one <!-- done 2026-10-14 -->\n- [ ] Still open\n')
+  assert.ok(ran.archive.includes(`## synthetic-project · ${histDay}\n### Synthetic long task\n- [x] Old one <!-- done 2026-10-01 -->\n- [-] Old cancelled <!-- done 2026-10-05 -->`), ran.archive)
+  assert.ok(!ran.archive.includes('Recent one'), ran.archive)
+})
+
+test('open, waiting and blocked steps and owner lines never move, however old', () => {
+  const kept = '## synthetic-project\n### Synthetic old task\n> Owner words <!-- done 2020-01-01 -->\n- [ ] Todo <!-- done 2020-01-01 -->\n- [~] Doing <!-- done 2020-01-01 -->\n- [?] Waiting, OK? <!-- done 2020-01-01 -->\n- [>] Running <!-- done 2020-01-01 -->\n- [!] Blocked — why <!-- done 2020-01-01 -->\n- [x] Fresh <!-- done 2026-10-16 -->\n'
+  // A second task shows the sweep did run: its old finished step moves while the first is untouched.
+  const ran = histRun(['--tidy'], `${kept}### Synthetic other task\n- [x] Long gone <!-- done 2020-01-01 -->\n- [ ] Open\n`)
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, `${kept}### Synthetic other task\n1 earlier step archived (from 01-01 to 01-01)\n- [ ] Open\n`)
+  assert.ok(ran.archive.includes('- [x] Long gone'), ran.archive)
+  for (const word of ['Todo', 'Doing', 'Waiting', 'Running', 'Blocked', 'Owner words']) assert.ok(!ran.archive.includes(word), word)
+})
+
+test('a done step with no date is stamped with today and is not archived on the first pass', () => {
+  const ran = histRun(['--tidy'], '## synthetic-project\n### Synthetic task\n- [x] Undated done\n- [-] Undated cancelled\n- [ ] Still open\n')
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, `## synthetic-project\n### Synthetic task\n- [x] Undated done <!-- done ${histDay} -->\n- [-] Undated cancelled <!-- done ${histDay} -->\n- [ ] Still open\n`)
+  assert.equal(ran.archive, '')
+})
+
+test('a second pass adds to the summary line instead of writing another', () => {
+  // The first pass wrote its line in zh-TW; this pass speaks English and still finds it.
+  const board = '## synthetic-project\n### Synthetic long task\n已封存 2 個較早的步驟（10-01 至 10-05）\n- [x] Older still <!-- done 2026-09-28 -->\n- [ ] Still open\n'
+  const ran = histRun(['--tidy'], board)
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, '## synthetic-project\n### Synthetic long task\n3 earlier steps archived (from 09-28 to 10-05)\n- [ ] Still open\n')
+})
+
+test('a step ticked on the board is stamped that day, and a press on a stamped line still finds it', () => {
+  const board = '## Job search\n### Fabrikam fellowship\n- [x] Draft the statement <!-- done 2026-10-10 -->\n- [ ] Ask two referees\n'
+  const ran = histRun(['--keys', 'x'], board)
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.stdout.includes('Done: “Ask two referees”.'), ran.stdout)
+  assert.equal(ran.board, `## Job search\n### Fabrikam fellowship\n- [x] Draft the statement <!-- done 2026-10-10 -->\n- [x] Ask two referees <!-- done ${histDay} -->\n`)
+})
+
+test('historyDays in progress-settings.json changes the 7 days, and a missing file means 7', () => {
+  const board = '## synthetic-project\n### Synthetic task\n- [x] Four days old <!-- done 2026-10-12 -->\n- [ ] Still open\n'
+  assert.equal(histRun(['--tidy'], board).board, board)
+  assert.equal(histRun(['--tidy'], board, { 'progress-settings.json': 'not json' }).board, board)
+  const ran = histRun(['--tidy'], board, { 'progress-settings.json': '{"historyDays": 3}\n' })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.board, '## synthetic-project\n### Synthetic task\n1 earlier step archived (from 10-12 to 10-12)\n- [ ] Still open\n')
+})
+
 test('a reporter for another session writes below a block cut off in the middle of the file, and one for its own session writes its block in place of the marker line', () => {
   for (const [args, payload] of [
     [['--codex-event'], { session_id: 'synthetic-cut-239', hook_event_name: 'SessionStart' }],
