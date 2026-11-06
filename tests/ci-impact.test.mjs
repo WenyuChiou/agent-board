@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
@@ -508,6 +509,122 @@ test('the part given to a run reaches its test processes, even when the environm
   } finally {
     if (saved === undefined) delete process.env.CI_TEST_PART
     else process.env.CI_TEST_PART = saved
+  }
+})
+
+test('the board time check fails a file over its budget and a part over its budget, naming the slow files', async () => {
+  const { checkBoardTimes, BOARD_FILE_BUDGETS_MS, BOARD_PART_BUDGET_MS } = await import('../scripts/ci-impact.mjs')
+  assert.equal(BOARD_FILE_BUDGETS_MS['tests/board.test.mjs'], 140_000)
+  assert.equal(BOARD_PART_BUDGET_MS, 480_000)
+  const base = { version: 1, part: '1/4', serial: true, totalMs: 300_000, files: [{ path: 'tests/board.test.mjs', ms: 100_000 }, { path: 'tests/ws-stdio.test.mjs', ms: 5_000 }] }
+  assert.deepEqual(checkBoardTimes(base), { ok: true, errors: [] })
+  // A file exactly at its budget is not over it.
+  assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/board.test.mjs', ms: 140_000 }] }), { ok: true, errors: [] })
+  const overFile = checkBoardTimes({ ...base, files: [{ path: 'tests/board.test.mjs', ms: 150_000 }] })
+  assert.equal(overFile.ok, false)
+  assert.deepEqual(overFile.errors, ['tests/board.test.mjs took 150s, over its 140s budget'])
+  const overPart = checkBoardTimes({ ...base, totalMs: 500_000, files: [
+    { path: 'tests/board.test.mjs', ms: 100_000 },
+    { path: 'tests/codex-local.test.mjs', ms: 150_000 },
+    { path: 'tests/legacy-connect.test.mjs', ms: 100_000 },
+  ] })
+  assert.equal(overPart.ok, false)
+  assert.deepEqual(overPart.errors, ['board part 1/4 took 500s, over its 480s budget; slowest files: tests/codex-local.test.mjs 150s, tests/board.test.mjs 100s, tests/legacy-connect.test.mjs 100s'])
+  assert.deepEqual(checkBoardTimes(null), { ok: false, errors: ['missing or invalid board timings'] })
+  // A file outside the board group, and a file with no time recorded, are not judged.
+  const unjudged = { ...base, totalMs: 100_000, files: [{ path: 'tests/messaging.test.mjs', ms: 999_000 }, { path: 'tests/board.test.mjs', ms: null }] }
+  assert.deepEqual(checkBoardTimes(unjudged), { ok: true, errors: [] })
+})
+
+test('a serial run times one file at a time and records the times for the time check', async () => {
+  const { runTestFiles, partFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-'))
+  const serial = process.env.CI_TEST_SERIAL
+  const timings = process.env.CI_TEST_TIMINGS
+  process.env.CI_TEST_SERIAL = '1'
+  process.env.CI_TEST_TIMINGS = join(dir, 'timings.json')
+  try {
+    const files = ['tests/ws-stdio.test.mjs', 'tests/connect-worker.test.mjs', 'tests/board.test.mjs']
+    assert.deepEqual(partFiles(files, '1/2'), ['tests/ws-stdio.test.mjs', 'tests/board.test.mjs'])
+    const calls = []
+    runTestFiles(files, '1/2', (command, args) => { calls.push(args); return { status: 0 } }, 'win32')
+    assert.deepEqual(calls, [
+      ['--test', '--test-concurrency=1', 'tests/ws-stdio.test.mjs'],
+      ['--test', '--test-concurrency=1', 'tests/board.test.mjs'],
+    ])
+    const recorded = JSON.parse(await readFile(process.env.CI_TEST_TIMINGS, 'utf8'))
+    assert.equal(recorded.version, 1)
+    assert.equal(recorded.part, '1/2')
+    assert.equal(recorded.serial, true)
+    assert.equal(typeof recorded.totalMs, 'number')
+    assert.equal(recorded.files.length, 2)
+    assert.equal(recorded.files[0].path, 'tests/ws-stdio.test.mjs')
+    assert.equal(typeof recorded.files[0].ms, 'number')
+    // A failing file does not stop the rest, and the times are still recorded.
+    const failing = []
+    assert.throws(() => runTestFiles(files, '1/2', (command, args) => { failing.push(args); return { status: args.includes('tests/board.test.mjs') ? 1 : 0 } }, 'win32'), /selected tests failed: 1/)
+    assert.equal(failing.length, 2)
+    const recordedAfterFailure = JSON.parse(await readFile(process.env.CI_TEST_TIMINGS, 'utf8'))
+    assert.equal(recordedAfterFailure.files.length, 2)
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+    if (timings === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timings
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a parallel run keeps its single Node run and records no per-file times', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-'))
+  const serial = process.env.CI_TEST_SERIAL
+  const timings = process.env.CI_TEST_TIMINGS
+  delete process.env.CI_TEST_SERIAL
+  process.env.CI_TEST_TIMINGS = join(dir, 'timings.json')
+  try {
+    const calls = []
+    runTestFiles(['tests/ws-stdio.test.mjs', 'tests/connect-worker.test.mjs'], '', (command, args) => { calls.push(args); return { status: 0 } }, 'linux')
+    assert.deepEqual(calls, [['--test', 'tests/ws-stdio.test.mjs', 'tests/connect-worker.test.mjs']])
+    const recorded = JSON.parse(await readFile(process.env.CI_TEST_TIMINGS, 'utf8'))
+    assert.equal(recorded.serial, false)
+    assert.deepEqual(recorded.files, [
+      { path: 'tests/ws-stdio.test.mjs', ms: null },
+      { path: 'tests/connect-worker.test.mjs', ms: null },
+    ])
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+    if (timings === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timings
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the time check command fails on over-budget timings and passes on green ones', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-'))
+  try {
+    const path = join(dir, 'timings.json')
+    const script = fileURLToPath(new URL('../scripts/ci-impact.mjs', import.meta.url))
+    const run = () => spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: path } })
+    await writeFile(path, JSON.stringify({ version: 1, part: '1/4', serial: true, totalMs: 300_000, files: [{ path: 'tests/board.test.mjs', ms: 100_000 }] }))
+    const green = run()
+    assert.equal(green.status, 0)
+    assert.match(green.stdout, /total 300s of 480s budget/)
+    await writeFile(path, JSON.stringify({ version: 1, part: '1/4', serial: true, totalMs: 500_000, files: [
+      { path: 'tests/board.test.mjs', ms: 200_000 },
+      { path: 'tests/codex-local.test.mjs', ms: 180_000 },
+      { path: 'tests/legacy-connect.test.mjs', ms: 100_000 },
+    ] }))
+    const red = run()
+    assert.equal(red.status, 1)
+    assert.match(red.stdout, /tests\/board\.test\.mjs took 200s, over its 140s budget/)
+    assert.match(red.stdout, /board part 1\/4 took 500s, over its 480s budget; slowest files: tests\/board\.test\.mjs 200s, tests\/codex-local\.test\.mjs 180s/)
+    const missing = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: join(dir, 'missing.json') } })
+    assert.equal(missing.status, 0)
+    assert.match(missing.stdout, /no test timings recorded/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
   }
 })
 
