@@ -120,6 +120,20 @@ export const LIFECYCLE_STEPS: ReadonlySet<string> = new Set([
 ])
 export const isLifecycleStep = (text: string): boolean => LIFECYCLE_STEPS.has(text.trim())
 
+// The hook keeps one line so the ledger sees the same words when a prompt answers it.
+export const questionSteps = (held: readonly string[], previousAsked: number | undefined, state: unknown, value: unknown, isBoardPrompt = false): { steps: string[]; asked: number | undefined } => {
+  const steps = [...held]
+  let asked = previousAsked !== undefined && Number.isInteger(previousAsked) && previousAsked >= 0 && previousAsked < steps.length ? previousAsked : undefined
+  if (isBoardPrompt) return { steps, asked }
+  if (state === 'working' && asked !== undefined) steps[asked] = steps[asked]!.replace(/^- \[\?\] /, '- [x] ')
+  const question = state === 'waiting' && typeof value === 'string' ? cutLine(value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
+  if (question !== '' && (asked !== undefined || steps.length < 40)) {
+    if (asked === undefined) asked = steps.length
+    steps[asked] = `- [?] ${question}`
+  }
+  return { steps, asked }
+}
+
 // Hooks describe lifecycle, not task completion. Only an explicit report can say done.
 export const codexEvent = (previous: CodexReport | null, input: Record<string, unknown>, now: string, s: Strings): CodexReport => {
   const session = line(input.session_id)
@@ -131,8 +145,8 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   if (event !== 'SessionStart' && event !== 'SessionEnd' && turn === null) throw new Error('MISSING_TURN')
   const key = `${String(event)}:${turn ?? ''}`
   if (turn && previous?.retiredTurns?.includes(turn)) throw new Error('STALE_TURN')
-  // A second ask in the same turn is a new question, not a replay.
-  if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest') return previous
+  // Cursor can send its reply after Stop with the same generation id.
+  if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest' && !(event === 'Stop' && typeof input.question === 'string' && input.question.trim() !== '')) return previous
   if (previous?.turn && turn && previous.turn !== turn && event !== 'UserPromptSubmit') throw new Error('STALE_TURN')
   const working = event === 'UserPromptSubmit'
   const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' ? 'done' : 'waiting'
@@ -140,19 +154,12 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   // A session ending does not answer its last question, but it does end an approval.
   const held = previous?.steps ?? [`- [ ] ${s.codexLifecycle}`]
   const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
-  const earlierAsked = previous?.asked !== undefined && previous.asked < held.length ? previous.asked : undefined
-  const steps = held.map((step, index) => event !== 'SessionStart' && (index === earlier || (event !== 'SessionEnd' && index === earlierAsked)) ? step.replace(/^- \[\?\] /, '- [x] ') : step)
+  const approvalSteps = held.map((step, index) => event !== 'SessionStart' && index === earlier ? step.replace(/^- \[\?\] /, '- [x] ') : step)
+  const { steps, asked } = questionSteps(approvalSteps, previous?.asked, working ? 'working' : event === 'Stop' ? state : 'ended', event === 'Stop' ? input.question : undefined, working && input.prompt_submitted === false)
   let approval = earlier
-  let asked = earlierAsked
-  // Only the closing question reaches here from the last message (scripts/codex-local.ts), one line, cut like other step text.
-  const question = event === 'Stop' && state !== 'done' && typeof input.question === 'string' ? cutLine(input.question.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
   if (event === 'PermissionRequest') {
     if (approval === undefined) approval = steps.length
     steps[approval] = `- [?] ${s.codexApprovalStep}`
-  }
-  if (question !== '') {
-    if (asked === undefined) asked = steps.length
-    steps[asked] = `- [?] ${question}`
   }
   return {
     session, turn: turn ?? previous?.turn ?? null, state,

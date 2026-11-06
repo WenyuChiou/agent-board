@@ -4829,6 +4829,24 @@ test('a Codex Stop keeps nothing of the last message but its closing question', 
   assert.ok(!existsSync(join(f.root, 'pending')) || readdirSync(join(f.root, 'pending')).every(name => !readFileSync(join(f.root, 'pending', name), 'utf8').includes(secret)))
 }))
 
+test('a Codex question stays waiting through an approval and a stop without a question, until the next prompt', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which folder should I use?' }).status, 0)
+  assert.equal(f.event('PermissionRequest', 'turn-1').status, 0)
+  assert.ok(readFileSync(f.progress, 'utf8').includes('- [?] Which folder should I use?'))
+  // A board-only prompt does not answer it, so the stop that ends that turn leaves it waiting too.
+  assert.equal(f.event('UserPromptSubmit', 'turn-2', { prompt: '/agent-board' }).status, 0)
+  assert.equal(f.event('Stop', 'turn-2', { last_assistant_message: 'Here is the board.' }).status, 0)
+  const held = readFileSync(f.progress, 'utf8')
+  assert.equal(held.match(/- \[[?x]\] Which folder should I use\?/g)?.length, 1)
+  assert.ok(held.includes('- [?] Which folder should I use?'))
+  assert.equal(f.event('UserPromptSubmit', 'turn-3').status, 0)
+  const answered = readFileSync(f.progress, 'utf8')
+  assert.ok(answered.includes('- [x] Which folder should I use?'))
+  assert.ok(!/- \[\?\]/.test(answered))
+}))
+
 test('the approval step and the question step close and reuse their own lines in either order', () => fixture(f => {
   f.install('--apply')
   const question = { last_assistant_message: 'Which folder should I use?' }
@@ -4850,6 +4868,153 @@ test('the approval step and the question step close and reuse their own lines in
   const answered = readFileSync(f.progress, 'utf8')
   assert.ok(answered.includes('- [x] Which folder should I use?'))
   assert.ok(!/- \[\?\]/.test(answered))
+}))
+
+test('Grok keeps only its closing question through board and end events, then closes and reuses it', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const id = 'synthetic-grok-question', secret = 'SYNTHETIC-PRIVATE-GROK-DETAIL'
+  const send = (state, extra = {}) => f.command(['--agent-status', '--agent', 'grok', '--state', state], { sessionId: id, ...extra })
+  assert.equal(send('working', { hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(send('waiting', { hookEventName: 'Stop', lastAssistantMessage: `${secret}\n\nWhich color?` }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Which color\?/)
+  assert.equal(send('working', { hookEventName: 'UserPromptSubmit', prompt: '/agent-board' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Which color\?/)
+  assert.equal(send('ended', { hookEventName: 'SessionEnd' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Which color\?/)
+  assert.equal(send('working', { hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Which color\?/)
+  assert.equal(send('waiting', { last_assistant_message: 'Use the default.' }).status, 0)
+  assert.doesNotMatch(readFileSync(f.progress, 'utf8'), /- \[\?\]/)
+  assert.equal(send('waiting', { last_assistant_message: 'Which folder?' }).status, 0)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /- \[\?\] Which folder\?/)
+  assert.equal((text.match(/- \[[?x]\] Which (?:color|folder)\?/g) ?? []).length, 1)
+  assert.ok(!text.includes(secret))
+  const record = readFileSync(join(f.root, 'sessions', createHash('sha256').update(`grok:${id}`).digest('hex') + '.json'), 'utf8')
+  assert.ok(!record.includes(secret))
+  assert.equal(f.command(['--codex-report', '--agent', 'grok', '--session', id], { title: 'Own report', state: 'working', steps: ['- [~] Continue work'] }).status, 0)
+  // A `!` ends a sentence for lastQuestion, so `<!--` never reaches a step; a closing `-->` would.
+  assert.equal(send('waiting', { lastAssistantMessage: 'Choose blue --> or green?' }).status, 0)
+  const reported = readFileSync(f.progress, 'utf8')
+  assert.equal((reported.match(/- \[[?x]\] (?:Which folder|Choose blue or green)\?/g) ?? []).length, 1)
+  assert.match(reported, /- \[\?\] Choose blue or green\?/)
+  assert.doesNotMatch(reported, /- \[\?\] .*-->/)
+  // A later stop with no question leaves the open one waiting; only a prompt answers it.
+  assert.equal(send('waiting', { lastAssistantMessage: 'Still thinking about the colors.' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Choose blue or green\?/)
+}))
+
+test('Cursor records a closing question on either side of stop and the next prompt closes it once', () => fixture(f => {
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  for (const [index, order] of [['response-first', ['afterAgentResponse', 'stop']], ['stop-first', ['stop', 'afterAgentResponse']]]) {
+    const id = `synthetic-cursor-${index}`
+    const send = (event, generation, extra = {}) => f.command(['--codex-event', '--agent', 'cursor'], { conversation_id: id, generation_id: generation, hook_event_name: event, ...extra })
+    assert.equal(send('beforeSubmitPrompt', 'generation-1').status, 0)
+    for (const event of [...order, 'afterAgentResponse']) assert.equal(send(event, 'generation-1', { text: 'SYNTHETIC-PRIVATE-CURSOR\n\nProceed now?' }).status, 0)
+    const recordFile = join(f.root, 'sessions', createHash('sha256').update(`cursor:${id}`).digest('hex') + '.json')
+    const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+    assert.equal(record.steps.filter(step => step === '- [?] Proceed now?').length, 1)
+    assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Proceed now\?/)
+    assert.ok(!readFileSync(recordFile, 'utf8').includes('SYNTHETIC-PRIVATE-CURSOR'))
+    assert.equal(send('beforeSubmitPrompt', 'generation-2').status, 0)
+    const answered = JSON.parse(readFileSync(recordFile, 'utf8'))
+    assert.equal(answered.steps.filter(step => step === '- [x] Proceed now?').length, 1)
+    assert.ok(!answered.steps.some(step => step.startsWith('- [?] ')))
+    assert.doesNotMatch(readFileSync(f.progress, 'utf8'), /- \[\?\] Proceed now\?/)
+  }
+}))
+
+test('OpenCode status keeps a closing question and respects the forty-step limit', () => fixture(f => {
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const id = 'synthetic-opencode-question'
+  const send = (state, extra = {}) => f.command(['--agent-status', '--agent', 'opencode', '--state', state], { session_id: id, ...extra })
+  assert.equal(send('waiting', { last_assistant_message: 'SYNTHETIC-PRIVATE-OPENCODE\n\nWhich branch?' }).status, 0)
+  const first = readFileSync(f.progress, 'utf8')
+  assert.equal((first.match(/- \[\?\] Which branch\?/g) ?? []).length, 1)
+  assert.ok(!first.includes('SYNTHETIC-PRIVATE-OPENCODE'))
+  assert.equal(send('working', { prompt_submitted: true }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Which branch\?/)
+  assert.equal(f.command(['--codex-report', '--agent', 'opencode', '--session', id], { title: 'Forty steps', state: 'working', steps: Array.from({ length: 40 }, (_, index) => `- [ ] Step ${index + 1}`) }).status, 0)
+  assert.equal(send('waiting', { last_assistant_message: 'Another question?' }).status, 0)
+  const record = JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`opencode:${id}`).digest('hex') + '.json'), 'utf8'))
+  assert.equal(record.steps.length, 40)
+  assert.ok(!record.steps.some(step => step.includes('Another question?')))
+}))
+
+test('Antigravity reads only a current closing question from a bounded transcript tail', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const file = join(f.home, 'conversation', 'transcript.jsonl')
+  const user = { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'SYNTHETIC-PRIVATE-PROMPT' }
+  const model = content => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', content })
+  const save = entries => f.save(file, entries.map(entry => typeof entry === 'string' ? entry : JSON.stringify(entry)).join('\n') + '\n')
+  const send = (id, state, event, transcriptPath = file) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId: id, transcriptPath })
+  const record = id => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`antigravity:${id}`).digest('hex') + '.json'), 'utf8'))
+  const id = 'synthetic-agy-current-question'
+  save([user, model('SYNTHETIC-PRIVATE-REPLY\n\nReady to proceed?')])
+  assert.equal(send(id, 'waiting', 'Stop').status, 0)
+  assert.ok(record(id).steps.includes('- [?] Ready to proceed?'))
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Ready to proceed\?/)
+  assert.equal(send(id, 'working', 'PreInvocation').status, 0)
+  assert.ok(record(id).steps.includes('- [x] Ready to proceed?'))
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Ready to proceed\?/)
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-PRIVATE'))
+  save([user, model('Old question?'), user])
+  assert.equal(send('synthetic-agy-new-prompt', 'waiting', 'Stop').status, 0)
+  assert.equal(record('synthetic-agy-new-prompt').asked, undefined)
+  save([user, model('No question in this reply.')])
+  assert.equal(send('synthetic-agy-no-question', 'waiting', 'Stop').status, 0)
+  assert.equal(record('synthetic-agy-no-question').asked, undefined)
+  save([user, 'not JSON', model('Do not retain this?')])
+  assert.equal(send('synthetic-agy-garbage', 'waiting', 'Stop').status, 0)
+  assert.equal(record('synthetic-agy-garbage').asked, undefined)
+  save([user, 42, model('Invalid shape?')])
+  assert.equal(send('synthetic-agy-bad-shape', 'waiting', 'Stop').status, 0)
+  assert.equal(record('synthetic-agy-bad-shape').asked, undefined)
+  save([user, model('Old question?'), { source: 'MODEL', type: 'PLANNER_RESPONSE', content: { text: 'Invalid reply shape' } }])
+  assert.equal(send('synthetic-agy-bad-reply', 'waiting', 'Stop').status, 0)
+  assert.equal(record('synthetic-agy-bad-reply').asked, undefined)
+  const folder = join(f.home, 'directory', 'transcript.jsonl')
+  mkdirSync(folder, { recursive: true })
+  for (const [name, path] of [['missing', join(f.home, 'missing', 'transcript.jsonl')], ['directory', folder], ['relative', 'transcript.jsonl'], ['wrong-name', join(f.home, 'other.jsonl')]]) {
+    const session = `synthetic-agy-${name}`
+    assert.equal(send(session, 'waiting', 'Stop', path).status, 0)
+    assert.equal(record(session).state, 'waiting')
+    assert.equal(record(session).asked, undefined)
+  }
+  save([model('a'.repeat(300000)), user, model('A long transcript.\n\nUse the blue one?')])
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting'], { conversationId: 'synthetic-agy-long-tail', transcriptPath: file }).status, 0)
+  assert.ok(record('synthetic-agy-long-tail').steps.includes('- [?] Use the blue one?'))
+}))
+
+test('queued Grok status retains only the closing question and replays it', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const id = 'synthetic-grok-queued-question', locked = lockedProgress(f)
+  const queued = f.command(['--agent-status', '--agent', 'grok', '--state', 'waiting'], { sessionId: id, lastAssistantMessage: 'SYNTHETIC-PRIVATE-QUEUED\n\nKeep this choice?' }, locked.env)
+  assert.equal(queued.status, 0, queued.stderr)
+  const files = pendingFiles(f)
+  assert.equal(files.length, 1)
+  const contents = readFileSync(join(f.root, 'pending', files[0]), 'utf8')
+  assert.deepEqual(JSON.parse(contents).payload, { question: 'Keep this choice?' })
+  assert.ok(!contents.includes('SYNTHETIC-PRIVATE-QUEUED'))
+  unlinkSync(locked.marker)
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: 'synthetic-grok-other-session' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Keep this choice\?/)
+  holdAutomaticRecovery(f)
+  const rawId = 'synthetic-grok-raw-question'
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const raw = spawnSync(process.execPath, [worker, '--hook-version', '1', '--hook-deadline', String(Date.now() - 1), '--agent-status', '--agent', 'grok', '--state', 'waiting', '--progress-file', f.progress], {
+    env: f.env, input: JSON.stringify({ sessionId: rawId, lastAssistantMessage: 'SYNTHETIC-PRIVATE-RAW\n\nCan we continue?' }), encoding: 'utf8', windowsHide: true, timeout: 15000,
+  })
+  assert.equal(raw.status, 0, raw.stderr)
+  const pending = pendingFiles(f)
+  assert.equal(pending.length, 1)
+  assert.ok(pending[0].endsWith('.raw.json'))
+  const rawText = readFileSync(join(f.root, 'pending', pending[0]), 'utf8')
+  assert.doesNotMatch(rawText, /SYNTHETIC-PRIVATE-RAW|Can we continue\?|lastAssistantMessage/)
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: 'synthetic-grok-replay-session' }).status, 0)
+  const record = JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`grok:${rawId}`).digest('hex') + '.json'), 'utf8'))
+  assert.equal(record.state, 'waiting')
+  assert.equal(record.asked, undefined)
 }))
 
 // These synthetic full ids have distinct SHA-256 owners with the same eight-character prefix.
@@ -5109,7 +5274,7 @@ test('a shared installation retains its chosen progress path when another agent 
   assert.equal(JSON.parse(f.install().stdout).progress, chosen)
 }))
 
-test('OpenCode metadata adapter and task tool work without reading messages or Claude', async () => {
+test('OpenCode adapter and task tool work without Claude', async () => {
   const home = mkdtempSync(join(tmpdir(), 'opencode-adapter-'))
   const exitListeners = process.listeners('exit')
   try {
@@ -5118,7 +5283,7 @@ test('OpenCode metadata adapter and task tool work without reading messages or C
     assert.equal(installed.status, 0, installed.stderr)
     const plugin = join(home, '.config', 'opencode', 'plugins', 'agent-board-local.js')
     const source = readFileSync(plugin, 'utf8')
-    assert.ok(!source.includes('session.messages') && !source.includes('transcript'))
+    assert.ok(source.includes('session.messages') && !source.includes('transcript'))
     // A minimal SDK stand-in verifies our adapter only, not OpenCode host discovery.
     const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
     const testPlugin = join(home, 'adapter-test.mjs')
@@ -9705,6 +9870,41 @@ const planPlugin = async (f, agent, build, exercise) => {
     deliver: call => spawnSync(process.execPath, [worker, ...call.args.slice(1)], { env: f.env, input: call.input, encoding: 'utf8', windowsHide: true, timeout: 15000 }),
   }
 }
+
+test('OpenCode idle events send the last assistant text and preserve status on failed, stalled or oversized replies', () => fixture(async f => {
+  const got = await planPlugin(f, 'opencode', 'return AgentBoardLocal', async factory => {
+    const client = { session: {
+      get: async ({ path }) => ({ data: { id: path.id } }),
+      messages: async ({ path }) => {
+        if (path.id.endsWith('failed')) throw new Error('synthetic failure')
+        if (path.id.endsWith('stalled')) return new Promise(() => {})
+        if (path.id.endsWith('oversized')) return { data: [{ info: { role: 'assistant' }, parts: [{ type: 'text', text: 'a'.repeat(1100000) }] }] }
+        return { data: [
+          { info: { role: 'assistant' }, parts: [{ type: 'text', text: 'Old answer?' }] },
+          { info: { role: 'assistant' }, parts: [{ type: 'text', text: 'Visible answer.' }, { type: 'text', text: 'Synthetic?', synthetic: true }, { type: 'text', text: 'Ignored?', ignored: true }, { type: 'text', text: 'Which option?' }] },
+          { info: { role: 'user' }, parts: [{ type: 'text', text: 'Not assistant text' }] },
+        ] }
+      },
+    } }
+    const hooks = await factory({ client, directory: f.home })
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-opencode-idle' } } })
+    await hooks.event({ event: { type: 'session.status', properties: { sessionID: 'synthetic-opencode-status-idle', status: { type: 'idle' } } } })
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-opencode-failed' } } })
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-opencode-stalled' } } })
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'synthetic-opencode-oversized' } } })
+  })
+  assert.equal(got.saved.length, 5)
+  for (const call of got.saved.slice(0, 2)) {
+    const sent = JSON.parse(call.input)
+    assert.equal(sent.state, 'waiting')
+    assert.equal(sent.last_assistant_message, 'Visible answer.\nWhich option?')
+  }
+  for (const call of got.saved.slice(2)) {
+    const sent = JSON.parse(call.input)
+    assert.equal(sent.state, 'waiting')
+    assert.equal(sent.last_assistant_message, undefined)
+  }
+}))
 
 test('an OpenCode todo.updated event becomes the session steps; a child session, another event, no session, no todos or a failed session lookup write nothing', () => fixture(async f => {
   const id = 'ses_opencode_plan_1', child = 'ses_opencode_child_1'
