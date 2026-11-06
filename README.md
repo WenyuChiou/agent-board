@@ -292,7 +292,7 @@ More answers are in the guide's [FAQ](docs/GUIDE.md#faq) and [Troubleshooting](d
 <details>
 <summary><b>Colours and marks</b></summary>
 
-The pane follows Claude Code's theme (`/config`, then **Theme**); the page follows your computer's light or dark mode until you pick Light or Dark at the top right. Every mark has its own shape, so it reads without colour; the page draws a step still to do as a small dot rather than a ring, so it does not look like a button:
+The pane follows Claude Code's theme (`/config`, then **Theme**); the page follows your computer's light or dark mode until you pick Light or Dark. On the board's page, the switch is next to **Close the board**: at the bottom of the expanded sidebar, or below the tasks on a narrow screen or when the sidebar is collapsed. Every mark has its own shape, so it reads without colour; the page draws a step still to do as a small dot rather than a ring, so it does not look like a button:
 
 | Mark | Means | | Mark | Means |
 |:-:|---|---|:-:|---|
