@@ -135,7 +135,9 @@ export const questionSteps = (held: readonly string[], previousAsked: number | u
   if (state === 'working' && asked !== undefined) steps[asked] = steps[asked]!.replace(/^- \[\?\] /, '- [x] ')
   const question = state === 'waiting' && typeof value === 'string' ? cutLine(value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
   if (question !== '' && (asked !== undefined || steps.length < 40)) {
-    askedRevision = nextRevision(askedRevision)
+    // Hosts may deliver the same closing question again after Stop or an idle status.
+    // Only a changed question or a slot closed by a real prompt begins a new incarnation.
+    if (asked === undefined || steps[asked] !== `- [?] ${question}`) askedRevision = nextRevision(askedRevision)
     if (asked === undefined) asked = steps.length
     steps[asked] = `- [?] ${question}`
   }

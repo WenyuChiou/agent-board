@@ -5005,6 +5005,57 @@ test('Cursor records a closing question on either side of stop and the next prom
   }
 }))
 
+test('bundled Cursor and idle status replays do not reopen resolved questions after reload', async () => {
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { emptyQuestions, observeQuestions, resolveQuestion } = await importTs('../hooks/questions.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  return fixture(f => {
+    for (const agent of ['cursor', 'opencode']) {
+      assert.equal(f.install('--agent', agent, '--apply').status, 0)
+      const id = `synthetic-${agent}-question-replay`
+      const file = join(f.root, 'sessions', createHash('sha256').update(`${agent}:${id}`).digest('hex') + '.json')
+      const record = () => JSON.parse(readFileSync(file, 'utf8'))
+      const projects = () => parseProgress(readFileSync(f.progress, 'utf8'))
+      const send = (state, generation, question) => agent === 'cursor'
+        ? f.command(['--codex-event', '--agent', agent], { conversation_id: id, generation_id: generation,
+          hook_event_name: state === 'working' ? 'beforeSubmitPrompt' : question === undefined ? 'stop' : 'afterAgentResponse',
+          ...(question === undefined ? {} : { text: question }) })
+        : f.command(['--agent-status', '--agent', agent, '--state', state], { session_id: id,
+          ...(state === 'working' ? { prompt_submitted: true } : {}), ...(question === undefined ? {} : { last_assistant_message: question }) })
+      const now = Date.now()
+      assert.equal(send('working', 'generation-1').status, 0)
+      assert.equal(send('waiting', 'generation-1').status, 0)
+      assert.equal(send('waiting', 'generation-1', 'Proceed now?').status, 0)
+      const first = record()
+      const open = observeQuestions(emptyQuestions(), projects(), null, [], now, true).ledger
+      const old = open.records.find(one => one.isUnresolved && one.source.agent === agent)
+      assert.ok(old)
+      const resolved = resolveQuestion(open, old.id, now + 1)
+      // Each command reloads the cache; a second afterAgentResponse or idle status is a replay.
+      assert.equal(send('waiting', 'generation-1', 'Proceed now?').status, 0)
+      const replay = observeQuestions(resolved, projects(), null, [], now + 2, true).ledger
+      assert.equal(replay.records.filter(one => one.isUnresolved && one.source.agent === agent).length, 0)
+      assert.equal(record().askedRevision, first.askedRevision)
+      assert.equal(buildView(projects(), [], null, now + 2, 0, {}, STRINGS.en, [], {}, replay).waiting.length, 0)
+      // A different no-question hook/status persists intervening activity but does not answer A.
+      // The later identical delivery must stay resolved even when the consecutive-write shortcut cannot apply.
+      assert.equal(send(agent === 'cursor' ? 'waiting' : 'ended', 'generation-1').status, 0)
+      assert.equal(send('waiting', 'generation-1', 'Proceed now?').status, 0)
+      const delayed = observeQuestions(replay, projects(), null, [], now + 3, true).ledger
+      assert.equal(delayed.records.filter(one => one.isUnresolved && one.source.agent === agent).length, 0)
+      assert.equal(record().askedRevision, first.askedRevision)
+      assert.equal(buildView(projects(), [], null, now + 3, 0, {}, STRINGS.en, [], {}, delayed).waiting.length, 0)
+      assert.equal(send('working', 'generation-2').status, 0)
+      assert.equal(send('waiting', 'generation-2', 'Proceed now?').status, 0)
+      const renewed = observeQuestions(delayed, projects(), null, [], now + 4, true).ledger
+      assert.notEqual(record().askedRevision, first.askedRevision)
+      assert.notEqual(renewed.records.find(one => one.isUnresolved && one.source.agent === agent)?.id, old.id)
+      assert.equal(send('working', 'generation-3').status, 0)
+    }
+  })
+})
+
 test('OpenCode status retains its owned question beyond forty user steps and keeps the new-slot limit', () => fixture(f => {
   assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
   const id = 'synthetic-opencode-question'

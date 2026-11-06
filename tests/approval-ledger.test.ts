@@ -231,3 +231,42 @@ test('internal report validation allows only bounded owned extras and retains in
   expect(() => validateCodexReport({ ...report, steps: ['not a step'] }, session)).toThrow('INVALID_STEP')
   expect(() => codexReport(report, session, { ...input, steps: report.steps }, report.updated, words)).toThrow('INVALID_STEPS')
 })
+
+test('identical Codex Stop replay keeps a resolved question closed but real asks renew it', () => {
+  const started = event(null, 'UserPromptSubmit', 'turn-1')
+  const early = event(started, 'Stop', 'turn-1')
+  const first = event(early, 'Stop', 'turn-1', { question: 'Which folder?' })
+  const open = observeQuestions(emptyQuestions(), codexProjects(first), null, [], NOW, true).ledger
+  const oldId = open.records.find(record => record.isUnresolved)!.id
+  const resolved = resolveQuestion(open, oldId, NOW + 1)
+  const replay = event(JSON.parse(JSON.stringify(first)), 'Stop', 'turn-1', { question: '  Which   folder?  ' })
+  const projects = codexProjects(replay)
+  const held = observeQuestions(resolved, projects, null, [], NOW + 2, true).ledger
+  expect(held.records.filter(record => record.isUnresolved)).toHaveLength(0)
+  expect(buildView(projects, [], null, NOW + 2, 0, {}, words, [], {}, held).waiting).toHaveLength(0)
+  expect(replay.askedRevision).toBe(first.askedRevision)
+  const changed = event(replay, 'Stop', 'turn-1', { question: 'Which branch?' })
+  expect(changed.askedRevision).not.toBe(first.askedRevision)
+  const changedLedger = observeQuestions(held, codexProjects(changed), null, [], NOW + 3, true).ledger
+  expect(changedLedger.records.filter(record => record.isUnresolved)).toHaveLength(1)
+  const working = event(replay, 'UserPromptSubmit', 'turn-2')
+  const renewed = event(working, 'Stop', 'turn-2', { question: 'Which folder?' })
+  const renewedLedger = observeQuestions(held, codexProjects(renewed), null, [], NOW + 3, true).ledger
+  expect(renewed.askedRevision).not.toBe(first.askedRevision)
+  expect(renewedLedger.records.find(record => record.isUnresolved)?.id).not.toBe(oldId)
+  expect(buildView(codexProjects(renewed), [], null, NOW + 3, 0, {}, words, [], {}, renewedLedger).waiting).toHaveLength(1)
+})
+
+test('identical idle question status preserves resolved identity across cache reload', () => {
+  const base = event(null, 'UserPromptSubmit', 'turn-1')
+  const first = { ...base, state: 'waiting' as const, ...questionSteps(base.steps, undefined, 'waiting', 'Which folder?') }
+  const open = observeQuestions(emptyQuestions(), codexProjects(first), null, [], NOW, true).ledger
+  const resolved = resolveQuestion(open, open.records[0]!.id, NOW + 1)
+  const saved: CodexReport = JSON.parse(JSON.stringify(first))
+  const replay = { ...saved, ...questionSteps(saved.steps, saved.asked, 'waiting', 'Which folder?', false, saved.askedRevision) }
+  const projects = codexProjects(replay)
+  const settled = observeQuestions(resolved, projects, null, [], NOW + 2, true).ledger
+  expect(settled.records.filter(record => record.isUnresolved)).toHaveLength(0)
+  expect(buildView(projects, [], null, NOW + 2, 0, {}, words, [], {}, settled).waiting).toHaveLength(0)
+  expect(replay.askedRevision).toBe(first.askedRevision)
+})
