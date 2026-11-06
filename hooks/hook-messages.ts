@@ -27,10 +27,18 @@ export const enrollMcp = (state: MessageState, agent: string, session: string, s
       ? { ...one, contested: true }
       : { ...one, mcpOwner: owner, folderDigest, mcpLeaseUntil: until, contested: false }) }
 }
-export const takeMailboxMessage = (state: MessageState, agent: string, session: string, surface: string, now: number, ttlMs: number, nonce: string): { state: MessageState; message: Message | null } => {
+export const takeMailboxMessage = (state: MessageState, agent: string, session: string, surface: string, now: number, ttlMs: number, nonce: string, ref?: string): { state: MessageState; message: Message | null } => {
   const next = enrollMailbox(state, agent, session, surface, now, ttlMs)
-  const claimed = claimMessages(next, next.mailboxes!.find(one => one.id === mailboxId(agent, session))!, now, nonce)
+  const claimed = claimMessages(next, next.mailboxes!.find(one => one.id === mailboxId(agent, session))!, now, nonce, ref)
   return { state: claimed.state, message: claimed.messages[0] ?? null }
+}
+// A hook that stopped waiting never showed what the board claimed for it, so it hands the claim back
+// and the next turn has the message at once (#990). The ACK code stays, for a message shown before.
+export const releaseMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number): MessageState => {
+  const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && message.error === '')
+  if (one === undefined) return state
+  const { ref: _ref, ...kept } = one
+  return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, claimed: 0, updated: now } : message) }
 }
 export const acceptMailboxMessage = (state: MessageState, agent: string, session: string, id: string, nonce: string, now: number): MessageState => {
   const target = state.mailboxes?.find(one => one.id === mailboxId(agent, session))
