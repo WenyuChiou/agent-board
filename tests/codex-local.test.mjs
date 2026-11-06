@@ -1542,7 +1542,7 @@ test('setup prints a plain summary with each agent and the next steps, and --jso
     assert.ok(codexStep.includes(`--codex-bin '${codex}'`), codexStep)
     assert.match(result.stdout, /--apply/)
     assert.match(result.stdout, /agent-board/)
-    assert.match(result.stdout, /--serve/)
+    assert.doesNotMatch(result.stdout, /--serve/)
     assert.match(result.stdout, /^1\. /m)
     summaries.push(result.stdout)
   }
@@ -4061,20 +4061,13 @@ test('the sh reporter logs CLEANUP_FAILED when its sweep fails, but not for a fi
   assert.equal(readdirSync(inbox).filter(name => name.endsWith('.json')).length, 4)
 }))
 
-test('a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board', () => fixture(async f => {
-  const isWindows = process.platform === 'win32'
-  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
-  const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
-  const exitProof = join(f.home, 'classifier-exit.json')
-  f.save(script, isWindows ? observeClassifierExit(reporterPs1(), exitProof) : reporterSh(inbox))
-  f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
-  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
-  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
-  // Only the words outside the folder paths count: a project folder named agent-board is no board request.
-  // The sh reporter keeps only plain ASCII values; PowerShell keeps every value.
-  // `kept` lists keys in the receipt's order (RECEIPT_KEYS); the POSIX check also compares the bytes.
+// Only the words outside the folder paths count: a project folder named agent-board is no board request.
+// The sh reporter keeps only plain ASCII values; PowerShell keeps every value.
+// `kept` lists keys in the receipt's order (RECEIPT_KEYS); the POSIX check also compares the bytes.
+// One test per case, so CI spreads the cases over its parts instead of one part taking about 21 s (#910).
+const timedOutClassifierCases = isWindows => {
   const grok = { hookEventName: 'UserPromptSubmit' }
-  const cases = [
+  return [
     { payload: { cwd: '/synthetic/中文', prompt: '/board', transcript_path: '/synthetic/中文/PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: '/synthetic/中文' } : {}, isBoard: true },
     { payload: { cwd: '/synthetic/中文', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: '/synthetic/中文/PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: '/synthetic/中文' } : {} },
     { payload: { cwd: '/synthetic/agent-board', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: '/synthetic/agent-board/PRIVATE_TRANSCRIPT.jsonl' }, kept: { cwd: '/synthetic/agent-board' } },
@@ -4086,7 +4079,17 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
     { payload: { hookEventName: 'UserPromptSubmit', hook_event_name: 'UserPromptSubmit', directory: '/synthetic/dir *', project_dir: '/synthetic/project', workspace: '/synthetic/work', workspaceRoot: '/synthetic/root', cwd: '/synthetic/cwd', conversationId: 'synthetic-conversation', conversation_id: 'synthetic-conversation-underscore', 'thread-id': 'synthetic-thread-dash', thread_id: 'synthetic-thread', extra: { sessionID: 'synthetic-upper' }, sessionId: 'synthetic-camel', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { sessionId: 'synthetic-camel', sessionID: 'synthetic-upper', 'thread-id': 'synthetic-thread-dash', thread_id: 'synthetic-thread', conversation_id: 'synthetic-conversation-underscore', conversationId: 'synthetic-conversation', cwd: '/synthetic/cwd', workspaceRoot: '/synthetic/root', workspace: '/synthetic/work', project_dir: '/synthetic/project', directory: '/synthetic/dir *', hook_event_name: 'UserPromptSubmit', hookEventName: 'UserPromptSubmit' } },
     { key: null, payload: { cwd: '/synthetic/project', prompt: 'PRIVATE_RAW_PROMPT' } },
   ]
-  for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of cases.entries()) {
+}
+for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of timedOutClassifierCases(process.platform === 'win32').entries()) {
+  test(`a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board, case ${index}`, () => fixture(async f => {
+    const isWindows = process.platform === 'win32'
+    const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
+    const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
+    const exitProof = join(f.home, 'classifier-exit.json')
+    f.save(script, isWindows ? observeClassifierExit(reporterPs1(), exitProof) : reporterSh(inbox))
+    f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+    const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+    const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
     const session = `synthetic-timeout-${index}`
     rmSync(pidFile, { force: true })
     rmSync(exitProof, { force: true })
@@ -4107,7 +4110,7 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
       const log = hookLog(f)
       assert.match(log, /REPORTER_TIMEOUT/)
       assert.doesNotMatch(log, /REPORTER_FAILED/)
-      if (key === null) { assert.deepEqual(files, []); continue }
+      if (key === null) { assert.deepEqual(files, []); return }
       assert.equal(files.length, 1)
       assert.ok(files[0].endsWith('.json'))
       const body = readFileSync(join(inbox, files[0]), 'utf8')
@@ -4120,8 +4123,8 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
     } finally {
       if (!isGone && existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
     }
-  }
-}))
+  }))
+}
 
 test('a classifier interrupted while publishing its PID marker still proves its owned process exited', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), pidFile = join(f.home, 'classifier.pid')
@@ -4349,7 +4352,7 @@ test('a repeat setup preview after the hooks are trusted does not ask to trust t
   assert.equal(trusted.status, 0, trusted.stderr)
   assert.match(trusted.stdout, /^Codex: already set up/m)
   assert.doesNotMatch(trusted.stdout, /--codex-trust/)
-  assert.match(trusted.stdout, /--serve/)
+  assert.doesNotMatch(trusted.stdout, /--serve/)
   // Codex saying no keeps the step.
   writeFileSync(stateFile, JSON.stringify({ trusted: false }))
   const untrusted = setupAgent(f, '--lang', 'en', '--agent', 'codex')
@@ -4686,9 +4689,10 @@ test('Codex hook replays are no-ops and a Stop never invents task completion', (
   assert.match(readFileSync(f.progress, 'utf8'), /state=done/)
 }))
 
-test('native lifecycle events retain a board-confirmed completion in session JSON instead of reopening old steps', () => fixture(f => {
-  assert.equal(f.install('--apply').status, 0)
-  for (const agent of ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']) {
+// One test per agent, so CI spreads them over its parts (#910).
+for (const agent of ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']) {
+  test(`native lifecycle events retain a board-confirmed completion in session JSON instead of reopening old steps: ${agent}`, () => fixture(f => {
+    assert.equal(f.install('--apply').status, 0)
     const id = `native-confirm-${agent}-123`
     const report = (state, steps) => f.command(['--codex-report', '--agent', agent, '--session', id], { title: `${agent} task`, state, steps })
     assert.equal(report('ended', ['- [ ] Old task', '- [-] Canceled']).status, 0)
@@ -4710,8 +4714,8 @@ test('native lifecycle events retain a board-confirmed completion in session JSO
     assert.equal(report('working', ['- [ ] Genuinely new work']).status, 0)
     assert.deepEqual(JSON.parse(readFileSync(recordPath)).steps, ['- [ ] Genuinely new work'], agent)
     assert.equal(report('done', ['- [x] Genuinely new work']).status, 0)
-  }
-}))
+  }))
+}
 
 test('Codex lifecycle hooks never retain conversation and approval payloads, and open nothing that is not a Codex history file', () => fixture(f => {
   f.install('--apply')
@@ -5468,7 +5472,7 @@ test('OpenCode honors its config override for installation, doctor and removal',
   assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
   const plugin = join(f.env.OPENCODE_CONFIG_DIR, 'plugins', 'agent-board-local.js')
   assert.ok(existsSync(plugin))
-  assert.ok(existsSync(join(f.env.OPENCODE_CONFIG_DIR, 'commands', 'board.md')))
+  assert.ok(existsSync(join(f.env.OPENCODE_CONFIG_DIR, 'commands', 'agent-board.md')))
   assert.ok(!existsSync(join(f.home, '.config', 'opencode')))
   assert.equal(JSON.parse(f.command(['--codex-doctor', '--agent', 'opencode', '--json']).stdout).installed, true)
   f.env.OPENCODE_CONFIG_DIR = join(f.home, 'changed-root')
@@ -5660,7 +5664,7 @@ test('all targets initialize one shared board and explicitly name unfinished nat
   assert.equal(plans.find(plan => plan.agent === 'hermes').capabilities.lifecycle, 'adapter-pending')
   for (const agent of ['openclaw', 'deepseek']) assert.equal(plans.find(plan => plan.agent === agent).capabilities.lifecycle, 'adapter-installed-unverified')
   assert.equal(plans.find(plan => plan.agent === 'antigravity').capabilities.lifecycle, 'adapter-installed-unverified')
-  assert.ok(existsSync(join(f.home, '.gemini', 'commands', 'board.toml')))
+  assert.ok(existsSync(join(f.home, '.gemini', 'commands', 'agent-board.toml')))
   assert.ok(existsSync(join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')))
   for (const agent of ['gemini', 'grok', 'muse']) {
     const response = f.command(['--agent-status', '--agent', agent, '--state', 'waiting'], { session_id: `shared-${agent}-session-123`, prompt: 'PRIVATE_PAYLOAD' })
@@ -9783,3 +9787,85 @@ test('#922 a plan event keeps the project of an existing block', () => fixture(f
   assert.match(text, /^## Kept project\r?$/m)
   assert.ok(!text.includes('## other-folder'), text)
 }))
+
+// 0.24.2 wrote /board for Gemini CLI and OpenCode, with --serve; #868 renames it to /agent-board and runs no flag.
+const commandOf0242 = (f, agent) => {
+  const kind = agent === 'gemini' ? { old: join(f.home, '.gemini', 'commands', 'board.toml'), now: join(f.home, '.gemini', 'commands', 'agent-board.toml') }
+    : { old: join(f.home, '.config', 'opencode', 'commands', 'board.md'), now: join(f.home, '.config', 'opencode', 'commands', 'agent-board.md') }
+  const written = readFileSync(kind.now, 'utf8')
+  const text = agent === 'gemini' ? written.replace("}\n'''\n", " --serve}\n'''\n") : written.replace(/`\n$/, ' --serve`\n')
+  assert.notEqual(text, written)
+  // The 0.24.2 install: the old file on disk, listed in its record, and no new one.
+  const record = join(f.root, `install-${agent}.json`)
+  const manifest = JSON.parse(readFileSync(record, 'utf8'))
+  delete manifest.files[kind.now]
+  manifest.files[kind.old] = createHash('sha256').update(text).digest('hex')
+  rmSync(kind.now)
+  writeFileSync(kind.old, text)
+  writeFileSync(record, `${JSON.stringify(manifest, null, 2)}\n`)
+  return { ...kind, text, record }
+}
+
+for (const agent of ['gemini', 'opencode']) {
+  test(`${agent} setup writes /agent-board that opens the page with no flag`, () => fixture(f => {
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const file = join(f.home, ...(agent === 'gemini' ? ['.gemini', 'commands', 'agent-board.toml'] : ['.config', 'opencode', 'commands', 'agent-board.md']))
+    const text = readFileSync(file, 'utf8')
+    assert.ok(text.includes(f.script), text)
+    assert.ok(!text.includes('--serve'), text)
+    assert.equal(existsSync(join(file, '..', agent === 'gemini' ? 'board.toml' : 'board.md')), false)
+  }))
+
+  test(`${agent} setup on a 0.24.2 install retires the unchanged /board file, names it and writes /agent-board`, () => fixture(f => {
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const old = commandOf0242(f, agent)
+    const preview = f.install('--agent', agent, '--json')
+    assert.equal(preview.status, 0, preview.stderr)
+    const plan = JSON.parse(preview.stdout)
+    assert.deepEqual(plan.conflicts, [])
+    assert.deepEqual(plan.changes.filter(change => change.file === old.old), [{ file: old.old, action: 'remove' }])
+    assert.deepEqual(plan.changes.filter(change => change.file === old.now), [{ file: old.now, action: 'create' }])
+    const plain = setupAgent(f, '--lang', 'en', '--agent', agent)
+    assert.match(plain.stdout, /board\.(toml|md) \(the old \/board command; setup removes it\)/, plain.stdout)
+    assert.equal(existsSync(old.old), true, 'a preview changes nothing')
+    const applied = f.install('--agent', agent, '--apply', '--json')
+    assert.equal(applied.status, 0, applied.stderr)
+    assert.equal(existsSync(old.old), false)
+    assert.equal(existsSync(old.now), true)
+    assert.equal(Object.hasOwn(JSON.parse(readFileSync(old.record, 'utf8')).files, old.old), false)
+    assert.deepEqual(JSON.parse(f.install('--agent', agent, '--json').stdout).changes, [])
+  }))
+
+  test(`${agent} setup on a 0.24.2 install keeps an edited /board file and names it, with no INSTALL_CONFLICT`, () => fixture(f => {
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const old = commandOf0242(f, agent)
+    writeFileSync(old.old, `${old.text}\nMy own line\n`)
+    const plan = JSON.parse(f.install('--agent', agent, '--json').stdout)
+    assert.deepEqual(plan.conflicts, [])
+    assert.deepEqual(plan.keptEdited, [old.old])
+    assert.equal(plan.changes.some(change => change.file === old.old), false)
+    const plain = setupAgent(f, '--lang', 'en', '--agent', agent)
+    assert.match(plain.stdout, /board\.(toml|md) \(your edited old \/board command; setup leaves it; the command is now \/agent-board\)/, plain.stdout)
+    const applied = f.install('--agent', agent, '--apply', '--json')
+    assert.equal(applied.status, 0, applied.stderr)
+    assert.equal(readFileSync(old.old, 'utf8'), `${old.text}\nMy own line\n`)
+    assert.equal(existsSync(old.now), true)
+  }))
+
+  test(`${agent} removal of a 0.24.2 install also takes the unchanged /board file, and leaves an edited one`, () => fixture(f => {
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const old = commandOf0242(f, agent)
+    const removed = remove774(f, agent)
+    assert.equal(removed.status, 0, removed.stderr)
+    assert.deepEqual(JSON.parse(removed.stdout).conflicts, [])
+    assert.equal(existsSync(old.old), false)
+    assert.equal(existsSync(old.now), false)
+    assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const edited = commandOf0242(f, agent)
+    writeFileSync(edited.old, `${edited.text}\nMy own line\n`)
+    const kept = remove774(f, agent)
+    assert.equal(kept.status, 0, kept.stderr)
+    assert.deepEqual(JSON.parse(kept.stdout).keptEdited, [edited.old])
+    assert.equal(readFileSync(edited.old, 'utf8'), `${edited.text}\nMy own line\n`)
+  }))
+}

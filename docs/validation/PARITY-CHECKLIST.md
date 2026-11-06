@@ -21,14 +21,14 @@ One row per surface. The UI and the CLI of one vendor are separate rows.
 Every surface in this table appears in the record:
 - **Installed:** a row of its own.
 - **Not installed, or not checked this time:** it may share one line, for example "Not installed, so untested: …".
-- **No connector:** the row says what a user of that agent can do today, for example "opens the `--serve` page; copy only". Agents whose connectors are planned are tracked in #278.
+- **No connector:** the row says what a user of that agent can do today, for example "opens the page; copy only". Agents whose connectors are planned are tracked in #278.
 
 ## Checks per row
 
 | | Check | Pass when |
 |---|---|---|
 | a | Open the board from inside the agent (its skill, command or link) | The board or its link shows, with every agent's rows |
-| b | One synthetic turn that reports two steps and ends on a question | The card is on the terminal board and the `--serve` page within a few seconds |
+| b | One synthetic turn that reports two steps and ends on a question | The card is on the terminal board and the page within a few seconds |
 | c | Answer that question from the page | The answer reaches the agent, or the card names the copy fallback |
 | d | Archive, confirm done and hide its row, on the terminal and the page | Every press shows a result or a plain reason next to the card |
 | e | Send a message from this agent to its own other session and to another agent | Delivered, or the card names the fallback |
@@ -39,7 +39,7 @@ Each cell is one of:
 - **FAIL**, with an issue number
 - **untested**, with the reason
 - **needs owner**, with the screen that stopped the check (sign-in, trust, consent, usage limit or config) and its words, with account names, emails and paths masked
-- **via the page**: checks c and d run once on the shared `--serve` page and terminal board, which get rows of their own; a host whose own turn did not reach the board is marked this way
+- **via the page**: checks c and d run once on the shared page and terminal board, which get rows of their own; a host whose own turn did not reach the board is marked this way
 - **n/a**, with the reason: the check cannot apply, for example the agent has no connector or its service has ended
 
 A cell may add a short note, and a `*` that points to a sentence under the table. Also record the host version and quote any fallback or result text the screen shows.
@@ -51,7 +51,7 @@ A cell may add a short note, and a `*` that points to a sentence under the table
 - **Work in a scratch project folder, with synthetic prompts only** ("Synthetic test: …"). Board checks c, d and f use a synthetic board through `CLAUDE_PROGRESS_FILE`.
 - **Never open an existing conversation or project.** If an app opens on one, start a new chat in the scratch folder at once.
 - **Screenshots:** at least one per surface, and one inside every CLI. Crop each to the scratch window, with no sidebar, history, account name or real path. Do not commit them. Keep them in a local folder, give the count in the record, and say in the PR body who holds them. Pictures in the repository follow CONTRIBUTING's image rules.
-- **Approvals:** you may approve a one-time or this-session prompt to run the board's own command (`--serve`, `--json`) in the scratch folder, never an "always allow". The one exception is the board's own hooks approval in the kept test home, pressed after a yes (below).
+- **Approvals:** you may approve a one-time or this-session prompt to run the board's own command (plain `agent-board`, `--json`) in the scratch folder, never an "always allow". The one exception is the board's own hooks approval in the kept test home, pressed after a yes (below).
 - **Sign-ins stay with the person whose computer runs the check:** never type a password, a sign-in code or a token, and never create an account. Record "needs owner" and the words on the screen, masked as above.
 - **Some prompts the checker may press after a yes** (owner, 2026-11-03: 「理論上你要用computer use幫我做才對」). Press only after the person says yes in chat to that item, through computer use or the browser tools. The yes covers the items on this run's list and is given in this run. A blanket yes, or a yes from an earlier run, does not count.
   - a trust prompt for the scratch project folder;

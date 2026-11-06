@@ -10,7 +10,7 @@ const read = path => readFileSync(resolve(root, path), 'utf8')
 const matrix = JSON.parse(read('docs/parity-matrix.json'))
 const baseline = JSON.parse(read('docs/parity-baseline.json'))
 const hosts = ['claude-cli', 'claude-app', 'claude-ide', 'codex-cli', 'codex-app', 'codex-ide', 'antigravity-app', 'agy-cli', 'gemini-cli', 'cursor-ide', 'cursor-agent-cli', 'windsurf', 'devin-cli', 'copilot-vscode', 'copilot-cli', 'opencode', 'grok-build', 'hermes', 'openclaw', 'muse-dot', 'kiro', 'amp', 'cline', 'aider', 'goose', 'qwen-code', 'crush', 'droid', 'auggie']
-const surfaces = ['pane', '--watch', '--chat', '--json', '--serve', 'host-ui']
+const surfaces = ['pane', '--watch', '--chat', '--json', 'page', 'host-ui']
 const capabilities = ['open-board', 'report-question', 'answer-question', 'archive-confirm-hide', 'message-agent', 'redact-default-view']
 const levels = ['native', 'activity only', 'explicit report', 'opt-in resume', 'copy', 'paste or cooperative', 'none', 'unverified']
 const key = cell => [cell.host, cell.surface, cell.capability].join('|')

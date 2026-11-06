@@ -5,6 +5,11 @@ import { DARK, LIGHT, PAGE_DARK, PAGE_LIGHT } from './palette'
 
 const cssVars = (values: Record<string, string>): string => Object.entries(values).map(([key, value]) => `--${key}:${value}`).join(';')
 
+// A Simplified Chinese page reads its Chinese in the SC UI fonts first: the shared characters otherwise take
+// Traditional glyph shapes on a Mac or Windows machine. The rest of the stack is unchanged, so every face
+// stays available for any language.
+const SANS_SC = 'Inter,"PingFang SC","Noto Sans SC","Microsoft YaHei UI","Microsoft YaHei","PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
+
 export const pageTokens = (headHeight = '54px'): string => {
   const shared = {
     // Latin text is Inter, embedded below (the owner found Atkinson beside the system's CJK font a poor pair, 11-06).
@@ -38,6 +43,7 @@ export const pageTokens = (headHeight = '54px'): string => {
   }
   const dark = `${cssVars(DARK)};${cssVars(PAGE_DARK)};color-scheme:dark`
   return `:root{${cssVars(LIGHT)};${cssVars(PAGE_LIGHT)};${cssVars(shared)};color-scheme:light}
+:root:lang(zh-Hans){--font-sans:${SANS_SC}}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){${dark}}}
 :root[data-theme="dark"]{${dark}}
 @media (max-width:640px){:root{--text-lg:max(18px,1.125rem)}}`

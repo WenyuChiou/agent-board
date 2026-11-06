@@ -37,6 +37,9 @@ const summaries = [
   {
     "preview": "would update {count} setup files",
     "applied": "updated {count} setup files",
+    "current": "{count} already current",
+    "retire": "{file} (the old /board command; setup removes it)",
+    "keptEdited": "{file} (your edited old /board command; setup leaves it; the command is now /agent-board)",
     "ready": "already set up",
     "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry with {command}.",
     "retry": "Retry after fixing the conflicting files: {command}",
@@ -47,7 +50,14 @@ const summaries = [
     "apply": "Apply these changes: {command}",
     "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works). Then start a new session.",
     "codexMissing": "Codex: setup could not find Codex; run where.exe codex in PowerShell or command -v codex in bash, then pass its full path to --codex-bin.",
-    "reload": "{host}: enable its reporting hooks or plugin, then start a new session.",
+    "antigravity": "Antigravity: start a new conversation; setup has already configured its reporting hooks.",
+    "cursor": "Cursor: start a new chat in Cursor or cursor-agent; setup has already configured its reporting hooks.",
+    "grok": "Grok Build: start a new session; setup has already configured its reporting hooks.",
+    "muse": "Muse Code: start a new session; setup has already configured its reporting hooks.",
+    "gemini": "Gemini CLI: start a new session; setup has already configured its reporting hooks.",
+    "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin, then start a new session.",
+    "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin, then start a new chat.",
+    "deepseek": "DeepSeek: restart the Cordis CLI to load its generated agent-board plugin, then start a new session.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
     "board": "Open the board: {command}"
@@ -55,6 +65,9 @@ const summaries = [
   {
     "preview": "將更新 {count} 個設定檔案",
     "applied": "已更新 {count} 個設定檔案",
+    "current": "{count} 個已是最新",
+    "retire": "{file}（舊的 /board 命令；setup 會移除）",
+    "keptEdited": "{file}（你改過的舊 /board 命令；setup 不動它；命令已改成 /agent-board）",
     "ready": "已設定完成",
     "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案，再執行 {command} 重試。",
     "retry": "修正衝突的檔案後重試：{command}",
@@ -65,7 +78,14 @@ const summaries = [
     "apply": "套用這些變更：{command}",
     "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。然後開始新的工作階段。",
     "codexMissing": "Codex：setup 找不到 Codex；請在 PowerShell 執行 where.exe codex 或在 bash 執行 command -v codex，再用 --codex-bin 傳入完整路徑。",
-    "reload": "{host}：啟用回報 hooks 或外掛，再開始新的工作階段。",
+    "antigravity": "Antigravity：開始新的對話；setup 已設定回報 hooks。",
+    "cursor": "Cursor：在 Cursor 或 cursor-agent 開始新的對話；setup 已設定回報 hooks。",
+    "grok": "Grok Build：開始新的工作階段；setup 已設定回報 hooks。",
+    "muse": "Muse Code：開始新的工作階段；setup 已設定回報 hooks。",
+    "gemini": "Gemini CLI：開始新的工作階段；setup 已設定回報 hooks。",
+    "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛，再開始新的工作階段。",
+    "openclaw": "OpenClaw：重新啟動 OpenClaw，載入 setup 產生的 agent-board 外掛，再開始新的對話。",
+    "deepseek": "DeepSeek：重新啟動 Cordis CLI，載入 setup 產生的 agent-board 外掛，再開始新的工作階段。",
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
     "plugin": "Claude Code：執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。",
     "board": "開啟看板：{command}"
@@ -73,6 +93,9 @@ const summaries = [
   {
     "preview": "将更新 {count} 个设置文件",
     "applied": "已更新 {count} 个设置文件",
+    "current": "{count} 个已是最新",
+    "retire": "{file}（旧的 /board 命令；setup 会移除）",
+    "keptEdited": "{file}（你改过的旧 /board 命令；setup 不动它；命令已改成 /agent-board）",
     "ready": "已设置完成",
     "skipped": "已跳过：无法安全更新 {files}。请修复或移走冲突的文件，再运行 {command} 重试。",
     "retry": "修复冲突的文件后重试：{command}",
@@ -83,7 +106,14 @@ const summaries = [
     "apply": "应用这些更改：{command}",
     "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。然后开始新的会话。",
     "codexMissing": "Codex：setup 找不到 Codex；请在 PowerShell 运行 where.exe codex 或在 bash 运行 command -v codex，再用 --codex-bin 传入完整路径。",
-    "reload": "{host}：启用报告 hooks 或插件，再开始新的会话。",
+    "antigravity": "Antigravity：开始新的对话；setup 已配置报告 hooks。",
+    "cursor": "Cursor：在 Cursor 或 cursor-agent 开始新的对话；setup 已配置报告 hooks。",
+    "grok": "Grok Build：开始新的会话；setup 已配置报告 hooks。",
+    "muse": "Muse Code：开始新的会话；setup 已配置报告 hooks。",
+    "gemini": "Gemini CLI：开始新的会话；setup 已配置报告 hooks。",
+    "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件，再开始新的会话。",
+    "openclaw": "OpenClaw：重新启动 OpenClaw，加载 setup 生成的 agent-board 插件，再开始新的对话。",
+    "deepseek": "DeepSeek：重新启动 Cordis CLI，加载 setup 生成的 agent-board 插件，再开始新的会话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",
     "board": "打开看板：{command}"
@@ -280,11 +310,20 @@ const main = () => {
   })
   const lines = selected.map((agent, i) => {
     const plan = results[i]
+    // Earlier selected agents may already have updated this plan's shared files.
+    const alreadyCurrent = apply && !plan.conflicts.length && plan.managedBy !== 'connector' ? Math.max(0, plans[i].changes.length - plan.changes.length) : 0
+    const current = alreadyCurrent > 0 ? `; ${words('current', { count: alreadyCurrent })}` : ''
     const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.join(', '), command: setupCommand(['--agent', agent, '--apply']) })
       : !plan.changes.length ? words('ready') : words(apply ? 'applied' : 'preview', { count: plan.changes.length })
     const capability = plan.managedBy !== 'connector' && !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
-    const files = !apply && !plan.conflicts.length ? [...plan.changes.map(change => change.file), ...records(plan)].map(file => `  ${shortPath(file)}`) : []
-    return [`${names[agent]}: ${status}${capability}`, ...files].join('\n')
+    // An install plan removes a file only to retire the old /board command (#868), so the preview says so.
+    const files = !apply && !plan.conflicts.length ? [
+      ...plan.changes.map(change => change.action === 'remove' ? words('retire', { file: shortPath(change.file) }) : shortPath(change.file)),
+      ...records(plan).map(shortPath),
+    ].map(line => `  ${line}`) : []
+    // An old /board file the person edited stays; say so in the preview and after applying.
+    const kept = plan.conflicts.length ? [] : (plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`)
+    return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
   })
   if (hasClaude) lines.push(`Claude Code: ${words('claude')}`)
   const steps = []
@@ -308,12 +347,12 @@ const main = () => {
     // A repeat run of an unchanged install asks Codex itself whether the board's hooks are trusted,
     // and leaves out the trust step only on its yes; no answer or any other answer keeps it (#808).
     if (codex && !plan.changes.length && isTrusted(plan, codex)) continue
-    steps.push(words(agent === 'codex' ? codex ? 'codex' : 'codexMissing' : plan.capabilities.lifecycle === 'adapter-pending' ? 'skill' : 'reload', { host: names[agent], command: boardCommand, codex: codex ? quote(codex) : '' }))
+    steps.push(words(agent === 'codex' ? codex ? 'codex' : 'codexMissing' : plan.capabilities.lifecycle === 'adapter-pending' ? 'skill' : agent, { host: names[agent], command: boardCommand, codex: codex ? quote(codex) : '' }))
   }
   for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
   if (hasClaude) steps.push(words('plugin'))
   if (available.length) {
-    steps.push(words('board', { command: `${boardCommand} --serve` }))
+    steps.push(words('board', { command: boardCommand }))
   }
   if (steps.length) lines.push('', words('next'), ...steps.map((step, i) => `${i + 1}. ${step}`))
   process.stdout.write(`${lines.join('\n')}\n`)

@@ -272,3 +272,28 @@ ${block('a2000002', 'codex', 'waiting', 'Synthetic card', '- [?] Synthetic ask: 
     assert.equal(boardDocument(view, [], [], s, '', false, NOW, groupOptions()).counts.stuck, 1)
   }
 })
+
+test('#997 a working session with an open question and a blocked step shows the blocker on its row, on the page model and in --json', () => {
+  const source = `## synthetic-api
+${block('a9970001', 'cursor', 'working', 'Synthetic card', '- [?] Synthetic ask: blue or green?\n- [!] Synthetic blocker: waiting on a fake license key', NOW - MINUTE)}`
+  for (const s of Object.values(STRINGS)) {
+    const view = viewOf(source, s)
+    const row = view.groups.flatMap(group => group.rows)[0]
+    assert.match(row.status, /fake license key/)
+    assert.equal(row.tone, 'alert')
+    const model = serveModel(view, [], s, new Set(), false, undefined, false, groupOptions())
+    assert.match(model.groups[0].rows[0].status, /fake license key/)
+    assert.equal(boardDocument(view, [], [], s, '', false, NOW, groupOptions()).counts.stuck, 1)
+  }
+})
+
+test('#997 an ended session keeps its ended phrase: a blocked step on a stopped session is not a live request', () => {
+  const source = `## synthetic-api
+${block('a9970002', 'cursor', 'ended', 'Synthetic card', '- [?] Synthetic ask: blue or green?\n- [!] Synthetic blocker: waiting on a fake license key', NOW - MINUTE)}`
+  const view = viewOf(source)
+  const row = view.stopped[0]
+  assert.doesNotMatch(row.status, /fake license key/)
+  const document = boardDocument(view, [], [], STRINGS.en, '', false, NOW, groupOptions())
+  assert.equal(document.counts.stuck, 0)
+  assert.ok(!document.needs.some(one => one.kind === 'stuck'))
+})
