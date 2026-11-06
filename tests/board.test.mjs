@@ -3536,6 +3536,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     delays,
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: () => windowEvents.pagehide?.(),
+    restore: persisted => windowEvents.pageshow?.({ persisted }),
     sent,
     setNow: value => { clockNow = value },
     hideTab: () => { document.hidden = true; document.events.visibilitychange?.() },
@@ -4579,6 +4580,32 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   assert.equal(gone[0].keepalive, true, 'the request outlives the closing page')
   assert.equal(gone[0].headers['x-board-token'], 'x')
   assert.equal(gone[0].headers['x-board-page'], named, 'the page that leaves is the one that was polling')
+})
+
+test('a page restored from the back/forward cache polls under a new page id (#1028)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  const polls = []
+  const dom = await pageDom(html, null, { width: 1000, getBoard: async options => { polls.push(options.headers); return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }, now: 1 }) } } })
+  await dom.settle()
+  const first = polls[0]['x-board-page']
+  dom.leave()
+  await dom.settle()
+  // A page that only went into the cache and comes back keeps its document, but the board has forgotten that id.
+  const before = polls.length
+  dom.restore(true)
+  await dom.settle()
+  assert.ok(polls.length > before, 'a restored page asks for the board at once')
+  const second = polls.at(-1)['x-board-page']
+  assert.match(second, /^[\w-]{1,64}$/)
+  assert.notEqual(second, first, 'a restored page names itself anew')
+  // A page shown again without having been cached keeps its id and asks nothing extra.
+  const same = polls.length
+  dom.restore(false)
+  await dom.settle()
+  assert.equal(polls.length, same)
 })
 
 test('a page the board says was replaced stops asking and shows one line (#265)', async () => {
