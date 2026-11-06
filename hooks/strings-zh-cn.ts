@@ -582,6 +582,7 @@ export const ZH_CN: Strings = {
   boardOpenPage: '打开看板网页',
   boardPageWindowOpened: (url: string): string => `已在浏览器打开 Agent Board：${url}`,
   boardPageLink: (url: string): string => url,
+  boardPageAlreadyOpen: (url: string): string => `Agent Board 已在浏览器开着：${url}`,
   boardInbox: '收件箱里还没整理的回合（开一个 Claude Code 对话就会整理进来）',
   boardWatching: '每 2 秒更新，Ctrl+C 结束',
   boardCommandDescription: 'Agent Board：每个 agent 在做什么、什么在等你',
@@ -685,6 +686,7 @@ export const ZH_CN: Strings = {
   serveLanFailed: '没法把看板开到局域网上。',
   serveClose: '关闭看板',
   serveClosed: '看板已关闭，这个标签页可以关了。要再打开，可在终端运行 agent-board 或在 agent 对话中输入 /agent-board。',
+  serveMoved: '看板已移到更新的标签页，这个标签页不再更新，可以关了。要再打开看板，可在 agent 对话中输入 /agent-board 或在终端运行 agent-board。',
   serveCloseBusy: '还有一句正在发给 agent，等它回完再关闭看板。',
   serveNotStarted: '服务器没有启动。',
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'

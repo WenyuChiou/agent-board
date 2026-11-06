@@ -626,6 +626,7 @@ export const ZH_TW = {
   boardOpenPage: '開啟看板網頁',
   boardPageWindowOpened: (url: string): string => `已在瀏覽器開啟 Agent Board：${url}`,
   boardPageLink: (url: string): string => url,
+  boardPageAlreadyOpen: (url: string): string => `Agent Board 已在瀏覽器開著：${url}`,
   boardInbox: '收件匣裡還沒整理的回合（開一個 Claude Code 對話就會整理進來）',
   boardWatching: '每 2 秒更新，Ctrl+C 結束',
   boardCommandDescription: 'Agent Board：每個 agent 在做什麼、什麼在等你',
@@ -729,6 +730,7 @@ export const ZH_TW = {
   serveLanFailed: '沒辦法把看板開到區域網路上。',
   serveClose: '關閉看板',
   serveClosed: '看板已關閉，這個分頁可以關了。要再開，可在終端機執行 agent-board 或在 agent 對話中輸入 /agent-board。',
+  serveMoved: '看板已移到較新的分頁，這個分頁不再更新，可以關了。要再開看板，可在 agent 對話中輸入 /agent-board 或在終端機執行 agent-board。',
   serveCloseBusy: '還有一句正在傳給 agent，等它回完再關閉看板。',
   serveNotStarted: '伺服器沒有啟動。',
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
