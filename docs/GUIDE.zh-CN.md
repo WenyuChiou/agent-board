@@ -130,7 +130,7 @@ claude plugin install agent-board@agent-board
 
 可选连接器需要 Node.js 18+；迁移前请重新加载较旧的 plugin 会话。原生 worker 跨数据目录共用安装锁，持续记住移除停用意图，并保留外部修改。侧栏与轮询先启动，版本检查在后台进行；缺少 Node 或设置记录损坏时不修改设置。`connect status` 表示设置结果，不证明原生执行。
 
-可选的 `scripts/setup.sh`／`scripts/setup.ps1` 处理 Claude 专用 Task 工具／profile 与 marketplace 配置。修改 profile 前先检查范围；独立安装不需要这些脚本。旧 plugin inbox 连接器可保留对话数据并调用 Claude 整理，和只记活动 metadata 的独立 hooks 不同。[安全说明](../SECURITY.md)。
+可选的 `scripts/setup.sh`／`scripts/setup.ps1` 处理 Claude 专用 Task 工具／profile 与 marketplace 配置。修改 profile 前先检查范围；独立安装不需要这些脚本。旧 plugin inbox 连接器可保留对话数据并调用 Claude 整理；独立 hooks 只保留选定的元数据和受支持的 agent 的结尾问题。[安全说明](../SECURITY.md)。
 
 ## 它怎么保持整齐
 
@@ -227,7 +227,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 
 ### 会把数据传出去吗？要花多少钱？
 
-独立 reporter 只在本地保留挑选过的 session 元数据，不调用摘要模型。发信给在线 agent会使用目标 agent 的模型与额度。下列模型与对话访问适用于可选的 Claude 插件流程：看板文件保存在本机。通过你自己的 Claude Code 登录／模型访问，回合摘要会把提问和回复发送给 Claude Haiku；标题会发送该对话的第一个请求和步骤名称；交接行会发送最多 6,000 个字符的压缩摘要。面板的侧边提问框也会通过同一个登录，把你的问题发送给模型，根据这段对话的记录回答。这些调用使用该账号的额度或计费。面板会运行 `git branch --show-current`，装了 GitHub 的 `gh` 的话，也会用它查 pull request 和 CI 状态。默认只发给确切在线的对话；旧版 Codex／Grok 进程续接须明确加上 `--allow-resume`，使用该 agent 的权限和网络。独立 OpenClaw 插件禁用对话访问；可选 Claude 连接器则设置 `allowConversationAccess: true`。
+独立 reporter 在本地保留挑选过的 session 元数据，以及 Codex、Grok Build、Cursor CLI、OpenCode 和 Antigravity CLI 的结尾问题，不调用摘要模型。Antigravity 的 hook 不带回复文字，所以看板从该对话自己的记录文件读取最后回复；格式没有文档，已在 agy 1.5.2 检查，只保留结尾问题。发信给在线 agent 会使用目标 agent 的模型与额度。下列模型与对话访问适用于可选的 Claude 插件流程：看板文件保存在本机。通过你自己的 Claude Code 登录／模型访问，回合摘要会把提问和回复发送给 Claude Haiku；标题会发送该对话的第一个请求和步骤名称；交接行会发送最多 6,000 个字符的压缩摘要。面板的侧边提问框也会通过同一个登录，把你的问题发送给模型，根据这段对话的记录回答。这些调用使用该账号的额度或计费。面板会运行 `git branch --show-current`，装了 GitHub 的 `gh` 的话，也会用它查 pull request 和 CI 状态。默认只发给确切在线的对话；旧版 Codex／Grok 进程续接须明确加上 `--allow-resume`，使用该 agent 的权限和网络。独立 OpenClaw 插件禁用对话访问；可选 Claude 连接器则设置 `allowConversationAccess: true`。
 
 网页默认只监听本机（`127.0.0.1`）；这台电脑上的任何程序只要有链接就能使用。`--lan` 会通过带 token 的 HTTP 链接，在私有网络分享网页。token 是访问密钥，不会加密：同一网络上任何拿到 LAN 链接的人都能读看板、修改看板文件（包括导入区块），也能停止服务器。LAN 网页会拒绝启动 agent 的回复，也不显示恢复会话的命令。私有网络地址不代表咖啡馆或酒店的网络值得信任。不要分享链接或二维码。要停止服务，请按网页上的“关闭看板”按钮；若正在发送回复，请等完成后重试。只关标签页，后台服务会继续运行；空闲关闭须自行启用。看板服务器或 LAN 监听器每次重新启动都会生成新的 token，因此停止后旧链接就无法使用。文件变更、启动的程序、网络访问和 看板隐藏信息的限制，详见 [SECURITY.md](../SECURITY.md)（英文）。
 

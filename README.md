@@ -148,18 +148,18 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 | | Agent | Runs in | On the board | Reply from the board |
 |:-:|---|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | Its own pane: every task and turn | In the pane |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI, App | Seven hooks, plus the steps it reports | Copy; send to a [connected session](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI, App, IDE | Four hooks, plus the steps it reports | Copy; send to a [connected CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | Session events, plus steps from its progress tool | Copy |
-| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE, CLI | Hooks | Copy |
-| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | Four hooks | Copy; `--allow-resume` once a session ended |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI, App | Seven hooks, closing questions and reported steps | Copy; send to a [connected session](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI, App, IDE | Four hooks, CLI closing questions and reported steps | Copy; send to a [connected CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | Session events, closing questions and steps from its progress tool | Copy |
+| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE, CLI | Hooks and CLI closing questions | Copy |
+| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | Four hooks and closing questions | Copy; `--allow-resume` once a session ended |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | CLI | Two hooks (stop, end) | Copy |
 | <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | Chat | The board and its skill; its own hooks are still to come | Copy |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | Chat | Its plugin's session events | Copy |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | CLI | Its plugin's session events | Copy |
 | | dot, other web chats | Web | A block you merge | Answer in its chat |
 
-Hooks say whether a session is working or waiting; its steps and when it is done come from the agent's own reports. Gemini CLI is still a target (`--agent gemini`) for paid and enterprise use: see [setup](docs/SETUP.md#legacy-gemini-cli-compatibility).
+Hooks say whether a session is working or waiting; task steps and when it is done come from the agent's own reports. The closing questions above reach Needs you as hook-owned steps. Antigravity CLI's hooks carry no reply text, so the board reads the last reply from its own transcript file; that format is undocumented and was checked on agy 1.5.2. Only the closing question is kept. Gemini CLI is still a target (`--agent gemini`) for paid and enterprise use: see [setup](docs/SETUP.md#legacy-gemini-cli-compatibility).
 
 ### Connected-session messaging
 
@@ -259,7 +259,7 @@ The page listens on 127.0.0.1 only, and its address carries a random key: anythi
 
 <img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, board page, archive and status line read it. Synthetic data." src="docs/images/flow-en.svg" width="100%">
 
-Each agent's hooks write what its session is doing into its own block of one local `progress.md` (a fresh install uses `~/.agent-board/progress.md`). Task steps come only from the agent's own reports, and no private conversation is read. The board reads the file without calling a model; the optional Claude plugin can sum up turns with Claude's model, as [the guide says](docs/GUIDE.md#does-anything-leave-my-machine-what-does-it-cost). You can read and edit the file too: [the file format](docs/FORMAT.md). In English, 繁體中文 and 简体中文.
+Each agent's hooks write what its session is doing into its own block of one local `progress.md` (a fresh install uses `~/.agent-board/progress.md`). Task steps come from the agent's own reports; supported hooks also read the last reply and keep only its closing question. The board reads the file without calling a model; the optional Claude plugin can sum up turns with Claude's model, as [the guide says](docs/GUIDE.md#does-anything-leave-my-machine-what-does-it-cost). You can read and edit the file too: [the file format](docs/FORMAT.md). In English, 繁體中文 and 简体中文.
 
 ### Three Core Pillars
 
