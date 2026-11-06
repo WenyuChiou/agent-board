@@ -96,8 +96,12 @@ block `ended` merely to avoid duplicate cards. Finish a completed task as `done`
 unfinished work waiting. `ended` is reserved for observed session termination or an explicit
 decision to stop that work permanently.
 
-Hooks keep only selected metadata. They ignore prompts, tool inputs, assistant messages and
-permission decisions, and call no model. The one thing they open from `transcript_path` is the
+Hooks keep only selected metadata. They ignore prompts, tool inputs and
+permission decisions, and call no model. At Stop they keep one thing of the last assistant message: the
+question it closes on, found as the Claude Code plugin finds a turn's (the last sentence ending in a question mark
+on the last line, cut to one line), which shows as a waiting step until the next prompt. Nothing else of the message
+is saved. A Stop the hook wrapper copied raw to its queue has no question; one the reporter queued itself keeps its
+one line. The one thing they open from `transcript_path` is the
 first record of the session's own Codex history file (the `rollout-<time>-<session id>.jsonl` file named for the
 session; another session's file is never opened), at a session's start and at each prompt. The
 file is read in pieces of 4 KiB until the one that holds the first line break, so up to 4 KiB

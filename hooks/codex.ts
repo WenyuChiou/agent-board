@@ -25,6 +25,9 @@ export type CodexReport = Origin & {
   // The index of the step a PermissionRequest added (#1048): it waits on the person in Codex's own window, and the block
   // carries a native line after it. Any explicit report drops it with the steps.
   approval?: number
+  // The index of the step a Stop added for the question the last message closed on (#1045). Like `approval`, it is
+  // the hook's own and any explicit report drops it with the steps.
+  asked?: number
   updated: string
   events?: string[]
   retiredTurns?: string[]
@@ -137,15 +140,22 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   // request puts one in its place.
   const held = previous?.steps ?? [`- [ ] ${s.codexLifecycle}`]
   const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
-  const rest = event === 'SessionStart' || earlier === undefined ? held : held.filter((_, index) => index !== earlier)
+  // The question step is the hook's own the same way. Both go together on any event but SessionStart, so the
+  // index of a step put after them is the length of what is left.
+  const earlierAsked = previous?.asked !== undefined && previous.asked < held.length ? previous.asked : undefined
+  const rest = event === 'SessionStart' || (earlier === undefined && earlierAsked === undefined) ? held : held.filter((_, index) => index !== earlier && index !== earlierAsked)
   const approval = event === 'PermissionRequest' ? rest.length : event === 'SessionStart' ? earlier : undefined
+  // Only the closing question reaches here from the last message (scripts/codex-local.ts), one line, cut like other step text.
+  const question = event === 'Stop' && state !== 'done' && typeof input.question === 'string' ? cutLine(input.question.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
+  const asked = question !== '' ? rest.length : event === 'SessionStart' ? earlierAsked : undefined
   return {
     session, turn: turn ?? previous?.turn ?? null, state,
     title: previous?.title ?? s.codexTask,
     project: previous?.project ?? s.codexProject,
     // The hook never reads the prompt, so only a report or the board can confirm an answer (#243).
-    steps: event === 'PermissionRequest' ? [...rest, `- [?] ${s.codexApprovalStep}`] : rest,
+    steps: event === 'PermissionRequest' ? [...rest, `- [?] ${s.codexApprovalStep}`] : question !== '' ? [...rest, `- [?] ${question}`] : rest,
     ...(approval === undefined ? {} : { approval }),
+    ...(asked === undefined ? {} : { asked }),
     updated: now,
     events: [...(previous?.events ?? []), key].slice(-256),
     retiredTurns: [...(previous?.retiredTurns ?? []), ...(working && previous?.turn && previous.turn !== turn ? [previous.turn] : [])].slice(-128),
