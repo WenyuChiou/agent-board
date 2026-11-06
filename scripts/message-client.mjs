@@ -53,7 +53,7 @@ export const boardClient = address => {
       if (typeof verify !== 'function' || typeof deliver !== 'function' || canReceive !== undefined && typeof canReceive !== 'function' || !await verify()) throw new Error('HOST_NOT_CONNECTED')
       const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }) })
       const credentials = { connection: registered.id, secret: registered.secret }
-      let isClosed = false, isPolling = false, isPollDue = false, leaseUntil = registered.expires
+      let isClosed = false, isPolling = false, isPollDue = false, isRetried = false, leaseUntil = registered.expires
       const close = async () => {
         if (isClosed) return
         isClosed = true
@@ -106,6 +106,8 @@ export const boardClient = address => {
             if (!isClosed) for (const message of result.messages) void processMessage(message)
           } catch (error) {
             if (!error.isRetryable || Date.now() >= leaseUntil) await close()
+            // A busy store (#914) costs one short wait, not a whole poll period; once per period.
+            else if (!isRetried) { isRetried = true; setTimeout(() => { void poll() }, 250).unref?.() }
             onError(error)
           }
         } finally {
@@ -116,7 +118,7 @@ export const boardClient = address => {
           if (isPollDue && !isClosed) { isPollDue = false; void poll() }
         }
       }
-      const timer = setInterval(() => { void poll() }, 2000)
+      const timer = setInterval(() => { isRetried = false; void poll() }, 2000)
       void poll()
       return {
         id: registered.id, agent, session, surface, turn, close,
