@@ -374,7 +374,7 @@ export const ZH_CN: Strings = {
   copiedSuffix: '（已复制到剪贴板）',
   notifyOn: '桌面通知已打开：需要你、别的对话在问、今天到期、做完、CI 跑完时会通知。',
   notifyOff: '桌面通知已关闭。',
-  paneOpened: (path: string): string => `进度面板已打开：${path}`,
+  paneOpened: '进度面板已打开',
   paneNotOpened: (reason: string): string => `进度面板打不开：${reason}`,
   livePageOpened: '这个应用无法显示面板。请打开看板网页，回答问题或归档工作：',
   livePageFallback: '看板网页无法启动。',

@@ -3087,7 +3087,8 @@ test('the footer status is unchanged when the pane is placed', async ($, on) => 
   await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
   expect(seen.status.at(-1)).toBe(`${EN.statusPrefix} · ${EN.statusWaiting(1)}`)
   const opened = await $.command.run({ ...TIDY, args: '' })
-  expect(opened.text).toBe(EN.paneOpened(FILE))
+  expect(opened.text).toBe(EN.paneOpened)
+  expect(opened.text).not.toContain(FILE)
   expect(seen.status.at(-1)).toBeUndefined()
   const surfaceCalls = world.surfaceCalls
   // A later successful placement clears a hint left by an unavailable pane.

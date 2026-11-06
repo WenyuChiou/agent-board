@@ -375,7 +375,7 @@ export const EN: Strings = {
   copiedSuffix: ' (copied to clipboard)',
   notifyOn: 'Desktop notifications on: when something needs you, another session asks, work is due, work is done, or CI finishes.',
   notifyOff: 'Desktop notifications off.',
-  paneOpened: (path: string): string => `Progress pane opened: ${path}`,
+  paneOpened: 'Progress pane opened',
   paneNotOpened: (reason: string): string => `Couldn't open the progress pane: ${reason}`,
   livePageOpened: 'This app cannot show the pane. Open the board page to answer questions and archive work:',
   livePageFallback: 'The board page could not start.',
