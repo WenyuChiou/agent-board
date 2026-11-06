@@ -26,7 +26,8 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { defaultMessagesDirectory, isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { isTimeout, privateFolderHandoff } from './private-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
@@ -1926,9 +1927,25 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
-  // On Windows the server child is told which folder was just checked, so it does not check it again.
+  // On Windows the server child is told which folders were just checked, so it does not check them again.
   const handoff = runtimeFolderHandoff()
-  const childEnv = serverMemoryEnv(handoff === undefined ? process.env : { ...process.env, [RUNTIME_FOLDER_ENV]: handoff })
+  // The default message folder is checked here, so its whoami and icacls starts are not among
+  // what the child does in the few seconds it has to print its address (#799). A check that
+  // fails here is left to the child, which checks in full and reports what it finds.
+  // Its timeout is the one the person is told about when the child, checking in full, is cut off
+  // before it can say why.
+  let messageHandoff: string | undefined
+  let isCheckTimeout = false
+  if (process.platform === 'win32' && flag('--messages-dir') === undefined) {
+    try { messageHandoff = privateFolderHandoff(messagesDirectory()) } catch (error) { isCheckTimeout = isTimeout(error) }
+  }
+  // Only what this command checked is handed over, never a value it inherited.
+  const handed: NodeJS.ProcessEnv = { ...process.env }
+  delete handed[RUNTIME_FOLDER_ENV]
+  delete handed[MESSAGE_FOLDER_ENV]
+  if (handoff !== undefined) handed[RUNTIME_FOLDER_ENV] = handoff
+  if (messageHandoff !== undefined) handed[MESSAGE_FOLDER_ENV] = messageHandoff
+  const childEnv = serverMemoryEnv(handed)
   const startPage = async (): Promise<{ url: string | null; stderr: string; readyBy: number }> => {
     // In the board's own folder, not the agent's, so the server holds no project folder open.
     const readyBy = performance.now() + 10_000
@@ -2021,7 +2038,8 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
       if (afterWait !== null) return { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs }
       if (performance.now() < deadline) continue
     }
-    if (failure !== undefined && storeCode !== undefined) failure.storeCode = storeCode
+    const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
+    if (failure !== undefined && code !== undefined) failure.storeCode = code
     return null
   }
   return null

@@ -6,7 +6,7 @@ import { acceptMailboxMessage, endMailbox, enrollMcp, expireMailboxes, MAILBOX_C
 import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isFinished, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, shownMessage, textHash } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
-import { privateFolder } from './private-folder'
+import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
 import { claimMessageStore } from './message-store-claim'
 import type { MessageStoreClaim } from './message-store-claim'
 
@@ -135,14 +135,19 @@ export const moveLockAside = (lock: string, recorded: string, claim: MessageStor
 // this server; message ids and receipts survive restart so uncertainty is never auto-retried.
 const openMessaging = (directory: string, isDefault = false) => {
   const root = resolve(directory)
-  const isCreated = mkdirSync(root, { recursive: true, mode: 0o700 }) !== undefined
+  const isMade = mkdirSync(root, { recursive: true, mode: 0o700 }) !== undefined
+  // The default folder the command that started this server has just checked is not checked
+  // again (#799); a folder made here is new and is checked in full.
+  const handed = takePrivateFolderHandoff(root)
+  const trusted = process.platform === 'win32' && isDefault && !isMade ? handed : undefined
+  const isCreated = isMade || trusted?.isCreated === true
   const isFreshDefault = isDefault && isCreated
   try {
     if (lstatSync(root).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_DIRECTORY')
-    if (process.platform === 'win32' && (isCreated || isDefault)) {
+    if (process.platform === 'win32' && trusted === undefined && (isCreated || isDefault)) {
       try {
         privateFolder(root)
-      } catch (error) { throw new Error('MESSAGE_STORE_ACL', { cause: error }) }
+      } catch (error) { throw new Error(isTimeout(error) ? 'ACL_CHECK_TIMEOUT' : 'MESSAGE_STORE_ACL', { cause: error }) }
     }
     const claim = claimMessageStore(root)
     try { return openClaimedMessaging(root, claim, isFreshDefault) } catch (error) {

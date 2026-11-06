@@ -183,7 +183,7 @@ let latest: { path: string; identity: string } | undefined
 
 // Which plain folder is at the path: device, file number and creation time, so a folder that
 // was deleted and made again under a reused file number is not taken for the checked one.
-const identityOf = (dir: string): string | undefined => {
+export const identityOf = (dir: string): string | undefined => {
   try {
     const found: BigIntStats = lstatSync(dir, { bigint: true })
     return found.isDirectory() && !found.isSymbolicLink() ? `${found.dev}:${found.ino}:${found.birthtimeNs}` : undefined
@@ -205,6 +205,8 @@ const remember = (root: string, identity: string): void => {
 // plain folder: once the folder's list is the sole full-control grant of this account, only this
 // account can change it. Without the variable, or with another folder, the server checks in full.
 export const RUNTIME_FOLDER_ENV = 'AGENT_BOARD_RUNTIME_FOLDER'
+// The default message folder, handed over the same way (private-folder.ts).
+export const MESSAGE_FOLDER_ENV = 'AGENT_BOARD_MESSAGE_FOLDER'
 
 export const runtimeFolderHandoff = (): string | undefined => latest === undefined ? undefined : JSON.stringify(latest)
 
