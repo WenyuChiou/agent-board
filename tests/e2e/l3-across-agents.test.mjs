@@ -87,11 +87,22 @@ describe('L3 across agents and sessions', () => {
       assert.equal((await server.post('/api/page-gone', {})).status, 200)
       const third = await command(world, ['--serve', '--idle-minutes', '1'])
       assert.equal((third.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1, third)
-      // A page that keeps asking (its poll carries x-board-page) counts as open again.
+      // Two pages that keep asking (each poll names its page in x-board-page) count as open again.
       const page = new URL(server.url)
-      assert.equal((await fetch(new URL('/api/board', page), { headers: { 'x-board-token': page.searchParams.get('t'), 'x-board-page': '1' } })).status, 200)
+      const poll = id => fetch(new URL('/api/board', page), { headers: { 'x-board-token': page.searchParams.get('t'), 'x-board-page': id } })
+      const leave = id => fetch(new URL('/api/page-gone', page), { method: 'POST', headers: { 'x-board-token': page.searchParams.get('t'), 'x-board-page': id, 'content-type': 'application/json' }, body: '{}' })
+      assert.equal((await poll('page-one')).status, 200)
+      assert.equal((await poll('page-two')).status, 200)
       const fourth = await command(world, ['--serve', '--idle-minutes', '1'])
       assert.equal((fourth.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, fourth)
+      // One of them leaves: the other is still open, so no new window.
+      assert.equal((await leave('page-one')).status, 200)
+      const fifth = await command(world, ['--html'])
+      assert.equal((fifth.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, fifth)
+      // The last one leaves: the next open starts a window.
+      assert.equal((await leave('page-two')).status, 200)
+      const sixth = await command(world, ['--html'])
+      assert.equal((sixth.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1, sixth)
       noMachineIds(await server.page(), world)
     } finally { await world.close() }
   })

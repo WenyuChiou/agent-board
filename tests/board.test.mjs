@@ -4488,7 +4488,9 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   const dom = await pageDom(html, null, { width: 1000, getBoard: async options => { polls.push(options.headers); return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], now: 1 }, now: 1 }) } } })
   await dom.settle()
   assert.ok(polls.length > 0, 'the page polls the board')
-  for (const headers of polls) assert.equal(headers['x-board-page'], '1', 'a poll says it comes from the page, so scripts reading the board do not count as one')
+  const named = polls[0]['x-board-page']
+  assert.match(named, /^[\w-]{1,64}$/, 'the page names itself in a form the board accepts')
+  for (const headers of polls) assert.equal(headers['x-board-page'], named, 'every poll names the same page, so scripts reading the board do not count as one and two pages stay apart')
   assert.equal(dom.requests.length, 0)
   dom.leave()
   await dom.settle()
@@ -4496,6 +4498,7 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   assert.equal(gone.length, 1, 'leaving tells the board once')
   assert.equal(gone[0].keepalive, true, 'the request outlives the closing page')
   assert.equal(gone[0].headers['x-board-token'], 'x')
+  assert.equal(gone[0].headers['x-board-page'], named, 'the page that leaves is the one that was polling')
 })
 
 test('an old page rejected by a restarted server shows the offline line', async () => {

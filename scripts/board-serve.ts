@@ -268,8 +268,19 @@ export const startServer = (o: ServeOptions): void => {
   const replies = new Map<string, Result & { at: number; key: string }>()
   let port = 0
   let lastSeen = Date.now()
-  // When the board page itself (its address, or its poll with x-board-page; not a script or the terminal board reading the board) last loaded or asked for the board; 0 once it said it left (#265).
-  let pageAt = 0
+  // Which board pages are open (#265). A page names itself in x-board-page on every poll; loading the page counts until its
+  // first poll. The terminal board and other scripts read GET /api/board without that header and do not count. A page that
+  // says it left is dropped alone, so another page that is still open stays counted.
+  const pages = new Map<string, number>()
+  let loadedAt = 0
+  const pageIdOf = (headers: IncomingMessage['headers']): string => {
+    const id = text(headers['x-board-page'])
+    return /^[\w-]{1,64}$/.test(id) ? id : ''
+  }
+  const pageAgo = (now: number): number | null => {
+    const latest = Math.max(loadedAt, ...pages.values())
+    return latest === 0 ? null : now - latest
+  }
   let isStopping = false
   // The page on the local network: its own server, address and token, so the computer's token
   // never crosses the network.
@@ -374,7 +385,13 @@ export const startServer = (o: ServeOptions): void => {
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
-    if (!isLan && (isPage || req.method === 'GET' && url.pathname === '/api/board' && req.headers['x-board-page'] === '1')) pageAt = Date.now()
+    if (!isLan && isPage) loadedAt = Date.now()
+    if (!isLan && req.method === 'GET' && url.pathname === '/api/board' && pageIdOf(req.headers) !== '') {
+      const now = Date.now()
+      pages.set(pageIdOf(req.headers), now)
+      // Pages that stopped asking long ago (a crashed window) are forgotten.
+      if (pages.size > 32) for (const [id, at] of pages) if (now - at > 300_000) pages.delete(id)
+    }
     if (!url.pathname.startsWith('/api/messages/')) {
       lastSeen = Date.now()
       if (side !== null) side.lastSeen = lastSeen
@@ -418,13 +435,14 @@ export const startServer = (o: ServeOptions): void => {
         }
       }
       // Only the board script on the computer asks; the answer names progress.md's path.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size, pageAgo: pageAt === 0 ? null : Date.now() - pageAt })
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size, pageAgo: pageAgo(Date.now()) })
       return json(res, 404, {})
     }
     const body = await readBody(req)
     if (body === null) return json(res, 400, {})
     if (url.pathname === '/api/page-gone' && !isLan) {
-      pageAt = 0
+      pages.delete(pageIdOf(req.headers))
+      loadedAt = 0
       return json(res, 200, {})
     }
     if (url.pathname.startsWith('/api/messages/')) {
