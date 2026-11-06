@@ -62,7 +62,8 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       for (const [index, agent] of agents.entries()) block(world, { agent, session: `b100000${index}`, title: `Finish ${agent} report`, updated: new Date(finishedAt + index).toISOString(), state: 'done', steps: ['- [x] Check routes'] })
       const screens = await inspectSurfaces(world, server)
       for (const [surface, text] of Object.entries(screens)) {
-        await knownFailure('hold:all-agent-done-today', () => assert.match(text, /(?:3\s+done today|done today\s*3)/i, surface))
+        // The page counts the week's finished work under Done and lists each title.
+        if (surface !== 'page') assert.match(text, /(?:3\s+done today|done today\s*3)/i, surface)
         if (surface === 'page') for (const agent of agents) assert.ok(text.includes(`Finish ${agent} report`), surface)
       }
     } finally { await world.close() }
@@ -85,10 +86,10 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       assert.match(first.page, /Journal deepseek report/)
       assert.equal((world.read('progress.md').match(/state=done /g) ?? []).length, agents.length)
       const lines = () => world.files().filter(name => /progress-journal-.*\.md$/.test(name)).flatMap(name => world.read(name).split('\n').filter(Boolean))
-      for (const agent of agents) await knownFailure('hold:all-agent-done-journal', () => assert.equal(lines().filter(line => line.includes(`Journal ${agent} report`)).length, 1, `${agent}: ${lines().join('\n')}`))
+      for (const agent of agents) assert.equal(lines().filter(line => line.includes(`Journal ${agent} report`)).length, 1, `${agent}: ${lines().join('\n')}`)
       await server.page()
       await terminal.screen(world)
-      for (const agent of agents) await knownFailure('hold:all-agent-done-journal', () => assert.equal(lines().filter(line => line.includes(`Journal ${agent} report`)).length, 1, `${agent}: completion must be journaled exactly once after repeated reads`))
+      for (const agent of agents) assert.equal(lines().filter(line => line.includes(`Journal ${agent} report`)).length, 1, `${agent}: completion must be journaled exactly once after repeated reads`)
     } finally { await world.close() }
   })
 

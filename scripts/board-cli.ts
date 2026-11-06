@@ -18,6 +18,7 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
+import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside } from './board-messaging'
 import { claimMessageStore, hasLiveClaims } from './message-store-claim'
@@ -139,13 +140,55 @@ const partOf = (base: string): string => currentPart(base, file => {
 
 // This month's journal as far as today needs it: its last part, and the one before when the last
 // began today. The rest of a long month is not read (#373).
-const journalToday = (now: number): string => {
+const journalRaw = (now: number): string => {
   const base = journalPath(path, now)
   const parts = monthParts(base, existsSync)
   // A month with no journal yet is read as before, so a file the board cannot read is still named.
   const text = read(parts.at(-1) ?? base)
   const before = parts.at(-2)
   return before !== undefined && !parseJournal(text).some(entry => entry.at < localDay(now)) ? `${read(before)}\n${text}` : text
+}
+
+// A task any agent finished today is one journal line, written once (#245). Claude's ticks already
+// wrote their own lines, so a task with a line today under the same project and title is not added.
+let doneProjects: readonly ProgressProject[] = []
+const doneBlockLines = (projects: readonly ProgressProject[], journal: string, now: number): string[] => {
+  const day = localDay(now)
+  const written = new Set(parseJournal(journal).filter(entry => entry.at === day).map(entry => `${entry.project}\n${entry.task}`))
+  const lines: string[] = []
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      const updated = task.auto?.state === 'done' ? task.auto.updated : undefined
+      if (updated === undefined || !Number.isFinite(updated) || updated <= 0 || updated > now || localDay(updated) !== day) continue
+      const title = task.title || s.unnamed
+      const line = journalLine({ project: project.name || s.uncategorized, task: title, step: task.steps.filter(step => step.status === 'done').at(-1)?.text ?? title }, updated, s)
+      const [parsed] = parseJournal(line)
+      if (parsed === undefined || written.has(`${parsed.project}\n${parsed.task}`)) continue
+      written.add(`${parsed.project}\n${parsed.task}`)
+      lines.push(line)
+    }
+  }
+  return lines
+}
+
+// The journal for today with what other agents finished today counted too, so every surface that
+// reads it (the count, the done list, --json) agrees with the blocks.
+const journalToday = (now: number): string => {
+  const text = journalRaw(now)
+  return appendJournal(text, doneBlockLines(doneProjects, text, now), s)
+}
+
+// An interactive board also saves those lines to the month's journal, which the weekly report reads.
+const saveDoneBlocks = (projects: readonly ProgressProject[], now: number): void => {
+  try {
+    if (doneBlockLines(projects, journalRaw(now), now).length === 0) return
+    rewrite(partOf(journalPath(path, now)), past => {
+      const missing = doneBlockLines(projects, `${journalRaw(now)}\n${past}`, now)
+      return missing.length === 0 ? null : appendJournal(past, missing, s)
+    })
+  } catch {
+    // A journal that cannot be written still counts through journalToday; the next read tries again.
+  }
 }
 
 // A session log's end only, kept while the file is unchanged: --watch looks again every
@@ -448,6 +491,8 @@ const readBoardView = (source: string, now: number) => {
     seen = {}
   }
   lastSeen = seen
+  doneProjects = projects
+  if (isQuestionWriter && progressHealthCache.isSnapshot) saveDoneBlocks(projects, now)
   let answered = parseAnswered(read(answeredPath(path))) ?? []
   const file = questionsPath(path)
   const isWritingQuestions = progressHealthCache.isSnapshot && isQuestionWriter
