@@ -3464,6 +3464,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     ...(motion === undefined ? {} : { matchMedia: () => ({ matches: motion === 'reduce', addEventListener: () => {} }) }),
   }
   const requests = []
+  // What each request carried besides its path and body, kept apart so `requests` keeps its shape.
+  const sent = []
   const pending = new Set()
   const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(found => found[1]).find(code => code.includes('(function ()'))
   runInNewContext(script, {
@@ -3491,6 +3493,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
           return { ...answer, json: async () => { const data = await answer.json(); return data.model ? { ...data, model: viewed(data.model) } : data } }
         }
         requests.push({ path: target, body: JSON.parse(options.body) })
+        sent.push({ path: target, headers: options.headers, keepalive: options.keepalive })
         if (post) return post(requests.at(-1))
         return { ok: true, json: async () => ({ note: '' }) }
       })()
@@ -3532,6 +3535,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     title: () => document.title,
     delays,
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
+    leave: () => windowEvents.pagehide?.(),
+    sent,
     setNow: value => { clockNow = value },
     hideTab: () => { document.hidden = true; document.events.visibilitychange?.() },
     showTab: () => { document.hidden = false; document.events.visibilitychange?.() },
@@ -4544,6 +4549,51 @@ test('the phone page explains how to open a new address in every language withou
     await dom.settle()
     assert.equal(dom.node('offline').textContent, line)
   }
+})
+
+test('the board page marks its polls as the page and tells the board when it leaves (#265)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  const polls = []
+  const dom = await pageDom(html, null, { width: 1000, getBoard: async options => { polls.push(options.headers); return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], now: 1 }, now: 1 }) } } })
+  await dom.settle()
+  assert.ok(polls.length > 0, 'the page polls the board')
+  const named = polls[0]['x-board-page']
+  assert.match(named, /^[\w-]{1,64}$/, 'the page names itself in a form the board accepts')
+  for (const headers of polls) assert.equal(headers['x-board-page'], named, 'every poll names the same page, so scripts reading the board do not count as one and two pages stay apart')
+  assert.equal(dom.sent.length, 0)
+  assert.ok(polls.every(headers => headers['x-board-visible'] === '1'), 'a shown page says it is visible')
+  // A tab put in the background says so with its next poll, so it no longer counts as a window the person can see.
+  dom.hideTab()
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+  assert.equal(polls.at(-1)['x-board-visible'], '0', 'a hidden page says it is hidden')
+  dom.showTab()
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+  assert.equal(polls.at(-1)['x-board-visible'], '1')
+  dom.leave()
+  await dom.settle()
+  const gone = dom.sent.filter(one => one.path === '/api/page-gone')
+  assert.equal(gone.length, 1, 'leaving tells the board once')
+  assert.equal(gone[0].keepalive, true, 'the request outlives the closing page')
+  assert.equal(gone[0].headers['x-board-token'], 'x')
+  assert.equal(gone[0].headers['x-board-page'], named, 'the page that leaves is the one that was polling')
+})
+
+test('a page the board says was replaced stops asking and shows one line (#265)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  let polls = 0
+  const dom = await pageDom(html, null, { width: 1000, getBoard: async () => { polls += 1; return { ok: true, json: async () => ({ moved: true }) } } })
+  await dom.settle()
+  assert.equal(polls, 1, 'the page asked once')
+  assert.match(dom.node('main').textContent, /The board moved to a newer tab/)
+  const before = polls
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }).catch(() => {})
+  assert.equal(polls, before, 'a replaced page asks no more')
 })
 
 test('an old page rejected by a restarted server shows the offline line', async () => {
