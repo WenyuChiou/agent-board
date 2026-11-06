@@ -1138,7 +1138,9 @@ export const buildView = (
       const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
       const { done, total } = countSteps(shown)
       const phrase =
-        auto === 'working'
+        auto === 'working' && isBlocked
+          ? stepPhrase(task, s, isPrompt)
+          : auto === 'working'
           ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
           : auto === 'ended'
             ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
