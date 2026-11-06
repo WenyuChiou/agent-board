@@ -84,7 +84,7 @@ test('the messaging matrix is generated from each receiver record and CI fails w
       assert.equal(run(directory, '--check', outside).status, 1)
       assert.equal(run(directory, '--write', outside).status, 0)
       assert.equal(run(directory, '--check', outside).status, 0)
-      for (const file of matrixFiles) assert.match(read(join(directory, file)), /Synthetic Host \| Synthetic IDE \| 2 \| &#91;P4&#93; \| Implemented/)
+      for (const file of matrixFiles) assert.match(read(join(directory, file)), /Synthetic Host \| Synthetic IDE \| 2 \| Step-end pickup[^|]*\| Implemented/)
       assert.deepEqual(connectors.map(file => read(join(directory, 'scripts', file))), before)
 
       mkdirSync(join(directory, 'hooks'))
@@ -101,6 +101,38 @@ test('the messaging matrix is generated from each receiver record and CI fails w
       assert.match(bad.stderr, /markers/)
     })
   } finally { rmSync(outside, { recursive: true, force: true }) }
+})
+
+test('the support table lists surfaces as a person sees them, one row each', async () => {
+  const records = await readReceiverRecords(root)
+  for (const file of matrixFiles) {
+    const table = renderMatrix(records, file, root)
+    // Antigravity is one app row and one agy row; the owned stream is a note, not a row.
+    assert.match(table, /\| Antigravity \| Antigravity app \| 3 \|/)
+    assert.match(table, /\| Antigravity \| `agy` in a terminal \* \| 3 \|/)
+    assert.doesNotMatch(table, /2\.0 Desktop App/)
+    assert.doesNotMatch(table, /\| Antigravity \| IDE \|/)
+    assert.doesNotMatch(table, /Exclusive-owner Stream CLI/)
+    // The Codex owner rows use plain words too.
+    assert.match(table, /\| Codex \| App server \| 1 \| Live push/)
+    assert.match(table, /\| Codex \| Proxy \(active turn only\) \| 2 \|/)
+    assert.match(table, /\| OpenCode \| Terminal \| 4 \| Copy/)
+    assert.match(table, /\| DeepSeek Harness \| Terminal \| 4 \| Copy/)
+    // Plain words only: no TUI, no owner jargon, no primitive codes, no Primitive header.
+    assert.doesNotMatch(table, /TUI/)
+    assert.doesNotMatch(table, /exclusive-owner/i)
+    assert.doesNotMatch(table, /Existing-owner/)
+    assert.doesNotMatch(table, /&#91;P[1-5]&#93;/)
+    assert.doesNotMatch(table, /Primitive/)
+    // Delivery words, the note with its adapter link, and the tier line under the table.
+    assert.ok(table.includes('Live push'))
+    assert.ok(table.includes('Copy'))
+    assert.ok(table.includes('antigravity-session-connector.mjs'))
+    assert.match(table, /\* The board can also reach `agy` it started itself|board 也可以联系它自己以 headless 模式启动的 `agy`|board 也可以聯繫它自己以 headless 模式啟動的 `agy`/)
+    assert.match(table, /Tier is how directly|层级是联系会话的直接程度|層級是聯繫工作階段的直接程度/)
+    // The committed copy matches what the generator writes.
+    assert.ok(read(join(root, file)).replaceAll('\r\n', '\n').includes(table), file)
+  }
 })
 
 const watchImports = `
@@ -182,7 +214,7 @@ test('a receiver record marks a surface Verified only when it names a live-run f
   assert.equal(generated.status, 0, generated.stderr)
   for (const file of matrixFiles) {
     const table = read(join(directory, file))
-    assert.match(table, /Synthetic Host \| CLI \| 1 \| &#91;P1&#93; \| Verified/)
+    assert.match(table, /Synthetic Host \| CLI \| 1 \| Live push[^|]*\| Verified/)
     assert.ok(table.includes((file.startsWith('docs/') ? '../' : '') + evidence))
     assert.ok(table.includes(file.includes('.zh-CN.') ? '未测试' : file.includes('.zh-TW.') ? '未測試' : 'Not tested'))
     assert.ok(!table.includes('missing-live.md'))

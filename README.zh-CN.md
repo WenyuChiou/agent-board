@@ -148,8 +148,8 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | | Agent | 在哪里运行 | 看板上有什么 | 从看板回复 |
 |:-:|---|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | 它自己的面板：每件工作、每个回合 | 在面板里 |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI、App | 七个 hooks，加上它报告的步骤 | 复制；可发送给[已连接的对话](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI、App、IDE | 四个 hooks，加上它报告的步骤 | 复制；可发送给[已连接的 CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI、App | 七个 hooks，加上它报告的步骤 | 复制；可发送给[已连接的对话](docs/MESSAGING.md#codex-app-server-adapter) |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI、App、IDE | 四个 hooks，加上它报告的步骤 | 复制；可发送给[已连接的 CLI](docs/MESSAGING.md#antigravity-owned-cli-stream) |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | 对话事件，加上它的进度工具报告的步骤 | 复制 |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE、CLI | Hooks | 复制 |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | 四个 hooks | 复制；对话结束后可用 `--allow-resume` |
@@ -165,45 +165,46 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 <!-- messaging-matrix:start -->
 
-由接收器记录生成：`node scripts/messaging-matrix.mjs --write`。进度报告与消息接收分别验证。Verified 需要该运行界面的 `<date>-<host>-live.md` 文件；合成测试只能证明 Implemented。未连接的目标使用 Tier 4 / [P5] 复制回退，不代表已有原生接收器。“未知”表示路线图没有为该运行界面指定原语。
+由接收器记录生成：`node scripts/messaging-matrix.mjs --write`。进度报告与消息接收分别验证。Verified 需要该运行界面的 `<date>-<host>-live.md` 文件；合成测试只能证明 Implemented。未连接的目标使用 Tier 4 / 复制回退，不代表已有原生接收器。“未知”表示路线图没有为该运行界面指定投递方式。
 
-| 宿主 | 运行界面 | 层级 | 原语 | 状态 | 现场运行 | 接收器 |
+| 宿主 | 运行界面 | 层级 | 投递方式 | 状态 | 现场运行 | 接收器 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Antigravity | 2.0 Desktop App | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
-| Antigravity | agy TUI | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
-| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | 未知 | Implemented（已实现） | 早期运行（不计入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
-| Antigravity | IDE | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
-| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented（已实现） | 未测试 | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
-| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Antigravity | `agy` in a terminal * | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Antigravity | Antigravity app | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Claude Code | CLI | 1 | Live push（实时推送） | Implemented（已实现） | 未测试 | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
+| Claude Code | Desktop Code | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| Claude Desktop | Chat | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| Codex | App server | 1 | Live push（实时推送） | Implemented（已实现） | 早期运行（不计入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
 | Codex | CLI | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-codex.ts](hooks/receivers/hook-mailbox-codex.ts) |
-| Codex | Daemon | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented（已实现） | 早期运行（不计入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
-| Codex | Existing-owner proxy (active turn only) | 2 | 未知 | Verified（已验证） | [docs/validation/2026-11-04-codex-cli-proxy-live.md](docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
+| Codex | Daemon | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| Codex | Desktop App | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| Codex | Proxy (active turn only) | 2 | 未知 | Verified（已验证） | [docs/validation/2026-11-04-codex-cli-proxy-live.md](docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
 | Cursor | cursor-agent CLI | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
 | Cursor | IDE (Composer) | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
-| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| Gemini | Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| DeepSeek Harness | Cordis CLI | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| DeepSeek Harness | Desktop | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| DeepSeek Harness | Terminal | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| DeepSeek Harness | Web | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| dot / Web Chats | ChatGPT | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| dot / Web Chats | Claude.ai | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| dot / Web Chats | DeepSeek Web | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| dot / Web Chats | dot | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| dot / Web Chats | Grok Web | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| Gemini | Web | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
 | Gemini CLI | CLI | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-gemini.ts](hooks/receivers/hook-mailbox-gemini.ts) |
-| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| Grok Build | CLI | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| Hermes Agent | Chat Gateway | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| Hermes Agent | CLI | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
 | Muse Code | CLI | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-muse.ts](hooks/receivers/hook-mailbox-muse.ts) |
-| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| OpenClaw | Desktop Control UI | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| OpenClaw | Gateway | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| OpenClaw | WebChat | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| OpenCode | Desktop App | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| OpenCode | Terminal | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+| OpenCode | Web UI | 4 | Copy（复制） | Proposed（规划中） | 未测试 | 无 |
+
+* board 也可以联系它自己以 headless 模式启动的 `agy`，由其拥有输入流；那是一种投递方式，不是独立的运行界面。见 [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs)。
+层级是联系会话的直接程度：1 立即唤醒，2 在步骤结束时接收，3 为下一轮排队消息，4 复制消息由用户粘贴。
 
 <!-- messaging-matrix:end -->
 

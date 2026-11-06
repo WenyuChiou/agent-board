@@ -1,9 +1,11 @@
 import { boardClient, deliveryPrompt } from './message-client.mjs'
 
+// The owned stream is a way of delivering, not a surface a person opens: it is a note
+// on the `agy` row, not a row of its own.
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
   host: 'Antigravity',
-  surfaces: [{ name: 'Exclusive-owner Stream CLI (stdin)', evidence: null, earlier: 'docs/validation/2026-10-19-native-hooks.md' }],
+  surfaces: [{ name: '`agy` in a terminal', evidence: null, earlier: 'docs/validation/2026-10-19-native-hooks.md', note: 'boardStarted', isDelivery: true }],
   tier: 1,
   primitive: 'unknown',
   isImplemented: true,

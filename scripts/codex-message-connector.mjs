@@ -7,7 +7,7 @@ import { openWebSocketStdio } from './ws-stdio.mjs'
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
   host: 'Codex',
-  surfaces: [{ name: 'Existing-owner proxy (active turn only)', evidence: 'docs/validation/2026-11-04-codex-cli-proxy-live.md' }],
+  surfaces: [{ name: 'Proxy (active turn only)', evidence: 'docs/validation/2026-11-04-codex-cli-proxy-live.md' }],
   tier: 2,
   primitive: 'unknown',
   isImplemented: true,

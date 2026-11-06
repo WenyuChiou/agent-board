@@ -304,45 +304,46 @@ restored on restart. They never send, retry, approve or create a progress block.
 
 <!-- messaging-matrix:start -->
 
-Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.
+Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / Copy fallback, not a native receiver. Unknown means the roadmap names no delivery way for this surface.
 
-| Host | Surface | Tier | Primitive | Status | Live run | Receiver |
+| Host | Surface | Tier | Delivery | Status | Live run | Receiver |
 | --- | --- | --- | --- | --- | --- | --- |
-| Antigravity | 2.0 Desktop App | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
-| Antigravity | agy TUI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
-| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) |
-| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
-| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) |
-| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | `agy` in a terminal * | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
+| Antigravity | Antigravity app | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
+| Claude Code | CLI | 1 | Live push | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) |
+| Claude Code | Desktop Code | 4 | Copy | Proposed | Not tested | None |
+| Claude Desktop | Chat | 4 | Copy | Proposed | Not tested | None |
+| Codex | App server | 1 | Live push | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) |
 | Codex | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) |
-| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) |
-| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |
+| Codex | Daemon | 4 | Copy | Proposed | Not tested | None |
+| Codex | Desktop App | 4 | Copy | Proposed | Not tested | None |
+| Codex | Proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |
 | Cursor | cursor-agent CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) |
 | Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) |
-| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Cordis CLI | 4 | Copy | Proposed | Not tested | None |
+| DeepSeek Harness | Desktop | 4 | Copy | Proposed | Not tested | None |
+| DeepSeek Harness | Terminal | 4 | Copy | Proposed | Not tested | None |
+| DeepSeek Harness | Web | 4 | Copy | Proposed | Not tested | None |
+| dot / Web Chats | ChatGPT | 4 | Copy | Proposed | Not tested | None |
+| dot / Web Chats | Claude.ai | 4 | Copy | Proposed | Not tested | None |
+| dot / Web Chats | DeepSeek Web | 4 | Copy | Proposed | Not tested | None |
+| dot / Web Chats | dot | 4 | Copy | Proposed | Not tested | None |
+| dot / Web Chats | Grok Web | 4 | Copy | Proposed | Not tested | None |
+| Gemini | Web | 4 | Copy | Proposed | Not tested | None |
 | Gemini CLI | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-gemini.ts](../hooks/receivers/hook-mailbox-gemini.ts) |
-| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Grok Build | CLI | 4 | Copy | Proposed | Not tested | None |
+| Hermes Agent | Chat Gateway | 4 | Copy | Proposed | Not tested | None |
+| Hermes Agent | CLI | 4 | Copy | Proposed | Not tested | None |
 | Muse Code | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-muse.ts](../hooks/receivers/hook-mailbox-muse.ts) |
-| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Desktop Control UI | 4 | Copy | Proposed | Not tested | None |
+| OpenClaw | Gateway | 4 | Copy | Proposed | Not tested | None |
+| OpenClaw | WebChat | 4 | Copy | Proposed | Not tested | None |
+| OpenCode | Desktop App | 4 | Copy | Proposed | Not tested | None |
+| OpenCode | Terminal | 4 | Copy | Proposed | Not tested | None |
+| OpenCode | Web UI | 4 | Copy | Proposed | Not tested | None |
+
+* The board can also reach `agy` it started itself in headless mode, which owns its input stream; that is a delivery way, not a surface of its own. See [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs).
+Tier is how directly the board can reach the session: 1 wakes it at once, 2 catches it at the end of a step, 3 queues a message for its next turn, 4 copies the message for the person to paste.
 
 <!-- messaging-matrix:end -->
 
@@ -369,13 +370,16 @@ Each surface names its own `docs/validation/<date>-<host>-live.md` file, or `nul
 name in lower case, with spaces and slashes as hyphens, starts the `<host>` part (`deepseek-harness`,
 `dot-web-chats`), and a surface may follow it. Importing a record module must start nothing;
 a test watches the scan for this. A dated note on a run
-that doesn't count goes in the optional `earlier`. A Copy-only tier 4 surface can be Verified
+that doesn't count goes in the optional `earlier`. A way of delivering the person does
+not open, such as the board starting a CLI itself, goes in a surface with `isDelivery: true`
+and a `note` naming a footnote under the table, instead of a row of its own; a surface the
+person opens can carry the same `note` to mark its row. A Copy-only tier 4 surface can be Verified
 with `isImplemented: false`, since it needs no receiver.
 Set `isImplemented` only for a merged receiver covered by synthetic tests; a proposed
-receiver stays `false`, even if a spike record exists. Tier and primitive follow the
+receiver stays `false`, even if a spike record exists. Tier and delivery way follow the
 [roadmap](dev/universal-messaging-roadmap.md#4-five-delivery-primitives--four-honest-ui-tiers).
-An owned app-server or CLI stream is a separate surface from a CLI TTY, desktop app or
-IDE. Earlier transport spikes and progress-hook runs do not verify those surfaces.
+An owned app-server stays its own row; an owned CLI stream is a note on its surface's
+row, not a row of its own. Earlier transport spikes and progress-hook runs do not verify those surfaces.
 
 Run `node scripts/messaging-matrix.mjs --write` after changing a record or its evidence.
 `node scripts/messaging-matrix.mjs --check` checks all four copies without writing and
@@ -478,7 +482,7 @@ and the card stays on Copy.
 After a `/clear` or a resume the same process goes on under another id, with no `session.start`:
 the receiver ends the old connection and registers the new id.
 
-## Codex existing-owner adapter
+## Codex proxy adapter
 
 `scripts/codex-message-connector.mjs` uses the installed Codex executable's existing
 `app-server proxy` control socket. It speaks WebSocket through the proxy's byte stream:
@@ -515,7 +519,7 @@ Tests: `node --test tests/messaging.test.mjs`. They cover synthetic routing, ide
 conflicts, offline/expired bindings, stale turns, crash uncertainty, fake approvals, and a
 mock Codex proxy. A real `AB-TEST-001` ACK must be verified separately with consent.
 
-## Codex exclusive-owner adapter
+## Codex app-server adapter
 
 An application that already owns a loaded Codex session and receives its native
 notifications can import `attachCodexSession` from `scripts/codex-session-connector.mjs`:
@@ -558,10 +562,10 @@ conservative uncertainty without replay. The existing-proxy adapter continues to
 The real self-test used Codex `0.163.0-alpha.10.2`, a newly created ephemeral session,
 a read-only sandbox and synthetic input, after approval of its exact server/thread
 binding. It did not use or inspect an existing private conversation. Both test servers
-were stopped afterward. This proves the exclusive-owner app-server layer; it is not a
+were stopped afterward. This proves the app-server layer; it is not a
 CLI, desktop or dot acceptance result, nor proof that all agents install a receiver.
 
-## Antigravity exclusive-owner CLI stream
+## Antigravity owned CLI stream
 
 An application that already owns an initialized Antigravity CLI NDJSON stream can
 import `attachAntigravitySession` from `scripts/antigravity-session-connector.mjs`.

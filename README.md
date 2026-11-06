@@ -148,8 +148,8 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 | | Agent | Runs in | On the board | Reply from the board |
 |:-:|---|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | Its own pane: every task and turn | In the pane |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI, App | Seven hooks, plus the steps it reports | Copy; send to a [connected session](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI, App, IDE | Four hooks, plus the steps it reports | Copy; send to a [connected CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI, App | Seven hooks, plus the steps it reports | Copy; send to a [connected session](docs/MESSAGING.md#codex-app-server-adapter) |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI, App, IDE | Four hooks, plus the steps it reports | Copy; send to a [connected CLI](docs/MESSAGING.md#antigravity-owned-cli-stream) |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | Session events, plus steps from its progress tool | Copy |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE, CLI | Hooks | Copy |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | Four hooks | Copy; `--allow-resume` once a session ended |
@@ -165,45 +165,46 @@ Hooks say whether a session is working or waiting; its steps and when it is done
 
 <!-- messaging-matrix:start -->
 
-Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.
+Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / Copy fallback, not a native receiver. Unknown means the roadmap names no delivery way for this surface.
 
-| Host | Surface | Tier | Primitive | Status | Live run | Receiver |
+| Host | Surface | Tier | Delivery | Status | Live run | Receiver |
 | --- | --- | --- | --- | --- | --- | --- |
-| Antigravity | 2.0 Desktop App | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
-| Antigravity | agy TUI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
-| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs) |
-| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
-| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
-| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Antigravity | `agy` in a terminal * | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Antigravity | Antigravity app | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](hooks/receivers/hook-mailbox-antigravity.ts) |
+| Claude Code | CLI | 1 | Live push | Implemented | Not tested | [hooks/receiver-record.ts](hooks/receiver-record.ts) |
+| Claude Code | Desktop Code | 4 | Copy | Proposed | Not tested | None |
+| Claude Desktop | Chat | 4 | Copy | Proposed | Not tested | None |
+| Codex | App server | 1 | Live push | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
 | Codex | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-codex.ts](hooks/receivers/hook-mailbox-codex.ts) |
-| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
-| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
+| Codex | Daemon | 4 | Copy | Proposed | Not tested | None |
+| Codex | Desktop App | 4 | Copy | Proposed | Not tested | None |
+| Codex | Proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
 | Cursor | cursor-agent CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
 | Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
-| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | Cordis CLI | 4 | Copy | Proposed | Not tested | None |
+| DeepSeek Harness | Desktop | 4 | Copy | Proposed | Not tested | None |
+| DeepSeek Harness | Terminal | 4 | Copy | Proposed | Not tested | None |
+| DeepSeek Harness | Web | 4 | Copy | Proposed | Not tested | None |
+| dot / Web Chats | ChatGPT | 4 | Copy | Proposed | Not tested | None |
+| dot / Web Chats | Claude.ai | 4 | Copy | Proposed | Not tested | None |
+| dot / Web Chats | DeepSeek Web | 4 | Copy | Proposed | Not tested | None |
+| dot / Web Chats | dot | 4 | Copy | Proposed | Not tested | None |
+| dot / Web Chats | Grok Web | 4 | Copy | Proposed | Not tested | None |
+| Gemini | Web | 4 | Copy | Proposed | Not tested | None |
 | Gemini CLI | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-gemini.ts](hooks/receivers/hook-mailbox-gemini.ts) |
-| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Grok Build | CLI | 4 | Copy | Proposed | Not tested | None |
+| Hermes Agent | Chat Gateway | 4 | Copy | Proposed | Not tested | None |
+| Hermes Agent | CLI | 4 | Copy | Proposed | Not tested | None |
 | Muse Code | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-muse.ts](hooks/receivers/hook-mailbox-muse.ts) |
-| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| OpenClaw | Desktop Control UI | 4 | Copy | Proposed | Not tested | None |
+| OpenClaw | Gateway | 4 | Copy | Proposed | Not tested | None |
+| OpenClaw | WebChat | 4 | Copy | Proposed | Not tested | None |
+| OpenCode | Desktop App | 4 | Copy | Proposed | Not tested | None |
+| OpenCode | Terminal | 4 | Copy | Proposed | Not tested | None |
+| OpenCode | Web UI | 4 | Copy | Proposed | Not tested | None |
+
+* The board can also reach `agy` it started itself in headless mode, which owns its input stream; that is a delivery way, not a surface of its own. See [scripts/antigravity-session-connector.mjs](scripts/antigravity-session-connector.mjs).
+Tier is how directly the board can reach the session: 1 wakes it at once, 2 catches it at the end of a step, 3 queues a message for its next turn, 4 copies the message for the person to paste.
 
 <!-- messaging-matrix:end -->
 
