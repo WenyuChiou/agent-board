@@ -60,7 +60,9 @@ after the tests checks them against the budgets in `scripts/ci-impact.mjs` (#902
 its budget, or a part over 480 s, fails the job and names the slow files. The file budgets come from
 step 1 of #902 (each file's share of the Windows board logs, x 1.5); the part budget is re-derived
 from recent main runs, since a 420 s job wall already fails on main. A parallel run records no
-per-file times, so the file check only applies to serial parts. Every job that runs tests on Windows first tries to turn off Windows
+per-file times, so the file check only applies to serial parts.
+
+Every job that runs tests on Windows first tries to turn off Windows
 Defender's real-time scanning (a failure there does not stop the job); the product's own antivirus
 handling stays covered by its simulated tests. No
 product dependency is added to the npm package.

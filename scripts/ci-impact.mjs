@@ -148,8 +148,9 @@ export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
 // (3485740, 4617bc1, e30fe0a, 01cdc5a) run 206-504 s, the slowest part (1/4) 347-504 s, so a 420 s
 // threshold on the job wall already fails on main. Checkout, Node setup and the first PowerShell and
-// Python starts take roughly 60-90 s of the wall, which puts part 1/4 test execution near 400 s at
-// worst; 480 s is about 20% above that and keeps the job wall under the ten-minute timeout.
+// Python starts take roughly 60-90 s of the wall, which puts part 1/4 test execution at
+// 414-444 s at worst (504 s wall minus 60-90 s setup); 480 s is about 8-16% above that
+// and keeps the job wall under the ten-minute timeout.
 export const BOARD_PART_BUDGET_MS = 480_000
 
 const seconds = ms => (ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)
