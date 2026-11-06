@@ -41,7 +41,7 @@ Set up, once per computer:
 The board:
   agent-board                  open the terminal board over SSH or without a display; open the page otherwise
   agent-board stop             stop the board's page
-  agent-board --json           read the board as JSON for an agent
+  agent-board --json           read the board as JSON for an agent (--days N for finished)
 
 All options: agent-board --help all (--watch, --print, --tidy, ...)
 
@@ -59,7 +59,7 @@ Without installing: npx ${name} <the same options>`,
 看板：
   agent-board                  SSH 或無顯示器的終端機開終端看板，其他情況開網頁
   agent-board stop             停止看板網頁
-  agent-board --json           供 agent 以 JSON 讀取看板
+  agent-board --json           供 agent 以 JSON 讀取看板（--days N 包含已完成工作）
 
 所有選項：agent-board --help all（--watch、--print、--tidy...）
 
@@ -77,7 +77,7 @@ Without installing: npx ${name} <the same options>`,
 看板：
   agent-board                  SSH 或无显示器的终端打开终端看板，其他情况打开网页
   agent-board stop             停止看板网页
-  agent-board --json           供 agent 以 JSON 读取看板
+  agent-board --json           供 agent 以 JSON 读取看板（--days N 包含已完成工作）
 
 所有选项：agent-board --help all（--watch、--print、--tidy...）
 
@@ -98,7 +98,7 @@ The board:
   agent-board                  open the board where you are
   agent-board stop             stop the board's page
   agent-board --print          print the board as text
-  agent-board --json           read the board as JSON for an agent
+  agent-board --json           read the board as JSON for an agent (--days N [--project name])
   agent-board --status         one line for a status bar: needs you and working
   agent-board --watch          the board in this terminal, with keys
   agent-board --serve          old; the same as no option: the board's page in your browser
@@ -125,7 +125,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board                  在所在位置打開看板
   agent-board stop             停止看板網頁
   agent-board --print          印出純文字看板
-  agent-board --json           供 agent 以 JSON 讀取看板
+  agent-board --json           供 agent 以 JSON 讀取看板（--days N [--project 名稱]）
   agent-board --status         狀態列的一行摘要：等你與進行中項目
   agent-board --watch          在這個終端機開看板，可用按鍵操作
   agent-board --serve          舊用法，同不加選項：在瀏覽器開看板網頁
@@ -152,7 +152,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board                  在所在位置打开看板
   agent-board stop             停止看板网页
   agent-board --print          打印纯文本看板
-  agent-board --json           供 agent 以 JSON 读取看板
+  agent-board --json           供 agent 以 JSON 读取看板（--days N [--project 名称]）
   agent-board --status         状态栏的一行摘要：等你与进行中项目
   agent-board --watch          在这个终端打开看板，可用按键操作
   agent-board --serve          旧用法，同不加选项：在浏览器打开看板网页

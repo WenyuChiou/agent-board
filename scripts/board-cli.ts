@@ -35,7 +35,8 @@ import { pickSurface } from '../hooks/surface'
 import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
 import { boardStatus } from '../hooks/board-status'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, clipped, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, plain, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
-import { BOARD_JSON_SCHEMA, boardDocument } from '../hooks/board-json'
+import { BOARD_JSON_SCHEMA, boardDocument, collectFinished } from '../hooks/board-json'
+import type { FinishedTask } from '../hooks/board-json'
 import { RELEASED } from '../hooks/released'
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile, keepInboxDone } from '../hooks/inbox'
@@ -2209,7 +2210,7 @@ const jsonFailure = (error: unknown): void => {
 }
 
 // The one document for an agent's read: --json prints it and MCP's board_status returns it.
-const boardJson = () => {
+const boardJson = (days?: number, projectFilter?: string) => {
   // --mcp keeps running and --json does not: each read starts from what a new process would hold.
   lastSeen = {}
   lastStat = { stat: '', at: 0 }
@@ -2236,10 +2237,61 @@ const boardJson = () => {
     versions: { board, package: /^\d+\.\d+\.\d+$/.test(packageVersion) ? packageVersion : null },
     unreadable: current.unreadable ?? [],
   }
-  return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group)
+  let finished: FinishedTask[] | undefined
+  if (days !== undefined) {
+    const journalTexts: string[] = []
+    const archiveTexts: string[] = []
+    const stem = path.replace(/\.md$/i, '')
+    const fromTime = now - (days - 1) * 24 * 60 * 60 * 1000
+    const months = new Set<string>()
+    for (let t = fromTime; t <= now; t += 24 * 60 * 60 * 1000) {
+      months.add(localDay(t).slice(0, 7))
+    }
+    months.add(localDay(now).slice(0, 7))
+
+    const isThere = (file: string): boolean => {
+      try { return statSync(file).isFile() } catch { return false }
+    }
+
+    const archivesDir = join(dirname(path), OLD_MONTHS_FOLDER)
+    for (const m of months) {
+      const jBase = `${stem}-journal-${m}.md`
+      for (const f of monthParts(jBase, isThere)) {
+        const t = read(f)
+        if (t) journalTexts.push(t)
+      }
+      const jArchive = join(archivesDir, `${basename(stem)}-journal-${m}.md`)
+      for (const f of monthParts(jArchive, isThere)) {
+        const t = read(f)
+        if (t) journalTexts.push(t)
+      }
+
+      const aBase = `${stem}-archive-${m}.md`
+      for (const f of monthParts(aBase, isThere)) {
+        const t = read(f)
+        if (t) archiveTexts.push(t)
+      }
+      const aArchive = join(archivesDir, `${basename(stem)}-archive-${m}.md`)
+      for (const f of monthParts(aArchive, isThere)) {
+        const t = read(f)
+        if (t) archiveTexts.push(t)
+      }
+    }
+    finished = collectFinished(source, journalTexts, archiveTexts, days, now, projectFilter, home, isWin)
+  }
+  return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group, finished)
 }
 const json = (): void => {
-  try { process.stdout.write(`${JSON.stringify(boardJson())}\n`) } catch (error) { jsonFailure(error) }
+  try {
+    const daysIndex = args.indexOf('--days')
+    let days: number | undefined
+    if (daysIndex !== -1) {
+      const nextArg = args[daysIndex + 1]
+      days = (nextArg === undefined || nextArg.startsWith('--')) ? 7 : Number(nextArg)
+    }
+    const project = flag('--project')
+    process.stdout.write(`${JSON.stringify(boardJson(days, project))}\n`)
+  } catch (error) { jsonFailure(error) }
 }
 
 const runWatchTerminal = async (): Promise<void> => {
@@ -2328,6 +2380,21 @@ const runWatchTerminal = async (): Promise<void> => {
 }
 
 const run = async (): Promise<void> => {
+  if (args.includes('--days')) {
+    const daysIndex = args.indexOf('--days')
+    const nextArg = args[daysIndex + 1]
+    let isValid = true
+    if (nextArg !== undefined && !nextArg.startsWith('--')) {
+      if (!/^\d+$/.test(nextArg) || Number(nextArg) < 1 || Number(nextArg) > 90) {
+        isValid = false
+      }
+    }
+    if (!isValid) {
+      process.exitCode = 1
+      process.stderr.write(`${s.boardUsage}\n`)
+      return
+    }
+  }
   // Setup keeps its own --json protocol; a board read wins over every action flag.
   if (isJsonBoard) {
     json()
