@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { test } from 'node:test'
@@ -277,7 +278,7 @@ test('dependency walking follows the generated board bundle to its parts without
   })
 })
 
-test('a change to one board bundle part alone counts as a bundle change and selects the npm and installer checks', async () => {
+test('a change to one board bundle part alone counts as a bundle change and selects the npm, installer and browser checks', async () => {
   const { buildPlan } = await import('../scripts/ci-impact.mjs')
   assert.equal(makePlan(['hooks/board-script-1.ts'], options()).generated.bundle, true)
   await withFixture(async root => {
@@ -286,7 +287,11 @@ test('a change to one board bundle part alone counts as a bundle change and sele
     const plan = await buildPlan(['hooks/board-script-1.ts'], { roots: [root] })
     assert.equal(plan.full, false)
     assert.equal(plan.generated.bundle, true)
-    assertOnly(plan, ['npm', 'installers', 'generated'])
+    // The browser journeys install this bundle in a child process: a page change runs them (#942).
+    assertOnly(plan, ['npm', 'installers', 'browser', 'generated'])
+    // setup-agent.mjs runs setup-codex.mjs in a child process too, so a change to it alone runs them as well.
+    await writeFixture(root, 'scripts/setup-codex.mjs', 'export {}')
+    assert.equal((await buildPlan(['scripts/setup-codex.mjs'], { roots: [root] })).checks.browser, true)
   })
 })
 
@@ -431,6 +436,198 @@ test('selected test execution refuses an empty or invalid file list', async () =
   assert.throws(() => runTestFiles(['tests/missing.test.mjs']))
 })
 
+test('a test part runs its share of the files in one Node run, and a bad part is refused before any test runs', async () => {
+  const { testArgs, testRuns, runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const files = ['tests/a.test.mjs', 'tests/b.test.mjs', 'tests/c.test.mjs']
+  assert.deepEqual(testArgs(files), ['--test', ...files])
+  assert.deepEqual(testArgs(files, { isSerial: true }), ['--test', '--test-concurrency=1', ...files])
+  assert.deepEqual(testRuns(files, { part: '1/2' }), [['--test', 'tests/a.test.mjs', 'tests/c.test.mjs']])
+  assert.deepEqual(testRuns(files, { part: '2/2' }), [['--test', 'tests/b.test.mjs']])
+  assert.deepEqual(testRuns(['tests/a.test.mjs'], { part: '2/2' }), [])
+  for (const part of ['0/2', '3/2', '1/0', 'x', '1/2 --inspect']) assert.throws(() => testRuns(files, { part }), /test part/, part)
+  assert.throws(() => runTestFiles(['tests/ci-impact.test.mjs'], '3/2'), /test part/)
+})
+
+test('a Windows job runs at most two test files at once, and a serial job still one', async () => {
+  const { testArgs, testRuns, runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const files = ['tests/a.test.mjs', 'tests/b.test.mjs', 'tests/c.test.mjs']
+  assert.deepEqual(testArgs(files, { isWindows: true }), ['--test', '--test-concurrency=2', ...files])
+  assert.deepEqual(testArgs(files, { isWindows: true, isSerial: true }), ['--test', '--test-concurrency=1', ...files])
+  assert.deepEqual(testRuns(files, { isWindows: true, part: '2/2' }), [['--test', '--test-concurrency=2', 'tests/b.test.mjs']])
+  const serial = process.env.CI_TEST_SERIAL
+  delete process.env.CI_TEST_SERIAL
+  try {
+    const seen = platform => {
+      const runs = []
+      runTestFiles(['tests/ci-impact.test.mjs'], '', (command, args) => { runs.push(args); return { status: 0 } }, platform)
+      return runs
+    }
+    assert.deepEqual(seen('win32'), [['--test', '--test-concurrency=2', 'tests/ci-impact.test.mjs']])
+    assert.deepEqual(seen('linux'), [['--test', 'tests/ci-impact.test.mjs']])
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+  }
+})
+
+test('a self-parted test file runs whole in every part and keeps its share, so the parts together run each of its tests once', async () => {
+  const { testRuns, partTest, selfPartedTests } = await import('../scripts/ci-impact.mjs')
+  const files = ['tests/a.test.mjs', 'tests/board.test.mjs', 'tests/b.test.mjs', 'tests/codex-local.test.mjs']
+  assert.deepEqual(testRuns(files), [['--test', ...files]])
+  assert.deepEqual(testRuns(files, { part: '1/1' }), [['--test', ...files]])
+  assert.deepEqual(testRuns(files, { part: '1/2' }), [['--test', 'tests/a.test.mjs', 'tests/board.test.mjs', 'tests/codex-local.test.mjs']])
+  assert.deepEqual(testRuns(files, { part: '2/2' }), [['--test', 'tests/b.test.mjs', 'tests/board.test.mjs', 'tests/codex-local.test.mjs']])
+  assert.deepEqual(testRuns(['tests/board.test.mjs'], { isSerial: true, part: '1/2' }), [['--test', '--test-concurrency=1', 'tests/board.test.mjs']])
+  const ran = part => {
+    const names = []
+    const test = partTest(name => names.push(name), part)
+    for (const name of ['t0', 't1', 't2', 't3', 't4']) test(name)
+    return names
+  }
+  assert.deepEqual(ran(''), ['t0', 't1', 't2', 't3', 't4'])
+  assert.deepEqual(ran('1/2'), ['t0', 't2', 't4'])
+  assert.deepEqual(ran('2/2'), ['t1', 't3'])
+  assert.deepEqual([...ran('1/3'), ...ran('2/3'), ...ran('3/3')].sort(), ['t0', 't1', 't2', 't3', 't4'])
+  assert.throws(() => partTest(() => {}, '2/1'), /test part/)
+  for (const path of selfPartedTests) assert.match(await readFile(path, 'utf8'), /^const test = partTest\(nodeTest\)$/m, path)
+})
+
+test('the part given to a run reaches its test processes, even when the environment names another part', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const saved = process.env.CI_TEST_PART
+  process.env.CI_TEST_PART = '2/2'
+  try {
+    const partsSeen = part => {
+      const seen = []
+      runTestFiles(['tests/board.test.mjs'], part, (command, args, options) => { seen.push(options.env.CI_TEST_PART); return { status: 0 } })
+      return seen
+    }
+    assert.deepEqual(partsSeen('1/1'), ['1/1'])
+    assert.deepEqual(partsSeen(''), [''])
+    assert.deepEqual(partsSeen('1/2'), ['1/2'])
+    assert.deepEqual(partsSeen(undefined), ['2/2'])
+  } finally {
+    if (saved === undefined) delete process.env.CI_TEST_PART
+    else process.env.CI_TEST_PART = saved
+  }
+})
+
+test('the board time check fails a file over its budget and a part over its budget, naming the slow files', async () => {
+  const { checkBoardTimes, BOARD_FILE_BUDGETS_MS, BOARD_PART_BUDGET_MS } = await import('../scripts/ci-impact.mjs')
+  assert.equal(BOARD_FILE_BUDGETS_MS['tests/board.test.mjs'], 140_000)
+  assert.equal(BOARD_PART_BUDGET_MS, 480_000)
+  const base = { version: 1, part: '1/4', serial: true, totalMs: 300_000, files: [{ path: 'tests/board.test.mjs', ms: 100_000 }, { path: 'tests/ws-stdio.test.mjs', ms: 5_000 }] }
+  assert.deepEqual(checkBoardTimes(base), { ok: true, errors: [] })
+  // A file exactly at its budget is not over it.
+  assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/board.test.mjs', ms: 140_000 }] }), { ok: true, errors: [] })
+  const overFile = checkBoardTimes({ ...base, files: [{ path: 'tests/board.test.mjs', ms: 150_000 }] })
+  assert.equal(overFile.ok, false)
+  assert.deepEqual(overFile.errors, ['tests/board.test.mjs took 150s, over its 140s budget'])
+  const overPart = checkBoardTimes({ ...base, totalMs: 500_000, files: [
+    { path: 'tests/board.test.mjs', ms: 100_000 },
+    { path: 'tests/codex-local.test.mjs', ms: 150_000 },
+    { path: 'tests/legacy-connect.test.mjs', ms: 100_000 },
+  ] })
+  assert.equal(overPart.ok, false)
+  assert.deepEqual(overPart.errors, ['board part 1/4 took 500s, over its 480s budget; slowest files: tests/codex-local.test.mjs 150s, tests/board.test.mjs 100s, tests/legacy-connect.test.mjs 100s'])
+  assert.deepEqual(checkBoardTimes(null), { ok: false, errors: ['missing or invalid board timings'] })
+  // A file outside the board group, and a file with no time recorded, are not judged.
+  const unjudged = { ...base, totalMs: 100_000, files: [{ path: 'tests/messaging.test.mjs', ms: 999_000 }, { path: 'tests/board.test.mjs', ms: null }] }
+  assert.deepEqual(checkBoardTimes(unjudged), { ok: true, errors: [] })
+})
+
+test('a serial run times one file at a time and records the times for the time check', async () => {
+  const { runTestFiles, partFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-'))
+  const serial = process.env.CI_TEST_SERIAL
+  const timings = process.env.CI_TEST_TIMINGS
+  process.env.CI_TEST_SERIAL = '1'
+  process.env.CI_TEST_TIMINGS = join(dir, 'timings.json')
+  try {
+    const files = ['tests/ws-stdio.test.mjs', 'tests/connect-worker.test.mjs', 'tests/board.test.mjs']
+    assert.deepEqual(partFiles(files, '1/2'), ['tests/ws-stdio.test.mjs', 'tests/board.test.mjs'])
+    const calls = []
+    runTestFiles(files, '1/2', (command, args) => { calls.push(args); return { status: 0 } }, 'win32')
+    assert.deepEqual(calls, [
+      ['--test', '--test-concurrency=1', 'tests/ws-stdio.test.mjs'],
+      ['--test', '--test-concurrency=1', 'tests/board.test.mjs'],
+    ])
+    const recorded = JSON.parse(await readFile(process.env.CI_TEST_TIMINGS, 'utf8'))
+    assert.equal(recorded.version, 1)
+    assert.equal(recorded.part, '1/2')
+    assert.equal(recorded.serial, true)
+    assert.equal(typeof recorded.totalMs, 'number')
+    assert.equal(recorded.files.length, 2)
+    assert.equal(recorded.files[0].path, 'tests/ws-stdio.test.mjs')
+    assert.equal(typeof recorded.files[0].ms, 'number')
+    // A failing file does not stop the rest, and the times are still recorded.
+    const failing = []
+    assert.throws(() => runTestFiles(files, '1/2', (command, args) => { failing.push(args); return { status: args.includes('tests/board.test.mjs') ? 1 : 0 } }, 'win32'), /selected tests failed: 1/)
+    assert.equal(failing.length, 2)
+    const recordedAfterFailure = JSON.parse(await readFile(process.env.CI_TEST_TIMINGS, 'utf8'))
+    assert.equal(recordedAfterFailure.files.length, 2)
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+    if (timings === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timings
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a parallel run keeps its single Node run and records no per-file times', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-'))
+  const serial = process.env.CI_TEST_SERIAL
+  const timings = process.env.CI_TEST_TIMINGS
+  delete process.env.CI_TEST_SERIAL
+  process.env.CI_TEST_TIMINGS = join(dir, 'timings.json')
+  try {
+    const calls = []
+    runTestFiles(['tests/ws-stdio.test.mjs', 'tests/connect-worker.test.mjs'], '', (command, args) => { calls.push(args); return { status: 0 } }, 'linux')
+    assert.deepEqual(calls, [['--test', 'tests/ws-stdio.test.mjs', 'tests/connect-worker.test.mjs']])
+    const recorded = JSON.parse(await readFile(process.env.CI_TEST_TIMINGS, 'utf8'))
+    assert.equal(recorded.serial, false)
+    assert.deepEqual(recorded.files, [
+      { path: 'tests/ws-stdio.test.mjs', ms: null },
+      { path: 'tests/connect-worker.test.mjs', ms: null },
+    ])
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+    if (timings === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timings
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the time check command fails on over-budget timings and passes on green ones', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-'))
+  try {
+    const path = join(dir, 'timings.json')
+    const script = fileURLToPath(new URL('../scripts/ci-impact.mjs', import.meta.url))
+    const run = () => spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: path } })
+    await writeFile(path, JSON.stringify({ version: 1, part: '1/4', serial: true, totalMs: 300_000, files: [{ path: 'tests/board.test.mjs', ms: 100_000 }] }))
+    const green = run()
+    assert.equal(green.status, 0)
+    assert.match(green.stdout, /total 300s of 480s budget/)
+    await writeFile(path, JSON.stringify({ version: 1, part: '1/4', serial: true, totalMs: 500_000, files: [
+      { path: 'tests/board.test.mjs', ms: 200_000 },
+      { path: 'tests/codex-local.test.mjs', ms: 180_000 },
+      { path: 'tests/legacy-connect.test.mjs', ms: 100_000 },
+    ] }))
+    const red = run()
+    assert.equal(red.status, 1)
+    assert.match(red.stdout, /tests\/board\.test\.mjs took 200s, over its 140s budget/)
+    assert.match(red.stdout, /board part 1\/4 took 500s, over its 480s budget; slowest files: tests\/board\.test\.mjs 200s, tests\/codex-local\.test\.mjs 180s/)
+    const missing = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: join(dir, 'missing.json') } })
+    assert.equal(missing.status, 0)
+    assert.match(missing.stdout, /no test timings recorded/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('ci result validation rejects incomplete or non-boolean selection metadata', () => {
   const plan = makePlan([], options())
   const incomplete = structuredClone(plan)
@@ -540,10 +737,21 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   // On a pull request the planner picks the plugin systems; an empty planner output falls through to both.
   assert.ok(text.includes(`plugin_os: \${{ ${onPr} && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}`))
   assert.match(text, /plugin_os:'\["ubuntu-latest","windows-latest"\]'/)
+  // The board job and the journeys take the same pairs, with the Windows sets in serial parts so each
+  // keeps ten minutes: the board in four, the journeys in two (#910).
+  const parts = (node, n) => Array.from({ length: n }, (_, i) => `{"os":"windows-latest","node":${node},"part":"${i + 1}/${n}"}`).join(',')
+  const ubuntu = '{"os":"ubuntu-latest","node":22,"part":"1/1"}', ubuntu24 = '{"os":"ubuntu-latest","node":24,"part":"1/1"}'
+  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 4)}]' || '[${ubuntu},${ubuntu24},${parts(22, 4)},${parts(24, 4)}]' }}`))
+  assert.ok(text.includes(`journeys_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 2)}]' || '[${ubuntu},${ubuntu24},${parts(22, 2)},${parts(24, 2)}]' }}`))
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
     assert.ok(block, group)
-    assert.match(block, /include: \$\{\{ fromJSON\(needs\.impact\.outputs\.node_matrix\) \}\}/, group)
+    const matrix = group === 'board' || group === 'journeys' ? `${group}_matrix` : 'node_matrix'
+    assert.ok(block.includes(`include: \${{ fromJSON(needs.impact.outputs.${matrix}) }}`), group)
+    if (group === 'board' || group === 'journeys') {
+      assert.ok(block.includes('CI_TEST_PART: ${{ matrix.part }}') && block.includes('timeout-minutes: 10'), group)
+      assert.ok(block.includes("CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}"), group)
+    }
     assert.doesNotMatch(block, /node: \[/, group)
     assert.doesNotMatch(block, /^\s+os: \[/m, group)
     assert.match(block, /CI_TEST_FILES:/, group)
@@ -551,6 +759,13 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   }
   const plugin = text.split('\n  plugin:\n')[1]?.split(/\n  [\w-]+:\n/)[0]
   assert.match(plugin, /os: \$\{\{ fromJSON\(needs\.impact\.outputs\.plugin_os\) \}\}/)
+  // Every job that runs tests on Windows turns real-time scanning off first, on Windows only.
+  for (const group of ['board', 'messaging', 'tooling', 'npm', 'plugin', 'installers', 'remote', 'journeys', 'browser']) {
+    const steps = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]?.split('\n    steps:\n')[1] ?? ''
+    assert.ok(steps.startsWith('      # Real-time scanning'), group)
+    const first = steps.split('\n      - ')[1] ?? ''
+    assert.ok(first.includes("if: runner.os == 'Windows'") && first.includes('Set-MpPreference -DisableRealtimeMonitoring $true'), group)
+  }
 })
 
 test('workflow selection uses base rules and bootstraps with every group selected', async () => {

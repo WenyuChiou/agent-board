@@ -5,11 +5,12 @@ import { performance } from 'node:perf_hooks'
 import { CONNECTOR_POLL_MS, GAPS, NATIVE_RECEIVERS, RECEIVERS, SENDERS, openHub, receiptBudget, withHub } from './lib/hub.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { noMachineIds, noSilentPress, seenWithin } from './lib/expect.mjs'
-import { chat, pageDom, run, serve, terminal } from './lib/surfaces.mjs'
+import { pageDom, print, run, serve, terminal } from './lib/surfaces.mjs'
 import { makeWorld } from './lib/world.mjs'
 import { EN } from '../../hooks/strings-en.ts'
 import { BLOCKS, LIVE_SESSIONS, PAGE_MS } from './lib/budget.mjs'
 import { block } from './lib/writers.mjs'
+import { hookOrDeferred } from '../helpers/deferred-turn.mjs'
 import { finishedRecord, isFinishedRecord, readStore, seedStore } from './lib/hub-wire.mjs'
 
 const text = 'Review route /health?mode=ready — 測試 intact\nKeep both lines.'
@@ -21,8 +22,7 @@ test('messages: a Codex session with no poller takes a page message on its next 
   try {
     const server = await serve.start(world)
     const hook = event => run(world, ['--codex-event', '--home', world.home, '--progress-file', world.path], { input: JSON.stringify({ session_id: session, hook_event_name: event, turn_id: 'next-turn' }) })
-    const enrolled = await hook('SessionStart')
-    assert.equal(enrolled.status, 0, enrolled.stderr)
+    await hookOrDeferred(() => hook('SessionStart'), async () => (await server.get('/api/board')).json().messaging.mailboxes.length > 0)
     let snapshot = (await server.get('/api/board')).json()
     assert.equal(snapshot.messaging.connections.length, 0)
     assert.equal(snapshot.messaging.mailboxes.length, 1)
@@ -41,8 +41,7 @@ test('messages: a Codex session with no poller takes a page message on its next 
     await page.flush()
     snapshot = (await server.get('/api/board')).json()
     assert.equal(snapshot.messaging.messages[0].status, 'queued')
-    const delivered = await hook('UserPromptSubmit')
-    assert.equal(delivered.status, 0, delivered.stderr)
+    const delivered = await hookOrDeferred(() => hook('UserPromptSubmit'), one => one.stdout.includes('Synthetic next-turn mailbox message'))
     assert.ok(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext.includes('Synthetic next-turn mailbox message'))
     snapshot = (await server.get('/api/board')).json()
     assert.equal(snapshot.messaging.messages[0].status, 'accepted')
@@ -117,7 +116,7 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     const [codex, antigravity] = hub.actors
     await nativeDelivery(hub, codex, antigravity, 'AB-outward')
     await nativeDelivery(hub, antigravity, codex, 'AB-return')
-  }))
+  }, { traceReceipt: true }))
 
   for (const agent of Object.keys(NATIVE_RECEIVERS)) test(`messages: a message typed on the serve page reaches ${NATIVE_RECEIVERS[agent].label} card's live session and the card shows the receipt`, { timeout: 20000 }, async () => withHub([
     { agent },
@@ -151,9 +150,8 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
   ], async hub => {
     const [, receiver] = hub.actors
     await nativeDelivery(hub, hub.actors[0], receiver)
-    const surfaces = { terminal: (await terminal.screen(hub.world)), chat: (await chat(hub.world)) }
-    assert.equal(surfaces.chat.status, 0, surfaces.chat.stderr)
-    for (const [surface, output] of [['terminal', surfaces.terminal], ['--chat', surfaces.chat.stdout]]) {
+    const surfaces = { terminal: await terminal.screen(hub.world), print: await print(hub.world) }
+    for (const [surface, output] of Object.entries(surfaces)) {
       assert.ok(output.includes(receiver.title), `${surface}: receiver card missing`)
       noMachineIds(output, hub.world)
       await knownFailure(232, () => {

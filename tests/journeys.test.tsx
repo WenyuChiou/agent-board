@@ -4,7 +4,6 @@ import { blockId } from '../hooks/inbox'
 import { emptyMirror } from '../hooks/mirror'
 import { upsertAutoBlock } from '../hooks/blocks'
 import { boardText, chatText } from '../hooks/board'
-import { dashboardHtml } from '../hooks/dashboard'
 import { parseProgress } from '../hooks/parse'
 import { emptyQuestions, observeQuestions, questionsJson } from '../hooks/questions'
 import { serveModel } from '../hooks/serve'
@@ -38,6 +37,16 @@ const block = ({
   resume?: string
 } = {}): string =>
   `## ${project}\n<!-- auto session=${session} agent=${agent} state=${state} updated=2026-10-16T12:00:00Z${resume === undefined ? '' : ` resume=${resume}`} -->\n### ${title}\n> Context: Synthetic journey data.\n${steps}\n<!-- /auto session=${session} -->\n`
+
+// Keep this first so module loading is paid by a session without pane or connection work.
+test('starting a session preserves a hand-kept open task', async ($, on) => {
+  const source = '## synthetic-project\n### Synthetic task\n- [ ] Next step\n'
+  const world = makeWorld([[FILE, source]])
+  world.env = english
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  expect(world.files.get(FILE)).toBe(source)
+})
 
 describe('L1 first run', () => {
   test('L1 latency: a new ask is visible within 3 s on the pane', async ($, on) => {
@@ -146,7 +155,8 @@ describe('L2 a busy board', () => {
     timing.begin()
     const ran = await $.command.run({ command: 'progress', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
     timing.stop()
-    expect(ran.text).toBe(EN.paneOpened(FILE))
+    expect(ran.text).toBe(EN.paneOpened)
+    expect(ran.text).not.toContain(FILE)
     expect(world.files.get(ARCHIVE)?.match(/^## /gm)?.length).toBe(board.archivable)
     expect(within(timing.stretches.longest, BUDGET_MS, timing.stretches.at)).toBe('within')
   })
@@ -254,7 +264,6 @@ describe('L3 across agents and sessions', () => {
       terminal: boardText(view, [], EN),
       chat: chatText(view, [], [], EN, '/home/me'),
       page: [...page.asks.map(ask => ask.text), ...page.groups.flatMap(group => group.rows.flatMap(row => [row.title, row.status, row.next ?? '']))].join(' '),
-      html: dashboardHtml(view, EN, FILE, ''),
     }
     for (const visible of [surfaces.terminal, surfaces.chat]) {
       expect(visible).toContain('0 waiting')
@@ -262,9 +271,11 @@ describe('L3 across agents and sessions', () => {
     }
     expect(surfaces.terminal).toContain('✓ 1 Retry limit')
     expect(surfaces.terminal).not.toContain('● 1 Retry limit')
-    // progress.html counts what needs you in its Needs you flag, as the page does.
-    expect(surfaces.html).toContain('<b id="needs-n">0</b>')
-    expect(surfaces.html).toContain('Nothing needs you right now')
+    // Answering the question leaves the agent's remaining work on the page.
+    expect(page.counts.waiting).toBe(0)
+    expect(page.counts.active).toBe(1)
+    expect(page.groups).toHaveLength(1)
+    expect(page.groups[0]).toMatchObject({ project: 'api-gateway', rows: [{ title: 'Set the retry limit', done: 1, isAsking: false, steps: [{ text: 'Retry limit', status: 'done' }, { text: 'Apply the retry limit', status: 'todo', isCurrent: true }] }] })
     for (const visible of Object.values(surfaces)) {
       noMachineIds(visible, world)
       expect(visible).not.toContain('1 waiting')

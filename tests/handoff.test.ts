@@ -1,7 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { renderAutoBlock } from '../hooks/blocks'
 import { boardText } from '../hooks/board'
-import { dashboardHtml } from '../hooks/dashboard'
 import { applyDigest, parseDigest } from '../hooks/digest'
 import { applyTaskCreate, applyTaskUpdate, completedSince, emptyMirror, fromTaskList, markAnswered, questionToken, resumeNote, stateOf } from '../hooks/mirror'
 import { parseProgress } from '../hooks/parse'
@@ -98,7 +97,7 @@ for (const s of Object.values(STRINGS)) test(`handoff pointers preserve the reci
     expect(own.current?.done).toBe(0)
     expect(own.current?.total).toBe(0)
     expect(own.current?.steps[0]).toMatchObject({ status: 'cancelled', note: s.transferredTo('Export session'), isCurrent: false })
-    for (const output of [boardText(remote, [], s), dashboardHtml(remote, s, '/synthetic/progress.md', 'test'), JSON.stringify(serveModel(remote, [], s))]) {
+    for (const output of [boardText(remote, [], s), JSON.stringify(serveModel(remote, [], s))]) {
       expect(output).toContain('Export session')
     }
     expect(s.digestPrompt('', '', '', '', '', '')).toContain('HANDOFF:')

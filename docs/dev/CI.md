@@ -48,8 +48,24 @@ does `installers_os`. Pushes to main, the weekly run, a manual run and a release
 run Node 22 and 24 on both systems and plugin on both. Browser checks use
 Node 24/Chromium on both systems. Plugin checks keep the pinned offline Claude
 runner. Legacy installers and the Python reporter run without installing Claude.
-Board and messaging have separate ten-minute jobs. No product dependency is
-added to the npm package.
+Board and messaging have separate ten-minute jobs. On Windows the board set runs in four parts
+and the journeys in two. Each Windows part runs its files one at a time (`CI_TEST_SERIAL`), and the
+other Windows jobs run at most two files at once. When
+three spawn-heavy files ran side by side on the 4-vCPU runner, every test ran about 1.35x slower, and
+the tests with the tightest time limits failed, a different one each run (#910). Each part runs every
+fourth (or second) file in one Node run. `tests/codex-local.test.mjs` and `tests/board.test.mjs` take
+far longer than the rest (about 8 and 5 minutes there), so every part runs them, each part taking an
+equal share of their tests. A serial run times one file at a time and records the times, and a step
+after the tests checks them against the budgets in `scripts/ci-impact.mjs` (#902 step 4): a file over
+its budget, or a part over 480 s, fails the job and names the slow files. The file budgets come from
+step 1 of #902 (each file's share of the Windows board logs, x 1.5); the part budget is re-derived
+from recent main runs, since a 420 s job wall already fails on main. A parallel run records no
+per-file times, so the file check only applies to serial parts.
+
+Every job that runs tests on Windows first tries to turn off Windows
+Defender's real-time scanning (a failure there does not stop the job); the product's own antivirus
+handling stays covered by its simulated tests. No
+product dependency is added to the npm package.
 
 The always-run affected checks and CI validation jobs record the plan and require
 literal success for every selected group. A skipped selected job fails validation.

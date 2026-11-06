@@ -50,7 +50,7 @@ const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArra
 // Windows refuses a file for a moment while another process removes it (EPERM until the remover
 // closes it), or while a virus scanner holds one just written (EPERM, EBUSY). Every step on a claim
 // file is tried again after short waits; only a refusal that outlasts them all counts.
-const patiently = <T>(step: () => T): T => {
+export const patiently = <T>(step: () => T): T => {
   for (let attempt = 0; ; attempt++) {
     try {
       return step()

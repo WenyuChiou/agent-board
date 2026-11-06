@@ -12,10 +12,11 @@ import type {
 import type { PressOutcome, ProgressAnswer, ProgressPressResult, ProgressStepStatus, ResolveResult } from '../types'
 import type { Strings } from './i18n'
 import { ZH_TW } from './i18n'
+import { displayColumns } from './board'
 import { agentLabel } from './strings'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { OLDER_SHOWN, progressBar, replyHint } from './view'
+import { OLDER_SHOWN, progressBar, questionHead, replyHint } from './view'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
 // The pane's drawing, from the view and a set of actions; it never touches the engine,
@@ -72,6 +73,7 @@ export type PaneActions = {
   confirmRow: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
   report: (surface: RenderSurface) => PressOutcome | Promise<PressOutcome>
   toggleNotify: () => PressOutcome | Promise<PressOutcome>
+  openPage?: () => PressOutcome | Promise<PressOutcome>
   toggleLegend: () => PressOutcome | Promise<PressOutcome>
 }
 
@@ -86,6 +88,8 @@ export type PaneModel = {
   resolveResult?: ResolveResult | null
   path: string
   width: number
+  // The host's body width (`bodyColumns`); undefined when the host gives none.
+  bodyColumns?: number
   hasTaskTools: boolean
   isNotifyOn: boolean
   isLegendOpen: boolean
@@ -99,6 +103,7 @@ export type PressResult = ProgressPressResult
 
 // Action keys use `${card.key}::verb`, so results follow a card through redraws.
 export const pressTarget = (view: View, button: string, s: Strings = ZH_TW): { key: string; revision: string; label: string } => {
+  if (button === 'page') return { key: button, revision: '', label: s.boardOpenPage }
   if (button === 'section::hidden') return { key: button, revision: '', label: s.hiddenCount(view.hidden.length) }
   if (button === 'section::idle') return { key: button, revision: '', label: s.idleCount(view.idle.length) }
   if (button === 'section::stopped') return { key: button, revision: '', label: s.stoppedCount(view.stopped.length) }
@@ -410,7 +415,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const askDetail = (item: WaitingItem) => (
     <Box flexDirection="column">
       <Text color={palette.project} wrap="truncate-end">
-        {`${item.project} › ${item.task}${item.where === 'manual' ? '' : ` · ${agentLabel(item.agent || 'claude', s)}`}`}
+        {`${questionHead(item.project, item.task)}${item.where === 'manual' ? '' : ` · ${agentLabel(item.agent || 'claude', s)}`}`}
       </Text>
       {item.note !== '' && <Text wrap="wrap">{item.note}</Text>}
       {item.note === '' && item.context !== '' && muted(s.contextLine(item.context))}
@@ -614,7 +619,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const hiddenRow = (item: WaitingItem) => (
     <Box flexDirection="column" marginTop={1} paddingLeft={1}>
       {muted(item.text)}
-      {muted(`${item.project} › ${item.task}`)}
+      {muted(questionHead(item.project, item.task))}
       <Box marginTop={1}>
         <Button key={`${item.key}::unhide`} onPress={buttonPress(`${item.key}::unhide`, () => actions.unhide(item))}>
           {s.showAgain}
@@ -627,6 +632,17 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   // The counts at the top; each opens what it counts. A zero stays, in the muted colour.
   const overview = () => {
     const { waiting, active, due, today } = view.overview
+    const counts = [
+      { id: 'waiting', glyph: '●', n: waiting, word: s.countWaiting, hue: palette.waiting },
+      { id: 'others', glyph: '▸', n: active, word: s.countActive, hue: palette.accent },
+      { id: 'due', glyph: '⚑', n: due, word: s.countDue, hue: palette.soon },
+      { id: 'recent', glyph: '✓', n: today, word: s.countToday, hue: palette.done },
+    ]
+    // A host may lay the row out at a near-zero width on a first frame, which left only the last
+    // letter of each word (#857). The row wraps between counts, so it needs the widest count whole;
+    // until the body is that wide it draws nothing. A host that gives no width draws it as before.
+    const needed = Math.max(...counts.map(({ glyph, n, word }) => displayColumns(`${glyph} ${n} ${word}`, s.lang !== 'en')))
+    const fits = model.bodyColumns === undefined || model.bodyColumns >= needed
     const count = (id: string, glyph: string, n: number, word: string, hue: string) => (
       <Box flexDirection="row">
         <Text color={n > 0 ? hue : palette.muted}>{`${glyph} ${n}`}</Text>
@@ -638,12 +654,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="row" flexWrap="wrap" columnGap={2} marginTop={1}>
-          {count('waiting', '●', waiting, s.countWaiting, palette.waiting)}
-          {count('others', '▸', active, s.countActive, palette.accent)}
-          {count('due', '⚑', due, s.countDue, palette.soon)}
-          {count('recent', '✓', today, s.countToday, palette.done)}
-        </Box>
+        {fits && (
+          <Box flexDirection="row" flexWrap="wrap" columnGap={2} marginTop={1}>
+            {counts.map(({ id, glyph, n, word, hue }) => count(id, glyph, n, word, hue))}
+          </Box>
+        )}
         {['waiting', 'others', 'due', 'recent'].map(id => cardResult(`count::${id}`))}
       </Box>
     )
@@ -687,7 +702,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           </Box>
         ) : (
           <Box flexDirection="column">
-            {now !== undefined && !current.status.includes(now.text) && <Text wrap="truncate-end">{s.nowStep(now.text)}</Text>}
+            {now !== undefined && !current.status.includes(now.text) && now.text.trim() !== current.title.trim() && <Text wrap="truncate-end">{s.nowStep(now.text)}</Text>}
             {next !== undefined && muted(s.nextStepLine(next.text), 'truncate-end')}
           </Box>
         )}
@@ -914,6 +929,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {cardResult('clear-answer')}
 
       <Box flexDirection="row" marginTop={1} gap={2}>
+        {actions.openPage !== undefined && <Button key="page" plain onPress={buttonPress('page', actions.openPage)}>{s.boardOpenPage}</Button>}
         <Button key="report" plain onPress={buttonPress('report', press => actions.report(press.surface))}>
           {s.report}
         </Button>
@@ -924,6 +940,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           {model.isLegendOpen ? s.legendClose : s.legend}
         </Button>
       </Box>
+      {cardResult('page')}
       {cardResult('report')}
       {cardResult('notify')}
       {cardResult('legend')}

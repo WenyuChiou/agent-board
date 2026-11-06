@@ -14,13 +14,31 @@ export const enrollMailbox = (state: MessageState, agent: string, session: strin
   const id = mailboxId(agent, session)
   const mailboxes = next.mailboxes ?? []
   if (!mailboxes.some(one => one.id === id) && mailboxes.length >= MAILBOX_CAP) throw new Error('MAILBOX_LIMIT')
-  const entry: Connection = { id, agent, session, surface, turn: 'session', scope: 'mailbox', expires: now + ttlMs, origin: 'local' }
+  const prior = mailboxes.find(one => one.id === id)
+  // A lease that ran out takes its owner and any contest with it: otherwise two owners that ever met block this mailbox for good.
+  const { mcpOwner: _owner, mcpLeaseUntil: _until, contested: _contested, ...kept } = prior ?? {}
+  const entry: Connection = { ...((prior?.mcpLeaseUntil ?? 0) > now ? prior : kept), id, agent, session, surface, turn: 'session', scope: 'mailbox', expires: now + ttlMs, origin: 'local' }
   return { ...next, mailboxes: [...mailboxes.filter(one => one.id !== id), entry] }
 }
-export const takeMailboxMessage = (state: MessageState, agent: string, session: string, surface: string, now: number, ttlMs: number, nonce: string): { state: MessageState; message: Message | null } => {
+export const enrollMcp = (state: MessageState, agent: string, session: string, surface: string, owner: string, folderDigest: string, until: number, now: number, ttlMs: number): MessageState => {
   const next = enrollMailbox(state, agent, session, surface, now, ttlMs)
-  const claimed = claimMessages(next, next.mailboxes!.find(one => one.id === mailboxId(agent, session))!, now, nonce)
+  return { ...next, mailboxes: next.mailboxes!.map(one => one.id !== mailboxId(agent, session) ? one
+    : (one.mcpLeaseUntil ?? 0) > now && (one.contested || one.mcpOwner !== undefined && one.mcpOwner !== owner)
+      ? { ...one, contested: true }
+      : { ...one, mcpOwner: owner, folderDigest, mcpLeaseUntil: until, contested: false }) }
+}
+export const takeMailboxMessage = (state: MessageState, agent: string, session: string, surface: string, now: number, ttlMs: number, nonce: string, ref?: string): { state: MessageState; message: Message | null } => {
+  const next = enrollMailbox(state, agent, session, surface, now, ttlMs)
+  const claimed = claimMessages(next, next.mailboxes!.find(one => one.id === mailboxId(agent, session))!, now, nonce, ref)
   return { state: claimed.state, message: claimed.messages[0] ?? null }
+}
+// A hook that stopped waiting never showed what the board claimed for it, so it hands the claim back
+// and the next turn has the message at once (#990). The ACK code stays, for a message shown before.
+export const releaseMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number): MessageState => {
+  const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && message.error === '')
+  if (one === undefined) return state
+  const { ref: _ref, ...kept } = one
+  return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, claimed: 0, updated: now } : message) }
 }
 export const acceptMailboxMessage = (state: MessageState, agent: string, session: string, id: string, nonce: string, now: number): MessageState => {
   const target = state.mailboxes?.find(one => one.id === mailboxId(agent, session))

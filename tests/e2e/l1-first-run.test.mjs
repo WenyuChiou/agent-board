@@ -1,6 +1,5 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { performance } from 'node:perf_hooks'
 import { basename } from 'node:path'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
@@ -18,7 +17,7 @@ describe('L1 first run', () => {
     try {
       assert.equal(world.exists('progress.md'), false)
       const screens = await inspectSurfaces(world)
-      for (const surface of ['terminal', 'chat', 'page', 'html']) {
+      for (const surface of ['terminal', 'chat', 'page', 'print']) {
         // The page has no Needs you section yet: its empty board is the "Your board is ready" card.
         assert.match(screens[surface], surface === 'page' ? EMPTY_PAGE : /Nothing needs you|No work in progress/, surface)
         await knownFailure('hold:empty-board-connect', () => assert.match(screens[surface], /\b(?:connect|set up|install)\b.*(?:agent|setup-agent)|setup-agent.*--apply/i, surface))
@@ -136,10 +135,11 @@ describe('L1 first run', () => {
       await watch.next(text => text.includes('No work in progress'), 10000)
       for (const [index, host] of ['codex', 'antigravity', 'hermes', 'grok'].entries()) {
         const title = `First ${host} task`
-        const start = performance.now()
         block(world, { agent: host, session: `a100000${index}`, title })
+        // Timed from the finished write. On main b31fa26 the board drew this block 0.1 ms after the write
+        // returned, but the test's own synchronous write had taken nearly the whole budget (#910).
         const frame = await watch.next(text => text.includes(title), PANE_MS)
-        assert.ok(performance.now() - start <= PANE_MS, `${host}: ${frame.elapsed} ms`)
+        assert.ok(frame.elapsed <= PANE_MS, `${host}: ${Math.round(frame.elapsed)} ms`)
         assert.match(frame.text, new RegExp(host))
       }
       const screens = await inspectSurfaces(world)

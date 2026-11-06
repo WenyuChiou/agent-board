@@ -39,7 +39,7 @@ const sentence = (text, world) => {
   noMachineIds(text, world)
 }
 
-test('L7 words: no session id, hash or file path on the default pane, terminal, --chat, page or html views', async () => {
+test('L7 words: no session id, hash or file path on the default pane, terminal, chat and live page', async () => {
   // The companion test in journeys.test.tsx mounts the actual pane engine.
   for (const s of locales) {
     const world = makeWorld({ lang: s.lang })
@@ -48,7 +48,7 @@ test('L7 words: no session id, hash or file path on the default pane, terminal, 
       const screens = await inspectSurfaces(world)
       assert.ok(world.exists('progress-questions.json'), 'The question list is present')
       for (const text of Object.values(screens)) noMachineIds(text, world)
-      assert.ok(screens.html.includes(s.progressFileShown))
+      assert.ok(screens.page.includes(s.serveClose))
       const copied = await terminal.keys(world, 'c')
       assert.ok(copied.includes(s.copied), copied)
       noMachineIds(copied, world)
@@ -239,6 +239,7 @@ test('L7 errors: every error is one plain sentence with no stack trace and no fu
       storageFault(world, { code }).enable('read')
       const result = await chat(world)
       assert.equal(result.status, 1)
+      assert.equal(result.stderr, '')
       // A read refused because another program has the file open, before anything was written,
       // says only that the file is locked (#244).
       assert.equal(result.stdout.trim(), ['EBUSY', 'EAGAIN'].includes(code) ? EN.boardLocked(EN.fileProgress) : EN.chatReadFailed(EN.fileProgress, why))

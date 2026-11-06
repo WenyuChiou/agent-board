@@ -37,7 +37,7 @@ npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入，第三行在所在位置打開看板：在桌面開視窗、SSH 開終端機即時看板、agent 印純文字。在 agent 對話中，輸入 `/agent-board` 打開同一個看板。若要停止看板服務，執行 `npx @wenyuchiou/agent-board stop`。想用較短的 `agent-board` 指令，先執行一次 `npm install -g @wenyuchiou/agent-board`。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`。若要移除，見[更新與移除](docs/GUIDE.zh-TW.md#更新與移除)。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。
+第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入；第三行在 SSH 或沒有圖形顯示的互動式終端機開即時終端看板，其他情況開網頁。在 agent 對話中，輸入 `/agent-board` 打開同一個網頁。若要停止看板服務，執行 `npx @wenyuchiou/agent-board stop`。想用較短的 `agent-board` 指令，先執行一次 `npm install -g @wenyuchiou/agent-board`。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`。若要移除，見[更新與移除](docs/GUIDE.zh-TW.md#更新與移除)。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要讀看板狀態時使用 `agent-board --json`；版本化且已遮蔽私密資料的欄位見 [Board JSON 說明](docs/BOARD-JSON.md)（英文）。
 
 看板語言跟著系統設定：系統是繁體或簡體中文就用中文，其他用英文。要自己指定，在兩行 setup 都加上 `--lang zh-TW`（或 `zh-CN`、`en`），之後看板、網頁和 `stop` 都會用這個語言。透過 Claude Code 外掛接上的帳號，改用 `/progress lang`。
 
@@ -57,6 +57,8 @@ npx @wenyuchiou/agent-board
 - **我用 Codex：** `$agent-board`
 - **我用 Antigravity：** `/agent-board`（在測試環境檢查過，還沒實機執行）
 - **我用 OpenCode：** `/board`
+
+要加自己的任務，在 `progress.md` 裡寫一個 `### 標題`，下面每個步驟寫一行 `- [ ] 步驟`（全新安裝用 `~/.agent-board/progress.md`；[檔案格式](docs/FORMAT.md)，英文）。裝了 Claude Code 外掛時，也可以在面板的輸入框打 `+ 專案：標題；步驟；步驟`，或在 Claude Code 的對話裡打 `/progress add …`。
 
 <details>
 <summary><b>不用 npm：用 git clone 安裝</b></summary>
@@ -107,18 +109,18 @@ CLI、桌面 App、IDE 的實際 hook 事件分開驗收；安裝了檔案、傳
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | `/agent-board` |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | `/agent-board`（在測試環境檢查過，還沒實機執行） |
 
-**Claude 桌面 App** 的 Code 分頁沒有顯示面板時：底部狀態列會顯示等你的數量和「/agent-board 開啟看板」。`/agent-board` 會啟動可回覆問題、封存工作的[看板網頁](#看板的網頁)並提供連結；每個 Claude Code 工作階段都能用，也不動面板。面板無法顯示時，`/progress` 做同樣的事。互動網頁無法啟動時，兩者都改開唯讀網頁。看板網頁需要 `/progress connect` 安裝的看板腳本，或在下次工作階段開始時更新。
+**Claude 桌面 App** 的 Code 分頁沒有顯示面板時：底部狀態列會顯示等你的數量和「/agent-board 開啟看板」。`/agent-board` 會啟動可回覆問題、封存工作的[看板網頁](#看板的網頁)並提供連結；每個 Claude Code 工作階段都能用，也不動面板。面板無法顯示時，`/progress` 做同樣的事。互動網頁無法啟動時，兩者都會說明原因，並顯示啟動網頁的指令。看板網頁需要 `/progress connect` 安裝的看板腳本，或在下次工作階段開始時更新。
+
+在 Claude 桌面 App 裡，agent 也能開啟看板：請它開啟看板，它會啟動同一個網頁，並給你同樣的連結。
 
 ### 在任何地方打開看板
 
 | 在哪裡 | 指令 |
 |---|---|
-| 任何終端機 | `node "$HOME/.agent-board/agent-board.mjs" --watch`（`--html` 在瀏覽器開） |
+| 終端機或桌面 | `node "$HOME/.agent-board/agent-board.mjs"`（SSH 或沒有圖形顯示時開終端看板，其他情況開網頁） |
 | 瀏覽器 | `node "$HOME/.agent-board/agent-board.mjs" --serve` |
-| 聊天軟體（透過 Hermes Agent 或 OpenClaw） | `node "$HOME/.agent-board/agent-board.mjs" --chat` |
+| Agent 讀取看板 | `node "$HOME/.agent-board/agent-board.mjs" --json`（[欄位說明](docs/BOARD-JSON.md)） |
 | 檢查某個 agent 的設定 | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
-
-**在聊天軟體裡，** `--chat` 把看板印成純文字，縮到一則訊息放得下，沒有網頁也沒有連結。它會把你的家目錄顯示成 `~`，並遮掉它認得的憑證形式，例如 `token=...`；其他形式的機密它辨識不出來，所以別把機密寫進看板。
 
 <details>
 <summary><b>終端機看板的按鍵</b></summary>
@@ -146,7 +148,7 @@ CLI、桌面 App、IDE 的實際 hook 事件分開驗收；安裝了檔案、傳
 | | Agent | 在哪裡跑 | 看板上有什麼 | 從看板回覆 |
 |:-:|---|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | 它自己的面板：每件工作、每個回合 | 在面板裡 |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI、App | 六個 hooks，加上它回報的步驟 | 複製；可傳送給[已連線的對話](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI、App | 七個 hooks，加上它回報的步驟 | 複製；可傳送給[已連線的對話](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI、App、IDE | 四個 hooks，加上它回報的步驟 | 複製；可傳送給[已連線的 CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | 對話事件，加上它的進度工具回報的步驟 | 複製 |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE、CLI | Hooks | 複製 |
@@ -178,7 +180,7 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 | Codex | Daemon | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented（已實作） | 早期執行（不計入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
-| Codex | Existing-owner proxy (active turn only) | 2 | 未知 | Implemented（已實作） | 未測試 | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
+| Codex | Existing-owner proxy (active turn only) | 2 | 未知 | Verified（已驗證） | [docs/validation/2026-11-04-codex-cli-proxy-live.md](docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |
 | Cursor | cursor-agent CLI | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
 | Cursor | IDE (Composer) | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
@@ -255,7 +257,7 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 ## 怎麼運作
 
-<img alt="Claude Code 對話、透過 hook 的其他 agent、和你，都寫進同一個 Markdown 檔 progress.md；面板、progress.html、封存與狀態列都讀它。合成資料。" src="docs/images/flow-zh-TW.svg" width="100%">
+<img alt="Claude Code 對話、透過 hook 的其他 agent、和你，都寫進同一個 Markdown 檔 progress.md；面板、看板網頁、封存與狀態列都讀它。合成資料。" src="docs/images/flow-zh-TW.svg" width="100%">
 
 每個 agent 的 hooks 把它的對話正在做什麼，寫進本機同一個 `progress.md` 裡它自己的區塊（全新安裝用 `~/.agent-board/progress.md`）。任務步驟只來自 agent 自己的回報，不讀任何私人對話。看板讀這個檔不需要呼叫模型；選用的 Claude 外掛可以用 Claude 的模型總結每個回合，細節見[使用指南](docs/GUIDE.zh-TW.md#會把資料傳出去嗎要花多少錢)。這個檔你也可以自己看、自己改：[檔案格式](docs/FORMAT.md)（英文）。支援 English、繁體中文、简体中文。
 
@@ -279,8 +281,8 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 
 | 你看到 | 試試 |
 |---|---|
-| 某個 agent 沒出現在看板上 | 開一個它的新對話；原本就開著的不會接上。Codex 還要先在 `/hooks` 信任它的 hooks。 |
-| 裝完之後什麼都沒變 | 不加 `--apply` 再跑一次 `npx @wenyuchiou/agent-board setup --json`（用 git clone 的話是 `node scripts/setup-agent.mjs --json`），看它列出的衝突和 `adapter-pending`；你改過的檔案不會被覆蓋，會列在那裡。 |
+| 某個 agent 沒出現在看板上 | 開一個它的新對話；原本就開著的不會接上。Codex 請以完整執行檔路徑執行 `npx @wenyuchiou/agent-board --codex-trust --codex-bin "<path-to-codex>" --json` 預覽；doctor 能連上 Codex 時，純文字輸出會列出指令。先檢查預覽，確認同意後才加上 `--apply`。Codex CLI 也可使用 `/hooks`。 |
+| 裝完之後什麼都沒變 | 不加 `--apply` 再跑一次 `npx @wenyuchiou/agent-board setup`（用 git clone 的話是 `node scripts/setup-agent.mjs`），查看列出的衝突和接下來的步驟；你改過的檔案不會被覆蓋，會列在那裡。 |
 | 還在跑舊版 | 跑著的對話會一直用它載入時的版本：開一個新的。更新方式見[使用指南](docs/GUIDE.zh-TW.md#更新與移除)。 |
 | 同一個 agent 出現兩次 | 可能兩種方式都接上了：Claude 外掛的 `/progress connect` 和安裝程式（setup）。`/progress connect status` 會列出外掛接了哪些；用 `/progress connect remove` 或 `--codex-remove --agent <name>` 拿掉其中一個。 |
 | 有個問題一直不消失 | 在它自己的對話裡回答，再按**已回覆，先隱藏**（`h`）。3 天後它會移到**較早的未答問題**，7 天後移到**更早、尚未回答的問題**。 |
@@ -290,7 +292,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 <details>
 <summary><b>顏色與符號</b></summary>
 
-面板跟著 Claude Code 的主題走（`/config`，再選 **Theme**）；網頁和 `progress.html` 跟著你電腦的淺色或深色模式，直到你在頁面右上角選了亮色或暗色。每個符號形狀都不一樣，不看顏色也分得出來；網頁上還沒做的步驟畫成小圓點，不畫圓圈，免得看起來像能按的按鈕：
+面板跟著 Claude Code 的主題走（`/config`，再選 **Theme**）；網頁跟著你電腦的淺色或深色模式，直到你選了亮色或暗色。看板網頁的開關在**關閉看板**旁邊：位於展開的側欄底部；窄螢幕或側欄收起時，則在工作清單下方。每個符號形狀都不一樣，不看顏色也分得出來；網頁上還沒做的步驟畫成小圓點，不畫圓圈，免得看起來像能按的按鈕：
 
 | 符號 | 意思 | | 符號 | 意思 |
 |:-:|---|---|:-:|---|

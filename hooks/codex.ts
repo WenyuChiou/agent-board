@@ -4,9 +4,11 @@ import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
 import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
 import { scanBlocks } from './blocks'
+import { cutLine } from './step-words'
 import type { BlockSpan } from './blocks'
 import { sha256 } from './sha256'
 import type { Origin } from './runs'
+import type { JournalEntry } from './journal'
 
 // `origin`, `parent` and `isWeak` say who started the session (#399): a run an agent started for
 // itself keeps only a session record; weak hints retain the legacy block mark and parent.
@@ -14,6 +16,7 @@ export type CodexReport = Origin & {
   session: string
   folder?: string
   folderDigest?: string
+  folderCanonicalDigest?: string
   turn: string | null
   state: 'working' | 'waiting' | 'done' | 'ended'
   title: string
@@ -27,6 +30,43 @@ export type CodexReport = Origin & {
 }
 
 export const codexEvents = ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop', 'Interrupt', 'SessionEnd'] as const
+
+// The plan a tool call carries, as a report input (#922). Codex's update_plan sends
+// `plan: [{step, status}]` and Gemini's write_todos `todos: [{description, status}]`; nothing else of
+// the call is read. Grok Build's todo_write may carry only the changed items, so its list is read from
+// the result, which holds the whole list after the merge (camelCase payload). Null when it is another
+// tool, no session id, or no usable step.
+const PLAN_MARKS: Record<string, string> = { completed: 'x', in_progress: '~', pending: ' ', cancelled: '-', blocked: '!' }
+const asRecord = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
+export const planReport = (raw: Record<string, unknown>): { session: string; input: { state: 'working'; steps: string[]; planTitle: string } } | null => {
+  const isGrok = raw.toolName === 'todo_write'
+  const isCodex = raw.tool_name === 'update_plan'
+  // A truncated result is half a list, and a DuplicateId or InvalidArgument result has none.
+  const list = isGrok ? (raw.toolResultTruncated === true ? undefined : asRecord(asRecord(raw.toolResult).TodosUpdated).todos)
+    : isCodex ? asRecord(raw.tool_input).plan : raw.tool_name === 'write_todos' ? asRecord(raw.tool_input).todos : undefined
+  const session = isGrok ? raw.sessionId : raw.session_id
+  if (typeof session !== 'string' || !Array.isArray(list)) return null
+  const items: { mark: string; text: string }[] = []
+  for (const item of list) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue
+    const one = item as Record<string, unknown>
+    const words = one[isGrok ? 'content' : isCodex ? 'step' : 'description']
+    if (typeof words !== 'string') continue
+    let text = words.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()
+    // The report check refuses a step line over 500 characters, its `- [m] ` marker included: a longer
+    // step keeps its first 494, which the writer then cuts to 120 and journals.
+    if (text.length > 494) text = text.slice(0, text.charCodeAt(493) >= 0xd800 && text.charCodeAt(493) < 0xdc00 ? 493 : 494)
+    if (text === '') continue
+    const status = typeof one.status === 'string' && Object.hasOwn(PLAN_MARKS, one.status) ? one.status : 'pending'
+    items.push({ mark: PLAN_MARKS[status]!, text })
+    if (items.length === 40) break
+  }
+  if (items.length === 0) return null
+  return {
+    session,
+    input: { state: 'working', steps: items.map(one => `- [${one.mark}] ${one.text}`), planTitle: (items.find(one => one.mark === '~') ?? items[0]!).text },
+  }
+}
 
 const line = (value: unknown): string => {
   if (typeof value !== 'string') throw new Error('INVALID_TEXT')
@@ -50,8 +90,12 @@ export const folderProject = (cwd: unknown): string => {
   return name.length > 500 ? '' : name
 }
 
-// This is the one place a new local session title comes from (#246).
-export const sessionTitle = (folder: string, fallback: string): string => line(folder || fallback)
+// This is the one place a new local session title comes from (#246). A session the
+// hook cannot file by folder still needs a title a person can tell from another
+// session's before either reports (#814): the fallback plus a human-readable
+// distinction the caller supplies (a start time), when the caller supplies one.
+export const sessionTitle = (folder: string, fallback: string, distinct = ''): string =>
+  line(folder || (distinct === '' ? fallback : `${fallback} · ${distinct}`))
 
 // The step a hook writes for a session that has reported none of its own (`codexLifecycle` here,
 // `localAgentLifecycle` in codex-local.ts). The view tells it from an agent's step by these words:
@@ -114,6 +158,23 @@ export const codexReport = (previous: CodexReport | null, session: string, input
     steps, updated: now,
     events: previous?.events ?? [], retiredTurns: previous?.retiredTurns ?? [],
     ...(previous?.activity === undefined ? {} : { activity: previous.activity }),
+  }
+}
+
+// Keep the full words available until the caller has saved them in the journal.
+export const limitReport = <T extends CodexReport>(report: T): { report: T; entries: Omit<JournalEntry, 'at'>[]; cut: number } => {
+  const short = (text: string): string => cutLine(text).text
+  const title = short(report.title)
+  const steps = report.steps.map(step => `${step.slice(0, 6)}${short(step.slice(6))}`)
+  // Only a field that was shortened is journaled: the title once, and each cut step with
+  // its task. Journaling every step of a cut title would flood the journal on each resend.
+  const entries: Omit<JournalEntry, 'at'>[] = [
+    ...(title !== report.title ? [{ project: report.project, task: report.title, step: report.title }] : []),
+    ...report.steps.flatMap((step, index) => steps[index] !== step ? [{ project: report.project, task: report.title, step: step.slice(6) }] : []),
+  ]
+  return {
+    report: { ...report, title, steps }, entries,
+    cut: Number(title !== report.title) + steps.filter((step, index) => step !== report.steps[index]).length,
   }
 }
 

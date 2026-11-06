@@ -9,10 +9,17 @@ node scripts/setup-agent.mjs
 node scripts/setup-agent.mjs --apply
 ```
 
-Auto detection checks host-specific configuration paths, not conversations or credentials.
-It reports candidates, not active sessions or account access. A `.gemini` directory alone
-does not identify Gemini CLI: Antigravity uses that parent too. If the current host has
-not created its configuration yet, select its known target with `--agent <name>`.
+Auto detection checks five signs: host-specific configuration paths, an earlier setup's
+install record in the data folder (`--data-dir`, else `~/.agent-board`), Grok Build's own
+`~/.grok/bin` program, commands on the PATH, and installed apps. On Windows a command counts
+as `.exe`, `.cmd`, `.bat`, `.com` or `.ps1`. With `--home`, it checks only the first three,
+since commands and apps belong to the account running setup. It does not read
+conversations or credentials. A found command or app is a candidate, not an active
+session or account access. Run setup without `--apply` first: its preview lists each file;
+a bare `--apply` writes to the same agents and prints only how many files changed.
+A `.gemini` directory alone does not identify Gemini CLI: Antigravity uses that parent
+too. Finding nothing exits 0 without writing anything and names the next command to
+run. You can also select a known target with `--agent <name>`.
 `--agent all` previews all supported targets; it does not install the AI applications.
 
 Setup prints a short summary in the board's language (`--lang en`, `zh-TW` or `zh-CN`):
@@ -25,15 +32,16 @@ says each agent is already set up and writes nothing.
 
 Without `--lang`, setup uses `LANG`, then the system language, else English, and writes that language into the files it installs.
 
-Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`),
+Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`), or
+`claude` is on the PATH and `--home` was not given,
 the next steps include both `claude plugin` commands to connect it, even alongside other
 agents. If only Claude Code is found, setup prints its plugin guidance and exits 0.
 
 Add `--json` for the existing machine-readable output, with the same `targets`, `plans`
 and `applied` fields. An apply run that skips an agent for a conflict but sets up another
 still reports `applied: true`, so scripts should check `plans[].conflicts`. Claude-only
-detection keeps empty `targets` and `plans` and
-`applied` false. Other setup errors give one sentence with a next step; `--json` prints
+detection, and finding no agent, keep empty `targets` and `plans` and
+`applied` false, with exit 0. Other setup errors give one sentence with a next step; `--json` prints
 them as one JSON line on stderr, `{"error":{"code":"...","message":"..."}}`, with
 codes `INVALID_TARGETS`, `MISSING_ARGUMENT`, `INVALID_CONNECT_RECORD`, `SETUP_FAILED`
 (with the failing `agent` and its `cause`) or `UNKNOWN` (with the system error's `cause` when there is one, or a `reason` in words when there is none). Conflicts stay in `plans` on stdout with no JSON stderr
@@ -51,6 +59,12 @@ Independent setup needs neither Claude Code nor another model. It creates one sh
 Use `--progress-file /absolute/path/progress.md` to select another existing local board.
 Each target has an ownership manifest; shared files remain while another target needs
 them. Only an agent's own proven native id may report its task steps.
+Folder-based reports keep the existing path digest and, when the directory can be
+resolved, an additional canonical-path digest. This lets a hook's directory alias and
+the report subprocess's directory identify the same owner without storing either path.
+Old records still match their exact path digest; an old alias-only record needs a fresh
+hook before a different spelling can match. Missing or unreadable directories do not
+gain alias matching, and ambiguous, stale, ended or background-run owners remain refused.
 With an active Claude Code plugin connector, setup keeps its selected board and leaves
 agents it already manages to that connector, without adding another hook or board script.
 
@@ -89,7 +103,7 @@ keep manual tasks; an unreadable observation file stays untouched and does not p
 eligible agent blocks from being archived.
 Archive entries are saved before removing work from the board, and repeated runs do
 not duplicate them. A failed persistence operation exits nonzero; retain the files and
-retry after fixing its reported problem. `--chat` remains read-only even with `--tidy`.
+retry after fixing its reported problem. `--json` remains read-only even with `--tidy`.
 `--tidy` takes precedence over `--serve`, `--watch` and `--html`, so those combinations
 run only the sweep. A running `--serve` page also sweeps every hour; if the seen file cannot
 be read, that hourly pass writes nothing. A person's Clean up on the pane or page archives
@@ -165,8 +179,13 @@ files: the board script lands at `~/.agent-board/agent-board.mjs`, and no hook p
 npm's cache, so clearing that cache breaks nothing. `npm install -g @wenyuchiou/agent-board` gives a
 lasting `agent-board` command in place of `npx`.
 
-Every other call (`--serve`, `--watch`, `--chat`, `--html`, or none to print the board)
-runs the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
+A plain `agent-board` call opens the interactive local page on a desktop, from an agent or
+in a non-interactive call. An interactive terminal over SSH or without a display opens the
+terminal board; CI prints text. `--serve` and `--html` start or reuse the local service and
+open the page; `--watch` selects the terminal board, `--print` prints text, and `--json`
+returns the board for agents.
+
+These board calls run the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
 the board the Claude Code plugin's connector last connected, else
 `~/.agent-board/agent-board.mjs`, else the Claude Code plugin's beside
 `~/.claude/progress.md`. It never runs a second copy from the package, which would restart
@@ -182,11 +201,11 @@ dependencies and no install scripts. Pre-releases are on the `next` tag
 
 | Host | Installed adapter | Separate acceptance / remaining limit |
 | --- | --- | --- |
-| Codex | Six lifecycle hooks and explicit own-thread reporter | Scoped native trust and actual CLI/desktop events; [details](CODEX.md) |
+| Codex | Seven hooks (six lifecycle, one plan mirror) and explicit own-thread reporter | Scoped native trust and actual CLI/desktop events; [details](CODEX.md) |
 | Cursor | Conversation/generation lifecycle hooks | Native CLI/IDE execution and turn binding |
 | OpenCode | Session event plugin and context-bound progress tool | Plugin reload; status events lack a turn id |
 | Antigravity | Four named native hooks plus shared skill | Native CLI/App/IDE events; no session-end event or turn fence |
-| Grok Build | SessionStart, UserPromptSubmit, Stop, SessionEnd | Prompt/idle/end status; native execution unverified |
+| Grok Build | SessionStart, UserPromptSubmit, Stop, SessionEnd, and a plan mirror on `todo_write` | Prompt/idle/end status; native execution unverified |
 | Muse Code | Stop, SessionEnd | Coarse status and native execution unverified |
 | Hermes Agent | Board and skill | Independent native hook adapter pending |
 | OpenClaw | Independent metadata plugin and native skill | Native host execution unverified; requires sanitized lifecycle subscription API |
@@ -209,7 +228,9 @@ OpenClaw receives `session_start`, `session_end` and sanitized lifecycle start/e
 events. Only the native session/run ids and state are reported; stale runs cannot replace
 the current one. It explicitly denies conversation access. Hosts lacking the subscription
 API fail visibly rather than falling back to transcript access. Reload the plugin in each
-host; installation cannot enumerate every previously open session.
+host; installation cannot enumerate every previously open session. When OpenClaw's
+`progress_card` (or the older `update_plan`) call succeeds with a plan, the plugin copies each
+step's text and status into the board's steps; OpenCode's plugin does the same with its todo list, and Grok Build's `PostToolUse` hook (matcher `^todo_write$`, timeout 5 s, prints nothing) copies the full list from the tool's result.
 
 DeepSeek uses `agent/created`, `agent/status` (running/idle) and `agent/disposed`, retaining
 its own agent identity. Its owned entry is appended to a plain root YAML patch sequence;

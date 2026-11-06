@@ -13,6 +13,12 @@ import { STRINGS } from './strings'
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 const BOARD_PROMPT_HELPER = boardPromptHelper(BOARD_WORDS)
 
+// Prompt changes must not make an exact file we installed look like a personal edit.
+// Only generated templates get the old helper; ownership still compares every byte.
+const boardPromptVariants = (templates: readonly string[]): string[] => templates.flatMap(text =>
+  [text, text.replace(BOARD_PROMPT_HELPER, boardPromptHelper(boardRequestWords([])))],
+)
+
 // The inbox cap (#373) for the plugins that save turn files themselves, as the reporter scripts
 // keep it: once a turn file is saved, the oldest go past INBOX_MAX_FILES files or INBOX_MAX_BYTES
 // bytes, and each removal is counted in INBOX_DROPPED_FILE. A failure here never loses the turn
@@ -495,7 +501,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: ctx.openclawHome,
       file: [ctx.openclawHome, OPENCLAW_FILE].join(ctx.sep),
       generated: true,
-      edit: generatedFile(openclawPlugin(ctx), [openclawPlugin(ctx, false), legacyOpenClawPlugin(ctx), legacyOpenClawPlugin(ctx, false), legacyOpenClawPlugin(ctx, true, false)]),
+      edit: generatedFile(openclawPlugin(ctx), boardPromptVariants([openclawPlugin(ctx), openclawPlugin(ctx, false), legacyOpenClawPlugin(ctx), legacyOpenClawPlugin(ctx, false), legacyOpenClawPlugin(ctx, true, false)])),
     },
     {
       agent: 'openclaw',
@@ -519,7 +525,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       setupFile: [opencodeHome, 'plugins', 'agent-board-local.js'].join(ctx.sep),
       old: [opencodeHome, 'plugin', 'progress-pane.js'].join(ctx.sep),
       generated: true,
-      edit: generatedFile(opencodePlugin(ctx), [opencodePlugin(ctx, false), legacyOpenCodePlugin(ctx), legacyOpenCodePlugin(ctx, false), legacyOpenCodePlugin(ctx, true, false)]),
+      edit: generatedFile(opencodePlugin(ctx), boardPromptVariants([opencodePlugin(ctx), opencodePlugin(ctx, false), legacyOpenCodePlugin(ctx), legacyOpenCodePlugin(ctx, false), legacyOpenCodePlugin(ctx, true, false)])),
     },
     {
       // Antigravity groups its events under one named definition. Its commands are the

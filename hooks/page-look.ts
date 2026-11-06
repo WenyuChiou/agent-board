@@ -48,7 +48,7 @@ export const themeHead = String.raw`
   var timer;
   var saved = '';
   // The live page starts on a new port each time, so its storage starts empty there; a cookie
-  // is shared across ports and keeps the pick. progress.html, a file, keeps it in storage.
+  // is shared across ports and keeps the pick.
   try {
     var kept = /(?:^|;\s*)agent-board\.theme=(light|dark)(?:;|$)/.exec(document.cookie || '');
     if (kept) saved = kept[1];
@@ -226,7 +226,7 @@ button:hover,.btn:hover,summary:hover{background-color:var(--hover)}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 `
 
-// The row of agent icons, shared by the live page and progress.html (the script that fills it differs).
+// The row of agent icons, used by the live page.
 export const agentRowCss = `
 .agents{position:sticky;top:var(--head-h,56px);z-index:4;background:var(--ground);border-bottom:1px solid var(--line)}
 .agents-in{display:flex;gap:var(--s2);overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity;padding-top:var(--s2);padding-bottom:var(--s2)}
@@ -238,11 +238,14 @@ export const agentRowCss = `
 .chip{position:relative;flex:none;scroll-snap-align:start;display:inline-flex;align-items:center;gap:var(--s2);min-width:44px;height:44px;padding:0 7px;border:1px solid transparent;border-radius:var(--radius-m);background:transparent;cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 .chip .ag{width:28px;height:28px}
 /* A presence dot at the icon's bottom-right; a ring around the icon would read as selected. */
-.chip[data-presence="offline"] .ag,.chip[data-presence="notseen"] .ag{background-color:var(--muted)}
-.chip.working::after{content:'';position:absolute;left:25px;top:25px;width:14px;height:14px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--alive);pointer-events:none}
+.chip[data-presence]::after,.chip.working::after{content:'';position:absolute;left:25px;top:25px;width:14px;height:14px;border:2px solid var(--ground);border-radius:var(--radius-round);pointer-events:none}
+.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after{border-color:var(--alive);background:var(--ground)}
+.chip[data-presence="offline"]::after{border-radius:var(--radius-s);background:var(--muted)}
+.chip[data-presence="notseen"]::after{background:linear-gradient(var(--muted),var(--muted)) center/8px 2px no-repeat var(--ground)}
+.chip.working::after{border-color:var(--ground);border-radius:var(--radius-round);background:var(--alive)}
 .chip .c-name{max-width:0;overflow:hidden;white-space:nowrap;font-weight:600;line-height:1.5;transition:max-width var(--dur-layout) var(--ease-out)}
 .chip[aria-pressed="true"]{border-color:var(--ink);background:var(--current);padding-right:var(--s3)}
-.chip[aria-pressed="true"] .c-name{max-width:18em}
+.chip[aria-pressed="true"] .c-name{max-width:24em}
 .badge{position:absolute;top:-2px;right:-2px;min-width:22px;height:22px;padding:0 6px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-xs);font-weight:600;line-height:18px;text-align:center;font-variant-numeric:tabular-nums}
 .badge.bad{background:var(--alert)}
 .agent-note{display:grid;gap:var(--s1);padding-top:var(--s2);padding-bottom:var(--s2);color:var(--muted)}

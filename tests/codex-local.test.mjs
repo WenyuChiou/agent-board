@@ -4,11 +4,13 @@ import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
-import { beforeEach, test } from 'node:test'
+import { beforeEach, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 import { formatWriter } from './e2e/lib/faults.mjs'
+import { neverShown } from './fixtures/never-shown.mjs'
+import { hookOrDeferred, turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { HOOK_INPUT_TIMEOUT, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
@@ -17,6 +19,11 @@ import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/nat
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
 import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { partTest } from '../scripts/ci-impact.mjs'
+
+// The Windows board job runs this file in two parts, and each part runs its share of the tests: the
+// file alone took about 8 minutes there against a ten-minute limit (#899).
+const test = partTest(nodeTest)
 
 test('native cleanup diagnostics keep watchdog failures bounded and private', () => {
   const error = Object.assign(new Error('PRIVATE_ERROR'), { code: 'ETIMEDOUT', path: '/PRIVATE_EXECUTABLE', spawnargs: ['PRIVATE_ARGUMENT'] })
@@ -59,30 +66,50 @@ test('native cleanup diagnostics allowlist unknown fields and missing markers', 
 
 const setup = resolve('scripts/setup-codex.mjs')
 const session = 'test-codex-session-123'
-const withoutCodexOnPath = pathValue => {
+const withoutCodexOnPath = (pathValue, home) => {
   if (!pathValue) return ''
-  return pathValue
+  let isNodeHidden = false
+  const cleanPath = pathValue
     .split(delimiter)
     .filter(dir => {
       if (!dir) return false
       try {
-        return !existsSync(join(dir, 'codex.exe')) && !existsSync(join(dir, 'codex')) && !existsSync(join(dir, 'codex.cmd'))
+        const hasCodex = ['codex.exe', 'codex', 'codex.cmd'].some(name => existsSync(join(dir, name)))
+        if (hasCodex && existsSync(join(dir, process.platform === 'win32' ? 'node.exe' : 'node'))) isNodeHidden = true
+        return !hasCodex
       } catch {
         return true
       }
     })
     .join(delimiter)
+  if (!isNodeHidden) return cleanPath
+  // Preserve only this running runtime, never the host commands beside it.
+  // A stable fixture-owned location also keeps repeated environment reads inert.
+  const runtimeDir = join(home, '.test-node-runtime')
+  const runtime = join(runtimeDir, process.platform === 'win32' ? 'node.exe' : 'node')
+  if (!existsSync(runtime)) {
+    mkdirSync(runtimeDir, { recursive: true })
+    if (process.platform === 'win32') {
+      try { linkSync(process.execPath, runtime) } catch { copyFileSync(process.execPath, runtime) }
+    } else symlinkSync(process.execPath, runtime)
+  }
+  return [runtimeDir, cleanPath].filter(Boolean).join(delimiter)
 }
 // A runner may set XDG/host overrides. No synthetic home may inherit those and
 // write into another test or the account's actual native configuration.
-const isolatedEnv = home => {
+const isolatedEnv = (home, pathValue) => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
-  const originalPath = process.env[pathKey] ?? ''
-  const cleanPath = withoutCodexOnPath(originalPath)
+  const originalPath = pathValue ?? process.env[pathKey] ?? ''
+  const cleanPath = withoutCodexOnPath(originalPath, home)
   const env = {
     ...process.env,
     HOME: home, USERPROFILE: home,
     LANG: 'en', AGENT_BOARD_SETUP_COMMAND: '',
+    // A board these tests start opens no window and stops once this test process is gone (#959).
+    AGENT_BOARD_TEST_PID: String(process.pid),
+    // A bare `board` here prints text, as on CI, where CI is set. Without it the fixture's
+    // CODEX_THREAD_ID picks the page, and that server holds the fixture folder open (#975).
+    CI: '1',
     LOCALAPPDATA: join(home, 'AppData', 'Local'), APPDATA: join(home, 'AppData', 'Roaming'),
     CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
     CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
@@ -107,18 +134,21 @@ const stopNativeTree = child => {
   }
 }
 
-const nativeProcess = (executable, args, env, input, after = setTimeout, stop = stopNativeTree, { isInputOpen = false, ...options } = {}) => new Promise((resolve, reject) => {
+// A hard link is instant and is the same file for any scanner; a 110 MB copy is the fallback (EXDEV, denied link).
+const placeNode = destination => { try { linkSync(process.execPath, destination) } catch { copyFileSync(process.execPath, destination) } }
+
+const nativeProcess = (executable, args, env, input, after = setTimeout, stop = stopNativeTree, { isInputOpen = false, inputFd, stdoutFd, stderrFd, ...options } = {}) => new Promise((resolve, reject) => {
   const child = spawn(executable, args, {
-    env, ...options, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32',
+    env, ...options, stdio: [inputFd ?? 'pipe', stdoutFd ?? 'pipe', stderrFd ?? 'pipe'], windowsHide: true, detached: process.platform !== 'win32',
   })
   let stdout = '', stderr = '', error, termination
   let isClosed = false, isTimedOut = false
   let grace, notifyClosed
   const whenClosed = new Promise(done => { notifyClosed = done })
-  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
-  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  child.stdout?.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+  child.stderr?.setEncoding('utf8').on('data', chunk => { stderr += chunk })
   child.on('error', failure => { error ??= failure })
-  child.stdin.on('error', failure => { error ??= failure })
+  child.stdin?.on('error', failure => { error ??= failure })
   const timer = after(() => {
     if (isClosed || isTimedOut || child.pid === undefined) return
     isTimedOut = true
@@ -129,9 +159,9 @@ const nativeProcess = (executable, args, env, input, after = setTimeout, stop = 
       // An OS refusal cannot prove the descendants exited. Keep their fixture and
       // report the owned PID rather than hanging or deleting files they may use.
       const failure = Object.assign(new Error(`Native hook tree ${child.pid} did not close; fixture retained; ${JSON.stringify(termination)}`), { code: 'NATIVE_HOOK_UNREAPED', keepFixture: true, pid: child.pid, termination, whenClosed })
-      child.stdin.destroy()
-      child.stdout.destroy()
-      child.stderr.destroy()
+      child.stdin?.destroy()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
       child.unref()
       reject(failure)
     }, 2000)
@@ -140,12 +170,12 @@ const nativeProcess = (executable, args, env, input, after = setTimeout, stop = 
     isClosed = true
     clearTimeout(timer)
     clearTimeout(grace)
-    child.stdin.destroy()
+    child.stdin?.destroy()
     notifyClosed({ status, signal })
     resolve({ status, signal, error, termination, stdout, stderr })
   })
-  if (isInputOpen) child.stdin.write(input)
-  else child.stdin.end(input)
+  if (isInputOpen) child.stdin?.write(input)
+  else child.stdin?.end(input)
 })
 
 const nativeHook = (command, env, input, after = setTimeout, stop = stopNativeTree) => {
@@ -376,6 +406,329 @@ const fixture = async fn => {
   finally { if (isSafeToRemove) rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 
+const tree774 = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+  const file = join(dir, entry.name)
+  return entry.isDirectory() ? [file, ...tree774(file)] : [file]
+}).sort()
+const trustKey774 = (f, event, index = 0) => `${resolve(f.hooks)}:${event.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()}:${index}:0`
+const trustTable774 = key => `\n[hooks.state.'${key}']\ntrusted_hash = "sha256:synthetic"\n`
+const remove774 = (f, agent, apply = true, extra = []) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-remove', '--agent', agent, '--json', ...extra, ...(apply ? ['--apply'] : [])], { cwd: f.home, env: { ...f.env, XDG_RUNTIME_DIR: join(f.home, 'runtime') }, encoding: 'utf8', windowsHide: true })
+
+for (const order of [['codex', 'cursor'], ['cursor', 'codex']]) test(`#774 removal in ${order.join(' then ')} order keeps exactly history and user trust`, () => fixture(f => {
+  const toml = join(f.home, '.codex', 'config.toml')
+  const original = '# User settings\nmodel = "synthetic"\n'
+  f.save(toml, original)
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const groups = JSON.parse(readFileSync(join(f.root, 'install-codex.json'), 'utf8')).groups
+  const foreign = '\n[hooks.state."foreign"]\ntrusted_hash = "foreign"\n\n[hooks.state.unrelated]\nenabled = true\n'
+  f.save(toml, original + '\n[hooks.state]\n' + Object.keys(groups).map(event => trustTable774(trustKey774(f, event))).join('') + foreign)
+  const kept = ['progress.md', 'progress-archive-2026-11.md', 'progress-journal-2026-11.md', 'sessions/synthetic.json', 'hook-errors.log', 'progress-answered.json', 'progress-questions.json', 'progress-questions-source-synthetic.json', 'progress-seen.json', 'progress-run-cursor.txt', 'progress-page-state.json', 'progress-page-state-done-synthetic.json', 'progress-inbox/synthetic.json']
+  for (const name of kept) f.save(join(f.root, name), name === 'progress.md' ? '' : 'synthetic history')
+  const runtime = join(f.home, '.cache', 'agent-board')
+  mkdirSync(join(runtime, 'synthetic-messages'), { recursive: true })
+  for (const agent of order) {
+    const result = remove774(f, agent)
+    assert.equal(result.status, 0, result.stderr)
+  }
+  assert.equal(readFileSync(toml, 'utf8'), original + '\n[hooks.state]\n' + foreign)
+  const files = [toml, ...kept.map(name => join(f.root, name))]
+  const expected = new Set(files)
+  for (const file of files) for (let folder = dirname(file); folder !== f.home; folder = dirname(folder)) expected.add(folder)
+  // PATH isolation may supply the fixture's runtime before setup starts.
+  if (existsSync(join(f.home, '.test-node-runtime'))) for (const file of [join(f.home, '.test-node-runtime'), ...tree774(join(f.home, '.test-node-runtime'))]) expected.add(file)
+  expected.add(join(f.home, '.cache'))
+  assert.deepEqual(tree774(f.home), [...expected].sort())
+}))
+
+test('#774 existing hooks, existing skill parents and user files survive', () => fixture(f => {
+  f.save(f.hooks, '{"hooks": {}}')
+  mkdirSync(dirname(dirname(f.skill)), { recursive: true })
+  assert.equal(f.install('--apply').status, 0)
+  f.save(join(dirname(f.skill), 'user.txt'), 'mine')
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')), { hooks: {} })
+  assert.equal(readFileSync(join(dirname(f.skill), 'user.txt'), 'utf8'), 'mine')
+  assert.ok(existsSync(dirname(dirname(f.skill))))
+}))
+
+test('#774 legacy manifest keeps hooks and skill parents but removes the owned skill folder', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const file = join(f.root, 'install-codex.json')
+  const manifest = JSON.parse(readFileSync(file, 'utf8'))
+  delete manifest.createdConfig
+  delete manifest.createdDirs
+  f.save(file, JSON.stringify(manifest))
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')), { hooks: {} })
+  assert.equal(existsSync(dirname(f.skill)), false)
+  assert.equal(existsSync(dirname(dirname(f.skill))), true)
+}))
+
+test('#774 setup is byte idempotent and removal preview writes nothing', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const files = tree774(f.home).filter(file => statSync(file).isFile())
+  const before = files.map(file => [file, readFileSync(file)])
+  const result = f.install('--apply')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout).changes, [])
+  assert.equal(remove774(f, 'codex', false).status, 0)
+  assert.deepEqual(tree774(f.home).filter(file => statSync(file).isFile()), files)
+  for (const [file, text] of before) assert.deepEqual(readFileSync(file), text)
+}))
+
+test('#774 foreign hooks keep their trust and board trust uses the actual group index', () => fixture(f => {
+  const foreign = { hooks: [{ type: 'command', command: 'synthetic-user-hook' }] }
+  f.save(f.hooks, JSON.stringify({ hooks: { SessionStart: [foreign] } }))
+  assert.equal(f.install('--apply').status, 0)
+  const toml = join(f.home, '.codex', 'config.toml')
+  const retained = '# user\n' + trustTable774(trustKey774(f, 'SessionStart'))
+  f.save(toml, retained + trustTable774(trustKey774(f, 'SessionStart', 1)))
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.equal(readFileSync(toml, 'utf8'), retained)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')), { hooks: { SessionStart: [foreign] } })
+}))
+
+test('#774 trust removal preserves TOML bytes and unrecognized table content', async () => {
+  const { removeCodexTrustEntries: clean } = await importTs('../scripts/codex-local.ts')
+  const key = 'C:\\synthetic\\hooks.json:session_start:0:0'
+  const original = '# user\r\nmodel = "synthetic"\r\n'
+  const basic = JSON.stringify(key)
+  const appended = `\r\n[hooks.state]\r\n\r\n[hooks.state.${basic}]\r\ntrusted_hash = "synthetic"\r\nenabled = true\r\n`
+  assert.deepEqual(clean(original + appended, [key]), { text: original, removed: 1 })
+  assert.equal(clean(original + trustTable774(key), [key]).text, original)
+  const comment = trustTable774(key) + '# user comment\n'
+  assert.deepEqual(clean(comment, [key]), { text: comment, removed: 0 })
+  const extra = trustTable774(key) + 'user_key = true\n'
+  assert.equal(clean(extra, [key]).text, extra)
+  const foreign = trustTable774('foreign')
+  assert.equal(clean(foreign, [key]).text, foreign)
+  const noMatch = '[hooks.state]\n\n' + foreign
+  assert.deepEqual(clean(noMatch, [key]), { text: noMatch, removed: 0 })
+  const other = '[hooks.state]\nenabled = true\n'
+  assert.equal(clean(other + trustTable774(key), [key]).text, other)
+  const quoteKey = 'synthetic"hooks.json:session_start:0:0'
+  assert.equal(clean(`\n[hooks.state.${JSON.stringify(quoteKey)}]\ntrusted_hash = "synthetic"\n`, [quoteKey]).text, '')
+  const changedCase = trustTable774(key.toUpperCase())
+  assert.equal(clean(changedCase, [key]).removed, process.platform === 'win32' ? 1 : 0)
+})
+
+for (const agent of ['codex', 'cursor', 'gemini', 'grok', 'muse', 'antigravity']) test(`#774 ${agent} removes its newly created empty config and folders`, () => fixture(f => {
+  const installed = f.install('--agent', agent, '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const manifest = JSON.parse(readFileSync(join(f.root, `install-${agent}.json`), 'utf8'))
+  assert.equal(manifest.createdConfig, true)
+  const removed = remove774(f, agent)
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(manifest.config), false)
+  for (const folder of manifest.createdDirs) {
+    if (folder === f.root) continue
+    assert.equal(existsSync(folder), false, folder)
+  }
+}))
+
+test('#774 removing the creator transfers shared directory ownership without a repair', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const runtime = join(f.home, '.cache', 'agent-board')
+  mkdirSync(runtime, { recursive: true })
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.equal(existsSync(runtime), true)
+  const file = join(f.root, 'install-cursor.json')
+  const before = readFileSync(file, 'utf8')
+  assert.ok(JSON.parse(before).createdDirs.includes(dirname(f.skill)))
+  const preview = f.install('--agent', 'cursor')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.deepEqual(JSON.parse(preview.stdout).changes, [])
+  assert.equal(readFileSync(file, 'utf8'), before)
+  assert.equal(remove774(f, 'cursor').status, 0)
+  assert.equal(existsSync(dirname(dirname(f.skill))), false)
+  assert.equal(existsSync(runtime), false)
+}))
+
+test('#774 a legacy install rerun leaves the manifest bytes unchanged', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const file = join(f.root, 'install-codex.json')
+  const manifest = JSON.parse(readFileSync(file, 'utf8'))
+  delete manifest.createdConfig
+  delete manifest.createdDirs
+  const before = `${JSON.stringify(manifest, null, 2)}\n`
+  f.save(file, before)
+  const result = f.install('--apply')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout).changes, [])
+  assert.equal(readFileSync(file, 'utf8'), before)
+}))
+
+test('#774 removal clears the board root when progress is stored elsewhere', () => fixture(f => {
+  const progress = join(f.home, 'history', 'progress.md')
+  const result = f.install('--progress-file', progress, '--apply')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.equal(existsSync(f.root), false)
+  assert.equal(readFileSync(progress, 'utf8'), '')
+  assert.equal(existsSync(dirname(f.skill)), false)
+}))
+
+test('#774 runtime cleanup removes only empty folders and keeps message history', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const runtime = join(f.home, 'runtime', 'agent-board')
+  const empty = join(runtime, 'empty-messages')
+  const occupied = join(runtime, 'history-messages')
+  mkdirSync(empty, { recursive: true })
+  f.save(join(occupied, 'messages.json'), 'synthetic message history')
+  const result = remove774(f, 'codex')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(empty), false)
+  assert.equal(readFileSync(join(occupied, 'messages.json'), 'utf8'), 'synthetic message history')
+  assert.equal(existsSync(runtime), true)
+}))
+
+for (const [agent, parts] of [['openclaw', ['.openclaw', 'openclaw.json']], ['deepseek', ['.dsh', 'cordis.patch.yml']]]) test(`#774 ${agent} removes the hollow config setup created`, () => fixture(f => {
+  const installed = f.install('--agent', agent, '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const native = join(f.home, ...parts)
+  assert.equal(existsSync(native), true)
+  assert.equal(JSON.parse(readFileSync(join(f.root, `install-${agent}.json`), 'utf8')).createdConfig, true)
+  const removed = remove774(f, agent)
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(dirname(native)), false)
+}))
+
+for (const [agent, parts, original] of [['openclaw', ['.openclaw', 'openclaw.json'], '{"user":true}\n'], ['deepseek', ['.dsh', 'cordis.patch.yml'], '# mine\n']]) test(`#774 ${agent} keeps a config it did not create`, () => fixture(f => {
+  const native = join(f.home, ...parts)
+  f.save(native, original)
+  const installed = f.install('--agent', agent, '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const removed = remove774(f, agent)
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(native), true)
+  assert.match(readFileSync(native, 'utf8'), agent === 'openclaw' ? /"user": true/ : /# mine/)
+}))
+
+test('#774 removal cleans the config.toml beside a --codex-dir hooks file', () => fixture(f => {
+  const dir = join(f.home, 'custom codex')
+  const toml = join(dir, 'config.toml')
+  const defaultToml = join(f.home, '.codex', 'config.toml')
+  mkdirSync(dir, { recursive: true })
+  const installed = spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', dir, '--apply'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true })
+  assert.equal(installed.status, 0, installed.stderr)
+  f.save(toml, `# mine\n${trustTable774(`${resolve(join(dir, 'hooks.json'))}:session_start:0:0`)}`)
+  f.save(defaultToml, '# default account\n')
+  const removed = remove774(f, 'codex', true, ['--codex-dir', dir])
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(toml, 'utf8'), '# mine\n')
+  assert.equal(readFileSync(defaultToml, 'utf8'), '# default account\n')
+}))
+
+test('#774 a linked config.toml stays a link and keeps its permissions', { skip: process.platform === 'win32' }, () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const target = join(f.home, 'dotfiles', 'config.toml')
+  const toml = join(f.home, '.codex', 'config.toml')
+  f.save(target, `# mine\n${trustTable774(trustKey774(f, 'SessionStart'))}`)
+  chmodSync(target, 0o644)
+  symlinkSync(target, toml)
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.equal(lstatSync(toml).isSymbolicLink(), true)
+  assert.equal(readFileSync(target, 'utf8'), '# mine\n')
+  assert.equal(statSync(target).mode & 0o777, 0o644)
+}))
+
+test('#774 a --data-dir folder the person made stays when empty', () => fixture(f => {
+  const own = join(f.home, 'my data')
+  mkdirSync(own)
+  const progress = join(f.home, 'history', 'progress.md')
+  const installed = f.install('--data-dir', own, '--progress-file', progress, '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const removed = spawnSync(process.execPath, [join(own, 'agent-board.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--data-dir', own, '--codex-remove', '--agent', 'codex', '--apply'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true })
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(join(own, 'agent-board.mjs')), false)
+  assert.equal(existsSync(own), true)
+}))
+
+test('#774 an empty message folder directly in the runtime folder goes, the runtime folder and a full one stay', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const runtime = join(f.home, 'runtime')
+  const empty = join(runtime, 'agent-board-abc-messages')
+  const full = join(runtime, 'agent-board-def-messages')
+  const other = join(runtime, 'other-messages')
+  mkdirSync(empty, { recursive: true })
+  mkdirSync(other)
+  f.save(join(full, 'messages.json'), 'synthetic')
+  assert.equal(remove774(f, 'codex').status, 0)
+  assert.equal(existsSync(empty), false)
+  assert.equal(existsSync(join(full, 'messages.json')), true)
+  assert.equal(existsSync(other), true)
+}))
+
+test('#774 a plugins key that is not an object in another agent config blocks neither setup nor removal', () => fixture(f => {
+  const settings = join(f.home, '.gemini', 'settings.json')
+  f.save(settings, '{"plugins":[]}\n')
+  const installed = f.install('--agent', 'gemini', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const removed = remove774(f, 'gemini')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')).plugins, [])
+}))
+
+test('#774 a --data-dir folder named agent-board the person made stays when empty', () => fixture(f => {
+  const own = join(f.home, 'agent-board')
+  mkdirSync(own)
+  const progress = join(f.home, 'history', 'progress.md')
+  const installed = f.install('--data-dir', own, '--progress-file', progress, '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const removed = spawnSync(process.execPath, [join(own, 'agent-board.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--data-dir', own, '--codex-remove', '--agent', 'codex', '--apply'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true })
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(join(own, 'agent-board.mjs')), false)
+  assert.equal(existsSync(own), true)
+}))
+
+test('#774 an unreadable trust file stays without a trust plan change', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const toml = join(f.home, '.codex', 'config.toml')
+  mkdirSync(toml)
+  const result = remove774(f, 'codex')
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(!JSON.parse(result.stdout).changes.some(change => change.file === toml))
+  assert.equal(statSync(toml).isDirectory(), true)
+}))
+
+test('PATH isolation preserves Node beside Codex without exposing Codex', () => fixture(async f => {
+  const shared = join(f.home, 'shared tools')
+  mkdirSync(shared)
+  const runtime = join(shared, process.platform === 'win32' ? 'node.exe' : 'node')
+  try { linkSync(process.execPath, runtime) } catch { copyFileSync(process.execPath, runtime) }
+  for (const name of ['codex', 'codex.cmd', 'codex.exe']) {
+    const host = join(shared, name)
+    f.save(host, 'synthetic host must stay undiscoverable')
+    const env = { ...f.env }
+    for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+    env.PATH = withoutCodexOnPath(shared, f.home)
+    assert.equal(withoutCodexOnPath(shared, f.home), env.PATH, 'repeated isolation keeps the same fixture runtime')
+    // `node --version` never reads its input and can exit before an empty write reaches it (EPIPE).
+    const node = await nativeProcess('node', ['--version'], env, '', callback => setTimeout(callback, 5000), stopNativeTree, { cwd: f.home, inputFd: 'ignore' })
+    assert.equal(node.error, undefined, 'the preserved runtime launches without a process error')
+    assert.equal(node.status, 0, `isolated Node failed: ${node.error?.code ?? 'none'}`)
+    assert.equal(node.stdout.trim(), process.version)
+    const codex = spawnSync('codex', ['--version'], { cwd: f.home, env, encoding: 'utf8', timeout: 5000 })
+    assert.equal(codex.error?.code, 'ENOENT', 'the real host must remain undiscoverable')
+    unlinkSync(host)
+  }
+}))
+
+test('PATH isolation keeps explicit no-Node paths without adding a runtime', () => fixture(f => {
+  const tools = join(f.home, 'tools without node')
+  mkdirSync(tools)
+  f.save(join(tools, 'codex'), 'synthetic host')
+  const path = withoutCodexOnPath(tools, f.home)
+  assert.equal(path, '')
+  assert.equal(withoutCodexOnPath('', f.home), '')
+  const env = { ...f.env }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = path
+  const node = spawnSync('node', ['-e', 'process.exit(0)'], { cwd: f.home, env, encoding: 'utf8', timeout: 5000 })
+  assert.equal(node.error?.code, 'ENOENT')
+}))
+
 const mailboxFixture = async fn => fixture(async f => {
   const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
   const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
@@ -402,6 +755,22 @@ const mailboxFixture = async fn => fixture(async f => {
   await fn({ ...f, script, progress, env, directory, call, seed, state, mailboxId })
 })
 
+// Inject only the claim boundary so the real mailbox write and cleanup still run.
+const importMailboxWithClaim = async (name, wrap) => {
+  const url = new URL('../scripts/board-messaging.ts', import.meta.url)
+  url.searchParams.set('claim', name)
+  const claim = new URL('../scripts/message-store-claim.ts', import.meta.url)
+  const injected = 'data:text/javascript,' + encodeURIComponent(`import { claimMessageStore as original } from ${JSON.stringify(claim.href)}
+export const claimMessageStore = directory => (${wrap})(original(directory))`)
+  const resolver = registerHooks({ resolve(specifier, context, next) {
+    return next(specifier === './message-store-claim' && context.parentURL === url.href ? injected : specifier, context)
+  } })
+  try { return await importTs(url.href) } finally { resolver.deregister() }
+}
+
+// On Windows a scanner can hold a new claim file past the hook's 120 ms store limit.
+const codexTurn = (f, mailbox, beforeNext) => turnOrDeferred(mailbox, ['codex', session, 'CLI', Date.now()], () => f.state().messages[0].status, beforeNext)
+
 test('hookWorker preserves host timeouts above 3 seconds instead of clamping to 3000 ms', () => {
   const source = hookWorker('synthetic-home', 'synthetic-script', '')
   assert.ok(source.includes('started + hostTimeout - 1000'))
@@ -415,8 +784,14 @@ test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, G
   for (const [agent, events] of Object.entries({ codex: ['SessionStart', 'UserPromptSubmit'], antigravity: ['SessionStart', 'PreInvocation'], gemini: ['SessionStart', 'BeforeAgent'], muse: ['UserPromptSubmit'], cursor: ['sessionStart'] })) {
     for (const event of events) {
       f.seed(agent)
-      const result = f.call(agent, event)
+      let result = f.call(agent, event)
       assert.equal(result.status, 0, result.stderr)
+      if (!result.stdout.includes('Synthetic mailbox payload')) {
+        assert.equal(result.stderr, 'board: mailbox deferred\n', agent + ' ' + event)
+        assert.equal(f.state().messages[0].status, 'queued')
+        result = f.call(agent, event)
+        assert.equal(result.status, 0, result.stderr)
+      }
       const output = JSON.parse(result.stdout)
       assert.ok(JSON.stringify(output).includes('Synthetic mailbox payload'), agent + ' ' + event + ': ' + result.stdout)
       if (agent === 'codex' || agent === 'gemini' || agent === 'muse') assert.equal(output.hookSpecificOutput.hookEventName, event)
@@ -430,6 +805,109 @@ test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, G
       if (agent === 'gemini') assert.equal(output.decision, 'allow')
     }
   }
+}))
+
+test('a held mailbox store claim reports deferral and the next turn delivers after release', async () => mailboxFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  f.seed()
+  const before = readFileSync(join(f.directory, 'messages.json'), 'utf8')
+  const claim = claimMessageStore(f.directory)
+  const nonce = 'a'.repeat(32)
+  const pending = join(f.directory, `.message-pending-${process.pid}-${nonce}.json`)
+  f.save(pending, JSON.stringify({ version: 1, pid: process.pid, nonce }) + '\n')
+  try {
+    assert.ok(existsSync(pending))
+    const deferred = f.call('codex', 'UserPromptSubmit')
+    assert.equal(deferred.status, 0, deferred.stderr)
+    assert.equal(deferred.stdout, '')
+    assert.equal(deferred.stderr, 'board: mailbox deferred\n')
+    assert.equal(f.state().messages[0].status, 'queued')
+    assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
+  } finally {
+    claim.release()
+    unlinkSync(pending)
+  }
+  const delivered = f.call('codex', 'UserPromptSubmit')
+  assert.equal(delivered.status, 0, delivered.stderr)
+  assert.ok(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext.includes('Synthetic mailbox payload'))
+  assert.equal(f.state().messages[0].status, 'accepted')
+}))
+
+test('a mailbox turn returns its saved message when claim release throws', async () => mailboxFixture(async f => {
+  const { hookMailbox } = await importMailboxWithClaim('release-failure', `claim => ({
+    check: directory => claim.check(directory),
+    release: () => { claim.release(); throw new Error('SYNTHETIC_RELEASE_FAILURE') },
+  })`)
+  f.seed()
+  const mailbox = hookMailbox(f.directory, Infinity)
+  const message = await codexTurn(f, mailbox)
+  assert.equal(message?.id, 'hook-mailbox-message')
+  assert.equal(message.text, 'Synthetic mailbox payload')
+  assert.equal(f.state().messages[0].status, 'uncertain')
+  assert.equal(mailbox.hasDeferred, false)
+  await mailbox.accept('codex', session, message.id, message.nonce, Date.now())
+  assert.equal(f.state().messages[0].status, 'accepted')
+  assert.equal(await mailbox.turn('codex', session, 'CLI', Date.now()), null)
+  assert.equal(mailbox.hasDeferred, false, 'an empty mailbox is not deferred')
+  assert.equal(readdirSync(f.directory).some(name => name.startsWith('.message-claim-') || name.endsWith('.tmp')), false)
+
+  const { hookMailbox: beforeWrite } = await importMailboxWithClaim('check-failure', `claim => ({
+    check: () => { throw new Error('SYNTHETIC_CHECK_FAILURE') },
+    release: () => { claim.release(); throw new Error('SYNTHETIC_RELEASE_FAILURE') },
+  })`)
+  f.seed()
+  const failed = beforeWrite(f.directory, Infinity)
+  assert.equal(await failed.turn('codex', session, 'CLI', Date.now()), null)
+  assert.equal(failed.hasDeferred, true)
+  assert.equal(f.state().messages[0].status, 'queued')
+}))
+
+test('a mailbox claim that cannot be removed is reused, so the accept of a message handed out still saves', async () => mailboxFixture(async f => {
+  globalThis.syntheticClaims = 0
+  globalThis.syntheticStuckReleases = 1
+  const { hookMailbox } = await importMailboxWithClaim('stuck-release', `claim => (globalThis.syntheticClaims++, {
+    check: directory => claim.check(directory),
+    release: () => {
+      if (globalThis.syntheticStuckReleases-- > 0) throw Object.assign(new Error('SYNTHETIC_STUCK_RELEASE'), { code: 'EPERM' })
+      claim.release()
+    },
+  })`)
+  f.seed()
+  const mailbox = hookMailbox(f.directory, Infinity)
+  // A deferred first turn used up the stuck release; the turn that delivers gets its own.
+  const message = await codexTurn(f, mailbox, () => { globalThis.syntheticStuckReleases = 1 })
+  assert.equal(message?.id, 'hook-mailbox-message')
+  assert.equal(f.state().messages[0].status, 'uncertain')
+  assert.equal(readdirSync(f.directory).filter(name => name.startsWith('.message-claim-')).length, 1)
+  await mailbox.accept('codex', session, message.id, message.nonce, Date.now())
+  assert.equal(f.state().messages[0].status, 'accepted')
+  assert.equal(globalThis.syntheticClaims, 1)
+  assert.equal(readdirSync(f.directory).some(name => name.startsWith('.message-claim-')), false)
+}))
+
+test('a mailbox accept saves after a slow successful claim while turns still defer', async () => mailboxFixture(async f => {
+  const { hookMailbox } = await importMailboxWithClaim('slow-claim', `claim => {
+    const started = Date.now()
+    Date.now = () => started + 121
+    return claim
+  }`)
+  const { takeMailboxMessage } = await importTs('../hooks/hook-messages.ts')
+  f.seed()
+  const now = Date.now()
+  const taken = takeMailboxMessage(f.state(), 'codex', session, 'CLI', now, 43_200_000, 'abcdef')
+  assert.ok(taken.message)
+  f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, ...taken.state }))
+  const clock = Date.now
+  Date.now = () => now
+  try {
+    const mailbox = hookMailbox(f.directory, Infinity)
+    await mailbox.accept('codex', session, taken.message.id, taken.message.nonce, now)
+    assert.equal(f.state().messages[0].status, 'accepted')
+    f.seed()
+    assert.equal(await mailbox.turn('codex', session, 'CLI', Date.now()), null)
+    assert.equal(mailbox.hasDeferred, true)
+    assert.equal(f.state().messages[0].status, 'queued')
+  } finally { Date.now = clock }
 }))
 
 test('a turn-start hook with an empty mailbox prints exactly what it printed before', async () => mailboxFixture(async f => {
@@ -503,15 +981,27 @@ test('a live hub takes hook mailbox calls over loopback and the hook does not wr
   try {
     writeFileSync(join(f.directory, 'server.lock'), String(process.pid))
     writeFileSync(join(f.directory, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token` }))
-    const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--codex-event'], { cwd: f.home, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
-    let out = '', err = ''
-    child.stdout.on('data', chunk => { out += chunk })
-    child.stderr.on('data', chunk => { err += chunk })
-    const exited = new Promise(done => child.once('close', done))
-    child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }))
-    assert.equal(await exited, 0, err)
-    assert.ok(out.includes('Synthetic mailbox payload'))
-    assert.deepEqual(calls.map(one => one[0]), ['/api/messages/mailbox-turn', '/api/messages/mailbox-accept'])
+    const hook = async () => {
+      const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--codex-event'], { cwd: f.home, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+      let out = '', err = ''
+      child.stdout.on('data', chunk => { out += chunk })
+      child.stderr.on('data', chunk => { err += chunk })
+      const exited = new Promise(done => child.once('close', done))
+      child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }))
+      assert.equal(await exited, 0, err)
+      return { out, err }
+    }
+    let { out, err } = await hook()
+    // A hub slower than the hook's 150 ms defers the turn by design, and the next turn delivers (#902).
+    const isDeferred = !out.includes('Synthetic mailbox payload')
+    if (isDeferred) {
+      assert.equal(err, 'board: mailbox deferred\n')
+      ;({ out, err } = await hook())
+    }
+    assert.ok(out.includes('Synthetic mailbox payload'), err)
+    // The turn the hook gave up on may or may not have reached the hub before the one that delivered.
+    const expected = ['/api/messages/mailbox-turn', '/api/messages/mailbox-accept']
+    assert.deepEqual(calls.map(one => one[0]), isDeferred && calls.length === 3 ? [expected[0], ...expected] : expected)
     assert.ok(calls.every(one => one[2] === 'synthetic-token'))
     assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), before)
   } finally { await new Promise(done => server.close(done)) }
@@ -533,10 +1023,10 @@ test('the hook finds the same default messages folder as --serve', async () => m
     const server = await serve.start(world)
     const directory = defaultMessagesDirectory(world.path, world.home, world.env, process.platform)
     assert.equal(existsSync(join(directory, 'server.lock')), true)
-    const hook = spawnSync(process.execPath, [world.script, '--codex-event', '--home', world.home, '--progress-file', world.path], { cwd: world.root, env: world.env, encoding: 'utf8', windowsHide: true, timeout: 15000, input: JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }) })
-    assert.equal(hook.status, 0, hook.stderr)
-    const snapshot = (await server.get('/api/board')).json()
-    assert.equal(snapshot.messaging.mailboxes[0].session, session)
+    const hook = () => spawnSync(process.execPath, [world.script, '--codex-event', '--home', world.home, '--progress-file', world.path], { cwd: world.root, env: world.env, encoding: 'utf8', windowsHide: true, timeout: 15000, input: JSON.stringify({ session_id: session, hook_event_name: 'SessionStart' }) })
+    const mailboxes = async () => (await server.get('/api/board')).json().messaging.mailboxes
+    const result = await hookOrDeferred(hook, async () => (await mailboxes()).length > 0)
+    assert.equal((await mailboxes())[0]?.session, session, result.stderr)
   } finally { await world.close() }
 }))
 
@@ -692,6 +1182,179 @@ test('setup preserves malformed BOM-prefixed Codex hooks when it refuses install
 
 const setupAgent = (f, ...args) => observeSetupResult(() => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 }))
 
+const detectedSetupFixture = fn => fixture(f => {
+  const bin = mkdtempSync(join(tmpdir(), 'setup commands-'))
+  const env = {
+    ...f.env, HOME: f.home, USERPROFILE: f.home, CLAUDE_PROGRESS_FILE: '', LANG: 'en',
+    CODEX_HOME: join(f.home, '.codex'), GROK_HOME: join(f.home, '.grok'), HERMES_HOME: join(f.home, '.hermes'),
+    OPENCODE_CONFIG_DIR: join(f.home, '.config', 'opencode'), XDG_CONFIG_HOME: join(f.home, '.config'),
+    OPENCLAW_STATE_DIR: join(f.home, '.openclaw'), DSH_HOME: join(f.home, '.dsh'),
+    CLAUDE_CONFIG_DIR: join(f.home, '.claude'), LOCALAPPDATA: join(f.home, 'local-app-data'),
+  }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = bin
+  const fake = name => {
+    const file = join(bin, `${name}${process.platform === 'win32' ? '.cmd' : ''}`)
+    writeFileSync(file, process.platform === 'win32' ? '@exit /b 99\r\n' : '#!/bin/sh\nexit 99\n')
+    chmodSync(file, 0o755)
+  }
+  const run = (...args) => observeSetupResult(() => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), ...args], {
+    cwd: bin, env, encoding: 'utf8', windowsHide: true, timeout: 30000,
+  }))
+  try { return fn({ ...f, env, fake, run }) }
+  finally { rmSync(bin, { recursive: true, force: true }) }
+})
+
+test('a setup preview in a new home lists the agents installed on the PATH', () => detectedSetupFixture(f => {
+  f.fake('gemini')
+  f.fake('agy')
+  const preview = f.run()
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.equal(preview.stderr, '')
+  assert.match(preview.stdout, /^Gemini CLI:/m)
+  assert.match(preview.stdout, /^Antigravity:/m)
+  assert.doesNotMatch(preview.stdout, /^(Codex|Cursor|OpenCode|Grok Build|Muse Code|Hermes Agent|OpenClaw|DeepSeek):/m)
+  const json = f.run('--json')
+  assert.equal(json.status, 0, json.stderr)
+  assert.deepEqual(JSON.parse(json.stdout).targets, ['gemini', 'antigravity'])
+  f.fake('claude')
+  const claude = f.run()
+  assert.equal(claude.status, 0, claude.stderr)
+  assert.match(claude.stdout, /^Claude Code:/m)
+  assert.match(claude.stdout, /claude plugin install agent-board@agent-board/)
+  assert.deepEqual(readdirSync(f.home), [])
+}))
+
+test('a setup preview in a new home lists an agent whose app is installed', { skip: !['win32', 'darwin'].includes(process.platform) }, () => detectedSetupFixture(f => {
+  const app = process.platform === 'win32' ? join(f.env.LOCALAPPDATA, 'Programs', 'cursor') : join(f.home, 'Applications', 'Cursor.app')
+  mkdirSync(app, { recursive: true })
+  const preview = f.run()
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.match(preview.stdout, /^Cursor:/m)
+  assert.equal(existsSync(f.root), false)
+  assert.equal(existsSync(join(f.home, '.cursor')), false)
+}))
+
+test('a setup preview that finds no agent exits 0 and names the next command', () => detectedSetupFixture(f => {
+  for (const [lang, hint] of [['en', 'Setup found no agent'], ['zh-TW', 'setup 在這台電腦沒有找到 agent'], ['zh-CN', 'setup 在这台电脑没有找到 agent']]) {
+    const result = f.run('--lang', lang)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    // The run starts outside the checkout, so a relative command could not work from here.
+    assert.ok(result.stdout.includes(resolve('scripts/setup-agent.mjs')), result.stdout)
+    assert.ok(result.stdout.includes(`--lang ${lang} --agent codex`), result.stdout)
+    assert.match(result.stdout, /PATH/)
+    assert.ok(result.stdout.includes(hint), result.stdout)
+    assert.ok(result.stdout.includes(f.home))
+    assert.equal(result.stdout.trim().split('\n').length, 1)
+    assert.deepEqual(readdirSync(f.home), [])
+  }
+  const json = f.run('--json')
+  assert.equal(json.status, 0, json.stderr)
+  assert.equal(json.stderr, '')
+  assert.deepEqual(JSON.parse(json.stdout), { targets: [], plans: [], applied: false })
+  assert.deepEqual(readdirSync(f.home), [])
+}))
+
+test('setup with --home does not read the PATH or apps of the account running it', () => detectedSetupFixture(f => {
+  f.fake('gemini')
+  f.fake('claude')
+  if (process.platform === 'win32') mkdirSync(join(f.env.LOCALAPPDATA, 'Programs', 'cursor'), { recursive: true })
+  if (process.platform === 'darwin') mkdirSync(join(f.home, 'Applications', 'Cursor.app'), { recursive: true })
+  const home = join(f.home, 'other-home')
+  mkdirSync(home)
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const result = f.run('--home', home, '--lang', lang)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    assert.doesNotMatch(result.stdout, /Gemini CLI:|Cursor:|Claude Code:|PATH/)
+    assert.ok(result.stdout.includes(home))
+  }
+  assert.deepEqual(readdirSync(home), [])
+}))
+
+test('an unknown agent name still fails and says how to name one', () => detectedSetupFixture(f => {
+  const result = f.run('--agent', 'bogus')
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr.trim().split('\n').length, 1)
+  assert.match(result.stderr, /--agent named an agent setup does not know\. Name one: --agent codex/)
+  assert.deepEqual(readdirSync(f.home), [])
+}))
+
+test('a repeat setup preview lists Antigravity after an all-agent apply', () => fixture(f => {
+  const applied = setupAgent(f, '--lang', 'en', '--agent', 'all', '--apply', '--json')
+  assert.equal(applied.status, 0, applied.stderr)
+  const installed = JSON.parse(applied.stdout).targets
+  const result = setupAgent(f, '--lang', 'en')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stderr, '')
+  assert.match(result.stdout, /^Antigravity: already set up/m)
+  assert.equal(result.stdout.match(/^.+: already set up/gm)?.length, installed.length, result.stdout)
+}))
+
+test('the setup messages for no agent and an unknown agent match all three string tables', () => {
+  const installer = readFileSync(resolve('scripts/setup-agent.mjs'), 'utf8')
+  const start = installer.indexOf('const noAgentWords = ') + 'const noAgentWords = '.length
+  const end = installer.indexOf('\nconst noAgentText = ', start)
+  assert.ok(start >= 'const noAgentWords = '.length && end > start)
+  const tables = ['hooks/strings-en.ts', 'hooks/i18n.ts', 'hooks/strings-zh-cn.ts'].map(file => {
+    const match = readFileSync(resolve(file), 'utf8').match(/  setupNoAgent: (\{[\s\S]*?\n  \}),/)
+    assert.ok(match, file)
+    return JSON.parse(match[1])
+  })
+  assert.deepEqual(JSON.parse(installer.slice(start, end)), tables)
+})
+
+test('setup finds Grok Build in its own bin folder when it is not on the PATH', () => detectedSetupFixture(f => {
+  f.env.GROK_HOME = join(f.home, 'grok elsewhere')
+  const own = join(f.home, '.grok', 'bin')
+  mkdirSync(own, { recursive: true })
+  writeFileSync(join(own, process.platform === 'win32' ? 'grok.exe' : 'grok'), 'synthetic Grok', { mode: 0o755 })
+  for (const args of [[], ['--home', f.home]]) {
+    const result = f.run('--json', ...args)
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual(JSON.parse(result.stdout).targets, ['grok'], JSON.stringify(args))
+  }
+}))
+
+test('setup on Windows counts every command spelling and not a bare name', { skip: process.platform !== 'win32' }, () => detectedSetupFixture(f => {
+  const targetsWith = name => {
+    const file = join(f.env.PATH, name)
+    writeFileSync(file, 'synthetic command')
+    try {
+      const result = f.run('--json')
+      assert.equal(result.status, 0, result.stderr)
+      return JSON.parse(result.stdout).targets
+    } finally { rmSync(file) }
+  }
+  for (const extension of ['.exe', '.cmd', '.bat', '.com', '.ps1']) assert.deepEqual(targetsWith(`gemini${extension}`), ['gemini'], extension)
+  assert.deepEqual(targetsWith('gemini'), [])
+}))
+
+test('a removed Antigravity is not listed again once its emptied hooks file is gone', () => fixture(f => {
+  const applied = setupAgent(f, '--lang', 'en', '--agent', 'antigravity', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  const removed = spawnSync(process.execPath, [join(f.root, 'agent-board.mjs'), '--home', f.home, '--codex-remove', '--agent', 'antigravity', '--apply'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(existsSync(join(f.home, '.gemini', 'config', 'hooks.json')), false)
+  const result = setupAgent(f, '--lang', 'en')
+  assert.equal(result.status, 0, result.stderr)
+  assert.doesNotMatch(result.stdout, /^Antigravity:/m)
+}))
+
+test('a command on the PATH is listed once setup applies it, and again as already set up', () => detectedSetupFixture(f => {
+  f.fake('gemini')
+  const applied = f.run('--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.match(applied.stdout, /^Gemini CLI: updated/m)
+  assert.equal(existsSync(join(f.root, 'install-gemini.json')), true)
+  const second = f.run()
+  assert.equal(second.status, 0, second.stderr)
+  assert.equal(second.stderr, '')
+  assert.match(second.stdout, /^Gemini CLI: already set up/m)
+}))
+
 const systemLanguageEnv = () => ({ LANG: '', NODE_OPTIONS: `--require ${JSON.stringify(resolve('tests/fixtures/system-lang-zh-tw.cjs'))}` })
 
 test('setup on a zh-TW system with no LANG previews in zh-TW and bakes zh-TW', () => fixture(f => {
@@ -739,6 +1402,16 @@ const homeSnapshot = home => Object.fromEntries(readdirSync(home, { recursive: t
   const path = join(entry.parentPath, entry.name)
   return [path.slice(home.length), entry.isDirectory() ? 'directory' : { bytes: readFileSync(path).toString('base64'), mtimeMs: statSync(path).mtimeMs }]
 }))
+
+const sharedRuntimePath = f => {
+  const shared = join(f.home, 'shared tools')
+  mkdirSync(shared)
+  const runtime = join(shared, process.platform === 'win32' ? 'node.exe' : 'node')
+  try { linkSync(process.execPath, runtime) } catch { copyFileSync(process.execPath, runtime) }
+  f.save(join(shared, 'codex.cmd'), 'synthetic host must stay undiscoverable')
+  const inherited = Object.entries(f.env).find(([key]) => key.toLowerCase() === 'path')?.[1] ?? ''
+  return [shared, inherited].filter(Boolean).join(delimiter)
+}
 
 test('setup preview lists every planned file under its agent and apply changes only those files', () => fixture(f => {
   f.save(f.hooks, '{"other":{"keep":true},"hooks":{}}\n')
@@ -807,8 +1480,11 @@ test('setup preview groups files per agent and shortens only paths inside the se
   const home = join(f.home, 'home')
   const data = join(f.home, 'home-other')
   mkdirSync(home)
+  // Preparing this fixture's runtime is not a change made by preview. Do it
+  // before the no-write snapshot, even when Node and Codex share a PATH entry.
+  const env = isolatedEnv(home, sharedRuntimePath(f))
   const run = (...args) => spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', home, '--data-dir', data, '--agent', 'codex,hermes', ...args], {
-    cwd: f.home, env: isolatedEnv(home), encoding: 'utf8', windowsHide: true, timeout: 30000,
+    cwd: f.home, env, encoding: 'utf8', windowsHide: true, timeout: 30000,
   })
   const before = homeSnapshot(f.home)
   const json = run('--json')
@@ -969,9 +1645,41 @@ test('a second setup says everything is already set up and writes nothing', () =
   assert.deepEqual(snapshot(f.home), before)
 }))
 
+test('after setup --lang en --apply on a zh-TW system, a plain setup says already set up and writes nothing', () => fixture(f => {
+  const zhTw = { ...f, env: { ...f.env, LANG: 'zh_TW.UTF-8' } }
+  const first = setupAgent(zhTw, '--lang', 'en', '--agent', 'codex', '--apply')
+  assert.equal(first.status, 0, first.stderr)
+  const snapshot = directory => Object.fromEntries(readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => {
+      const file = join(entry.parentPath, entry.name)
+      return [file.slice(directory.length), { bytes: readFileSync(file), mtimeMs: statSync(file).mtimeMs }]
+    }))
+  const before = snapshot(f.home)
+  // Plain setup preview without --lang
+  const preview = setupAgent(zhTw, '--agent', 'codex')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.equal(preview.stderr, '')
+  assert.match(preview.stdout, /已設定完成/)
+  assert.doesNotMatch(preview.stdout, /將更新/)
+  assert.deepEqual(snapshot(f.home), before)
+  // Plain setup apply without --lang
+  const second = setupAgent(zhTw, '--agent', 'codex', '--apply')
+  assert.equal(second.status, 0, second.stderr)
+  assert.equal(second.stderr, '')
+  assert.match(second.stdout, /已設定完成/)
+  assert.doesNotMatch(second.stdout, /已更新/)
+  assert.deepEqual(snapshot(f.home), before)
+  // Explicit --lang zh-TW preview names the updated files
+  const langChange = setupAgent(zhTw, '--agent', 'codex', '--lang', 'zh-TW')
+  assert.equal(langChange.status, 0, langChange.stderr)
+  assert.match(langChange.stdout, /將更新 3 個設定檔案/)
+}))
+
 test('setup on a computer with only Claude Code prints guidance and exits 0 without a stack trace', () => fixture(f => {
   mkdirSync(join(f.home, '.claude'))
-  const english = { ...f, env: { ...f.env, LANG: 'en' } }
+  const english = { ...f, env: { ...f.env, ...isolatedEnv(f.home, sharedRuntimePath(f)), LANG: 'en' } }
+  const before = homeSnapshot(f.home)
   const guidance = setupAgent(english)
   assert.equal(guidance.status, 0, guidance.stderr)
   assert.equal(guidance.stderr, '')
@@ -989,7 +1697,7 @@ test('setup on a computer with only Claude Code prints guidance and exits 0 with
   assert.equal(traditional.status, 0, traditional.stderr)
   assert.equal(traditional.stderr, '')
   assert.ok(traditional.stdout.includes('claude plugin install agent-board@agent-board'))
-  assert.deepEqual(readdirSync(f.home), ['.claude'])
+  assert.deepEqual(homeSnapshot(f.home), before)
 }))
 
 test('setup on a computer with Claude Code and Codex previews Codex only', async () => {
@@ -1004,16 +1712,15 @@ test('setup on a computer with Claude Code and Codex previews Codex only', async
   })
   await fixture(f => {
     const result = setupAgent(f, '--lang', 'en')
-    assert.equal(result.status, 1)
-    assert.equal(result.stdout, '')
-    assert.equal(result.stderr.trim().split('\n').length, 1)
-    assert.match(result.stderr, /found no agent/)
+    assert.equal(result.status, 0)
+    assert.equal(result.stderr, '')
+    assert.equal(result.stdout.trim().split('\n').length, 1)
+    assert.match(result.stdout, /found no agent/)
   })
 })
 
 const setupErrorCases = async check => {
   for (const [args, code, cause] of [
-    [[], 'INVALID_TARGETS'],
     [['--agent', 'bogus'], 'INVALID_TARGETS'],
     [['--agent'], 'MISSING_ARGUMENT'],
     [['--agent', 'codex', '--data-dir'], 'SETUP_FAILED', 'MISSING_ARGUMENT'],
@@ -1239,6 +1946,52 @@ test('removal preview and apply print plain changes and one next step unless JSO
   }
 }))
 
+test('a removal preview names the shared files it keeps while another agent uses them', () => fixture(f => {
+  const runner = join(f.home, 'kept-shared-cli.mjs')
+  f.save(runner, bundleFromDir(new URL('..', import.meta.url)))
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const shared = [f.script, worker, f.skill]
+  const remove = (agent, lang, ...args) => spawnSync(process.execPath, [runner, '--home', f.home, '--codex-remove', '--agent', agent, '--lang', lang, ...args], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  for (const [lang, removeWord, next] of [
+    ['en', 'Would remove: ', 'Next:'],
+    ['zh-TW', '將移除：', '下一步：'],
+    ['zh-CN', '将移除：', '下一步：'],
+  ]) {
+    assert.equal(f.install('--agent', 'codex', '--lang', lang, '--apply').status, 0)
+    assert.equal(f.install('--agent', 'antigravity', '--lang', lang, '--apply').status, 0)
+    const snapshot = homeSnapshot(f.home)
+    const preview = remove('antigravity', lang)
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.equal(preview.stdout.split(next).length - 1, 1, preview.stdout)
+    for (const file of shared) {
+      const keptLine = lang === 'en' ? `Keeps ${file}; still in use by Codex` : `保留 ${file}；Codex 仍在使用`
+      assert.ok(preview.stdout.includes(keptLine), preview.stdout)
+      assert.ok(!preview.stdout.includes(`${removeWord}${file}`), preview.stdout)
+    }
+    assert.deepEqual(homeSnapshot(f.home), snapshot)
+    const jsonPreview = remove('antigravity', lang, '--json')
+    assert.equal(jsonPreview.status, 0, jsonPreview.stderr)
+    const plan = JSON.parse(jsonPreview.stdout)
+    assert.equal(plan.mode, 'remove')
+    assert.equal(plan.applied, undefined)
+    assert.deepEqual(plan.keptShared, shared.map(file => ({ file, usedBy: ['codex'] })), jsonPreview.stdout)
+    assert.ok(!plan.changes.some(change => shared.includes(change.file)), jsonPreview.stdout)
+    // Applying the removal leaves the shared files for Codex.
+    const applied = remove('antigravity', lang, '--apply')
+    assert.equal(applied.status, 0, applied.stderr)
+    assert.equal(existsSync(join(f.root, 'install-antigravity.json')), false)
+    for (const file of shared) assert.equal(existsSync(file), true, file)
+    // Codex is now the last agent: its preview names the shared files as removed.
+    const lastPreview = remove('codex', lang)
+    assert.equal(lastPreview.status, 0, lastPreview.stderr)
+    for (const file of shared) assert.ok(lastPreview.stdout.includes(`${removeWord}${file}`), lastPreview.stdout)
+    const lastPlan = JSON.parse(remove('codex', lang, '--json').stdout)
+    assert.equal(lastPlan.keptShared, undefined)
+    assert.ok(shared.every(file => lastPlan.changes.some(change => change.file === file && change.action === 'remove')), JSON.stringify(lastPlan.changes))
+    assert.equal(remove('codex', lang, '--apply').status, 0)
+  }
+}))
+
 test('doctor and removal print a next step that works when a path holds characters a shell would expand or eat', () => fixture(f => {
   const runner = join(f.home, 'next-step-cli.mjs')
   f.save(runner, bundleFromDir(new URL('..', import.meta.url)))
@@ -1446,7 +2199,8 @@ createInterface({ input: process.stdin }).on('line', line => {
     f.save(shim, source)
     const result = f.command(['--codex-trust', '--codex-bin', shim, '--json'])
     assert.equal(result.status, 0, result.stderr)
-    assert.equal(JSON.parse(result.stdout).hooks.length, 6)
+    assert.equal(JSON.parse(result.stdout).hooks.length, 7)
+    assert.ok(JSON.parse(result.stdout).hooks.some(hook => hook.event === 'postToolUse'))
     assert.equal(JSON.parse(result.stdout).applied, false)
     f.save(shim, 'not an npm shim')
     for (const lang of ['en', 'zh-TW', 'zh-CN']) {
@@ -2328,7 +3082,7 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
     wasReaped = !existsSync(pidFile) || !isReporterAlive(Number(readFileSync(pidFile, 'utf8')))
     assert.equal(result.status, 0, hookFailure(result))
     assert.equal(wasReaped, true, 'the timed-out reporter must be reaped before the hook returns')
-    assert.ok(performance.now() - started < 3000)
+    assert.ok(performance.now() - started < 11000)
     const files = pendingFiles(f)
     assert.equal(files.length, 1)
     assert.match(files[0], /^\d{15}-[\da-f-]+\.raw\.json$/)
@@ -2395,12 +3149,12 @@ test('the hook deadline counts from the process start, not from when the worker 
 test('a late Codex worker queues an ISO event time and recovery preserves it', t => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   holdAutomaticRecovery(f)
-  const at = Date.now() - 3000
+  const at = Date.now() - 10000
   const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
   const worker = join(f.root, 'agent-board-hook.mjs')
   const payload = { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'late-iso-turn' }
   const result = spawnSync(process.execPath, [worker, '--hook-version', '1', '--hook-event', 'UserPromptSubmit', '--codex-event', '--agent', 'codex', '--progress-file', f.progress, '--hook-started', String(at)], {
-    env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 5000,
+    env: f.env, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 15000,
   })
   assert.equal(result.status, 0, hookFailure(result))
   const files = pendingFiles(f)
@@ -2489,6 +3243,79 @@ test('an older live lifecycle event cannot replace a newer state or its update t
   assert.equal(report('working', 'PreInvocation', newer + 1).status, 0)
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, 'working')
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).appliedAt, newer + 1)
+}))
+
+test('two Antigravity sessions in one folder show different titles before either reports (#814)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  // No folder reaches the board for Antigravity: its hook binds only the
+  // conversation id, so both sessions arrive with the same fixture folder.
+  const first = 'synthetic-first-antigravity-814'
+  const second = 'synthetic-second-antigravity-814'
+  const report = (conversationId, state, event) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId })
+  for (const conversationId of [first, second]) {
+    assert.equal(report(conversationId, 'waiting', 'SessionStart').status, 0)
+    assert.equal(report(conversationId, 'working', 'PreInvocation').status, 0)
+  }
+  const ownerOf = id => createHash('sha256').update(`antigravity:${id}`).digest('hex')
+  const firstRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(first)}.json`), 'utf8'))
+  const secondRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(second)}.json`), 'utf8'))
+  assert.notEqual(firstRecord.title, secondRecord.title)
+  // No hash in the title: a default view shows no session id, hash or file
+  // path (parity checklist; dot's Question on #849). The distinction is the
+  // session's start time, to the millisecond — second precision would let two
+  // sessions started in the same second share a title.
+  for (const [record, id] of [[firstRecord, first], [secondRecord, second]]) {
+    assert.ok(!record.title.includes(ownerOf(id).slice(0, 8)), record.title)
+    assert.match(record.title, / · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, record.title)
+  }
+  const text = readFileSync(f.progress, 'utf8')
+  assert.ok(text.includes(`### ${firstRecord.title}`), text)
+  assert.ok(text.includes(`### ${secondRecord.title}`), text)
+  // Both distinct titles reach the default terminal view in every language, and
+  // the rendered output passes the never-shown check.
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardText, boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { LANGS } = await importTs('../hooks/i18n.ts')
+  for (const lang of LANGS) {
+    const s = STRINGS[lang]
+    const view = buildView(parseProgress(text), [], null, Date.now(), 0, {}, s)
+    for (const drawn of [boardText(view, [], s, { width: 80, isColor: false }), boardScreen(view, [], emptyBoardState, s, { width: 80, isColor: false })]) {
+      assert.ok(drawn.includes(firstRecord.title), `${lang}: first title drawn`)
+      assert.ok(drawn.includes(secondRecord.title), `${lang}: second title drawn`)
+      assert.deepEqual(neverShown(drawn), [], lang)
+    }
+  }
+  // An explicit report still supplies its own title: distinct only until the agent reports.
+  const reported = f.command(['--codex-report', '--agent', 'antigravity', '--session', first], { title: 'Reported summary', project: 'antigravity', state: 'working', steps: ['- [~] Reported step'] })
+  assert.equal(reported.status, 0, reported.stderr)
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(first)}.json`), 'utf8')).title, 'Reported summary')
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(second)}.json`), 'utf8')).title, secondRecord.title)
+}))
+
+test('an Antigravity session created before the distinct title still gets one on its next event (#814)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const conversationId = 'synthetic-legacy-antigravity-814'
+  const report = (state, event) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId })
+  assert.equal(report('waiting', 'SessionStart').status, 0)
+  const owner = createHash('sha256').update(`antigravity:${conversationId}`).digest('hex')
+  const recordFile = join(f.root, 'sessions', `${owner}.json`)
+  const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+  // Rewrite the record and its block heading as the pre-fix shape: the generic title.
+  const before = readFileSync(f.progress, 'utf8')
+  writeFileSync(recordFile, `${JSON.stringify({ ...record, title: 'Local antigravity task' }, null, 2)}\n`)
+  writeFileSync(f.progress, before.replace(`### ${record.title}`, '### Local antigravity task'))
+  assert.equal(report('working', 'PreInvocation').status, 0)
+  const after = JSON.parse(readFileSync(recordFile, 'utf8'))
+  // The re-title is a start time, not the old hash suffix: it differs from the
+  // first event's title, carries no hash, and then stays put on later events.
+  assert.notEqual(after.title, 'Local antigravity task')
+  assert.ok(!after.title.includes(owner.slice(0, 8)), after.title)
+  assert.match(after.title, / · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, after.title)
+  assert.ok(readFileSync(f.progress, 'utf8').includes(`### ${after.title}`))
+  assert.equal(report('working', 'PostInvocation').status, 0)
+  assert.equal(JSON.parse(readFileSync(recordFile, 'utf8')).title, after.title)
 }))
 
 test('a hook worker that starts after the host would stop it still reads its input and queues the event', () => fixture(f => {
@@ -3397,22 +4224,25 @@ test('--codex-trust prints one plain line by default and the JSON only with --js
   try {
     const { codexTrustOutput } = await import('../scripts/codex-local.ts')
     const { STRINGS } = await import('../hooks/strings.ts')
+    // The step names config.toml under ~, the way the setup preview names its files (#812).
+    const home = resolve('synthetic home')
+    const shown = join('~', '.codex', 'config.toml')
     const examples = [
-      [{ changes: 6, applied: false }, STRINGS.en, "Codex: would trust the board's 6 hooks. Run the same command again with --apply."],
-      [{ changes: 6, applied: true }, STRINGS.en, "Codex: trusted the board's 6 hooks. Start a new Codex session."],
+      [{ changes: 6, applied: false }, STRINGS.en, `Codex: would trust the board's 6 hooks by writing their [hooks.state] entries in ${shown}. Run the same command again with --apply.`],
+      [{ changes: 6, applied: true }, STRINGS.en, `Codex: trusted the board's 6 hooks; their [hooks.state] entries are in ${shown}. Start a new Codex session.`],
       [{ changes: 0, applied: false }, STRINGS.en, "Codex: the board's hooks are already trusted. Start a new Codex session."],
       [{ changes: 0, applied: true }, STRINGS.en, "Codex: the board's hooks are already trusted. Start a new Codex session."],
-      [{ changes: 6, applied: false }, STRINGS['zh-TW'], 'Codex：將信任看板的 6 個 hooks。加上 --apply 再執行同一命令。'],
-      [{ changes: 6, applied: true }, STRINGS['zh-TW'], 'Codex：已信任看板的 6 個 hooks。開始新的 Codex 工作階段。'],
+      [{ changes: 6, applied: false }, STRINGS['zh-TW'], `Codex：將信任看板的 6 個 hooks，在 ${shown} 寫入它們的 [hooks.state] 信任項。加上 --apply 再執行同一命令。`],
+      [{ changes: 6, applied: true }, STRINGS['zh-TW'], `Codex：已信任看板的 6 個 hooks，它們的 [hooks.state] 信任項在 ${shown}。開始新的 Codex 工作階段。`],
       [{ changes: 0, applied: false }, STRINGS['zh-TW'], 'Codex：看板的 hooks 已受信任。開始新的 Codex 工作階段。'],
-      [{ changes: 6, applied: false }, STRINGS['zh-CN'], 'Codex：将信任看板的 6 个 hooks。加上 --apply 再运行同一命令。'],
-      [{ changes: 6, applied: true }, STRINGS['zh-CN'], 'Codex：已信任看板的 6 个 hooks。开始新的 Codex 会话。'],
+      [{ changes: 6, applied: false }, STRINGS['zh-CN'], `Codex：将信任看板的 6 个 hooks，在 ${shown} 中写入它们的 [hooks.state] 信任项。加上 --apply 再运行同一命令。`],
+      [{ changes: 6, applied: true }, STRINGS['zh-CN'], `Codex：已信任看板的 6 个 hooks，它们的 [hooks.state] 信任项在 ${shown} 中。开始新的 Codex 会话。`],
       [{ changes: 0, applied: false }, STRINGS['zh-CN'], 'Codex：看板的 hooks 已受信任。开始新的 Codex 会话。'],
     ]
     for (const [result, strings, expected] of examples) {
-      const output = codexTrustOutput(result, strings, false)
+      const output = codexTrustOutput({ ...result, file: join(home, '.codex', 'config.toml') }, strings, false, home)
       assert.equal(output, `${expected}\n`)
-      assert.doesNotMatch(output.slice(0, -1), /[\r\n{\\/]|sha256:/)
+      assert.doesNotMatch(output.slice(0, -1).replace(shown, ''), /[\r\n{\\/]|sha256:/)
     }
     const result = { file: 'synthetic/config.toml', hooks: [{ hash: 'sha256:synthetic' }], changes: 6, applied: false }
     const json = codexTrustOutput(result, STRINGS.en, true)
@@ -3421,7 +4251,7 @@ test('--codex-trust prints one plain line by default and the JSON only with --js
   } finally { resolver.deregister() }
 })
 
-test('the installed Codex host grants only six reviewed hashes and preserves unrelated config', { skip: !process.env.AGENT_BOARD_TEST_CODEX }, () => fixture(f => {
+test('the installed Codex host grants only seven reviewed hashes and preserves unrelated config', { skip: !process.env.AGENT_BOARD_TEST_CODEX }, () => fixture(f => {
   const executable = process.env.AGENT_BOARD_TEST_CODEX
   f.env.CODEX_HOME = join(f.home, '.codex')
   const config = join(f.home, '.codex', 'config.toml')
@@ -3432,19 +4262,19 @@ test('the installed Codex host grants only six reviewed hashes and preserves unr
   const args = ['--codex-trust', '--codex-bin', executable, '--json']
   const plan = f.command(args)
   assert.equal(plan.status, 0, plan.stderr)
-  assert.equal(JSON.parse(plan.stdout).changes, 6)
+  assert.equal(JSON.parse(plan.stdout).changes, 7)
   assert.equal(readFileSync(config, 'utf8'), original)
   const applied = f.command([...args, '--apply'])
   assert.equal(applied.status, 0, applied.stderr)
-  assert.equal(JSON.parse(applied.stdout).trusted, 6)
+  assert.equal(JSON.parse(applied.stdout).trusted, 7)
   const saved = readFileSync(config, 'utf8')
   assert.match(saved, /# Keep this comment/)
   assert.match(saved, /\[hooks.state.unrelated\]\nenabled = false/)
-  assert.equal((saved.match(/trusted_hash/g) ?? []).length, 6)
+  assert.equal((saved.match(/trusted_hash/g) ?? []).length, 7)
   const again = f.command(args)
   assert.equal(again.status, 0, again.stderr)
   assert.equal(JSON.parse(again.stdout).changes, 0)
-  assert.equal(JSON.parse(again.stdout).hooks.length, 6)
+  assert.equal(JSON.parse(again.stdout).hooks.length, 7)
   const doctor = f.command(['--codex-doctor', '--codex-bin', executable, '--json'])
   assert.equal(JSON.parse(doctor.stdout).hooksTrusted, true, doctor.stderr)
   assert.equal(JSON.parse(doctor.stdout).connected, 'unverified')
@@ -3489,6 +4319,56 @@ rl.on('line', line => {
 `
   return { stateFile, mockServerScript }
 }
+
+test('the Codex trust preview names the config.toml it would change and changes nothing, in every language', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const { stateFile, mockServerScript } = mockCodexServer(f)
+  const executable = join(f.home, 'bin', 'codex-mock.js')
+  f.save(executable, mockServerScript)
+  writeFileSync(stateFile, JSON.stringify({ trusted: false }))
+  const config = join(f.home, '.codex', 'config.toml')
+  f.save(config, '# synthetic user settings\n')
+  const shown = join('~', '.codex', 'config.toml')
+  for (const [lang, words] of [['en', `by writing their [hooks.state] entries in ${shown}.`], ['zh-TW', `在 ${shown} 寫入它們的 [hooks.state] 信任項`], ['zh-CN', `在 ${shown} 中写入它们的 [hooks.state] 信任项`]]) {
+    const preview = f.command(['--codex-trust', '--codex-bin', executable, '--lang', lang])
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.ok(preview.stdout.includes(words), preview.stdout)
+    assert.equal(readFileSync(config, 'utf8'), '# synthetic user settings\n')
+  }
+}))
+
+test('a repeat setup preview after the hooks are trusted does not ask to trust them again', { skip: process.platform === 'win32' && 'setup finds Codex on the PATH only as a native .exe or an npm shim on Windows' }, () => fixture(f => {
+  assert.equal(setupAgent(f, '--lang', 'en', '--agent', 'codex', '--apply').status, 0)
+  const bin = join(f.home, 'bin')
+  mkdirSync(bin, { recursive: true })
+  const { stateFile, mockServerScript } = mockCodexServer(f)
+  writeFileSync(join(bin, 'codex'), mockServerScript, { mode: 0o755 })
+  const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  f.env[pathKey] = [bin, f.env[pathKey]].filter(Boolean).join(delimiter)
+  const trusted = setupAgent(f, '--lang', 'en', '--agent', 'codex')
+  assert.equal(trusted.status, 0, trusted.stderr)
+  assert.match(trusted.stdout, /^Codex: already set up/m)
+  assert.doesNotMatch(trusted.stdout, /--codex-trust/)
+  assert.match(trusted.stdout, /--serve/)
+  // Codex saying no keeps the step.
+  writeFileSync(stateFile, JSON.stringify({ trusted: false }))
+  const untrusted = setupAgent(f, '--lang', 'en', '--agent', 'codex')
+  assert.equal(untrusted.status, 0, untrusted.stderr)
+  assert.match(untrusted.stdout, /--codex-trust/)
+}))
+
+test('a repeat setup preview keeps the trust step when Codex cannot be asked', () => fixture(f => {
+  assert.equal(setupAgent(f, '--lang', 'en', '--agent', 'codex', '--apply').status, 0)
+  const bin = join(f.home, 'synthetic bin')
+  mkdirSync(bin)
+  writeFileSync(join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex'), 'synthetic Codex', { mode: 0o755 })
+  const pathKey = Object.keys(f.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  f.env[pathKey] = [bin, f.env[pathKey]].filter(Boolean).join(delimiter)
+  const result = setupAgent(f, '--lang', 'en', '--agent', 'codex')
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /^Codex: already set up/m)
+  assert.match(result.stdout, /--codex-trust/)
+}))
 
 test('a doctor that reached Codex prints a trust step that runs', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
@@ -3540,7 +4420,36 @@ test('--codex-doctor auto-discovers Codex on PATH and verifies hook trust', { sk
   assert.ok(step?.includes('--codex-bin'), plainUntrusted)
   const preview = spawnSync(step, { shell: true, cwd: f.home, env: { ...f.env, ...withBinOnPath }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
   assert.equal(preview.status, 0, preview.stderr)
-  assert.ok(preview.stdout.includes('would trust'), preview.stdout)
+  assert.ok(preview.stdout.includes("would trust the board's 7 hooks"), preview.stdout)
+}))
+
+test('a six-hook Codex install from before the plan hook is sent to setup by the doctor, refused by trust, and gets its seventh group from setup', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const manifestFile = join(f.root, 'install-codex.json')
+  const older = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  delete older.hooks.PostToolUse
+  f.save(f.hooks, `${JSON.stringify(older, null, 2)}\n`)
+  const record = JSON.parse(readFileSync(manifestFile, 'utf8'))
+  delete record.groups.PostToolUse
+  delete record.foreignGroups.PostToolUse
+  f.save(manifestFile, `${JSON.stringify(record, null, 2)}\n`)
+  const doctor = f.command(['--codex-doctor', '--lang', 'en'])
+  assert.equal(doctor.status, 0, doctor.stderr)
+  const lines = doctor.stdout.split(/\r?\n/)
+  assert.ok(lines.some(line => /^Missing or outdated: .*hooks\.json$/.test(line)), doctor.stdout)
+  const next = lines.filter(line => line.startsWith('Next:'))
+  assert.equal(next.length, 1, doctor.stdout)
+  assert.match(next[0], /^Next: preview the setup repair: /)
+  assert.doesNotMatch(doctor.stdout, /--codex-trust/)
+  const trust = f.command(['--codex-trust', '--codex-bin', join(f.home, 'codex.exe'), '--json'])
+  assert.notEqual(trust.status, 0)
+  assert.match(trust.stderr, /OWNED_CODEX_INSTALL_REQUIRED/)
+  assert.equal(f.install('--apply').status, 0)
+  const groups = JSON.parse(readFileSync(f.hooks, 'utf8')).hooks
+  assert.equal(groups.PostToolUse.length, 1)
+  assert.equal(groups.PostToolUse[0].matcher, 'update_plan')
+  assert.equal(Object.keys(groups).length, 7)
+  assert.ok(Object.hasOwn(JSON.parse(readFileSync(manifestFile, 'utf8')).groups, 'PostToolUse'))
 }))
 
 test('--codex-doctor detects missing trusted_hash and unverified hash without --codex-bin', () => fixture(f => {
@@ -3606,6 +4515,141 @@ test('Codex explicit reports bind the current thread and preserve other blocks b
   assert.ok(f.command([]).stdout.includes('Task'))
   assert.equal(f.report('done', ['- [x] Finished']).status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /state=done updated=\d{4}-/)
+}))
+
+test('the same report from three agents gives three blocks of the same shape', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const payload = { title: 'Shared report', project: 'Synthetic project', state: 'working', steps: ['- [x] Read the task', '- [~] Check the result'] }
+  const shapes = []
+  for (const agent of ['codex', 'cursor', 'muse']) {
+    const id = `synthetic-report-${agent}`
+    const result = f.command(['--report', '--print', '--agent', agent, '--session', id], payload)
+    assert.equal(result.status, 0, result.stderr)
+    const text = readFileSync(f.progress, 'utf8')
+    const owner = createHash('sha256').update(`${agent}:${id}`).digest('hex').slice(0, 8)
+    const block = text.match(new RegExp(`<!-- auto session=${owner} [^\\n]*\\n[\\s\\S]*?<!-- /auto session=${owner} -->`))?.[0]
+    assert.ok(block, `${agent} has a bound block`)
+    assert.match(block, new RegExp(` agent=${agent} `))
+    shapes.push(block.replace(/owner=[a-f0-9]{64}/, 'owner=OWNER').replaceAll(owner, 'OWNER').replace(`agent=${agent}`, 'agent=AGENT').replace(`source=${agent}-local`, 'source=AGENT-local').replace(`resume=${id}`, 'resume=SESSION').replace(/updated=\S+/, 'updated=TIME'))
+    assert.equal(JSON.parse(result.stdout).cut, 0)
+  }
+  assert.equal((readFileSync(f.progress, 'utf8').match(/^<!-- auto /gm) ?? []).length, 3)
+  assert.equal(new Set(shapes).size, 1)
+}))
+
+test('a report step over 120 characters is cut on the board and kept in full in the journal', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const title = 'Synthetic title ' + 't'.repeat(130)
+  const long = 'Synthetic detail ' + 's'.repeat(130)
+  const exact = 'e'.repeat(120)
+  const unicode = '🧪'.repeat(121)
+  const result = f.command(['--codex-report'], { title, project: 'Synthetic project', state: 'working', steps: [`- [~] ${long}`, `- [ ] ${exact}`, `- [ ] ${unicode}`] })
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.cut, 3)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.ok(text.includes(`### ${title.slice(0, 119)}…\n`))
+  assert.ok(text.includes(`- [~] ${long.slice(0, 119)}…\n`))
+  assert.ok(text.includes(`- [ ] ${exact}\n`))
+  assert.ok(text.includes(`- [ ] ${'🧪'.repeat(119)}…\n`))
+  assert.ok(!text.includes(long))
+  const now = new Date(output.updated)
+  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+  const journal = readFileSync(join(f.root, `progress-journal-${month}.md`), 'utf8')
+  assert.ok(journal.includes(title))
+  assert.ok(journal.includes(long))
+  assert.ok(journal.includes(unicode))
+  const { countDay } = await importTs('../hooks/journal.ts')
+  assert.equal(countDay(journal, now.getTime()), 0)
+  const titleOnly = f.command(['--report'], { title, state: 'working', steps: ['- [~] Short step'] })
+  assert.equal(titleOnly.status, 0, titleOnly.stderr)
+  assert.equal(JSON.parse(titleOnly.stdout).cut, 1)
+  assert.ok(!readFileSync(join(f.root, `progress-journal-${month}.md`), 'utf8').includes('Short step'))
+  const blockedProgress = join(f.root, 'blocked.md')
+  f.save(blockedProgress, '## Preserve this project\n')
+  mkdirSync(join(f.root, `blocked-journal-${month}.md`))
+  const blocked = f.command(['--report', '--progress-file', blockedProgress], { title: 'Blocked journal', state: 'working', steps: [`- [~] ${long}`] })
+  assert.notEqual(blocked.status, 0)
+  assert.equal(readFileSync(blockedProgress, 'utf8'), '## Preserve this project\n')
+}))
+
+const journalOf = (f, updated) => {
+  const day = new Date(updated)
+  return join(f.root, `progress-journal-${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}.md`)
+}
+
+test('the same long report sent again a minute later adds no journal line', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const long = 'Synthetic detail ' + 's'.repeat(130)
+  const payload = { title: 'Resent plan', project: 'Synthetic project', state: 'working', steps: [`- [~] ${long}`] }
+  const started = Math.floor(Date.now() / 60000) * 60000 - 600000
+  const first = f.command(['--report', '--hook-started', String(started)], payload)
+  assert.equal(first.status, 0, first.stderr)
+  const file = journalOf(f, JSON.parse(first.stdout).updated)
+  const before = readFileSync(file, 'utf8')
+  assert.ok(before.includes(long))
+  const again = f.command(['--report', '--hook-started', String(started + 60000)], payload)
+  assert.equal(again.status, 0, again.stderr)
+  assert.equal(readFileSync(file, 'utf8'), before)
+}))
+
+test('a cut title with uncut steps journals only the title, once', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const title = 'Synthetic title ' + 't'.repeat(130)
+  const payload = { title, project: 'Synthetic project', state: 'working', steps: ['- [~] First short step', '- [ ] Second short step'] }
+  const first = f.command(['--report'], payload)
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(JSON.parse(first.stdout).cut, 1)
+  const file = journalOf(f, JSON.parse(first.stdout).updated)
+  const text = readFileSync(file, 'utf8')
+  assert.equal(text.split(title).length - 1, 2, 'the title is the task and the step of its one line')
+  assert.equal(text.split(/\r?\n/).filter(line => line.startsWith('> - ')).length, 1)
+  assert.ok(!text.includes('short step'))
+}))
+
+test('a journal line written between the report read and its replace survives', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const long = 'Synthetic detail ' + 's'.repeat(130)
+  const other = '- 2000-01-01 00:00 · Other project · Other task · Finished by the board'
+  const result = f.command(['--report'], { title: 'Racing plan', project: 'Synthetic project', state: 'working', steps: [`- [~] ${long}`] }, { AGENT_BOARD_TEST_JOURNAL_RACE: other })
+  assert.equal(result.status, 0, result.stderr)
+  const text = readFileSync(journalOf(f, JSON.parse(result.stdout).updated), 'utf8')
+  assert.ok(text.includes(other))
+  assert.ok(text.includes(long))
+}))
+
+test('--report and --codex-report write the same block', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const payload = { title: 'Alias report', project: 'Synthetic project', state: 'waiting', steps: ['- [?] Choose the next step', '- [ ] Continue'] }
+  const legacy = f.command(['--codex-report', '--print'], payload)
+  assert.equal(legacy.status, 0, legacy.stderr)
+  const normalize = text => text.replace(/updated=\S+/g, 'updated=TIME')
+  const before = normalize(readFileSync(f.progress, 'utf8'))
+  const alias = f.command(['--report', '--print'], payload)
+  assert.equal(alias.status, 0, alias.stderr)
+  assert.equal(normalize(readFileSync(f.progress, 'utf8')), before)
+  const { updated: legacyUpdated, ...legacyOutput } = JSON.parse(legacy.stdout)
+  const { updated: aliasUpdated, ...aliasOutput } = JSON.parse(alias.stdout)
+  assert.deepEqual(aliasOutput, legacyOutput)
+  assert.equal(aliasOutput.cut, 0)
+  for (const flag of ['--report', '--codex-report']) {
+    const rejected = f.command([flag, '--print'], payload, { CODEX_THREAD_ID: '' })
+    assert.notEqual(rejected.status, 0)
+    assert.equal(rejected.stderr.trim().split('\n').length, 1)
+    assert.equal(normalize(readFileSync(f.progress, 'utf8')), before)
+  }
+  // These are every named agent in the board's three language tables, including report-only hosts.
+  for (const agent of ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'dot', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek']) {
+    const id = `synthetic-alias-${agent}`
+    for (const flag of ['--report', '--codex-report']) {
+      const result = f.command([flag, '--agent', agent, '--session', id], payload)
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(JSON.parse(result.stdout).session, id)
+    }
+    const unbound = f.command(['--report', '--agent', agent], payload, { CODEX_THREAD_ID: '', AGENT_BOARD_AGENT: '', AGENT_BOARD_SESSION_ID: '' })
+    assert.notEqual(unbound.status, 0)
+    assert.equal(unbound.stderr.trim().split('\n').length, 1)
+  }
 }))
 
 test('Codex cannot mark unfinished work done or inject another Markdown block', () => fixture(f => {
@@ -4498,7 +5542,7 @@ test('OpenClaw native metadata callbacks fence stale runs and never request conv
     const hooks = new Map()
     let subscription
     plugin.register({ on: (name, fn) => hooks.set(name, fn), agent: { events: { registerAgentEventSubscription: value => { subscription = value } } } })
-    assert.deepEqual([...hooks.keys()], ['session_start', 'session_end'])
+    assert.deepEqual([...hooks.keys()], ['session_start', 'session_end', 'after_tool_call'])
     assert.equal(subscription.payload, 'metadata')
     assert.deepEqual(subscription.streams, ['lifecycle'])
     const sessionId = 'openclaw-native-session-123'
@@ -4727,6 +5771,7 @@ test('Windows Antigravity binds its executable across PATH batch files and anoth
   for (const dir of [home, runtime, shadow, otherCwd]) mkdirSync(dir)
   const boundNode = join(runtime, 'node.exe')
   copyFileSync(process.execPath, boundNode)
+  // Both stay real copies: a hard link shares node.exe's inode with the Node on PATH and the decoy, and would hide a wrong pick.
   copyFileSync(process.execPath, join(otherCwd, 'node.exe'))
   const marker = join(shadow, 'ran.txt')
   writeFileSync(join(shadow, 'node.cmd'), `@echo off\r\n> "${marker}" echo SYNTHETIC_SHADOW_COMMAND\r\nexit /b 37\r\n`)
@@ -4787,7 +5832,7 @@ test('compact Antigravity fallback preserves hook arguments and Codex trust comm
     const runtime = join(f.home, 'n s')
     mkdirSync(runtime)
     const node = join(runtime, 'node.exe')
-    copyFileSync(process.execPath, node)
+    placeNode(node)
     const worker = join(root, 'agent-board-hook.mjs')
     const capture = join(root, 'synthetic-long-fallback.json')
     const stdout = 'synthetic compact stdout\n', stderr = 'synthetic compact stderr\n'
@@ -7562,6 +8607,119 @@ const reportPayload = { title: 'Synthetic work', project: 'demo', state: 'workin
 const folderReport = (f, cwd, payload = reportPayload, extra = []) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-report', ...extra], {
   cwd, env: { ...f.env, CODEX_THREAD_ID: undefined }, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 15000,
 })
+// Exercise the real standalone entry without a synchronous bootstrap child;
+// the test's own process helper waits for exit and reaps only its child tree.
+const folderIdentityFixture = fn => fixture(async f => {
+  const bootstrap = join(f.home, 'offline-board.mjs')
+  f.save(bootstrap, bundleFromDir(new URL('..', import.meta.url)))
+  const args = ['--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes')]
+  const invoke = async (flags, input, cwd = f.home, extra = {}, script = f.script) => {
+    const payload = join(f.home, 'offline-input.json')
+    const output = join(f.home, 'offline-stdout.txt'), errors = join(f.home, 'offline-stderr.txt')
+    f.save(payload, input === undefined ? '' : JSON.stringify(input))
+    // File-backed stdio makes the real CLI's bytes observable independently of
+    // parent pipe delivery; all descriptors remain owned by this fixture.
+    const inputFd = openSync(payload, 'r'), stdoutFd = openSync(output, 'w'), stderrFd = openSync(errors, 'w')
+    try {
+      const ran = await nativeProcess(process.execPath, [script, ...flags, ...args],
+        { ...f.env, CODEX_THREAD_ID: undefined, ...extra }, '', callback => setTimeout(callback, 15000), stopNativeTree, { cwd, inputFd, stdoutFd, stderrFd })
+      return { ...ran, stdout: readFileSync(output, 'utf8'), stderr: readFileSync(errors, 'utf8') }
+    } finally { closeSync(inputFd); closeSync(stdoutFd); closeSync(stderrFd) }
+  }
+  const installed = await invoke(['--codex-setup', '--apply'], undefined, f.home, {}, bootstrap)
+  assert.equal(installed.error, undefined, hookFailure(installed))
+  assert.equal(installed.status, 0, hookFailure(installed))
+  return fn({ ...f, invoke })
+})
+
+const aliasFolders = f => {
+  const physical = join(f.home, 'physical'), alias = join(f.home, 'alias')
+  mkdirSync(join(physical, 'demo'), { recursive: true })
+  symlinkSync(physical, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  return { real: join(physical, 'demo'), alias: join(alias, 'demo') }
+}
+const aliasEvent = (f, cwd, turn = 'alias-turn', id = session, extra = {}) => f.invoke(['--codex-event'], {
+  session_id: id, hook_event_name: 'UserPromptSubmit', turn_id: turn, cwd,
+  transcript_path: rollout(f, id, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' }),
+}, f.home, extra)
+const aliasReport = (f, cwd) => f.invoke(['--codex-report'], reportPayload, cwd)
+const folderCacheFile = (f, id = session) => join(f.root, 'sessions', createHash('sha256').update(`codex:${id}`).digest('hex') + '.json')
+const assertAliasRefused = async (f, cwd) => {
+  const before = everyFile(f.root).map(file => [file, readFileSync(file)])
+  const ran = await aliasReport(f, cwd)
+  assert.notEqual(ran.status, 0)
+  assert.equal(ran.stdout, '')
+  assert.equal(ran.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
+  assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file)]), before)
+}
+
+test('folder aliases bind one native owner without rebinding another same-named directory', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  const started = await aliasEvent(f, dirs.alias)
+  assert.equal(started.status, 0, hookFailure(started))
+  const history = rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  const historyBytes = readFileSync(history)
+  const other = join(f.home, 'other', 'demo')
+  mkdirSync(other, { recursive: true })
+  await assertAliasRefused(f, other)
+  const ran = await aliasReport(f, dirs.real)
+  assert.equal(ran.status, 0, hookFailure(ran))
+  assert.equal(JSON.parse(ran.stdout).session, session)
+  const record = sessionRecord(f, session)
+  assert.match(record.folderDigest, /^[a-f0-9]{64}$/)
+  assert.match(record.folderCanonicalDigest, /^[a-f0-9]{64}$/)
+  assert.ok(!JSON.stringify(record).includes(f.home))
+  assert.deepEqual(readFileSync(history), historyBytes)
+  assert.equal((await aliasEvent(f, dirs.real, 'real-turn')).status, 0)
+  assert.equal((await aliasReport(f, dirs.alias)).status, 0)
+}))
+
+test('folder aliases keep legacy exact digests and require a fresh hook for old alias hashes', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  assert.equal((await aliasEvent(f, dirs.real)).status, 0)
+  const { folderCanonicalDigest: discarded, ...legacy } = sessionRecord(f, session)
+  f.save(folderCacheFile(f), JSON.stringify(legacy))
+  const accepted = await aliasReport(f, dirs.real)
+  assert.equal(accepted.status, 0, hookFailure(accepted))
+  assert.equal(sessionRecord(f, session).folderDigest, legacy.folderDigest)
+  assert.equal((await aliasEvent(f, dirs.alias, 'old-alias-turn')).status, 0)
+  const { folderCanonicalDigest: omitted, ...oldAlias } = sessionRecord(f, session)
+  f.save(folderCacheFile(f), JSON.stringify(oldAlias))
+  await assertAliasRefused(f, dirs.real)
+  assert.equal((await aliasEvent(f, dirs.alias, 'fresh-alias-turn')).status, 0)
+  assert.equal((await aliasReport(f, dirs.real)).status, 0)
+}))
+
+test('folder aliases refuse ambiguous stale ended run and malformed canonical records', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  assert.equal((await aliasEvent(f, dirs.alias)).status, 0)
+  const original = sessionRecord(f, session)
+  for (const change of [
+    { state: 'ended' }, { origin: 'run' }, { updated: '2020-01-01T00:00:00Z' },
+    { updated: new Date(Date.now() + 60000).toISOString() }, { folderDigest: undefined },
+    { folderCanonicalDigest: 'malformed' }, { folderCanonicalDigest: '0'.repeat(64) },
+  ]) {
+    f.save(folderCacheFile(f), JSON.stringify({ ...original, ...change }))
+    await assertAliasRefused(f, dirs.real)
+  }
+  f.save(folderCacheFile(f), JSON.stringify(original))
+  assert.equal((await aliasEvent(f, dirs.real, 'second-owner-turn', secondSession)).status, 0)
+  await assertAliasRefused(f, dirs.real)
+}))
+
+test('folder aliases keep missing and unreadable paths on exact legacy matching only', () => folderIdentityFixture(async f => {
+  const dirs = aliasFolders(f)
+  assert.equal((await aliasEvent(f, join(f.home, 'missing', 'demo'))).status, 0)
+  assert.equal(sessionRecord(f, session).folderCanonicalDigest, undefined)
+  await assertAliasRefused(f, dirs.real)
+  const denied = join(f.home, 'deny-realpath.cjs')
+  f.save(denied, `const fs = require('node:fs')\nconst original = fs.realpathSync\nfs.realpathSync = (path, ...args) => { if (path === ${JSON.stringify(dirs.alias)}) throw Object.assign(new Error('SYNTHETIC_DENIED'), { code: 'EACCES' }); return original(path, ...args) }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  assert.equal((await aliasEvent(f, dirs.alias, 'unreadable-turn', session, { NODE_OPTIONS: `--require ${JSON.stringify(denied)}` })).status, 0)
+  assert.equal(sessionRecord(f, session).folderCanonicalDigest, undefined)
+  await assertAliasRefused(f, dirs.real)
+  assert.equal((await aliasEvent(f, dirs.alias, 'readable-turn')).status, 0)
+  assert.equal((await aliasReport(f, dirs.real)).status, 0)
+}))
 const oldBlock = (id, title, mark = '') => {
   const block = createHash('sha256').update(`codex:${id}`).digest('hex').slice(0, 8)
   return `<!-- auto session=${block} agent=codex state=waiting updated=${new Date().toISOString()} resume=${id}${mark} -->
@@ -7688,7 +8846,7 @@ test("a report from a folder with the same name as a person's session in another
   const before = everyFile(f.root).map(file => [file, readFileSync(file)])
   const result = folderReport(f, otherFolder)
   assert.notEqual(result.status, 0)
-  assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+  assert.equal(result.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
   assert.equal(result.stdout, '')
   assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file)]), before)
   assert.equal(sessionRecord(f, session).folder, 'demo')
@@ -7749,6 +8907,26 @@ test("an old block of an agent's run is archived once and a person's block is ke
   assert.match(before, /Review it, OK/)
   assert.equal(f.command(['--tidy']).status, 0)
   assert.equal(readFileSync(archives[0], 'utf8'), before)
+}))
+
+test("a tidied run's question does not come back as a card", () => fixture(f => {
+  f.install('--apply')
+  rollout(f, execSession, { source: 'exec' })
+  rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  f.save(f.progress, '## demo\n' + oldBlock(execSession, 'Verified run') + oldBlock(session, 'Person session'))
+  // A board that has seen both blocks keeps a record for each question, with the same words.
+  assert.equal(f.command(['--keys', 'j']).status, 0)
+  const ledgerFile = f.progress.replace(/\.md$/, '-questions.json')
+  const open = () => JSON.parse(readFileSync(ledgerFile, 'utf8')).records.filter(record => record.isUnresolved).map(record => record.source.task).sort()
+  assert.deepEqual(open(), ['Person session', 'Verified run'])
+  const tidy = f.command(['--tidy'])
+  assert.equal(tidy.status, 0, tidy.stderr)
+  assert.doesNotMatch(readFileSync(f.progress, 'utf8'), /Verified run/)
+  // The next board pass folds the run's resolved copy into the ledger; the other session's identical question stays live.
+  const shown = f.command(['--keys', 'j'])
+  assert.equal(shown.status, 0, shown.stderr)
+  assert.doesNotMatch(shown.stdout, /Verified run/)
+  assert.deepEqual(open(), ['Person session'])
 }))
 
 test('a block whose session record cannot be read is kept', () => fixture(f => {
@@ -7891,7 +9069,7 @@ test('folder reporting rechecks an inferred session after a two-session backlog'
   }))
   const result = folderReport(f, cwd)
   assert.notEqual(result.status, 0)
-  assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+  assert.equal(result.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
   assert.equal(result.stdout, '')
   assert.ok(readFileSync(f.progress).includes(before))
   assert.deepEqual(sessionRecord(f, session), record)
@@ -7912,7 +9090,7 @@ test('folder reporting refuses ambiguous, stale, ended, old and strong-run recor
     const before = everyFile(f.root).map(file => [file, readFileSync(file, 'utf8')])
     const result = folderReport(f, cwd)
     assert.notEqual(result.status, 0)
-    assert.equal(result.stderr.trim(), 'This session cannot report steps yet; the board still shows it from its hooks.')
+    assert.equal(result.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
     assert.equal(result.stdout, '')
     assert.deepEqual(everyFile(f.root).map(file => [file, readFileSync(file, 'utf8')]), before)
   }
@@ -8168,4 +9346,342 @@ test('a Codex start note uses the folder name for a bare repository worktree and
   const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext
   assert.match(context, /Synthetic bare work/)
   assert.doesNotMatch(context, /Synthetic parent folder work/)
+}))
+
+// The plan mirror (#922): a plan tool call becomes the session's steps, through the report's writer.
+const planCall = (id, tool, list, extra = {}) => ({
+  session_id: id, hook_event_name: tool === 'update_plan' ? 'PostToolUse' : 'AfterTool', tool_name: tool,
+  tool_input: tool === 'update_plan' ? { explanation: 'synthetic', plan: list } : { todos: list }, ...extra,
+})
+const planLong = `Synthetic plan detail ${'p'.repeat(130)}`
+
+test('a Codex update_plan call becomes the session steps, titled and cut like a report, and prints nothing', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const first = f.command(['--plan-event'], planCall(session, 'update_plan', [
+    { step: 'Read the spec', status: 'completed' }, { step: 'Write   the\ncode', status: 'in_progress' }, { step: planLong, status: 'pending' },
+  ]))
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(first.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /state=working/)
+  assert.match(text, /^### Write the code$/m)
+  assert.match(text, /^- \[x\] Read the spec$/m)
+  assert.match(text, /^- \[~\] Write the code$/m)
+  const cut = `${planLong.slice(0, 119)}…`
+  assert.ok(text.includes(`- [ ] ${cut}`), text)
+  assert.ok(!text.includes(planLong))
+  assert.ok(readFileSync(journalOf(f, sessionRecord(f, session).updated), 'utf8').includes(planLong))
+  // The block's own title stays when a later plan arrives.
+  const second = f.command(['--plan-event'], planCall(session, 'update_plan', [{ step: 'Only step', status: 'in_progress' }]))
+  assert.equal(second.status, 0, second.stderr)
+  assert.equal(second.stdout, '')
+  const later = readFileSync(f.progress, 'utf8')
+  assert.match(later, /^### Write the code$/m)
+  assert.match(later, /^- \[~\] Only step$/m)
+  assert.ok(!later.includes('Read the spec'))
+}))
+
+test('a Gemini write_todos call marks cancelled and blocked todos, and the first todo titles a block with none in progress', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  const id = 'gemini-plan-session-1'
+  const ran = f.command(['--plan-event', '--agent', 'gemini'], planCall(id, 'write_todos', [
+    { description: 'Done one', status: 'completed' }, { description: 'Dropped one', status: 'cancelled' }, { description: 'Stuck one', status: 'blocked' },
+  ]))
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=gemini/)
+  assert.match(text, /^### Done one$/m)
+  assert.match(text, /^- \[-\] Dropped one$/m)
+  assert.match(text, /^- \[!\] Stuck one$/m)
+}))
+
+test('a plan call that is not a plan, is bad JSON or is empty writes nothing, prints nothing and exits 0', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const before = existsSync(f.progress) ? readFileSync(f.progress, 'utf8') : null
+  for (const input of [
+    planCall(session, 'shell', [{ step: 'Not a plan', status: 'pending' }]),
+    { ...planCall(session, 'update_plan', [{ step: 'x', status: 'pending' }]), tool_name: 'write_todos' },
+    planCall(session, 'update_plan', []),
+    planCall(session, 'update_plan', [{ step: '   ', status: 'pending' }, 7]),
+    { ...planCall(session, 'update_plan', [{ step: 'No session', status: 'pending' }]), session_id: undefined },
+  ]) {
+    const ran = f.command(['--plan-event'], input)
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.equal(ran.stdout, '')
+  }
+  const broken = spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--plan-event'], { env: f.env, input: '{broken', encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(broken.status, 0, broken.stderr)
+  assert.equal(broken.stdout, '')
+  assert.equal(existsSync(f.progress) ? readFileSync(f.progress, 'utf8') : null, before)
+  assertNoBlock(f, session)
+}))
+
+test('a plan call into a denied Windows folder exits 0, prints nothing and names LOCK_DENIED for the hook log', { skip: process.platform !== 'win32' && 'Windows ACLs only' }, () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const folder = join(f.home, 'denied-plan')
+  const progress = join(folder, 'progress.md')
+  f.save(progress, '## Synthetic denied plan\n')
+  const before = readFileSync(progress)
+  await withDeniedCreation(folder, () => {
+    const result = f.command(['--plan-event', '--progress-file', progress, '--lang', 'en'], planCall(session, 'update_plan', [{ step: 'Synthetic denied step', status: 'in_progress' }]))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, '')
+    assert.match(result.stderr, /\(LOCK_DENIED\)/)
+    assert.deepEqual(readFileSync(progress), before)
+  })
+}))
+
+test('setup writes the plan hook as a matcher group for Codex and Gemini, and remove leaves a person\'s own groups', () => fixture(async f => {
+  const mine = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo mine' }] }
+  const geminiConfig = join(f.home, '.gemini', 'settings.json')
+  f.save(f.hooks, JSON.stringify({ hooks: { PostToolUse: [mine] } }))
+  f.save(geminiConfig, JSON.stringify({ hooks: { AfterTool: [mine] } }))
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  const codex = JSON.parse(readFileSync(f.hooks, 'utf8')).hooks
+  assert.deepEqual(codex.PostToolUse[0], mine)
+  assert.equal(codex.PostToolUse.length, 2)
+  assert.equal(codex.PostToolUse[1].matcher, 'update_plan')
+  assert.match(codex.PostToolUse[1].hooks[0].command, /agent-board|EncodedCommand/)
+  assert.equal(codex.PostToolUse[1].hooks[0].matcher, undefined)
+  const gemini = JSON.parse(readFileSync(geminiConfig, 'utf8')).hooks
+  assert.deepEqual(gemini.AfterTool[0], mine)
+  assert.equal(gemini.AfterTool.length, 2)
+  assert.equal(gemini.AfterTool[1].matcher, '^write_todos$')
+  assert.equal(gemini.AfterTool[1].hooks[0].matcher, undefined)
+  // The installed command is the real hook: it writes the steps and prints nothing.
+  const fired = await fireCommand(f, codex.PostToolUse[1].hooks[0].command, JSON.stringify(planCall(session, 'update_plan', [{ step: 'Fired through the hook', status: 'in_progress' }])))
+  assert.equal(fired.status, 0, fired.stderr)
+  assert.equal(fired.stdout, '')
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[~\] Fired through the hook$/m)
+  // Installing again adds no second group of ours.
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(JSON.parse(readFileSync(f.hooks, 'utf8')).hooks.PostToolUse.length, 2)
+  assert.equal(f.command(['--codex-remove', '--apply']).status, 0)
+  assert.equal(f.command(['--codex-remove', '--agent', 'gemini', '--apply']).status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')), { hooks: { PostToolUse: [mine] } })
+  assert.deepEqual(JSON.parse(readFileSync(geminiConfig, 'utf8')), { hooks: { AfterTool: [mine] } })
+}))
+
+// Grok Build's todo_write may carry only the changed items; the whole list is in the result (#922).
+const grokCall = (id, todos, extra = {}) => ({
+  sessionId: id, hookEventName: 'PostToolUse', toolName: 'todo_write', toolResultTruncated: false,
+  toolInput: { merge: true, todos: [{ id: 'b', status: 'in_progress' }] },
+  toolResult: { type: 'Todo', TodosUpdated: { summary_for_prompt: 'synthetic', todos, state: {} } }, ...extra,
+})
+
+test('a Grok todo_write merge call with one changed item reports the whole list from its result', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const ran = f.command(['--plan-event', '--agent', 'grok'], grokCall('grok-plan-session-1', [
+    { content: 'Grok first', priority: 'high', status: 'completed' }, { content: 'Grok second', priority: 'medium', status: 'in_progress' },
+    { content: 'Grok third', priority: 'low', status: 'pending' }, { content: 'Grok dropped', priority: 'low', status: 'cancelled' },
+  ]))
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=grok/)
+  assert.match(text, /^- \[x\] Grok first$/m)
+  assert.match(text, /^- \[~\] Grok second$/m)
+  assert.match(text, /^- \[ \] Grok third$/m)
+  assert.match(text, /^- \[-\] Grok dropped$/m)
+}))
+
+test('a Grok todo_write call with a truncated result, a DuplicateId result, an empty list or another tool writes nothing', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const one = [{ content: 'Grok never written', priority: 'low', status: 'pending' }]
+  // A good call first, so the refusals below are shown to leave its steps alone.
+  assert.equal(f.command(['--plan-event', '--agent', 'grok'], grokCall('grok-plan-session-2', [{ content: 'Grok kept', priority: 'low', status: 'in_progress' }])).status, 0)
+  for (const input of [
+    grokCall('grok-plan-session-2', one, { toolResultTruncated: true }),
+    grokCall('grok-plan-session-2', one, { toolResult: { type: 'Todo', DuplicateId: { id: 'a' } } }),
+    grokCall('grok-plan-session-2', []),
+    grokCall('grok-plan-session-2', one, { toolName: 'shell' }),
+    grokCall('grok-plan-session-2', one, { sessionId: undefined }),
+  ]) {
+    const ran = f.command(['--plan-event', '--agent', 'grok'], input)
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.equal(ran.stdout, '')
+  }
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^- \[~\] Grok kept$/m)
+  assert.ok(!text.includes('Grok never written'))
+}))
+
+test('setup installs the Grok PostToolUse plan hook with the todo_write matcher and a 5 second timeout', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const grok = JSON.parse(readFileSync(join(f.home, '.grok', 'hooks', 'agent-board-local.json'), 'utf8')).hooks
+  assert.equal(grok.PostToolUse.length, 1)
+  assert.equal(grok.PostToolUse[0].matcher, '^todo_write$')
+  assert.equal(grok.PostToolUse[0].hooks[0].timeout, 5)
+  assert.match(grok.PostToolUse[0].hooks[0].command, /--plan-event/)
+}))
+
+test('Windows fixture Node is a hard link to the running executable when linking works', { skip: process.platform !== 'win32' }, t => fixture(f => {
+  const node = join(f.home, 'linked node.exe')
+  placeNode(node)
+  const linked = statSync(node, { bigint: true }), original = statSync(process.execPath, { bigint: true })
+  // Where Windows refuses the link (node.exe under Program Files), the copy is used and the log says so.
+  if (linked.nlink < 2n) return t.skip('this computer refused a hard link to node.exe; the fixture copied it')
+  assert.equal(linked.ino, original.ino)
+}))
+
+test('codex: three turns in one interactive session each reach the board (#289)', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const recordFile = join(f.root, 'sessions', createHash('sha256').update(`codex:${session}`).digest('hex') + '.json')
+  assert.equal(f.event('SessionStart', undefined, { turn_id: undefined }).status, 0)
+  for (const turn of ['t1', 't2', 't3']) {
+    const start = f.event('UserPromptSubmit', turn)
+    assert.equal(start.status, 0, `${turn} prompt: ${start.stderr}`)
+    assert.match(readFileSync(f.progress, 'utf8'), /state=working/, turn)
+    const stop = f.event('Stop', turn)
+    assert.equal(stop.status, 0, `${turn} stop: ${stop.stderr}`)
+    assert.match(readFileSync(f.progress, 'utf8'), /state=waiting/, turn)
+  }
+  const events = JSON.parse(readFileSync(recordFile, 'utf8')).events
+  for (const turn of ['t1', 't2', 't3']) for (const name of ['UserPromptSubmit', 'Stop']) assert.ok(events.includes(`${name}:${turn}`), `${name}:${turn} in ${events}`)
+}))
+
+test('codex: every turn of one interactive session claims its mailbox message (#289)', async () => mailboxFixture(async f => {
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  f.seed()
+  for (const [index, turn] of ['t1', 't2', 't3'].entries()) {
+    if (index > 0) {
+      const saved = f.state(), target = saved.mailboxes[0]
+      const queued = queueMessage(saved, { id: `hook-mailbox-message-${turn}`, target: target.id, turn: 'session', text: `Synthetic payload ${turn}` }, 'board', target, Date.now()).state
+      writeFileSync(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, ...queued }))
+    }
+    const text = index === 0 ? 'Synthetic mailbox payload' : `Synthetic payload ${turn}`
+    // A claim held by a slow scanner defers once; the helper checks that it really was a deferral.
+    const result = await hookOrDeferred(() => f.call('codex', 'UserPromptSubmit', { turn_id: turn }), r => r.stdout.includes(text))
+    assert.ok(result.stdout.includes(text), `${turn}: ${result.stdout} ${result.stderr}`)
+    assert.equal(f.call('codex', 'Stop', { turn_id: turn }).status, 0, turn)
+  }
+  assert.deepEqual(f.state().messages.map(one => one.status), ['accepted', 'accepted', 'accepted'])
+}))
+
+// The plan mirror for OpenCode and OpenClaw (#922): each plugin sends its agent's own plan to the
+// worker as a --plan-event, and the worker turns it into the session's steps. The plugin is loaded
+// here with a spawnSync that keeps the call, which then runs against the real installed worker.
+const planPlugin = async (f, agent, build, exercise) => {
+  assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const { opencodePlugin } = await importTs('../hooks/local-agents.ts')
+  const { openclawLocalPlugin } = await importTs('../hooks/portable-agents.ts')
+  const saved = []
+  const source = agent === 'opencode' ? opencodePlugin(process.execPath, worker, f.progress, 'Progress', f.home) : openclawLocalPlugin(process.execPath, worker, f.progress, f.home)
+  const load = new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\n${build}`)
+  const spawn = (_node, args, options) => { saved.push({ args: [...args], input: options.input }); return { status: 0, stdout: '' } }
+  const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })
+  const exitListeners = process.listeners('exit')
+  try { await exercise(load(createRequire, spawn, tool), saved) } finally { dropExitReports(exitListeners) }
+  return {
+    saved,
+    // Runs a kept call the way the host would: the worker, with the plugin's own arguments and input.
+    deliver: call => spawnSync(process.execPath, [worker, ...call.args.slice(1)], { env: f.env, input: call.input, encoding: 'utf8', windowsHide: true, timeout: 15000 }),
+  }
+}
+
+test('an OpenCode todo.updated event becomes the session steps; a child session, another event, no session, no todos or a failed session lookup write nothing', () => fixture(async f => {
+  const id = 'ses_opencode_plan_1', child = 'ses_opencode_child_1'
+  const todos = [
+    { content: 'Read the spec', status: 'completed', priority: 'high' }, { content: 'Write the code', status: 'in_progress', priority: 'high' },
+    { content: 'Ship it', status: 'pending', priority: 'low' }, { content: 'Dropped idea', status: 'cancelled', priority: 'low' },
+  ]
+  const got = await planPlugin(f, 'opencode', 'return AgentBoardLocal', async (factory, saved) => {
+    const hooks = await factory({ client: { session: { get: async ({ path }) => path.id === 'ses_lookup_fails' ? { error: 'synthetic lookup failure' } : ({ data: { id: path.id, ...(path.id === child ? { parentID: id } : {}) } }) } }, directory: f.home })
+    await hooks.event({ event: { type: 'todo.updated', properties: { sessionID: child, todos } } })
+    await hooks.event({ event: { type: 'message.updated', properties: { sessionID: id, todos } } })
+    await hooks.event({ event: { type: 'todo.updated', properties: { todos } } })
+    await hooks.event({ event: { type: 'todo.updated', properties: { sessionID: id, todos: [] } } })
+    await hooks.event({ event: { type: 'todo.updated', properties: { sessionID: 'ses_lookup_fails', todos } } })
+    assert.equal(saved.length, 0)
+    await hooks.event({ event: { type: 'todo.updated', properties: { sessionID: id, todos } } })
+  })
+  assert.equal(got.saved.length, 1)
+  assert.ok(got.saved[0].args.includes('--plan-event'))
+  const sent = JSON.parse(got.saved[0].input)
+  assert.equal(sent.session_id, id)
+  assert.equal(JSON.stringify(sent).includes('high'), false, 'only text and status leave the plugin')
+  const ran = got.deliver(got.saved[0])
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=opencode/)
+  assert.match(text, /^### Write the code$/m)
+  assert.match(text, /^- \[x\] Read the spec$/m)
+  assert.match(text, /^- \[~\] Write the code$/m)
+  assert.match(text, /^- \[ \] Ship it$/m)
+  assert.match(text, /^- \[-\] Dropped idea$/m)
+}))
+
+test('an OpenClaw progress_card or update_plan call becomes the session steps; an error, no plan or another tool writes nothing', () => fixture(async f => {
+  const id = 'openclaw-plan-session-1'
+  const plan = [{ step: 'Read the spec', status: 'completed' }, { step: 'Write the code', status: 'in_progress' }, { step: 'Ship it', status: 'pending' }]
+  const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }, saved) => {
+    const handlers = new Map()
+    plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
+    const fire = (event, ctx = { sessionId: id }) => handlers.get('after_tool_call')?.(event, ctx)
+    fire({ toolName: 'progress_card', params: { plan }, error: 'tool failed' })
+    fire({ toolName: 'progress_card', params: { markdown: 'only text' } })
+    fire({ toolName: 'progress_card', params: { plan: [] } })
+    fire({ toolName: 'read_file', params: { plan } })
+    fire({ toolName: 'update_plan', params: { plan } }, {})
+    assert.equal(saved.length, 0)
+    fire({ toolName: 'progress_card', params: { plan } })
+  })
+  assert.equal(got.saved.length, 1)
+  assert.ok(got.saved[0].args.includes('--plan-event'))
+  assert.equal(JSON.parse(got.saved[0].input).session_id, id)
+  const ran = got.deliver(got.saved[0])
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=openclaw/)
+  assert.match(text, /^- \[x\] Read the spec$/m)
+  assert.match(text, /^- \[~\] Write the code$/m)
+  assert.match(text, /^- \[ \] Ship it$/m)
+}))
+
+// The plugins pass at most 200 items and the worker keeps the first 40 as steps.
+test('a plan of 250 items reaches the board as its first 40 steps, from OpenCode and from OpenClaw', async () => {
+  const many = Array.from({ length: 250 }, (_, index) => 'Item ' + (index + 1))
+  const fortySteps = progress => {
+    const text = readFileSync(progress, 'utf8')
+    assert.equal((text.match(/^- \[[ x~!?-]\] Item \d+$/gm) ?? []).length, 40)
+    assert.match(text, /^- \[ \] Item 40$/m)
+    assert.doesNotMatch(text, /^- \[ \] Item 41$/m)
+  }
+  await fixture(async f => {
+    const got = await planPlugin(f, 'opencode', 'return AgentBoardLocal', async factory => {
+      const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } }, directory: f.home })
+      await hooks.event({ event: { type: 'todo.updated', properties: { sessionID: 'ses_opencode_many', todos: many.map(content => ({ content, status: 'pending', priority: 'low' })) } } })
+    })
+    assert.equal(got.saved.length, 1)
+    assert.equal(JSON.parse(got.saved[0].input).tool_input.todos.length, 200)
+    assert.equal(got.deliver(got.saved[0]).status, 0)
+    fortySteps(f.progress)
+  })
+  await fixture(async f => {
+    const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }) => {
+      const handlers = new Map()
+      plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
+      handlers.get('after_tool_call')?.({ toolName: 'progress_card', params: { plan: many.map(step => ({ step, status: 'pending' })) } }, { sessionId: 'openclaw-plan-session-many' })
+    })
+    assert.equal(got.saved.length, 1)
+    assert.equal(JSON.parse(got.saved[0].input).tool_input.plan.length, 200)
+    assert.equal(got.deliver(got.saved[0]).status, 0)
+    fortySteps(f.progress)
+  })
+})
+
+test('the older OpenClaw update_plan name reaches the board too', () => fixture(async f => {
+  const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }) => {
+    const handlers = new Map()
+    plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
+    handlers.get('after_tool_call')?.({ toolName: 'update_plan', params: { plan: [{ step: 'Old name step', status: 'in_progress' }] } }, { sessionId: 'openclaw-plan-session-2' })
+  })
+  assert.equal(got.saved.length, 1)
+  assert.equal(got.deliver(got.saved[0]).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[~\] Old name step$/m)
 }))

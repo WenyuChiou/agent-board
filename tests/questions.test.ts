@@ -1,8 +1,8 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, emptyQuestions, isAskedBy, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
-import type { QuestionLedger } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, copiesToKeep, emptyQuestions, isAskedBy, isContinuationTurn, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionWords, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import type { QuestionAnswerEvidence, QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
 import { sha256 } from '../hooks/sha256'
@@ -617,6 +617,22 @@ test('a stopped task whose question was resolved can still be archived', () => {
   expect(archiveQuestionsKept(projects, ref, restored)).toBe(true)
   expect(archiveQuestionsKept(parseProgress(text.replace('Publish?', 'Another ask?')), ref, restored)).toBe(false)
   expect(view(restored, text).stopped[0]?.questions).toEqual([])
+})
+
+// #921 R2: a capture still queued for the background flush counts as held —
+// the view passes the pending captures to copiesToKeep and withCaptures, so
+// no copy is queued twice and a record dropped from the ledger while its
+// capture is pending still appears.
+test('a pending capture counts as held: no copy is queued for it, and its record survives a dropped ledger', () => {
+  const text = file('- [?] Publish?')
+  const current = observe(emptyQuestions(), text).ledger
+  const record = current.records[0]!
+  const receipt = captureJson(record, 'unresolved')
+  const pending = parseCapture(receipt, sha256(receipt))!
+  expect(copiesToKeep(current, current, [])).toHaveLength(1)
+  expect(copiesToKeep(current, current, [pending])).toEqual([])
+  const dropped = { ...emptyQuestions(), next: current.next, records: [] }
+  expect(withCaptures(dropped, [pending]).records.map(one => one.id)).toEqual([record.id])
 })
 
 test('a resolution does not hide the same words in a later task of that session', () => {
@@ -1295,4 +1311,48 @@ test('the own list\'s part of the idle question key moves with its questions, no
     null,
   ]
   for (const [index, one] of moved.entries()) expect([index, ownQuestionsKey(one) === key]).toEqual([index, false])
+})
+
+test('question words collapse only whitespace runs and keep single spaces as they are', () => {
+  expect(questionWords('Should we keep plan 12?')).toEqual('Should we keep plan 12?')
+  expect(questionWords('  Should we keep plan 12?  ')).toEqual('Should we keep plan 12?')
+  expect(questionWords('Should\twe\nkeep   plan 12?')).toEqual('Should we keep plan 12?')
+  expect(questionWords('Should we keep plan 12?')).toEqual('Should we keep plan 12?')
+  expect(questionWords('')).toEqual('')
+})
+
+test('continuation guard narrows QuestionAnswerEvidence and excludes end events or empty stops', () => {
+  const baseTurn: AgentTurn = {
+    agent: 'codex',
+    event: 'turn',
+    session: 'sess-1',
+    id: 'block-1',
+    cwd: '/work/demo',
+    project: 'demo',
+    prompt: '',
+    answer: 'Here is the answer',
+    transcript: '',
+    at: NOW + 1000,
+  }
+
+  // Nonempty turn is continuation
+  expect(isContinuationTurn(baseTurn)).toBe(true)
+
+  // Prompt event is continuation
+  expect(isContinuationTurn({ ...baseTurn, event: 'prompt', answer: '' })).toBe(true)
+
+  // Turn without answer field (e.g. minimal QuestionAnswerEvidence) is continuation
+  const evidence: QuestionAnswerEvidence = { agent: 'codex', id: 'block-1', session: 'sess-1', event: 'turn', at: NOW + 1000 }
+  expect(isContinuationTurn(evidence)).toBe(true)
+
+  // Empty turn stop (Cursor/Grok) is rejected
+  expect(isContinuationTurn({ ...baseTurn, answer: '' })).toBe(false)
+  expect(isContinuationTurn({ ...baseTurn, answer: '   \n  ' })).toBe(false)
+
+  // End event is rejected
+  expect(isContinuationTurn({ ...baseTurn, event: 'end' })).toBe(false)
+
+  // Missing or non-finite at is rejected
+  expect(isContinuationTurn({ ...baseTurn, at: undefined })).toBe(false)
+  expect(isContinuationTurn({ ...baseTurn, at: NaN })).toBe(false)
 })

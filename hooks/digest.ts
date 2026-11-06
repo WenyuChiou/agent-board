@@ -68,7 +68,8 @@ export const requestData = (text: string): string => text.slice(0, 1200).replace
 // token in a shape no pattern for tokens knows.
 const withoutEmphasis = (line: string): string =>
   line
-    .replace(/[*#>]+/g, '')
+    .replace(/[*#]+/g, '')
+    .replace(/^\s*>+\s?/, '')
     .replace(/_+/g, (run, at: number, whole: string) => (/[A-Za-z0-9]/.test(whole[at - 1] ?? '') && /[A-Za-z0-9]/.test(whole[at + run.length] ?? '') ? run : ''))
 
 // JSON objects and arrays are data, not prose. Only a top-level, nonempty string can
@@ -203,8 +204,8 @@ export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTu
     const renewed = renewQuestion(target, mirror.questionSequence)
     return { ...mirror, questionSequence: renewed.questionRevision, tasks: mirror.tasks.map(one => one.id === target.id ? renewed : one) }
   }
-  const target = mirror.tasks.find(one => one.status === 'in_progress') ?? mirror.tasks.find(one => one.status === 'pending')
-  if (target === undefined) return mirror
+  // Finished work stays finished when the closing reply asks a new question.
+  const target = mirror.tasks.find(one => one.status === 'in_progress') ?? mirror.tasks.find(one => one.status === 'pending') ?? task('auto-question', question, 'pending', null)
   const renewed = renewQuestion({ ...target, waiting: 'you', why: question, ask: null, options: [], command: null, link: null }, mirror.questionSequence)
 
   return {
@@ -214,7 +215,7 @@ export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTu
     // Asked again, even in the words the person answered: it waits on them again, as a plain
     // question. The kind, options, command and link Claude set were for the one they answered.
     answered: withoutMarks(mirror, [target.id]),
-    tasks: mirror.tasks.map(one => (one.id === target.id ? renewed : one)),
+    tasks: mirror.tasks.some(one => one.id === target.id) ? mirror.tasks.map(one => (one.id === target.id ? renewed : one)) : [...mirror.tasks, renewed],
   }
 }
 
@@ -227,9 +228,29 @@ export const clearAsked = (mirror: ProgressMirror): ProgressMirror => {
   return {
     ...mirror,
     autoAsk: null,
-    tasks: mirror.tasks.map(one => (one.id === id && one.waiting === 'you' ? { ...one, waiting: null, why: null } : one)),
+    tasks: mirror.tasks.map(one => one.id !== id || one.waiting !== 'you' ? one : id === 'auto-question' ? { ...one, status: 'completed' as const, waiting: null, why: null } : { ...one, waiting: null, why: null }),
   }
 }
+
+// Only the explicit question fields enter the mirror; tool results and answers stay in the host.
+export const toolQuestions = (mirror: ProgressMirror, questions: unknown, call: string, now: number): ProgressMirror => {
+  if (!Array.isArray(questions)) return mirror
+  const added = questions.flatMap((given: unknown, index) => {
+    if (given === null || typeof given !== 'object' || !('question' in given) || typeof given.question !== 'string' || given.question.trim() === '') return []
+    const options = 'options' in given && Array.isArray(given.options) ? given.options.flatMap((option: unknown) => option !== null && typeof option === 'object' && 'label' in option && typeof option.label === 'string' ? [clip(option.label, 120)] : []) : []
+    return [{ ...task(`ask:${call}:${index}`, clip(given.question, 120), 'pending', clip(given.question, 120)), ask: 'choose' as const, options }]
+  })
+  return added.reduce((current, one) => {
+    const renewed = renewQuestion(one, current.questionSequence)
+    return { ...current, source: mirror.tasks.length === 0 ? 'turns' : mirror.source, tasks: [...current.tasks.filter(task => task.id !== one.id), renewed], questionSequence: renewed.questionRevision, updated: now }
+  }, mirror)
+}
+
+// The native prompt for these questions ended: their steps are finished, so no list keeps one open.
+export const closeToolQuestions = (mirror: ProgressMirror, call: string): ProgressMirror => ({
+  ...mirror,
+  tasks: mirror.tasks.map(one => one.id.startsWith(`ask:${call}:`) ? { ...one, status: 'completed' as const, waiting: null, why: null } : one),
+})
 
 // Whether a session that keeps a Task list has a step waiting on the person.
 export const isAskingYou = (mirror: ProgressMirror): boolean => mirror.source === 'tasks' && mirror.tasks.some(one => waitsOnYou(mirror, one))

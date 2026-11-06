@@ -10,11 +10,13 @@ import { EN } from '../hooks/strings-en'
 import { paletteFor } from '../hooks/palette'
 import { ZH_CN } from '../hooks/strings-zh-cn'
 import { pressTarget } from '../hooks/pane'
-import { dashboardHtml } from '../hooks/dashboard'
+import { serveModel } from '../hooks/serve'
+import type { Strings } from '../hooks/i18n'
+import { parseQuestions } from '../hooks/questions'
 import { buildView, IDLE_MS, OLDER_SHOWN, parseSeen, relativeTime, seenJson, seenPath, SWEEP_ARMED_KEY, withSeen } from '../hooks/view'
 import type { TaskRow, View } from '../hooks/view'
 import { doneKey, parseProgress } from '../hooks/parse'
-import { chatText, peekInbox } from '../hooks/board'
+import { chatText, peekInbox, redact } from '../hooks/board'
 import { answerAgentPrompt, blockId, CLAIM_MS, isInboxFile, takenName, withAgentPrompts } from '../hooks/inbox'
 import { applyTaskCreate, applyTaskUpdate, completionKey, completionOverlay, emptyMirror } from '../hooks/mirror'
 import { applyDigest, startBackgroundJob } from '../hooks/digest'
@@ -79,6 +81,11 @@ type World = {
   paneOpenCalls?: number
   registered?: string[]
   registeredDescriptions?: string[]
+  registeredTools?: Array<{ name: string; description: string }>
+  // A refusal the host gives instead of registering (a name clash, a session without tools).
+  commandRefusal?: Record<string, string>
+  toolRefusal?: string
+  debugLog?: Array<{ text: string; to: string | undefined }>
   liveOutput?: string
   liveFailure?: 'exit' | 'timeout' | 'truncated'
   liveCalls?: Array<{ argv: string[]; init: unknown }>
@@ -262,9 +269,21 @@ const engineBeneath = (on: On, world: World): MockClock => {
     },
   }))
   on('command.register', ($, e) => {
+    const refusal = world.commandRefusal?.[e.name]
+    if (refusal !== undefined) return { deny: refusal }
     world.registered?.push(e.name)
     world.registeredDescriptions?.push(e.description ?? '')
     return { value: { command: e.name } }
+  })
+  on('tool.register', ($, e) => {
+    if (world.toolRefusal !== undefined) return { deny: world.toolRefusal }
+    world.registeredTools?.push({ name: e.name, description: e.description })
+    // The host puts its own prefix before the name the plugin chose.
+    return { value: { tool: `mcp__plugin_synthetic__${e.name}` } }
+  })
+  on('ui.log', ($, e) => {
+    world.debugLog?.push({ text: e.text, to: e.to })
+    return { value: undefined }
   })
   on('ui.open', () => {
     world.paneOpenCalls = (world.paneOpenCalls ?? 0) + 1
@@ -887,10 +906,25 @@ const ANSWERED = '/home/me/.claude/progress-answered.json'
 const storedQuestion = (world: World, words: string): string =>
   (JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ id: string; words: string; isWaiting: boolean }>).find(row => row.words === words && row.isWaiting)?.id ?? ''
 
-// progress.html lists what needs you in its Needs you sheet, before Working now (#546).
-const inNeeds = (page: string, text: string): boolean => { const at = page.indexOf(text); return at > page.indexOf('id="dash-needs"') && at < page.indexOf('id="dash-working"') }
-// An unprocessed inbox turn's copy; a Needs you item also uses class="ask", but starts with its kind.
-const INBOX_ASK = /<div class="ask" data-agent="[^"]*"><div class="where">/
+// Feed the live model the fixture's persisted report and unprocessed inbox data.
+// Mounting the pane first exercises the production pending reader and its read limits.
+const pageModelText = async ($: Engine, world: World, s: Strings = ZH_TW): Promise<string> => {
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.unmount()
+  const done = typeof world.store?.inboxDone === 'object' && world.store.inboxDone !== null ? world.store.inboxDone as Record<string, string> : {}
+  const files = [...world.files].filter(([path]) => path.startsWith(`${INBOX}/`) && isInboxFile(path.slice(INBOX.length + 1)) && done[path.slice(INBOX.length + 1)] === undefined)
+    .map(([path, body]) => ({ name: path.slice(INBOX.length + 1), body, at: world.mtimes?.[path] ?? world.mtime }))
+    .sort((a, b) => b.at - a.at).slice(0, 30)
+  const pending = peekInbox(files, () => '', text => redact(text, '/home/me'), s)
+  const ledger = parseQuestions(world.files.get(QUESTIONS) ?? '', true) ?? emptyQuestions()
+  const hidden = JSON.parse(world.files.get(ANSWERED) ?? '{"answered":[]}').answered as string[]
+  const view = buildView(parseProgress(world.files.get(FILE) ?? ''), [], null, world.at ?? Date.parse('2026-10-16T12:00:00Z'), 0, {}, s, hidden, {}, ledger, undefined, pending)
+  return JSON.stringify(serveModel(view, pending, s))
+}
+const inNeeds = (page: string, text: string): boolean => {
+  const model = JSON.parse(page) as ReturnType<typeof serveModel>
+  return [...model.asks, ...model.turns.filter(turn => turn.isQuestion)].some(item => item.text.includes(text))
+}
 
 const ASKED = (text: string): string => `# 專案進度
 
@@ -1110,7 +1144,6 @@ export {
   HERMES_TURN,
   IDLE_MS,
   INBOX,
-  INBOX_ASK,
   JOBS,
   JOURNAL,
   LEDGER_LINK,
@@ -1179,7 +1212,8 @@ export {
   confirmStep,
   connectDataRoots,
   controlFile,
-  dashboardHtml,
+  serveModel,
+  pageModelText,
   doneKey,
   effectivePromptMirror,
   emptyMirror,

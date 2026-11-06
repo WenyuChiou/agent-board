@@ -25,6 +25,14 @@ export default {
       if (['compaction', 'restart'].includes(event.reason)) return
       report('--codex-event', { session_id: event.sessionId, hook_event_name: 'SessionEnd' }, deadline)
     }))
+    // The plan mirror (#922): the agent's own plan, as a failed call or a call without a plan has none.
+    // Only each step's text and status are sent, in the shape of Codex's update_plan.
+    api.on('after_tool_call', (event, ctx) => withHook((_current, deadline) => {
+      if (event?.error || !['progress_card', 'update_plan'].includes(event?.toolName)) return
+      const plan = event.params?.plan
+      if (!ctx?.sessionId || !Array.isArray(plan) || plan.length === 0) return
+      report('--plan-event', { session_id: ctx.sessionId, tool_name: 'update_plan', tool_input: { plan: plan.slice(0, 200).map(item => ({ step: item?.step, status: item?.status })) } }, deadline)
+    }))
     api.agent.events.registerAgentEventSubscription({
       id: 'agent-board-local-status', streams: ['lifecycle'], phases: ['start', 'end', 'error'], payload: 'metadata',
       handle: event => withHook((_current, deadline) => {

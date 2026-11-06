@@ -45,7 +45,8 @@ export const makeWorld = ({ lang = 'en' } = {}) => {
   }
   const modules = process.platform === 'win32' && modulePath()
   if (modules) env.PSModulePath = modules
-  Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1' })
+  // AGENT_BOARD_TEST_PID: a board this world starts opens no window and stops once this test process is gone (#959).
+  Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid) })
   const inside = file => {
     const rel = relative(root, resolve(file))
     assert.ok(rel && rel !== '..' && !rel.startsWith('..\\') && !rel.startsWith('../') && !isAbsolute(rel), `Outside world: ${file}`)
@@ -120,10 +121,10 @@ cp.spawnSync = (file, args, options) => {
 syncBuiltinESMExports()
 `)
     env.NODE_OPTIONS = `--import=${pathToFileURL(preload).href} --import=${pathToFileURL(clipboard).href}`
-    // HTML, serve, and desktop surface launch paths must stay inside the test process.
+    // Serve and desktop launch paths must stay inside the test process.
     const browserCalls = [...BOARD_SCRIPT.matchAll(/openInBrowser\(([^,]+),/g)]
-    assert.equal(browserCalls.length, 3, 'Review every browser launch when the bundle changes')
-    assert.deepEqual(browserCalls.map(match => match[1]).sort(), ['address', 'html', 'url'])
+    assert.equal(browserCalls.length, 2, 'Review every browser launch when the bundle changes')
+    assert.deepEqual(browserCalls.map(match => match[1]).sort(), ['address', 'url'])
     // The bytes stay identical across worlds; only the isolated environment
     // supplies this instance's baked configuration.
     world.write('agent-board.mjs', `globalThis.AGENT_BOARD = { path: process.env.E2E_BOARD_PATH, lang: process.env.E2E_BOARD_LANG }\n${BOARD_SCRIPT.replace(/openInBrowser\(([^,]+),/g, '((target, done) => done(false))($1,')}`)
