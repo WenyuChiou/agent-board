@@ -729,6 +729,7 @@ export const ZH_TW = {
   serveLanFailed: '沒辦法把看板開到區域網路上。',
   serveClose: '關閉看板',
   serveClosed: '看板已關閉，這個分頁可以關了。要再開，可在終端機執行 agent-board 或在 agent 對話中輸入 /agent-board。',
+  serveMoved: '看板已移到較新的分頁，這個分頁不再更新，可以關了。',
   serveCloseBusy: '還有一句正在傳給 agent，等它回完再關閉看板。',
   serveNotStarted: '伺服器沒有啟動。',
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'

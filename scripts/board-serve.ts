@@ -270,15 +270,22 @@ export const startServer = (o: ServeOptions): void => {
   let lastSeen = Date.now()
   // Which board pages are open (#265). A page names itself in x-board-page on every poll; loading the page counts until its
   // first poll. The terminal board and other scripts read GET /api/board without that header and do not count. A page that
-  // says it left is dropped alone, so another page that is still open stays counted.
-  const pages = new Map<string, number>()
+  // says it left is dropped alone, so another page that is still open stays counted. Only a page that reported itself visible
+  // counts as a window the person can see; a hidden or minimized one does not. When a newer page has asked, an older page is
+  // told it was replaced and stops asking.
+  const pages = new Map<string, { seq: number; at: number; visible: boolean }>()
   let loadedAt = 0
+  let pageSeq = 0
+  // A page that has not asked for this long no longer stands for a newer page (a backgrounded tab asks about once a minute).
+  const PAGE_STALE_MS = 150_000
   const pageIdOf = (headers: IncomingMessage['headers']): string => {
     const id = text(headers['x-board-page'])
     return /^[\w-]{1,64}$/.test(id) ? id : ''
   }
+  // How long ago a visible page last loaded or asked; null when none did.
   const pageAgo = (now: number): number | null => {
-    const latest = Math.max(loadedAt, ...pages.values())
+    let latest = loadedAt
+    for (const one of pages.values()) if (one.visible && one.at > latest) latest = one.at
     return latest === 0 ? null : now - latest
   }
   let isStopping = false
@@ -386,11 +393,16 @@ export const startServer = (o: ServeOptions): void => {
     )
     if (problem !== null) return json(res, problem, {})
     if (!isLan && isPage) loadedAt = Date.now()
+    let isReplaced = false
     if (!isLan && req.method === 'GET' && url.pathname === '/api/board' && pageIdOf(req.headers) !== '') {
       const now = Date.now()
-      pages.set(pageIdOf(req.headers), now)
+      const id = pageIdOf(req.headers)
+      const mine = pages.get(id)?.seq ?? ++pageSeq
+      isReplaced = [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)
+      if (isReplaced) pages.delete(id)
+      else pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
       // Pages that stopped asking long ago (a crashed window) are forgotten.
-      if (pages.size > 32) for (const [id, at] of pages) if (now - at > 300_000) pages.delete(id)
+      if (pages.size > 32) for (const [other, one] of pages) if (now - one.at > 300_000) pages.delete(other)
     }
     if (!url.pathname.startsWith('/api/messages/')) {
       lastSeen = Date.now()
@@ -404,6 +416,8 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (req.method === 'GET') {
       if (url.pathname === '/api/board') {
+        // An older page stops asking: it shows one line that the board moved to the newer page (#265).
+        if (isReplaced) return json(res, 200, { moved: true })
         // A file the board cannot read is named on the page, which would otherwise say it is offline. The page
         // is always the grouped one; the old ?group=agent address asks for what every address gets now.
         try {

@@ -4495,6 +4495,14 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   assert.match(named, /^[\w-]{1,64}$/, 'the page names itself in a form the board accepts')
   for (const headers of polls) assert.equal(headers['x-board-page'], named, 'every poll names the same page, so scripts reading the board do not count as one and two pages stay apart')
   assert.equal(dom.sent.length, 0)
+  assert.ok(polls.every(headers => headers['x-board-visible'] === '1'), 'a shown page says it is visible')
+  // A tab put in the background says so with its next poll, so it no longer counts as a window the person can see.
+  dom.hideTab()
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+  assert.equal(polls.at(-1)['x-board-visible'], '0', 'a hidden page says it is hidden')
+  dom.showTab()
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+  assert.equal(polls.at(-1)['x-board-visible'], '1')
   dom.leave()
   await dom.settle()
   const gone = dom.sent.filter(one => one.path === '/api/page-gone')
@@ -4502,6 +4510,21 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   assert.equal(gone[0].keepalive, true, 'the request outlives the closing page')
   assert.equal(gone[0].headers['x-board-token'], 'x')
   assert.equal(gone[0].headers['x-board-page'], named, 'the page that leaves is the one that was polling')
+})
+
+test('a page the board says was replaced stops asking and shows one line (#265)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  let polls = 0
+  const dom = await pageDom(html, null, { width: 1000, getBoard: async () => { polls += 1; return { ok: true, json: async () => ({ moved: true }) } } })
+  await dom.settle()
+  assert.equal(polls, 1, 'the page asked once')
+  assert.match(dom.node('main').textContent, /The board moved to a newer tab/)
+  const before = polls
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }).catch(() => {})
+  assert.equal(polls, before, 'a replaced page asks no more')
 })
 
 test('an old page rejected by a restarted server shows the offline line', async () => {

@@ -691,6 +691,7 @@ export const EN: Strings = {
   serveLanFailed: "Couldn't open the board to the local network.",
   serveClose: 'Close the board',
   serveClosed: 'The board is closed; you can close this tab. To open it again, run agent-board in a terminal or /agent-board in an agent\'s chat.',
+  serveMoved: 'The board moved to a newer tab, so this tab stopped updating; you can close it.',
   serveCloseBusy: 'A message is still on its way to an agent; close the board once it replies.',
   serveNotStarted: 'its server did not start.',
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
