@@ -265,6 +265,13 @@ export const markApproval = (mirror: ProgressMirror, step: string): ProgressMirr
 export const clearApproval = (mirror: ProgressMirror): ProgressMirror =>
   mirror.tasks.some(one => one.id === APPROVAL) ? { ...mirror, tasks: mirror.tasks.filter(one => one.id !== APPROVAL) } : mirror
 
+// The ledger needs to see the approval closed before its temporary step goes away.
+export const closeApproval = (mirror: ProgressMirror): ProgressMirror =>
+  mirror.tasks.some(one => one.id === APPROVAL) ? {
+    ...mirror,
+    tasks: mirror.tasks.map(one => one.id === APPROVAL ? { ...one, status: 'completed' as const, waiting: null, why: null } : one),
+  } : mirror
+
 // The native prompt for these questions ended: their steps are finished, so no list keeps one open.
 export const closeToolQuestions = (mirror: ProgressMirror, call: string): ProgressMirror => ({
   ...mirror,
