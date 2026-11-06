@@ -82,7 +82,7 @@ const fullDay = (monthDay: string, now: number): string => {
 
 export type HistorySweep = { text: string; entries: string[]; stamped: number; moved: number }
 
-// One pass over a board's text. A finished (`[x]` or `[-]`) step of a hand-kept task with no date
+// One pass over a board's text. A finished (`[x]` or `[-]`) step of a hand-kept task that is still open, with no date
 // gets today's, and nothing else happens to it. A step whose date is more than `days` days
 // before now, in a task that is still open, moves out, one archive entry for each task. Steps
 // of any other mark, `>` lines, agent blocks and finished tasks (the 3-day rule keeps those)
@@ -101,7 +101,9 @@ export const sweepHistory = (text: string, now: number, days: number, s: Strings
   let stampCount = 0
   let moveCount = 0
   for (const { project, task } of tasks) {
-    const isOpen = !isTaskComplete(task)
+    // A finished task is left exactly as it is: the 3-day rule and the first release's count-only
+    // pass own it, so a sweep that has nothing else to write writes nothing there.
+    if (isTaskComplete(task)) continue
     const moving: Array<{ line: number; day: string }> = []
     for (const step of task.steps) {
       if (step.status !== 'done' && step.status !== 'cancelled') continue
@@ -115,7 +117,7 @@ export const sweepHistory = (text: string, now: number, days: number, s: Strings
         stampCount += 1
         continue
       }
-      if (isOpen && now - startOf(day) > days * DAY) moving.push({ line: step.line, day })
+      if (now - startOf(day) > days * DAY) moving.push({ line: step.line, day })
     }
     const firstStep = moving[0]
     if (firstStep === undefined) continue
