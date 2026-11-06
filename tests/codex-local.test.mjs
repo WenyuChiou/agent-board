@@ -9472,3 +9472,41 @@ test('Windows fixture Node is a hard link to the running executable when linking
   if (linked.nlink < 2n) return t.skip('this computer refused a hard link to node.exe; the fixture copied it')
   assert.equal(linked.ino, original.ino)
 }))
+
+test('codex: three turns in one interactive session each reach the board (#289)', () => fixture(async f => {
+  assert.equal(f.install('--apply').status, 0)
+  const recordFile = join(f.root, 'sessions', createHash('sha256').update(`codex:${session}`).digest('hex') + '.json')
+  assert.equal(f.event('SessionStart', undefined, { turn_id: undefined }).status, 0)
+  const seen = []
+  for (const turn of ['t1', 't2', 't3']) {
+    const start = f.event('UserPromptSubmit', turn)
+    assert.equal(start.status, 0, `${turn} prompt: ${start.stderr}`)
+    assert.match(readFileSync(f.progress, 'utf8'), /state=working/, turn)
+    const stop = f.event('Stop', turn)
+    assert.equal(stop.status, 0, `${turn} stop: ${stop.stderr}`)
+    assert.match(readFileSync(f.progress, 'utf8'), /state=waiting/, turn)
+    seen.push(...JSON.parse(readFileSync(recordFile, 'utf8')).events)
+  }
+  const events = JSON.parse(readFileSync(recordFile, 'utf8')).events
+  for (const turn of ['t1', 't2', 't3']) for (const name of ['UserPromptSubmit', 'Stop']) assert.ok(events.includes(`${name}:${turn}`), `${name}:${turn} in ${events}`)
+}))
+
+test('codex: every turn of one interactive session claims its mailbox message, whatever turn id Codex sends (#289)', async () => mailboxFixture(async f => {
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  f.seed()
+  for (const [index, turn] of ['t1', 't2', 't3'].entries()) {
+    if (index > 0) {
+      const saved = f.state(), target = saved.mailboxes[0]
+      const queued = queueMessage(saved, { id: `hook-mailbox-message-${turn}`, target: target.id, turn: 'session', text: `Synthetic payload ${turn}` }, 'board', target, Date.now()).state
+      writeFileSync(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, ...queued }))
+    }
+    const text = index === 0 ? 'Synthetic mailbox payload' : `Synthetic payload ${turn}`
+    let result = f.call('codex', 'UserPromptSubmit', { turn_id: turn })
+    assert.equal(result.status, 0, result.stderr)
+    // A claim held by a slow scanner defers once; the next prompt of the same turn delivers (see the deferral test).
+    if (!result.stdout.includes(text)) result = f.call('codex', 'UserPromptSubmit', { turn_id: turn })
+    assert.ok(result.stdout.includes(text), `${turn}: ${result.stdout} ${result.stderr}`)
+    assert.equal(f.call('codex', 'Stop', { turn_id: turn }).status, 0, turn)
+  }
+  assert.deepEqual(f.state().messages.map(one => one.status), ['accepted', 'accepted', 'accepted'])
+}))
