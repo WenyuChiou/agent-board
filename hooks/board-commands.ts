@@ -25,7 +25,9 @@ export const normalizeCommandPath = (text: string, path: string, placeholder: st
   return text.split(encoded).join(placeholder).split(JSON.stringify(path).slice(1, -1)).join(placeholder).split(path).join(placeholder)
 }
 
-// Share the exact command names with generated prompt hooks and inbox readers.
+// Share the exact command names with generated prompt hooks and inbox readers. `/board` is
+// only recognised: since #868 no command file or text offers it, but an install that kept an
+// edited old /board file still has it, and its typed prompt is still a board request.
 export const BOARD_REQUEST = /^\s*(?:\/board|[$/]agent-board)\s*$/
 
 // The fields a prompt receipt keeps: who sent it and from which folder, never its words.

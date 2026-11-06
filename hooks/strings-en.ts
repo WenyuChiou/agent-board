@@ -96,6 +96,8 @@ export const EN: Strings = {
     "preview": "would update {count} setup files",
     "applied": "updated {count} setup files",
     "current": "{count} already current",
+    "retire": "{file} (the old /board command; setup removes it)",
+    "keptEdited": "{file} (your edited old /board command; setup leaves it; the command is now /agent-board)",
     "ready": "already set up",
     "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry with {command}.",
     "retry": "Retry after fixing the conflicting files: {command}",
