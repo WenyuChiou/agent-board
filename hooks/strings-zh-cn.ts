@@ -685,7 +685,7 @@ export const ZH_CN: Strings = {
   serveLanFailed: '没法把看板开到局域网上。',
   serveClose: '关闭看板',
   serveClosed: '看板已关闭，这个标签页可以关了。要再打开，可在终端运行 agent-board 或在 agent 对话中输入 /agent-board。',
-  serveMoved: '看板已移到更新的标签页，这个标签页不再更新，可以关了。',
+  serveMoved: '看板已移到更新的标签页，这个标签页不再更新，可以关了。要再打开看板，可在 agent 对话中输入 /agent-board 或在终端运行 agent-board。',
   serveCloseBusy: '还有一句正在发给 agent，等它回完再关闭看板。',
   serveNotStarted: '服务器没有启动。',
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'

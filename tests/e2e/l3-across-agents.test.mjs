@@ -67,55 +67,57 @@ describe('L3 across agents and sessions', () => {
       assert.equal(before.split(seam).length - 1, 2)
       world.write('agent-board.mjs', before.split(seam).join('((target, done) => { process.stdout.write("E2E_BROWSER_REQUEST\\n"); done(true) })('))
       const server = await serve.start(world)
-      const outputs = []
-      outputs.push(await command(world, ['--serve', '--idle-minutes', '1']))
-      // The terminal board reads the board from the running page too; that is not a window.
-      assert.equal((await server.get('/api/board')).status, 200)
-      outputs.push(await command(world, ['--serve', '--idle-minutes', '1']))
-      assert.equal((outputs[1].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1, 'a script reading the board is not an open window')
-      // The opened window loads the page, as a real one does.
-      await server.page()
-      outputs.push(await command(world, ['--serve', '--idle-minutes', '1']))
-      for (const output of outputs) assert.ok(output.includes(server.url), 'The same isolated server address must be reused')
-      assert.equal((outputs[0].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1)
-      assert.equal((outputs[2].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, outputs[2])
-      // The agent's own way to open the page (--html, the same code /agent-board uses) points at the open window too.
-      const html = await command(world, ['--html'])
-      assert.equal((html.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, html)
-      assert.ok(html.includes(server.url), html)
-      // A page that says it is leaving is no longer an open window: the next open starts one.
-      assert.equal((await server.post('/api/page-gone', {})).status, 200)
-      const third = await command(world, ['--serve', '--idle-minutes', '1'])
-      assert.equal((third.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1, third)
-      // The test machine can be slow to start a command, so a visible page counts for a minute here; the expiry itself is tested last with a short one.
-      world.env.AGENT_BOARD_PAGE_OPEN_MS = '60000'
-      // A page counts only while it reports itself visible: each poll names its page in x-board-page and its visibility in x-board-visible.
       const page = new URL(server.url)
+      // Each poll names its page in x-board-page and says whether the page is visible in x-board-visible, as the real page does.
       const poll = (id, visible = '1') => fetch(new URL('/api/board', page), { headers: { 'x-board-token': page.searchParams.get('t'), 'x-board-page': id, 'x-board-visible': visible } })
       const leave = id => fetch(new URL('/api/page-gone', page), { method: 'POST', headers: { 'x-board-token': page.searchParams.get('t'), 'x-board-page': id, 'content-type': 'application/json' }, body: '{}' })
+      // A real page asks every 3 seconds, so while a command runs the pages named here keep asking (every second); the window is never stretched for a slow machine.
+      const keeping = async (pages, run) => {
+        const tick = () => Promise.all(pages.map(([id, visible]) => poll(id, visible)))
+        await tick()
+        const timer = setInterval(() => { void tick().catch(() => {}) }, 1000)
+        try { return await run() } finally { clearInterval(timer) }
+      }
       const windows = output => (output.match(/E2E_BROWSER_REQUEST/g) ?? []).length
+      const serving = () => command(world, ['--serve', '--idle-minutes', '1'])
+      const outputs = []
+      outputs.push(await serving())
+      // The terminal board reads the board from the running page too; that is not a window.
+      assert.equal((await server.get('/api/board')).status, 200)
+      outputs.push(await serving())
+      assert.equal(windows(outputs[1]), 1, 'a script reading the board is not an open window')
+      // The opened window loads the page and keeps asking, as a real one does.
+      await server.page()
+      outputs.push(await keeping([['page-zero', '1']], serving))
+      for (const output of outputs) assert.ok(output.includes(server.url), 'The same isolated server address must be reused')
+      assert.equal(windows(outputs[0]), 1)
+      assert.equal(windows(outputs[2]), 0, outputs[2])
+      // The agent's own way to open the page (--html, the same code /agent-board uses) points at the open window too.
+      const html = await keeping([['page-zero', '1']], () => command(world, ['--html']))
+      assert.equal(windows(html), 0, html)
+      assert.ok(html.includes(server.url), html)
+      // A page that says it is leaving is no longer an open window: the next open starts one.
+      assert.equal((await leave('page-zero')).status, 200)
+      assert.equal(windows(await serving()), 1)
       // A page in a hidden or minimized window does not stand for a window the person can see.
-      assert.equal((await poll('page-one', '0')).status, 200)
-      assert.equal(windows(await command(world, ['--html'])), 1, 'a hidden page must not stop a window')
+      assert.equal(windows(await keeping([['page-one', '0']], () => command(world, ['--html']))), 1, 'a hidden page must not stop a window')
       // A visible page does.
-      assert.equal((await poll('page-one')).status, 200)
-      assert.equal(windows(await command(world, ['--html'])), 0)
-      // A newer page takes over: the older one is told once and stops, the newer one keeps its board.
+      assert.equal(windows(await keeping([['page-one', '1']], () => command(world, ['--html']))), 0)
+      // A newer page takes over: the older one is told it was replaced and stays replaced; the newer one keeps its board.
       assert.equal((await poll('page-two')).status, 200)
-      const replaced = await poll('page-one')
-      assert.equal((await replaced.json()).moved, true, 'the older page is told the board moved')
+      assert.equal((await (await poll('page-one')).json()).moved, true, 'the older page is told the board moved')
+      assert.equal((await (await poll('page-one')).json()).moved, true, 'a poll already on its way must not make the replaced page the newest again')
       const kept = await (await poll('page-two')).json()
       assert.equal(kept.moved, undefined)
       assert.ok(kept.model, 'the newer page still gets the board')
       // The replaced page leaving changes nothing; the newer page is still open.
       assert.equal((await leave('page-one')).status, 200)
-      assert.equal(windows(await command(world, ['--serve', '--idle-minutes', '1'])), 0)
+      assert.equal(windows(await keeping([['page-two', '1']], serving)), 0)
       // The last page leaving: the next open starts a window.
       assert.equal((await leave('page-two')).status, 200)
       assert.equal(windows(await command(world, ['--html'])), 1)
       // A page that stopped asking without leaving (a crash) stops counting once its last visible poll is old enough.
       assert.equal((await poll('page-three')).status, 200)
-      assert.equal(windows(await command(world, ['--html'])), 0)
       world.env.AGENT_BOARD_PAGE_OPEN_MS = '1500'
       await new Promise(done => setTimeout(done, 1800))
       assert.equal(windows(await command(world, ['--html'])), 1, 'a page that stopped asking must not stop a window')

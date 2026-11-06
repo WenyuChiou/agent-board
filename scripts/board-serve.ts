@@ -276,6 +276,8 @@ export const startServer = (o: ServeOptions): void => {
   const pages = new Map<string, { seq: number; at: number; visible: boolean }>()
   let loadedAt = 0
   let pageSeq = 0
+  // Pages told they were replaced. They stay replaced: a poll already on its way when the page stopped must not make it the newest again.
+  const retired = new Set<string>()
   // A page that has not asked for this long no longer stands for a newer page (a backgrounded tab asks about once a minute).
   const PAGE_STALE_MS = 150_000
   const pageIdOf = (headers: IncomingMessage['headers']): string => {
@@ -398,9 +400,13 @@ export const startServer = (o: ServeOptions): void => {
       const now = Date.now()
       const id = pageIdOf(req.headers)
       const mine = pages.get(id)?.seq ?? ++pageSeq
-      isReplaced = [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)
-      if (isReplaced) pages.delete(id)
-      else pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
+      isReplaced = retired.has(id) || [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)
+      if (isReplaced) {
+        pages.delete(id)
+        retired.add(id)
+        // A bound on the memory: the oldest ids are forgotten first.
+        if (retired.size > 256) retired.delete(retired.values().next().value as string)
+      } else pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
       // Pages that stopped asking long ago (a crashed window) are forgotten.
       if (pages.size > 32) for (const [other, one] of pages) if (now - one.at > 300_000) pages.delete(other)
     }
@@ -456,6 +462,7 @@ export const startServer = (o: ServeOptions): void => {
     if (body === null) return json(res, 400, {})
     if (url.pathname === '/api/page-gone' && !isLan) {
       pages.delete(pageIdOf(req.headers))
+      retired.delete(pageIdOf(req.headers))
       loadedAt = 0
       return json(res, 200, {})
     }
