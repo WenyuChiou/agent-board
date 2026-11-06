@@ -49,13 +49,13 @@ agent-board --help all
 | --- | --- |
 | `agent-board` | Open the terminal board over SSH or in an interactive terminal without a display, and the page otherwise |
 | `agent-board stop` | Stop the board page server for this progress file |
-| `--serve` | The old spelling of plain `agent-board`: still accepted, and prints only the page address |
+| `--serve` | The old spelling of plain `agent-board`: still accepted, and prints only the page address, with no text board |
 | `--lan` | Open the page and show the phone address too; no `--serve` needed |
 | `--watch` | Terminal board; arrows or `j`/`k` and Enter to select, `x` tick, `d` confirm done, `a` archive, `t` archive the done list now, `y`/`n` or `1`–`9` answer, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` page, `q` quit. Into a pipe it prints the board once as plain text |
 | `--json` | Versioned, redacted, read-only board data for an agent; see [Board JSON](BOARD-JSON.md) |
 | `--status` | One line for tmux or a shell prompt, e.g. `2 need you · 3 working`. Reads only `progress.md` once; no sidecar/inbox reads, writes, browser or service. Counts follow the page's Needs you and Working now rules for that snapshot; questions retained only in sidecars are not included. Always plain text, even with `FORCE_COLOR`. |
 
-The terminal board uses the page's colours: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the nearest of 256. It takes the light set with `--theme light` or when `COLORFGBG` names a light background; `NO_COLOR` or `--no-color` turns colour off and `FORCE_COLOR` turns it on for `| less -R`. An answer key sends the answer when the running page (`--serve`) can send it into the question's session; otherwise it copies it, and the line says so. The Chinese boards count symbols such as ● and ✓ as two columns.
+The terminal board uses the page's colours: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the nearest of 256. It takes the light set with `--theme light` or when `COLORFGBG` names a light background; `NO_COLOR` or `--no-color` turns colour off and `FORCE_COLOR` turns it on for `| less -R`. An answer key sends the answer when the running page can send it into the question's session; otherwise it copies it, and the line says so. The Chinese boards count symbols such as ● and ✓ as two columns.
 
 Add `--lang en`, `zh-TW` or `zh-CN` to select the board language. Windows/custom installations use the printed absolute paths. `$agent-board` is the Codex skill entry; OpenCode installs `/agent-board`. Other hosts must load their installed skill/command first.
 

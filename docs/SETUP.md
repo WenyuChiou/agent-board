@@ -189,7 +189,7 @@ On a first plain `agent-board` run with nothing set up, it prints the setup prev
 A plain `agent-board` call opens the interactive local page on a desktop, from an agent or
 in a non-interactive call. An interactive terminal over SSH or without a display opens the
 terminal board; CI prints text. `--html` and the old spelling `--serve` start or reuse the local service and
-open the page (`--serve` prints only the address); `--lan` opens it and shows the phone address; `--watch` selects the terminal board, `--print` prints text, and `--json`
+open the page (`--serve` prints only the address, with no text board); `--lan` opens it and shows the phone address; `--watch` selects the terminal board, `--print` prints text, and `--json`
 returns the board for agents.
 
 These board calls run the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
