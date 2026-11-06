@@ -492,6 +492,20 @@ test('a self-parted test file runs whole in every part and keeps its share, so t
   for (const path of selfPartedTests) assert.match(await readFile(path, 'utf8'), /^const test = partTest\(nodeTest\)$/m, path)
 })
 
+test('the budgeted slow files go to different parts, and the parts together run every other file once', async () => {
+  const { partFiles, selfPartedTests, BOARD_FILE_BUDGETS_MS } = await import('../scripts/ci-impact.mjs')
+  // The board set in the order main's Windows run 42281474369 listed it, where every-nth put all four budgeted files in part 2 of 6.
+  const files = ['answer-guidance', 'board-entry', 'board-json', 'board-status', 'board-storage', 'board-surfaces', 'board', 'classifier-exit-proof', 'codex-fallback', 'codex-host', 'codex-local', 'codex-project-move', 'connect-worker', 'folder-identity', 'host-upgrade', 'legacy-connect', 'local-agent-manifest', 'local-lock', 'mcp-tools', 'messaging-matrix', 'page-look', 'page-regressions', 'page-state', 'page-titles', 'parity', 'performance-budgets', 'preflight-lock-policy', 'prompt-hooks', 'question-clarity', 'readme-codex-trust', 'report-tail', 'report-validation', 'row-keys', 'runtime-folder', 'setup-guidance', 'setup-readme', 'tidy', 'view-index-mutation', 'ws-stdio'].map(name => 'tests/' + name + '.test.mjs')
+  const slow = Object.keys(BOARD_FILE_BUDGETS_MS).filter(path => !selfPartedTests.includes(path))
+  for (const total of [4, 6]) {
+    const shares = Array.from({ length: total }, (_, i) => partFiles(files, (i + 1) + '/' + total))
+    for (const share of shares) assert.ok(share.filter(path => slow.includes(path)).length <= 1, total + ' parts: ' + share.join(' '))
+    const others = shares.flat().filter(path => !selfPartedTests.includes(path))
+    assert.deepEqual([...others].sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
+    for (const share of shares) for (const path of selfPartedTests) assert.ok(share.includes(path))
+  }
+})
+
 test('the part given to a run reaches its test processes, even when the environment names another part', async () => {
   const { runTestFiles } = await import('../scripts/ci-impact.mjs')
   const saved = process.env.CI_TEST_PART
