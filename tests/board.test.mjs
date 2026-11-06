@@ -9674,10 +9674,12 @@ test('a working Codex session with no block of its own names its project once an
     assert.equal(working.toLowerCase().split('demo-garden').length - 1, 1, working)
     assert.ok(!working.includes(EN.codexLifecycle), working)
   } finally { await board.close() }
-  // Once it waits, the hook's words are true and the row says them.
+  // Once it waits, the hook's words are true and the row says them, outside Working now (#1051).
   const waiting = await groupedPage(lifecycle('waiting'))
   try {
-    assert.ok(sectionWords(await pageDom(waiting.html, waiting.model), 'working').includes(EN.codexLifecycle))
+    const dom = await pageDom(waiting.html, waiting.model)
+    assert.ok(!sectionWords(dom, 'working').includes(EN.codexLifecycle), sectionWords(dom, 'working'))
+    assert.ok(sectionWords(dom, 'others').includes(EN.codexLifecycle), sectionWords(dom, 'others'))
   } finally { await waiting.board.close() }
 })
 
