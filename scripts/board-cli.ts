@@ -1968,11 +1968,18 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
   if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
   const found = await runningPage()
   if (found !== null) return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
-  const rest = ['--lang', '--port', '--messages-dir', '--idle-minutes', '--stale-ms'].flatMap(name => {
+  const rest = ['--lang', '--port', '--idle-minutes', '--stale-ms'].flatMap(name => {
     const value = flag(name)
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
+  // The child runs with cwd set to the board's folder, so a relative path would resolve
+  // against the board's folder instead of this command's folder. Pass the board and the
+  // messages folder the parent resolved, as absolute paths, so the child serves the same
+  // board and messages. The board is passed every time: a relative CLAUDE_PROGRESS_FILE
+  // would resolve differently in the child too.
+  rest.push('--progress-file', path)
+  if (flag('--messages-dir') !== undefined) rest.push('--messages-dir', messagesDirectory())
   // On Windows the server child is told which folders were just checked, so it does not check them again.
   const handoff = runtimeFolderHandoff()
   // The default message folder is checked here, so its whoami and icacls starts are not among

@@ -6217,6 +6217,67 @@ test('--serve forwards --stale-ms to the background browser child', { timeout: 6
   } finally { await board.end([url]) }
 })
 
+test('a page started with --progress-file shows that board, not the default one', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const other = join(board.dir, 'other')
+  mkdirSync(other)
+  const custom = join(other, 'progress.md')
+  writeFileSync(custom, `# Progress\n\n## custom-board\n### Custom board work\n- [ ] A custom step\n`)
+  const elsewhere = join(board.dir, 'elsewhere')
+  mkdirSync(elsewhere)
+  const titlesOf = async url => {
+    const res = await fetch(`http://127.0.0.1:${new URL(url).port}/api/board`, { headers: { 'x-board-token': new URL(url).searchParams.get('t') } })
+    assert.equal(res.status, 200)
+    const model = (await res.json()).model
+    // Rows and the questions the page asks: the default board's waiting session shows
+    // only as a question ("Per-key limit"), never as a row, so both must be checked.
+    return {
+      rows: [...model.groups.flatMap(group => group.rows), ...model.stopped].map(row => row.title),
+      asks: model.asks.map(ask => ask.text),
+    }
+  }
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board', '--progress-file', custom]))
+    assert.ok(url)
+    const shown = await titlesOf(url)
+    assert.ok(shown.rows.includes('Custom board work'), JSON.stringify(shown))
+    assert.ok(!shown.rows.includes('Rate-limit the public endpoints'), JSON.stringify(shown))
+    assert.ok(!shown.asks.includes('Per-key limit'), JSON.stringify(shown))
+    // A relative path given from another folder resolves the same way: the parent
+    // resolves it before handing it to the child, which runs in the board's folder.
+    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board', '--progress-file', '../other/progress.md'], { env: board.env, cwd: elsewhere, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout))))
+    const same = board.urlOf(out)
+    assert.ok(same, out)
+    const again = await titlesOf(same)
+    assert.ok(again.rows.includes('Custom board work'), JSON.stringify(again))
+    assert.ok(!again.rows.includes('Rate-limit the public endpoints'), JSON.stringify(again))
+    assert.ok(!again.asks.includes('Per-key limit'), JSON.stringify(again))
+    url = same
+  } finally {
+    // The custom board's address file is not the fixture's default one; close its page
+    // and wait for its server to exit before the fixture folder is removed (on Windows
+    // the server holds its working folder).
+    const customServed = servedAt(join(board.dir, 'run'), custom)
+    const record = existsSync(customServed) ? JSON.parse(readFileSync(customServed, 'utf8')) : null
+    if (url !== null) {
+      const { port, searchParams } = new URL(url)
+      await new Promise(done => {
+        const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+        req.on('error', done)
+        req.end('{}')
+      })
+    }
+    for (let tries = 0; existsSync(customServed) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
+    const pid = record?.pid
+    if (typeof pid === 'number' && pid !== process.pid) {
+      const alive = () => { try { process.kill(pid, 0); return true } catch { return false } }
+      for (let tries = 0; alive() && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
+    }
+    await board.end([])
+  }
+})
+
 test('running page reuses server when timeout matches and restarts when requested stale timeout differs', { timeout: 60_000 }, async () => {
   const board = serveIn()
   let url1 = null
@@ -9613,10 +9674,12 @@ test('a working Codex session with no block of its own names its project once an
     assert.equal(working.toLowerCase().split('demo-garden').length - 1, 1, working)
     assert.ok(!working.includes(EN.codexLifecycle), working)
   } finally { await board.close() }
-  // Once it waits, the hook's words are true and the row says them.
+  // Once it waits, the hook's words are true and the row says them, outside Working now (#1051).
   const waiting = await groupedPage(lifecycle('waiting'))
   try {
-    assert.ok(sectionWords(await pageDom(waiting.html, waiting.model), 'working').includes(EN.codexLifecycle))
+    const dom = await pageDom(waiting.html, waiting.model)
+    assert.ok(!sectionWords(dom, 'working').includes(EN.codexLifecycle), sectionWords(dom, 'working'))
+    assert.ok(sectionWords(dom, 'others').includes(EN.codexLifecycle), sectionWords(dom, 'others'))
   } finally { await waiting.board.close() }
 })
 
