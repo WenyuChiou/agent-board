@@ -88,7 +88,7 @@ a turn id. Stale turns are rejected and recent repeated events are no-ops. Retir
 ids and event keys are bounded to 128 and 256 per session. This protects lifecycle replay;
 it is not an authenticated message-delivery channel.
 
-A seventh hook, `PostToolUse` with the matcher `update_plan`, copies each plan Codex sets (its step text and status) into the session's steps through the same writer as `--report`, with no model call. It prints nothing. Gemini CLI's `AfterTool` hook with the matcher `^write_todos$` does the same for its todos.
+A seventh hook, `PostToolUse` with the matcher `update_plan`, copies each plan Codex sets (its step text and status) into the session's steps through the same writer as `--report`, with no model call. It prints nothing. Gemini CLI's `AfterTool` hook with the matcher `^write_todos$` does the same for its todos. OpenCode's plugin does it on the `todo.updated` event (top-level session only), and OpenClaw's plugin on `after_tool_call` for `progress_card` or the older `update_plan` (skipped when the call failed or carries no plan); both send only each step's text and status, and neither adds a hook to the host's configuration.
 
 A real resume/start and new prompt reactivate the same session's block. Changing reporters
 or starting a follow-up task is not evidence that a session ended: never mark a legacy
@@ -226,7 +226,8 @@ claiming equivalent support across Cursor IDE and CLI versions.
 OpenCode installs `~/.config/opencode/plugins/agent-board-local.js` (plural `plugins`, as
 the current official documentation specifies). Its event adapter reads session metadata
 only, skips child sessions, and never calls `session.messages`. `session.status` has no
-turn id, so its capability report explicitly lists that limitation. The plugin exposes
+turn id, so its capability report explicitly lists that limitation. It also copies the
+session's own todo list (`todo.updated`: each item's text and status only) into the board's steps. The plugin exposes
 `agent_board_progress`; semantic reports bind to `context.sessionID`, not an id chosen by
 the model. A minimal SDK stand-in tests the adapter, not OpenCode's actual plugin loader.
 

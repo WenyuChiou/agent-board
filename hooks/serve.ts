@@ -177,6 +177,7 @@ export type ServeRow = {
   done: number
   total: number
   due: string | null
+  dueTone: Tone | null
   pr: string
   steps: ServeStep[]
   next: string | null
@@ -439,6 +440,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         done: row.done,
         total: row.total,
         due: row.due?.left ?? null,
+        dueTone: row.due?.tone ?? null,
         pr: row.pr,
         steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent, ...lined(step.note ? `${step.text} — ${step.note}` : step.text), ...(step.line === null ? {} : { fileLine: step.line }) })),
         next: row.next?.step ?? null,
@@ -898,6 +900,7 @@ div.row-btn{cursor:default}
 .row-btn[aria-expanded="true"] .r-chev{transform:rotate(90deg)}
 div.row-btn .r-chev{visibility:hidden}
 .r-meta .st{color:var(--ink)}
+.r-right.t-alert{color:var(--alert)}
 .r-right{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;max-width:9em;overflow:hidden;text-overflow:ellipsis}
 .row-open{background:var(--current);border-radius:0 0 var(--radius-m) var(--radius-m);padding:var(--s1) var(--s2) var(--s3) calc(var(--s2) + 36px);display:grid;gap:var(--s3);min-width:0;opacity:0;transition:opacity var(--dur-base) var(--ease-out)}
 .row.open .row-open{opacity:1}
@@ -1557,6 +1560,9 @@ const PAGE_SCRIPT = String.raw`
   }
   function source(ref) { return pg.sources[ref.sourceKey || ref.key] || pg.sources[ref.key.replace(/^stuck:/, '')] || {}; }
   function fullTitle(ref) { var one = source(ref); return String(one.title || one.task || one.text || ''); }
+  // A row with a due date and no age (a hand-kept task) shows the date where the age would be; an
+  // agent's row keeps its age, so how fresh its status is stays on the row.
+  function dueOf(ref) { var one = source(ref); return one.when ? '' : clean(one.due || ''); }
   function ageOf(ref) { return clean(source(ref).when || w('pgUnknownAge')); }
   // 'own' for the person's hand-kept tasks, '?' for a finished task whose agent the model did not say.
   function agentOf(ref) { return source(ref).isOwn || ref.isOwn ? 'own' : ref.agent || '?'; }
@@ -1851,7 +1857,7 @@ const PAGE_SCRIPT = String.raw`
     }) : el('div');
     head.className = 'row-btn';
     if (isExpandable) head.setAttribute('aria-expanded', String(isOpen));
-    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', 'r-right', ageOf(ref)), el('span', 'r-chev'));
+    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', 'r-right' + (dueOf(ref) && source(ref).dueTone === 'alert' ? ' t-alert' : ''), dueOf(ref) || ageOf(ref)), el('span', 'r-chev'));
     var block = el('div', 'fx');
     add(block, add(el('div', 'fx-in'), head, isExpandable ? fold : null));
     add(li, block);
