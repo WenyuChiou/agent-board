@@ -293,5 +293,7 @@ ${block('a9970002', 'cursor', 'ended', 'Synthetic card', '- [?] Synthetic ask: b
   const view = viewOf(source)
   const row = view.stopped[0]
   assert.doesNotMatch(row.status, /fake license key/)
-  assert.equal(boardDocument(view, [], [], STRINGS.en, '', false, NOW, groupOptions()).counts.stuck, 0)
+  const document = boardDocument(view, [], [], STRINGS.en, '', false, NOW, groupOptions())
+  assert.equal(document.counts.stuck, 0)
+  assert.ok(!document.needs.some(one => one.kind === 'stuck'))
 })

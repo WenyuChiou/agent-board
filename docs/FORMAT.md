@@ -81,6 +81,8 @@ A step line is: optional indentation, a bullet (`-`, `*` or `+`), whitespace, `[
 | `[!]` | Blocked: stuck. The step's note says why. | blocked |
 | `[-]` | Cancelled. Counts as neither done nor open. | cancelled |
 
+A row shows an open `[!]` as `stuck: …` while its session is waiting or working, also when the same task has an open `[?]`. A stopped (`ended`) session shows its ended phrase even with an open `[!]`, and its `[!]` is not counted as stuck on any surface, because its blocker is history: no agent is left to unblock it. The steps stay readable when the row is opened.
+
 A completed handoff uses the existing cancelled mark, for example `- [-] Finish export — Handed to Export session`. Keep the recipient in the note; the source has no remaining responsibility for that step. A nonempty task with only cancelled steps is closed with zero completed steps, even while an activity hook reports the session waiting. Empty tasks remain open. This is an owner declaration, not proof that the recipient received a message or accepted a tool action. Ordinary proposals and transport receipts must not cancel work.
 
 Completing an uncached agent block also retains its exact parsed cancelled text through later prompt updates, without inferring a recipient. The internal completion snapshot keeps up to 256 cancelled lines of at most 4,096 characters each outside completed-work counts; larger snapshots are refused rather than clipped. A fresh producer mirror can supersede that snapshot. FORMAT v1 is unchanged.
