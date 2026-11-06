@@ -23,7 +23,7 @@ try {
 } finally { loader.deregister() }
 
 const [{ pageTokens, boardMark }, { servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
-const SANS = '"Atkinson Hyperlegible Next",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif'
+const SANS = 'Inter,"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
 const MARK_PATH = 'M 51 14.5 V 36 C 51 46 52 54 57.5 59 C 50.6 59 43.71 56.77 40.01 51.67 Q 34.7 55 28 55 Q 18.47 55 11.74 48.26 Q 5 41.53 5 32 Q 5 22.47 11.74 15.74 Q 18.47 9 28 9 Q 34.9 9 40.34 12.54 Q 40.74 11.48 41.61 10.61 Q 43.22 9 45.5 9 Q 47.78 9 49.39 10.61 Q 51 12.22 51 14.5 Z M 40 32 Q 40 27.03 36.49 23.51 Q 32.97 20 28 20 Q 23.03 20 19.51 23.51 Q 16 27.03 16 32 Q 16 36.97 19.51 40.49 Q 23.03 44 28 44 Q 32.97 44 36.49 40.49 Q 40 36.97 40 32 Z'
 const SHAPES = `<path class="lg-mark" d="${MARK_PATH}"/>`
@@ -111,7 +111,7 @@ const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input)(?=$|[:[\s])/.test
 
 test('the page uses only colour, size, radius, spacing and motion tokens from page-look', () => {
   const expected = {
-    text: { 'text-xs': 'max(14px,.875rem)', 'text-sm': 'max(16px,1rem)', 'text-md': 'max(18px,1.125rem)', 'text-lg': 'max(22px,1.375rem)' },
+    text: { 'text-xs': 'max(13px,.8125rem)', 'text-sm': 'max(14px,.875rem)', 'text-md': 'max(16px,1rem)', 'text-lg': 'max(20px,1.25rem)' },
     radius: { 'radius-s': '6px', 'radius-m': '10px', 'radius-round': '999px' },
     dur: { 'dur-fast': '120ms', 'dur-base': '200ms', 'dur-layout': '260ms', 'dur-glow': '1.6s', 'dur-dots': '1.2s', 'dur-theme': '.28s' },
     ease: { 'ease-out': 'cubic-bezier(.2,0,0,1)', 'ease-in': 'cubic-bezier(.4,0,1,1)' },
@@ -123,11 +123,11 @@ test('the page uses only colour, size, radius, spacing and motion tokens from pa
   }
   assert.deepEqual(Object.fromEntries(Object.entries(light).filter(([name]) => /^s\d$/.test(name))), { s1: '4px', s2: '8px', s3: '12px', s4: '16px', s5: '24px', s6: '32px', s7: '48px' }, 'spacing is the 4px scale')
   assert.equal(light.hit, '36px', 'a control is at least 36px tall')
-  // Every text size is a floor that follows the reader's own font size, and nothing is below 14px.
+  // Every text size is a floor that follows the reader's own font size, and nothing is below 13px.
   for (const value of Object.values(expected.text)) assert.match(value, /^max\((\d+)px,[\d.]+rem\)$/, 'text sizes are max(px floor, rem)')
-  assert.ok(Object.values(expected.text).every(value => Number(/^max\((\d+)px/.exec(value)[1]) >= 14), 'no text size is below 14px')
+  assert.ok(Object.values(expected.text).every(value => Number(/^max\((\d+)px/.exec(value)[1]) >= 13), 'no text size is below 13px')
   const phone = tokenRules.find(rule => rule.ancestors.some(ancestor => /max-width\s*:\s*640px/.test(ancestor)))
-  assert.deepEqual(phone?.declarations, [{ property: '--text-lg', value: 'max(20px,1.25rem)' }], 'the question size is 20px on a phone')
+  assert.deepEqual(phone?.declarations, [{ property: '--text-lg', value: 'max(18px,1.125rem)' }], 'the question size is 18px on a phone')
   for (const icon of AGENT_ICONS) {
     assert.equal(light[`ag-${icon.file}`], icon.tile, `the ${icon.file} tile is a token`)
     assert.equal(tokenRules.flatMap(rule => rule.declarations).filter(item => item.property === `--ag-${icon.file}`).length, 1, `${icon.file} is declared once, outside theme overrides`)
@@ -167,7 +167,7 @@ test('the page uses only colour, size, radius, spacing and motion tokens from pa
     }
     assert.ok(rules.some(rule => rule.selector === '.sheet' && rule.declarations.some(item => /^(?:background|background-color)$/.test(item.property) && item.value === 'var(--surface)')), `${name}: .sheet retains its surface background`)
     const bodyFont = rules.filter(rule => rule.selector === 'body').flatMap(rule => rule.declarations.filter(item => item.property === 'font')).at(-1)
-    assert.equal(bodyFont?.value, 'var(--text-sm)/1.5 var(--font-sans)', `${name}: body uses the 16px text size and line height`)
+    assert.equal(bodyFont?.value, 'var(--text-sm)/1.5 var(--font-sans)', `${name}: body uses the 14px text size and line height`)
     assert.ok(rules.some(rule => rule.selector === ':focus-visible' && rule.declarations.some(item => item.property === 'outline')), `${name}: keyboard focus keeps its outline`)
     const reduced = rules.filter(rule => rule.ancestors.some(ancestor => ancestor.includes('prefers-reduced-motion:reduce')))
     assert.ok(reduced.some(rule => rule.declarations.some(item => item.property === 'transition' && item.value === 'none') && rule.declarations.some(item => item.property === 'animation' && item.value === 'none')), `${name}: reduced motion turns every transition and animation off`)
@@ -222,7 +222,7 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
       }
     }
     // The count on an agent's badge and on the Needs you flag (on-accent on the amber fill), the "!" badge (on-accent on
-    // the alert colour), the primary button, and the glyph on an offline agent's muted tile. The 14px semibold numerals
+    // the alert colour), the primary button, and the glyph on an offline agent's muted tile. The 13px semibold numerals
     // are not "large text", so the badge pairs need the full 4.5:1.
     // 'surface' on 'ink' is a primary button: its text (--on-act) on its fill (--act), both of which are the ink pair.
     for (const [token, surface, threshold] of [['on-accent', 'accent', 4.5], ['on-accent', 'waiting-fill', 4.5], ['on-accent', 'alert', 4.5], ['on-accent', 'muted', 3], ['ground', 'ink', 4.5], ['surface', 'ink', 4.5]]) pairs.push({ mode, rule: `${token}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
@@ -273,13 +273,13 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
 })
 
 test('the page embeds its fonts, makes no font request and allows only font-src data:', () => {
-  assert.equal(light['font-sans'], SANS, 'the sans token starts with Atkinson and keeps the system stack')
+  assert.equal(light['font-sans'], SANS, 'the sans token starts with Inter, then the CJK UI fonts and the system stack')
   assert.equal(light['font-mono'], MONO, 'the mono token is the exact system stack')
-  assert.match(FONT_LICENSE, /^Copyright 2020-2024 The Atkinson Hyperlegible Next Project Authors/)
+  assert.match(FONT_LICENSE, /^Copyright \(c\) 2016 The Inter Project Authors/)
   assert.equal(FONT_LICENSE, readFileSync(new URL('../hooks/fonts/OFL.txt', import.meta.url), 'utf8').replace(/\r\n/g, '\n'), 'the bundled license matches the license shipped beside the source')
   const hashes = {
-    400: '378aea0f5c1d179f4e0b5382c06bfc87571b98cfcc4fd1352bc979e2e2259c54',
-    600: '4ab00275cc496a478fce7baafe89ed44af875acf57655dfd1183ff22bd23829a',
+    400: 'dd05e326cf8eac3b55acecf29c842ed73e6e6dd06491cf47f7e8800680ab3e33',
+    600: '62553d159189834af73c9a6264704be5b2bee9a08da66a14768d8e5c6ffd2cdb',
   }
   const policy = pagePolicy('n')
   assert.match(policy, /(?:^|;)\s*default-src 'none'(?:;|$)/)
@@ -296,7 +296,7 @@ test('the page embeds its fonts, makes no font request and allows only font-src 
       assert.equal(faces.length, 2, `${where}: both font faces are embedded`)
       const weights = []
       for (const face of faces) {
-        assert.match(face, /\bfont-family\s*:\s*(['"])Atkinson Hyperlegible Next\1\s*;/i, `${where}: font family`)
+        assert.match(face, /\bfont-family\s*:\s*Inter\s*;/i, `${where}: font family`)
         assert.match(face, /\bfont-display\s*:\s*swap\s*(?:;|$)/i, `${where}: font display`)
         const weight = /\bfont-weight\s*:\s*(400|600)\s*(?:;|$)/i.exec(face)?.[1]
         assert.ok(weight, `${where}: regular or semibold weight`)
@@ -318,7 +318,7 @@ test('the page embeds its fonts, makes no font request and allows only font-src 
       for (const link of html.match(/<link\b[^>]*>/gi) ?? []) assert.doesNotMatch(link, /\brel\s*=\s*["'](?:stylesheet|preload)["']/i, `${where}: no stylesheet or preload link`)
       for (const match of cleanCss.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) assert.match(match[1] ?? match[2] ?? match[3], /^(?:data:image\/svg\+xml,|data:font\/woff2;base64,)/, `${where}: CSS URLs are inline SVG images or WOFF2 fonts`)
       const sans = valuesOf(styleRules(html).find(rule => rule.selector === ':root'))['font-sans']
-      assert.equal(sans, SANS, `${where}: the rendered page uses Atkinson with the system fallback stack`)
+      assert.equal(sans, SANS, `${where}: the rendered page uses Inter with the CJK and system fallback stack`)
       for (const face of ['Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'PingFang SC', 'Microsoft JhengHei', 'Microsoft YaHei']) assert.ok(sans.includes(`"${face}"`), `${where}: ${face} is available for Chinese text`)
     }
   }
