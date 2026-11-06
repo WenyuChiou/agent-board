@@ -72,7 +72,9 @@ export type QuestionLedger = {
 export type QuestionProofs = { retired: string[]; consumed: string[] }
 
 // `line` (0-based) and `raw` (the line as written) let a press tick exactly this line.
-export type ProgressStep = { text: string; status: ProgressStepStatus; depth: number; line: number; raw: string; questionToken?: string }
+// A question answered in its own agent's window (`<!-- native=… options=[…] -->` after the step): the board lists the options and where to answer, and offers no reply box.
+export type NativeAsk = { agent: string; options: string[] }
+export type ProgressStep = { text: string; status: ProgressStepStatus; depth: number; line: number; raw: string; questionToken?: string; native?: NativeAsk }
 
 // working: Claude is mid-turn · waiting: idle with open steps · done: every step done ·
 // ended: the session closed with open steps
@@ -160,6 +162,8 @@ export type ProgressMirrorTask = {
   blocked: string | null
   blockedBy: string[]
   questionRevision?: string
+  // The question is answered in the agent's own window (AskUserQuestion, a tool approval): the block carries it as a native line.
+  native?: NativeAsk
   // A confirmed transfer reported by this task's owner, not a suggestion or a transport receipt.
   handoffTo?: string
 }

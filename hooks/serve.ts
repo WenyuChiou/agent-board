@@ -129,6 +129,8 @@ export type ServeAsk = {
   answers: string[]
   command: string | null
   link: string | null
+  // Answered in the agent's own window: its options as plain text and the line that says where; the page draws no reply for it.
+  native?: { options: string[]; line: string }
   // A hand-kept question, the person's own (its agent is '', as Claude Code's is); absent otherwise.
   isOwn?: true
   canTick: boolean
@@ -387,6 +389,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         answers: isManual ? [] : answersOf(ask, s),
         command: ask.command,
         link: ask.link,
+        ...(ask.native === undefined ? {} : { native: { options: ask.native.options, line: s.nativeAnswerIn(agentLabel(ask.native.agent, s)) } }),
         canTick: ask.step !== null,
         canHide: ask.hideKey !== '' && ask.canHide !== false,
         ...(ask.hideKey !== '' && ask.canHide !== false ? { unhideKey: `hidden:${ask.hideKey}` } : {}),
@@ -855,6 +858,7 @@ ${sheetCss}
 .c-meta .who{color:var(--ink);font-weight:600}
 .q{margin:0;font-size:var(--text-lg);line-height:1.4;font-weight:600;overflow-wrap:anywhere}
 .note,.context{margin:0;color:var(--muted)}
+.native-options{margin:0;padding-left:var(--s5);color:var(--muted)}
 .answers{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;padding-top:var(--s1)}
 .btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)}
@@ -1722,6 +1726,15 @@ const PAGE_SCRIPT = String.raw`
     } else if (isOlder) {
       if (ask.canHide) add(answers, button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
       else add(body, el('p', 'note', w('questionReviewOnly')));
+    } else if (ask.native) {
+      // Answered in the agent's own window: the options are only listed, so no button, reply box or copy is offered.
+      if (ask.native.options.length) {
+        var choices = el('ul', 'native-options');
+        ask.native.options.forEach(function (option) { add(choices, el('li', '', clean(option))); });
+        add(body, choices);
+      }
+      add(body, el('p', 'note', ask.native.line));
+      if (ask.canHide) add(answers, button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
     } else if (ask.isOwn) {
       if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
     } else {

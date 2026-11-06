@@ -4732,6 +4732,33 @@ test('Codex lifecycle hooks never retain conversation and approval payloads, and
   assert.ok(!existsSync(transcript))
 }))
 
+test('a Codex PermissionRequest adds a waiting approval step with a native line, and Stop takes it back', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('PermissionRequest', 'turn-1').status, 0)
+  const asked = readFileSync(f.progress, 'utf8')
+  assert.match(asked, /- \[\?\] Codex (asks to run a command|請你核准指令)\n<!-- native=codex -->\n/)
+  assert.equal(f.event('Stop', 'turn-1').status, 0)
+  const stopped = readFileSync(f.progress, 'utf8')
+  assert.ok(!stopped.includes('native=codex'))
+  assert.ok(!/- \[\?\]/.test(stopped))
+}))
+
+test('a second Codex PermissionRequest after a report adds the approval step again', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('PermissionRequest', 'turn-1').status, 0)
+  assert.equal(f.report('working', ['- [~] Real task', '- [ ] Next task']).status, 0)
+  const reported = readFileSync(f.progress, 'utf8')
+  assert.ok(!reported.includes('native=codex'))
+  assert.ok(reported.includes('- [~] Real task'))
+  assert.equal(f.event('PermissionRequest', 'turn-1').status, 0)
+  const again = readFileSync(f.progress, 'utf8')
+  assert.match(again, /- \[ \] Next task\n- \[\?\] Codex [^\n]*\n<!-- native=codex -->\n/)
+  assert.equal(f.event('Stop', 'turn-1').status, 0)
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('native=codex'))
+}))
+
 // These synthetic full ids have distinct SHA-256 owners with the same eight-character prefix.
 const collisionSessions = ['collision-fixture-9342', 'collision-fixture-29381']
 const collisionOwner = id => createHash('sha256').update(`codex:${id}`).digest('hex')

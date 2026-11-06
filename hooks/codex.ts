@@ -22,6 +22,9 @@ export type CodexReport = Origin & {
   title: string
   project: string
   steps: string[]
+  // The index of the step a PermissionRequest added (#1048): it waits on the person in Codex's own window, and the block
+  // carries a native line after it. Any explicit report drops it with the steps.
+  approval?: number
   updated: string
   events?: string[]
   retiredTurns?: string[]
@@ -125,16 +128,24 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   if (event !== 'SessionStart' && event !== 'SessionEnd' && turn === null) throw new Error('MISSING_TURN')
   const key = `${String(event)}:${turn ?? ''}`
   if (turn && previous?.retiredTurns?.includes(turn)) throw new Error('STALE_TURN')
-  if (turn && previous?.events?.includes(key)) return previous
+  // A second ask in the same turn is a new question, not a replay.
+  if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest') return previous
   if (previous?.turn && turn && previous.turn !== turn && event !== 'UserPromptSubmit') throw new Error('STALE_TURN')
   const working = event === 'UserPromptSubmit'
   const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' ? 'done' : 'waiting'
+  // The approval step is the hook's own: every event but a start of the hook's tracking takes it back, and a new
+  // request puts one in its place.
+  const held = previous?.steps ?? [`- [ ] ${s.codexLifecycle}`]
+  const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
+  const rest = event === 'SessionStart' || earlier === undefined ? held : held.filter((_, index) => index !== earlier)
+  const approval = event === 'PermissionRequest' ? rest.length : event === 'SessionStart' ? earlier : undefined
   return {
     session, turn: turn ?? previous?.turn ?? null, state,
     title: previous?.title ?? s.codexTask,
     project: previous?.project ?? s.codexProject,
     // The hook never reads the prompt, so only a report or the board can confirm an answer (#243).
-    steps: previous?.steps ?? [`- [ ] ${s.codexLifecycle}`],
+    steps: event === 'PermissionRequest' ? [...rest, `- [?] ${s.codexApprovalStep}`] : rest,
+    ...(approval === undefined ? {} : { approval }),
     updated: now,
     events: [...(previous?.events ?? []), key].slice(-256),
     retiredTurns: [...(previous?.retiredTurns ?? []), ...(working && previous?.turn && previous.turn !== turn ? [previous.turn] : [])].slice(-128),
@@ -199,6 +210,11 @@ const localBlockSpans = (lines: readonly string[], owner: string, agent: string,
   return owned
 }
 
+// A report's step lines. The step a PermissionRequest added, while it still waits, is followed by the native line.
+const NATIVE_CODEX = '<!-- native=codex -->'
+const stepLines = (steps: readonly string[], approval: number | undefined, isAsking: boolean): string[] =>
+  steps.flatMap((step, index) => index === approval && (!isAsking || step.startsWith('- [?]')) ? [step, NATIVE_CODEX] : [step])
+
 // A board completion is authoritative only for this exact owned task. Lifecycle
 // metadata reads it under the existing board lock before reusing its session cache.
 // Explicit task reports carry fresh intent and deliberately supersede this projection.
@@ -212,7 +228,7 @@ export const boardConfirmedReport = (text: string, previous: CodexReport, owner:
   const at = Date.parse(attrs.updated ?? '')
   if (!Number.isFinite(at) || at < Date.parse(previous.updated)) return previous
   const steps = previous.steps.map(step => step.replace(/^(- \[)[ ~?>!](\] .*)$/, '$1x$2'))
-  const expected = [`### ${previous.title}`, ...steps].join('\n')
+  const expected = [`### ${previous.title}`, ...stepLines(steps, previous.approval !== undefined && previous.steps[previous.approval]?.startsWith('- [?]') ? previous.approval : undefined, false)].join('\n')
   if (lines.slice(span.start + 1, span.end).join('\n') !== expected) return previous
   if (previous.state === 'done' && at === Date.parse(previous.updated) && JSON.stringify(steps) === JSON.stringify(previous.steps)) return previous
   return { ...previous, state: 'done', steps, updated: new Date(at).toISOString() }
@@ -229,7 +245,7 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const run = report.origin === 'run' ? ` origin=run${report.parent !== undefined && RESUME.test(report.parent) ? ` parent=${report.parent}` : ''}` : ''
   const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${resume}${run} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
-  const block = [marker, `### ${report.title}`, ...report.steps, `<!-- /auto session=${id} -->`].join(eol)
+  const block = [marker, `### ${report.title}`, ...stepLines(report.steps, report.approval, true), `<!-- /auto session=${id} -->`].join(eol)
   // Use the board's scanner: Markdown examples are not task ownership, and a
   // missing close must never reach past the next project or another agent's block.
   // Keep raw CR bytes in these lines so offsets preserve even mixed line endings.

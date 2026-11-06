@@ -238,13 +238,32 @@ export const toolQuestions = (mirror: ProgressMirror, questions: unknown, call: 
   const added = questions.flatMap((given: unknown, index) => {
     if (given === null || typeof given !== 'object' || !('question' in given) || typeof given.question !== 'string' || given.question.trim() === '') return []
     const options = 'options' in given && Array.isArray(given.options) ? given.options.flatMap((option: unknown) => option !== null && typeof option === 'object' && 'label' in option && typeof option.label === 'string' ? [clip(option.label, 120)] : []) : []
-    return [{ ...task(`ask:${call}:${index}`, clip(given.question, 120), 'pending', clip(given.question, 120)), ask: 'choose' as const, options }]
+    // The question is written once, as the step itself; the native line says it is answered in Claude's own window.
+    return [{ ...task(`ask:${call}:${index}`, clip(given.question, 120), 'pending', null), waiting: 'you' as const, ask: 'choose' as const, options, native: { agent: 'claude', options } }]
   })
   return added.reduce((current, one) => {
     const renewed = renewQuestion(one, current.questionSequence)
     return { ...current, source: mirror.tasks.length === 0 ? 'turns' : mirror.source, tasks: [...current.tasks.filter(task => task.id !== one.id), renewed], questionSequence: renewed.questionRevision, updated: now }
   }, mirror)
 }
+
+// The id of the step a tool approval puts into a Task list (#1048): one at a time, in the dialog's own window.
+const APPROVAL = 'approval'
+
+// A tool is waiting for the person's yes in Claude's own dialog: the list gets one step that waits on
+// them, with the native line, so the board says where to answer. A list that already asks something
+// keeps its question, and a session without a Task list has nothing to hang the step on.
+export const markApproval = (mirror: ProgressMirror, step: string): ProgressMirror => {
+  if (mirror.source !== 'tasks' || mirror.tasks.length === 0) return mirror
+  if (mirror.tasks.some(one => one.id !== APPROVAL && waitsOnYou(mirror, one))) return mirror
+  const renewed = renewQuestion({ ...task(APPROVAL, step, 'pending', null), waiting: 'you', native: { agent: 'claude', options: [] } }, mirror.questionSequence)
+
+  return { ...mirror, questionSequence: renewed.questionRevision, tasks: [...mirror.tasks.filter(one => one.id !== APPROVAL), renewed] }
+}
+
+// The dialog is over (answered, declined, or the turn ended): the step goes, it was never the model's.
+export const clearApproval = (mirror: ProgressMirror): ProgressMirror =>
+  mirror.tasks.some(one => one.id === APPROVAL) ? { ...mirror, tasks: mirror.tasks.filter(one => one.id !== APPROVAL) } : mirror
 
 // The native prompt for these questions ended: their steps are finished, so no list keeps one open.
 export const closeToolQuestions = (mirror: ProgressMirror, call: string): ProgressMirror => ({

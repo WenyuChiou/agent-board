@@ -697,7 +697,7 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[]): strin
 
 // What each key does on the selected line, so the footer lists only keys that do something.
 export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
-  ask.kind === 'confirm' ? [s.yesAnswer, s.noAnswer] : ask.kind === 'choose' ? ask.options.slice(0, 9) : []
+  ask.native !== undefined ? [] : ask.kind === 'confirm' ? [s.yesAnswer, s.noAnswer] : ask.kind === 'choose' ? ask.options.slice(0, 9) : []
 
 // The state with the chosen line's key set, so a key pressed later acts on the line that was
 // on screen, or on nothing if that line has gone, and with every line's fingerprint as drawn.
@@ -782,7 +782,7 @@ const keysFor = (item: BoardItem | undefined, s: Strings, routes: Readonly<Recor
     const isSent = routes[item.key] !== undefined
     return [
       ...(ask.step !== null ? [s.boardKeyTick] : []),
-      ...(ask.kind === 'confirm' ? [isSent ? s.boardKeyConfirmSend : s.boardKeyConfirm] : answers.length > 0 ? [isSent ? s.boardKeyOptionsSend(answers.length) : s.boardKeyOptions(answers.length)] : []),
+      ...(ask.kind === 'confirm' && ask.native === undefined ? [isSent ? s.boardKeyConfirmSend : s.boardKeyConfirm] : answers.length > 0 ? [isSent ? s.boardKeyOptionsSend(answers.length) : s.boardKeyOptions(answers.length)] : []),
       ...((ask.command ?? ask.link) !== null
         ? [s.boardKeyCopyCommand]
         : replyHint(ask, s).reopen !== null
@@ -948,6 +948,11 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       if (isOpen || isHere) {
         if (ask.canHide === false) lines.push(`    ${c('quiet', cut(s.questionReviewOnly, o.width - 6))}`)
         if (ask.note) lines.push(`    ${cut(ask.note, o.width - 6)}`)
+        // Answered in the agent's own window: its options are listed as plain text, with no key that sends or copies one.
+        if (ask.native !== undefined) {
+          ask.native.options.forEach(option => lines.push(`    · ${cut(option, o.width - 8)}`))
+          lines.push(...muted(s.nativeAnswerIn(agentLabel(ask.native.agent, s)), '    '))
+        }
         const answers = answersOf(ask, s)
         answers.forEach((answer, n) => lines.push(`    ${c('accent', ask.kind === 'confirm' ? (n === 0 ? 'y' : 'n') : String(n + 1), true)} ${cut(answer, o.width - 8)}`))
         // Whether the key answers or only copies, said on the line: without a session that takes
@@ -959,7 +964,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
         }
         if (ask.command !== null) lines.push(`    ${c('accent', cut(`$ ${ask.command}`, o.width - 6))}`)
         // The way back to the session, never cut, with which command c copies.
-        if (ask.where === 'other') {
+        if (ask.where === 'other' && ask.native === undefined) {
           // Its folder and session id stay off the screen, as everywhere on the board; c copies
           // the whole command.
           const back = (ask.command ?? ask.link) === null ? replyHint(ask, s).reopen : null
