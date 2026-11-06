@@ -18,6 +18,7 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
+import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside } from './board-messaging'
 import { claimMessageStore, hasLiveClaims } from './message-store-claim'
@@ -25,7 +26,8 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { defaultMessagesDirectory, isOwnFolder, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { isTimeout, privateFolderHandoff } from './private-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
@@ -139,13 +141,58 @@ const partOf = (base: string): string => currentPart(base, file => {
 
 // This month's journal as far as today needs it: its last part, and the one before when the last
 // began today. The rest of a long month is not read (#373).
-const journalToday = (now: number): string => {
+const journalRaw = (now: number): string => {
   const base = journalPath(path, now)
   const parts = monthParts(base, existsSync)
   // A month with no journal yet is read as before, so a file the board cannot read is still named.
   const text = read(parts.at(-1) ?? base)
   const before = parts.at(-2)
   return before !== undefined && !parseJournal(text).some(entry => entry.at < localDay(now)) ? `${read(before)}\n${text}` : text
+}
+
+// A task any agent finished today is one journal line, written once (#245). Claude's ticks already
+// wrote their own lines, so a task with a line today under the same project and title is not added.
+let doneProjects: readonly ProgressProject[] = []
+const doneBlockLines = (projects: readonly ProgressProject[], journal: string, now: number): string[] => {
+  const day = localDay(now)
+  const written = new Set(parseJournal(journal).filter(entry => entry.at === day).map(entry => `${entry.project}\n${entry.task}`))
+  const lines: string[] = []
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      const updated = task.auto?.state === 'done' ? task.auto.updated : undefined
+      if (updated === undefined || !Number.isFinite(updated) || updated <= 0 || updated > now || localDay(updated) !== day) continue
+      const title = task.title || s.unnamed
+      const line = journalLine({ project: project.name || s.uncategorized, task: title, step: task.steps.filter(step => step.status === 'done').at(-1)?.text ?? title }, updated, s)
+      const [parsed] = parseJournal(line)
+      if (parsed === undefined || written.has(`${parsed.project}\n${parsed.task}`)) continue
+      written.add(`${parsed.project}\n${parsed.task}`)
+      lines.push(line)
+    }
+  }
+  return lines
+}
+
+// The journal for today with what other agents finished today counted too, so every surface that
+// reads it (the count, the done list, --json) agrees with the blocks.
+const journalToday = (now: number): string => {
+  const text = journalRaw(now)
+  return appendJournal(text, doneBlockLines(doneProjects, text, now), s)
+}
+
+// An interactive board also saves those lines to the month's journal, which the weekly report reads.
+let isDoneSaveFailed = false
+const saveDoneBlocks = (projects: readonly ProgressProject[], now: number): void => {
+  try {
+    isDoneSaveFailed = false
+    if (doneBlockLines(projects, journalRaw(now), now).length === 0) return
+    rewrite(partOf(journalPath(path, now)), past => {
+      const missing = doneBlockLines(projects, `${journalRaw(now)}\n${past}`, now)
+      return missing.length === 0 ? null : appendJournal(past, missing, s)
+    })
+  } catch {
+    // The board still counts the task through journalToday and tries again on the next read; the warning says the history is not saved.
+    isDoneSaveFailed = true
+  }
 }
 
 // A session log's end only, kept while the file is unchanged: --watch looks again every
@@ -534,6 +581,8 @@ const readBoardView = (source: string, now: number) => {
     seen = {}
   }
   lastSeen = seen
+  doneProjects = projects
+  if (isQuestionWriter && progressHealthCache.isSnapshot) saveDoneBlocks(projects, now)
   let answered = parseAnswered(read(answeredPath(path))) ?? []
   const file = questionsPath(path)
   const isWritingQuestions = progressHealthCache.isSnapshot && isQuestionWriter
@@ -628,7 +677,7 @@ const readBoardView = (source: string, now: number) => {
   const tail = progressHealthCache.tail
   const sizes = { progress: Buffer.byteLength(source), store: pageState.store }
   const large = sizeWarnings(sizes, s)
-  const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...large]
+  const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...(isDoneSaveFailed ? [s.journalFailed] : []), ...large]
   const finished = countManualDone(projects, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now))
   const details = storageDetails(sizes, finished, s)
   const health = progressHealthCache.lines
@@ -1887,9 +1936,25 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
-  // On Windows the server child is told which folder was just checked, so it does not check it again.
+  // On Windows the server child is told which folders were just checked, so it does not check them again.
   const handoff = runtimeFolderHandoff()
-  const childEnv = serverMemoryEnv(handoff === undefined ? process.env : { ...process.env, [RUNTIME_FOLDER_ENV]: handoff })
+  // The default message folder is checked here, so its whoami and icacls starts are not among
+  // what the child does in the few seconds it has to print its address (#799). A check that
+  // fails here is left to the child, which checks in full and reports what it finds.
+  // Its timeout is the one the person is told about when the child, checking in full, is cut off
+  // before it can say why.
+  let messageHandoff: string | undefined
+  let isCheckTimeout = false
+  if (process.platform === 'win32' && flag('--messages-dir') === undefined) {
+    try { messageHandoff = privateFolderHandoff(messagesDirectory()) } catch (error) { isCheckTimeout = isTimeout(error) }
+  }
+  // Only what this command checked is handed over, never a value it inherited.
+  const handed: NodeJS.ProcessEnv = { ...process.env }
+  delete handed[RUNTIME_FOLDER_ENV]
+  delete handed[MESSAGE_FOLDER_ENV]
+  if (handoff !== undefined) handed[RUNTIME_FOLDER_ENV] = handoff
+  if (messageHandoff !== undefined) handed[MESSAGE_FOLDER_ENV] = messageHandoff
+  const childEnv = serverMemoryEnv(handed)
   const startPage = async (): Promise<{ url: string | null; stderr: string; readyBy: number }> => {
     // In the board's own folder, not the agent's, so the server holds no project folder open.
     const readyBy = performance.now() + 10_000
@@ -1982,7 +2047,8 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
       if (afterWait !== null) return { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs }
       if (performance.now() < deadline) continue
     }
-    if (failure !== undefined && storeCode !== undefined) failure.storeCode = storeCode
+    const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
+    if (failure !== undefined && code !== undefined) failure.storeCode = code
     return null
   }
   return null

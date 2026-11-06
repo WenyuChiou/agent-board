@@ -68,8 +68,11 @@ the address file. The directory is created with mode 0700. On Windows, a newly c
 store and every default store are made your account's alone: the board makes your account
 the folder's owner, removes inherited and other accounts' access, and reads the access
 entries back (the owner is set, not read back). If it cannot, startup stops with
-`MESSAGE_STORE_ACL`. For a new or default store, a board run as SYSTEM, LocalService or
-NetworkService always stops there: run it as a person's account. An existing folder supplied with `--messages-dir`
+`MESSAGE_STORE_ACL`; if Windows takes too long to answer one of these checks, with
+`ACL_CHECK_TIMEOUT` (try again once the computer is less busy). `--serve` checks the default
+store itself and hands it to the page's server, which only confirms it is still the same folder,
+so a slow check does not use up the few seconds the server has to start. For a new or default
+store, a board run as SYSTEM, LocalService or NetworkService always stops there: run it as a person's account. An existing folder supplied with `--messages-dir`
 keeps its permissions; make that folder private yourself.
 `--messages-dir /private/local/message-data` overrides the location;
 `/api/ping` reports the actual `messagesDirectory`.

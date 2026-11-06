@@ -699,9 +699,11 @@ export const EN: Strings = {
       ? `The board has stopped (${code}): ${folder}. Start it again with --serve. Uncertain messages have not been resent.`
       : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
         ? `The board could not verify a message owner (${code}): ${folder}. Stop all board servers before inspecting .message-claim-*.json in that folder. Remove a malformed claim only after confirming no hub is running. Keep messages.json and do not resend uncertain messages.`
-        : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
-          ? `The board could not open its message folder (${code}): ${folder}. Check that the folder is your account's own and that no other account can open it, then try again.`
-          : `The board could not open its message folder (${code}): ${folder}. Its message file may be damaged. Move messages.json out of that folder, then try again.`,
+        : code === 'ACL_CHECK_TIMEOUT'
+          ? `Windows took too long to check who can open the board's message folder (${code}): ${folder}. The computer may be busy, for example with a virus scan. Try again in a moment.`
+          : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
+            ? `The board could not open its message folder (${code}): ${folder}. Check that the folder is your account's own and that no other account can open it, then try again.`
+            : `The board could not open its message folder (${code}): ${folder}. Its message file may be damaged. Move messages.json out of that folder, then try again.`,
   serveOffline: "Can't reach the board. Run the board with --serve again; it opens a new page, and you can close this one.",
   serveOfflineLan: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
   themeToDark: 'Switch to dark',
@@ -790,6 +792,22 @@ export const EN: Strings = {
   pgNothingHint: 'When an agent asks you something or gets stuck, it shows up here, and the tab title shows a number.',
   pgOlder: (n: number): string => `${n} older questions still unanswered (their chats have stopped)`,
   pgOlderOne: (n: number): string => `${n} older question still unanswered (its chat has stopped)`,
+  awayForMinutes: (n: number): string => `Away for ${n} min`,
+  awayForHours: (n: number): string => `Away for ${n} h`,
+  awayAskedNamedOne: (agent: string): string => `${agent} asked a question`,
+  awayAskedNamed: (agent: string, n: number): string => `${agent} asked ${n} questions`,
+  awayAskedGenericOne: '1 agent asked a question',
+  awayAskedGenericOneAgent: (n: number): string => `1 agent asked ${n} questions`,
+  awayAskedGeneric: (agents: number, n: number): string => `${agents} agents asked ${n} questions`,
+  awayFinished: (n: number): string => `${n} tasks done`,
+  awayFinishedOne: (n: number): string => `${n} task done`,
+  awayOfflineNamed: (agent: string): string => `${agent} is offline`,
+  awayOffline: (n: number): string => `${n} agents are offline`,
+  awayOfflineOne: (n: number): string => `${n} agent is offline`,
+  awayUnreadableNamed: (agent: string): string => `${agent} still can't be read`,
+  awayUnreadable: (n: number): string => `${n} agents still can't be read`,
+  awayUnreadableOne: (n: number): string => `${n} agent still can't be read`,
+  awayDismiss: 'Dismiss',
   pgSeeAll: 'See all',
   pgMore: (n: number): string => `Show ${n} more`,
   pgOwnTodo: 'Your own to-do',

@@ -693,9 +693,11 @@ export const ZH_CN: Strings = {
       ? `看板已停止（${code}）：${folder}。请用 --serve 重新启动；不确定是否送达的消息没有重新发送。`
       : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
         ? `看板无法确认消息持有者（${code}）：${folder}。请先停止所有看板 server，再检查该文件夹里的 .message-claim-*.json。确认没有 hub 运行后，才能移除损坏的 claim。请保留 messages.json，不要重发不确定是否送达的消息。`
-        : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
-          ? `看板无法打开消息文件夹（${code}）：${folder}。请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。`
-          : `看板无法打开消息文件夹（${code}）：${folder}。消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。`,
+        : code === 'ACL_CHECK_TIMEOUT'
+          ? `Windows 检查谁能打开看板的消息文件夹时用时太长（${code}）：${folder}。电脑可能正忙，例如正在扫描病毒。请稍后再试。`
+          : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
+            ? `看板无法打开消息文件夹（${code}）：${folder}。请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。`
+            : `看板无法打开消息文件夹（${code}）：${folder}。消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。`,
   serveOffline: '连不上看板。请用 --serve 重新启动看板；新页面会自动打开，这个标签页可以关闭。',
   serveOfflineLan: '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
   themeToDark: '切换成深色',
@@ -784,6 +786,22 @@ export const ZH_CN: Strings = {
   pgNothingHint: '代理问你问题或卡住时，会显示在这里，标签页标题也会显示数字。',
   pgOlder: (n: number): string => `${n} 个较早的问题尚未回答（对话已停止）`,
   pgOlderOne: (n: number): string => `${n} 个较早的问题尚未回答（对话已停止）`,
+  awayForMinutes: (n: number): string => `你离开了 ${n} 分钟`,
+  awayForHours: (n: number): string => `你离开了 ${n} 小时`,
+  awayAskedNamedOne: (agent: string): string => `${agent} 问了 1 个问题`,
+  awayAskedNamed: (agent: string, n: number): string => `${agent} 问了 ${n} 个问题`,
+  awayAskedGenericOne: '1 个代理问了 1 个问题',
+  awayAskedGenericOneAgent: (n: number): string => `1 个代理问了 ${n} 个问题`,
+  awayAskedGeneric: (agents: number, n: number): string => `${agents} 个代理问了 ${n} 个问题`,
+  awayFinished: (n: number): string => `完成了 ${n} 件`,
+  awayFinishedOne: (n: number): string => `完成了 ${n} 件`,
+  awayOfflineNamed: (agent: string): string => `${agent} 离线中`,
+  awayOffline: (n: number): string => `${n} 个代理离线`,
+  awayOfflineOne: (n: number): string => `${n} 个代理离线`,
+  awayUnreadableNamed: (agent: string): string => `${agent} 还是读不到`,
+  awayUnreadable: (n: number): string => `${n} 个代理还是读不到`,
+  awayUnreadableOne: (n: number): string => `${n} 个代理还是读不到`,
+  awayDismiss: '收起这行',
   pgSeeAll: '查看全部',
   pgMore: (n: number): string => `再显示 ${n} 项`,
   pgOwnTodo: '你的待办',

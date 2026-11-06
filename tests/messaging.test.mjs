@@ -441,18 +441,20 @@ test("a private folder check reads the local Administrator's own entry, which Wi
 })
 
 test('a store failure gives advice that fits its cause', () => {
-  for (const [s, permission, damaged] of [
-    [EN, "Check that the folder is your account's own and that no other account can open it, then try again.", 'Its message file may be damaged. Move messages.json out of that folder, then try again.'],
-    [ZH_TW, '請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。', '訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。'],
-    [ZH_CN, '请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。', '消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。'],
+  for (const [s, permission, damaged, busy] of [
+    [EN, "Check that the folder is your account's own and that no other account can open it, then try again.", 'Its message file may be damaged. Move messages.json out of that folder, then try again.', 'The computer may be busy'],
+    [ZH_TW, '請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。', '訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。', '電腦可能正忙'],
+    [ZH_CN, '请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。', '消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。', '电脑可能正忙'],
   ]) {
     const folder = 'synthetic-store'
-    for (const code of ['MESSAGE_STORE_IN_USE', 'MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM', 'UNREADABLE', 'INVALID_MESSAGE_STORE']) {
+    for (const code of ['MESSAGE_STORE_IN_USE', 'MESSAGE_STORE_ACL', 'ACL_CHECK_TIMEOUT', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM', 'UNREADABLE', 'INVALID_MESSAGE_STORE']) {
       const text = s.serveStoreFailed(code, folder)
       assert.ok(text.includes(folder) && text.includes(code), text)
       assert.equal(text.includes('server.lock'), code === 'MESSAGE_STORE_IN_USE', text)
       assert.equal(text.includes(permission), ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code), text)
       assert.equal(text.includes(damaged), ['UNREADABLE', 'INVALID_MESSAGE_STORE'].includes(code), text)
+      // A check that ran out of time is not called a folder another account can open (#799).
+      assert.equal(text.includes(busy), code === 'ACL_CHECK_TIMEOUT', text)
     }
   }
 })

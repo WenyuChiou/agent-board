@@ -28,7 +28,7 @@ import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { immutableQuestionFiles } from '../scripts/question-files.ts'
 import { recentInboxFiles } from '../scripts/inbox-files.ts'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from '../scripts/server-runtime.ts'
-import { isPrivateRuntimeDacl, isPrivateRuntimeSddl, privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
+import { identityOf, isPrivateRuntimeDacl, isPrivateRuntimeSddl, MESSAGE_FOLDER_ENV, privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
 import { AGENT_ICONS } from '../hooks/agent-icons.ts'
 import { partTest } from '../scripts/ci-impact.mjs'
 import { bigBoard, bigBoardNow } from './fixtures/big-board.mjs'
@@ -3252,7 +3252,7 @@ const viewed = model => {
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
 // `width`: the window's width in pixels (the page folds and moves its sidebar by it); `storage`: a Map behind localStorage;
 // `motion`: 'reduce' or 'full', what the person's system asks for (left out: the page never moves, as in the other tests).
-const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion } = {}) => {
+const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -3378,12 +3378,14 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     querySelectorAll: selector => [...nodes.values()].flatMap(node => [...(matches(node, selector) ? [node] : []), ...node.querySelectorAll(selector)]),
     activeElement: null,
     title: '',
+    hidden: false,
     events: {},
     addEventListener(name, run) { this.events[name] = run },
     body: new Element('body'),
     execCommand: () => { copies.push(document.body.childNodes.find(node => node.tag === 'textarea')?.value); return copyAllowed },
   }
   let model = viewed(first)
+  let clockNow = now === undefined ? Date.now() : now
   let scheduled
   const delays = []
   const windowEvents = {}
@@ -3404,6 +3406,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     ...(storage === undefined ? {} : { localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { storage.set(key, value) }, removeItem: key => { storage.delete(key) } } }),
     ...(motion === undefined ? {} : { requestAnimationFrame: run => { run(); return 1 } }),
     crypto: { randomUUID: () => `synthetic-offline-attempt-${requests.length}` },
+    Date: { now: () => clockNow },
     setTimeout: (run, delay) => {
       delays.push(delay)
       // Only the board's own poll (every 3 seconds) is the next redraw; the short waits of a moving page are not.
@@ -3462,6 +3465,9 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: () => windowEvents.pagehide?.(),
     requests,
+    setNow: value => { clockNow = value },
+    hideTab: () => { document.hidden = true; document.events.visibilitychange?.() },
+    showTab: () => { document.hidden = false; document.events.visibilitychange?.() },
     flush,
     settle,
     redraw: async next => {
@@ -5567,10 +5573,45 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
+// #799's older face: the server child checked its message folder with whoami and four or more
+// icacls starts inside the 10 s it has to print its address, and on a busy runner a few slow
+// exits used that up, twice, so the start failed after 20 s. The command now checks the folder
+// and hands it over, as it does the runtime folder, and the child starts none of them.
+test('a Windows page start opens the page when each message-folder access command in the server child would take 3 s', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 80_000 }, async () => {
+  const board = serveIn()
+  const messages = resolve(board.served.replace(/\.json$/, '-messages'))
+  const log = join(board.dir, 'message-folder-acl.log')
+  const preload = join(board.dir, 'slow-child-message-acl.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+const role = process.argv.includes('--serve-child') ? 'child' : 'parent'
+const folder = ${JSON.stringify(messages.toLowerCase())}
+cp.execFileSync = function (file, args, options) {
+  if (/icacls\\.exe$/i.test(String(file)) && Array.isArray(args) && String(args[0]).toLowerCase() === folder) {
+    fs.appendFileSync(${JSON.stringify(log)}, role + ' ' + args.slice(1).join(' ') + '\\n')
+    if (role === 'child') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000)
+  }
+  return original.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    const out = await board.serve(['--quiet-board'])
+    url = board.urlOf(out)
+    assert.ok(url, out)
+    const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean)
+    assert.ok(calls.some(line => line.startsWith('parent /setowner ')), `the command checked the message folder:\n${calls.join('\n')}`)
+    assert.deepEqual(calls.filter(line => line.startsWith('child ')), [], 'the server child checked it again')
+    const acl = windowsAcl(messages, board.env)
+    assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the message folder is private')
+  } finally { await board.end([url]) }
+})
+
 // The server child is told which folder the command just checked. It starts the page on that
 // folder when it is still the same plain folder, and checks in full when it is not.
-const startChild = (board, handoff) => new Promise(done => {
-  const env = { ...board.env }
+const startChild = (board, handoff, extra = {}) => new Promise(done => {
+  const env = { ...board.env, ...extra }
   if (handoff !== undefined) env[RUNTIME_FOLDER_ENV] = handoff
   const child = spawn(process.execPath, [board.script, '--serve-child'], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
   let out = '', err = ''
@@ -5665,6 +5706,90 @@ test('a Windows server child refuses a runtime junction even when it is handed t
     assert.equal(refused.err.trim(), EN.serveRuntimePrivate)
     assert.equal(readFileSync(sentinel, 'utf8'), 'Synthetic file must stay unchanged')
     assert.deepEqual(readdirSync(other), ['keep.txt'])
+  } finally { await board.end([]) }
+})
+
+// The message folder is handed over the same way (#799): the child trusts only the same plain
+// folder at the same path, and checks any other in full.
+test('a Windows server child checks its message folder in full unless it is handed that same folder', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 120_000 }, async () => {
+  const board = serveIn()
+  const starts = countPowerShell(board)
+  const log = board.env.AGENT_BOARD_TEST_PS_LOG
+  const messages = resolve(board.served.replace(/\.json$/, '-messages'))
+  let url = null
+  try {
+    privateRuntimeFolder(join(board.env.XDG_RUNTIME_DIR, 'agent-board'))
+    const runtime = runtimeFolderHandoff()
+    // The first start makes and checks the folder; each later one is handed it as the command would.
+    const handed = () => ({ path: messages, identity: identityOf(messages), isCreated: false })
+    const variants = {
+      'no variable': [() => undefined, true],
+      'the same folder': [() => JSON.stringify(handed()), false],
+      'not JSON': [() => '{"path":', true],
+      'another identity': [() => JSON.stringify({ ...handed(), identity: '1:2:3' }), true],
+      'another path': [() => JSON.stringify({ ...handed(), path: join(board.dir, 'elsewhere') }), true],
+      'no isCreated': [() => JSON.stringify({ path: messages, identity: identityOf(messages) }), true],
+    }
+    for (const [name, [valueOf, isChecked]] of Object.entries(variants)) {
+      rmSync(`${log}.detail`, { force: true })
+      const value = valueOf()
+      const started = await startChild(board, runtime, value === undefined ? {} : { [MESSAGE_FOLDER_ENV]: value })
+      url = started.url
+      assert.ok(url, `${name}: ${started.err}`)
+      assert.equal(starts.detail().includes(`child icacls ${messages} /setowner `), isChecked, `${name}${starts.detail()}`)
+      await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': new URL(url).searchParams.get('t'), 'content-type': 'application/json' }, body: '{}' })
+      for (let tries = 0; existsSync(board.served) && tries < 50; tries++) await delay(100)
+      assert.ok(!existsSync(board.served), name)
+      url = null
+    }
+  } finally { await board.end([url]) }
+})
+
+test('a Windows server child names a message-folder access check that ran out of time ACL_CHECK_TIMEOUT', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const messages = resolve(board.served.replace(/\.json$/, '-messages'))
+  const preload = join(board.dir, 'timed-out-acl.cjs')
+  // Thrown the way Node reports an execFileSync its timeout stopped.
+  writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+const folder = ${JSON.stringify(messages.toLowerCase())}
+cp.execFileSync = function (file, args) {
+  if (/icacls\\.exe$/i.test(String(file)) && Array.isArray(args) && String(args[0]).toLowerCase() === folder) throw Object.assign(new Error('spawnSync icacls.exe ETIMEDOUT'), { code: 'ETIMEDOUT', signal: 'SIGTERM' })
+  return original.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    privateRuntimeFolder(join(board.env.XDG_RUNTIME_DIR, 'agent-board'))
+    const refused = await startChild(board, runtimeFolderHandoff())
+    assert.equal(refused.url, null)
+    assert.match(refused.err, /^MESSAGE_STORE_FAILED ACL_CHECK_TIMEOUT\r?$/m)
+  } finally { await board.end([]) }
+})
+
+// The child that checks in full after the command's own check ran out of time is cut off at
+// its 10 s before its own 10 s limit can say why, so the command says it.
+test('a Windows page start whose message-folder check runs out of time says the computer may be busy', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 80_000 }, async () => {
+  const board = serveIn()
+  const messages = resolve(board.served.replace(/\.json$/, '-messages'))
+  const preload = join(board.dir, 'busy-acl.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+const role = process.argv.includes('--serve-child') ? 'child' : 'parent'
+const folder = ${JSON.stringify(messages.toLowerCase())}
+cp.execFileSync = function (file, args) {
+  if (/icacls\\.exe$/i.test(String(file)) && Array.isArray(args) && String(args[0]).toLowerCase() === folder) {
+    if (role === 'parent') throw Object.assign(new Error('spawnSync icacls.exe ETIMEDOUT'), { code: 'ETIMEDOUT', signal: 'SIGTERM' })
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 11_000)
+  }
+  return original.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
+    assert.equal(board.urlOf(out), null, out)
+    assert.equal(out.trim(), EN.serveStoreFailed('ACL_CHECK_TIMEOUT', messages), out)
   } finally { await board.end([]) }
 })
 
@@ -9958,6 +10083,232 @@ test('a hand-written own task with two open steps with the same text shows one D
   assert.equal(ticks.length, 2)
   assert.ok(ticks.every(request => request.body.text === 'Draft the notes'))
   assert.equal(new Set(ticks.map(request => request.body.line)).size, 2, 'each press names its own step by its file line')
+})
+
+// The line's words live in its fold inner; the harness keeps the static HTML's nesting flat, so the inner node is read directly (in a browser it is the box's only child).
+const awayLine = dom => dom.node('away-line-in').textContent
+const awayAfter = async (base, later, minutes, opts = {}) => {
+  const dom = await pageDom(await sourcePage('en'), base, { now: ONE_LINE_NOW, ...opts })
+  dom.hideTab()
+  dom.setNow(ONE_LINE_NOW + minutes * 60 * 1000)
+  dom.showTab()
+  await dom.redraw(later)
+  await dom.settle()
+  return dom
+}
+
+test('coming back after 5 minutes shows one line with what changed while away', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await awayAfter(base, later, 42)
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task done')
+})
+
+test('the away lead counts whole hours from an hour', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await awayAfter(base, later, 130)
+  assert.equal(awayLine(dom), 'Away for 2 h · Codex asked a question · 1 task done')
+})
+
+test('no away line when the tab was hidden for less than 5 minutes', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
+  const dom = await awayAfter(base, later, 4)
+  assert.equal(awayLine(dom), '')
+})
+
+test('a refresh while the tab is still hidden keeps the away snapshot for the return', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await pageDom(await sourcePage('en'), base, { now: ONE_LINE_NOW })
+  dom.hideTab()
+  dom.setNow(ONE_LINE_NOW + 1 * 60 * 1000)
+  await dom.redraw(base)
+  await dom.settle()
+  assert.equal(awayLine(dom), '')
+  dom.setNow(ONE_LINE_NOW + 42 * 60 * 1000)
+  dom.showTab()
+  await dom.redraw(later)
+  await dom.settle()
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task done')
+})
+
+test('no away line when nothing changed while away', async () => {
+  const base = cardsModel('codex')
+  const dom = await awayAfter(base, base, 30)
+  assert.equal(awayLine(dom), '')
+})
+
+test('the away line is empty on the first load', async () => {
+  const dom = await pageDom(await sourcePage('en'), cardsModel('codex'))
+  assert.equal(awayLine(dom), '')
+})
+
+test('a new question from an agent the board does not know by name uses the generic form', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-mystery', agent: 'mystery', task: 'Mystery plan', text: 'Mystery, OK?' }] }
+  const dom = await awayAfter(base, later, 10)
+  assert.equal(awayLine(dom), 'Away for 10 min · 1 agent asked a question')
+})
+
+test('new questions from two agents show the agent count', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [
+      ...base.asks,
+      { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' },
+      { ...base.asks[0], key: 'ask-3', agent: 'claude', task: 'Third plan', text: 'Third, OK?' },
+    ],
+  }
+  const dom = await awayAfter(base, later, 6)
+  assert.equal(awayLine(dom), 'Away for 6 min · 2 agents asked 2 questions')
+})
+
+test('a question that changed agents while away is not a new question', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [{ ...base.asks[0], agent: 'claude' }] }
+  const dom = await awayAfter(base, later, 9)
+  assert.equal(awayLine(dom), '')
+})
+
+test('an agent coming online while away shows no away line', async () => {
+  const base = cardsModel('codex')
+  base.groups[0].rows[0] = { ...base.groups[0].rows[0], isClosed: true }
+  const later = cardsModel('codex')
+  later.groups[0].rows[0] = { ...later.groups[0].rows[0], send: 'open' }
+  const dom = await awayAfter(base, later, 7)
+  assert.equal(awayLine(dom), '')
+})
+
+test('an agent going offline while away is named on the line', async () => {
+  const base = cardsModel('codex')
+  base.groups[0].rows[0] = { ...base.groups[0].rows[0], send: 'open' }
+  const later = cardsModel('codex')
+  later.groups[0].rows[0] = { ...later.groups[0].rows[0], isClosed: true }
+  const dom = await awayAfter(base, later, 8)
+  assert.equal(awayLine(dom), 'Away for 8 min · Codex is offline')
+})
+
+test('an agent the board does not know by name going offline shows the count', async () => {
+  const base = cardsModel('codex')
+  base.groups[0].rows.push({ ...base.groups[0].rows[0], key: 'mystery-row', agent: 'mystery', title: 'Mystery plan', send: 'open' })
+  const later = cardsModel('codex')
+  later.groups[0].rows.push({ ...later.groups[0].rows[0], key: 'mystery-row', agent: 'mystery', title: 'Mystery plan', isClosed: true })
+  const dom = await awayAfter(base, later, 8)
+  assert.equal(awayLine(dom), 'Away for 8 min · 1 agent is offline')
+})
+
+test('an agent that still can\'t be read while away is named on the line', async () => {
+  const base = viewed(cardsModel('codex'))
+  base.view.agents.find(agent => agent.agent === 'codex').isUnreadable = true
+  const later = viewed({
+    ...cardsModel('codex'),
+    asks: [...cardsModel('codex').asks, { ...cardsModel('codex').asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+  })
+  later.view.agents.find(agent => agent.agent === 'codex').isUnreadable = true
+  const dom = await awayAfter(base, later, 10)
+  assert.equal(awayLine(dom), 'Away for 10 min · Codex asked a question · Codex still can\'t be read')
+})
+
+test('the away line stays until you close it', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await awayAfter(base, later, 42)
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task done')
+  // A filter change does not hide it: it never hides by itself.
+  rowAgent(dom, 'codex').click()
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task done')
+  // Only the × folds it away.
+  dom.node('away-line-in').querySelectorAll('button').find(button => button.className === 'away-x').click()
+  await dom.settle()
+  assert.equal(awayLine(dom), '')
+})
+
+test('the away line hides when the tab is hidden a second time', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await awayAfter(base, later, 42)
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task done')
+  dom.hideTab()
+  dom.setNow(ONE_LINE_NOW + 52 * 60 * 1000)
+  dom.showTab()
+  await dom.redraw(later)
+  await dom.settle()
+  assert.equal(awayLine(dom), '')
+})
+
+test('tasks done on the away line opens the Done list', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+    groups: [],
+    recent: [{ ...base.groups[0].rows[0] }],
+  }
+  const dom = await awayAfter(base, later, 42, { motion: 'full' })
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task done')
+  // From another view the link switches to Overview first, and the line stays.
+  dom.node('view-needs').click()
+  assert.equal(dom.node('shell').getAttribute('data-view'), 'needs')
+  assert.equal(awayLine(dom), 'Away for 42 min · Codex asked a question · 1 task done')
+  dom.node('away-line-in').querySelectorAll('button').find(button => button.className === 'link').click()
+  await dom.settle()
+  assert.equal(dom.node('shell').getAttribute('data-view'), 'all')
+  assert.equal(dom.node('view-all').getAttribute('aria-pressed'), 'true')
+  // The Done list is open, and the row that finished while away is lit.
+  const row = dom.query('[data-k="row"]')[0]
+  assert.ok(row, 'the finished row is on the page')
+  assert.ok(String(row.className).split(' ').includes('arrived'), 'the finished row glows')
+  let shelf = row
+  while (shelf && !(shelf.tag === 'section' && String(shelf.className).startsWith('shelf'))) shelf = shelf.parentNode
+  assert.ok(shelf && String(shelf.className).includes('open'), 'the Done list is open')
+})
+
+test('new question cards get the arrive glow once', async () => {
+  const base = cardsModel('codex')
+  const later = {
+    ...base,
+    asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }],
+  }
+  const dom = await awayAfter(base, later, 10, { motion: 'full' })
+  assert.equal(awayLine(dom), 'Away for 10 min · Codex asked a question')
+  const card = dom.query('[data-k="ask-2"]')[0]
+  assert.ok(card, 'the new question card is on the page')
+  assert.ok(String(card.className).split(' ').includes('arrived'), 'the new card glows')
+  // A later refresh does not light it again: the glow is once. The refresh must redraw
+  // (an unchanged board is not rebuilt), so the question's text changes.
+  const changed = { ...later, asks: later.asks.map(one => one.key === 'ask-2' ? { ...one, text: 'Second, still OK?' } : one) }
+  await dom.redraw(changed)
+  await dom.settle()
+  const again = dom.query('[data-k="ask-2"]')[0]
+  assert.ok(!String(again.className).split(' ').includes('arrived'), 'the glow does not repeat')
 })
 
 test('on a wide screen the sidebar lists views, agents and projects', async () => {

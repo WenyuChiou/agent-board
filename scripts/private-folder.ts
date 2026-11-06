@@ -1,9 +1,10 @@
 import { randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { lstatSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, rmdirSync, unlinkSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join, resolve } from 'node:path'
 import { patiently } from './message-store-claim'
+import { identityOf, MESSAGE_FOLDER_ENV } from './runtime-folder'
 
 // This computer's NetBIOS name, which whoami prints as a local account's domain. A board started
 // with a trimmed environment has no COMPUTERNAME; Windows takes the name from the host name's
@@ -105,4 +106,58 @@ export const privateFolder = (dir: string): void => {
     }
     if (!isPrivateDacl(readDacl(), sid, own) || lstatSync(root).isSymbolicLink()) throw new Error('PRIVATE_FOLDER')
   } catch (error) { throw new Error('PRIVATE_FOLDER', { cause: error }) }
+}
+
+// The page's server is started by a command that has just checked its message folder. As with
+// the runtime folder (RUNTIME_FOLDER_ENV), the command hands over the folder's identity in
+// MESSAGE_FOLDER_ENV and the server checks only that the same plain folder is still there: once
+// the folder's list is the sole full-control grant of this account, only this account can change
+// it. Its parent must be private too, or another account could swap the folder between the two
+// checks, so only the default message folder, inside the private runtime folder, is handed over
+// (#799).
+
+// Checks the folder in full and returns what the server is handed. Whether this call made the
+// folder goes along, so a server that cannot start still removes the empty folder, as it would
+// have had it made the folder itself.
+export const privateFolderHandoff = (dir: string): string => {
+  const root = resolve(dir)
+  const isCreated = !isPresent(root)
+  try {
+    mkdirSync(root, { recursive: true, mode: 0o700 })
+    // The folder checked must be the folder handed over, whoever else could reach its parent.
+    const identity = identityOf(root)
+    privateFolder(root)
+    if (identity === undefined || identityOf(root) !== identity) throw new Error('PRIVATE_FOLDER')
+    return JSON.stringify({ path: root, identity, isCreated })
+  } catch (error) {
+    // A folder made here for a check that failed is left as it was found: absent.
+    if (isCreated) try { rmdirSync(root) } catch {}
+    throw error
+  }
+}
+
+// An access command that ran out of time says so, apart from a folder another account can open.
+export const isTimeout = (error: unknown): boolean => {
+  let at = error
+  for (let depth = 0; depth < 4 && at instanceof Error; depth++) {
+    if ((at as NodeJS.ErrnoException).code === 'ETIMEDOUT') return true
+    at = at.cause
+  }
+  return false
+}
+
+// The handoff for this folder, taken once. A missing or malformed handoff, one for another folder,
+// or a folder that is no longer the same plain folder leaves the full check to the caller.
+export const takePrivateFolderHandoff = (dir: string): { isCreated: boolean } | undefined => {
+  const value = process.env[MESSAGE_FOLDER_ENV]
+  if (value === undefined) return undefined
+  // Meant for this process alone, not for programs it starts.
+  delete process.env[MESSAGE_FOLDER_ENV]
+  try {
+    const found = JSON.parse(value) as { path?: unknown; identity?: unknown; isCreated?: unknown } | null
+    const root = resolve(dir)
+    return found?.path === root && typeof found.identity === 'string' && typeof found.isCreated === 'boolean' && identityOf(root) === found.identity
+      ? { isCreated: found.isCreated }
+      : undefined
+  } catch { return undefined }
 }

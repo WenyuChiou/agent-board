@@ -737,9 +737,11 @@ export const ZH_TW = {
       ? `看板已停止（${code}）：${folder}。請用 --serve 重新啟動；不確定是否送達的訊息沒有重新送出。`
       : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
         ? `看板無法確認訊息持有者（${code}）：${folder}。請先停止所有看板 server，再檢查該資料夾裡的 .message-claim-*.json。確認沒有 hub 執行後，才能移除損壞的 claim。請保留 messages.json，勿重送不確定是否送達的訊息。`
-        : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
-          ? `看板無法開啟訊息資料夾（${code}）：${folder}。請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。`
-          : `看板無法開啟訊息資料夾（${code}）：${folder}。訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。`,
+        : code === 'ACL_CHECK_TIMEOUT'
+          ? `Windows 檢查誰能開啟看板的訊息資料夾時花了太久（${code}）：${folder}。電腦可能正忙，例如正在掃毒。請稍後再試一次。`
+          : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
+            ? `看板無法開啟訊息資料夾（${code}）：${folder}。請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。`
+            : `看板無法開啟訊息資料夾（${code}）：${folder}。訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。`,
   serveOffline: '連不上看板。請用 --serve 重新啟動看板；新的頁面會自動開啟，這個分頁可以關閉。',
   serveOfflineLan: '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
   themeToDark: '切換成深色',
@@ -828,6 +830,22 @@ export const ZH_TW = {
   pgNothingHint: '代理程式問你問題或卡住時，會顯示在這裡，分頁標題也會顯示數字。',
   pgOlder: (n: number): string => `${n} 個較早的問題尚未回答（對話已停止）`,
   pgOlderOne: (n: number): string => `${n} 個較早的問題尚未回答（對話已停止）`,
+  awayForMinutes: (n: number): string => `你離開 ${n} 分鐘`,
+  awayForHours: (n: number): string => `你離開 ${n} 小時`,
+  awayAskedNamedOne: (agent: string): string => `${agent} 問了 1 個問題`,
+  awayAskedNamed: (agent: string, n: number): string => `${agent} 問了 ${n} 個問題`,
+  awayAskedGenericOne: '1 個代理程式問了 1 個問題',
+  awayAskedGenericOneAgent: (n: number): string => `1 個代理程式問了 ${n} 個問題`,
+  awayAskedGeneric: (agents: number, n: number): string => `${agents} 個代理程式問了 ${n} 個問題`,
+  awayFinished: (n: number): string => `做完 ${n} 件`,
+  awayFinishedOne: (n: number): string => `做完 ${n} 件`,
+  awayOfflineNamed: (agent: string): string => `${agent} 離線中`,
+  awayOffline: (n: number): string => `${n} 個代理程式離線`,
+  awayOfflineOne: (n: number): string => `${n} 個代理程式離線`,
+  awayUnreadableNamed: (agent: string): string => `${agent} 還是讀不到`,
+  awayUnreadable: (n: number): string => `${n} 個代理程式還是讀不到`,
+  awayUnreadableOne: (n: number): string => `${n} 個代理程式還是讀不到`,
+  awayDismiss: '收起這行',
   pgSeeAll: '查看全部',
   pgMore: (n: number): string => `再顯示 ${n} 項`,
   pgOwnTodo: '你的待辦',
