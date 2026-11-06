@@ -192,6 +192,18 @@ const fitted = (raw: string, width: number, columnOf: (char: string) => number):
 
 export const fit = (raw: string, width: number, isWide = false): string => fitted(raw, width, columnsOf(isWide))
 
+// Footer guidance stays a sequence of readable words; other labels may still clip by glyph.
+const fitWords = (raw: string, width: number, isWide: boolean): string => {
+  const shortened = fit(raw, width, isWide)
+  if (!shortened.endsWith('…')) return shortened
+  const head = shortened.slice(0, -1)
+  const word = /[\p{Script=Latin}\p{N}_]/u
+  if (!word.test(head.at(-1) ?? '') || !word.test(plain(raw).slice(head.length, head.length + 1))) return shortened
+  const space = head.lastIndexOf(' ')
+
+  return `${space < 0 ? '' : head.slice(0, space).trimEnd()}…`
+}
+
 const MARK: Record<string, string> = { done: '✓', doing: '▸', todo: '○', waiting: '●', running: '◐', blocked: '!', cancelled: '–' }
 
 // Recovery advice must stay readable even when it is longer than one terminal row.
@@ -1016,7 +1028,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
   // (the answer hints must stay complete), so it gets its own line, and only when the
   // board has stopped rows to clean.
   const own = keysFor(items[at], s, routes).join(' · ')
-  lines.push('', c('quiet', own === '' ? cut(s.boardKeysMove, o.width) : `${cut(own, o.width - cols(s.boardKeysMove) - cols(' · ') - 1)} · ${s.boardKeysMove}`))
+  lines.push('', c('quiet', own === '' ? cut(s.boardKeysMove, o.width) : `${fitWords(own, o.width - cols(s.boardKeysMove) - cols(' · ') - 1, isWide)} · ${s.boardKeysMove}`))
   if (view.stopped.length > 0) lines.push(c('quiet', s.boardKeyBulkArchive))
   if (result === undefined) resultLines('')
   for (const line of view.health ?? []) lines.push(...wrap(line, o.width - 2).map(part => c('quiet', part)))

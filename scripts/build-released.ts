@@ -106,8 +106,8 @@ const outputsOf = async (dir: string, label: string): Promise<Output> => {
         const file: string = hook.file
         const ending = (...parts: string[]) => file.endsWith(parts.join(ctx.sep))
         if (ending('', 'SKILL.md')) add('skill', `skill ${lang} ${hook.agent} ${variant}`, swap(text, ctx))
-        else if (ending('commands', 'board.toml')) add('gemini', `gemini ${lang} ${variant}`, swap(text, ctx))
-        else if (ending('commands', 'board.md')) add('opencode', `opencode ${lang} ${variant}`, swap(text, ctx))
+        else if (ending('commands', 'board.toml') || ending('commands', 'agent-board.toml')) add('gemini', `gemini ${lang} ${variant}`, swap(text, ctx))
+        else if (ending('commands', 'board.md') || ending('commands', 'agent-board.md')) add('opencode', `opencode ${lang} ${variant}`, swap(text, ctx))
         else if (ending('hooks', 'agent-board.json') || ending('plugin', 'agent-board.js') || ending('.openclaw', 'agent-board.mjs')) {
           const key = `${system} ${name} ${file.slice(ctx.home.length)}`
           fixed.set(key, text)

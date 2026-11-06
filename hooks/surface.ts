@@ -1,5 +1,5 @@
 // Pure decision function: decides whether `agent-board` with no flags should print
-// plain text, start the terminal board (--watch), or open the desktop web page (--serve).
+// plain text, start the terminal board (--watch), or open the desktop web page.
 //
 // CI keeps a text read for scripts. Agents and non-interactive calls open the page.
 // An interactive terminal uses the terminal board over SSH or without a display,
