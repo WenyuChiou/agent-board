@@ -3,7 +3,7 @@ import type { Strings } from './i18n'
 import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
 import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
-import { scanBlocks } from './blocks'
+import { scanBlocks, sectionOfProject } from './blocks'
 import { cutLine } from './step-words'
 import type { BlockSpan } from './blocks'
 import { sha256 } from './sha256'
@@ -238,7 +238,19 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   if (found === null || found.length > 1) throw new Error('BLOCK_CONFLICT')
   const existing = found[0]
   // Append a section rather than reformat another writer's bytes.
-  const append = (text: string): string => `${text}${text && !text.endsWith('\n') ? eol : ''}${eol}## ${report.project}${eol}${block}${eol}`
+  // A project already headed in the file gets the block at the end of that section, found the way
+  // placeUnder finds it; only a project with no section gets a new heading at the end.
+  const append = (text: string): string => {
+    const all = text.split('\n')
+    const section = sectionOfProject(all, report.project)
+    if (section === null) return `${text}${text && !text.endsWith('\n') ? eol : ''}${eol}## ${report.project}${eol}${block}${eol}`
+    let at = section.end
+    while (at > section.heading + 1 && all[at - 1]?.trim() === '') at -= 1
+    const pos = Math.min(all.slice(0, at).reduce((total, one) => total + one.length + 1, 0), text.length)
+    const before = text.slice(0, pos)
+    const after = text.slice(pos)
+    return `${before}${before.endsWith('\n') ? '' : eol}${eol}${block}${eol}${after === '' || /^[ \t]*\r?\n/.test(after) ? '' : eol}${after}`
+  }
   let next: string
   if (existing) {
     const attrs = parseAttrs(lines[existing.start] ?? '')

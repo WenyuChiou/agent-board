@@ -9685,3 +9685,83 @@ test('the older OpenClaw update_plan name reaches the board too', () => fixture(
   assert.equal(got.deliver(got.saved[0]).status, 0)
   assert.match(readFileSync(f.progress, 'utf8'), /^- \[~\] Old name step$/m)
 }))
+
+// #922: a new block joins its project's section, and a plan event with no block files like a status event.
+const sharedReports = (f, eol) => {
+  assert.equal(f.install('--apply').status, 0)
+  writeFileSync(f.progress, ['# Progress', '', '## Shared project', '- [ ] hand kept', '', '## Other project', '- [ ] other', ''].join(eol))
+  for (const id of ['shared-report-session-1', 'shared-report-session-2']) {
+    const ran = f.command(['--report', '--agent', 'codex', '--session', id], { title: `Task ${id.at(-1)}`, project: 'Shared project', state: 'working', steps: ['- [~] Step'] })
+    assert.equal(ran.status, 0, ran.stderr)
+  }
+  return readFileSync(f.progress, 'utf8')
+}
+
+for (const [label, eol] of [['LF', '\n'], ['CRLF', '\r\n']]) {
+  test(`#922 two sessions of one project share its one heading, ${label}`, () => fixture(f => {
+    const text = sharedReports(f, eol)
+    assert.equal(text.match(/^## Shared project\r?$/gm).length, 1, text)
+    assert.equal(text.match(/^## Other project\r?$/gm).length, 1, text)
+    const other = text.indexOf('## Other project')
+    for (const n of ['1', '2']) {
+      const at = text.indexOf(`### Task ${n}`)
+      assert.ok(at > text.indexOf('## Shared project') && at < other, text)
+    }
+    assert.ok(text.indexOf('- [ ] hand kept') < text.indexOf('### Task 1'), text)
+    assert.ok(text.includes(`<!-- /auto session=${createHash('sha256').update('codex:shared-report-session-2').digest('hex').slice(0, 8)} -->${eol}${eol}## Other project`), JSON.stringify(text))
+    if (eol === '\r\n') assert.ok(!/(^|[^\r])\n/.test(text), 'every line keeps its CRLF')
+  }))
+}
+
+test('#922 a block joins only a heading with its whole project name, not one that shares the first word', async () => {
+  const { putCodexBlock } = await importTs('../hooks/codex.ts')
+  const base = ['# Progress', '', '## my other', '- [ ] hand kept', ''].join('\n')
+  const text = putCodexBlock(base, { session: 'm1', turn: null, state: 'working', title: 'Task', project: 'my project', steps: ['- [~] Step'], updated: '2026-11-06T00:00:00.000Z' }, 'c'.repeat(64))
+  assert.equal(text.match(/^## my other$/gm).length, 1, text)
+  assert.equal(text.match(/^## my project$/gm).length, 1, text)
+  assert.ok(text.indexOf('### Task') > text.indexOf('## my project'), text)
+})
+
+test('#922 dropping one of two blocks in a shared section keeps the heading', async () => {
+  const { putCodexBlock, dropCodexBlock } = await importTs('../hooks/codex.ts')
+  const owners = ['a', 'b'].map(one => one.repeat(64))
+  const report = (n) => ({ session: `d${n}`, turn: null, state: 'working', title: `Task ${n}`, project: 'Shared project', steps: ['- [~] Step'], updated: '2026-11-06T00:00:00.000Z' })
+  let text = ''
+  owners.forEach((owner, index) => { text = putCodexBlock(text, report(index), owner) })
+  assert.equal(text.match(/^## Shared project$/gm).length, 1, text)
+  const first = dropCodexBlock(text, owners[0])
+  assert.match(first, /^## Shared project$/m)
+  assert.ok(first.includes('### Task 1') && !first.includes('### Task 0'), first)
+  const second = dropCodexBlock(text, owners[1])
+  assert.match(second, /^## Shared project$/m)
+  assert.ok(second.includes('### Task 0') && !second.includes('### Task 1'), second)
+})
+
+test('#922 a Codex plan event with a cwd and no earlier block files under the folder name, not Codex', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const ran = f.command(['--plan-event'], planCall('plan-folder-session-1', 'update_plan', [{ step: 'Folder step', status: 'in_progress' }], { cwd: join(f.home, 'synthetic-plan-folder') }))
+  assert.equal(ran.status, 0, ran.stderr)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^## synthetic-plan-folder\r?$/m)
+  assert.ok(!text.includes('## Codex'), text)
+}))
+
+test('#922 a Gemini and a Grok plan event with no earlier block file under their own agent heading', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  assert.equal(f.command(['--plan-event', '--agent', 'gemini'], planCall('gemini-heading-session-1', 'write_todos', [{ description: 'Gemini step', status: 'in_progress' }], { cwd: join(f.home, 'ignored-folder') })).status, 0)
+  assert.equal(f.command(['--plan-event', '--agent', 'grok'], grokCall('grok-heading-session-1', [{ content: 'Grok step', priority: 'low', status: 'in_progress' }])).status, 0)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^## gemini\r?$/m)
+  assert.match(text, /^## grok\r?$/m)
+  assert.ok(!text.includes('## Codex') && !text.includes('ignored-folder'), text)
+}))
+
+test('#922 a plan event keeps the project of an existing block', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.command(['--codex-report', '--agent', 'codex', '--session', 'plan-keep-session-1'], { title: 'Existing', project: 'Kept project', state: 'working', steps: ['- [~] First'] }).status, 0)
+  assert.equal(f.command(['--plan-event'], planCall('plan-keep-session-1', 'update_plan', [{ step: 'Second', status: 'in_progress' }], { cwd: join(f.home, 'other-folder') })).status, 0)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^## Kept project\r?$/m)
+  assert.ok(!text.includes('## other-folder'), text)
+}))
