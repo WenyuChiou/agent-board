@@ -23,7 +23,7 @@ try {
 } finally { loader.deregister() }
 
 const [{ pageTokens, boardMark }, { servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
-const SANS = '"Atkinson Hyperlegible Next",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif'
+const SANS = 'Inter,"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
 const MARK_PATH = 'M 51 14.5 V 36 C 51 46 52 54 57.5 59 C 50.6 59 43.71 56.77 40.01 51.67 Q 34.7 55 28 55 Q 18.47 55 11.74 48.26 Q 5 41.53 5 32 Q 5 22.47 11.74 15.74 Q 18.47 9 28 9 Q 34.9 9 40.34 12.54 Q 40.74 11.48 41.61 10.61 Q 43.22 9 45.5 9 Q 47.78 9 49.39 10.61 Q 51 12.22 51 14.5 Z M 40 32 Q 40 27.03 36.49 23.51 Q 32.97 20 28 20 Q 23.03 20 19.51 23.51 Q 16 27.03 16 32 Q 16 36.97 19.51 40.49 Q 23.03 44 28 44 Q 32.97 44 36.49 40.49 Q 40 36.97 40 32 Z'
 const SHAPES = `<path class="lg-mark" d="${MARK_PATH}"/>`
@@ -273,13 +273,13 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
 })
 
 test('the page embeds its fonts, makes no font request and allows only font-src data:', () => {
-  assert.equal(light['font-sans'], SANS, 'the sans token starts with Atkinson and keeps the system stack')
+  assert.equal(light['font-sans'], SANS, 'the sans token starts with Inter, then the CJK UI fonts and the system stack')
   assert.equal(light['font-mono'], MONO, 'the mono token is the exact system stack')
-  assert.match(FONT_LICENSE, /^Copyright 2020-2024 The Atkinson Hyperlegible Next Project Authors/)
+  assert.match(FONT_LICENSE, /^Copyright \(c\) 2016 The Inter Project Authors/)
   assert.equal(FONT_LICENSE, readFileSync(new URL('../hooks/fonts/OFL.txt', import.meta.url), 'utf8').replace(/\r\n/g, '\n'), 'the bundled license matches the license shipped beside the source')
   const hashes = {
-    400: '378aea0f5c1d179f4e0b5382c06bfc87571b98cfcc4fd1352bc979e2e2259c54',
-    600: '4ab00275cc496a478fce7baafe89ed44af875acf57655dfd1183ff22bd23829a',
+    400: 'dd05e326cf8eac3b55acecf29c842ed73e6e6dd06491cf47f7e8800680ab3e33',
+    600: '62553d159189834af73c9a6264704be5b2bee9a08da66a14768d8e5c6ffd2cdb',
   }
   const policy = pagePolicy('n')
   assert.match(policy, /(?:^|;)\s*default-src 'none'(?:;|$)/)
@@ -296,7 +296,7 @@ test('the page embeds its fonts, makes no font request and allows only font-src 
       assert.equal(faces.length, 2, `${where}: both font faces are embedded`)
       const weights = []
       for (const face of faces) {
-        assert.match(face, /\bfont-family\s*:\s*(['"])Atkinson Hyperlegible Next\1\s*;/i, `${where}: font family`)
+        assert.match(face, /\bfont-family\s*:\s*Inter\s*;/i, `${where}: font family`)
         assert.match(face, /\bfont-display\s*:\s*swap\s*(?:;|$)/i, `${where}: font display`)
         const weight = /\bfont-weight\s*:\s*(400|600)\s*(?:;|$)/i.exec(face)?.[1]
         assert.ok(weight, `${where}: regular or semibold weight`)
@@ -318,7 +318,7 @@ test('the page embeds its fonts, makes no font request and allows only font-src 
       for (const link of html.match(/<link\b[^>]*>/gi) ?? []) assert.doesNotMatch(link, /\brel\s*=\s*["'](?:stylesheet|preload)["']/i, `${where}: no stylesheet or preload link`)
       for (const match of cleanCss.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) assert.match(match[1] ?? match[2] ?? match[3], /^(?:data:image\/svg\+xml,|data:font\/woff2;base64,)/, `${where}: CSS URLs are inline SVG images or WOFF2 fonts`)
       const sans = valuesOf(styleRules(html).find(rule => rule.selector === ':root'))['font-sans']
-      assert.equal(sans, SANS, `${where}: the rendered page uses Atkinson with the system fallback stack`)
+      assert.equal(sans, SANS, `${where}: the rendered page uses Inter with the CJK and system fallback stack`)
       for (const face of ['Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'PingFang SC', 'Microsoft JhengHei', 'Microsoft YaHei']) assert.ok(sans.includes(`"${face}"`), `${where}: ${face} is available for Chinese text`)
     }
   }

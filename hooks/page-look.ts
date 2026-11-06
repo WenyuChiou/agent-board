@@ -7,7 +7,10 @@ const cssVars = (values: Record<string, string>): string => Object.entries(value
 
 export const pageTokens = (headHeight = '54px'): string => {
   const shared = {
-    'font-sans': '"Atkinson Hyperlegible Next",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif',
+    // Latin text is Inter, embedded below (the owner found Atkinson beside the system's CJK font a poor pair, 11-06).
+    // Chinese uses each system's own UI sans: PingFang on a Mac, Noto Sans TC where installed, else Microsoft
+    // JhengHei UI on Windows. A CJK web font would be megabytes, so none is embedded.
+    'font-sans': 'Inter,"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif',
     'font-mono': 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace',
     // Nothing on the page is smaller than 13px, and each size grows with the reader's own font size (max of the
     // floor and a rem value). xs (13) is the floor: ages, counts, small labels. sm (14) is body, buttons, meta
@@ -199,8 +202,8 @@ export const agentFade = String.raw`
 `
 
 export const pageBaseCss = `
-@font-face{font-family:'Atkinson Hyperlegible Next';src:url(data:font/woff2;base64,${FONT_REGULAR}) format('woff2');font-weight:400;font-display:swap;/* ${FONT_LICENSE} */}
-@font-face{font-family:'Atkinson Hyperlegible Next';src:url(data:font/woff2;base64,${FONT_SEMIBOLD}) format('woff2');font-weight:600;font-display:swap}
+@font-face{font-family:Inter;src:url(data:font/woff2;base64,${FONT_REGULAR}) format('woff2');font-weight:400;font-display:swap;/* ${FONT_LICENSE} */}
+@font-face{font-family:Inter;src:url(data:font/woff2;base64,${FONT_SEMIBOLD}) format('woff2');font-weight:600;font-display:swap}
 *,*::before,*::after{box-sizing:border-box}
 html{background:var(--ground)}
 body{margin:0;background:var(--ground);color:var(--ink);font:var(--text-sm)/1.5 var(--font-sans);-webkit-font-smoothing:antialiased}
