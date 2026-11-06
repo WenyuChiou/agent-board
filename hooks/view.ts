@@ -1130,7 +1130,9 @@ export const buildView = (
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
       // One whose questions were all marked answered is back with the work in progress.
-      if (!isIdle && auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index))) continue
+      // A blocked step keeps its row beside an open question: the card shows the ask, the row shows the blocker (#224).
+      const isBlocked = task.steps.some(step => step.status === 'blocked')
+      if (!isIdle && !isBlocked && auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index))) continue
 
       // A hook's placeholder step says the session waits; while it works the row shows no step (#612).
       const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
@@ -1140,7 +1142,7 @@ export const buildView = (
           ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
           : auto === 'ended'
             ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
-            : task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
+            : !isBlocked && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
               ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
               : stepPhrase(task, s, isPrompt)
       const open = task.steps[currentStepIndex(task)]
