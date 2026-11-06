@@ -13,6 +13,13 @@ export const renewQuestion = (task: ProgressMirrorTask, floor = '0'): ProgressMi
 export const plain = (text: string): string => text.replace(/<!--/g, ' ').replace(/--+>/g, '->').replace(/\s+/g, ' ').trim()
 export const oneLine = (text: string): string => plain(text).replace(/^#+\s*/, '').trim()
 
+// One rule for every agent (#922): a title or step longer than 120 code points is written as
+// its first 119 plus `…`. Counting code points, not UTF-16 units, so CJK and emoji count once.
+export const cutLine = (text: string): { text: string; isCut: boolean } => {
+  const chars = [...text]
+  return chars.length > 120 ? { text: `${chars.slice(0, 119).join('')}…`, isCut: true } : { text, isCut: false }
+}
+
 // A question the person answered finishes in the words it asked in. A finished step shows no
 // note, and the question ledger knows a question by the words its step showed (questions.ts),
 // so dropping the note would leave its record unresolved and the question listed as waiting.

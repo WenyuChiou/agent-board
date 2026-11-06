@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
 
 const script = fileURLToPath(new URL('../scripts/preflight.mjs', import.meta.url))
+const syntheticIdentity = ticks => `linux:00000000-0000-4000-8000-000000000001:${ticks}:time:[1]:pid:[2]`
 const currentRegister = readFileSync(new URL('../hooks/register.tsx', import.meta.url), 'utf8')
 const tableFiles = [['hooks/i18n.ts', 'ZH_TW'], ['hooks/strings-en.ts', 'EN'], ['hooks/strings-zh-cn.ts', 'ZH_CN']]
 const homeNames = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_PROGRESS_FILE']
@@ -73,7 +74,7 @@ const fixture = t => {
   // Module-only injection keeps CLI fixtures off the real account lock, even inside preflight.
   const cli = join(root, 'preflight-cli.mjs')
   writeFileSync(cli, `import { main } from ${JSON.stringify(pathToFileURL(script).href)}\nprocess.exitCode = await main(process.argv.slice(2), { lockPath: ${JSON.stringify(lockPath)}, fallbackLockPath: null })\n`)
-  const check = options => runPreflight({ cwd, isNoFetch: true, run, lockPath, fallbackLockPath: null, readProcessIdentity: pid => `synthetic:${pid}`, ...options })
+  const check = options => runPreflight({ cwd, isNoFetch: true, run, lockPath, fallbackLockPath: null, readProcessIdentity: syntheticIdentity, lockPlatform: 'linux', ...options })
   return { root, cwd, home, env, lockPath, cli, write, git, commit, check, run }
 }
 
@@ -82,7 +83,7 @@ const has = (checks, state, text) => checks.some(item => item.state === state &&
 const mainFixture = (t, { isSame = false, hasImportFailure = false, mainSource } = {}) => {
   const f = fixture(t)
   const local = readFileSync(script, 'utf8')
-  for (const name of ['pr-check.mjs', 'changelog-fold.mjs', 'bundle-text.mjs']) {
+  for (const name of ['pr-check.mjs', 'changelog-fold.mjs', 'bundle-text.mjs', 'preflight-lock-policy.mjs']) {
     f.write(`scripts/${name}`, readFileSync(new URL(`../scripts/${name}`, import.meta.url), 'utf8'))
   }
   const main = mainSource ?? (isSame ? local : `import { message } from './main-only-message.mjs'\n${local.replace("'the branch contains the base.'", 'message')}`)
@@ -120,6 +121,16 @@ test('preflight warns once and uses the local copy when fetching is disabled', a
   assert.deepEqual(checks.filter(item => item.state === 'WARN').map(item => item.message), [
     'using the local preflight because --no-fetch was supplied; origin/main freshness is unknown.',
   ])
+})
+
+test('preflight warns that a release branch behind main needs current main, with the PR title given', async t => {
+  const f = fixture(t)
+  const tree = f.git('rev-parse', 'HEAD^{tree}')
+  f.git('update-ref', 'refs/remotes/origin/main', f.git('commit-tree', tree, '-p', 'HEAD', '-m', 'New main'))
+  f.write('body.md', 'Synthetic body\n')
+  const checks = await f.check({ bodyFile: 'body.md', title: 'chore(release): Agent Board 9.9.9' })
+  assert.ok(has(checks, 'WARN', 'release pull request needs current main'))
+  assert.equal(has(checks, 'WARN', 'does not contain the latest main'), false)
 })
 
 test('preflight only warns when the branch is behind main, since a branch behind main can merge as it is', async t => {
@@ -198,7 +209,7 @@ test('an older preflight runs main once in a detached temporary checkout against
       locks++
       const markers = readdirSync(f.lockPath).filter(name => name.endsWith('.lock'))
       assert.equal(markers.length, 1)
-      assert.equal(JSON.parse(readFileSync(join(f.lockPath, `${markers[0]}.start`), 'utf8')), `synthetic:${process.pid}`)
+      assert.equal(JSON.parse(readFileSync(join(f.lockPath, `${markers[0]}.start`), 'utf8')), syntheticIdentity(process.pid))
     },
   })
   assert.ok(has(checks, 'PASS', 'checked by main'))
@@ -322,6 +333,37 @@ for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
     assert.equal(f.git('worktree', 'list', '--porcelain'), before)
   })
 }
+
+test('preflight carries the synthetic lock platform and namespace guard through the main handover', async t => {
+  const f = mainFixture(t)
+  f.write('tests/handover-namespace.test.mjs', '')
+  mkdirSync(f.lockPath, { mode: 0o700 })
+  const name = '2147483647-00000000-0000-4000-8000-000000000041.lock'
+  const marker = join(f.lockPath, name)
+  const recorded = syntheticIdentity(1).replace('pid:[2]', 'pid:[3]')
+  writeFileSync(`${marker}.start`, JSON.stringify(recorded))
+  writeFileSync(marker, '')
+  const before = f.git('worktree', 'list', '--porcelain')
+  let testStarts = 0
+  const checks = await f.check({
+    isNoFetch: false,
+    lockPlatform: 'linux',
+    run: (program, args, options) => {
+      if (args.includes('--test')) {
+        testStarts++
+        return { status: 0, stdout: '# tests 1\n# fail 0\n', stderr: '' }
+      }
+      return f.run(program, args, options)
+    },
+  })
+  assert.ok(has(checks, 'PASS', `preflight from origin/main ${f.sha}`))
+  assert.ok(has(checks, 'FAIL', 'time or process ID namespace'))
+  assert.equal(testStarts, 0)
+  assert.equal(readFileSync(marker, 'utf8'), '')
+  assert.equal(readFileSync(`${marker}.start`, 'utf8'), JSON.stringify(recorded))
+  assert.deepEqual(readdirSync(f.lockPath).sort(), [name, `${name}.start`].sort())
+  assert.equal(f.git('worktree', 'list', '--porcelain'), before)
+})
 
 test('preflight keeps an identical local checker after fetching without creating a temporary checkout', async t => {
   const f = mainFixture(t, { isSame: true })
@@ -497,7 +539,9 @@ test('preflight recovers a stale test lock and releases its own lock after a fai
   const f = fixture(t)
   f.write('tests/stale.test.mjs', '')
   mkdirSync(f.lockPath, { mode: 0o700 })
-  writeFileSync(join(f.lockPath, '2147483647-00000000-0000-4000-8000-000000000001.lock'), '')
+  const stale = join(f.lockPath, '2147483647-00000000-0000-4000-8000-000000000001.lock')
+  writeFileSync(`${stale}.start`, JSON.stringify(syntheticIdentity(1)))
+  writeFileSync(stale, '')
   const run = (program, args, options) => args.includes('--test')
     ? { status: 1, stdout: '# tests 1\n# fail 1\n', stderr: '' }
     : f.run(program, args, options)
@@ -669,7 +713,7 @@ test('preflight publishes its identity beside an empty marker that legacy reader
       assert.match(name, new RegExp(`^${process.pid}-[0-9a-f-]+\\.lock$`))
       const marker = join(f.lockPath, name)
       assert.equal(lstatSync(marker).size, 0)
-      assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), `synthetic:${process.pid}`)
+      assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), syntheticIdentity(process.pid))
       assert.deepEqual(names.sort(), [name, `${name}.start`].sort())
       hasPublished = true
     },
@@ -740,6 +784,7 @@ for (const isWatched of [false, true]) {
       let runs = 0
       const checks = await f.check({
         fallbackLockPath: isWatched ? directory : null,
+        lockPlatform: 'darwin',
         readProcessIdentity: () => processStartIdentity(process.pid, { platform: 'darwin', run: () => ({ status: 0, stdout: 'Mon Nov  4 05:06:07 2024\n' }) }),
         onProgress: () => { runs++ },
       })
@@ -840,7 +885,7 @@ for (const identity of ['linux:00000000-0000-4000-8000-000000000001:12345:time:[
     const marker = join(f.lockPath, name)
     writeFileSync(`${marker}.start`, JSON.stringify(identity))
     writeFileSync(marker, '')
-    const checks = await f.check({ readProcessIdentity: () => identity, onProgress: () => assert.fail('tests must not start') })
+    const checks = await f.check({ lockPlatform: platform === 'Linux' ? 'linux' : 'win32', readProcessIdentity: () => identity, onProgress: () => assert.fail('tests must not start') })
     const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
     assert.ok(failure)
     assert.doesNotMatch(failure.message, /reused process ID|known only to the second|owner could not be confirmed/)
@@ -983,8 +1028,8 @@ for (const [isWatched, isEqual] of [[false, false], [false, true], [true, false]
       assert.ok(failure)
       assert.ok(failure.message.includes(', its time or process ID namespace differs or could not be read, so the owner could not be confirmed'))
       assert.ok(failure.message.includes(name))
-      assert.ok(paths.includes(`/proc/${child.pid}/stat`))
-      assert.ok(identities.some(([pid, identity]) => pid === child.pid && identity === `linux:${boot}:18345:time:[1]`))
+      assert.equal(paths.includes(`/proc/${child.pid}/stat`), false)
+      assert.ok(identities.some(([pid, identity]) => pid === process.pid && identity === `linux:${boot}:18345:time:[1]`))
       assert.equal(existsSync(marker), true)
       assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), recorded)
       if (isWatched) assert.deepEqual(readdirSync(f.lockPath), [])
@@ -1091,6 +1136,105 @@ for (const isWatched of [false, true]) {
   }
 }
 
+// Only these serial, disposable marker fixtures see this PID as dead. All other probes
+// keep their native behavior, and the global method is restored even on a failed assertion.
+const withSyntheticDeadMarker = async (pid, check) => {
+  const originalKill = process.kill
+  let probes = 0
+  process.kill = (target, signal) => {
+    if (target === pid && signal === 0) {
+      probes++
+      throw Object.assign(new Error('synthetic absent marker owner'), { code: 'ESRCH' })
+    }
+    return Reflect.apply(originalKill, process, [target, signal])
+  }
+  try { return await check(() => probes) } finally { process.kill = originalKill }
+}
+
+for (const isWatched of [false, true]) {
+  const folder = isWatched ? 'watched' : 'own'
+  for (const [scenario, recorded, current] of [
+    ['a different namespace', syntheticIdentity(1).replace('pid:[2]', 'pid:[3]'), syntheticIdentity(process.pid)],
+    ['a missing recorded namespace', syntheticIdentity(1).replace(':pid:[2]', ''), syntheticIdentity(process.pid)],
+    ['a missing reader namespace', syntheticIdentity(1), syntheticIdentity(process.pid).replace(':pid:[2]', '')],
+    ['an unreadable reader', syntheticIdentity(1), null],
+    ['an unreadable record', null, syntheticIdentity(process.pid)],
+    ['a legacy record', undefined, syntheticIdentity(process.pid)],
+  ]) {
+    test(`preflight retains a marker with ${scenario} even when its PID is absent locally in its ${folder} folder`, { concurrency: false }, async t => {
+      const f = fixture(t)
+      f.write('tests/foreign-pid.test.mjs', '')
+      const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
+      mkdirSync(directory, { mode: 0o700 })
+      const name = '2147483647-00000000-0000-4000-8000-000000000039.lock'
+      const marker = join(directory, name)
+      if (recorded !== undefined) writeFileSync(`${marker}.start`, JSON.stringify(recorded))
+      writeFileSync(marker, '')
+      let testStarts = 0
+      let ownerReads = 0
+      const checks = await withSyntheticDeadMarker(2147483647, async probes => {
+        const result = await f.check({
+          fallbackLockPath: isWatched ? directory : null,
+          readProcessIdentity: pid => {
+            if (pid !== process.pid) ownerReads++
+            return current
+          },
+          run: (program, args, options) => {
+            if (args.includes('--test')) {
+              testStarts++
+              return { status: 0, stdout: '# tests 1\n# fail 0\n', stderr: '' }
+            }
+            return f.run(program, args, options)
+          },
+        })
+        assert.equal(probes(), 0, 'a foreign or unknown PID namespace must block before process.kill(pid, 0)')
+        return result
+      })
+      assert.equal(testStarts, 0)
+      assert.equal(ownerReads, 0)
+      const failure = checks.find(item => item.state === 'FAIL' && item.message.includes('another preflight test run'))
+      assert.ok(failure)
+      assert.ok(failure.message.includes(name))
+      assert.equal(readFileSync(marker, 'utf8'), '')
+      if (recorded === undefined) assert.equal(existsSync(`${marker}.start`), false)
+      else assert.equal(readFileSync(`${marker}.start`, 'utf8'), JSON.stringify(recorded))
+      assert.deepEqual(readdirSync(directory).sort(), recorded === undefined ? [name] : [name, `${name}.start`].sort())
+      if (isWatched) assert.deepEqual(readdirSync(f.lockPath), [])
+    })
+  }
+
+  test(`preflight still ignores a dead same-namespace owner and only cleans its ${folder} folder when owned`, { concurrency: false }, async t => {
+    const f = fixture(t)
+    f.write('tests/dead-same-namespace.test.mjs', '')
+    const directory = isWatched ? join(f.root, 'watched-lock') : f.lockPath
+    mkdirSync(directory, { mode: 0o700 })
+    const name = '2147483647-00000000-0000-4000-8000-000000000040.lock'
+    const marker = join(directory, name)
+    writeFileSync(`${marker}.start`, JSON.stringify(syntheticIdentity(1)))
+    writeFileSync(marker, '')
+    let testStarts = 0
+    const checks = await withSyntheticDeadMarker(2147483647, async probes => {
+      const result = await f.check({
+        fallbackLockPath: isWatched ? directory : null,
+        run: (program, args, options) => {
+          if (args.includes('--test')) {
+            testStarts++
+            return { status: 0, stdout: '# tests 1\n# fail 0\n', stderr: '' }
+          }
+          return f.run(program, args, options)
+        },
+      })
+      assert.equal(probes(), 1, 'a verified same-namespace owner still receives the ordinary liveness probe')
+      return result
+    })
+    assert.equal(testStarts, 1)
+    assert.ok(has(checks, 'PASS', 'tests/dead-same-namespace.test.mjs: 1 tests, 0 failed'))
+    assert.equal(existsSync(marker), isWatched)
+    assert.equal(existsSync(`${marker}.start`), isWatched)
+    assert.deepEqual(readdirSync(f.lockPath), [])
+  })
+}
+
 test('preflight still frees a reused Linux PID read through the same time and PID namespaces', async t => {
   const { processStartIdentity } = await import('../scripts/preflight.mjs')
   const f = fixture(t)
@@ -1157,6 +1301,7 @@ test('preflight reports an unreadable start when a process reader times out', as
   writeFileSync(marker, '')
   let runs = 0
   const checks = await f.check({
+    lockPlatform: 'darwin',
     readProcessIdentity: pid => processStartIdentity(pid, { platform: 'darwin', run: () => ({ error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), signal: 'SIGKILL', status: null }) }),
     onProgress: () => { runs++ },
   })
@@ -1198,7 +1343,7 @@ test('preflight removes an own-folder marker when its live PID was reused', asyn
   f.write('tests/reused-owner.test.mjs', '')
   mkdirSync(f.lockPath, { mode: 0o700 })
   const marker = join(f.lockPath, `${process.pid}-00000000-0000-4000-8000-000000000023.lock`)
-  writeFileSync(`${marker}.start`, JSON.stringify('synthetic:previous-owner'))
+  writeFileSync(`${marker}.start`, JSON.stringify(syntheticIdentity(0)))
   writeFileSync(marker, '')
   const checks = await f.check()
   assert.ok(has(checks, 'PASS', 'tests/reused-owner.test.mjs: 1 tests, 0 failed'))
@@ -1245,14 +1390,14 @@ test('preflight removes a marker when an unrelated live process reuses its PID',
     f.write('tests/reused-pid.test.mjs', '')
     mkdirSync(f.lockPath, { mode: 0o700 })
     const marker = join(f.lockPath, `${child.pid}-00000000-0000-4000-8000-000000000011.lock`)
-    writeFileSync(`${marker}.start`, JSON.stringify('synthetic:previous-owner'))
+    writeFileSync(`${marker}.start`, JSON.stringify(syntheticIdentity(0)))
     writeFileSync(marker, '')
     const old = new Date(Date.now() - 3 * 60 * 60 * 1000 - 60_000)
     utimesSync(marker, old, old)
     let hasCheckedChild = false
     const checks = await f.check({ readProcessIdentity: pid => {
       if (pid === child.pid) hasCheckedChild = true
-      return `synthetic:${pid}`
+      return syntheticIdentity(pid)
     } })
     assert.equal(hasCheckedChild, true)
     assert.ok(has(checks, 'PASS', 'tests/reused-pid.test.mjs: 1 tests, 0 failed'))
@@ -1291,7 +1436,7 @@ test('preflight leaves a reused-PID marker in a watched folder and still runs', 
   const fallbackLockPath = join(f.root, 'watched-lock')
   mkdirSync(fallbackLockPath, { mode: 0o700 })
   const marker = join(fallbackLockPath, `${process.pid}-00000000-0000-4000-8000-000000000013.lock`)
-  writeFileSync(`${marker}.start`, JSON.stringify('synthetic:previous-owner'))
+  writeFileSync(`${marker}.start`, JSON.stringify(syntheticIdentity(0)))
   writeFileSync(marker, '')
   const checks = await f.check({ fallbackLockPath })
   assert.ok(has(checks, 'PASS', 'tests/watched-expired.test.mjs: 1 tests, 0 failed'))
@@ -1338,7 +1483,9 @@ test('simultaneous stale preflight claimants never run test files together', asy
   const f = fixture(t)
   f.write('tests/claim.test.mjs', '')
   mkdirSync(f.lockPath, { mode: 0o700 })
-  writeFileSync(join(f.lockPath, '2147483647-00000000-0000-4000-8000-000000000001.lock'), '')
+  const stale = join(f.lockPath, '2147483647-00000000-0000-4000-8000-000000000001.lock')
+  writeFileSync(`${stale}.start`, JSON.stringify(syntheticIdentity(1)))
+  writeFileSync(stale, '')
   let firstRuns = 0
   let secondRuns = 0
   const runner = counter => (program, args, options) => {
@@ -1364,7 +1511,7 @@ test('preflight recovers an interrupted owner record after its process has exite
   f.write('tests/interrupted.test.mjs', '')
   mkdirSync(f.lockPath, { mode: 0o700 })
   const marker = join(f.lockPath, '2147483647-00000000-0000-4000-8000-000000000001.lock')
-  writeFileSync(`${marker}.start`, JSON.stringify('synthetic:interrupted-start'))
+  writeFileSync(`${marker}.start`, JSON.stringify(syntheticIdentity(1)))
   writeFileSync(marker, '')
   const checks = await f.check()
   assert.ok(checks.some(item => item.state === 'PASS' && item.message.startsWith('tests/interrupted.test.mjs:') && item.message.includes('0 failed')))
@@ -1569,7 +1716,7 @@ test('preflight runs touched tests under the shared fallback lock when the home 
     const name = readdirSync(f.fallbackLockPath).find(name => name.endsWith('.lock'))
     const marker = join(f.fallbackLockPath, name)
     assert.equal(lstatSync(marker).size, 0)
-    assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), `synthetic:${process.pid}`)
+    assert.equal(JSON.parse(readFileSync(`${marker}.start`, 'utf8')), syntheticIdentity(process.pid))
     hasPublished = true
   } })
   assert.equal(hasPublished, true)
@@ -1620,11 +1767,15 @@ test('a preflight with a writable home meets a restricted run whose fallback fol
 
 test('a restricted preflight leaves a stale marker in the read-only home lock alone and still runs', { skip: restrictedSkip }, async t => {
   const stale = '2147483647-00000000-0000-4000-8000-000000000008.lock'
-  const f = restricted(t, { homeLock: path => { mkdirSync(path, { mode: 0o700 }); writeFileSync(join(path, stale), '') } })
+  const f = restricted(t, { homeLock: path => {
+    mkdirSync(path, { mode: 0o700 })
+    writeFileSync(join(path, `${stale}.start`), JSON.stringify(syntheticIdentity(1)))
+    writeFileSync(join(path, stale), '')
+  } })
   f.write('tests/restricted-stale.test.mjs', '')
   const checks = await f.check()
   assert.ok(has(checks, 'PASS', 'tests/restricted-stale.test.mjs: 1 tests, 0 failed'))
-  assert.deepEqual(readdirSync(f.lockPath), [stale])
+  assert.deepEqual(readdirSync(f.lockPath).sort(), [stale, `${stale}.start`].sort())
   assert.deepEqual(readdirSync(f.fallbackLockPath), [])
 })
 
@@ -2134,5 +2285,6 @@ test('preflight prints safe status lines counts and a failing CLI exit code', t 
   assert.match(failed.stdout, /1 FAIL\s*$/)
   assert.equal(run(['--body-file', '/home/private-person/body.md']).status, 1)
   assert.equal(run(['--unknown']).status, 1)
+  assert.equal(run(['--lock-platform', 'win32']).status, 1)
   assert.equal(safeLine('C:\\Users\\private-person\\file /home/private-person/file tests/nested/file.mjs\n'), '<path> <path> tests/nested/file.mjs ')
 })

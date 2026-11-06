@@ -83,6 +83,7 @@ import {
   test,
   upsertAutoBlock,
   withSeen,
+  type Engine,
   type On,
   type PressNode,
   type ProgressMirror,
@@ -1300,6 +1301,21 @@ test('a denied board write immediately names the retained claim and persistence 
   expect(seen.notified.some(text => text.includes(claim) && text.includes('EACCES'))).toBe(true)
   expect((world.store!.inboxDone as Record<string, string>)[PROBE_NAME]).toBeUndefined()
   expect(world.files.get(FILE)).toBe('# Progress\n')
+})
+
+test('a long task subject puts its full text in the journal once, however often the block is written again', async ($, on) => {
+  const world: World = { files: new Map([[FILE, '# 專案進度\n']]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await start($, 'Synthetic long request')
+  const long = `${'x'.repeat(130)}`
+
+  await $.tool.call({ tool: 'TaskCreate', subject: long, description: '' })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Short step', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress' })
+
+  expect(world.files.get(FILE)).toContain(`- [ ] ${'x'.repeat(119)}…\n`)
+  const saved = world.files.get('/home/me/.claude/progress-journal-2026-10.md') ?? ''
+  expect(saved.split(long).length - 1).toBe(1)
 })
 
 test('Claude’s task calls fill the file and the pane by themselves', async ($, on) => {
@@ -3071,7 +3087,8 @@ test('the footer status is unchanged when the pane is placed', async ($, on) => 
   await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
   expect(seen.status.at(-1)).toBe(`${EN.statusPrefix} · ${EN.statusWaiting(1)}`)
   const opened = await $.command.run({ ...TIDY, args: '' })
-  expect(opened.text).toBe(EN.paneOpened(FILE))
+  expect(opened.text).toBe(EN.paneOpened)
+  expect(opened.text).not.toContain(FILE)
   expect(seen.status.at(-1)).toBeUndefined()
   const surfaceCalls = world.surfaceCalls
   // A later successful placement clears a hint left by an unavailable pane.
@@ -3160,6 +3177,72 @@ test('the plugin registers /agent-board beside /progress', async ($, on) => {
     ])
     expect(world.registeredDescriptions?.slice(before).every(description => description.length > 0)).toBe(true)
   }
+})
+
+test('the plugin registers one agent-board tool for the agent, described from the string table in every language', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, registered: [], registeredTools: [], store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
+  engineBeneath(on, world)
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    world.store!.lang = lang
+    const before = world.registeredTools?.length ?? 0
+    const commands = world.registered?.length ?? 0
+    await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+    expect(world.registeredTools?.slice(before)).toEqual([{ name: 'agent-board', description: STRINGS[lang].liveBoardToolDescription }])
+    expect(STRINGS[lang].liveBoardToolDescription.length).toBeGreaterThan(0)
+    // One entry for the person (the command) and one for the agent (the tool); no skill, no second name.
+    expect(world.registered?.slice(commands).filter(name => name === 'agent-board')).toHaveLength(1)
+  }
+})
+
+test('the agent-board tool runs the /agent-board path and answers with the same text', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], liveCalls: [], registeredTools: [], store: { autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const url = `http://127.0.0.1:34567/?t=${lang.replace('-', '').padEnd(32, 'b')}`
+    const s = STRINGS[lang]
+    await $.command.run({ ...TIDY, args: `lang ${lang}` })
+    world.liveOutput = `${s.serveAt(url)}
+`
+    const viaCommand = await $.command.run({ ...TIDY, command: 'agent-board', args: '' })
+    const callsAfterCommand = world.liveCalls?.length ?? 0
+    const viaTool = await $.tool.call({ tool: 'mcp__plugin_synthetic__agent-board' })
+    expect(viaTool.result).toBe(viaCommand.text)
+    expect(viaTool.result).toBe(`${s.boardPageOpened}
+<${url}>`)
+    // The same path: the same --serve run, with the same options.
+    expect(world.liveCalls?.length).toBe(callsAfterCommand + 1)
+    expect(world.liveCalls?.at(-1)).toEqual(world.liveCalls?.at(callsAfterCommand - 1))
+  }
+  expect(world.ran?.some(argv => ['xdg-open', 'open', 'cmd'].includes(argv[0] ?? ''))).toBe(false)
+})
+
+test('a refused /agent-board command or agent-board tool registration is logged, and the plugin still starts', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, registered: [], registeredTools: [], debugLog: [], commandRefusal: { 'agent-board': 'a skill named agent-board already exists' }, toolRefusal: 'no built-in tools', store: { autoConnectOff: true, closedByPerson: true, lang: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.debugLog).toEqual([
+    { text: 'agent-board: the /agent-board command was not registered: agent-board: $.command.register: a skill named agent-board already exists', to: 'debug' },
+    { text: 'agent-board: the agent-board tool was not registered: agent-board: $.tool.register: no built-in tools', to: 'debug' },
+  ])
+  // /progress was registered before, and the start went on to the end.
+  expect(world.registered).toEqual(['progress'])
+  expect(world.registeredTools).toEqual([])
+})
+
+test('a tool registration refused on a later session start keeps the board tool answering', async ($, on) => {
+  const world: World = { files: new Map([[FILE, JOBS], [LIVE_SCRIPT, installedBoard()]]), mtime: 1, hasTasks: true, ran: [], liveCalls: [], registeredTools: [], debugLog: [], store: { autoConnectOff: true, lang: 'en' } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  world.toolRefusal = 'agent-board is already registered'
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  expect(world.debugLog?.map(line => line.text)).toEqual(['agent-board: the agent-board tool was not registered: agent-board: $.tool.register: agent-board is already registered'])
+  const url = `http://127.0.0.1:34567/?t=${'c'.repeat(32)}`
+  world.liveOutput = `${STRINGS.en.serveAt(url)}
+`
+  const viaTool = await $.tool.call({ tool: 'mcp__plugin_synthetic__agent-board' })
+  expect(viaTool.result).toBe(`${STRINGS.en.boardPageOpened}
+<${url}>`)
 })
 
 test('a second press of continue before the first turn starts sends nothing', async ($, on) => {
@@ -3270,6 +3353,22 @@ test('question retention failure refuses explicit archive and preserves the orig
   expect(world.files.get(FILE)).toBe(board)
   expect(await ui.find({ type: 'Text', text: ZH_TW.questionRetentionFailed })).toBeDefined()
   await ui.unmount()
+})
+
+test('pressing Archive on a stopped task that asks says its question stays', async ($, on) => {
+  const board = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [x] Prepare\n- [?] Notify the team, OK?\n<!-- /auto session=a1b2c3d4 -->'
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'section::stopped' })
+    await ui.press({ key: 'demo::Stopped plan' })
+    await ui.press({ key: 'demo::Stopped plan::archive' })
+    expect(await ui.find({ type: 'Text', text: ZH_TW.archivedKeptQuestions('Stopped plan', 1) })).toBeDefined()
+  } finally {
+    await ui.unmount()
+  }
 })
 
 test('the pane keeps stopped tasks behind one toggle and shows their actions when opened', async ($, on) => {
@@ -3765,4 +3864,57 @@ test('a Claude print-mode session writes no block and leaves its existing block 
   await clock.advance(5000)
   expect(world.files.get(FILE)).toBe('')
   expect(JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records).toEqual([])
+})
+
+// #857: on a first turn a host drew the count row as `0 g 0 n s 0 e n 0 e y`, likely at a near-zero
+// `bodyColumns`. The row wraps between counts, so it needs its widest count whole: `▸ 0 in progress`,
+// 15 columns, in English; `✓ 0 今天完成`, 13, in Chinese, where the board counts the glyphs two wide.
+const COUNT_GLYPHS = ['●', '▸', '⚑', '✓']
+const COUNT_KEYS = ['count::waiting', 'count::others', 'count::due', 'count::recent']
+const countWords = (s: typeof EN) => [s.countWaiting, s.countActive, s.countDue, s.countToday]
+const firstTurn = async ($: Engine, on: On, lang: 'en' | 'zh-TW') => {
+  const world: World = { files: new Map([[FILE, '# Progress\n']]), mtime: 1, hasTasks: false, store: { lang, autoConnectOff: true } }
+  engineBeneath(on, world)
+  await start($, 'First turn')
+  return (bodyColumns: number) => $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PROPS, placement: 'inline', bodyColumns } })
+}
+
+test('the pane line on a first turn renders whole words', async ($, on) => {
+  const mount = await firstTurn($, on, 'en')
+  for (const bodyColumns of [15, 40]) {
+    const ui = await mount(bodyColumns)
+    try {
+      for (const [index, word] of countWords(EN).entries()) {
+        expect(await ui.find({ type: 'Button', key: COUNT_KEYS[index]!, text: ` ${word}` })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: `${COUNT_GLYPHS[index]} 0` })).toBeDefined()
+      }
+    } finally { await ui.unmount() }
+  }
+})
+
+test('the pane draws no count row while it is narrower than the row', async ($, on) => {
+  const mount = await firstTurn($, on, 'en')
+  for (const bodyColumns of [0, 1, 14]) {
+    const ui = await mount(bodyColumns)
+    try {
+      for (const key of COUNT_KEYS) expect(await ui.find({ type: 'Button', key })).toBeUndefined()
+      for (const glyph of COUNT_GLYPHS) expect(await ui.find({ type: 'Text', text: `${glyph} 0` })).toBeUndefined()
+      const drawn = JSON.stringify(await ui.drawn())
+      for (const word of countWords(EN)) expect(drawn).not.toContain(` ${word}"`)
+      // Only that row goes; the rest of the pane is still drawn.
+      expect(await ui.find({ type: 'Text', text: EN.paneTitle })).toBeDefined()
+    } finally { await ui.unmount() }
+  }
+})
+
+test('the pane count row in Chinese waits for its own widest count, two columns per character', async ($, on) => {
+  const mount = await firstTurn($, on, 'zh-TW')
+  for (const [bodyColumns, isDrawn] of [[12, false], [13, true], [40, true]] as const) {
+    const ui = await mount(bodyColumns)
+    try {
+      for (const [index, word] of countWords(ZH_TW).entries()) {
+        expect(await ui.find({ type: 'Button', key: COUNT_KEYS[index]!, text: ` ${word}` }) !== undefined).toBe(isDrawn)
+      }
+    } finally { await ui.unmount() }
+  }
 })

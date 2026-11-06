@@ -35,6 +35,7 @@ import {
   takeManualDone,
   takeTask,
   upsertAutoBlock,
+  cutEntries,
 } from './blocks'
 import type { ConfirmedTask, ConfirmRef } from './blocks'
 import { withRunMark } from './runs'
@@ -95,7 +96,7 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from './digest'
+import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
 import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
@@ -134,10 +135,12 @@ import {
 } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, liveToldKeys, remindersOf } from './remind'
+import { oldMonthFiles, OLD_MONTHS_FOLDER } from './old-months'
+import { makeFolderCommand, moveFileCommand } from './old-months-run'
 import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, doneRecord, inboxDropped, isExpiredRecord, isSameWrite, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, readMonthParts, RETENTION, sizeWarnings, storageDetails, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, STORE_FILE, unseenFailedInbox } from './retention'
 import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
-import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
+import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
@@ -219,6 +222,8 @@ let hasNoPaneSurface = false
 let hasPaneOpenAnswer = false
 // /progress runs still starting the board page; the footer says so until each one answers.
 let startingPages = 0
+// The model's name for the board tool: the host prefixes the registered name, so it is the host's answer.
+let boardToolName: string | null = null
 let lastStatus: string | undefined
 let isCheckingPr = false
 // gh is tried until it fails to start (not installed) or says it is signed out.
@@ -235,6 +240,7 @@ let isNextTurnAnswer = false
 // turn.start has no origin; undefined alone permits its legacy text fallback.
 let nextTurnNotification: boolean | undefined
 let hasTurnBackgroundLaunch = false
+let observedTurnTools: string[] = []
 let turnBackgroundJobIds = new Set<string>()
 let turnBackgroundLaunchesWithoutId = 0
 let hasBackgroundActivity = false
@@ -1361,6 +1367,30 @@ const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, h
   }
 }
 
+// What /agent-board and the agent's board tool both run: start or reuse the board page, answer with its link.
+const openBoard = async ($: EngineInterface): Promise<{ text: string }> => {
+  const s = await wordsOf($)
+  const { path } = await read($, snapshot)
+  const progress = path || (await progressPath($))
+  return showBoardPage($, progress, s, s.boardPageOpened, true)
+}
+
+// A refused registration must not hide the entry (a name clash did, silently), nor stop the plugin
+// starting: it goes to the debug log, where the host's own refusal text says why. The call is made
+// inside the try, so a host without the API (an older Claude Code has no $.tool) is logged too.
+const registerOrLog = async <T,>($: EngineInterface, what: string, registering: () => Promise<T>): Promise<T | null> => {
+  try {
+    return await registering()
+  } catch (error) {
+    try {
+      await $.ui.log(`agent-board: ${what} was not registered: ${messageOf(error)}`, { to: 'debug' })
+    } catch {
+      // Nowhere left to say it; the plugin still starts.
+    }
+    return null
+  }
+}
+
 // Hand-kept tasks seen done for the first time get a timestamp, so they leave a day later. A
 // time kept for a task that is no longer done in the whole file (archived, or ticked open again)
 // is let go, so a later task of the same name starts its own day. Every save keeps only the tasks
@@ -1560,7 +1590,36 @@ const writeMine = async ($: EngineInterface): Promise<void> => {
   await poll($)
 }
 
-const queueWrite = ($: EngineInterface): Promise<void> => enqueue(() => writeMine($)).catch(() => undefined)
+// The full words of a title or step the block shortens (#922) go to the journal once, before
+// the shortened block is written. A set remembers what this session saved; the month's journal
+// answers for an earlier session or a restart (the same line minus its minute stamp).
+const journaledCuts = new Set<string>()
+const saveCutTextNow = async ($: EngineInterface): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || mirror.isRun === true || mirror.tasks.length === 0) return
+  const s = await wordsOf($)
+  const fresh = cutEntries(mirror, s).filter(entry => !journaledCuts.has(JSON.stringify(entry)))
+  if (fresh.length === 0) return
+  const at = await $.clock.now()
+  const past = await readText($, await partFor($, journalPath(await progressPath($), at))).catch(() => '')
+  const tail = (line: string): string => line.replace(/^(?:> )?- \d{4}-\d{2}-\d{2} \d{2}:\d{2} · /, '')
+  const seen = new Set(past.split(/\r?\n/).map(tail))
+  const isNew = fresh.filter(entry => !seen.has(tail(journalLine(entry, at, s))))
+  if (isNew.length > 0) await journal($, isNew)
+  for (const entry of fresh) journaledCuts.add(JSON.stringify(entry))
+}
+
+// One at a time, so two writes in a row cannot both find a line missing and save it twice.
+let cutSaves: Promise<unknown> = Promise.resolve()
+const saveCutText = ($: EngineInterface): Promise<void> => {
+  const run = cutSaves.then(() => saveCutTextNow($))
+  cutSaves = run.catch(() => undefined)
+  return run
+}
+
+// The full words are handed to the journal before the shortened block is written. journal() keeps
+// lines it could not save pending for a retry, and a failing check here never stops the block write.
+const queueWrite = ($: EngineInterface): Promise<void> => saveCutText($).catch(() => undefined).then(() => enqueue(() => writeMine($))).catch(() => undefined)
 
 const notify = async ($: EngineInterface, text: string, project: string): Promise<void> => {
   if (!(await read($, isNotifyOn))) return
@@ -3554,6 +3613,27 @@ const dropGeneratedSeed = async ($: EngineInterface, keys: readonly string[]): P
   for (const key of generated) await $.store.delete(key)
 }
 
+// Archive and journal months before the last three move to an archives folder beside them (#922).
+// A name the folder already holds, or a move that fails, leaves the file where it is for the next
+// pass; nothing here deletes.
+const moveOldMonths = async ($: EngineInterface): Promise<void> => {
+  const path = await progressPath($)
+  const at = await $.clock.now()
+  const dir = path.replace(/[\\/][^\\/]*$/, '')
+  const stem = path.slice(dir.length + 1).replace(/\.md$/i, '')
+  const names = (await $.fs.list(dir).catch(() => [])).filter(entry => entry.kind === 'file').map(entry => entry.name)
+  if (!names.some(name => oldMonthFiles(stem, [name], [], at).length > 0)) return
+  const folder = `${dir}${sepOf(dir)}${OLD_MONTHS_FOLDER}`
+  const taken = (await $.fs.list(folder).catch(() => [])).map(entry => entry.name)
+  const moving = oldMonthFiles(stem, names, taken, at)
+  if (moving.length === 0) return
+  const isWin = await isWindows($, path)
+  const made = await $.process.run(makeFolderCommand(isWin, folder), { timeoutMs: 10000 }).catch(() => null)
+  if (made === null || made.exitCode !== 0) return
+  // A failed move leaves the file for the next pass.
+  for (const name of moving) await $.process.run(moveFileCommand(isWin, `${dir}${sepOf(dir)}${name}`, `${folder}${sepOf(dir)}${name}`), { timeoutMs: 10000 }).catch(() => null)
+}
+
 // Files that the board's own writes leave behind: the store's cut-off temporary copies and the
 // reporters' (inbox ones) after a day, and inbox files the drain gave up on a week after it did
 // (#373). The sh and PowerShell reporters also remove their own scratch files a minute old; the
@@ -3874,7 +3954,9 @@ export const register: Register = (on, options) => {
     await settleLang($, options)
     const words = await wordsOf($)
     await $.command.register({ name: 'progress', description: words.commandDescription, argumentHint: words.commandHint })
-    await $.command.register({ name: 'agent-board', description: words.liveBoardCommandDescription }).catch(() => undefined)
+    await registerOrLog($, 'the /agent-board command', () => $.command.register({ name: 'agent-board', description: words.liveBoardCommandDescription }))
+    // A refused repeat (a host that keeps the tool from an earlier start) keeps the name it gave then.
+    await isDoneWithin($, registerOrLog($, 'the agent-board tool', () => $.tool.register({ name: 'agent-board', description: words.liveBoardToolDescription })).then(registered => { boardToolName = registered?.tool ?? boardToolName }), HUNG_MS)
     sendingOwn.clear()
     await detectHere($)
     await loadMine($, e.cwd)
@@ -3944,6 +4026,7 @@ export const register: Register = (on, options) => {
     // A session left open for days still clears out old work.
     $.clock.every(ARCHIVE_MS, () => {
       enqueue(() => archiveOld($)).then(() => trimQuestionFiles($)).catch(() => undefined)
+      moveOldMonths($).catch(() => undefined)
       sweepFiles($).catch(() => undefined)
       $.clock.now().then(at => pruneStore($, at, 10)).catch(() => undefined)
     })
@@ -4062,19 +4145,14 @@ export const register: Register = (on, options) => {
     await refreshStatus($)
     const { path } = await read($, snapshot)
 
-    if (opened.isPlaced) return { text: s.paneOpened(path) }
+    if (opened.isPlaced) return { text: s.paneOpened }
     // This open's own answer decides; the footer's flag may already follow a newer roster.
     if (!hasNoPaneSurfaceIn(opened)) return { text: s.paneNotOpened(opened.reason) }
     const progress = path || (await progressPath($))
     return showBoardPage($, progress, s, s.livePageOpened)
   })
 
-  on('command.run', { command: 'agent-board' }, async $ => {
-    const s = await wordsOf($)
-    const { path } = await read($, snapshot)
-    const progress = path || (await progressPath($))
-    return showBoardPage($, progress, s, s.boardPageOpened, true)
-  })
+  on('command.run', { command: 'agent-board' }, async $ => openBoard($))
 
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers
   // what waits on them. A pane button's answer is marked when it is pressed.
@@ -4104,6 +4182,7 @@ export const register: Register = (on, options) => {
     journal($).catch(() => undefined)
     isTurnRunning = true
     hasTurnBackgroundLaunch = false
+    observedTurnTools = []
     turnBackgroundJobIds = new Set()
     turnBackgroundLaunchesWithoutId = 0
     // A board message's turn: neither what it said nor what Claude answered joins the board's
@@ -4190,7 +4269,7 @@ export const register: Register = (on, options) => {
     // No Task list: a turn that changed something, or any turn once the session is tracked,
     // is summed up into steps.
     if (mirror !== null && !e.isAborted && !isDelivery && (mirror.tasks.length === 0 || mirror.source === 'turns')) {
-      const hasWork = mirror.source === 'turns' || hasTurnBackgroundLaunch || isWork(turnTools(await $.session.messages().catch(() => [])))
+      const hasWork = mirror.source === 'turns' || hasTurnBackgroundLaunch || isWork(observedTurnTools) || observedTurnTools.length >= 2 || isWork(turnTools(await $.session.messages().catch(() => [])))
       if (hasWork) {
         const prompt = turnPrompt
         $.clock.after(1, () => {
@@ -4217,14 +4296,36 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined || e.tool === 'Agent' || !('run_in_background' in e) || e.run_in_background !== true) return next(e)
+    // The agent's way to the same board (the Skill tool cannot run a command). The host names a
+    // registered tool itself, so the call is matched against the name register answered; the
+    // engine takes one hook without a matcher, so it is answered here.
+    if (boardToolName !== null && e.tool === boardToolName) return { result: (await openBoard($)).text }
+    if (e.agentId !== undefined) return next(e)
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError === true) return ran
+    if (e.tool !== 'AskUserQuestion' && e.tool !== 'TaskList') observedTurnTools.push(e.tool)
+    if (e.tool === 'Agent' || !('run_in_background' in e) || e.run_in_background !== true) return ran
     hasTurnBackgroundLaunch = true
     if (e.tool_use_id) turnBackgroundJobIds.add(e.tool_use_id)
     else turnBackgroundLaunchesWithoutId += 1
     // turn.complete drains the queue; the tool's result need not wait for pane reads.
     saveBackground($, one => startBackgroundJob(one, e.tool_use_id || undefined)).catch(() => undefined)
+    return ran
+  })
+
+  on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
+    if (e.agentId !== undefined || !('questions' in e)) return next(e)
+    const call = e.tool_use_id || 'current'
+    const at = await $.clock.now()
+    try {
+      await saveMine($, one => toolQuestions(one, e.questions, call, at))
+      await settle($)
+    } catch {}
+    const ran = await next(e)
+    // Answered, declined or failed: the native prompt is over, so its steps stop waiting. A Task
+    // list session would otherwise keep a step nothing ever completes.
+    await saveMine($, one => closeToolQuestions(one.tasks.some(task => task.id.startsWith(`ask:${call}:`)) ? markAnswered(one, one.tasks.filter(task => task.id.startsWith(`ask:${call}:`)).map(task => task.id)) : one, call)).catch(() => undefined)
+    await settle($).catch(() => undefined)
     return ran
   })
 
@@ -4404,6 +4505,7 @@ export const register: Register = (on, options) => {
       resolveResult: await read($, resolveResult),
       path: snap.path,
       width: Math.max(8, Math.min(28, e.props.bodyColumns - 4)),
+      bodyColumns: e.props.bodyColumns,
       hasTaskTools: await read($, hasTaskTools),
       hasPendingQuestionsProblem: await read($, hasPendingQuestionsProblem),
       isNotifyOn: await read($, isNotifyOn),
@@ -4490,7 +4592,13 @@ export const register: Register = (on, options) => {
       archiveRow: async row => {
         if (row.archive === null) return failure(s.archiveGone)
         const isTaken = await enqueue(() => archiveOne($, row.archive!))
-        return isTaken ? s.archivedOne(row.title) : failure(s.archiveGone)
+        if (!isTaken) return failure(s.archiveGone)
+        try {
+          const count = keptQuestionCount(await paneView(), row.archive, s)
+          return count > 0 ? s.archivedKeptQuestions(row.title, count) : s.archivedOne(row.title)
+        } catch {
+          return s.archivedOne(row.title)
+        }
       },
       confirmRow: async row => {
         if (row.confirm == null) return failure(s.boardLineChanged)

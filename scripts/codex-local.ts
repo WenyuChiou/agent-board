@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, putCodexBlock, sessionTitle } from '../hooks/codex'
+import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, planReport, putCodexBlock, sessionTitle } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
@@ -14,7 +14,7 @@ import { reporterTail } from './reporter-tail'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
-import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, statusEvents, windowsHookCommand } from '../hooks/local-agents'
+import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, planEvents, planPlugins, statusEvents, windowsHookCommand } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
 import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
@@ -32,9 +32,48 @@ import { deliveryText } from '../hooks/messaging'
 import { isSessionEnd, isTurnStart, turnStartEnvelope } from '../hooks/hook-messages'
 import { hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
+import { folderIdentity, matchesFolderIdentity } from './folder-identity'
+import { appendJournal, journalLine, journalPath } from '../hooks/journal'
+import { currentPart } from '../hooks/retention'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
+
+// Only Codex's known trust fields establish ownership of a whole table.
+export const removeCodexTrustEntries = (text: string, keys: string[]): { text: string; removed: number } => {
+  const lines = text.match(/[^\n]*\n|[^\n]+$/g) ?? []
+  const normalized = (key: string): string => process.platform === 'win32' ? key.toLowerCase() : key
+  const owned = new Set(keys.map(normalized))
+  const sections: { start: number; end: number; header: string }[] = []
+  for (let index = 0; index < lines.length; index++) {
+    const header = lines[index]!.trim()
+    if (!header.startsWith('[')) continue
+    if (sections.length) sections[sections.length - 1]!.end = index
+    sections.push({ start: index, end: lines.length, header })
+  }
+  const deleted = new Set<number>()
+  let removed = 0
+  const drop = (section: typeof sections[number]): void => {
+    let end = section.end
+    if (end < lines.length && lines[end - 1]!.trim() === '') end--
+    for (let index = section.start; index < end; index++) deleted.add(index)
+    // Codex appends tables with a separating blank line.
+    if (section.start > 0 && lines[section.start - 1]!.trim() === '') deleted.add(section.start - 1)
+  }
+  for (const section of sections) {
+    const match = /^\[hooks\.state\.(?:'([^']*)'|"((?:[^"\\]|\\[\\"])*)")\]$/.exec(section.header)
+    if (!match) continue
+    const key = match[1] ?? match[2]!.replace(/\\([\\"])/g, '$1')
+    if (!owned.has(normalized(key))) continue
+    if (!lines.slice(section.start + 1, section.end).every(line => /^\s*(?:(?:trusted_hash|enabled)\s*=[^\r\n]*)?\s*$/.test(line))) continue
+    drop(section)
+    removed++
+  }
+  if (removed && !sections.some(section => section.header.startsWith('[hooks.state.') && !deleted.has(section.start))) {
+    for (const section of sections) if (section.header === '[hooks.state]' && lines.slice(section.start + 1, section.end).every(line => line.trim() === '')) drop(section)
+  }
+  return { text: lines.filter((_, index) => !deleted.has(index)).join(''), removed }
+}
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
 
@@ -48,12 +87,6 @@ const pad3 = (value: number): string => String(value).padStart(3, '0')
 const distinctStarted = (at: number): string => {
   const date = new Date(at)
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}.${pad3(date.getMilliseconds())}`
-}
-// Folder names are display labels; reports bind to the whole directory without retaining its path.
-const cwdDigest = (cwd: unknown): string | undefined => {
-  if (typeof cwd !== 'string' || !isAbsolute(cwd)) return undefined
-  const normalized = resolve(cwd)
-  return hash(process.platform === 'win32' ? normalized.toLowerCase() : normalized)
 }
 const readBytes = (file: string): Buffer | null => {
   try { return readFileSync(file) } catch (error) {
@@ -219,9 +252,12 @@ const quote = (path: string): string => {
 export const localProgressPath = (explicit: string | undefined, fallback: string, stored?: unknown): string =>
   resolve(explicit ?? (process.env.CLAUDE_PROGRESS_FILE || (typeof stored === 'string' ? stored : fallback)))
 
-export const codexTrustOutput = (result: { changes: number; applied: boolean }, s: Strings, isJson: boolean): string => {
+// The trust step names the config.toml it writes, the way the setup preview names its files (#812).
+export const codexTrustOutput = (result: { changes: number; applied: boolean; file?: string }, s: Strings, isJson: boolean, home?: string): string => {
   if (isJson) return `${JSON.stringify(result, null, 2)}\n`
-  const line = result.changes === 0 ? s.codexTrustNone : result.applied ? s.codexTrustApplied(result.changes) : s.codexTrustPreview(result.changes)
+  const inHome = home === undefined || result.file === undefined ? '' : relative(resolve(home), result.file)
+  const file = inHome !== '' && inHome !== '..' && !inHome.startsWith(`..${sep}`) && !isAbsolute(inHome) ? join('~', inHome) : result.file ?? 'config.toml'
+  const line = result.changes === 0 ? s.codexTrustNone : result.applied ? s.codexTrustApplied(result.changes, file) : s.codexTrustPreview(result.changes, file)
   return `${line}\n`
 }
 
@@ -338,8 +374,11 @@ const saveReporterTail = (progress: string, fragment: Buffer): string => {
 // sends one for that (#217); the others keep their agent's heading.
 const filesByFolder = (mode: string, agent: string): boolean => mode === '--codex-event' || mode === '--agent-status' && agent === 'opencode'
 
-export const runCodexLocal = async (args: string[], boardPath: string, s: Strings): Promise<boolean> => {
-  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-event', '--agent-status'].find(one => args.includes(one))
+// `planInput` is a plan the --plan-event step already turned into a report's input: the report then
+// runs as --report does and prints nothing, because Codex and Gemini read a hook's stdout as a decision.
+export const runCodexLocal = async (args: string[], boardPath: string, s: Strings, planInput?: Json): Promise<boolean> => {
+  args = args.map(arg => arg === '--report' ? '--codex-report' : arg)
+  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event'].find(one => args.includes(one))
   if (!mode) return false
   const flag = (name: string): string | undefined => {
     const index = args.indexOf(name)
@@ -349,8 +388,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     return value
   }
   const baked = (globalThis as { AGENT_BOARD?: { codexRoot?: string } }).AGENT_BOARD
+  // Reporting needs a known board name, while setup and lifecycle events need a native adapter.
   const agent = (flag('--agent') ?? 'codex') as LocalAgent
-  if (!localAgents.includes(agent)) throw new Error('UNSUPPORTED_AGENT')
+  if (!(mode === '--codex-report' ? Object.hasOwn(s.agentNames, agent) : localAgents.includes(agent))) throw new Error('UNSUPPORTED_AGENT')
+  if (mode === '--plan-event') {
+    if (planEvents[agent] === undefined && !planPlugins.includes(agent)) throw new Error('UNSUPPORTED_AGENT')
+    const plan = planReport(await input())
+    if (plan === null) return true
+    return runCodexLocal([...args.filter(arg => arg !== '--plan-event'), '--codex-report', '--session', plan.session], boardPath, s, plan.input)
+  }
   const home = resolve(flag('--home') ?? homedir())
   const root = resolve(flag('--data-dir') ?? baked?.codexRoot ?? join(home, '.agent-board'))
   const before = new Map<string, string | null>()
@@ -463,24 +509,24 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const hookDeadline = isRecovery ? Math.min(Date.now() + 1800, suppliedDeadline) : suppliedDeadline
     const checkDeadline = (): void => { if (Date.now() >= hookDeadline) throw new Error('HOOK_TIMEOUT') }
     checkDeadline()
-    const raw: Json = isRecovery ? {} : await input()
+    const raw: Json = isRecovery ? {} : planInput ?? await input()
     checkDeadline()
     type Pending = {
       version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
-      status: unknown; event?: string; folder?: string; folderDigest?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
+      status: unknown; event?: string; folder?: string; folderDigest?: string; folderCanonicalDigest?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
       // Who started the session, as far as the host's own words say (#399); absent when they say nothing.
       run?: RunSignal
     }
     const reportSession = (targetAgent: LocalAgent = agent): string | undefined => {
-      const digest = cwdDigest(process.cwd())
-      if (digest === undefined || !existsSync(join(root, 'sessions'))) return undefined
+      const identity = folderIdentity(process.cwd())
+      if (identity === undefined || !existsSync(join(root, 'sessions'))) return undefined
       const candidates: string[] = []
       for (const file of readdirSync(join(root, 'sessions'))) {
         if (!/^[a-f0-9]{64}\.json$/.test(file)) continue
         try {
           const record = object(JSON.parse(readLocal(join(root, 'sessions', file)) ?? '{}'))
           const updated = Date.parse(String(record.updated))
-          if (record.agent === targetAgent && record.folderDigest === digest && record.origin !== 'run' && (record.state === 'working' || record.state === 'waiting') && updated <= started && started - updated <= STALE_MS && typeof record.session === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(record.session)) candidates.push(record.session)
+          if (record.agent === targetAgent && matchesFolderIdentity(record, identity) && record.origin !== 'run' && (record.state === 'working' || record.state === 'waiting') && updated <= started && started - updated <= STALE_MS && typeof record.session === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(record.session)) candidates.push(record.session)
         } catch {}
         if (candidates.length > 1) return undefined
       }
@@ -492,7 +538,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // Read before Cursor's adapter drops workspace_roots; a queued raw event keeps cwd and workspace_roots for this (#246).
       const folder = filesByFolder(mode, agent) ? folderProject(rawCwd) : ''
       // Only metadata selected below is retained. Save no prompts, tool inputs,
-      // last_assistant_message, or permission decisions from a hook payload. transcript_path is
+      // last_assistant_message, or permission decisions from a hook payload. The plan mirror is the
+      // one place a tool input is read (--plan-event, before this): only each step's text and status,
+      // which a report carries. transcript_path is
       // opened, when it is this session's own history file, for its first record at a session's
       // start or prompt, which says whether a person started it (#399), and for nothing else.
       const session = mode !== '--codex-report'
@@ -500,7 +548,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           ? (typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID)
           : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined)
         : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : (env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined) ?? reportSession())
-      if (session === undefined && mode === '--codex-report' && agent === 'codex') throw new Error('UNBOUND_REPORT')
+      if (session === undefined && mode === '--codex-report') throw new Error('UNBOUND_REPORT')
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
       const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
       if (mode === '--agent-status' && (agent === 'codex' || agent === 'cursor')) throw new Error('INVALID_EVENT')
@@ -518,12 +566,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const opens = agent === 'codex' && mode === '--codex-event' && /^(?:SessionStart|UserPromptSubmit)$/.test(String(payload.hook_event_name))
       const path = payload.transcript_path
       const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path, session) : null) : undefined
-      const digest = mode !== '--codex-report' ? cwdDigest(rawCwd) : undefined
+      const identity = mode !== '--codex-report' ? folderIdentity(rawCwd) : undefined
       // A queued event keeps metadata only: the host's own fields stay out, as they do above.
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
         ...(filesByFolder(mode, agent) ? { folder } : {}),
-        ...(digest !== undefined && (agent !== 'codex' || folderProject(rawCwd) !== '') ? { folderDigest: digest } : {}),
+        ...(identity !== undefined && (agent !== 'codex' || folderProject(rawCwd) !== '') ? identity : {}),
         ...(run === undefined ? {} : { run }),
         payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
@@ -579,8 +627,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (!next.equals(before)) atomic(progress, next, checkDeadline)
     }
     let isFirstSessionEvent = false
+    let reportCut = 0
     const apply = (entry: Pending): CodexReport => {
-      const { mode, agent, session, now, at, status, event, folder = '', folderDigest, isBoardPrompt, payload, run } = entry
+      const { mode, agent, session, now, at, status, event, folder = '', folderDigest, folderCanonicalDigest, isBoardPrompt, payload, run } = entry
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
@@ -607,11 +656,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const text = bytes.toString('utf8')
       const previous = original === null || mode === '--codex-report' || isRun ? original : boardConfirmedReport(text, original, owner)
       const clock = previous === null ? now : new Date(Math.max(Date.parse(now), Date.parse(previous.updated))).toISOString()
+      // A mirrored plan keeps the block's own title, unless it is still the generic one a lifecycle event wrote.
+      const given = typeof payload.planTitle !== 'string' ? payload : {
+        state: payload.state, steps: payload.steps,
+        title: previous !== null && !Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(previous.title)) ? previous.title : payload.planTitle,
+      }
       const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s) : codexReport(previous, session, mode === '--agent-status' ? {
         title: previous?.title ?? s.localAgentTask(agent), project: previous?.project ?? agent,
         state: isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status,
         steps: previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`],
-      } : payload, clock, s)
+      } : given, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)
       // An Antigravity session keeps no folder (its hook binds only the conversation
@@ -635,19 +689,65 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const marked = { ...(origin.origin === undefined ? {} : { origin: origin.origin }), ...(parent === undefined ? {} : { parent }), ...(origin.isWeak === true ? { isWeak: true as const } : {}) }
       const { origin: _origin, parent: _parent, isWeak: _isWeak, ...lifecycle } = initial
       const directory = agent === 'codex' && mode === '--codex-event' && name !== ''
-        ? { folder: name, folderDigest }
-        : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest }
-      const report = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+        ? { folder: name, folderDigest, folderCanonicalDigest }
+        : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
+          folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const { report, entries, cut } = limitReport(full)
+      if (entry === current) reportCut = cut
+      const saveFullText = (): void => {
+        if (entries.length === 0) return
+        const now = Date.parse(clock)
+        const journal = currentPart(journalPath(progress, now), file => {
+          try { return statSync(file).size } catch (error) {
+            if ((error as { code?: string }).code === 'ENOENT') return null
+            throw error
+          }
+        })
+        // Everything after the minute stamp: the same overflow reported again is not new.
+        const tail = (line: string): string => line.replace(/^(?:> )?- \d{4}-\d{2}-\d{2} \d{2}:\d{2} · /, '')
+        const changed = new Error('JOURNAL_CHANGED')
+        let hasRaced = false
+        // The board's own writers (a done or tick press) share this file. Read it again just
+        // before the replace and again after it; when it moved, work from the new text so a
+        // line another writer added survives. checkDeadline bounds the retries.
+        for (;;) {
+          checkDeadline()
+          const past = readLocal(journal) ?? ''
+          // Test-only seam: lands one line from another writer between this read and the replace.
+          const racing = process.env.AGENT_BOARD_TEST_JOURNAL_RACE
+          if (racing !== undefined && !hasRaced) {
+            hasRaced = true
+            writeFileSync(journal, appendJournal(past, [racing], s))
+          }
+          const seen = new Set(past.split(/\r?\n/).map(tail))
+          // Overflow is evidence of the report, not a newly completed step.
+          const lines = entries.map(entry => `> ${journalLine(entry, now, s)}`).filter(line => !seen.has(tail(line)))
+          const next = appendJournal(past, lines, s)
+          if (next === past) return
+          try {
+            atomic(journal, next, () => {
+              checkDeadline()
+              if ((readLocal(journal) ?? '') !== past) throw changed
+            })
+          } catch (error) {
+            if (error === changed) continue
+            throw error
+          }
+          if (readLocal(journal) === next) return
+        }
+      }
       if (isRun) {
         // A lazy history file can prove that a block written from a hint is a run.
         // Once the record is strong, later reports still never read the board.
+        saveFullText()
         if (original !== null && !isStrongRun(original)) withdrawRunBlock(owner)
         atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`, checkDeadline, true)
         return report
       }
       // A replay can skip writes only after a board completion reached the cache too.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }
@@ -656,6 +756,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
         ...report, title: encoded(report.title), project: encoded(report.project), steps: report.steps.map(encoded),
       }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project), 'latin1')
+      saveFullText()
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
       try { atomic(progress, next, checkDeadline) } catch (error) {
         if (aside !== null) {
@@ -684,6 +785,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       && typeof entry.now === 'string' && typeof entry.isPrompt === 'boolean' && typeof entry.isBoardPrompt === 'boolean'
       && (entry.folder === undefined || typeof entry.folder === 'string')
       && (entry.folderDigest === undefined || typeof entry.folderDigest === 'string' && /^[a-f0-9]{64}$/.test(entry.folderDigest))
+      && (entry.folderCanonicalDigest === undefined || typeof entry.folderCanonicalDigest === 'string' && /^[a-f0-9]{64}$/.test(entry.folderCanonicalDigest))
       && (!Object.hasOwn(entry, 'at') || typeof entry.at === 'number' && Number.isFinite(entry.at))
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.
@@ -845,7 +947,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
       }
     }
-    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress })
+    if (mode === '--codex-report' && planInput !== undefined) return true
+    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress, cut: reportCut })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
     else if (agent === 'antigravity') {
       // The host supplies the binding; the agent supplies semantic summaries. A first
@@ -863,7 +966,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
 
   const hasHooks = agent === 'codex' || agent === 'cursor' || statusEvents[agent] !== undefined
-  const ownEvents = !hasHooks || agent === 'antigravity' ? [] : agent === 'cursor' ? Object.keys(cursorEvents) : agent === 'codex' ? codexEvents : Object.keys(statusEvents[agent] ?? {})
+  const ownEvents: readonly string[] = !hasHooks || agent === 'antigravity' ? [] : [...(agent === 'cursor' ? Object.keys(cursorEvents) : agent === 'codex' ? codexEvents : Object.keys(statusEvents[agent] ?? {})), ...(planEvents[agent] === undefined ? [] : [planEvents[agent].event])]
   const nativeConfig = agent === 'openclaw' ? join(openclawDir, 'openclaw.json') : agent === 'deepseek' ? join(deepseekDir, 'cordis.patch.yml') : config
   const nativeConfigText = initial(nativeConfig) ?? ''
   // Windows tools may start any JSON host config with a UTF-8 BOM; JSON.parse does not accept it.
@@ -896,6 +999,23 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
   const changes: { file: string; action: string }[] = []
+  // Beside the hooks.json it trusts, as the doctor reads it, so --codex-dir finds the same installation.
+  const trustConfig = agent === 'codex' ? join(dirname(resolve(config)), 'config.toml') : ''
+  let nextTrust: string | undefined
+  if (remove && agent === 'codex') {
+    const keys = Object.entries(manifest.groups).flatMap(([event, group]) => {
+      const entries = hooks[event]
+      const index = Array.isArray(entries) ? entries.findIndex(entry => isSame(entry, group)) : -1
+      return index < 0 ? [] : [`${resolve(config)}:${event.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()}:${index}:0`]
+    })
+    try {
+      const text = initial(trustConfig)
+      if (text !== null) {
+        const result = removeCodexTrustEntries(text, keys)
+        if (result.text !== text) { nextTrust = result.text; changes.push({ file: trustConfig, action: 'update' }) }
+      }
+    } catch { before.delete(trustConfig) }
+  }
   const keptShared: { file: string; usedBy: string[] }[] = []
   const alreadyGone: string[] = []
   let hasMissingGroup = false
@@ -911,7 +1031,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
     const eventCommand = isPowerShellHost ? windowsHookCommand(hookArgs(event, state), quote, hostNode) : hookArgs(event, state).map(quote).join(' ')
-    const group = agent === 'cursor' ? { command: eventCommand, timeout: hostHookTimeout(agent, event) } : { hooks: [{ type: 'command', command: eventCommand, timeout: hostHookTimeout(agent, event) }] }
+    // The plan mirror's group carries its tool matcher on the group, not on the hook inside it.
+    const matcher = planEvents[agent]?.event === event ? planEvents[agent].matcher : undefined
+    const group = agent === 'cursor' ? { command: eventCommand, timeout: hostHookTimeout(agent, event) } : { ...(matcher === undefined ? {} : { matcher }), hooks: [{ type: 'command', command: eventCommand, timeout: hostHookTimeout(agent, event) }] }
     if (hooks[event] !== undefined && !Array.isArray(hooks[event])) throw new Error('INVALID_HOOK_GROUP')
     const entries = (hooks[event] ?? []) as unknown[]
     const old = manifest.groups[event]
@@ -1048,13 +1170,64 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
   nextConfigText ??= `${JSON.stringify(nextConfig, null, 2)}\n`
   if (hasNativeConfig && (!remove || Object.keys(manifest.groups).length)) {
+    const isHollowOpenclaw = (): boolean => {
+      const plugins = object(nextConfig.plugins ?? {})
+      return Object.keys(nextConfig).every(key => key === 'plugins') && Object.keys(plugins).every(key => key === 'load' || key === 'entries' || key === 'allow' && Array.isArray(plugins.allow) && plugins.allow.length === 0) && isSame(plugins.load ?? { paths: [] }, { paths: [] }) && isSame(plugins.entries ?? {}, {})
+    }
+    const isEmptyCreatedConfig = loaded.createdConfig === true && (agent === 'deepseek' ? nextConfigText.trim() === '' : agent === 'openclaw' ? isHollowOpenclaw() : agent === 'antigravity' ? Object.keys(nextConfig).length === 0 : Object.keys(nextHooks).length === 0 && Object.keys(nextConfig).every(key => key === 'hooks' || key === 'version' && agent === 'cursor' && nextConfig[key] === 1 || key === 'schema_version' && agent === 'muse' && nextConfig[key] === 1))
     if (parsedConfig === null) conflicts.push(nativeConfig)
     else if (remove && initial(nativeConfig) === null) alreadyGone.push(nativeConfig)
+    else if (remove && isReadable && isEmptyCreatedConfig) changes.push({ file: nativeConfig, action: 'remove' })
     else if (agent === 'deepseek' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig)) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
   }
   if (!remove && readLocal(progress) === null) { before.set(progress, null); changes.push({ file: progress, action: 'create' }) }
-  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }) }, null, 2)}\n`
+  const createdDirs = new Set(Array.isArray(loaded.createdDirs) ? loaded.createdDirs.filter((value): value is string => typeof value === 'string') : [])
+  const folderKey = (folder: string): string => process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)
+  const isBelow = (folder: string, parent: string): boolean => folderKey(folder).startsWith(`${folderKey(parent)}${process.platform === 'win32' ? '\\' : '/'}`)
+  if (!remove) for (const file of [...changes.filter(change => change.action === 'create').map(change => change.file), ...(initial(manifestFile) === null ? [manifestFile] : [])]) {
+    for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
+  }
+  const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
+  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
+  const removedDirs = new Set<string>()
+  let handover: { file: string; text: string } | undefined
+  if (remove) {
+    // A folder named by --data-dir may be the person's own: it goes only when setup recorded making it.
+    const candidates = new Set([...createdDirs, ...(basename(root) === '.agent-board' ? [root] : [])])
+    for (const change of changes) if (change.action === 'remove') {
+      for (let folder = dirname(change.file); folderKey(folder) !== folderKey(root) && (basename(folder) === 'agent-board' || isBelow(folder, root)); folder = dirname(folder)) {
+        candidates.add(folder)
+        if (folder === dirname(folder)) break
+      }
+    }
+    const siblingIndex = otherManifests.findIndex(one => one.files !== undefined)
+    const hasOtherManifest = otherAgents.some(other => initial(join(root, `install-${other}.json`)) !== null)
+    if (!hasOtherManifest) for (const runtime of [join(home, '.cache', 'agent-board'), ...(process.env.XDG_RUNTIME_DIR ? [join(process.env.XDG_RUNTIME_DIR, 'agent-board')] : [])]) {
+      candidates.add(runtime)
+      try { for (const name of readdirSync(runtime)) if (name.endsWith('-messages')) candidates.add(join(runtime, name)) } catch {}
+    }
+    // Outside Windows the message folders sit directly in the runtime folder, which is not ours.
+    if (!hasOtherManifest && process.env.XDG_RUNTIME_DIR) try { for (const name of readdirSync(process.env.XDG_RUNTIME_DIR)) if (/^agent-board-.*-messages$/.test(name)) candidates.add(join(process.env.XDG_RUNTIME_DIR, name)) } catch {}
+    const deletedFiles = new Set(changes.filter(change => change.action === 'remove').map(change => change.file))
+    for (const folder of [...candidates].sort((a, b) => b.split(/[\\/]/).length - a.split(/[\\/]/).length)) {
+      if (folderKey(folder) === folderKey(home) || isBelow(home, folder)) continue
+      try {
+        if (readdirSync(folder).every(name => deletedFiles.has(join(folder, name)) || removedDirs.has(join(folder, name)))) {
+          removedDirs.add(folder)
+          changes.push({ file: folder, action: 'remove' })
+        }
+      } catch {}
+    }
+    if (siblingIndex >= 0) {
+      const sibling = otherManifests[siblingIndex]!
+      const carried = [...createdDirs].filter(folder => !removedDirs.has(folder))
+      if (carried.length) {
+        const dirs = Array.isArray(sibling.createdDirs) ? sibling.createdDirs.filter((value): value is string => typeof value === 'string') : []
+        handover = { file: join(root, `install-${otherAgents[siblingIndex]}.json`), text: `${JSON.stringify({ ...sibling, createdDirs: [...new Set([...dirs, ...carried])].sort() }, null, 2)}\n` }
+      }
+    }
+  }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
     alreadyGone, ...(keptShared.length ? { keptShared } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
@@ -1072,7 +1245,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const executable = flag('--codex-bin')
     if (!executable) throw new Error('CODEX_BINARY_REQUIRED')
     const result = await trustCodex(executable, config, manifest.groups, args.includes('--apply'))
-    process.stdout.write(codexTrustOutput(result, s, args.includes('--json')))
+    process.stdout.write(codexTrustOutput(result, s, args.includes('--json'), home))
     return true
   }
   if (mode === '--codex-doctor') {
@@ -1134,10 +1307,20 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // Compare the bytes used to build the plan, not a fresh snapshot taken after
     // planning: another installer or host may have changed them in that interval.
     for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
-    // Setup is deliberately explicit. It changes neither hook trust nor config.toml.
+    // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
     for (const change of changes) {
-      if (change.file === manifestFile) continue
-      if (change.file === nativeConfig) atomic(nativeConfig, nextConfigText!)
+      if (change.file === manifestFile || removedDirs.has(change.file)) continue
+      if (change.file === trustConfig && nextTrust !== undefined) {
+        // A linked config.toml stays a link, and the person's permissions stay.
+        const target = realpathSync(trustConfig)
+        const mode = statSync(target).mode & 0o777
+        atomic(target, nextTrust)
+        if (process.platform !== 'win32') chmodSync(target, mode)
+      }
+      else if (change.file === nativeConfig) {
+        if (change.action === 'remove') unlinkSync(nativeConfig)
+        else atomic(nativeConfig, nextConfigText!)
+      }
       else if (change.file === progress) {
         mkdirSync(dirname(progress), { recursive: true })
         writeFileSync(progress, '', { flag: 'wx', mode: 0o600 })
@@ -1145,6 +1328,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       else atomic(change.file, files[change.file] ?? '')
     }
     if (remove) {
+      if (handover) atomic(handover.file, handover.text)
       if (readLocal(manifestFile) !== null) unlinkSync(manifestFile)
     } else {
       atomic(manifestFile, nextManifest)
@@ -1167,6 +1351,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
   })
+  // A folder that cannot go (something appeared in it, or Windows holds it) stays and is not reported as removed.
+  for (const folder of removedDirs) try { rmdirSync(folder) } catch (error) {
+    if ((error as { code?: string }).code !== 'ENOENT') changes.splice(changes.findIndex(change => change.file === folder), 1)
+  }
   outputPlan({ ...plan, applied: true })
   return true
 }

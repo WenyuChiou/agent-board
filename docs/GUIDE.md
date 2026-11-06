@@ -13,7 +13,7 @@ node scripts/setup-agent.mjs
 node scripts/setup-agent.mjs --apply
 ```
 
-Auto detection finds host configuration, not active sessions. Use `--agent <name>` for a known host whose configuration is missing, or `--agent all` to preview every target. It does not install the AI products. [Setup](SETUP.md) lists paths and adapter coverage.
+Auto detection finds host configuration, install records, commands on the PATH and installed apps, not active sessions. Use `--agent <name>` for a known host it does not find, or `--agent all` to preview every target. It does not install the AI products. [Setup](SETUP.md) lists paths and adapter coverage.
 
 Fresh independent installs use `~/.agent-board/progress.md`. Existing installs retain their selected file; `--progress-file /absolute/path/progress.md` selects one explicitly. Do not choose another computer's board for an ordinary local install.
 
@@ -135,7 +135,7 @@ The optional `scripts/setup.sh` / `scripts/setup.ps1` manages Claude-specific Ta
 
 Strong Codex runs and Claude print-mode sessions write no new board block. The board script’s tidy moves old Codex run blocks to the archive when their own session history proves they are runs, even if they contain a question. Missing or unreadable history supplies no run proof; ordinary age rules still apply. The optional pane’s sweep does not open history files. Weak hints keep the earlier behavior.
 
-The optional pane sweeps on session start and hourly: done blocks after 12 hours, other stopped/stale blocks after three days. A running `--serve` page also sweeps every hour. A hand-kept task with every step `[x]` or `[-]` counts toward the archive after three days observed done; in 0.24.1 scheduled sweeps only count these tasks and move none. The details line says "N finished tasks can be archived"; a zero count is omitted. A working or waiting agent block stays live for 12 hours after its last write: the pane, terminal and page explain why Archive is unavailable, and tidy keeps it. Once stopped or ended, open the row to archive it immediately. Automatic sweeps take a block with an unresolved `[?]` step only when the same complete question snapshot the explicit archive requires is saved and read back, and only when it has been quiet long enough: three days after its last write if it has ended or is done, seven days with no report if it is still working or waiting. A block whose snapshot cannot be saved stays. The question is kept and shows under Older unanswered questions, where it can be hidden and shown again. Explicit archive requires that snapshot at any age, preserving recovery after the source moves; storage failure leaves the source in place.
+The optional pane sweeps on session start and hourly: done blocks after 12 hours, other stopped/stale blocks after three days. The page, while it runs, also sweeps every hour. A hand-kept task with every step `[x]` or `[-]` counts toward the archive after three days observed done; in 0.24.1 scheduled sweeps only count these tasks and move none. The details line says "N finished tasks can be archived"; a zero count is omitted. A working or waiting agent block stays live for 12 hours after its last write: the pane, terminal and page explain why Archive is unavailable, and tidy keeps it. Once stopped or ended, open the row to archive it immediately. Automatic sweeps take a block with an unresolved `[?]` step only when the same complete question snapshot the explicit archive requires is saved and read back, and only when it has been quiet long enough: three days after its last write if it has ended or is done, seven days with no report if it is still working or waiting. A block whose snapshot cannot be saved stays. The question is kept and shows under Older unanswered questions, where it can be hidden and shown again. Explicit archive requires that snapshot at any age, preserving recovery after the source moves; storage failure leaves the source in place. Archiving a stopped task that still asks says its question stays under Older unanswered questions; the terminal board's `a` also works on a Done recently entry that still asks.
 
 Run `node "$HOME/.agent-board/agent-board.mjs" --tidy` for one normal age-based sweep without a Claude session or page. It installs no scheduler and does not write `progress-seen.json`: the pane, `--watch` or `--serve` must first observe a completed hand-kept task and record when the three-day rule first ran. The three days count from the later of those two observations, giving work seen done under 0.24.0 three days from the upgrade. A machine running only `--tidy` never arms that rule and counts nothing without the reserved entry. Unknown, future or unreadable observations retain manual tasks; `--tidy` can still archive eligible dated agent blocks. The page's hourly sweep skips its pass and writes nothing if the seen file cannot be read.
 
@@ -169,7 +169,11 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
 node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 ```
 
-`--codex-remove` and `--codex-doctor` are retained maintenance names for all targets. Close that board before removal. Only unchanged owned definitions/files are removed; shared files stay while another target needs them. Progress, session records, archives, journals and user changes remain.
+`--codex-remove` and `--codex-doctor` are retained maintenance names for all targets. Close that board before removal. Removal takes unchanged board files, its hook definitions, Codex trust entries for those hooks, an empty hooks config setup created, and empty folders setup made. Shared files stay while another target needs them. User changes stay.
+
+Your history stays: `progress.md`, `progress-archive-*.md`, `progress-journal-*.md`, `sessions/`, `pending/`, `hook-recovery-*.json`, `hook-errors.log`, `progress-answered.json`, `progress-questions*.json`, `progress-seen.json`, `progress-run-cursor.txt`, `progress-page-state.json`, `progress-page-state-done-*.json`, `progress-inbox/` (`dropped.log`). You can delete these by hand. Non-empty runtime `*-messages/` folders also stay. Names based on `progress.md` follow your selected progress filename.
+
+Older installations keep an inert `{"hooks": {}}` file and empty parent folders such as `.agents/skills`: setup did not record that it created them. Trust tables with extra lines stay. Codex's own `config.toml` always stays.
 
 For the optional plugin, run `/progress connect remove` while it is still installed; finish reported cleanup, then `claude plugin uninstall agent-board@agent-board`. Remove its marketplace with `claude plugin marketplace remove agent-board`. Plugin marketplace updates use `claude plugin marketplace update agent-board` and `claude plugin update agent-board@agent-board`; reload the plugin afterward.
 
@@ -236,7 +240,7 @@ The plugin was renamed in 0.10.0 and doesn't move over by itself. Run the steps 
 
 ### How do I uninstall it?
 
-Independent setup: close the board, preview `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`, then add `--apply` after review. Progress and history remain. For the optional Claude plugin:
+Independent setup: close the board, preview `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`, then add `--apply` after review. Repeat for each installed agent. See [Update and uninstall](#update-and-uninstall) for the history files kept. For the optional Claude plugin:
 
 ```sh
 claude -p "/progress connect remove"

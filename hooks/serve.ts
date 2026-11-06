@@ -95,7 +95,16 @@ export const idleTimeout = (value: string | undefined): number => {
 // `line`, here and on the other texts below, is the text folded to one line (hooks/clip.ts) and
 // capped; it is absent when that is the text itself. The browser cuts the line to its width with an
 // ellipsis.
-export type ServeStep = { text: string; note: string; status: string; isCurrent: boolean; line?: string }
+export type ServeStep = {
+  text: string
+  note: string
+  status: string
+  isCurrent: boolean
+  line?: string
+  // The file line the step came from, so a press can tick exactly the line it showed; absent
+  // on a folded summary line, which is no step. `line` above is the clipped text it shows.
+  fileLine?: number
+}
 
 export type ServeAsk = {
   at?: number
@@ -169,11 +178,14 @@ export type ServeRow = {
   done: number
   total: number
   due: string | null
+  dueTone: Tone | null
   pr: string
   steps: ServeStep[]
   next: string | null
   // The words of the Done button for `next`, clipped; `next` itself is what a press must send back.
   nextLabel?: string
+  // The file line `next` came from, so a press can tick exactly the line it showed.
+  nextFileLine?: number
   // A hand-kept task, the person's own (its agent is '', as Claude Code's is); absent otherwise.
   isOwn?: true
   canArchive: boolean
@@ -206,7 +218,7 @@ export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string;
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
 export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[] }
-type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number }
+type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
 type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
 type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
 type PageView = {
@@ -283,21 +295,25 @@ const infoOf = (mode: SendMode, agent: string, task: string, session: string, s:
 }
 
 // The text folded to one line and capped at `room` characters, or undefined when that is the text itself.
-const clipped = (text: string, room: number): string | undefined => {
+const clipped = (text: string | undefined, room: number): string | undefined => {
+  if (!text) return undefined
   const { line } = clipLine(text, room)
   return line === text ? undefined : line
 }
-const lined = (text: string): { line?: string } => {
+const lined = (text?: string): { line?: string } => {
+  if (!text) return {}
   const line = clipped(text, LINE_ROOM)
 
   return line === undefined ? {} : { line }
 }
-const contextLined = (text: string): { contextLine?: string } => {
+const contextLined = (text?: string): { contextLine?: string } => {
+  if (!text) return {}
   const line = clipped(text, LINE_ROOM)
 
   return line === undefined ? {} : { contextLine: line }
 }
-const noteLined = (text: string): { noteLine?: string } => {
+const noteLined = (text?: string): { noteLine?: string } => {
+  if (!text) return {}
   const line = clipped(text, LINE_ROOM)
 
   return line === undefined ? {} : { noteLine: line }
@@ -312,15 +328,15 @@ const retainedOf = (item: WaitingItem): ServeRetained => ({
   key: olderKey(item),
   canHide: item.hideKey !== '' && item.canHide !== false,
   ...(item.hideKey !== '' && item.canHide !== false ? { unhideKey: `hidden:${item.hideKey}` } : {}),
-  project: item.project,
-  agent: item.agent,
+  project: item.project ?? '',
+  agent: item.agent ?? '',
   ...(item.where === 'manual' ? { isOwn: true as const } : {}),
-  task: item.task,
-  text: item.text,
+  task: item.task ?? '',
+  text: item.text ?? '',
   note: item.note,
   context: item.context,
   ...contextLined(item.context),
-  when: item.when,
+  when: item.when ?? '',
   ...(item.questionId === undefined ? {} : { questionId: item.questionId }),
 })
 
@@ -390,6 +406,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     }
     if (item.type === 'row') {
       const { row } = item
+      if (view.recentAsking?.some(one => one.key === row.key)) continue
       const needs = rowNeedsYou(row, idleKeys.has(row.key) || stoppedKeys.has(row.key))
       const connection = isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)
       const isContested = !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (row.agent || 'claude') && one.session === row.nativeSession) ?? false)
@@ -426,10 +443,12 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         done: row.done,
         total: row.total,
         due: row.due?.left ?? null,
+        dueTone: row.due?.tone ?? null,
         pr: row.pr,
-        steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent, ...lined(step.note ? `${step.text} — ${step.note}` : step.text) })),
+        steps: row.steps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent, ...lined(step.note ? `${step.text} — ${step.note}` : step.text), ...(step.line === null ? {} : { fileLine: step.line }) })),
         next: row.next?.step ?? null,
         ...(nextLabel === undefined ? {} : { nextLabel }),
+        ...(row.next === null ? {} : { nextFileLine: row.next.line }),
         canArchive: row.archive !== null,
         canConfirm: row.confirm != null,
         archiveNote: row.auto === 'working' || row.auto === 'waiting' ? s.archiveLive : '',
@@ -446,8 +465,10 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         // A row says why only when a reply could otherwise be expected here.
         info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
         isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
-        hasCopyBox: isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined,
-        ...(row.target?.isClosed === true ? { isClosed: true as const } : {}),
+        // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
+        hasCopyBox: !(row.auto === 'ended' && row.question === null && send === 'none') && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined),
+        // A Claude row has no target, so its closed session is the block's own state=ended.
+        ...(row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true ? { isClosed: true as const } : {}),
       })
       continue
     }
@@ -462,6 +483,17 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       // Connection closure does not answer an unresolved inbox question.
       info: turn.isQuestion ? infoOf(SENDERS.has(turn.agent) ? 'open' : 'none', turn.agent, '', '', s) : '',
     })
+  }
+
+  const askingByKey = new Map((view.recentAsking ?? []).map(one => [one.key, one]))
+  const askingFp = (itemKey: string): { canArchive?: boolean; fp?: string } => {
+    const asking = askingByKey.get(itemKey)
+    if (asking === undefined) return {}
+    const askingItem = items.find(one => one.type === 'row' && one.row.key === asking.key)
+    return {
+      canArchive: asking.archive !== null,
+      ...(askingItem === undefined ? {} : { fp: fingerprint(askingItem, items) }),
+    }
   }
 
   const model: ServeModel = {
@@ -482,16 +514,17 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     older: (view.older ?? []).map(retainedOf),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
-    recent: view.recent.map(item => ({ project: item.project, title: item.title, ...lined(item.title), when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) })),
+    recent: view.recent.map(item => ({ project: item.project, title: item.title, ...lined(item.title), when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')), ...askingFp(item.key) })),
   }
   if (group === undefined) return model
   const extra = (item: WaitingItem): ServeRetained => ({ ...retainedOf(item), ...(item.at === undefined ? {} : { at: item.at }), dir: item.dir ?? null })
   model.reminder = (view.reminder ?? []).map(extra)
   model.older = (view.older ?? []).map(extra)
-  model.finished = (view.finished ?? []).map(item => ({ ...item, key: `row:${item.key}`, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')) }))
+  model.finished = (view.finished ?? []).map(item => ({ ...item, key: `row:${item.key}`, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')), ...askingFp(item.key) }))
+  const finishedByKey = new Map((model.finished ?? []).map(one => [one.key, one]))
   model.recent = view.recent.map((item, index) => {
-    const finished = model.finished?.find(one => one.key === `row:${item.key}`)
-    return { ...model.recent[index]!, key: `row:${item.key}`, ...(finished === undefined ? {} : { agent: finished.agent, ...(finished.isOwn ? { isOwn: true as const } : {}), dir: finished.dir, at: finished.at }) }
+    const finished = finishedByKey.get(`row:${item.key}`)
+    return { ...model.recent[index]!, key: `row:${item.key}`, ...(finished === undefined ? {} : { agent: finished.agent, ...(finished.isOwn ? { isOwn: true as const } : {}), dir: finished.dir, at: finished.at }), ...askingFp(item.key) }
   })
   model.agents = [...new Set(group.unreadable)].map(agent => ({ agent, unreadable: true }))
   const grouped = groupBoard(model, group.now, group.repoOf, s)
@@ -529,7 +562,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
 
 // `asked`: with a reply, the question the page showed it under ('' for none). `fp`: the line's
 // fingerprint as the page drew it; a tick, an archive and a reply need it, hide and unhide do not.
-export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string; fp?: string; connection?: string; turn?: string }
+// `line` is the file line the pressed step came from, so a tick can name the exact step
+// when two open steps share a text; absent on a press that names the next step by text.
+export type ServeRequest = { key: string; type: string; text: string; session: string; asked?: string; fp?: string; line?: number; connection?: string; turn?: string }
 
 export type ServeAction =
   | { type: 'tick'; ref: StepRef }
@@ -573,9 +608,28 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   const item = items.find(one => one.key === request.key)
   if (item === undefined) return { type: 'refuse', note: s.boardLineChanged }
   if (request.type === 'tick') {
-    const ref = item.type === 'ask' ? item.ask.step : item.type === 'row' ? item.row.next : null
+    if (item.type === 'ask') {
+      const ref = item.ask.step
+      return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
+    }
+    if (item.type !== 'row') return { type: 'refuse', note: s.boardTickGone }
+    // A press names the step it showed by its file line, so two open steps with the same
+    // text are told apart; a press without a line ticks the next step, as before.
+    if (request.line !== undefined) {
+      const step = item.row.steps.find(one => one.line === request.line)
+      if (step !== undefined && step.line !== null && request.text === step.text) {
+        return { type: 'tick', ref: { project: item.row.project, title: item.row.title, step: step.text, line: step.line, raw: step.raw } }
+      }
+      // The primary Done button still names the next step when the step list folded it
+      // out of view: the page then sends the next step's line and its full text, which
+      // the folded list does not hold, so the next step's own ref answers the press.
+      const next = item.row.next
+      if (next !== null && next.line === request.line && request.text === next.step) return { type: 'tick', ref: next }
+      return { type: 'refuse', note: s.boardLineChanged }
+    }
+    const ref = item.row.next
     // A task keeps its key while its next step moves on: only the step the page showed is ticked.
-    if (ref !== null && item.type === 'row' && request.text !== ref.step) return { type: 'refuse', note: s.boardLineChanged }
+    if (ref !== null && request.text !== ref.step) return { type: 'refuse', note: s.boardLineChanged }
     return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
   }
   // Marked answered sends nothing: only the hidden list is written.
@@ -720,14 +774,17 @@ const PAGE_WORDS = [
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
   'archiveNow', 'cleanUp', 'stoppedCount',
+  'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
+  'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
+  'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -766,6 +823,13 @@ body:has(#offline:not(:empty)) .live{display:none}
 #offline{position:sticky;top:0;color:var(--alert);overflow-wrap:anywhere;padding:var(--s2) 0;border-bottom:1px solid var(--line)}
 #offline:empty{display:none}
 #offline:not(:empty){top:var(--head-h,56px);z-index:5;padding:var(--s3) max(var(--s4),calc((100vw - 808px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--ground))}
+/* The away line: one line at the top of the content column, above the can't-read line. Each part stays whole when the line wraps, and the " · " separator ends a line, never starts one. It folds away on its own row track when the × is pressed. */
+#away-line[hidden]{display:none}
+#away-line .away-seg{white-space:nowrap}
+#away-line .away-lead{color:var(--muted)}
+#away-line .away-bold{font-weight:600;color:var(--ink)}
+#away-line .away-x{flex:none;width:28px;height:28px;display:inline-grid;place-items:center;vertical-align:middle;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer}
+#away-line .away-x::before{content:"×";font-size:var(--text-md);line-height:1}
 #offline:not(:empty)::before{content:'!';display:inline-grid;place-items:center;width:20px;height:20px;border:1px solid currentColor;border-radius:var(--radius-round);margin-right:var(--s3);font-weight:600}
 button,.btn{font:inherit;color:inherit}
 button:hover,.btn:hover,summary:hover{background-color:var(--hover)}
@@ -816,7 +880,7 @@ textarea:focus{outline:none;border-color:var(--ink);box-shadow:var(--ring)}
 .press-result{font-size:var(--text-sm)}.press-result .acts{margin-top:var(--s2)}.press-result:empty{display:none}.press-result.done{color:var(--done)}.press-result.alert{color:var(--alert)}
 .press-result textarea{margin-top:var(--s2);font-size:var(--text-sm)}
 .empty{display:grid;gap:var(--s1);padding:var(--s4)}
-.empty p{margin:0}.empty .sub{font-size:var(--text-xs);color:var(--muted)}
+.empty p{margin:0}.empty .sub{font-size:var(--text-xs);color:var(--muted)}.empty .btn{justify-self:start}
 .sec{display:flex;flex-direction:column;gap:var(--s2)}
 .sec-head{display:flex;align-items:baseline;gap:var(--s3);flex-wrap:wrap}
 .sec-head h2{margin:0;font-size:var(--text-lg);line-height:1.4;font-weight:600}
@@ -839,6 +903,7 @@ div.row-btn{cursor:default}
 .row-btn[aria-expanded="true"] .r-chev{transform:rotate(90deg)}
 div.row-btn .r-chev{visibility:hidden}
 .r-meta .st{color:var(--ink)}
+.r-right.t-alert{color:var(--alert)}
 .r-right{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;max-width:9em;overflow:hidden;text-overflow:ellipsis}
 .row-open{background:var(--current);border-radius:0 0 var(--radius-m) var(--radius-m);padding:var(--s1) var(--s2) var(--s3) calc(var(--s2) + 36px);display:grid;gap:var(--s3);min-width:0;opacity:0;transition:opacity var(--dur-base) var(--ease-out)}
 .row.open .row-open{opacity:1}
@@ -897,7 +962,6 @@ ${CLIP_CSS}
 .s-item:hover{background:var(--hover)}
 .s-item:active{background:var(--press)}
 .s-item[aria-pressed="true"]{background:var(--current);font-weight:600}
-.s-agent[aria-pressed="true"].working .ag::after{border-color:var(--current)}
 .s-item>svg.i{width:18px;height:18px;margin-inline:3px}
 .s-item .ag{position:relative;width:24px;height:24px;border-radius:var(--radius-s);flex:none}
 .v-needs>svg.i{color:var(--waiting-text)}.v-working>svg.i{color:var(--alive)}.v-others>svg.i,.v-done>svg.i{color:var(--muted)}
@@ -907,8 +971,12 @@ ${CLIP_CSS}
 .s-n:empty{display:none}
 .s-n.hot,.side .badge{position:static;flex:none;min-width:22px;height:22px;padding:0 6px;border:0;border-radius:var(--radius-round);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-xs);font-weight:600;line-height:22px;text-align:center;font-variant-numeric:tabular-nums}
 .side .badge.bad{background:var(--alert)}
-.s-agent[data-presence="offline"] .ag,.s-agent[data-presence="notseen"] .ag{background-color:var(--muted)}
-.s-agent.working .ag::after{content:"";position:absolute;right:-5px;bottom:-5px;width:9px;height:9px;border:2px solid var(--ground);border-radius:var(--radius-round);background:var(--alive)}
+.s-agent[data-presence] .ag::after,.s-agent.working .ag::after{content:"";position:absolute;right:-5px;bottom:-5px;width:9px;height:9px;border:2px solid var(--ground);border-radius:var(--radius-round)}
+.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after{border-color:var(--alive);background:var(--ground)}
+.s-agent[data-presence="offline"] .ag::after{border-radius:var(--radius-s);background:var(--muted)}
+.s-agent[data-presence="notseen"] .ag::after{background:linear-gradient(var(--muted),var(--muted)) center/6px 2px no-repeat var(--ground)}
+.s-agent.working .ag::after{border-color:var(--ground);border-radius:var(--radius-round);background:var(--alive)}
+.s-agent[aria-pressed="true"].working .ag::after,.s-agent[aria-pressed="true"][data-presence="offline"] .ag::after,.s-agent[aria-pressed="true"][data-presence="notseen"] .ag::after{border-color:var(--current)}
 .shell[data-empty="1"] :is(.s-views,.s-projects){display:none}
 /* the settings at the foot of the sidebar: the language spot (reserved, in a row with the theme button), the project link, then Close the board */
 .s-foot{margin-top:auto;padding-top:var(--s3);border-top:1px solid var(--line)}
@@ -990,6 +1058,7 @@ ${CLIP_CSS}
   .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet{flex:0 0 auto;min-height:44px}
   .s-toggle{width:44px;height:44px}
+  #away-line .away-x{width:44px;height:44px}
   textarea{min-height:96px}
 }
 ${motionCss}
@@ -1036,10 +1105,10 @@ ${PAGE_CSS}
 <div class="stage">
 <header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i><span class="lbl">${esc(s.serveLive)}</span></span></div></div></header>
 <div id="offline" role="status" aria-live="polite"></div>
-<nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note" id="agent-note"></div></nav>
+<nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" class="btn" id="connect-web-chat" data-static>${esc(s.webChatConnect)}</button><button type="button" class="btn" id="import-clipboard" data-static>${esc(s.importClipboard)}</button>`}<button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
+<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" class="btn" id="connect-web-chat" data-static>${esc(s.webChatConnect)}</button><button type="button" class="btn" id="import-clipboard" data-static>${esc(s.importClipboard)}</button>`}<button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
@@ -1071,6 +1140,7 @@ const PAGE_SCRIPT = String.raw`
   var since = null;
   var messageAttempts = {};
   var latest = null;
+  var awaySnap = null;
   var connections = [];
   ${filterStore}
   ${agentFade}
@@ -1126,6 +1196,7 @@ const PAGE_SCRIPT = String.raw`
   var resultSlots = {};
   var lostResults = [];
   resultSlot(document.querySelector('.pfoot'), 'close', '', w('serveClose'));
+  resultSlot(document.getElementById('tidy-bulk'), 'tidy', '', w('tidyBulk'));
   function resultSlot(card, key, revision, label) {
     card.setAttribute('data-card-key', key);
     var previous = results[key];
@@ -1171,9 +1242,10 @@ const PAGE_SCRIPT = String.raw`
     add(node, add(el('div', 'acts'), button(w('showAgain'), function () { act(result.unhideKey, 'unhide'); })));
   }
   function hideQuestion(key, unhideKey) {
-    return act(key, 'hide', '', '', '', '', '', null, unhideKey);
+    return act(key, 'hide', '', '', '', '', '', null, undefined, unhideKey);
   }
   function beginPress() {
+    resetTidy(false);
     note.textContent = '';
     note.className = '';
     lostResults.forEach(function (card) { card.remove(); });
@@ -1291,11 +1363,11 @@ const PAGE_SCRIPT = String.raw`
   }
   // fp: the fingerprint the line was drawn with, which the server checks before it writes. go: the button
   // that sent it. A failed send keeps the message for Send again and Copy message.
-  function act(key, type, text, waiting, session, asked, fp, go, unhideKey) {
+  function act(key, type, text, waiting, session, asked, fp, go, line, unhideKey) {
     if (isUnreachable) return Promise.resolve();
     busyOn(go);
     say(waiting || w('pressPending'), '', key);
-    return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '' }).then(function (data) {
+    return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '', ...(line === undefined ? {} : { line: line }) }).then(function (data) {
       say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok);
       if (data.ok && type === 'hide' && unhideKey && results[key]) {
         results[key].unhideKey = unhideKey;
@@ -1497,6 +1569,9 @@ const PAGE_SCRIPT = String.raw`
   }
   function source(ref) { return pg.sources[ref.sourceKey || ref.key] || pg.sources[ref.key.replace(/^stuck:/, '')] || {}; }
   function fullTitle(ref) { var one = source(ref); return String(one.title || one.task || one.text || ''); }
+  // A row with a due date and no age (a hand-kept task) shows the date where the age would be; an
+  // agent's row keeps its age, so how fresh its status is stays on the row.
+  function dueOf(ref) { var one = source(ref); return one.when ? '' : clean(one.due || ''); }
   function ageOf(ref) { return clean(source(ref).when || w('pgUnknownAge')); }
   // 'own' for the person's hand-kept tasks, '?' for a finished task whose agent the model did not say.
   function agentOf(ref) { return source(ref).isOwn || ref.isOwn ? 'own' : ref.agent || '?'; }
@@ -1580,9 +1655,14 @@ const PAGE_SCRIPT = String.raw`
       var whole = step.note ? step.text + ' — ' + step.note : step.text;
       var cls = 't' + (step.status === 'done' || step.status === 'cancelled' ? ' t-quiet' : '');
       add(line, el('span', 'mk s-' + step.status, GLYPH[step.status] || '•'), clipped(clean(step.line || whole), whole, cls, 'step:' + row.key + ':' + row.steps.indexOf(step)));
-      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled') {
+      // The next step's Done button is the primary one in the actions row, so the step list
+      // does not tick it again: each step has exactly one Done button. Steps are told apart
+      // by the file line they came from, so two open steps with the same text each keep one;
+      // a step with no line (a folded summary) falls back to its text.
+      var isNext = step.fileLine !== undefined ? step.fileLine === row.nextFileLine : step.text === row.next;
+      if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && !isNext) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
-        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp); }, 'btn');
+        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp, undefined, step.fileLine); }, 'btn');
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
         tick.title = step.text;
         add(line, tick);
@@ -1737,7 +1817,11 @@ const PAGE_SCRIPT = String.raw`
       if (sends(row.send)) add(inner, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery));
       else if (row.hasCopyBox) add(inner, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, row.question));
       if (row.isOwn && section !== 'done' && row.next) {
-        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', row.next, '', '', '', row.fp); }, 'primary');
+        // The press names the next step by its file line and its shown text, the same way
+        // the step list names a step, so the server can tell it from a twin with the same text.
+        var nextStep = null;
+        for (var index = 0; index < row.steps.length; index += 1) if (row.nextFileLine !== undefined && row.steps[index].fileLine === row.nextFileLine) { nextStep = row.steps[index]; break; }
+        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.fp, undefined, row.nextFileLine); }, 'primary');
         // A long step is named by its first words; the whole step is its title (#463).
         if (row.nextLabel) tickNext.title = row.next;
         add(acts, tickNext);
@@ -1749,12 +1833,19 @@ const PAGE_SCRIPT = String.raw`
       if (acts.firstChild) add(inner, acts);
       if (row.receipt) add(inner, receiptLine(row.receipt, key, row.agent, !!row.delivery));
       if (row.info) add(inner, el('p', 'context', row.info));
-    } else (row.questions || []).forEach(function (question) { add(inner, el('p', 'context', clean(question))); });
+    } else {
+      (row.questions || []).forEach(function (question) { add(inner, el('p', 'context', clean(question))); });
+      if (row.canArchive || row.archiveNote) add(acts, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', row.fp); }));
+      if (acts.firstChild) add(inner, acts);
+    }
     var isExpandable = inner.childNodes.length > 0;
     if (isExpandable) resultSlot(inner, key, row.fp, row.title || row.task);
     var current = steps.filter(function (one) { return one.isCurrent; })[0] || steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled'; })[0];
     var step = current ? clean(current.text) : '';
-    var detail = !step ? '' : section === 'working' ? step : section === 'others' ? w('pgLast', step) : section === 'stopped' ? w('pgStoppedAt', step) : '';
+    // "Last:" names the last finished step, not the next one: a task with nothing finished yet shows no Last: line.
+    var lastDone = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
+    var lastFinished = lastDone.length ? clean(lastDone[lastDone.length - 1].text) : '';
+    var detail = section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
     var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
     var project = showProject ? clean(ref.repo || row.project) : '';
@@ -1776,7 +1867,7 @@ const PAGE_SCRIPT = String.raw`
     }) : el('div');
     head.className = 'row-btn';
     if (isExpandable) head.setAttribute('aria-expanded', String(isOpen));
-    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', 'r-right', ageOf(ref)), el('span', 'r-chev'));
+    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', 'r-right' + (dueOf(ref) && source(ref).dueTone === 'alert' ? ' t-alert' : ''), dueOf(ref) || ageOf(ref)), el('span', 'r-chev'));
     var block = el('div', 'fx');
     add(block, add(el('div', 'fx-in'), head, isExpandable ? fold : null));
     add(li, block);
@@ -1817,20 +1908,25 @@ const PAGE_SCRIPT = String.raw`
     });
     return map;
   }
-  // The word that follows the name when the board cannot reach the agent: offline or not seen.
+  // The word when the board cannot reach the agent: closed, or not heard from in the last 30 minutes.
   function lateWord(state) { return state === 'offline' ? w('pgOffline') : state === 'notseen' ? w('pgNotSeen') : ''; }
+  // An agent's icon keeps its colours in every state, so the state is this word and the mark beside the icon (#870).
+  function stateWord(entry) {
+    if (entry.working > 0) return w('pgTipWorking');
+    return entry.presence === 'open' || entry.presence === 'connected' ? w('pgStateOpen') : lateWord(entry.presence);
+  }
   function chipLabel(entry) {
     var parts = [];
     if (entry.needs === 1) parts.push(w('pgTipNeedsOne'));
     else if (entry.needs > 1) parts.push(w('pgTipNeeds', entry.needs));
-    if (entry.working > 0) parts.push(w('pgTipWorking'));
     if (entry.id === 'own' && entry.open > 0) {
       if (entry.open === 1) parts.push(w('pgTipOpenOne'));
       else parts.push(w('pgTipOpen', entry.open));
     }
     if (entry.unreadable) parts.push(w('pgTipCantRead'));
-    var late = lateWord(entry.presence);
-    return entry.name + (late ? ' · ' + late : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
+    var state = stateWord(entry);
+    if (entry.working > 0 && !parts.length) return entry.name + ' · ' + state;
+    return entry.name + (state ? ' · ' + state : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
   }
   // One button per agent, twice: in the icon row (phones) and in the sidebar (the rail and wider). Same label, count, dot and filter.
   function newChip(entry, isSide) {
@@ -1845,7 +1941,7 @@ const PAGE_SCRIPT = String.raw`
     chip.node.setAttribute('title', label);
     chip.node.className = (chip.isSide ? 's-item s-agent' : 'chip') + (entry.working > 0 ? ' working' : '');
     if (entry.presence) chip.node.setAttribute('data-presence', entry.presence);
-    setText(chip.name, lateWord(entry.presence) ? entry.name + ' · ' + lateWord(entry.presence) : entry.name);
+    setText(chip.name, stateWord(entry) ? entry.name + ' · ' + stateWord(entry) : entry.name);
     var text = entry.unreadable ? '!' : entry.needs > 0 ? String(entry.needs) : '';
     if (text && !chip.badge) { chip.badge = el('span', 'badge'); chip.node.appendChild(chip.badge); }
     if (!text && chip.badge) { chip.node.removeChild(chip.badge); chip.badge = null; }
@@ -1909,6 +2005,165 @@ const PAGE_SCRIPT = String.raw`
     else settle();
   }
   // The line under the row for an agent the board cannot read: while that agent is pressed, or for all of them when nothing is.
+  // The away line: when the tab is hidden, the page records a snapshot of the world it
+  // shows (the open questions by agent, the tasks already done, each agent's presence and
+  // whether it can be read). When the tab is visible again after 5 minutes or more, the
+  // next refresh compares the world with the snapshot and shows one line with what
+  // changed. Nothing is kept across reloads, and the line never shows on the first load.
+  // It never hides by itself: only the × on the line folds it away.
+  var AWAY_MS = 5 * 60 * 1000;
+  // An officer is an agent the board knows by name (its guarded name); any other agent is
+  // counted but never named on the line.
+  function isOfficer(id) { return Object.prototype.hasOwnProperty.call(W, 'agent:' + String(id).toLowerCase()); }
+  // The agents that are unreadable or offline now, by id: 'unreadable' when the board
+  // cannot read the agent, 'offline' when its sessions are closed and none is open.
+  function awayBadNow() {
+    var bad = {};
+    var unreadable = {};
+    latest.view.agents.forEach(function (one) { if (one.isUnreadable) unreadable[String(one.agent).toLowerCase()] = true; });
+    Object.keys(agentPresence).forEach(function (id) {
+      if (unreadable[id]) bad[id] = 'unreadable';
+      else if (agentPresence[id] === 'offline') bad[id] = 'offline';
+    });
+    return bad;
+  }
+  function awaySnapshot() {
+    if (!latest || !latest.view) return null;
+    var questions = {};
+    latest.view.needs.cards.forEach(function (ref) {
+      var id = agentOf(ref);
+      if (!questions[id]) questions[id] = {};
+      questions[id][ref.key] = true;
+    });
+    var done = {};
+    latest.view.all.done.concat(latest.view.own.done).forEach(function (ref) { done[ref.key] = true; });
+    return { at: Date.now(), questions: questions, done: done, bad: awayBadNow() };
+  }
+  function awayDiff(snap) {
+    if (!latest || !latest.view) return null;
+    var view = latest.view;
+    var seen = {};
+    Object.keys(snap.questions).forEach(function (id) { Object.keys(snap.questions[id]).forEach(function (key) { seen[key] = true; }); });
+    var questions = {};
+    var newKeys = [];
+    view.needs.cards.forEach(function (ref) {
+      if (seen[ref.key]) return;
+      var id = agentOf(ref);
+      questions[id] = (questions[id] || 0) + 1;
+      newKeys.push(ref.key);
+    });
+    // Finished tasks count within the current filter, and never name the task. Their keys
+    // are kept so the Done list can light up the rows that finished while away.
+    var finished = 0;
+    var finishedKeys = [];
+    view.all.done.concat(view.own.done).forEach(function (ref) {
+      if (snap.done[ref.key]) return;
+      if (!matches(agentOf(ref), projectOf(ref))) return;
+      finished += 1;
+      finishedKeys.push(ref.key);
+    });
+    // The line reports the agents that are unreadable or offline now, and shows for
+    // presence only when that set changed. An agent coming online leaves the set, and
+    // with nothing to name the line stays away.
+    var bad = awayBadNow();
+    var badKeys = Object.keys(bad).sort();
+    var snapKeys = Object.keys(snap.bad).sort();
+    var badChanged = badKeys.length !== snapKeys.length || badKeys.some(function (id, index) { return id !== snapKeys[index] || bad[id] !== snap.bad[id]; });
+    return { questions: questions, newKeys: newKeys, finished: finished, finishedKeys: finishedKeys, bad: bad, badChanged: badChanged };
+  }
+  function awayParts(diff, minutes) {
+    var segs = [{ text: minutes < 60 ? w('awayForMinutes', minutes) : w('awayForHours', Math.floor(minutes / 60)), bold: false }];
+    var agents = Object.keys(diff.questions);
+    var total = 0;
+    agents.forEach(function (id) { total += diff.questions[id]; });
+    if (agents.length === 1) {
+      var id = agents[0];
+      var n = diff.questions[id];
+      if (isOfficer(id)) segs.push({ text: n === 1 ? w('awayAskedNamedOne', agentName(id)) : w('awayAskedNamed', agentName(id), n), bold: true });
+      else segs.push({ text: n === 1 ? w('awayAskedGenericOne') : w('awayAskedGenericOneAgent', n), bold: true });
+    } else if (agents.length > 1) segs.push({ text: w('awayAskedGeneric', agents.length, total), bold: true });
+    if (diff.finished > 0) segs.push({ text: plural('awayFinished', diff.finished), bold: true, done: true });
+    // Agents that can't be read or are offline: officers by name, any others counted.
+    var badIds = Object.keys(diff.bad);
+    if (badIds.length) {
+      var named = [];
+      var unreadable = 0;
+      var offline = 0;
+      badIds.forEach(function (id) {
+        if (isOfficer(id)) named.push(diff.bad[id] === 'unreadable' ? w('awayUnreadableNamed', agentName(id)) : w('awayOfflineNamed', agentName(id)));
+        else if (diff.bad[id] === 'unreadable') unreadable += 1;
+        else offline += 1;
+      });
+      if (unreadable > 0) named.push(plural('awayUnreadable', unreadable));
+      if (offline > 0) named.push(plural('awayOffline', offline));
+      segs.push({ text: named.join(', '), bold: true });
+    }
+    return segs;
+  }
+  function clearAwayLine() {
+    var box = document.getElementById('away-line');
+    var inner = document.getElementById('away-line-in');
+    if (inner) inner.textContent = '';
+    if (box) box.hidden = true;
+  }
+  // The × folds the line away with the page's fold motion; the next return replaces it.
+  function dismissAwayLine() {
+    var box = document.getElementById('away-line');
+    if (!box) return;
+    reveal(box, false, function () { clearAwayLine(); });
+  }
+  // The finished part opens the Done list: Overview first, then the list, scrolled into
+  // view, with the rows that finished while away lit with the arrive glow.
+  function openDoneFromAway(keys) {
+    if (pg.view !== 'all') setView('all');
+    if (pg.openShelf.done) pg.openShelf.done(true);
+    if (moving()) (keys || []).forEach(function (key) {
+      pg.lis.forEach(function (one) {
+        if (one.list === 'done' && one.key === key) toggleClass(one.li, 'arrived', true);
+      });
+    });
+    var done = pg.sections.filter(function (one) { return one.list === 'done'; })[0];
+    if (done && done.block && typeof done.block.scrollIntoView === 'function') done.block.scrollIntoView();
+  }
+  function showAway(segs, diff) {
+    var box = document.getElementById('away-line');
+    var inner = document.getElementById('away-line-in');
+    if (!box || !inner) return;
+    inner.textContent = '';
+    box.setAttribute('title', segs.map(function (seg) { return seg.text; }).join(' · '));
+    segs.forEach(function (seg, index) {
+      // The separator lives inside the part's own span, so it ends a line and never starts one.
+      var wrap = el('span', 'away-seg' + (seg.bold ? ' away-bold' : ' away-lead'));
+      if (seg.done) add(wrap, button(seg.text, function () { openDoneFromAway(diff.finishedKeys); }, 'link', true, true));
+      else add(wrap, document.createTextNode(seg.text));
+      if (index < segs.length - 1) add(wrap, document.createTextNode(' · '));
+      add(inner, wrap);
+    });
+    var close = button('', dismissAwayLine, 'away-x', true, true);
+    close.setAttribute('aria-label', w('awayDismiss'));
+    close.setAttribute('title', w('awayDismiss'));
+    add(inner, close);
+    box.hidden = false;
+    reveal(box, true);
+  }
+  function maybeShowAway() {
+    if (!awaySnap) return;
+    // A background poll can run while the tab is hidden; the snapshot is only for the return, so leave it alone until the tab is visible again.
+    if (document.hidden) return;
+    var snap = awaySnap;
+    awaySnap = null;
+    if (Date.now() - snap.at < AWAY_MS) { clearAwayLine(); return; }
+    var minutes = Math.floor((Date.now() - snap.at) / 60000);
+    var diff = awayDiff(snap);
+    var hasChange = !!diff && (Object.keys(diff.questions).length > 0 || diff.finished > 0 || (Object.keys(diff.bad).length > 0 && diff.badChanged));
+    if (!hasChange) { clearAwayLine(); return; }
+    showAway(awayParts(diff, minutes), diff);
+    // New question cards get the arrive glow once.
+    if (moving()) diff.newKeys.forEach(function (key) {
+      var li = pg.cardNodes[key];
+      if (li) toggleClass(li, 'arrived', true);
+    });
+  }
   function drawNote(entries) {
     var box = document.getElementById('agent-note');
     var shown = entries.filter(function (one) { return one.unreadable && (!pg.filter || pg.filter === one.id); });
@@ -1969,6 +2224,15 @@ const PAGE_SCRIPT = String.raw`
     setText(pg.nodes.needsText, pg.filter ? w('pgNoQuestions', nameOf(pg.filter)) : w('pgNothing'));
     setText(pg.nodes.needsSub, pg.filter ? '' : w('pgNothingHint'));
     reveal(pg.nodes.needsEmpty, count.shown === 0);
+    var isFiltered = !!(pg.filter || pg.project);
+    pg.nodes.needsClear = clearFilters(pg.nodes.needsEmpty, pg.nodes.needsClear, isFiltered);
+    // The Other work view says so when it has nothing, here or on the Stopped shelf; Overview leaves the empty section out.
+    setText(pg.nodes.othersText, isFiltered ? w('pgNoOthersFor', pg.filter ? nameOf(pg.filter) : pg.project) : w('pgNoOthers'));
+    reveal(pg.nodes.othersEmpty, count.others === 0);
+    pg.nodes.othersClear = clearFilters(pg.nodes.othersEmpty, pg.nodes.othersClear, isFiltered);
+    // The tab title counts what the page shows, so a filter that hides questions is not a count the page lacks.
+    var waitingShown = isFiltered ? count.cards : pg.waitingNow;
+    document.title = waitingShown ? w('pgTabTitle', waitingShown) : 'Agent Board';
     if (pg.model && pg.model.view) setText(pg.nodes.workingEmpty, quietLine(pg.model.view.quiet, pg.model.view.now));
     reveal(pg.nodes.workingEmpty, count.working === 0 && !pg.filter && !pg.project);
     // The line counts every older question the filters allow, drawn or not.
@@ -1976,7 +2240,10 @@ const PAGE_SCRIPT = String.raw`
     if (pg.nodes.olderLine) setText(pg.nodes.olderLine, plural('pgOlder', count.older));
     reveal(pg.nodes.olderBlock, count.older > 0);
     Object.keys(pg.nodes.counts).forEach(function (name) { setText(pg.nodes.counts[name], name === 'done' ? w('pgDoneWeek', count.done) : count[name]); });
-    pg.sections.forEach(function (section) { reveal(section.block, count[section.list] > 0 || section.list === 'working' && !pg.filter && !pg.project); });
+    pg.sections.forEach(function (section) {
+      var isOthersView = section.list === 'others' && pg.view === 'others' && count.stopped === 0;
+      reveal(section.block, count[section.list] > 0 || section.list === 'working' && !pg.filter && !pg.project || isOthersView);
+    });
     drawSide(count, projects);
   }
   // The sidebar's numbers come from the same counts as the headings, so every number on the page agrees.
@@ -2011,6 +2278,25 @@ const PAGE_SCRIPT = String.raw`
     wanted.forEach(function (node, index) { if (list.childNodes[index] !== node) list.insertBefore(node, list.childNodes[index] || null); });
     if (group) group.hidden = wanted.length === 0;
   }
+  // Next to an empty list while a filter is on: a filter kept from an earlier visit is plain to see and one press clears it (#809).
+  // It exists only while a filter is on, so an unfiltered page offers the same buttons as before.
+  function clearFilters(holder, node, isFiltered) {
+    if (!holder) return null;
+    // The holder is fx's wrap: wrap > fx-in > the empty box the button goes in.
+    var box = holder.firstChild && holder.firstChild.firstChild || holder;
+    if (!isFiltered) {
+      if (node) node.remove();
+      return null;
+    }
+    if (node) return node;
+    // Local, so it works without the server, but not a navigation button: those are the sheet's own See all and Show all.
+    var made = button(w('clearFilters'), function () {
+      pg.project = '';
+      setFilter('');
+    }, 'btn', true, true);
+    add(box, made);
+    return made;
+  }
   function setProject(name) {
     pg.project = pg.project === name ? '' : name;
     layout();
@@ -2030,6 +2316,8 @@ const PAGE_SCRIPT = String.raw`
     shell.setAttribute('data-view', name);
     VIEWS.forEach(function (one) { document.getElementById('view-' + one).setAttribute('aria-pressed', String(one === name)); });
     if (name === 'done' && pg.openShelf.done) pg.openShelf.done(true);
+    // A view picks a section; it leaves the agent and project filters as they were (#809). Before the first draw there is nothing to lay out.
+    if (pg.sections) layout();
     enter(board);
     if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
   }
@@ -2194,6 +2482,8 @@ const PAGE_SCRIPT = String.raw`
     });
     var sec = el('section', 'sec');
     add(sec, sectionHead(w('pgOthers'), 'others'));
+    pg.nodes.othersText = el('p', '');
+    pg.nodes.othersEmpty = fx(add(el('div', 'empty'), pg.nodes.othersText));
     order.forEach(function (name) {
       var list = el('ul', 'rows');
       var group = { ul: list, entries: [], block: null };
@@ -2209,7 +2499,8 @@ const PAGE_SCRIPT = String.raw`
       pg.groups.push(group);
       add(sec, list);
     });
-    return refs.length ? sec : null;
+    add(sec, pg.nodes.othersEmpty);
+    return sec;
   }
   // A closed shelf: Stopped and Done list their rows flat, so each row names its project.
   function shelf(name, title, refs, section, extra) {
@@ -2337,6 +2628,7 @@ const PAGE_SCRIPT = String.raw`
       pg.sentBy[who] = (pg.sentBy[who] || 0) + 1;
     });
     var waitingNow = Math.max(0, view.needs.n - pg.sentTotal);
+    pg.waitingNow = waitingNow;
     document.title = waitingNow ? w('pgTabTitle', waitingNow) : 'Agent Board';
     var version = view.versions;
     document.getElementById('versions').textContent = !version.package || version.package === version.board ? w('pgVersion', version.board) : w('pgVersions', version.board, version.package);
@@ -2352,8 +2644,10 @@ const PAGE_SCRIPT = String.raw`
     pg.cardNodes = {};
     cardParts = {};
     var closeSlot = resultSlots.close;
+    var tidySlot = resultSlots.tidy;
     resultSlots = {};
     if (closeSlot) resultSlots.close = closeSlot;
+    if (tidySlot) resultSlots.tidy = tidySlot;
     agentPresence = presenceMap(view);
     drawChips(view);
     var parts = [];
@@ -2365,8 +2659,7 @@ const PAGE_SCRIPT = String.raw`
       var workingKeys = {};
       parts.push(needsSection(view));
       parts.push(sectionBlock(workingSection(view, workingKeys), 'working'));
-      var others = othersSection(view, workingKeys);
-      if (others) parts.push(sectionBlock(others, 'others'));
+      parts.push(sectionBlock(othersSection(view, workingKeys), 'others'));
       var stopped = shelf('stopped', w('pgStopped'), view.all.stopped.concat(view.own.stopped).sort(byTime), 'stopped');
       if (stopped) parts.push(sectionBlock(stopped, 'stopped'));
       var finished = view.all.done.concat(view.own.done).sort(byTime);
@@ -2451,7 +2744,7 @@ const PAGE_SCRIPT = String.raw`
     if (isClosed) return;
     clearTimeout(timer);
     call('/api/board').then(function (data) {
-      if (data.unchanged) { reachable(); return; }
+      if (data.unchanged) { reachable(); maybeShowAway(); return; }
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }
         else unreachable();
@@ -2476,6 +2769,8 @@ const PAGE_SCRIPT = String.raw`
           board.insertAdjacentElement('afterend', presence);
         }
       }
+      // The world on this refresh is the one the return is compared with.
+      maybeShowAway();
       // A reply runs in the background; its answer comes with the board once the agent is done.
       if (since === null) since = data.now;
       var seenAt = since;
@@ -2576,6 +2871,14 @@ const PAGE_SCRIPT = String.raw`
       if (isInside && active !== one.toggle) one.toggle.focus();
     });
   });
+  // Going away starts a new away period: the line from before is gone, and the world as
+  // it stands now is the snapshot the return is compared with.
+  if (typeof document.addEventListener === 'function') document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) return;
+    clearAwayLine();
+    var snap = awaySnapshot();
+    if (snap) awaySnap = snap;
+  });
   if (typeof ResizeObserver === 'function' && document.documentElement) {
     var head = document.getElementById('head');
     new ResizeObserver(function () { document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px'); }).observe(head);
@@ -2608,6 +2911,66 @@ const PAGE_SCRIPT = String.raw`
         refresh();
       }
     }, function () { say(w('serveOffline'), 'alert', 'close'); unreachable(); });
+  });
+  // A bulk archive previews first and archives only on a second, separate press. Any
+  // other press drops the preview; the token on the server then simply expires.
+  var tidyToken = '';
+  var tidyPreview = null;
+  var tidyBusy = false;
+  var tidyCommitting = false;
+  function resetTidy(cancel) {
+    if (tidyCommitting) return;
+    if (cancel && tidyToken) call('/api/tidy-bulk', { kind: 'cancel', token: tidyToken }).catch(function () {});
+    tidyToken = '';
+    tidyPreview = null;
+    var confirm = document.getElementById('tidy-confirm');
+    var cancelButton = document.getElementById('tidy-cancel');
+    if (confirm) confirm.disabled = true;
+    if (cancelButton) cancelButton.disabled = true;
+  }
+  function tidySelector() {
+    var kind = document.getElementById('tidy-kind').value;
+    if (kind === 'agent') return { kind: kind, value: document.getElementById('tidy-value').value.trim() };
+    if (kind === 'older') return { kind: kind, days: Number(document.getElementById('tidy-value').value.trim()) };
+    return { kind: 'stopped' };
+  }
+  document.getElementById('tidy-preview').addEventListener('click', function () {
+    if (isUnreachable || tidyBusy) return;
+    var selector = tidySelector();
+    if (selector.kind === 'agent' && !/^[a-z][a-z0-9-]{0,63}$/.test(selector.value || '')) { say(w('tidyInvalid'), 'alert', 'tidy'); return; }
+    if (selector.kind === 'older' && !(Number.isSafeInteger(selector.days) && selector.days >= 1 && selector.days <= 365000)) { say(w('tidyInvalid'), 'alert', 'tidy'); return; }
+    tidyBusy = true;
+    say(w('pressPending'), '', 'tidy');
+    call('/api/tidy-bulk', { kind: 'preview', selector: selector }).then(function (data) {
+      tidyBusy = false;
+      if (!data.token || !data.preview) { say(data.note || w('pressFailed'), 'alert', 'tidy'); return; }
+      tidyToken = data.token;
+      tidyPreview = data.preview;
+      document.getElementById('tidy-confirm').disabled = false;
+      document.getElementById('tidy-cancel').disabled = false;
+      say(data.note || '', 'quiet', 'tidy');
+    }, function () { tidyBusy = false; say(w('serveOffline'), 'alert', 'tidy'); unreachable(); });
+  });
+  document.getElementById('tidy-confirm').addEventListener('click', function () {
+    if (isUnreachable || tidyBusy || !tidyToken || !tidyPreview) return;
+    tidyBusy = true;
+    tidyCommitting = true;
+    say(w('pressPending'), '', 'tidy');
+    call('/api/tidy-bulk', { kind: 'confirm', token: tidyToken, preview: tidyPreview }).then(function (data) {
+      tidyBusy = false;
+      tidyCommitting = false;
+      tidyToken = '';
+      tidyPreview = null;
+      document.getElementById('tidy-confirm').disabled = true;
+      document.getElementById('tidy-cancel').disabled = true;
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', 'tidy');
+      refresh();
+    }, function () { tidyBusy = false; tidyCommitting = false; say(w('serveOffline'), 'alert', 'tidy'); unreachable(); });
+  });
+  document.getElementById('tidy-cancel').addEventListener('click', function () {
+    if (tidyBusy) return;
+    resetTidy(true);
+    say(w('tidyCancelled'), '', 'tidy');
   });
   refresh();
 })();

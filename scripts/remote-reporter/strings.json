@@ -1,0 +1,14 @@
+{
+  "en": {
+    "remoteReportFuture": "This report is dated in the future. Check the source clock and report again.",
+    "remoteReportStale": "This live report is more than three days old. Refresh it in the source agent and try again."
+  },
+  "zh-TW": {
+    "remoteReportFuture": "這份報告的時間在未來。請檢查來源時鐘，再重新上報。",
+    "remoteReportStale": "這份進行中的報告已超過三天。請在來源代理程式更新報告後再試。"
+  },
+  "zh-CN": {
+    "remoteReportFuture": "这份报告的时间在未来。请检查来源时钟，再重新上报。",
+    "remoteReportStale": "这份进行中的报告已超过三天。请在来源代理更新报告后重试。"
+  }
+}

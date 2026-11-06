@@ -58,6 +58,8 @@ npx @wenyuchiou/agent-board
 - **我用 Antigravity：** `/agent-board`（在测试环境检查过，还没实机运行）
 - **我用 OpenCode：** `/board`
 
+要加自己的任务，在 `progress.md` 里写一个 `### 标题`，下面每个步骤写一行 `- [ ] 步骤`（全新安装用 `~/.agent-board/progress.md`；[文件格式](docs/FORMAT.md)，英文）。装了 Claude Code 插件时，也可以在面板的输入框打 `+ 项目：标题；步骤；步骤`，或在 Claude Code 的对话里打 `/progress add …`。
+
 <details>
 <summary><b>不用 npm：用 git clone 安装</b></summary>
 
@@ -109,6 +111,8 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 
 **Claude 桌面 App** 的 Code 标签页没有显示面板时：底部状态栏会显示等你的数量和“/agent-board 打开看板”。`/agent-board` 会启动可回答问题、归档工作的[看板网页](#看板的网页)并提供链接；每个 Claude Code 会话都能用，也不动面板。面板无法显示时，`/progress` 做同样的事。交互网页无法启动时，两者都会说明原因，并显示启动网页的命令。看板网页需要 `/progress connect` 安装的看板脚本，或在下次会话开始时更新。
 
+在 Claude 桌面 App 里，agent 也能打开看板：请它打开看板，它会启动同一个网页，并给你同样的链接。
+
 ### 在任何地方打开看板
 
 | 在哪里 | 命令 |
@@ -144,7 +148,7 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | | Agent | 在哪里运行 | 看板上有什么 | 从看板回复 |
 |:-:|---|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | 它自己的面板：每件工作、每个回合 | 在面板里 |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI、App | 六个 hooks，加上它报告的步骤 | 复制；可发送给[已连接的对话](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI、App | 七个 hooks，加上它报告的步骤 | 复制；可发送给[已连接的对话](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI、App、IDE | 四个 hooks，加上它报告的步骤 | 复制；可发送给[已连接的 CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | 对话事件，加上它的进度工具报告的步骤 | 复制 |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE、CLI | Hooks | 复制 |
@@ -277,8 +281,8 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 
 | 你看到 | 试试 |
 |---|---|
-| 某个 agent 没出现在看板上 | 开一个它的新对话；原来就开着的不会接入。Codex 还要先在 `/hooks` 信任它的 hooks。 |
-| 装完之后什么都没变 | 不加 `--apply` 再运行一次 `npx @wenyuchiou/agent-board setup --json`（用 git clone 的话是 `node scripts/setup-agent.mjs --json`），看它列出的冲突和 `adapter-pending`；你改过的文件不会被覆盖，会列在那里。 |
+| 某个 agent 没出现在看板上 | 开一个它的新对话；原来就开着的不会接入。Codex 请以完整可执行文件路径运行 `npx @wenyuchiou/agent-board --codex-trust --codex-bin "<path-to-codex>" --json` 预览；doctor 能连接 Codex 时，纯文本输出会列出命令。先检查预览，确认同意后才加上 `--apply`。Codex CLI 也可使用 `/hooks`。 |
+| 装完之后什么都没变 | 不加 `--apply` 再运行一次 `npx @wenyuchiou/agent-board setup`（用 git clone 的话是 `node scripts/setup-agent.mjs`），查看列出的冲突和接下来的步骤；你改过的文件不会被覆盖，会列在那里。 |
 | 还在运行旧版 | 运行中的对话会一直用它加载时的版本：开一个新的。更新方式见[使用指南](docs/GUIDE.zh-CN.md#更新和卸载)。 |
 | 同一个 agent 出现两次 | 可能两种方式都接入了：Claude 插件的 `/progress connect` 和安装程序（setup）。`/progress connect status` 会列出插件接了哪些；用 `/progress connect remove` 或 `--codex-remove --agent <name>` 去掉其中一个。 |
 | 有个问题一直不消失 | 在它自己的对话里回答，再点**已回复，先隐藏**（`h`）。3 天后它会移到**较早的未答问题**，7 天后移到**更早、尚未回答的问题**。 |
@@ -288,7 +292,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 <details>
 <summary><b>颜色和符号</b></summary>
 
-面板跟着 Claude Code 的主题走（`/config`，再选 **Theme**）；网页跟着你电脑的浅色或深色模式，直到你在右上角选了亮色或暗色。每个符号形状都不一样，不看颜色也分得出来；网页上还没做的步骤画成小圆点，不画圆圈，免得看起来像能点的按钮：
+面板跟着 Claude Code 的主题走（`/config`，再选 **Theme**）；网页跟着你电脑的浅色或深色模式，直到你选了亮色或暗色。看板网页的开关在**关闭看板**旁边：位于展开的侧栏底部；窄屏幕或侧栏收起时，则在任务列表下方。每个符号形状都不一样，不看颜色也分得出来；网页上还没做的步骤画成小圆点，不画圆圈，免得看起来像能点的按钮：
 
 | 符号 | 意思 | | 符号 | 意思 |
 |:-:|---|---|:-:|---|

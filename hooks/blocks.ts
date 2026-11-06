@@ -10,7 +10,7 @@ import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
 import { isOutranked, pickParent } from './runs'
-import { oneLine, plain } from './step-words'
+import { cutLine, oneLine, plain } from './step-words'
 import { isStale, observedTime } from './parse'
 import type { JournalEntry } from './journal'
 
@@ -101,12 +101,31 @@ const markerOf = (mirror: ProgressMirror, parent?: string): string => {
 // A task's step line after its mark: what the block holds, and what a reader of the file gets
 // back (trimmed). The pane keys a question on it too, so its key is the one every other reader
 // of the block works out.
-export const stepWords = (task: ProgressMirrorTask, s: Strings = ZH_TW): string => {
-  if (task.handoffTo) return `${oneLine(task.subject)} — ${s.transferredTo(oneLine(task.handoffTo))}`
+// The whole line is cut, note included (#922): an answered step folds its note into the subject
+// (answeredStep), so cutting only the subject would change its key once the combined line is over
+// 120 and leave the question listed as waiting. A handoff keeps its suffix whole and cuts the subject.
+const fullStepWords = (task: ProgressMirrorTask): string => {
   const note = task.blocked !== null && task.blocked !== '' ? task.blocked : task.status === 'completed' ? '' : (task.why ?? '')
-  const reason = note === '' ? '' : ` — ${oneLine(note)}`
+  return `${oneLine(task.subject)}${note === '' ? '' : ` — ${oneLine(note)}`}`
+}
+export const stepWords = (task: ProgressMirrorTask, s: Strings = ZH_TW): string => {
+  if (task.handoffTo) return `${cutLine(oneLine(task.subject)).text} — ${s.transferredTo(oneLine(task.handoffTo))}`
+  return cutLine(fullStepWords(task)).text
+}
 
-  return `${oneLine(task.subject)}${reason}`
+const titleOf = (mirror: ProgressMirror, s: Strings): string => oneLine(mirror.title) || oneLine(fallbackTitle(mirror)) || s.unnamed
+
+// The full words of every title and step the block shortens (#922), for the caller to save in
+// the journal. The mirror keeps its full subjects: matching and handoff work on those.
+export const cutEntries = (mirror: ProgressMirror, s: Strings = ZH_TW): Omit<JournalEntry, 'at'>[] => {
+  const title = titleOf(mirror, s)
+  return [
+    ...(cutLine(title).isCut ? [{ project: mirror.project, task: title, step: title }] : []),
+    ...mirror.tasks.flatMap(task => {
+      const full = task.handoffTo ? oneLine(task.subject) : fullStepWords(task)
+      return cutLine(full).isCut ? [{ project: mirror.project, task: title, step: full }] : []
+    }),
+  ]
 }
 
 export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, parent?: string): string[] => {
@@ -116,7 +135,7 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
   return [
     markerOf(mirror, parent),
-    `### ${oneLine(mirror.title) || oneLine(fallbackTitle(mirror)) || s.unnamed}`,
+    `### ${cutLine(titleOf(mirror, s)).text}`,
     `> ${oneLine(meta)}`,
     ...(mirror.context ? [s.contextNote(oneLine(mirror.context))] : []),
     ...(mirror.handoff ? [s.handoffNote(oneLine(mirror.handoff))] : []),

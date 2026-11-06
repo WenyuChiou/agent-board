@@ -13,7 +13,7 @@ node scripts/setup-agent.mjs
 node scripts/setup-agent.mjs --apply
 ```
 
-自动检测识别 host 配置，不代表 session 在线。尚无配置的已知 host 可用 `--agent <name>`；`--agent all` 预览全部目标，不会安装 AI 应用。[安装说明](SETUP.md)列出路径与 adapter 范围。
+自动检测识别 host 配置、安装记录、PATH 上的命令和已安装的应用，不代表 session 在线。没检测到的已知 host 可用 `--agent <name>`；`--agent all` 预览全部目标，不会安装 AI 应用。[安装说明](SETUP.md)列出路径与 adapter 范围。
 
 新独立安装使用 `~/.agent-board/progress.md`，现有安装保留原文件；`--progress-file /absolute/path/progress.md` 可明确指定。普通本地安装不需选择另一台电脑的看板。
 
@@ -135,7 +135,7 @@ claude plugin install agent-board@agent-board
 
 已确认为程序启动的 Codex 运行与 Claude 打印模式不会写入新的看板区块。看板脚本整理时，若旧 Codex 区块自己的会话记录确认它是程序运行，就移入归档，即使含有提问也一样。记录缺少或读不到就不视为运行证据，仍按原有时间规则处理；可选侧栏的整理不读取历史文件。弱提示维持原有行为。
 
-可选侧栏在 session 开始与每小时清理：完成区块等 12 小时，其他已停／过时区块等三天。持续运行的 `--serve` 网页也每小时整理一次。手动工作每个步骤都是 `[x]` 或 `[-]`，且被观察完成满三天后，才计入可归档数量；0.24.1 的自动整理只计数，不移走任何手动工作。详细信息行会显示“可归档 N 个已完成的任务”；数量为零时不显示。工作中或等待中的 agent 区块，最后写入后 12 小时内仍算运行中；侧栏、终端与网页会说明暂不能归档，整理也会保留。停止或结束后，展开工作即可立即归档。 自动整理归档仍有 `[?]` 的区块时，只有在保存并读回与明确归档相同的完整问题快照后才会归档，而且要等够久：已结束或已完成的区块满三天，仍在工作或等待中的区块则是满七天都没有新报告；快照存不了就保留原处。问题会保留，列在“更早、尚未回答的问题”下，仍可隐藏与再显示。明确归档任何时候都必须先有这份快照，来源移走后仍可找回；存储失败便保留来源。
+可选侧栏在 session 开始与每小时清理：完成区块等 12 小时，其他已停／过时区块等三天。网页在运行期间也每小时整理一次。手动工作每个步骤都是 `[x]` 或 `[-]`，且被观察完成满三天后，才计入可归档数量；0.24.1 的自动整理只计数，不移走任何手动工作。详细信息行会显示“可归档 N 个已完成的任务”；数量为零时不显示。工作中或等待中的 agent 区块，最后写入后 12 小时内仍算运行中；侧栏、终端与网页会说明暂不能归档，整理也会保留。停止或结束后，展开工作即可立即归档。 自动整理归档仍有 `[?]` 的区块时，只有在保存并读回与明确归档相同的完整问题快照后才会归档，而且要等够久：已结束或已完成的区块满三天，仍在工作或等待中的区块则是满七天都没有新报告；快照存不了就保留原处。问题会保留，列在“更早、尚未回答的问题”下，仍可隐藏与再显示。明确归档任何时候都必须先有这份快照，来源移走后仍可找回；存储失败便保留来源。归档仍有未答问题的已停工作时，结果会说问题仍留在「更早、尚未回答的问题」；终端看板的 `a` 也能用在「最近完成」里仍在提问的工作。
 
 运行 `node "$HOME/.agent-board/agent-board.mjs" --tidy` 可在没有 Claude session 或网页时，按正常等待时间整理一次；不会安装计划任务，也不会写入 `progress-seen.json`。侧栏、`--watch` 或 `--serve` 会记录手动工作首次被观察完成的时间，以及三天规则首次运行的时间。三天从两者较晚的时间起算，让 0.24.0 就已完成的工作从升级后再等三天。电脑若只运行 `--tidy`，不会写入启用规则的保留记录，缺少这笔记录便不计数。未知、未来或读不到的观察时间都保留手动工作；`--tidy` 仍可归档等待时间已到的 agent 区块。网页的每小时整理若读不到观察文件，便跳过该次整理，不写入任何文件。
 
@@ -169,7 +169,11 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
 node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 ```
 
-`--codex-remove`、`--codex-doctor` 是沿用的维护名称，可搭配各目标。先关闭该看板。只移除未修改的自有定义／文件；其他目标还需要的共享文件保留，进度、session 记录、归档、日志及用户修改也保留。
+`--codex-remove`、`--codex-doctor` 是沿用的维护名称，可搭配各目标。先关闭该看板。卸载会移除未修改的看板文件、自有 hook 定义、对应的 Codex 信任项、setup 创建且已空的 hooks 配置，以及 setup 创建的空目录。其他目标还需要的共享文件保留。用户修改保留。
+
+这些是你的历史，会保留：`progress.md`, `progress-archive-*.md`, `progress-journal-*.md`, `sessions/`, `pending/`, `hook-recovery-*.json`, `hook-errors.log`, `progress-answered.json`, `progress-questions*.json`, `progress-seen.json`, `progress-run-cursor.txt`, `progress-page-state.json`, `progress-page-state-done-*.json`, `progress-inbox/` (`dropped.log`)。可手动删除。运行目录中非空的 `*-messages/` 目录也保留。以 `progress.md` 为基础的文件名会随所选进度文件名变化。
+
+旧安装会保留不起作用的 `{"hooks": {}}` 文件和 `.agents/skills` 这类空的上级目录，因为 setup 没有记录它们是自己创建的。带额外行的信任表保留。Codex 自己的 `config.toml` 始终保留。
 
 可选 plugin 请先在仍安装时运行 `/progress connect remove`，完成报告的清理后，再运行 `claude plugin uninstall agent-board@agent-board`；marketplace 用 `claude plugin marketplace remove agent-board` 移除。更新用 `claude plugin marketplace update agent-board`、`claude plugin update agent-board@agent-board`，之后重新加载 plugin。
 
@@ -236,7 +240,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 
 ### 怎么卸载？
 
-独立安装：先关闭看板，预览 `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`，确认后加上 `--apply`。进度和历史会保留。可选 Claude 插件的卸载方式：
+独立安装：先关闭看板，预览 `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`，确认后加上 `--apply`。对每个已安装的 agent 重复此步骤。保留的历史文件见[更新和卸载](#更新和卸载)。可选 Claude 插件的卸载方式：
 
 ```sh
 claude -p "/progress connect remove"

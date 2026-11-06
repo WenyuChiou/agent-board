@@ -58,6 +58,8 @@ In the new session, open the board with its entry:
 - **I use Antigravity:** `/agent-board` (checked in a synthetic home, not run live yet)
 - **I use OpenCode:** `/board`
 
+To add a task of your own, write a `### title` with `- [ ] step` lines in `progress.md` (a fresh install uses `~/.agent-board/progress.md`; [the format](docs/FORMAT.md)). With the Claude Code plugin, you can instead type `+ project: title; step; step` in the pane's box, or `/progress add …` in Claude Code's chat.
+
 <details>
 <summary><b>Without npm: install from a checkout</b></summary>
 
@@ -109,6 +111,8 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 
 **In the Claude desktop app,** when its Code tab shows no pane, the footer shows the waiting count and `/agent-board opens the board`. `/agent-board` starts the live [board page](#the-boards-page) and replies with its link, where you can answer questions and archive work; it works in every Claude Code session and leaves the pane as it is. When the pane cannot be placed, `/progress` does the same. If the live page cannot start, both explain why and show the command that starts it. The board page needs the board script that `/progress connect` installs, or the next session start updates.
 
+In the Claude desktop app the agent can open the board too: ask it to open the board and it starts the same page and gives you the same link.
+
 ### Open the board anywhere
 
 | Where | Command |
@@ -144,7 +148,7 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 | | Agent | Runs in | On the board | Reply from the board |
 |:-:|---|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | Its own pane: every task and turn | In the pane |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI, App | Six hooks, plus the steps it reports | Copy; send to a [connected session](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI, App | Seven hooks, plus the steps it reports | Copy; send to a [connected session](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI, App, IDE | Four hooks, plus the steps it reports | Copy; send to a [connected CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | Session events, plus steps from its progress tool | Copy |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE, CLI | Hooks | Copy |
@@ -277,8 +281,8 @@ Use the agent's own name after `--agent` (the doctor keeps its old name for ever
 
 | You see | Try |
 |---|---|
-| An agent is not on the board | Start a new session of it; one that was already open is not connected. Codex also needs its hooks trusted in `/hooks`. |
-| Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup --json` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs --json`) and read its conflicts and `adapter-pending` lines; edited files are left alone and listed there. |
+| An agent is not on the board | Start a new session of it; one that was already open is not connected. For Codex, preview `npx @wenyuchiou/agent-board --codex-trust --codex-bin "<path-to-codex>" --json` with Codex's full path; the plain doctor prints the command when it can reach Codex. Review the preview, then add `--apply` only if you approve. Codex CLI also offers `/hooks`. |
+| Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs`). Read the conflicts and Next steps; edited files are left alone and listed there. |
 | An old version is still running | A running session keeps the version it loaded: start a new one. To update, see [the guide](docs/GUIDE.md#update-and-uninstall). |
 | An agent shows up twice | It may be connected both ways: by the Claude plugin's `/progress connect` and by setup. `/progress connect status` lists what the plugin connected; remove one with `/progress connect remove` or `--codex-remove --agent <name>`. |
 | A question will not go away | Answer it in its own chat, then press **Already answered, hide** (`h`). After 3 days it moves into **Earlier unanswered questions**, and after 7 days into **Older unanswered questions**. |
@@ -288,7 +292,7 @@ More answers are in the guide's [FAQ](docs/GUIDE.md#faq) and [Troubleshooting](d
 <details>
 <summary><b>Colours and marks</b></summary>
 
-The pane follows Claude Code's theme (`/config`, then **Theme**); the page follows your computer's light or dark mode until you pick Light or Dark at the top right. Every mark has its own shape, so it reads without colour; the page draws a step still to do as a small dot rather than a ring, so it does not look like a button:
+The pane follows Claude Code's theme (`/config`, then **Theme**); the page follows your computer's light or dark mode until you pick Light or Dark. On the board's page, the switch is next to **Close the board**: at the bottom of the expanded sidebar, or below the tasks on a narrow screen or when the sidebar is collapsed. Every mark has its own shape, so it reads without colour; the page draws a step still to do as a small dot rather than a ring, so it does not look like a button:
 
 | Mark | Means | | Mark | Means |
 |:-:|---|---|:-:|---|

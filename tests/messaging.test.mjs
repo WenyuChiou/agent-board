@@ -8,7 +8,8 @@ import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
-import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging.ts'
+import { turnOrDeferred } from './helpers/deferred-turn.mjs'
+import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/message-client.mjs'
 import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
@@ -38,6 +39,22 @@ const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
 const { computerName, isPrivateDacl, localAliases, privateFolder, runningAccount, whoamiAccount } = await import('../scripts/private-folder.ts')
 
 const nonceOf = prompt => prompt.match(/Reply first with this line alone: ACK ([0-9a-f]{6})/)[1]
+
+test('repeated page messaging snapshots check the store without starting Windows ACL commands', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'message-snapshot-acl-'))
+  let hub
+  try {
+    hub = createMessaging(dir)
+    for (const name of ['execFileSync', 'execFile', 'spawnSync', 'spawn']) t.mock.method(childProcess, name, () => assert.fail(`snapshot started ${name}`))
+    syncBuiltinESMExports()
+    for (let index = 0; index < 3; index++) assert.equal(hub.snapshot(Date.now() + index).enabled, true)
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+    hub?.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 // The board shows a reply without the nonce its ACK line carries; the store keeps the line as it came.
 const storedReply = (dir, id) => JSON.parse(readFileSync(join(dir, 'messages', 'messages.json'), 'utf8')).messages.find(one => one.id === id)?.reply
 const pause = ms => new Promise(done => setTimeout(done, ms))
@@ -73,13 +90,119 @@ test('claimed mailbox messages transition to accepted after turn-start delivery 
     const state = mailboxQueue(mailboxSeed(), 'mailbox-delivery')
     writeFileSync(join(dir, 'messages.json'), JSON.stringify({ version: 2, ...state }))
     const mailbox = hookMailbox(dir, 500)
-    const message = await mailbox.turn('codex', 'mailbox-session', 'CLI', Date.now())
+    const status = () => parseMessageStore(readFileSync(join(dir, 'messages.json'), 'utf8'), Date.now()).messages[0].status
+    const message = await turnOrDeferred(mailbox, ['codex', 'mailbox-session', 'CLI', Date.now()], status)
     assert.equal(message.id, 'mailbox-delivery')
     assert.equal(parseMessageStore(readFileSync(join(dir, 'messages.json'), 'utf8'), Date.now()).messages[0].status, 'uncertain')
     await mailbox.accept('codex', 'mailbox-session', message.id, message.nonce, Date.now())
     assert.equal(JSON.parse(readFileSync(join(dir, 'messages.json'), 'utf8')).messages[0].status, 'accepted')
     assert.equal(await mailbox.turn('codex', 'mailbox-session', 'CLI', Date.now()), null)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a mailbox message a hook claimed but never accepted is handed out again after the lease, with its ACK code and a repeat line, at most three times', () => {
+  const now = Date.now()
+  let state = mailboxQueue(mailboxQueue(mailboxSeed(now), 'mailbox-lapsed', 'board', now), 'mailbox-behind', 'gemini:sender-session', now)
+  const take = (at, nonce, ref = 'a1b2c3d4e5f6') => takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', at, 43_200_000, nonce, ref)
+  let taken = take(now, 'abcdef')
+  state = taken.state
+  assert.equal(taken.message.redelivered, undefined)
+  assert.doesNotMatch(deliveryText(taken.message), /Sent again/)
+  // Inside the lease the session waits, and the message behind it does too.
+  assert.equal(take(now + MAILBOX_LEASE_MS - 1, '111111').message, null)
+  // A live poller of the same session cannot take the lapsed claim, so it keeps waiting behind it.
+  const live = { id: 'live1', agent: 'codex', session: 'mailbox-session', surface: 'CLI', turn: 'turn1', expires: now + 10 * MAILBOX_LEASE_MS }
+  const withLive = queueMessage(state, { id: 'live-behind', target: live.id, turn: live.turn, text: 'live' }, 'gemini:live-sender', live, now).state
+  assert.deepEqual(claimMessages(withLive, live, now + MAILBOX_LEASE_MS, '666666').messages, [])
+  for (let round = 1; round <= MAILBOX_REDELIVERIES; round++) {
+    taken = take(now + round * MAILBOX_LEASE_MS, '222222')
+    state = taken.state
+    assert.deepEqual([taken.message.id, taken.message.nonce, taken.message.redelivered], ['mailbox-lapsed', 'abcdef', round])
+    assert.match(deliveryText(taken.message), /\nSent again: [^\n]+\nReply first with this line alone: ACK abcdef\n/)
+  }
+  assert.equal(take(now + (MAILBOX_REDELIVERIES + 1) * MAILBOX_LEASE_MS, '333333').message, null)
+  const saved = parseMessageStore(JSON.stringify({ version: 2, ...state }), now)
+  assert.deepEqual([saved.messages[0].ref, saved.messages[0].redelivered], ['a1b2c3d4e5f6', MAILBOX_REDELIVERIES])
+  for (const bad of [{ ref: 'not-a-ref' }, { redelivered: 0 }, { redelivered: MAILBOX_REDELIVERIES + 1 }]) {
+    assert.throws(() => parseMessageStore(JSON.stringify({ version: 2, ...state, messages: [{ ...state.messages[0], ...bad }] }), now), /INVALID_MESSAGE_STORE/)
+  }
+  // The late accept still lands with the one ACK code, and the next message goes out.
+  state = acceptMailboxMessage(state, 'codex', 'mailbox-session', 'mailbox-lapsed', 'abcdef', now + 4 * MAILBOX_LEASE_MS)
+  assert.equal(take(now + 4 * MAILBOX_LEASE_MS, '444444').message.id, 'mailbox-behind')
+  // A claim no hook named (board_inbox) is handed over once.
+  const inbox = takeMailboxMessage(mailboxQueue(mailboxSeed(now), 'mailbox-once', 'board', now), 'codex', 'mailbox-session', 'CLI', now, 43_200_000, 'abcdef').state
+  assert.equal(takeMailboxMessage(inbox, 'codex', 'mailbox-session', 'CLI', now + 10 * MAILBOX_LEASE_MS, '555555', 'a1b2c3d4e5f6').message, null)
+})
+
+test('a hook that stops waiting after a running board claimed its message hands the claim back, so the message is not held', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-release-'))
+  let hub, server
+  try {
+    const now = Date.now()
+    hub = createMessaging(dir)
+    hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI' }, now)
+    hub.act('send', { id: 'mailbox-late', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'late reply' }, now)
+    assert.throws(() => hub.act('mailbox-release', { agent: 'codex', session: 'mailbox-session', ref: 'nope' }, now), /INVALID_REF/)
+    server = createServer(async (req, res) => {
+      const action = req.url.split('/').at(-1)
+      try {
+        let text = ''
+        for await (const chunk of req) text += chunk
+        const result = hub.act(action, JSON.parse(text), Date.now())
+        // The claim is saved, and the reply comes after the hook stopped waiting (#990).
+        if (action === 'mailbox-turn') await new Promise(done => setTimeout(done, 400))
+        res.end(JSON.stringify(result))
+      } catch (error) { if (!res.destroyed) { res.statusCode = 409; res.end(JSON.stringify({ error: error.message })) } }
+    })
+    await new Promise(done => server.listen(0, '127.0.0.1', done))
+    const url = `http://127.0.0.1:${server.address().port}`
+    hub.recordOwner(server.address().port, `${url}/?t=synthetic`)
+    const mailbox = hookMailbox(dir, 2000)
+    const started = Date.now()
+    assert.equal(await mailbox.turn('codex', 'mailbox-session', 'CLI', started), null)
+    const took = Date.now() - started
+    assert.equal(mailbox.hasDeferred, true)
+    const held = parseMessageStore(readFileSync(join(dir, 'messages.json'), 'utf8'), Date.now()).messages[0]
+    if (held.status === 'uncertain') {
+      // Only a machine that stalled past the hand-back's own 150 ms limit leaves the claim to the lease;
+      // a hook that skipped the hand-back returns after its first 150 ms.
+      assert.ok(took >= 250, `the claim was still held after ${took} ms`)
+      assert.match(held.ref, /^[0-9a-f]{12}$/)
+      assert.equal(hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI', ref: 'aaaaaaaaaaaa' }, Date.now() + MAILBOX_LEASE_MS).message.redelivered, 1)
+    } else {
+      assert.deepEqual([held.status, held.ref, held.claimed], ['queued', undefined, 0])
+      const next = hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI' }, Date.now()).message
+      // It was never shown, so it goes out with no repeat line, and a claimed one keeps its ACK code.
+      assert.deepEqual([next.id, next.redelivered], ['mailbox-late', undefined])
+      if (held.nonce !== '') assert.equal(next.nonce, held.nonce)
+    }
+  } finally { if (server) await new Promise(done => server.close(done)); hub?.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a hook still takes its mailbox message from a running board started before claims had names', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-old-board-'))
+  let hub, server
+  try {
+    const now = Date.now()
+    hub = createMessaging(dir)
+    hub.act('mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI' }, now)
+    hub.act('send', { id: 'mailbox-old-board', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'old board' }, now)
+    server = createServer(async (req, res) => {
+      try {
+        let text = ''
+        for await (const chunk of req) text += chunk
+        const body = JSON.parse(text)
+        // A board from before #990 refuses the claim's name, as its field check does.
+        if (body.ref !== undefined) throw new Error('UNKNOWN_FIELD')
+        res.end(JSON.stringify(hub.act(req.url.split('/').at(-1), body, Date.now())))
+      } catch (error) { if (!res.destroyed) { res.statusCode = 409; res.end(JSON.stringify({ error: error.message })) } }
+    })
+    await new Promise(done => server.listen(0, '127.0.0.1', done))
+    const url = `http://127.0.0.1:${server.address().port}`
+    hub.recordOwner(server.address().port, `${url}/?t=synthetic`)
+    const message = await turnOrDeferred(hookMailbox(dir, 2000), ['codex', 'mailbox-session', 'CLI', Date.now()], () => hub.snapshot(Date.now()).messages[0].status)
+    assert.deepEqual([message.id, message.ref], ['mailbox-old-board', undefined])
+  } finally { if (server) await new Promise(done => server.close(done)); hub?.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('ending a session rejects queued mailbox messages with DISCONNECTED and frees the open cap', () => {
@@ -318,18 +441,20 @@ test("a private folder check reads the local Administrator's own entry, which Wi
 })
 
 test('a store failure gives advice that fits its cause', () => {
-  for (const [s, permission, damaged] of [
-    [EN, "Check that the folder is your account's own and that no other account can open it, then try again.", 'Its message file may be damaged. Move messages.json out of that folder, then try again.'],
-    [ZH_TW, '請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。', '訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。'],
-    [ZH_CN, '请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。', '消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。'],
+  for (const [s, permission, damaged, busy] of [
+    [EN, "Check that the folder is your account's own and that no other account can open it, then try again.", 'Its message file may be damaged. Move messages.json out of that folder, then try again.', 'The computer may be busy'],
+    [ZH_TW, '請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。', '訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。', '電腦可能正忙'],
+    [ZH_CN, '请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。', '消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。', '电脑可能正忙'],
   ]) {
     const folder = 'synthetic-store'
-    for (const code of ['MESSAGE_STORE_IN_USE', 'MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM', 'UNREADABLE', 'INVALID_MESSAGE_STORE']) {
+    for (const code of ['MESSAGE_STORE_IN_USE', 'MESSAGE_STORE_ACL', 'ACL_CHECK_TIMEOUT', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM', 'UNREADABLE', 'INVALID_MESSAGE_STORE']) {
       const text = s.serveStoreFailed(code, folder)
       assert.ok(text.includes(folder) && text.includes(code), text)
       assert.equal(text.includes('server.lock'), code === 'MESSAGE_STORE_IN_USE', text)
       assert.equal(text.includes(permission), ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code), text)
       assert.equal(text.includes(damaged), ['UNREADABLE', 'INVALID_MESSAGE_STORE'].includes(code), text)
+      // A check that ran out of time is not called a folder another account can open (#799).
+      assert.equal(text.includes(busy), code === 'ACL_CHECK_TIMEOUT', text)
     }
   }
 })
@@ -1159,6 +1284,56 @@ test("on Windows a folder that still holds another account's entry after the rem
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+// A virus scanner can hold the access list the check just saved, and Windows then refuses to delete
+// it for a moment (#799): the check waits, and leaves a copy that stays held inside the folder.
+test('on Windows a folder check survives a scanner holding its saved access list', { skip: process.platform !== 'win32' ? 'Windows ACLs require whoami and icacls' : false }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-store-acl-held-'))
+  const original = fs.unlinkSync
+  // The next `times` deletes of a saved copy fail with `code`; -1 fails every one.
+  const hold = (times, code = 'EBUSY') => {
+    let left = times
+    fs.unlinkSync = (file, ...rest) => {
+      if (basename(String(file)).startsWith('.acl-') && left !== 0) {
+        left--
+        throw Object.assign(new Error('held'), { code })
+      }
+      return original(file, ...rest)
+    }
+    syncBuiltinESMExports()
+  }
+  const release = () => {
+    fs.unlinkSync = original
+    syncBuiltinESMExports()
+  }
+  const copies = folder => readdirSync(folder).filter(name => name.startsWith('.acl-'))
+  try {
+    const brief = join(dir, 'brief')
+    hold(2)
+    try { privateFolder(brief) } finally { release() }
+    assert.deepEqual(copies(brief), [])
+    const refused = join(dir, 'refused')
+    hold(2, 'EPERM')
+    try { privateFolder(refused) } finally { release() }
+    assert.deepEqual(copies(refused), [])
+    const stuck = join(dir, 'stuck')
+    hold(-1)
+    try { privateFolder(stuck) } finally { release() }
+    assert.equal(copies(stuck).length, 2)
+    // The copy left behind does not stop the next check.
+    privateFolder(stuck)
+    // Any other failure still refuses the folder, and the cause stays on the error.
+    hold(1, 'ENOSPC')
+    let refusal
+    try { createMessaging(join(dir, 'full')) } catch (error) { refusal = error } finally { release() }
+    assert.equal(refusal?.message, 'MESSAGE_STORE_ACL')
+    assert.equal(refusal.cause?.message, 'PRIVATE_FOLDER')
+    assert.equal(refusal.cause.cause?.code, 'ENOSPC')
+  } finally {
+    release()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("restarts and disconnects do not extend an uncertain message's age limit", () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-message-age-'))
   // A minute before it expires: three restarts on a loaded runner fit well inside that.
@@ -1883,6 +2058,24 @@ test('a transient message-store rename failure recovers polling without replayin
     } finally { await receiver.close() }
   }, failingRename)
 })
+
+// #914: one busy moment cost a whole 2 s poll period, the slack a delivery has on a slow runner.
+test('a receiver whose claim meets a busy message store polls again within a second, not a poll period later', async () => fixture(async (board, dir) => {
+  let busyAt, deliveredAt
+  const receiver = await boardClient(board.address).attach({
+    agent: 'fixture', session: 'busy-retry', turn: 'turn1', surface: 'Synthetic busy retry', verify: async () => true,
+    onError: error => { if (error.message === 'MESSAGE_STORE_BUSY') busyAt ??= Date.now() },
+    deliver: async message => { deliveredAt ??= Date.now(); return 'ACK ' + message.nonce },
+  })
+  try {
+    // Five failing renames use up one claim's own waits, so the store answers busy once, then clears.
+    writeFileSync(join(dir, 'fail-message-rename'), 'EBUSY 5')
+    await board.call('/api/messages/send', { ...input, target: receiver.id })
+    await waitFor(() => deliveredAt !== undefined)
+    assert.ok(busyAt !== undefined, 'the claim never met the busy store')
+    assert.ok(deliveredAt - busyAt < 1000, `delivered ${deliveredAt - busyAt} ms after the busy answer`)
+  } finally { await receiver.close() }
+}, failingRename))
 
 test('a store held for a moment by another program is written on a retry, and the receiver never sees it busy', async () => {
   for (const code of ['EPERM', 'EBUSY', 'EAGAIN']) await fixture(async (board, dir) => {
