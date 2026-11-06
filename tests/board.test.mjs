@@ -3395,6 +3395,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     ...(motion === undefined ? {} : { matchMedia: () => ({ matches: motion === 'reduce', addEventListener: () => {} }) }),
   }
   const requests = []
+  // What each request carried besides its path and body, kept apart so `requests` keeps its shape.
+  const sent = []
   const pending = new Set()
   const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(found => found[1]).find(code => code.includes('(function ()'))
   runInNewContext(script, {
@@ -3421,7 +3423,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
           const answer = await getBoard(options)
           return { ...answer, json: async () => { const data = await answer.json(); return data.model ? { ...data, model: viewed(data.model) } : data } }
         }
-        requests.push({ path: target, body: JSON.parse(options.body), headers: options.headers, keepalive: options.keepalive })
+        requests.push({ path: target, body: JSON.parse(options.body) })
+        sent.push({ path: target, headers: options.headers, keepalive: options.keepalive })
         if (post) return post(requests.at(-1))
         return { ok: true, json: async () => ({ note: '' }) }
       })()
@@ -3464,7 +3467,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     delays,
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: () => windowEvents.pagehide?.(),
-    requests,
+    sent,
     setNow: value => { clockNow = value },
     hideTab: () => { document.hidden = true; document.events.visibilitychange?.() },
     showTab: () => { document.hidden = false; document.events.visibilitychange?.() },
@@ -4491,10 +4494,10 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   const named = polls[0]['x-board-page']
   assert.match(named, /^[\w-]{1,64}$/, 'the page names itself in a form the board accepts')
   for (const headers of polls) assert.equal(headers['x-board-page'], named, 'every poll names the same page, so scripts reading the board do not count as one and two pages stay apart')
-  assert.equal(dom.requests.length, 0)
+  assert.equal(dom.sent.length, 0)
   dom.leave()
   await dom.settle()
-  const gone = dom.requests.filter(one => one.path === '/api/page-gone')
+  const gone = dom.sent.filter(one => one.path === '/api/page-gone')
   assert.equal(gone.length, 1, 'leaving tells the board once')
   assert.equal(gone[0].keepalive, true, 'the request outlives the closing page')
   assert.equal(gone[0].headers['x-board-token'], 'x')
