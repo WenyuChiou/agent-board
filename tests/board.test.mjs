@@ -3879,7 +3879,7 @@ test('every serve page action on every card kind from every agent answers with a
       projected = pressPageCell(runtime.serveModel(runtime.view(), runtime.pending(), runtime.s), cell)
       for (const failing of [false, true]) for (let index = 0; index < projected.expected; index += 1) {
         fixture.reset(cell)
-        let serverNote, serverExpected, isRefused = false
+        let serverNote, serverExpected, actionType, isRefused = false
         let refreshed = projected.model
         const dom = await pageDom(html, projected.model, { currentModel: () => refreshed, copyAllowed: !failing, post: async request => {
           fixture.enable(failing)
@@ -3888,6 +3888,7 @@ test('every serve page action on every card kind from every agent answers with a
             else {
               const items = runtime.boardItems(runtime.view(), runtime.pending(), true, true)
               const action = runtime.serveAction(items, request.body, runtime.s)
+              actionType = action.type
               isRefused = action.type === 'refuse'
               serverNote = action.type === 'refuse' ? action.note : runtime.act(action)
               serverExpected = action.type === 'refuse' ? undefined : pressExpected(runtime, action)
@@ -3915,7 +3916,12 @@ test('every serve page action on every card kind from every agent answers with a
         const results = pageHasCard(refreshed, key) ? pageCardResults(dom, key) : pageLostResults(dom, label)
         const context = `${cell.title} / ${button.textContent} / ${failing ? 'refused' : 'normal'}`
         if (serverNote !== undefined) {
-          assert.ok(results.some(node => node.textContent === serverNote), context)
+          const result = results.find(node => node.text === serverNote)
+          assert.ok(result, `${context}: the complete result line stays beside its card`)
+          // The hide result now carries an undo action, separate from its exact message.
+          const canRestore = actionType === 'hide' && !failing && !isRefused
+          assert.equal(result.textContent, serverNote + (canRestore ? runtime.s.showAgain : ''), context)
+          assert.deepEqual(pressWalk(result).filter(node => node.tag === 'button').map(node => node.textContent), canRestore ? [runtime.s.showAgain] : [], `${context}: only a successful hide offers restore`)
           // A running task keeps its Archive button; the board refuses it and says why.
           if (isRefused) assert.equal(serverNote, runtime.s.archiveLive, context)
           else if (failing) assert.ok(serverNote.includes(runtime.s.storageReadOnly), context)
