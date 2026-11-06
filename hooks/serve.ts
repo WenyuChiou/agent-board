@@ -16,7 +16,7 @@ import type { Connection, Message } from './messaging'
 import { deliveryTargets } from './hook-messages'
 import { address, isMailboxTarget, isOpen } from './messaging'
 
-// The board's page: what `agent-board.mjs --serve` shows in a browser for agents other than
+// The board's page: what `agent-board` shows in a browser for agents other than
 // Claude Code, and what a press on it does. It does what the pane does: tick a hand-kept step,
 // archive, copy an answer, answer another agent, and tidy the board.
 // Pure: scripts/board-serve.ts runs the server, writes the files and starts the agents.

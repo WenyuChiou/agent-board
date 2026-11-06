@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, readSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -43,7 +43,7 @@ The board:
   agent-board stop             stop the board's page
   agent-board --json           read the board as JSON for an agent
 
-All options: agent-board --help all (--watch, --serve, --print, --tidy, ...)
+All options: agent-board --help all (--watch, --print, --tidy, ...)
 
 The board runs the board script that setup installed (~/.agent-board/agent-board.mjs, or the
 Claude Code plugin's, beside its progress.md). Other options are passed to it unchanged.
@@ -61,7 +61,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board stop             停止看板網頁
   agent-board --json           供 agent 以 JSON 讀取看板
 
-所有選項：agent-board --help all（--watch、--serve、--print、--tidy...）
+所有選項：agent-board --help all（--watch、--print、--tidy...）
 
 看板執行的是 setup 安裝的看板程式（~/.agent-board/agent-board.mjs，或 Claude Code
 外掛放在 progress.md 旁的那份）。其他選項原樣交給它。
@@ -79,7 +79,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board stop             停止看板网页
   agent-board --json           供 agent 以 JSON 读取看板
 
-所有选项：agent-board --help all（--watch、--serve、--print、--tidy...）
+所有选项：agent-board --help all（--watch、--print、--tidy...）
 
 看板运行的是 setup 安装的看板程序（~/.agent-board/agent-board.mjs，或 Claude Code
 插件放在 progress.md 旁的那份）。其他选项原样交给它。
@@ -101,7 +101,7 @@ The board:
   agent-board --json           read the board as JSON for an agent
   agent-board --status         one line for a status bar: needs you and working
   agent-board --watch          the board in this terminal, with keys
-  agent-board --serve          the board's page in your browser
+  agent-board --serve          old; the same as no option: the board's page in your browser
   agent-board --tidy           archive eligible completed tasks
   agent-board --no-open        start the server without opening a browser
   agent-board --lan            open the board to devices on your local network
@@ -128,7 +128,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board --json           供 agent 以 JSON 讀取看板
   agent-board --status         狀態列的一行摘要：等你與進行中項目
   agent-board --watch          在這個終端機開看板，可用按鍵操作
-  agent-board --serve          在瀏覽器開看板網頁
+  agent-board --serve          舊用法，同不加選項：在瀏覽器開看板網頁
   agent-board --tidy           封存符合條件的已完成工作
   agent-board --no-open        啟動伺服器但不打開瀏覽器
   agent-board --lan            開放區域網路連線
@@ -155,7 +155,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board --json           供 agent 以 JSON 读取看板
   agent-board --status         状态栏的一行摘要：等你与进行中项目
   agent-board --watch          在这个终端打开看板，可用按键操作
-  agent-board --serve          在浏览器打开看板网页
+  agent-board --serve          旧用法，同不加选项：在浏览器打开看板网页
   agent-board --tidy           归档符合条件的已完成工作
   agent-board --no-open        启动服务器但不打开浏览器
   agent-board --lan            开放局域网连接
@@ -192,7 +192,7 @@ const run = (path, passed, { isSetup = false, env = process.env } = {}) => {
   process.exit(result.status ?? 1)
 }
 const unknown = word => {
-  console.error(message(`agent-board: unknown command "${word}". The board takes options such as --serve; run agent-board --help.`, `agent-board：不認得的指令「${word}」。看板用的是 --serve 這類選項；請執行 agent-board --help。`, `agent-board：不认识的命令「${word}」。看板用的是 --serve 这类选项；请运行 agent-board --help。`))
+  console.error(message(`agent-board: unknown command "${word}". The board takes options such as --print or --json; run agent-board --help.`, `agent-board：不認得的指令「${word}」。看板用的是 --print、--json 這類選項；請執行 agent-board --help。`, `agent-board：不认识的命令「${word}」。看板用的是 --print、--json 这类选项；请运行 agent-board --help。`))
   process.exit(2)
 }
 const isHelp = args.includes('--help') || args.includes('-h')
@@ -237,6 +237,21 @@ const candidates = [
   ]),
 ]
 const installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
+// One yes in place of "setup, then setup --apply": only the plain command, in a terminal someone is typing at.
+const askYes = question => {
+  process.stdout.write(question)
+  let answer = ''
+  try {
+    const bytes = Buffer.alloc(64)
+    answer = bytes.toString('utf8', 0, readSync(0, bytes, 0, bytes.length, null))
+  } catch {}
+  return /^\s*(y|yes|是|好|對|对)\s*$/i.test(answer.split(/\r?\n/)[0])
+}
+if (!installed && args.length === 0 && process.stdin.isTTY && process.stdout.isTTY) {
+  if (askYes(message('Agent Board is not set up on this computer yet. Set it up now for the agents found here? [y/N] ', 'Agent Board 還沒在這台電腦設定。現在替找到的 agent 設定嗎？[y/N] ', 'Agent Board 还没在这台电脑设置。现在为找到的 agent 设置吗？[y/N] '))) {
+    run(join(pkg, 'scripts/setup-agent.mjs'), ['--apply'], { isSetup: true })
+  }
+}
 if (!installed) {
   const list = candidates.map(path => `  ${shown(path)}`).join('\n')
   console.error(message(`Agent Board is not set up for this account yet. No board script at:\n${list}\nSee what setup would change: npx ${name} setup\nThen apply it:               npx ${name} setup --apply`, `這個帳號還沒設定 Agent Board。以下位置都沒有看板程式：\n${list}\n先看設定會改什麼：npx ${name} setup\n再套用：          npx ${name} setup --apply`, `这个账号还没设置 Agent Board。以下位置都没有看板程序：\n${list}\n先看设置会改什么：npx ${name} setup\n再应用：          npx ${name} setup --apply`))

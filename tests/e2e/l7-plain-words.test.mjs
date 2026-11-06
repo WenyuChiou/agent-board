@@ -8,7 +8,7 @@ import { ZH_TW } from '../../hooks/i18n.ts'
 import { ZH_CN } from '../../hooks/strings-zh-cn.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block, turn } from './lib/writers.mjs'
-import { chat, inspectSurfaces, pageDom, plain, run, serve, terminal } from './lib/surfaces.mjs'
+import { inspectSurfaces, pageDom, plain, run, serve, terminal } from './lib/surfaces.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { noMachineIds } from './lib/expect.mjs'
 import { storageFault } from './lib/faults.mjs'
@@ -39,7 +39,7 @@ const sentence = (text, world) => {
   noMachineIds(text, world)
 }
 
-test('L7 words: no session id, hash or file path on the default pane, terminal, chat and live page', async () => {
+test('L7 words: no session id, hash or file path on the default pane, terminal, print and live page', async () => {
   // The companion test in journeys.test.tsx mounts the actual pane engine.
   for (const s of locales) {
     const world = makeWorld({ lang: s.lang })
@@ -225,11 +225,12 @@ test('L7 errors: every error is one plain sentence with no stack trace and no fu
       assert.equal(server.dom.node('note').textContent, '')
       assert.ok(world.read('progress.md').includes('- [ ] Review routes'))
       fault.enable('read')
-      const unreadable = await chat(world)
+      const unreadable = await run(world, ['--json'])
       assert.equal(unreadable.status, 1)
       assert.equal(unreadable.stderr, '')
-      assert.equal(unreadable.stdout.trim(), s.chatReadFailed(s.fileProgress, s.storageReadOnly))
-      sentence(unreadable.stdout.trim(), world)
+      const unreadableText = JSON.parse(unreadable.stdout).error
+      assert.equal(unreadableText, s.chatReadFailed(s.fileProgress, s.storageReadOnly))
+      sentence(unreadableText, world)
     } finally { await world.close() }
   }
   for (const [code, why] of [['EPERM', EN.storageReadOnly], ['EROFS', EN.storageReadOnly], ['EBUSY', EN.storageBusy], ['EAGAIN', EN.storageBusy], ['ENOSPC', EN.storageFull], ['EIO', EN.storageUnknown]]) {
@@ -237,9 +238,10 @@ test('L7 errors: every error is one plain sentence with no stack trace and no fu
     try {
       world.write('progress.md', '## Synthetic\n### Check routes\n- [ ] Review routes\n')
       storageFault(world, { code }).enable('read')
-      const result = await chat(world)
+      const result = await run(world, ['--json'])
       assert.equal(result.status, 1)
       assert.equal(result.stderr, '')
+      result.stdout = JSON.parse(result.stdout).error
       // A read refused because another program has the file open, before anything was written,
       // says only that the file is locked (#244).
       assert.equal(result.stdout.trim(), ['EBUSY', 'EAGAIN'].includes(code) ? EN.boardLocked(EN.fileProgress) : EN.chatReadFailed(EN.fileProgress, why))
