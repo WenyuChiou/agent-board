@@ -6,6 +6,9 @@ import { bundleSources, safeLine } from './preflight.mjs'
 
 const usage = 'Usage: node scripts/review-queue.mjs [--repo owner/name] [--roadmap N] [--json] [--help]'
 const maxBuffer = 64 * 1024 * 1024
+// The pull request list is capped here. At the cap it may omit a pull request that names an issue, so a list
+// at the cap cannot prove an issue has no open pull request.
+export const prListLimit = 100
 const hour = 60 * 60 * 1000
 const day = 24 * hour
 const laneLimitHours = 2
@@ -263,7 +266,10 @@ export const fetchQueue = ({ repo }, { run = execFileSync } = {}) => {
   const options = { encoding: 'utf8', maxBuffer, stdio: ['ignore', 'pipe', 'pipe'] }
   // The Author line in the description distinguishes agents sharing a GitHub login.
   const fields = 'number,title,author,isDraft,headRefOid,mergeStateStatus,additions,deletions,updatedAt,url,body,files,reviews'
-  const prs = JSON.parse(run('gh', ['pr', 'list', '--state', 'open', '--json', fields, '--limit', '100', '--repo', repo], options))
+  const prs = JSON.parse(run('gh', ['pr', 'list', '--state', 'open', '--json', fields, '--limit', String(prListLimit), '--repo', repo], options))
+  // The list is complete only below the cap with every pull request body read: at the cap it may omit a pull
+  // request that names an issue, and a missing body cannot prove it names none.
+  const prListComplete = prs.length < prListLimit && prs.every(pr => typeof pr.body === 'string')
   const commentsByNumber = {}
   for (const pr of prs) {
     const output = run('gh', ['api', '--paginate', '--jq', '.[] | tojson', `repos/${repo}/issues/${pr.number}/comments?per_page=100`], options)
@@ -277,7 +283,7 @@ export const fetchQueue = ({ repo }, { run = execFileSync } = {}) => {
       pr.behindBy = Number(run('gh', ['api', '--jq', '.behind_by', `repos/${repo}/compare/main...${pr.headRefOid}`], options).trim()) || 0
     } catch { pr.behindBy = null }
   }
-  return { prs, commentsByNumber }
+  return { prs, commentsByNumber, prListComplete }
 }
 
 const jsonLines = output => output.split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line))
@@ -504,7 +510,7 @@ export const main = (argv = process.argv.slice(2), { fetch = fetchQueue, context
     return 0
   }
   try {
-    const { prs, commentsByNumber } = fetch(options)
+    const { prs, commentsByNumber, prListComplete } = fetch(options)
     let suggestions
     try { suggestions = reviewers() } catch { suggestions = { map: null, note: reviewerNote } }
     const current = now()
@@ -518,10 +524,13 @@ export const main = (argv = process.argv.slice(2), { fetch = fetchQueue, context
     const queue = classify(prs, commentsByNumber, current, suggestions.map, {
       collaborators, awayLogins: away.active.map(item => item.login.toLowerCase()), backs: away.backs, bundleSources: sources.sources,
     })
-    const expiredClaims = extra.claimed ? readClaims(extra.claimed, prs, current) : []
+    // An incomplete pull request list cannot prove an issue has no open pull request, so no expired claim is
+    // listed from it. A fetch that does not report completeness keeps the old reading.
+    const prListNote = prListComplete === false ? 'Pull request list may be truncated (at its 100-item limit, or a pull request body could not be read), so expired claims are not listed.' : null
+    const expiredClaims = extra.claimed && prListComplete !== false ? readClaims(extra.claimed, prs, current) : []
     let staleLanes
     try { staleLanes = lanes(options, { now }) } catch { staleLanes = { stale: [], notes: ['lane check skipped: lookup failed'] } }
-    const notes = [suggestions.note, sources.note, ...(extra.notes ?? []), ...away.notes].filter(Boolean)
+    const notes = [suggestions.note, sources.note, ...(extra.notes ?? []), ...away.notes, prListNote].filter(Boolean)
     if (options.isJson) log(JSON.stringify(safeData({ ...queue, staleLanes, away: away.active, expiredClaims, ...(notes.length ? { notes } : {}) }), null, 2))
     else {
       const awayLines = away.active.map(item => safeLine(`Away: ${item.login} until ${item.until}`))
