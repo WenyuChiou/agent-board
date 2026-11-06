@@ -3952,7 +3952,7 @@ test('every serve page action on every card kind from every agent answers with a
       projected = pressPageCell(runtime.serveModel(runtime.view(), runtime.pending(), runtime.s), cell)
       for (const failing of [false, true]) for (let index = 0; index < projected.expected; index += 1) {
         fixture.reset(cell)
-        let serverNote, serverExpected, isRefused = false
+        let serverNote, serverExpected, actionType, isRefused = false
         let refreshed = projected.model
         const dom = await pageDom(html, projected.model, { currentModel: () => refreshed, copyAllowed: !failing, post: async request => {
           fixture.enable(failing)
@@ -3961,6 +3961,7 @@ test('every serve page action on every card kind from every agent answers with a
             else {
               const items = runtime.boardItems(runtime.view(), runtime.pending(), true, true)
               const action = runtime.serveAction(items, request.body, runtime.s)
+              actionType = action.type
               isRefused = action.type === 'refuse'
               serverNote = action.type === 'refuse' ? action.note : runtime.act(action)
               serverExpected = action.type === 'refuse' ? undefined : pressExpected(runtime, action)
@@ -3988,7 +3989,12 @@ test('every serve page action on every card kind from every agent answers with a
         const results = pageHasCard(refreshed, key) ? pageCardResults(dom, key) : pageLostResults(dom, label)
         const context = `${cell.title} / ${button.textContent} / ${failing ? 'refused' : 'normal'}`
         if (serverNote !== undefined) {
-          assert.ok(results.some(node => node.textContent === serverNote), context)
+          const result = results.find(node => node.text === serverNote)
+          assert.ok(result, `${context}: the complete result line stays beside its card`)
+          // The hide result now carries an undo action, separate from its exact message.
+          const canRestore = actionType === 'hide' && !failing && !isRefused
+          assert.equal(result.textContent, serverNote + (canRestore ? runtime.s.showAgain : ''), context)
+          assert.deepEqual(pressWalk(result).filter(node => node.tag === 'button').map(node => node.textContent), canRestore ? [runtime.s.showAgain] : [], `${context}: only a successful hide offers restore`)
           // A running task keeps its Archive button; the board refuses it and says why.
           if (isRefused) assert.equal(serverNote, runtime.s.archiveLive, context)
           else if (failing) assert.ok(serverNote.includes(runtime.s.storageReadOnly), context)
@@ -11794,4 +11800,53 @@ test('a board with 100 sessions in 70 projects keeps the page load read count of
   assert.ok(scale.bytes > 600_000)
   console.log(`PAGE LOAD READS normal=${normal.reads} scale=${scale.reads}`)
   assert.equal(scale.reads, normal.reads)
+})
+
+test('a Hidden notice restores that exact question directly, including after a refresh', async () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const html = await sourcePage(lang)
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const model = cardsModel()
+    model.asks[0].unhideKey = 'hidden:synthetic-restore-key'
+    const dom = await pageDom(html, model, { post: async ({ body }) => ({ ok: true, json: async () => ({ ok: true, note: body.type === 'hide' ? words.boardHidden?.replace('\u0001', 'Publish, OK?') || 'Synthetic hidden notice' : 'Synthetic shown notice' }) }) })
+    dom.buttons().find(button => button.textContent === words.answeredHide).click()
+    await dom.flush()
+    await dom.flush()
+    const hidden = { ...model, asks: [], hidden: [{ key: 'hidden:synthetic-restore-key', project: 'Demo', agent: 'codex', task: 'Plan', text: 'Publish, OK?' }] }
+    await dom.redraw(hidden)
+    const notice = pressWalk(dom.node('board')).find(node => node.className?.startsWith('press-result') && node.textContent.includes('hidden notice'))
+    assert.ok(notice, 'the hide result remains available')
+    const undo = pressWalk(notice).find(node => node.tag === 'button' && node.textContent === words.showAgain)
+    assert.ok(undo, 'Show again is on the Hidden notice itself')
+    undo.click()
+    await dom.flush()
+    await dom.flush()
+    assert.deepEqual(dom.requests.map(one => [one.body.key, one.body.type]), [['ask', 'hide'], ['hidden:synthetic-restore-key', 'unhide']])
+  }
+})
+
+test('after Send the hide button named by each README is visible without More', async () => {
+  const isVisible = node => {
+    for (let one = node; one; one = one.parentNode) if (one.hidden || one.inert || String(one.className || '').split(' ').includes('gone')) return false
+    return true
+  }
+  for (const [lang, readme] of [['en', 'README.md'], ['zh-TW', 'README.zh-TW.md'], ['zh-CN', 'README.zh-CN.md']]) {
+    const html = await sourcePage(lang)
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const model = cardsModel()
+    model.asks[0].send = 'send'
+    const dom = await pageDom(html, model, { confirm: () => true, post: async () => ({ ok: true, json: async () => ({ ok: true, note: 'Synthetic sent notice' }) }) })
+    const send = dom.buttons().find(button => button.textContent === words.pgSendReply.replace('\u0001', 'Yes'))
+    assert.ok(send)
+    send.click()
+    await dom.flush()
+    await dom.flush()
+    const card = pressWalk(dom.node('board')).find(node => node.getAttribute('data-ref-key') === 'ask')
+    const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
+    assert.ok(hide, 'the documented hide button is visible after sending')
+    assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), readme)
+    hide.click()
+    await dom.flush()
+    assert.equal(dom.requests.at(-1).body.type, 'hide')
+  }
 })

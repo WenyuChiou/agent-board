@@ -4346,7 +4346,9 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(boardKey(emptyBoardState, 'u', items, STRINGS.en).action).toEqual({ type: 'unhide', key: null })
   const model = serveModel(view, [], STRINGS.en)
   expect(model.asks.find(ask => ask.agent === 'codex')?.canHide).toBe(true)
+  expect(model.asks.find(ask => ask.agent === 'codex')?.unhideKey).toBe(`hidden:${key}`)
   expect(model.asks.find(ask => ask.project === 'docs-site')?.canHide).toBe(false)
+  expect(model.asks.find(ask => ask.project === 'docs-site')?.unhideKey).toBeUndefined()
   const press = (type: string, on: string) => serveAction(items, { key: on, type, text: '', session: '' }, STRINGS.en)
   const codexKey = items[codex]?.key ?? ''
   expect(press('hide', codexKey)).toEqual({ type: 'hide', key, text: 'Per-key limit' })
@@ -4362,8 +4364,8 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(press('unhide', codexKey)).toEqual({ type: 'refuse', note: STRINGS.en.pressNothing })
   // The page's script and words carry the buttons.
   const page = servePage(STRINGS.en, 'n')
-  expect(page).toContain("button(w('answeredHide'), function () { act(key, 'hide'); })")
-  expect(page).toContain("button(w('pgAnswered'), function () { act(key, 'hide'); }, 'primary')")
+  expect(page).toContain("button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); })")
+  expect(page).toContain("button(w('pgAnswered'), function () { hideQuestion(key, ask.unhideKey); }, 'primary')")
   expect(page).toContain("act(one.key, 'unhide')")
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
 })
