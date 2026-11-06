@@ -2,4 +2,5 @@
 // Kept in parts so each module stays under Claude Code's 1 MiB module limit (#582).
 import { LINES as PART_1 } from './board-script-1.ts'
 import { LINES as PART_2 } from './board-script-2.ts'
-export const BOARD_SCRIPT = [...PART_1, ...PART_2].join('\n')
+import { LINES as PART_3 } from './board-script-3.ts'
+export const BOARD_SCRIPT = [...PART_1, ...PART_2, ...PART_3].join('\n')
