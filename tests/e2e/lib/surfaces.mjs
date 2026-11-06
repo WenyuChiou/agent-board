@@ -115,6 +115,9 @@ export const command = async (world, args = []) => successful(await run(world, a
 export const print = async (world, args = []) => successful(await run(world, ['--print', ...args]))
 export const json = async (world, args = []) => JSON.parse(successful(await run(world, ['--json', ...args])))
 
+// The journeys read the board through --print and --json now; tests/board-surfaces.test.mjs still checks this reader.
+export const chat = (world, args = []) => run(world, ['--chat', ...args])
+
 // The small DOM is copied from tests/board.test.mjs pageDom. The actual shipped
 // page script builds every card and performs every press; tests do not emulate actions.
 // The state-first page draws a question as an article.card under Needs you and every task as a

@@ -253,6 +253,9 @@ if (!installed && args.length === 0 && process.stdin.isTTY && process.stdout.isT
   const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name} setup` }
   const preview = spawnSync(process.execPath, setup, { stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8', env: setupEnv, windowsHide: true })
   process.stdout.write(preview.stdout ?? '')
+  // A preview that fails says why itself; the "not set up" text below would only send the person back to it.
+  process.stderr.write(preview.stderr ?? (preview.error ? `${preview.error.message}\n` : ''))
+  if (preview.status !== 0) process.exit(preview.status ?? 1)
   // The preview offers its --apply step only when something would change; with nothing to do, nothing is asked.
   if (preview.status === 0 && (preview.stdout ?? '').includes('--apply') && askYes(message('Apply these changes? [y/N] ', '套用這些變更嗎？[y/N] ', '应用这些变更吗？[y/N] '))) {
     const applied = spawnSync(process.execPath, [...setup, '--apply'], { stdio: ['inherit', 'inherit', 'inherit'], env: setupEnv, windowsHide: true })

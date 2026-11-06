@@ -5176,7 +5176,7 @@ test('over SSH, in a terminal with no browser, plain agent-board runs the live t
   }
 })
 
-test('a second agent-board reuses the running page and prints the same bare URL',{ timeout: 40_000 }, async () => {
+test('a second agent-board reuses the running page and prints the same bare URL', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const urls = []
   try {

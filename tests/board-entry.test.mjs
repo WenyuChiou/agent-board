@@ -289,3 +289,21 @@ test('the first plain agent-board in a terminal with nothing set up applies setu
     assert.ok(!stdout.includes('--serve'), 'setup output names the plain command')
   }, { CI: '1' })
 })
+
+test('a first-run setup preview that fails shows its own error and exit status, and asks nothing (#868)', { timeout: 40_000 }, async () => {
+  // The preload makes only setup's preview fail; the launcher and an --apply run are untouched.
+  const shimDir = mkdtempSync(join(tmpdir(), 'board-first-fail-'))
+  try {
+    const failShim = join(shimDir, 'fail-preview.cjs')
+    writeFileSync(failShim, "if ((process.argv[1] || '').endsWith('setup-agent.mjs') && !process.argv.includes('--apply')) { process.stderr.write('setup preview failed for the test\\n'); process.exit(3) }\n")
+    await firstRun('y\n', ({ status, stdout, stderr }, home) => {
+      assert.equal(status, 3, stderr)
+      assert.match(stderr, /setup preview failed for the test/)
+      assert.doesNotMatch(stdout, /Apply these changes/)
+      assert.doesNotMatch(stderr, /not set up for this account yet/)
+      assert.equal(existsSync(join(home, '.agent-board')), false, 'nothing was written')
+    }, { NODE_OPTIONS: `--require "${failShim.replace(/\\/g, '/')}"` })
+  } finally {
+    removeTree(shimDir)
+  }
+})
