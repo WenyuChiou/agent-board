@@ -3528,8 +3528,8 @@ test('every serve page action on every card kind from every agent answers with a
       }
     }
     assert.deepEqual([...seen].sort(), PRESS_CELLS.map(cell => cell.title).sort())
-    assert.equal(inventory, 1136, 'all host/source page controls remain covered by the pure inventory (a running task offers Archive, which the board refuses)')
-    assert.equal(actions, 204, 'distinct normal/refused page controls')
+    assert.equal(inventory, 1052, 'all host/source page controls remain covered by the pure inventory (a running task offers Archive, which the board refuses)')
+    assert.equal(actions, 228, 'distinct normal/refused page controls')
     assert.equal(actions, expectedActions, 'exact grouped normal/refused page action inventory')
     console.log(`page runtime matrix: ${seen.size} cells, ${groups.size} groups, ${actions} normal/refused button presses, ${((performance.now() - started) / 1000).toFixed(3)} s`)
   } finally { await board.close(); fixture.close() }
