@@ -8909,6 +8909,26 @@ test("an old block of an agent's run is archived once and a person's block is ke
   assert.equal(readFileSync(archives[0], 'utf8'), before)
 }))
 
+test("a tidied run's question does not come back as a card", () => fixture(f => {
+  f.install('--apply')
+  rollout(f, execSession, { source: 'exec' })
+  rollout(f, session, { originator: 'Codex Desktop', source: 'vscode', thread_source: 'user' })
+  f.save(f.progress, '## demo\n' + oldBlock(execSession, 'Verified run') + oldBlock(session, 'Person session'))
+  // A board that has seen both blocks keeps a record for each question, with the same words.
+  assert.equal(f.command(['--keys', 'j']).status, 0)
+  const ledgerFile = f.progress.replace(/\.md$/, '-questions.json')
+  const open = () => JSON.parse(readFileSync(ledgerFile, 'utf8')).records.filter(record => record.isUnresolved).map(record => record.source.task).sort()
+  assert.deepEqual(open(), ['Person session', 'Verified run'])
+  const tidy = f.command(['--tidy'])
+  assert.equal(tidy.status, 0, tidy.stderr)
+  assert.doesNotMatch(readFileSync(f.progress, 'utf8'), /Verified run/)
+  // The next board pass folds the run's resolved copy into the ledger; the other session's identical question stays live.
+  const shown = f.command(['--keys', 'j'])
+  assert.equal(shown.status, 0, shown.stderr)
+  assert.doesNotMatch(shown.stdout, /Verified run/)
+  assert.deepEqual(open(), ['Person session'])
+}))
+
 test('a block whose session record cannot be read is kept', () => fixture(f => {
   f.install('--apply')
   rollout(f, execSession, { source: 'exec' })
