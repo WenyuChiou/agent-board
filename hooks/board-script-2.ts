@@ -1258,7 +1258,7 @@ export const LINES = [
 "        where: send === \"send\" ? row.target?.dir ?? \"\" : send === \"connected\" ? claudeHint(row.agent, row.auto === \"working\", s) : \"\",",
 "        info: connection ? \"\" : lanInfo(baseMode, row.agent) ?? (send === \"open\" || isOpenClaude ? infoOf(send, row.agent, row.title, \"\", s) : \"\"),",
 "        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some((one) => one.target === connection.id && isOpen(one) && !(one.status === \"accepted\" && isMailboxTarget(one.target))) ?? false),",
-"        hasCopyBox: !(row.auto === \"ended\" && row.question === null) && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined),",
+"        hasCopyBox: !(row.auto === \"ended\" && row.question === null && send === \"none\") && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined),",
 "        ...row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true ? { isClosed: true } : {}",
 "      });",
 "      continue;",

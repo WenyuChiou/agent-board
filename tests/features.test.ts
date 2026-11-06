@@ -3207,7 +3207,7 @@ test('the serve action contract covers every card kind from every agent and sour
     }
   }
   expect(cells.size).toBe(192)
-  expect(offered).toBe(440)
+  expect(offered).toBe(398)
 })
 
 test('the terminal key contract covers every card kind from every agent and source', () => {
