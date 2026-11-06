@@ -5802,8 +5802,10 @@ const sddl = target => {
   return 'O:' + sid + 'G:SYD:' + (isDir ? 'P(A;OICI;' : 'AI(A;ID;') + 'FA;;;' + sid + ')'
 }
 cp.execFileSync = (file, args, options) => {
-  if (/powershell\\.exe$/i.test(String(file))) {
-    const lines = String(options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH).split('|').map(sddl).join('\\n')
+  // Only the folder check stalls: it is the one call that carries the file list, and the
+  // recovery is about that call. Any other PowerShell use runs for real.
+  if (/powershell\\.exe$/i.test(String(file)) && typeof options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH === 'string') {
+    const lines = String(options.env.AGENT_BOARD_RUNTIME_ACL_PATH).split('|').map(sddl).join('\\n')
     throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
   }
   return original(file, args, options)
@@ -5813,8 +5815,10 @@ require('node:module').syncBuiltinESMExports()
   board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
   let url = null
   try {
-    url = board.urlOf(await board.serve(['--quiet-board']))
-    assert.ok(url)
+    const out = await board.serve(['--quiet-board'])
+    url = board.urlOf(out)
+    // The parent's output names the check that refused, when one did.
+    assert.ok(url, out)
     assert.ok(existsSync(board.served))
     const acl = windowsAcl(folder, board.env)
     assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the runtime folder is private')
