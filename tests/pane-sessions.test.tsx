@@ -1687,7 +1687,8 @@ test('封存 on a row takes that task out of the file now and into this month’
   await ui.press({ key: '求職::Google 暑期實習' })
   await ui.press({ key: '求職::Google 暑期實習::archive' })
   expect(world.files.get(FILE)).not.toContain('Google')
-  expect(world.files.get(ARCHIVE)).toContain('\n\n## 求職 · 2026-10-16\n### Google 暑期實習\n> 截止 12-20\n- [x] 改履歷\n- [?] 推薦信 — 等教授回覆\n- [ ] 投遞\n')
+  // The startup sweep dated the finished step (#922); the task keeps that hidden date in the archive.
+  expect(world.files.get(ARCHIVE)).toMatch(/\n\n## 求職 · 2026-10-16\n### Google 暑期實習\n> 截止 12-20\n- \[x\] 改履歷 <!-- done 2026-10-16 -->\n- \[\?\] 推薦信 — 等教授回覆\n- \[ \] 投遞\n/)
   expect(await ui.find({ type: 'Button', key: '求職::Google 暑期實習' })).toBeUndefined()
   await ui.unmount()
 })

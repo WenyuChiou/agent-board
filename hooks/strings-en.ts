@@ -646,6 +646,7 @@ export const EN: Strings = {
   cleanUp: 'Clean up',
   cleanSeenUnreadable: 'Nothing was archived because the record of when tasks were done cannot be read.',
   canArchive: (n: number): string => `${n} finished ${n === 1 ? 'task' : 'tasks'} can be archived`,
+  historyLine: (n: number, from: string, to: string): string => `${n} earlier ${n === 1 ? 'step' : 'steps'} archived (from ${from} to ${to})`,
   prunedAgents: (n: number): string => `${n} old agent ${n === 1 ? 'record' : 'records'}`,
   prunedSessions: (n: number): string => `${n} old session ${n === 1 ? 'task list' : 'task lists'}`,
   prunedTurns: (n: number): string => `${n} unread inbox ${n === 1 ? 'turn' : 'turns'}`,
