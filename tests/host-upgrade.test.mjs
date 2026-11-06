@@ -4,7 +4,7 @@ import { request } from 'node:http'
 import { join, resolve } from 'node:path'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, repeatApply, report, repoRoot, run, setup, setupOrder, tempFolder } from './e2e/lib/host-journey.mjs'
+import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, tempFolder } from './e2e/lib/host-journey.mjs'
 
 // The upgrade journey of #466. It reads the 0.24.0 files from the release tag, so it stays in
 // the board group, whose CI job fetches the tags; the other host journeys are in tests/e2e/.
@@ -105,6 +105,7 @@ const openPage = async (f, script, flags, label) => {
     const data = JSON.stringify(await board.json())
     assert.ok(data.includes('Prepare the quarterly report'), `${label}: the page shows the hand-kept task`)
     assert.ok(data.includes('Send it to Dana'), `${label}: the page shows its question`)
+    for (const id of ['codex', 'antigravity']) assert.ok(data.includes(questionOf(id)), `${label}: the page shows the ${id} question that was waiting`)
   } finally { await closePage(url) }
 }
 
