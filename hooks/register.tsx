@@ -97,7 +97,7 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, toolQuestions, turnTools } from './digest'
+import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, clearApproval, markApproval, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
 import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
@@ -205,9 +205,39 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 
 const wordsOf = async ($: EngineInterface): Promise<Strings> => STRINGS[langOf(await read($, lang)) ?? 'zh-TW']
 
+// The step for an approval that has waited long enough, only in a session that keeps a Task list (the
+// same rule as a closing question); a failed save leaves the tool's own dialog untouched.
+const showApproval = async ($: EngineInterface, id: string, tool: string): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || mirror.source !== 'tasks' || mirror.tasks.length === 0) return
+  const step = (await wordsOf($)).claudeApprovalStep(tool)
+  // The dialog can end while the words are read: the save checks again, and the flag is set first
+  // so a turn ending during the save still takes the step back.
+  if (!pendingApprovals.has(id)) return
+  hasApprovalStep = true
+  await saveMine($, one => pendingApprovals.has(id) ? markApproval(one, step) : one)
+  await settle($)
+}
+
+// The step goes once no approval is pending (no id = the turn or session ended, whatever is pending).
+const dropApproval = async ($: EngineInterface, id?: string): Promise<void> => {
+  if (id === undefined) pendingApprovals.clear()
+  else pendingApprovals.delete(id)
+  if (!hasApprovalStep || pendingApprovals.size > 0) return
+  hasApprovalStep = false
+  await saveMine($, clearApproval).catch(() => undefined)
+  await settle($).catch(() => undefined)
+}
+
 // Module state: reset by a reload, which only happens between turns.
 let isPolling = false
 let isTurnRunning = false
+// Tools the person is being asked to approve (#1048): tool_use_id to tool name. One that is still here
+// after APPROVAL_MS puts a waiting step on the board; its tool.call ending, or the turn or session
+// ending, takes the step back. `hasApprovalStep` is whether this session has written one.
+const APPROVAL_MS = 3000
+const pendingApprovals = new Map<string, string>()
+let hasApprovalStep = false
 let receiver: Receiver | null = null
 let receiverTimer: { cancel: () => void } | null = null
 // A hub that does not answer within this holds no tick up: it is a poll that failed.
@@ -4187,6 +4217,7 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     journal($).catch(() => undefined)
     isTurnRunning = true
+    await dropApproval($)
     hasTurnBackgroundLaunch = false
     observedTurnTools = []
     turnBackgroundJobIds = new Set()
@@ -4248,6 +4279,7 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     if (hasBackgroundActivity) await backgroundChanges
     isTurnRunning = false
+    await dropApproval($)
     const isDelivery = (await receiver?.turnEnded(e.turnId, e.answer, e.isAborted).catch(() => false)) === true
     const mirror = await read($, mine)
     const hasRunningTurnBackgroundJob = (mirror?.backgroundJobIds ?? []).some(id => turnBackgroundJobIds.has(id)) ||
@@ -4308,6 +4340,8 @@ export const register: Register = (on, options) => {
     if (boardToolName !== null && e.tool === boardToolName) return { result: (await openBoard($)).text }
     if (e.agentId !== undefined) return next(e)
     const ran = await next(e)
+    // Answered, declined or failed: the dialog this call waited on is over.
+    if (e.tool_use_id && pendingApprovals.has(e.tool_use_id)) await dropApproval($, e.tool_use_id)
     if (ran.deny !== undefined || ran.isError === true) return ran
     if (e.tool !== 'AskUserQuestion' && e.tool !== 'TaskList') observedTurnTools.push(e.tool)
     if (e.tool === 'Agent' || !('run_in_background' in e) || e.run_in_background !== true) return ran
@@ -4317,6 +4351,22 @@ export const register: Register = (on, options) => {
     // turn.complete drains the queue; the tool's result need not wait for pane reads.
     saveBackground($, one => startBackgroundJob(one, e.tool_use_id || undefined)).catch(() => undefined)
     return ran
+  })
+
+  // A tool that waits for the person's yes in Claude's own dialog (#1048). Only a main-loop call the
+  // person answers counts; a question or a plan has its own handling. The step comes after APPROVAL_MS,
+  // so an approval answered at once never reaches the board.
+  on('tool.check', async ($, e, next) => {
+    const checked = await next(e)
+    if (checked.decision !== 'ask' || e.approver !== 'person' || e.agentId !== undefined || !e.tool_use_id) return checked
+    if (e.tool === 'AskUserQuestion' || e.tool === 'ExitPlanMode') return checked
+    const id = e.tool_use_id
+    pendingApprovals.set(id, e.tool)
+    $.clock.after(APPROVAL_MS, () => {
+      if (pendingApprovals.has(id)) showApproval($, id, e.tool).catch(() => undefined)
+    })
+
+    return checked
   })
 
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
@@ -4412,6 +4462,7 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     if (hasBackgroundActivity) await backgroundChanges
+    await dropApproval($)
     await journal($)
     const mirror = await read($, mine)
     if (mirror !== null && (mirror.tasks.length > 0 || (mirror.backgroundJobs ?? 0) > 0)) {

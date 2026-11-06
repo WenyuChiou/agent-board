@@ -1,4 +1,4 @@
-import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressStep, ProgressStepStatus, ProgressTask, QuestionRecord } from '../types'
+import type { NativeAsk, ProgressAuto, ProgressMirror, ProgressProject, ProgressStep, ProgressStepStatus, ProgressTask, QuestionRecord } from '../types'
 import { askOf, askRank } from './ask'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -99,6 +99,8 @@ export type WaitingItem = {
   options: string[]
   command: string | null
   link: string | null
+  // Answered in the agent's own window (a native prompt, a tool approval): the options are listed, and no reply is offered.
+  native?: NativeAsk
   // here: this session's, answered from the pane · other: another live session's, answered
   // there · manual: a hand-kept step, ticked from the pane
   where: 'here' | 'other' | 'manual'
@@ -610,6 +612,7 @@ const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, strin
         command: task.command ?? undefined,
         link: task.link ?? undefined,
       }),
+      ...(task.native === undefined ? {} : { native: task.native }),
       where: 'here' as const,
       agent: '',
       session: shortId(mine.sessionId),
@@ -1071,6 +1074,7 @@ export const buildView = (
           ...(lastActive === undefined ? {} : { at: lastActive }),
           dir: task.auto?.dir ?? null,
           ...askOf(parts.text, parts.note),
+          ...(step.native === undefined ? {} : { native: step.native }),
           where: isManual ? 'manual' : 'other',
           agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
           // Another agent's block id is a hash of its session; its own id is what its session

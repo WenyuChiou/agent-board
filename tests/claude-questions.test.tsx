@@ -126,3 +126,92 @@ test('AskUserQuestion that fails does not leave its question waiting in Needs yo
   const ledger = parseQuestions(world.files.get(FILE.replace('.md', '-questions.json')) ?? '')
   expect(ledger?.records.some(record => record.isUnresolved) ?? false).toBe(false)
 })
+
+test('AskUserQuestion writes its question once with the options on a native line, and no repeated note', async ($, on) => {
+  const world = worldOf()
+  const clock = engineBeneath(on, world)
+  let release!: () => void
+  const answered = new Promise<void>(resolve => { release = resolve })
+  let entered!: () => void
+  const waiting = new Promise<void>(resolve => { entered = resolve })
+  on('tool.call', { tool: 'AskUserQuestion' }, async () => {
+    entered()
+    await answered
+    return { result: { answers: { 'Blue or green?': 'Blue' } } }
+  })
+  await start($, 'Choose the colors')
+  const call = $.tool.call({ tool: 'AskUserQuestion', tool_use_id: 'synthetic-native', questions: [{ question: 'Blue or green?', header: 'Color', options: [{ label: 'Blue', description: 'Blue palette' }, { label: 'Green', description: 'Green palette' }], multiSelect: false }] })
+  await waiting
+  try {
+    const written = world.files.get(FILE) ?? ''
+    expect(written.split('- [?] Blue or green?\n').length).toBe(2)
+    expect(written).not.toContain('Blue or green? —')
+    expect(written).toContain('<!-- native=claude options=["Blue","Green"] -->')
+    const projects = parseProgress(written)
+    const ledger = parseQuestions(world.files.get(FILE.replace('.md', '-questions.json')) ?? '') ?? emptyQuestions()
+    const view = buildView(projects, [], null, Date.parse('2026-10-16T12:00:00Z'), 0, {}, EN, [], {}, ledger)
+    const ask = serveModel(view, [], EN).asks.find(one => one.text.includes('Blue or green?'))
+    expect(ask?.native?.options).toEqual(['Blue', 'Green'])
+    expect(ask?.native?.line).toBe("Answer in Claude Code's window.")
+    expect(ask?.answers).toEqual([])
+  } finally {
+    release()
+    await call
+  }
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').not.toContain('native=')
+})
+
+const approval = { tool: 'Bash', input: { command: 'synthetic' }, approver: 'person' } as never
+
+test('a tool approval the person has waited on for 3 seconds shows a waiting step with a native line, and the tool finishing takes it back', async ($, on) => {
+  const world = { ...worldOf(), hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  let release!: () => void
+  const answered = new Promise<void>(resolve => { release = resolve })
+  on('tool.call', { tool: 'Bash' }, async () => {
+    await answered
+    return { result: 'done' }
+  })
+  await start($, 'Update colors')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check palette', description: '' })
+  await $.tool.check({ ...(approval as object), tool_use_id: 'synthetic-approval' } as never)
+  const call = $.tool.call({ tool: 'Bash', tool_use_id: 'synthetic-approval', command: 'synthetic' })
+  await clock.advance(2000)
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+  await clock.advance(1500)
+  const written = world.files.get(FILE) ?? ''
+  expect(written).toContain('- [?] Claude asks to run Bash\n<!-- question=')
+  expect(written).toContain('<!-- native=claude -->')
+  release()
+  await call
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+  expect(world.files.get(FILE) ?? '').not.toContain('native=')
+})
+
+test('a tool approval answered within 3 seconds never reaches the board', async ($, on) => {
+  const world = { ...worldOf(), hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  on('tool.call', { tool: 'Bash' }, () => ({ result: 'done' }))
+  await start($, 'Update colors')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check palette', description: '' })
+  await $.tool.check({ ...(approval as object), tool_use_id: 'synthetic-quick' } as never)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'synthetic-quick', command: 'synthetic' })
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+})
+
+test('a tool approval in a subagent or for AskUserQuestion shows no approval step', async ($, on) => {
+  const world = { ...worldOf(), hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  await start($, 'Update colors')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check palette', description: '' })
+  await $.tool.check({ ...(approval as object), tool_use_id: 'synthetic-sub', agentId: 'synthetic-agent' } as never)
+  await $.tool.check({ tool: 'AskUserQuestion', input: {}, approver: 'person', tool_use_id: 'synthetic-ask' } as never)
+  await clock.advance(5000)
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+})

@@ -341,6 +341,14 @@ def parser_parity():
           and validate_mod.extract_blocks("## a\n" + marked).get("12345678") == marked.strip().splitlines())
     check("producer question metadata is ignored inside a fenced example",
           validate_mod.classify(["```", f"<!-- question={token} -->", "```"]) == ["hidden", "hidden", "hidden"])
+    native = '<!-- native=claude options=["Blue","Green"] -->'
+    asked = frag.replace("<!-- /auto", f"{native}\n<!-- /auto")
+    check("a native ask line stays inside a complete visible block and reads as text",
+          validate_mod.validate_fragment_text(asked) == []
+          and validate_mod.classify([native, "<!-- native=codex -->"]) == ["text", "text"]
+          and validate_mod.extract_blocks("## a\n" + asked).get("12345678") == asked.strip().splitlines())
+    check("a native ask line is ignored inside a fenced example",
+          validate_mod.classify(["```", native, "```"]) == ["hidden", "hidden", "hidden"])
 
     # --- 9. fenced code and HTML comments are not blocks ---
     fenced = "## a\n\n```md\n" + old + "```\n\n~~~\n" + old + "~~~\n"

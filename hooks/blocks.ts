@@ -136,6 +136,15 @@ export const cutEntries = (mirror: ProgressMirror, s: Strings = ZH_TW): Omit<Jou
   ]
 }
 
+// The line that says a question is answered in its agent's own window. A comment must not hold `--` or `>`,
+// so both are written as JSON escapes; only a waiting step carries it.
+export const nativeLine = (task: ProgressMirrorTask): string => {
+  if (task.native === undefined || task.waiting !== 'you') return ''
+  const options = task.native.options.slice(0, 8).map(one => one.replace(/\s+/g, ' ').trim().slice(0, 120)).filter(one => one !== '')
+
+  return `<!-- native=${task.native.agent}${options.length === 0 ? '' : ` options=${JSON.stringify(options).replace(/-/g, '\\u002d').replace(/>/g, '\\u003e')}`} -->`
+}
+
 export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, parent?: string): string[] => {
   const id = shortId(mirror.sessionId)
   const pr = mirror.pr ?? null
@@ -152,7 +161,8 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
       const task = isAnswered(mirror, asked) ? { ...asked, waiting: null, why: s.answeredNote } : asked
 
       const token = questionToken(task)
-      return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`])]
+      const native = nativeLine(task)
+      return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native])]
     }),
     ...retainedCancelledOf(mirror).map(text => `- [-] ${text}`),
     `<!-- /auto session=${id} -->`,
