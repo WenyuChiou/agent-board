@@ -16,7 +16,7 @@ import type { Connection, Message } from './messaging'
 import { deliveryTargets } from './hook-messages'
 import { address, isMailboxTarget, isOpen } from './messaging'
 
-// The board's page: what `agent-board.mjs --serve` shows in a browser for agents other than
+// The board's page: what `agent-board` shows in a browser for agents other than
 // Claude Code, and what a press on it does. It does what the pane does: tick a hand-kept step,
 // archive, copy an answer, answer another agent, and tidy the board.
 // Pure: scripts/board-serve.ts runs the server, writes the files and starts the agents.
@@ -134,6 +134,7 @@ export type ServeAsk = {
   canTick: boolean
   // Another session's question can be marked answered: kept off the board until it changes.
   canHide: boolean
+  unhideKey?: string
   archiveNote: string
   send: SendMode
   // The session a reply goes to: the page sends it back with the reply, so a line that now
@@ -212,7 +213,7 @@ export type ServeRow = {
 // A question marked answered, listed so it can be shown again.
 export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string; questionId?: string }
 // key names the line in the action route; canHide is false for a retained source that is only for review.
-export type ServeRetained = { key: string; canHide: boolean; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null }
+export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
@@ -326,6 +327,7 @@ const noteLined = (text?: string): { noteLine?: string } => {
 const retainedOf = (item: WaitingItem): ServeRetained => ({
   key: olderKey(item),
   canHide: item.hideKey !== '' && item.canHide !== false,
+  ...(item.hideKey !== '' && item.canHide !== false ? { unhideKey: `hidden:${item.hideKey}` } : {}),
   project: item.project ?? '',
   agent: item.agent ?? '',
   ...(item.where === 'manual' ? { isOwn: true as const } : {}),
@@ -387,6 +389,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         link: ask.link,
         canTick: ask.step !== null,
         canHide: ask.hideKey !== '' && ask.canHide !== false,
+        ...(ask.hideKey !== '' && ask.canHide !== false ? { unhideKey: `hidden:${ask.hideKey}` } : {}),
         send,
         session: connection?.session ?? ask.target?.session ?? '',
         fp: fingerprint(item, items),
@@ -1239,6 +1242,7 @@ const PAGE_SCRIPT = String.raw`
     slot.node.textContent = result.text;
     slot.node.className = 'press-result ' + result.tone;
     slot.node.setAttribute('role', result.tone === 'alert' ? 'alert' : 'status');
+    restoreNotice(slot.node, result);
     if (result.tone === 'alert' && result.canRetry && sentLast[key]) {
       var again = sentLast[key];
       slot.node.appendChild(add(el('div', 'acts'), button(w('serveRetry'), function () { again.again(); }), button(w('serveCopyMessage'), function () { copy(again.text, key); }, '', true)));
@@ -1256,6 +1260,13 @@ const PAGE_SCRIPT = String.raw`
         result.focused = true;
       }
     }
+  }
+  function restoreNotice(node, result) {
+    if (typeof result.unhideKey !== 'string' || result.unhideKey.indexOf('hidden:') !== 0) return;
+    add(node, add(el('div', 'acts'), button(w('showAgain'), function () { act(result.unhideKey, 'unhide'); })));
+  }
+  function hideQuestion(key, unhideKey) {
+    return act(key, 'hide', '', '', '', '', '', null, undefined, unhideKey);
   }
   function beginPress() {
     resetTidy(false);
@@ -1302,7 +1313,8 @@ const PAGE_SCRIPT = String.raw`
     last = '';
   }
   // Names this page to the board, so it can tell one open page from another (#265).
-  var pageId = (function () { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } })();
+  function newPageId() { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } }
+  var pageId = newPageId();
   function call(path, body) {
     if (isUnreachable && body !== undefined) return Promise.reject();
     var headers = { 'x-board-token': token, 'x-board-page': pageId, 'x-board-visible': document.hidden ? '0' : '1' };
@@ -1320,6 +1332,12 @@ const PAGE_SCRIPT = String.raw`
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
     try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
+  });
+  // A page the browser kept in its back/forward cache and shows again is the same document, but the board forgot its id when it left: it names itself anew and asks at once (#1028).
+  if (typeof window.addEventListener === 'function') window.addEventListener('pageshow', function (event) {
+    if (!event || !event.persisted || isClosed) return;
+    pageId = newPageId();
+    refresh();
   });
   // onCopied: what to do once the text is on the clipboard; the card then says where to paste it. Without it the
   // result line says Copied. That line, and the card's after-copy line, show only after a copy was confirmed
@@ -1382,12 +1400,16 @@ const PAGE_SCRIPT = String.raw`
   }
   // fp: the fingerprint the line was drawn with, which the server checks before it writes. go: the button
   // that sent it. A failed send keeps the message for Send again and Copy message.
-  function act(key, type, text, waiting, session, asked, fp, go, line) {
+  function act(key, type, text, waiting, session, asked, fp, go, line, unhideKey) {
     if (isUnreachable) return Promise.resolve();
     busyOn(go);
     say(waiting || w('pressPending'), '', key);
     return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '', ...(line === undefined ? {} : { line: line }) }).then(function (data) {
       say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok);
+      if (data.ok && type === 'hide' && unhideKey && results[key]) {
+        results[key].unhideKey = unhideKey;
+        paintResult(key);
+      }
       busyOff(go, data.ok);
       return data.ok;
     }, function () {
@@ -1649,7 +1671,8 @@ const PAGE_SCRIPT = String.raw`
     reveal(parts.after, isAfter);
     if (!isAfter) return;
     parts.msg.textContent = state.mode === 'queued' ? w('messagesQueued') : state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text) : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
-    parts.answered.hidden = state.mode !== 'copied' || !parts.canHide;
+    parts.answered.hidden = !parts.canHide;
+    parts.answered.textContent = w(state.mode === 'copied' ? 'pgAnswered' : 'answeredHide');
     parts.again.hidden = state.mode !== 'copied';
   }
   function setMode(key, mode, text) {
@@ -1720,7 +1743,7 @@ const PAGE_SCRIPT = String.raw`
     if (isStuck) {
       if (ask.resume) add(answers, button(w('serveCopyResume'), function () { copy(ask.resume, key); }, '', true));
     } else if (isOlder) {
-      if (ask.canHide) add(answers, button(w('answeredHide'), function () { act(key, 'hide'); }));
+      if (ask.canHide) add(answers, button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
       else add(body, el('p', 'note', w('questionReviewOnly')));
     } else if (ask.isOwn) {
       if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
@@ -1742,7 +1765,7 @@ const PAGE_SCRIPT = String.raw`
         others.push(link);
       }
       if (ask.reopen) others.push(button(w('serveCopyResume'), function () { copy(ask.reopen, key); }, '', true));
-      if (ask.canHide) others.push(button(w('answeredHide'), function () { act(key, 'hide'); }));
+      if (ask.canHide) others.push(button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
     }
     var parts = { agent: agent, canHide: ask.canHide === true, late: lateWord(agentPresence[id]) !== '' };
     cardParts[key] = parts;
@@ -1781,7 +1804,7 @@ const PAGE_SCRIPT = String.raw`
     var after = el('div', 'state');
     after.setAttribute('role', 'status');
     parts.msg = el('span', 'msg ok');
-    parts.answered = button(w('pgAnswered'), function () { act(key, 'hide'); }, 'primary');
+    parts.answered = button(w('pgAnswered'), function () { hideQuestion(key, ask.unhideKey); }, 'primary');
     parts.again = button(w('pgCopyAgain'), function () {
       var state = cardState[key];
       if (state) copy(state.text, key);
@@ -2802,6 +2825,7 @@ const PAGE_SCRIPT = String.raw`
       slot.setAttribute('role', 'status');
       slot.textContent = result.text;
       slot.className += ' ' + result.tone;
+      restoreNotice(slot, result);
       add(card, slot);
       if (result.copyText) {
         var area = el('textarea');

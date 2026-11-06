@@ -105,6 +105,8 @@ describe('L3 across agents and sessions', () => {
       // A page that says it is leaving is no longer an open window: the next open starts one.
       assert.equal((await leave('page-zero')).status, 200)
       assert.equal(windows(await serving()), 1)
+      // A page that left stays gone: a poll that was already on its way does not make it an open page again.
+      assert.equal((await (await poll('page-zero')).json()).moved, true, 'a page that left must not come back')
       // A page in a hidden or minimized window does not stand for a window the person can see.
       assert.equal(windows(await keeping([['page-one', '0']], () => command(world, ['--html']))), 1, 'a hidden page must not stop a window')
       // A visible page does.
@@ -116,8 +118,10 @@ describe('L3 across agents and sessions', () => {
       const kept = await (await poll('page-two')).json()
       assert.equal(kept.moved, undefined)
       assert.ok(kept.model, 'the newer page still gets the board')
-      // The replaced page leaving changes nothing; the newer page is still open.
+      // The replaced page leaving changes nothing: the board still counts the newer page, with no poll of it in between.
       assert.equal((await leave('page-one')).status, 200)
+      const ping = await (await fetch(new URL('/api/ping', page), { headers: { 'x-board-token': page.searchParams.get('t') } })).json()
+      assert.equal(typeof ping.pageAgo, 'number', 'one page leaving must not clear the page that is still open')
       assert.equal(windows(await keeping([['page-two', '1']], serving)), 0)
       // The last page leaving: the next open starts a window.
       assert.equal((await leave('page-two')).status, 200)

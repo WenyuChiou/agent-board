@@ -37,11 +37,11 @@ npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the live terminal board over SSH or in an interactive terminal without a display, and the page otherwise. In an agent's chat, `/agent-board` opens the same page. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. To remove it, see [Update and uninstall](docs/GUIDE.md#update-and-uninstall). More in the [setup guide](docs/SETUP.md#install-with-npm). An agent that needs the board's status reads `agent-board --json`; the [Board JSON reference](docs/BOARD-JSON.md) describes its versioned, redacted fields.
+The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the live terminal board over SSH or in an interactive terminal without a display, and the page otherwise. In an agent's chat, `/agent-board` opens the same page. If nothing is set up yet, the third command alone shows the same preview, asks `Apply these changes? [y/N]`, and on yes applies it and opens the board. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. To remove it, see [Update and uninstall](docs/GUIDE.md#update-and-uninstall). More in the [setup guide](docs/SETUP.md#install-with-npm). An agent that needs the board's status reads `agent-board --json`; the [Board JSON reference](docs/BOARD-JSON.md) describes its versioned, redacted fields.
 
 The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise. To choose one, add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to both setup lines; the board, its page and `stop` then use it. An account connected through the Claude Code plugin uses `/progress lang` instead.
 
-Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
+Scan the QR code from `npx @wenyuchiou/agent-board --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
 
 Then:
 
@@ -56,7 +56,7 @@ In the new session, open the board with its entry:
 - **I use Claude Code:** `/agent-board`
 - **I use Codex:** `$agent-board`
 - **I use Antigravity:** `/agent-board` (checked in a synthetic home, not run live yet)
-- **I use OpenCode:** `/board`
+- **I use OpenCode:** `/agent-board`
 
 To add a task of your own, write a `### title` with `- [ ] step` lines in `progress.md` (a fresh install uses `~/.agent-board/progress.md`; [the format](docs/FORMAT.md)). With the Claude Code plugin, you can instead type `+ project: title; step; step` in the pane's box, or `/progress add …` in Claude Code's chat.
 
@@ -101,7 +101,7 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI and App | `$agent-board` |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board` (checked in a synthetic home, not run live yet) |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board` (checked in a synthetic home, not run live yet) |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board` (checked in a synthetic home, not run live yet) |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board` (checked in a synthetic home, not run live yet) |
@@ -118,7 +118,7 @@ In the Claude desktop app the agent can open the board too: ask it to open the b
 | Where | Command |
 |---|---|
 | A terminal or desktop | `node "$HOME/.agent-board/agent-board.mjs"` (terminal board over SSH or without a display, page otherwise) |
-| A browser | `node "$HOME/.agent-board/agent-board.mjs" --serve` |
+| A phone on the same Wi-Fi | `node "$HOME/.agent-board/agent-board.mjs" --lan` (scan the QR code it prints) |
 | An agent reading the board | `node "$HOME/.agent-board/agent-board.mjs" --json` ([field reference](docs/BOARD-JSON.md)) |
 | Check one agent's setup | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 
@@ -247,13 +247,13 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 
 ### The board's page
 
-The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node "$HOME/.agent-board/agent-board.mjs" --serve` does the same; run it again to reopen the page. On the page you can:
+The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node "$HOME/.agent-board/agent-board.mjs"` does the same; run it again to reopen the page. (`--serve` is the old spelling, still accepted.) On the page you can:
 
 - **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
-- **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent.
+- **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent. This button is also visible directly on the card after Send. The Hidden notice offers **Show again** to restore that question.
 
-The page listens on 127.0.0.1 only, and its address carries a random key: anything on this computer that has the link can use it. It keeps running after you close the tab; **Close the board** stops it. Add `--lan` to open it on a phone on the same Wi-Fi: that link is plain HTTP and anyone who has it can use the page, so use it only on a network you trust. Details and limits are in [the guide](docs/GUIDE.md#the-boards-page).
+The page listens on 127.0.0.1 only, and its address carries a random key: anything on this computer that has the link can use it. It keeps running after you close the tab; **Close the board** stops it. Add `--lan` to the same command to open it on a phone on the same Wi-Fi: that link is plain HTTP and anyone who has it can use the page, so use it only on a network you trust. Details and limits are in [the guide](docs/GUIDE.md#the-boards-page).
 
 ## How it works
 

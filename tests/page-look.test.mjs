@@ -24,6 +24,7 @@ try {
 
 const [{ pageTokens, boardMark }, { servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
 const SANS = 'Inter,"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
+const SANS_SC = 'Inter,"PingFang SC","Noto Sans SC","Microsoft YaHei UI","Microsoft YaHei","PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
 const MARK_PATH = 'M 51 14.5 V 36 C 51 46 52 54 57.5 59 C 50.6 59 43.71 56.77 40.01 51.67 Q 34.7 55 28 55 Q 18.47 55 11.74 48.26 Q 5 41.53 5 32 Q 5 22.47 11.74 15.74 Q 18.47 9 28 9 Q 34.9 9 40.34 12.54 Q 40.74 11.48 41.61 10.61 Q 43.22 9 45.5 9 Q 47.78 9 49.39 10.61 Q 51 12.22 51 14.5 Z M 40 32 Q 40 27.03 36.49 23.51 Q 32.97 20 28 20 Q 23.03 20 19.51 23.51 Q 16 27.03 16 32 Q 16 36.97 19.51 40.49 Q 23.03 44 28 44 Q 32.97 44 36.49 40.49 Q 40 36.97 40 32 Z'
 const SHAPES = `<path class="lg-mark" d="${MARK_PATH}"/>`
@@ -87,7 +88,7 @@ const styleRules = html => {
   }
   return rules
 }
-const isTokenRule = rule => /^:root(?:$|\[data-theme="dark"\]$|:not\(\[data-theme="light"\]\)$)/.test(rule.selector)
+const isTokenRule = rule => /^:root(?:$|\[data-theme="dark"\]$|:not\(\[data-theme="light"\]\)$|:lang\(zh-Hans\)$)/.test(rule.selector)
 const valuesOf = rule => Object.fromEntries(rule.declarations.filter(item => item.property.startsWith('--')).map(item => [item.property.slice(2), item.value]))
 const tokenRules = cssRules(pageTokens())
 const lightRule = tokenRules.find(rule => rule.selector === ':root')
@@ -321,6 +322,26 @@ test('the page embeds its fonts, makes no font request and allows only font-src 
       assert.equal(sans, SANS, `${where}: the rendered page uses Inter with the CJK and system fallback stack`)
       for (const face of ['Noto Sans TC', 'Noto Sans SC', 'PingFang TC', 'PingFang SC', 'Microsoft JhengHei', 'Microsoft YaHei']) assert.ok(sans.includes(`"${face}"`), `${where}: ${face} is available for Chinese text`)
     }
+  }
+})
+
+test('a zh-CN page lists the Simplified Chinese UI fonts before the Traditional ones', () => {
+  const hans = tokenRules.find(rule => rule.selector === ':root:lang(zh-Hans)')
+  assert.ok(hans, 'pageTokens declares a Simplified Chinese font rule')
+  const sans = valuesOf(hans)['font-sans']
+  assert.ok(sans, 'the Simplified Chinese rule sets --font-sans')
+  assert.ok(sans.startsWith('Inter,'), 'the Simplified Chinese stack still starts with Inter')
+  for (const [sc, tc] of [['"PingFang SC"', '"PingFang TC"'], ['"Noto Sans SC"', '"Noto Sans TC"'], ['"Microsoft YaHei"', '"Microsoft JhengHei"']]) {
+    assert.ok(sans.includes(sc) && sans.includes(tc), `${sc} and ${tc} are both in the stack`)
+    assert.ok(sans.indexOf(sc) < sans.indexOf(tc), `${sc} comes before ${tc}`)
+  }
+  assert.equal(sans, SANS_SC, 'the Simplified Chinese stack is Inter, the SC fonts, then the rest')
+  assert.equal(light['font-sans'], SANS, 'the base stack is unchanged for en and zh-TW')
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const html = servePage(STRINGS[lang], 'n')
+    const rule = styleRules(html).find(item => item.selector === ':root:lang(zh-Hans)')
+    assert.ok(rule, `${lang}: the page ships the Simplified Chinese font rule`)
+    assert.equal(valuesOf(rule)['font-sans'], SANS_SC, `${lang}: the shipped rule lists the SC fonts first`)
   }
 })
 

@@ -3536,6 +3536,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     delays,
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: () => windowEvents.pagehide?.(),
+    restore: persisted => windowEvents.pageshow?.({ persisted }),
     sent,
     setNow: value => { clockNow = value },
     hideTab: () => { document.hidden = true; document.events.visibilitychange?.() },
@@ -3952,7 +3953,7 @@ test('every serve page action on every card kind from every agent answers with a
       projected = pressPageCell(runtime.serveModel(runtime.view(), runtime.pending(), runtime.s), cell)
       for (const failing of [false, true]) for (let index = 0; index < projected.expected; index += 1) {
         fixture.reset(cell)
-        let serverNote, serverExpected, isRefused = false
+        let serverNote, serverExpected, actionType, isRefused = false
         let refreshed = projected.model
         const dom = await pageDom(html, projected.model, { currentModel: () => refreshed, copyAllowed: !failing, post: async request => {
           fixture.enable(failing)
@@ -3961,6 +3962,7 @@ test('every serve page action on every card kind from every agent answers with a
             else {
               const items = runtime.boardItems(runtime.view(), runtime.pending(), true, true)
               const action = runtime.serveAction(items, request.body, runtime.s)
+              actionType = action.type
               isRefused = action.type === 'refuse'
               serverNote = action.type === 'refuse' ? action.note : runtime.act(action)
               serverExpected = action.type === 'refuse' ? undefined : pressExpected(runtime, action)
@@ -3988,7 +3990,12 @@ test('every serve page action on every card kind from every agent answers with a
         const results = pageHasCard(refreshed, key) ? pageCardResults(dom, key) : pageLostResults(dom, label)
         const context = `${cell.title} / ${button.textContent} / ${failing ? 'refused' : 'normal'}`
         if (serverNote !== undefined) {
-          assert.ok(results.some(node => node.textContent === serverNote), context)
+          const result = results.find(node => node.text === serverNote)
+          assert.ok(result, `${context}: the complete result line stays beside its card`)
+          // The hide result now carries an undo action, separate from its exact message.
+          const canRestore = actionType === 'hide' && !failing && !isRefused
+          assert.equal(result.textContent, serverNote + (canRestore ? runtime.s.showAgain : ''), context)
+          assert.deepEqual(pressWalk(result).filter(node => node.tag === 'button').map(node => node.textContent), canRestore ? [runtime.s.showAgain] : [], `${context}: only a successful hide offers restore`)
           // A running task keeps its Archive button; the board refuses it and says why.
           if (isRefused) assert.equal(serverNote, runtime.s.archiveLive, context)
           else if (failing) assert.ok(serverNote.includes(runtime.s.storageReadOnly), context)
@@ -4538,9 +4545,9 @@ test('the terminal board prints one final result for repeated empty actions and 
 
 test('the phone page explains how to open a new address in every language without LAN access', async () => {
   const lines = {
-    en: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
-    'zh-TW': '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
-    'zh-CN': '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
+    en: "Can't reach the board. On the computer, run agent-board --lan again and open the new address.",
+    'zh-TW': '連不上看板。請在電腦上再執行一次 agent-board --lan，再開啟新的網址。',
+    'zh-CN': '连不上看板。请在电脑上再运行一次 agent-board --lan，再打开新地址。',
   }
   for (const [lang, line] of Object.entries(lines)) {
     const source = `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS[${JSON.stringify(lang)}], 'synthetic', true))\n`
@@ -4579,6 +4586,32 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   assert.equal(gone[0].keepalive, true, 'the request outlives the closing page')
   assert.equal(gone[0].headers['x-board-token'], 'x')
   assert.equal(gone[0].headers['x-board-page'], named, 'the page that leaves is the one that was polling')
+})
+
+test('a page restored from the back/forward cache polls under a new page id (#1028)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  const polls = []
+  const dom = await pageDom(html, null, { width: 1000, getBoard: async options => { polls.push(options.headers); return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }, now: 1 }) } } })
+  await dom.settle()
+  const first = polls[0]['x-board-page']
+  dom.leave()
+  await dom.settle()
+  // A page that only went into the cache and comes back keeps its document, but the board has forgotten that id.
+  const before = polls.length
+  dom.restore(true)
+  await dom.settle()
+  assert.ok(polls.length > before, 'a restored page asks for the board at once')
+  const second = polls.at(-1)['x-board-page']
+  assert.match(second, /^[\w-]{1,64}$/)
+  assert.notEqual(second, first, 'a restored page names itself anew')
+  // A page shown again without having been cached keeps its id and asks nothing extra.
+  const same = polls.length
+  dom.restore(false)
+  await dom.settle()
+  assert.equal(polls.length, same)
 })
 
 test('a page the board says was replaced stops asking and shows one line (#265)', async () => {
@@ -4659,14 +4692,14 @@ test('the page helper flush leaves a pending press available to resolve', async 
 
 test('L5 restarted server: an old page tab disables its buttons and says how to reconnect', { timeout: 30_000 }, async () => {
   const lines = {
-    en: "Can't reach the board. Run the board with --serve again; it opens a new page, and you can close this one.",
-    'zh-TW': '連不上看板。請用 --serve 重新啟動看板；新的頁面會自動開啟，這個分頁可以關閉。',
-    'zh-CN': '连不上看板。请用 --serve 重新启动看板；新页面会自动打开，这个标签页可以关闭。',
+    en: "Can't reach the board. Run agent-board again; it opens a new page, and you can close this one.",
+    'zh-TW': '連不上看板。請再執行一次 agent-board；新的頁面會自動開啟，這個分頁可以關閉。',
+    'zh-CN': '连不上看板。请再运行一次 agent-board；新页面会自动打开，这个标签页可以关闭。',
   }
   const phoneLines = {
-    en: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
-    'zh-TW': '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
-    'zh-CN': '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
+    en: "Can't reach the board. On the computer, run agent-board --lan again and open the new address.",
+    'zh-TW': '連不上看板。請在電腦上再執行一次 agent-board --lan，再開啟新的網址。',
+    'zh-CN': '连不上看板。请在电脑上再运行一次 agent-board --lan，再打开新地址。',
   }
   for (const [lang, line] of Object.entries(lines)) {
     const board = await page('', {}, ['--lang', lang])
@@ -4825,7 +4858,7 @@ test('a press that finds the board gone keeps the typed reply', async () => {
       const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
       // A message that did not go carries Send again and Copy message under its line.
       assert.ok(pageCardResults(dom, model.asks[0].key).some(node => node.textContent.startsWith(mode === 'connected' ? words.messagesFailed : words.serveOffline)), mode)
-      assert.ok(dom.node('offline').textContent.includes('--serve'))
+      assert.ok(dom.node('offline').textContent.includes('agent-board'))
       assert.equal(dom.requests.length, 1)
       isReachable = true
       await dom.redraw(model)
@@ -4978,13 +5011,13 @@ test('--serve --quiet-board prints only the page address lines', { timeout: 40_0
     assert.equal(first.trim(), address)
     const again = await board.serve(['--quiet-board', '--idle-minutes', '20'])
     assert.deepEqual(again.trim().split('\n'), [
-      'This board is configured to close after 10 minutes unused. Reopen with --serve.',
+      'This board is configured to close after 10 minutes unused. Reopen with agent-board.',
       address,
     ])
     writeFileSync(board.path, FILE)
     const ordinary = await board.serve()
-    assert.ok(ordinary.startsWith('Progress'), ordinary.slice(0, 200))
-    assert.ok(ordinary.includes('Rate-limit the public endpoints'))
+    assert.ok(ordinary.includes('The board you can click'), ordinary.slice(0, 200))
+    assert.ok(!ordinary.includes('Rate-limit the public endpoints'), 'no text board before the address')
   } finally { await board.end([url]) }
 })
 
@@ -4997,7 +5030,7 @@ test('--serve starts the page in the background once, and the next --serve bring
     const first = await board.serve()
     url = board.urlOf(first)
     assert.ok(url, first)
-    assert.ok(first.startsWith('Progress  ● 1 waiting'), first)
+    assert.ok(first.trimStart().startsWith('The board you can click'), first)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
     const again = await board.serve()
     assert.ok(again.includes(url), again)
@@ -5117,6 +5150,30 @@ test('the board command picks text, the terminal board or the page from where it
   assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: {} }), 'page')
   assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { DISPLAY: ':0' } }), 'page')
   assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { WAYLAND_DISPLAY: 'wayland-0' } }), 'page')
+})
+
+test('over SSH, in a terminal with no browser, plain agent-board runs the live terminal board as a real process (#810)', { timeout: 30_000 }, async () => {
+  const board = serveIn()
+  let child
+  try {
+    const shim = join(board.dir, 'ssh-terminal-shim.cjs')
+    // A terminal on both ends, with no display and no BROWSER, as an SSH login has.
+    writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
+    const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '' }
+    for (const name of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[name]
+    child = spawn(process.execPath, ['--require', shim, board.script], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    let out = ''
+    child.stdout.on('data', chunk => { out += chunk })
+    for (let tries = 0; tries < 150 && !(out.includes('\u001b[?1049h') && out.includes('Forward port')); tries++) await new Promise(done => setTimeout(done, 100))
+    assert.ok(out.startsWith('\u001b[?1049h'), `it draws on the alternate screen like --watch: ${JSON.stringify(out.slice(0, 80))}`)
+    assert.ok(out.includes('Rate-limit the public endpoints'), 'the live board shows the work')
+    assert.ok(out.includes('Forward port to open the page'), 'the page is offered through a forwarded port, not opened')
+    assert.doesNotMatch(out, /Opened Agent Board|window opened/i)
+    assert.equal(child.exitCode, null, 'the live board keeps running')
+  } finally {
+    if (child && child.exitCode === null) child.kill()
+    await board.end([])
+  }
 })
 
 test('a second agent-board reuses the running page and prints the same bare URL', { timeout: 40_000 }, async () => {
@@ -11933,4 +11990,53 @@ test('a board with 100 sessions in 70 projects keeps the page load read count of
   assert.ok(scale.bytes > 600_000)
   console.log(`PAGE LOAD READS normal=${normal.reads} scale=${scale.reads}`)
   assert.equal(scale.reads, normal.reads)
+})
+
+test('a Hidden notice restores that exact question directly, including after a refresh', async () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const html = await sourcePage(lang)
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const model = cardsModel()
+    model.asks[0].unhideKey = 'hidden:synthetic-restore-key'
+    const dom = await pageDom(html, model, { post: async ({ body }) => ({ ok: true, json: async () => ({ ok: true, note: body.type === 'hide' ? words.boardHidden?.replace('\u0001', 'Publish, OK?') || 'Synthetic hidden notice' : 'Synthetic shown notice' }) }) })
+    dom.buttons().find(button => button.textContent === words.answeredHide).click()
+    await dom.flush()
+    await dom.flush()
+    const hidden = { ...model, asks: [], hidden: [{ key: 'hidden:synthetic-restore-key', project: 'Demo', agent: 'codex', task: 'Plan', text: 'Publish, OK?' }] }
+    await dom.redraw(hidden)
+    const notice = pressWalk(dom.node('board')).find(node => node.className?.startsWith('press-result') && node.textContent.includes('hidden notice'))
+    assert.ok(notice, 'the hide result remains available')
+    const undo = pressWalk(notice).find(node => node.tag === 'button' && node.textContent === words.showAgain)
+    assert.ok(undo, 'Show again is on the Hidden notice itself')
+    undo.click()
+    await dom.flush()
+    await dom.flush()
+    assert.deepEqual(dom.requests.map(one => [one.body.key, one.body.type]), [['ask', 'hide'], ['hidden:synthetic-restore-key', 'unhide']])
+  }
+})
+
+test('after Send the hide button named by each README is visible without More', async () => {
+  const isVisible = node => {
+    for (let one = node; one; one = one.parentNode) if (one.hidden || one.inert || String(one.className || '').split(' ').includes('gone')) return false
+    return true
+  }
+  for (const [lang, readme] of [['en', 'README.md'], ['zh-TW', 'README.zh-TW.md'], ['zh-CN', 'README.zh-CN.md']]) {
+    const html = await sourcePage(lang)
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const model = cardsModel()
+    model.asks[0].send = 'send'
+    const dom = await pageDom(html, model, { confirm: () => true, post: async () => ({ ok: true, json: async () => ({ ok: true, note: 'Synthetic sent notice' }) }) })
+    const send = dom.buttons().find(button => button.textContent === words.pgSendReply.replace('\u0001', 'Yes'))
+    assert.ok(send)
+    send.click()
+    await dom.flush()
+    await dom.flush()
+    const card = pressWalk(dom.node('board')).find(node => node.getAttribute('data-ref-key') === 'ask')
+    const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
+    assert.ok(hide, 'the documented hide button is visible after sending')
+    assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), readme)
+    hide.click()
+    await dom.flush()
+    assert.equal(dom.requests.at(-1).body.type, 'hide')
+  }
 })

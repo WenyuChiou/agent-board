@@ -6,9 +6,9 @@ import { askOf } from '../hooks/ask'
 import { RULES } from '../hooks/rule'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor } from '../hooks/board'
 import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { connectDataRoots, connectRecordPath, recoveryUnreadableCode } from '../hooks/connect-pure'
-import { boardRun } from '../hooks/board-commands'
+import { boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
 import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
@@ -2856,11 +2856,11 @@ test('Hermes Agent’s skill from an earlier release is still the plugin’s own
 test('each agent gets a board command in the form it reads, and a missing reporter never makes a hook exit 2', () => {
   const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw', board: '/h/.claude/agent-board.mjs', s: STRINGS.en }
   const files = Object.fromEntries(boardCommands(ctx).map(hook => [hook.file, hook]))
-  const gemini = String(files['/h/.gemini/commands/board.toml']?.edit('', false))
+  const gemini = String(files['/h/.gemini/commands/agent-board.toml']?.edit('', false))
   // A TOML literal string, so a Windows path's backslashes stay as they are.
   // Both invoke the no-flag command, and their model sees that exact command path beside the output.
   expect(JSON.parse(/^prompt = (.*)$/m.exec(gemini)?.[1] ?? 'null')).toBe(`${STRINGS.en.boardCommandPrompt}\n\n\`node "/h/.claude/agent-board.mjs"\`\n\n!{node "/h/.claude/agent-board.mjs"}\n`)
-  expect(String(files['/h/.config/opencode/commands/board.md']?.edit('', false))).toContain('!`node "/h/.claude/agent-board.mjs"`')
+  expect(String(files['/h/.config/opencode/commands/agent-board.md']?.edit('', false))).toContain('!`node "/h/.claude/agent-board.mjs"`')
   const skill = String(files['/h/.agents/skills/agent-board/SKILL.md']?.edit('', false))
   // The description has a colon in it; quoted, it stays one YAML value.
   expect(skill.startsWith('---\nname: agent-board\ndescription: "Agent Board: what every agent is doing, and what waits on you"\n---\n')).toBe(true)
@@ -2878,6 +2878,46 @@ test('each agent gets a board command in the form it reads, and a missing report
   expect(reportCommand('/h/.claude/progress-report.sh', 'gemini', 'turn', false)).toBe("sh '/h/.claude/progress-report.sh' gemini turn || true")
 })
 
+test('the old /board command files are retired only when they are exactly what a release wrote', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw', board: '/h/.claude/agent-board.mjs', s: STRINGS.en }
+  const files = Object.fromEntries(boardCommands(ctx).map(hook => [hook.file, hook]))
+  for (const [now, old] of [['/h/.gemini/commands/agent-board.toml', '/h/.gemini/commands/board.toml'], ['/h/.config/opencode/commands/agent-board.md', '/h/.config/opencode/commands/board.md']] as const) {
+    const text = String(files[now]?.edit('', false))
+    const retired = files[old]
+    expect(retired?.label).toBe('')
+    for (const remove of [false, true]) {
+      expect(retired?.edit(text, remove)).toBe(DELETE)
+      // A file the person changed, even by a line, is theirs: left as it is, never a collision that stops the connect.
+      expect(retired?.edit(`${text}\nMy own line\n`, remove)).toBe(`${text}\nMy own line\n`)
+    }
+    expect(retired?.edit('', false)).toBeNull()
+  }
+})
+
+test('the skill description 0.24.2 installed is still known as ours on upgrade, in every language', () => {
+  // Written out, not read from STRINGS: a later change to the wording must not strand 0.24.2's installs.
+  const released = [
+    'Open the local interactive board and track real task progress for the currently connected session.',
+    '開啟本機互動看板，追蹤目前已接線 session 的實際任務進度。',
+    '打开本地交互看板，跟踪当前已接线 session 的实际任务进度。',
+  ]
+  for (const description of released) {
+    expect(isInstallerSkill(`---\nname: agent-board\ndescription: ${JSON.stringify(description)}\n---\n\nRun the board.\n`)).toBe(true)
+  }
+  expect(isInstallerSkill('---\nname: agent-board\ndescription: "My own board skill"\n---\n\nRun the board.\n')).toBe(false)
+})
+
+test('a typed /board is still taken for a board request on an old install, though no text offers it any more', () => {
+  const words = boardRequestWords(Object.values(STRINGS))
+  for (const prompt of ['/board', ' /board \n', '/agent-board', '$agent-board']) expect(isBoardRequest({ prompt }, words)).toBe(true)
+  expect(isBoardRequest({ prompt: '/boards' }, words)).toBe(false)
+  for (const s of Object.values(STRINGS)) {
+    for (const text of [s.boardCommandPrompt, s.boardSkillPrompt('node "/h/agent-board.mjs"'), s.boardChatSkillPrompt('node "/h/agent-board.mjs"'), s.localAgentSkill('node "/h/agent-board.mjs"')]) {
+      expect(/(^|[^-\w])\/board\b/.test(text)).toBe(false)
+    }
+  }
+})
+
 test('OpenCode generated paths use the exact Windows config root with spaces and non-ASCII', () => {
   const root = 'C:\\Agent Config\\設定\\OpenCode'
   const ctx = { home: 'C:\\Users\\me', sep: '\\', isWindows: true, script: 'C:\\board\\progress-report.ps1', inbox: 'C:\\board\\progress-inbox', codexHome: 'C:\\Users\\me\\.codex', grokHome: 'C:\\Users\\me\\.grok', hermesHome: 'C:\\Users\\me\\.hermes', openclawHome: 'C:\\Users\\me\\.openclaw', opencodeHome: root, board: 'C:\\board\\agent-board.mjs' }
@@ -2887,7 +2927,7 @@ test('OpenCode generated paths use the exact Windows config root with spaces and
   expect(plugin?.old).toBe(`${root}\\plugin\\progress-pane.js`)
   const command = boardCommands(ctx).find(hook => hook.agent === 'opencode')
   expect(command?.dir).toBe(root)
-  expect(command?.file).toBe(`${root}\\commands\\board.md`)
+  expect(command?.file).toBe(`${root}\\commands\\agent-board.md`)
   expect(boardCommands(ctx).find(hook => hook.agent === 'skills')?.dirs).toContain(root)
 })
 
@@ -2897,7 +2937,9 @@ test('every legacy board skill uses the literal-path command and adopts only exa
   const command = boardRun(board)
   const hooks = boardCommands(ctx)
   expect(command).not.toContain(board)
-  for (const hook of hooks) {
+  // The old /board files only come out: they write nothing.
+  const oldCommand = (file: string): boolean => /\/commands\/board\.(?:toml|md)$/.test(file)
+  for (const hook of hooks.filter(one => !oldCommand(one.file))) {
     const current = String(hook.edit('', false))
     const content = hook.agent === 'gemini' ? JSON.parse(/^prompt = (.*)$/m.exec(current)?.[1] ?? 'null') : current
     expect(content).toContain(command)
@@ -2908,6 +2950,12 @@ test('every legacy board skill uses the literal-path command and adopts only exa
       const old = template.split(RELEASE_PATHS.board).join(board)
       expect(hook?.edit(old, false)).toBe(hook?.edit('', false))
       expect(hook?.edit(old + '\n# Personal edit\n', false)).toBe(COLLISION)
+      // What 0.20.5 wrote as /board is still known by its bytes, so the retire rule takes it away.
+      const retired = kind === 'skill' ? undefined : hooks.find(one => one.agent === agent && oldCommand(one.file))
+      if (retired !== undefined) {
+        expect(retired.edit(old, false)).toBe(DELETE)
+        expect(retired.edit(old + '\n# Personal edit\n', false)).toBe(old + '\n# Personal edit\n')
+      }
     }
   }
 })
@@ -4346,7 +4394,9 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(boardKey(emptyBoardState, 'u', items, STRINGS.en).action).toEqual({ type: 'unhide', key: null })
   const model = serveModel(view, [], STRINGS.en)
   expect(model.asks.find(ask => ask.agent === 'codex')?.canHide).toBe(true)
+  expect(model.asks.find(ask => ask.agent === 'codex')?.unhideKey).toBe(`hidden:${key}`)
   expect(model.asks.find(ask => ask.project === 'docs-site')?.canHide).toBe(false)
+  expect(model.asks.find(ask => ask.project === 'docs-site')?.unhideKey).toBeUndefined()
   const press = (type: string, on: string) => serveAction(items, { key: on, type, text: '', session: '' }, STRINGS.en)
   const codexKey = items[codex]?.key ?? ''
   expect(press('hide', codexKey)).toEqual({ type: 'hide', key, text: 'Per-key limit' })
@@ -4362,8 +4412,8 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(press('unhide', codexKey)).toEqual({ type: 'refuse', note: STRINGS.en.pressNothing })
   // The page's script and words carry the buttons.
   const page = servePage(STRINGS.en, 'n')
-  expect(page).toContain("button(w('answeredHide'), function () { act(key, 'hide'); })")
-  expect(page).toContain("button(w('pgAnswered'), function () { act(key, 'hide'); }, 'primary')")
+  expect(page).toContain("button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); })")
+  expect(page).toContain("button(w('pgAnswered'), function () { hideQuestion(key, ask.unhideKey); }, 'primary')")
   expect(page).toContain("act(one.key, 'unhide')")
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
 })
