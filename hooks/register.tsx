@@ -136,6 +136,7 @@ import {
 import type { AgentTurn } from './inbox'
 import { keepRecent, liveToldKeys, remindersOf } from './remind'
 import { oldMonthFiles, OLD_MONTHS_FOLDER } from './old-months'
+import { makeFolderCommand, moveFileCommand } from './old-months-run'
 import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, doneRecord, inboxDropped, isExpiredRecord, isSameWrite, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, readMonthParts, RETENTION, sizeWarnings, storageDetails, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, STORE_FILE, unseenFailedInbox } from './retention'
 import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
@@ -3624,19 +3625,13 @@ const moveOldMonths = async ($: EngineInterface): Promise<void> => {
   if (!names.some(name => oldMonthFiles(stem, [name], [], at).length > 0)) return
   const folder = `${dir}${sepOf(dir)}${OLD_MONTHS_FOLDER}`
   const taken = (await $.fs.list(folder).catch(() => [])).map(entry => entry.name)
+  const moving = oldMonthFiles(stem, names, taken, at)
+  if (moving.length === 0) return
   const isWin = await isWindows($, path)
-  for (const name of oldMonthFiles(stem, names, taken, at)) {
-    const from = `${dir}${sepOf(dir)}${name}`
-    const to = `${folder}${sepOf(dir)}${name}`
-    const made = await $.process.run(isWin
-      ? ['powershell', '-NoProfile', '-Command', `New-Item -ItemType Directory -Force -LiteralPath ${psQuote(folder)} | Out-Null`]
-      : ['mkdir', '-p', folder], { timeoutMs: 10000 }).catch(() => null)
-    if (made === null || made.exitCode !== 0) continue
-    // `mv -n` skips a name that appeared meanwhile; a failed move leaves the file for the next pass.
-    await $.process.run(isWin
-      ? ['powershell', '-NoProfile', '-Command', `Move-Item -LiteralPath ${psQuote(from)} -Destination ${psQuote(to)} -ErrorAction Stop`]
-      : ['mv', '-n', from, to], { timeoutMs: 10000 }).catch(() => null)
-  }
+  const made = await $.process.run(makeFolderCommand(isWin, folder), { timeoutMs: 10000 }).catch(() => null)
+  if (made === null || made.exitCode !== 0) return
+  // A failed move leaves the file for the next pass.
+  for (const name of moving) await $.process.run(moveFileCommand(isWin, `${dir}${sepOf(dir)}${name}`, `${folder}${sepOf(dir)}${name}`), { timeoutMs: 10000 }).catch(() => null)
 }
 
 // Files that the board's own writes leave behind: the store's cut-off temporary copies and the

@@ -21,6 +21,7 @@ import { pickSurface, AGENT_ENV_VARS } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
+import { makeFolderCommand, moveFileCommand } from '../hooks/old-months-run.ts'
 import { liveBoardScript, pageDonePath } from '../hooks/live-page.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
@@ -11559,6 +11560,29 @@ test('--tidy moves archive and journal months older than 3 months to the archive
     for (const one of kept) assert.equal(readFileSync(join(f.dir, one), 'utf8'), `synthetic ${one}\n`)
     assert.equal(readdirSync(join(f.dir, 'archives')).length, 3)
   })
+})
+
+test('the pane makes the archives folder and moves an old month with this system’s own commands, never over a taken name, in a folder named with brackets and a quote', { timeout: 60_000 }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-board [months] o'k-"))
+  try {
+    const isWin = process.platform === 'win32'
+    const run = argv => spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 30_000 })
+    const folder = join(dir, 'archives')
+    // A second run finds the folder there and still succeeds.
+    for (let n = 0; n < 2; n++) assert.equal(run(makeFolderCommand(isWin, folder)).status, 0)
+    assert.ok(statSync(folder).isDirectory())
+    const from = join(dir, 'progress-archive-2026-05.md')
+    writeFileSync(from, '## synthetic May\n')
+    assert.equal(run(moveFileCommand(isWin, from, join(folder, 'progress-archive-2026-05.md'))).status, 0)
+    assert.equal(existsSync(from), false)
+    assert.equal(readFileSync(join(folder, 'progress-archive-2026-05.md'), 'utf8'), '## synthetic May\n')
+    writeFileSync(from, '## synthetic May again\n')
+    run(moveFileCommand(isWin, from, join(folder, 'progress-archive-2026-05.md')))
+    assert.equal(readFileSync(from, 'utf8'), '## synthetic May again\n')
+    assert.equal(readFileSync(join(folder, 'progress-archive-2026-05.md'), 'utf8'), '## synthetic May\n')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 const pageLoadReads = async (sessions, projects, taskBytes) => {
