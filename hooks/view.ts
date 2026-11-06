@@ -1291,7 +1291,12 @@ export const buildView = (
   const aged = (item: WaitingItem): WaitingItem => {
     const record = recordOf.get(item.questionId ?? '')
     const age = questionAge(firstSeen(item), now)
-    return { ...item, ageStage: age.stage, when: age.age === null ? s.questionAgeUnknown : relativeTime(firstSeen(item), now, s), ...(item.at === undefined && record !== undefined ? { at: record.firstObserved } : {}), dir: item.dir ?? recordFolder(record) ?? null }
+    // The page cannot have seen a question before its block's last write, so a question is never
+    // shown as newer than the block's own time (the same cap the Older list uses below). The
+    // aging stage keeps reading the ledger's first sighting.
+    const first = firstSeen(item)
+    const askedAt = item.at !== undefined && item.at > 0 && item.at < first ? item.at : first
+    return { ...item, ageStage: age.stage, when: age.age === null ? s.questionAgeUnknown : relativeTime(askedAt, now, s), ...(item.at === undefined && record !== undefined ? { at: record.firstObserved } : {}), dir: item.dir ?? recordFolder(record) ?? null }
   }
   const all = [...own, ...waiting, ...inbox].filter(item => !isResolved(item)).map(aged).sort(
     (a, b) => whereRank(a) - whereRank(b) || askRank(a.kind) - askRank(b.kind),
