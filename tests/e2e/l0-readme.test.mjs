@@ -38,7 +38,7 @@ const COMMAND = ['npx @wenyuchiou/agent-board', 'setup --apply']
 // The ten integrations the header names, in the support matrix's order (#407).
 const INTEGRATIONS = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode', 'Cursor', 'Grok Build', 'Muse Code', 'Hermes Agent', 'OpenClaw', 'DeepSeek Harness']
 // Each agent's board command, and the agents whose command is not run live yet.
-const BOARD_COMMANDS = { 'Claude Code': '/progress', Codex: '$agent-board', OpenCode: '/board' }
+const BOARD_COMMANDS = { 'Claude Code': '/progress', Codex: '$agent-board' }
 const boardCommand = agent => BOARD_COMMANDS[agent] ?? '/agent-board'
 // A live run is recorded in docs/parity-matrix.json with its date, host version and surface (#466).
 // An agent leaves this list in the same change that records its run.
@@ -46,15 +46,15 @@ const NOT_RUN_LIVE = ['Antigravity', 'Cursor', 'Grok Build', 'Muse Code', 'DeepS
 // The agents whose only check is the synthetic home: their row in the table of checks has no host version or record.
 const SYNTHETIC_ONLY = ['Cursor', 'Muse Code']
 // The setup and board commands still offered after #865 made the page the default.
-const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/board', '/agent-board', 'node "$HOME/.agent-board/agent-board.mjs"', 'node "$HOME/.agent-board/agent-board.mjs" --serve', 'node "$HOME/.agent-board/agent-board.mjs" --json', 'node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']
+const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/agent-board', 'node "$HOME/.agent-board/agent-board.mjs"', 'node "$HOME/.agent-board/agent-board.mjs" --lan', 'node "$HOME/.agent-board/agent-board.mjs" --json', 'node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']
 // The code each surface row holds: terminal or desktop, browser, agent read, one agent's setup.
-const SURFACE_COMMANDS = [['node "$HOME/.agent-board/agent-board.mjs"'], ['node "$HOME/.agent-board/agent-board.mjs" --serve'], ['node "$HOME/.agent-board/agent-board.mjs" --json'], ['node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']]
+const SURFACE_COMMANDS = [['node "$HOME/.agent-board/agent-board.mjs"'], ['node "$HOME/.agent-board/agent-board.mjs" --lan'], ['node "$HOME/.agent-board/agent-board.mjs" --json'], ['node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']]
 // Per language: the strip's label, the two command subsections, the caveat on a command
 // not run live yet, the board's page heading, and how each surface row starts.
 const WORDS = {
-  en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', checked: 'How each agent was checked', old: ['Untested'], notLive: '(checked in a synthetic home, not run live yet)', page: "The board's page", surfaces: ['A terminal or desktop', 'A browser', 'An agent reading the board', "Check one agent's setup"] },
-  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', checked: '各個 agent 是怎麼驗證的', old: ['未驗證', '還沒驗證'], notLive: '（在測試環境檢查過，還沒實機執行）', page: '看板的網頁', surfaces: ['終端機或桌面', '瀏覽器', 'Agent 讀取看板', '檢查某個 agent 的設定'] },
-  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', checked: '每个 agent 是怎么验证的', old: ['未验证', '还没验证'], notLive: '（在测试环境检查过，还没实机运行）', page: '看板的网页', surfaces: ['终端或桌面', '浏览器', 'Agent 读取看板', '检查某个 agent 的设置'] },
+  en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', checked: 'How each agent was checked', old: ['Untested'], notLive: '(checked in a synthetic home, not run live yet)', page: "The board's page", surfaces: ['A terminal or desktop', 'A phone on the same Wi-Fi', 'An agent reading the board', "Check one agent's setup"] },
+  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', checked: '各個 agent 是怎麼驗證的', old: ['未驗證', '還沒驗證'], notLive: '（在測試環境檢查過，還沒實機執行）', page: '看板的網頁', surfaces: ['終端機或桌面', '同一個 Wi-Fi 的手機', 'Agent 讀取看板', '檢查某個 agent 的設定'] },
+  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', checked: '每个 agent 是怎么验证的', old: ['未验证', '还没验证'], notLive: '（在测试环境检查过，还没实机运行）', page: '看板的网页', surfaces: ['终端或桌面', '同一个 Wi-Fi 的手机', 'Agent 读取看板', '检查某个 agent 的设置'] },
 }
 // A piece of text as a pattern that matches it and nothing else.
 const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -93,7 +93,7 @@ const groupsAround = (svg, at) => {
 }
 
 describe('L0 discover and install from the README', () => {
-  test('L0 README: each README opens with its title, tagline, badges and cover, and its Quick start holds the install commands, --serve --lan with its QR code and an I-use start for each main agent', () => {
+  test('L0 README: each README opens with its title, tagline, badges and cover, and its Quick start holds the install commands, --lan with its QR code and an I-use start for each main agent', () => {
     const agents = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode']
     const taglines = { en: 'See what every AI coding agent is doing, and answer the one that needs you, from one board.', 'zh-TW': '每個 AI coding agent 在做什麼，一個看板看完；哪個在等你，就在那裡回它。', 'zh-CN': '每个 AI coding agent 在做什么，一个看板看完；哪个在等你，就在那里回它。' }
     const labels = { en: agent => `I use ${agent}:`, 'zh-TW': agent => `我用 ${agent}：`, 'zh-CN': agent => `我用 ${agent}：` }
@@ -116,7 +116,7 @@ describe('L0 discover and install from the README', () => {
       const node = first.indexOf('Node.js 22')
       const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board setup\r?\nnpx @wenyuchiou\/agent-board setup --apply\r?\nnpx @wenyuchiou\/agent-board)\r?\n```/.exec(first)
       assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then all three ordered install commands`)
-      const lanLines = first.split('\n').filter(line => line.includes('npx @wenyuchiou/agent-board --serve --lan'))
+      const lanLines = first.split('\n').filter(line => line.includes('npx @wenyuchiou/agent-board --lan'))
       assert.equal(lanLines.length, 1, `${name}: one phone route in Quick start`)
       const lan = lanLines[0]
       assert.ok(first.indexOf(lan) > install.index + install[0].length, `${name}: LAN follows the install commands`)
@@ -556,7 +556,7 @@ describe('L0 discover and install from the README', () => {
       // One row per surface, in order, each beside its own board script command, so two swapped
       // commands fail.
       const surfaces = rows(anywhere, '|').slice(2)
-      assert.equal(surfaces.length, SURFACE_COMMANDS.length, `${name}: terminal or desktop, browser, agent read and one agent's setup`)
+      assert.equal(surfaces.length, SURFACE_COMMANDS.length, `${name}: terminal or desktop, phone, agent read and one agent's setup`)
       surfaces.forEach(([where, command], i) => {
         assert.ok(where.startsWith(words.surfaces[i]), `${name}: surface row ${i + 1} is "${words.surfaces[i]}"`)
         assert.deepEqual(codeSpans(command), SURFACE_COMMANDS[i], `${name}: "${words.surfaces[i]}" runs ${SURFACE_COMMANDS[i][0]}`)

@@ -37,11 +37,11 @@ npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入；第三行在 SSH 或沒有圖形顯示的互動式終端機開即時終端看板，其他情況開網頁。在 agent 對話中，輸入 `/agent-board` 打開同一個網頁。若要停止看板服務，執行 `npx @wenyuchiou/agent-board stop`。想用較短的 `agent-board` 指令，先執行一次 `npm install -g @wenyuchiou/agent-board`。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`。若要移除，見[更新與移除](docs/GUIDE.zh-TW.md#更新與移除)。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要讀看板狀態時使用 `agent-board --json`；版本化且已遮蔽私密資料的欄位見 [Board JSON 說明](docs/BOARD-JSON.md)（英文）。
+第一行會找出這台電腦上裝了哪些 agent，列出設定會改什麼，不會寫入任何東西。第二行才真的寫入；第三行在 SSH 或沒有圖形顯示的互動式終端機開即時終端看板，其他情況開網頁。在 agent 對話中，輸入 `/agent-board` 打開同一個網頁。若還沒設定任何東西，單獨跑第三行就會顯示同樣的預覽，問一次 `Apply these changes? [y/N]`，答 yes 就套用並打開看板。若要停止看板服務，執行 `npx @wenyuchiou/agent-board stop`。想用較短的 `agent-board` 指令，先執行一次 `npm install -g @wenyuchiou/agent-board`。只想設定其中一個 agent，就加上 `--agent` 和它的名字，例如 `--agent codex`。若要移除，見[更新與移除](docs/GUIDE.zh-TW.md#更新與移除)。更多細節見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要讀看板狀態時使用 `agent-board --json`；版本化且已遮蔽私密資料的欄位見 [Board JSON 說明](docs/BOARD-JSON.md)（英文）。
 
 看板語言跟著系統設定：系統是繁體或簡體中文就用中文，其他用英文。要自己指定，在兩行 setup 都加上 `--lang zh-TW`（或 `zh-CN`、`en`），之後看板、網頁和 `stop` 都會用這個語言。透過 Claude Code 外掛接上的帳號，改用 `/progress lang`。
 
-用同一個 Wi-Fi 的手機，掃 `npx @wenyuchiou/agent-board --serve --lan` 印出的 QR 碼。只在信得過的網路上用：這個連結沒有加密，拿到的人都能打開網頁。細節見[看板的網頁](#看板的網頁)。
+用同一個 Wi-Fi 的手機，掃 `npx @wenyuchiou/agent-board --lan` 印出的 QR 碼。只在信得過的網路上用：這個連結沒有加密，拿到的人都能打開網頁。細節見[看板的網頁](#看板的網頁)。
 
 接著：
 
@@ -56,7 +56,7 @@ npx @wenyuchiou/agent-board
 - **我用 Claude Code：** `/agent-board`
 - **我用 Codex：** `$agent-board`
 - **我用 Antigravity：** `/agent-board`（在測試環境檢查過，還沒實機執行）
-- **我用 OpenCode：** `/board`
+- **我用 OpenCode：** `/agent-board`
 
 要加自己的任務，在 `progress.md` 裡寫一個 `### 標題`，下面每個步驟寫一行 `- [ ] 步驟`（全新安裝用 `~/.agent-board/progress.md`；[檔案格式](docs/FORMAT.md)，英文）。裝了 Claude Code 外掛時，也可以在面板的輸入框打 `+ 專案：標題；步驟；步驟`，或在 Claude Code 的對話裡打 `/progress add …`。
 
@@ -101,7 +101,7 @@ CLI、桌面 App、IDE 的實際 hook 事件分開驗收；安裝了檔案、傳
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI 與 App | `$agent-board` |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（在測試環境檢查過，還沒實機執行） |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board`（在測試環境檢查過，還沒實機執行） |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（在測試環境檢查過，還沒實機執行） |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board`（在測試環境檢查過，還沒實機執行） |
@@ -118,7 +118,7 @@ CLI、桌面 App、IDE 的實際 hook 事件分開驗收；安裝了檔案、傳
 | 在哪裡 | 指令 |
 |---|---|
 | 終端機或桌面 | `node "$HOME/.agent-board/agent-board.mjs"`（SSH 或沒有圖形顯示時開終端看板，其他情況開網頁） |
-| 瀏覽器 | `node "$HOME/.agent-board/agent-board.mjs" --serve` |
+| 同一個 Wi-Fi 的手機 | `node "$HOME/.agent-board/agent-board.mjs" --lan`（掃它印出的 QR 碼） |
 | Agent 讀取看板 | `node "$HOME/.agent-board/agent-board.mjs" --json`（[欄位說明](docs/BOARD-JSON.md)） |
 | 檢查某個 agent 的設定 | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 
@@ -247,13 +247,13 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 
 ### 看板的網頁
 
-上面的看板指令會在瀏覽器打開看板網頁（在聊天軟體裡則只印出純文字，沒有連結）。在任何終端機跑 `node "$HOME/.agent-board/agent-board.mjs" --serve` 也一樣，再跑一次就會重新打開網頁。在網頁上可以：
+上面的看板指令會在瀏覽器打開看板網頁（在聊天軟體裡則只印出純文字，沒有連結）。在任何終端機跑 `node "$HOME/.agent-board/agent-board.mjs"` 也一樣，再跑一次就會重新打開網頁。（`--serve` 是舊寫法，仍可使用。）在網頁上可以：
 
 - **回覆**問題：開了訊息功能、對話也連上時就**傳送**，否則**複製**回覆。LAN 網頁沒有訊息功能。
 - **勾掉**下一步、**封存**一件工作，或按**現在封存**收走所有做完的。
 - **已回覆，先隱藏**：已在原本對話回過的問題，只在這台電腦上隱藏，直到那個對話問新的問題；不會送出任何東西。送出後，卡片上也會直接顯示這個按鈕。隱藏提示提供**重新顯示**，可還原該問題。
 
-網頁只監聽 127.0.0.1，網址帶一組隨機金鑰：這台電腦上拿到連結的程式都能用。關掉分頁它還在跑，按**關閉看板**才停。加上 `--lan` 就能用同一個 Wi-Fi 的手機打開：那條連結走沒加密的 HTTP，拿到的人都能用這個網頁，所以只在信得過的網路上用。細節和限制見[使用指南](docs/GUIDE.zh-TW.md#看板的網頁)。
+網頁只監聽 127.0.0.1，網址帶一組隨機金鑰：這台電腦上拿到連結的程式都能用。關掉分頁它還在跑，按**關閉看板**才停。在同一個指令加上 `--lan` 就能用同一個 Wi-Fi 的手機打開：那條連結走沒加密的 HTTP，拿到的人都能用這個網頁，所以只在信得過的網路上用。細節和限制見[使用指南](docs/GUIDE.zh-TW.md#看板的網頁)。
 
 ## 怎麼運作
 
