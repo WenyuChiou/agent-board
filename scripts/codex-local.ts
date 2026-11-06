@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, planReport, putCodexBlock, sessionTitle } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
-import { agentHooks, BOARD_FOR, readConfig } from '../hooks/connect-pure'
+import { agentHooks, BOARD_FOR, isReleased, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { parseProgress, STALE_MS } from '../hooks/parse'
@@ -270,6 +270,8 @@ type LocalPlan = {
   // Shared files this removal leaves alone, and the other agents still using each one.
   // Only set on a removal preview/apply while another agent's install record remains.
   keptShared?: { file: string; usedBy: string[] }[]
+  // An old /board command file the person edited: setup leaves it and names it here (#868).
+  keptEdited?: string[]
   applied?: boolean
 }
 
@@ -1149,8 +1151,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (agent === 'hermes') files[join(flag('--hermes-dir') ?? (process.env.HERMES_HOME || join(home, '.hermes')), 'skills', 'agent-board', 'SKILL.md')] = skillText
   if (agent === 'antigravity') files[antigravitySkill] = skillText
-  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)} --serve}\n'''\n`
-  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)} --serve\`\n`
+  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)}}\n'''\n`
+  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'agent-board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)}\`\n`
+  // 0.24.2 and earlier wrote /board here. The command is now /agent-board, so setup takes the old file
+  // away when it is still the bytes setup or a release wrote, and leaves one the person edited (#868).
+  const retired = agent === 'gemini' ? [join(home, '.gemini', 'commands', 'board.toml')] : agent === 'opencode' ? [join(opencodeDir, 'commands', 'board.md')] : []
+  const keptEdited: string[] = []
   const isReleasedBoard = (text: string): boolean => {
     const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))
     return RELEASED.some(release => release.board.includes(bodyHash))
@@ -1169,9 +1175,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (existing !== null && !owned && existing !== desired) conflicts.push(file)
     else if (remove ? owned : existing !== desired) changes.push({ file, action: remove ? 'remove' : existing === null ? 'create' : 'update' })
   }
+  for (const file of retired) {
+    const existing = initial(file)
+    if (existing === null) {
+      if (remove && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
+    } else if (hash(existing) === manifest.files[file] || [script, ...legacyBoards].some(board => isReleased(agent === 'gemini' ? 'gemini' : 'opencode', existing, { board }))) changes.push({ file, action: 'remove' })
+    else keptEdited.push(file)
+  }
   // A host-directory override must not strand an old active plugin outside the
   // new ownership record. Remove the old scoped install before changing roots.
-  for (const file of Object.keys(manifest.files)) if (!(file in files)) conflicts.push(file)
+  for (const file of Object.keys(manifest.files)) if (!(file in files) && !retired.includes(file)) conflicts.push(file)
   const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
   nextConfigText ??= `${JSON.stringify(nextConfig, null, 2)}\n`
   if (hasNativeConfig && (!remove || Object.keys(manifest.groups).length)) {
@@ -1235,7 +1248,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.
@@ -1329,7 +1342,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       else if (change.file === progress) {
         mkdirSync(dirname(progress), { recursive: true })
         writeFileSync(progress, '', { flag: 'wx', mode: 0o600 })
-      } else if (remove) unlinkSync(change.file)
+      } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
       else atomic(change.file, files[change.file] ?? '')
     }
     if (remove) {

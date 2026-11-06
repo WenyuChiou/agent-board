@@ -225,7 +225,7 @@ test('agent-board --help works in a scratch home with nothing installed and writ
     const result = f.run(pkg, args)
     success(result)
     assert.ok(result.stdout.includes('agent-board setup --apply'))
-    assert.ok(result.stdout.includes('--serve'))
+    assert.ok(!result.stdout.includes('--serve'), 'plain help does not name the old --serve')
     assert.ok(result.stdout.includes(`Without installing: npx ${manifest.name} <the same options>`))
     assert.equal(result.stderr, '')
   }
@@ -398,7 +398,7 @@ test('an unknown word prints the usage hint and exits 2', () => fixture(f => {
   assert.ifError(result.error)
   assert.equal(result.status, 2)
   assert.equal(result.stdout, '')
-  assert.equal(result.stderr, 'agent-board: unknown command "serve". The board takes options such as --serve; run agent-board --help.\n')
+  assert.equal(result.stderr, 'agent-board: unknown command "serve". The board takes options such as --print or --json; run agent-board --help.\n')
   assert.deepEqual(filesUnder(f.home), [])
 }))
 

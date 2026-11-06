@@ -37,11 +37,11 @@ npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，不写入任何东西；第二行才真正写入；第三行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要卸载，见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
+第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，不写入任何东西；第二行才真正写入；第三行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若还没设置任何东西，单独运行第三行就会显示同样的预览，问一次 `Apply these changes? [y/N]`，答 yes 就应用并打开看板。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要卸载，见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
 
 看板语言跟随系统设置：系统是繁体或简体中文就用中文，其他用英文。要自己指定，在两行 setup 都加上 `--lang zh-CN`（或 `zh-TW`、`en`），之后看板、网页和 `stop` 都会用这个语言。通过 Claude Code 插件接上的账号，改用 `/progress lang`。
 
-用同一个 Wi-Fi 的手机，扫 `npx @wenyuchiou/agent-board --serve --lan` 印出的二维码。只在信得过的网络上用：这个链接没有加密，拿到的人都能打开网页。详情见[看板的网页](#看板的网页)。
+用同一个 Wi-Fi 的手机，扫 `npx @wenyuchiou/agent-board --lan` 印出的二维码。只在信得过的网络上用：这个链接没有加密，拿到的人都能打开网页。详情见[看板的网页](#看板的网页)。
 
 然后：
 
@@ -56,7 +56,7 @@ npx @wenyuchiou/agent-board
 - **我用 Claude Code：** `/agent-board`
 - **我用 Codex：** `$agent-board`
 - **我用 Antigravity：** `/agent-board`（在测试环境检查过，还没实机运行）
-- **我用 OpenCode：** `/board`
+- **我用 OpenCode：** `/agent-board`
 
 要加自己的任务，在 `progress.md` 里写一个 `### 标题`，下面每个步骤写一行 `- [ ] 步骤`（全新安装用 `~/.agent-board/progress.md`；[文件格式](docs/FORMAT.md)，英文）。装了 Claude Code 插件时，也可以在面板的输入框打 `+ 项目：标题；步骤；步骤`，或在 Claude Code 的对话里打 `/progress add …`。
 
@@ -101,7 +101,7 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI 和 App | `$agent-board` |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（在测试环境检查过，还没实机运行） |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board`（在测试环境检查过，还没实机运行） |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（在测试环境检查过，还没实机运行） |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board`（在测试环境检查过，还没实机运行） |
@@ -118,7 +118,7 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | 在哪里 | 命令 |
 |---|---|
 | 终端或桌面 | `node "$HOME/.agent-board/agent-board.mjs"`（SSH 或没有图形显示时打开终端看板，其他情况打开网页） |
-| 浏览器 | `node "$HOME/.agent-board/agent-board.mjs" --serve` |
+| 同一个 Wi-Fi 的手机 | `node "$HOME/.agent-board/agent-board.mjs" --lan`（扫它打印的二维码） |
 | Agent 读取看板 | `node "$HOME/.agent-board/agent-board.mjs" --json`（[字段说明](docs/BOARD-JSON.md)） |
 | 检查某个 agent 的设置 | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 
@@ -247,13 +247,13 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 ### 看板的网页
 
-上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `node "$HOME/.agent-board/agent-board.mjs" --serve` 也一样，再运行一次就会重新打开网页。在网页上可以：
+上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `node "$HOME/.agent-board/agent-board.mjs"` 也一样，再运行一次就会重新打开网页。（`--serve` 是旧写法，仍可使用。）在网页上可以：
 
 - **回复**问题：开启消息功能、对话也连上时就**发送**，否则**复制**回复。LAN 网页没有消息功能。
 - **勾掉**下一步、**归档**一件工作，或点**现在归档**收走所有做完的。
-- **已回复，先隐藏**：已在原来对话里回过的问题，只在这台电脑上隐藏，直到那个对话问新的问题；不会发出任何内容。
+- **已回复，先隐藏**：已在原来对话里回过的问题，只在这台电脑上隐藏，直到那个对话问新的问题；不会发出任何内容。发送后，卡片上也会直接显示这个按钮。隐藏提示提供**重新显示**，可恢复该问题。
 
-网页只在 127.0.0.1 上监听，网址带一串随机密钥：这台电脑上拿到链接的程序都能用。关掉标签页它还在运行，点**关闭看板**才停止。加上 `--lan` 就能用同一个 Wi-Fi 的手机打开：那条链接走没加密的 HTTP，拿到的人都能用这个网页，所以只在信得过的网络上用。细节和限制见[使用指南](docs/GUIDE.zh-CN.md#看板的网页)。
+网页只在 127.0.0.1 上监听，网址带一串随机密钥：这台电脑上拿到链接的程序都能用。关掉标签页它还在运行，点**关闭看板**才停止。在同一个命令加上 `--lan` 就能用同一个 Wi-Fi 的手机打开：那条链接走没加密的 HTTP，拿到的人都能用这个网页，所以只在信得过的网络上用。细节和限制见[使用指南](docs/GUIDE.zh-CN.md#看板的网页)。
 
 ## 怎么运作
 

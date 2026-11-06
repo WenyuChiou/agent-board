@@ -95,6 +95,9 @@ export const EN: Strings = {
   setupSummary: {
     "preview": "would update {count} setup files",
     "applied": "updated {count} setup files",
+    "current": "{count} already current",
+    "retire": "{file} (the old /board command; setup removes it)",
+    "keptEdited": "{file} (your edited old /board command; setup leaves it; the command is now /agent-board)",
     "ready": "already set up",
     "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry with {command}.",
     "retry": "Retry after fixing the conflicting files: {command}",
@@ -105,7 +108,14 @@ export const EN: Strings = {
     "apply": "Apply these changes: {command}",
     "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works). Then start a new session.",
     "codexMissing": "Codex: setup could not find Codex; run where.exe codex in PowerShell or command -v codex in bash, then pass its full path to --codex-bin.",
-    "reload": "{host}: enable its reporting hooks or plugin, then start a new session.",
+    "antigravity": "Antigravity: start a new conversation; setup has already configured its reporting hooks.",
+    "cursor": "Cursor: start a new chat in Cursor or cursor-agent; setup has already configured its reporting hooks.",
+    "grok": "Grok Build: start a new session; setup has already configured its reporting hooks.",
+    "muse": "Muse Code: start a new session; setup has already configured its reporting hooks.",
+    "gemini": "Gemini CLI: start a new session; setup has already configured its reporting hooks.",
+    "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin, then start a new session.",
+    "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin, then start a new chat.",
+    "deepseek": "DeepSeek: restart the Cordis CLI to load its generated agent-board plugin, then start a new session.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
     "board": "Open the board: {command}"
@@ -626,8 +636,8 @@ export const EN: Strings = {
   boardNoAgents: 'No agent has reported to this board yet. Connect one with: npx @wenyuchiou/agent-board setup',
   boardEmptyHow: 'When an agent starts working, its tasks show up here under its name, and anything it asks you goes to Waiting on you.',
   boardStatusLine: (needs: number, working: number): string => `${needs} need you · ${working} working`,
-  boardUsage: 'Usage: agent-board | agent-board setup | agent-board stop | agent-board --json · --help all for all options (--watch, --serve, --tidy [--stopped | --agent name | --older days], --all, ...)',
-  boardUsageAll: 'Usage: agent-board [--print] [--status] [--watch] [--serve] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <port>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all lists idle and stopped tasks',
+  boardUsage: 'Usage: agent-board | agent-board setup | agent-board stop | agent-board --json · --help all for all options (--watch, --tidy [--stopped | --agent name | --older days], --all, ...)',
+  boardUsageAll: 'Usage: agent-board [--print] [--status] [--watch] [--serve (old)] [--stop] [--json] [--tidy] [--all] [--no-open] [--lan] [--port <port>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all lists idle and stopped tasks',
   boardHidden: (text: string): string => `Hidden: “${text}”; it comes back when the question changes.`,
   boardShown: 'The hidden questions are shown again.',
   hideFailed: "Couldn't save that it was answered; it stays on the list.",
@@ -681,7 +691,7 @@ export const EN: Strings = {
   serveSshHint: (port: number, host: string, url: string): string => `Forward port to open the page: ssh -L ${port}:127.0.0.1:${port} ${host} then open ${url}`,
   serveBrowserNone: (url: string): string => `No browser found. Open this address in your browser: ${url}`,
   serveIdle: 'The local board stays running. Reopen with agent-board in a terminal or /agent-board in an agent\'s chat; Close the board stops the service.',
-  serveIdleTimed: (minutes: number): string => `This board is configured to close after ${minutes} minutes unused. Reopen with --serve.`,
+  serveIdleTimed: (minutes: number): string => `This board is configured to close after ${minutes} minutes unused. Reopen with agent-board.`,
   serveLanIdle: 'On your network it closes itself after 10 minutes unused.',
   invalidStaleMs: 'Stale inactivity timeout must be a positive number of milliseconds.',
   serveFailed: (why: string): string => `Couldn't open the board page: ${why}`,
@@ -698,7 +708,7 @@ export const EN: Strings = {
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `The board could not open its message folder (${code}): ${folder}. Stop all board servers and check server.lock, server.owner and .message-claim-*.json together. Remove only ownership metadata verified to be stale, after confirming no hub is running. Keep messages.json and uncertain delivery evidence; do not resend uncertain messages.`
     : code === 'MESSAGE_STORE_CLOSED'
-      ? `The board has stopped (${code}): ${folder}. Start it again with --serve. Uncertain messages have not been resent.`
+      ? `The board has stopped (${code}): ${folder}. Start it again with agent-board. Uncertain messages have not been resent.`
       : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
         ? `The board could not verify a message owner (${code}): ${folder}. Stop all board servers before inspecting .message-claim-*.json in that folder. Remove a malformed claim only after confirming no hub is running. Keep messages.json and do not resend uncertain messages.`
         : code === 'ACL_CHECK_TIMEOUT'
@@ -706,8 +716,8 @@ export const EN: Strings = {
           : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
             ? `The board could not open its message folder (${code}): ${folder}. Check that the folder is your account's own and that no other account can open it, then try again.`
             : `The board could not open its message folder (${code}): ${folder}. Its message file may be damaged. Move messages.json out of that folder, then try again.`,
-  serveOffline: "Can't reach the board. Run the board with --serve again; it opens a new page, and you can close this one.",
-  serveOfflineLan: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
+  serveOffline: "Can't reach the board. Run agent-board again; it opens a new page, and you can close this one.",
+  serveOfflineLan: "Can't reach the board. On the computer, run agent-board --lan again and open the new address.",
   themeToDark: 'Switch to dark',
   themeToLight: 'Switch to light',
   serveLive: 'Live',
