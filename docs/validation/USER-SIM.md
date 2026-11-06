@@ -29,7 +29,7 @@ Walk each journey from the README's own words. A step names what the user tries,
 | J1 | Install | find the install commands in the README, preview what setup would change, then apply it |
 | J2 | Repeat and keep | run the preview again and see nothing left to change; find their own existing agent settings untouched |
 | J3 | Connect an agent | start a new session of their agent and see it appear on the board |
-| J4 | Open the board | open it each way the README offers: `npx @wenyuchiou/agent-board`, the agent's own board command (`/agent-board`, `$agent-board`, `/progress`), and the `--serve` page |
+| J4 | Open the board | open it each way the README offers: `npx @wenyuchiou/agent-board`, the agent's own board command (`/agent-board`, `$agent-board`, `/progress`), and the page `agent-board --lan` opens |
 | J5 | Answer a question | see an agent's question at the top, answer it (Copy, or Send when messaging is on), hide one already answered, show it again |
 | J6 | Several agents | see each agent's rows apart, tell which is working, waiting or stuck |
 | J7 | Finish and tidy | tick steps done, see finished work leave the board, archive a stopped session |
@@ -75,7 +75,7 @@ When the release pull request's head changes after a record (`main` merged, a fi
    | `bin/agent-board.mjs` | every saved step replayed (step 4), plus a walk of each command it changed |
    | `hooks/serve.ts`, `hooks/dashboard.ts`, the page's styles | J4 to J8 on the page, with new screenshots |
    | `scripts/board-cli.ts` | J4 and J5 on the terminal board, in a real terminal |
-   | `scripts/board-messaging.ts`, `scripts/board-serve.ts`, `hooks/receiver*.ts` | J4 and J5 with several `--serve` at once, and Send |
+   | `scripts/board-messaging.ts`, `scripts/board-serve.ts`, `hooks/receiver*.ts` | J4 and J5 with several pages at once, and Send |
    | `hooks/i18n.ts`, `hooks/strings-*.ts` | each screen whose words changed, and P3's journeys in full |
    | `hooks/board.ts`, `hooks/board-status.ts`, `hooks/view.ts`, `hooks/parse.ts`, `hooks/blocks.ts` | J3 to J8 |
    | `README*.md`, `docs/GUIDE*.md` | the steps that use the changed lines, plus J1 |

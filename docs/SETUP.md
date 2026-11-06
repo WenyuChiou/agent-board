@@ -76,7 +76,7 @@ agents it already manages to that connector, without adding another hook or boar
 The installed skill opens the interactive web board. Reopen with:
 
 ```sh
-node "$HOME/.agent-board/agent-board.mjs" --serve
+node "$HOME/.agent-board/agent-board.mjs"
 ```
 
 On Windows use the exact Node and script paths printed by setup. Closing a browser tab
@@ -98,7 +98,7 @@ timestamps stay. Completed hand-kept tasks use a three-day threshold; in 0.24.1 
 `--tidy` only counts them and moves none. The details line shows how many can be archived.
 If `--tidy` moves nothing else and counts due tasks, it prints that count.
 This is an observation, not the exact completion time.
-The pane, `--watch` or `--serve` must first observe the completed task and save its fingerprint
+The pane, `--watch` or the page must first observe the completed task and save its fingerprint
 in `progress-seen.json`. A machine that runs only scheduled `--tidy` never records that
 observation or the reserved entry recording the first run of the three-day rule, so it
 counts nothing without that entry. The three days start at the later of the task's first
@@ -109,8 +109,8 @@ eligible agent blocks from being archived.
 Archive entries are saved before removing work from the board, and repeated runs do
 not duplicate them. A failed persistence operation exits nonzero; retain the files and
 retry after fixing its reported problem. `--json` remains read-only even with `--tidy`.
-`--tidy` takes precedence over `--serve`, `--watch` and `--html`, so those combinations
-run only the sweep. A running `--serve` page also sweeps every hour; if the seen file cannot
+`--tidy` takes precedence over `--serve` (the old spelling), `--watch` and `--html`, so those combinations
+run only the sweep. A running page also sweeps every hour; if the seen file cannot
 be read, that hourly pass writes nothing. A person's Clean up on the pane or page archives
 finished hand-kept tasks whose three days are up, exactly the ones the count line counts,
 plus what the normal sweep moves. It writes to the same monthly archive before the board.
@@ -175,7 +175,7 @@ package's `engines` field asks for) and no checkout:
 ```sh
 npx @wenyuchiou/agent-board setup
 npx @wenyuchiou/agent-board setup --apply
-npx @wenyuchiou/agent-board --serve
+npx @wenyuchiou/agent-board
 ```
 
 `npx @wenyuchiou/agent-board setup` runs this same `setup-agent.mjs` from the package and takes the
@@ -184,10 +184,12 @@ files: the board script lands at `~/.agent-board/agent-board.mjs`, and no hook p
 npm's cache, so clearing that cache breaks nothing. `npm install -g @wenyuchiou/agent-board` gives a
 lasting `agent-board` command in place of `npx`.
 
+On a first plain `agent-board` run with nothing set up, it prints the setup preview, asks `Apply these changes? [y/N]`, and on yes applies it and opens the board. OpenCode and Gemini CLI use `/agent-board`; setup removes an unchanged old `/board` file and keeps one you edited.
+
 A plain `agent-board` call opens the interactive local page on a desktop, from an agent or
 in a non-interactive call. An interactive terminal over SSH or without a display opens the
-terminal board; CI prints text. `--serve` and `--html` start or reuse the local service and
-open the page; `--watch` selects the terminal board, `--print` prints text, and `--json`
+terminal board; CI prints text. `--html` and the old spelling `--serve` start or reuse the local service and
+open the page (`--serve` prints only the address); `--lan` opens it and shows the phone address; `--watch` selects the terminal board, `--print` prints text, and `--json`
 returns the board for agents.
 
 These board calls run the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
@@ -224,7 +226,7 @@ changes; no receiving connection or model call is added by setup.
 
 | Target | Native configuration | Override |
 | --- | --- | --- |
-| OpenCode | `~/.config/opencode/plugins/agent-board-local.js` and `commands/board.md` | `--opencode-dir`, then `OPENCODE_CONFIG_DIR`, then `XDG_CONFIG_HOME/opencode` |
+| OpenCode | `~/.config/opencode/plugins/agent-board-local.js` and `commands/agent-board.md` | `--opencode-dir`, then `OPENCODE_CONFIG_DIR`, then `XDG_CONFIG_HOME/opencode` |
 | OpenClaw | `~/.openclaw/openclaw.json`, `skills/agent-board/` and a private local plugin with its manifest | `--openclaw-dir`, then `OPENCLAW_STATE_DIR` |
 | DeepSeek Harness | `~/.dsh/cordis.patch.yml`, `skills/agent-board/` and a private Cordis plugin | `--deepseek-dir`, then `DSH_HOME` |
 | Grok Build | `~/.grok/hooks/agent-board-local.json` | `--grok-dir`, then `GROK_HOME` |

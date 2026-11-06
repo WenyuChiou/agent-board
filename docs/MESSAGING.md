@@ -46,7 +46,7 @@ Supported turn starts: Codex `SessionStart` / `UserPromptSubmit`, Antigravity
 ignores, so a Cursor message waits until that chat opens again and its card says so). End events
 are `SessionEnd` for Codex, Gemini and Muse, and `sessionEnd` for Cursor.
 
-The separate legacy `--serve --allow-resume` option deliberately allows a local reply to
+The separate legacy `--allow-resume` option deliberately allows a local reply to
 start an ended Codex or Grok Build session. It is disabled by default, never enabled by
 setup, and works for closed sessions even with the message hub running. It is not live delivery.
 Reopening without the option replaces an idle server that had it enabled. LAN sends remain
@@ -54,10 +54,10 @@ refused. Review the native agent's permissions before choosing this legacy mode.
 
 ## Local storage
 
-Starting the installed board with `--serve` also starts its local message hub:
+Opening the installed board page (`agent-board`; `--serve` is the old spelling, still accepted) also starts its local message hub:
 
 ```sh
-node /path/to/agent-board.mjs --serve
+node /path/to/agent-board.mjs
 ```
 
 The default store is `agent-board-<16-hex-board-hash>-messages` beside the board's address
@@ -69,7 +69,7 @@ store and every default store are made your account's alone: the board makes you
 the folder's owner, removes inherited and other accounts' access, and reads the access
 entries back (the owner is set, not read back). If it cannot, startup stops with
 `MESSAGE_STORE_ACL`; if Windows takes too long to answer one of these checks, with
-`ACL_CHECK_TIMEOUT` (try again once the computer is less busy). `--serve` checks the default
+`ACL_CHECK_TIMEOUT` (try again once the computer is less busy). The page checks the default
 store itself and hands it to the page's server, which only confirms it is still the same folder,
 so a slow check does not use up the few seconds the server has to start. For a new or default
 store, a board run as SYSTEM, LocalService or NetworkService always stops there: run it as a person's account. An existing folder supplied with `--messages-dir`
@@ -88,19 +88,19 @@ A live owner, including one returning `EPERM` to the liveness probe, causes
 A dead owner (`ESRCH`) or malformed PID is removed; lock creation makes at most three
 attempts, including when another process removes the old lock during recovery.
 PIDs outside 1..2147483647 are malformed.
-For a legacy PID-only lock with no live or unknown ownership claim, `--serve` using the
+For a legacy PID-only lock with no live or unknown ownership claim, the page using the
 default folder waits up to 10 seconds for the owner's page.
 If none appears and that hub no longer answers at the address beside the lock (nothing
 listens there, or the program there refuses the hub's token or does not answer like a
 board page, as any other program would), it treats the lock as left by a hub that was
 killed: after a restart, its number can belong to another program. It moves the lock aside
 once and starts the page. If the moved lock cannot be read, it is put back and no page
-starts; if another `--serve` took the lock meanwhile, this one tries once more. A lock
+starts; if another page took the lock meanwhile, this one tries once more. A lock
 with no such address (a hub still starting, a hub killed before it listened, or another
 board using the folder through `--messages-dir`) and a folder given with `--messages-dir`
 are never taken over this way, nor is one whose hub accepts its token or does not answer
 in time.
-If the message folder cannot open, `--serve` names the folder and error code. For
+If the message folder cannot open, the page names the folder and error code. For
 any `MESSAGE_STORE_IN_USE` that remains, stop all board servers and inspect `server.lock`,
 `server.owner` and `.message-claim-*.json` together. A valid lifetime claim whose PID is
 live or cannot be checked blocks takeover even when its old port is closed; a reused PID
@@ -355,7 +355,7 @@ This table is written by hand and covers progress reporting too. Its runs have n
 | Codex | Independent setup and explicit reporter; isolated native app-server SessionStart, UserPromptSubmit and Stop observed | Authenticated owners forwarded two prompts each way with Antigravity and native ACKs; autonomous model tools, CLI TTY and desktop chat remain separate |
 | Antigravity CLI | Independent named hooks; all four native Windows events observed after the command-quoting fix | Same cross-host owner acceptance; native stream ACK, idle continuation, deduplication, conflict and offline rejection verified |
 | Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established |
-| Legacy Gemini CLI | Separate enterprise/API compatibility hooks and `/board` integration | Generic client API only; no Gemini-native connector or bidirectional acceptance |
+| Legacy Gemini CLI | Separate enterprise/API compatibility hooks and `/agent-board` integration | Generic client API only; no Gemini-native connector or bidirectional acceptance |
 | OpenCode | Independent setup, session-context progress tool and plugin events | Generic client API only; no native receiving adapter or real bidirectional acceptance yet |
 | OpenClaw | Independent metadata lifecycle plugin and native skill; separate optional Claude reporter | Its native session tools are not yet integrated into this hub; no real bidirectional acceptance |
 | Grok Build | Existing reporter hooks; optional legacy resume requires `--allow-resume` | No live receiving adapter acceptance |
@@ -435,7 +435,7 @@ A Claude Code session started in a terminal receives board messages by itself (#
 nothing to set up. `hooks/receiver.ts` holds the logic and `hooks/register.tsx` connects it.
 
 - **Finding the board.** Every 2 s the session looks for the address file the running page left
-  for its `progress.md`, in the folder `--serve` uses. It reads the file only when it can show the
+  for its `progress.md`, in the folder the page uses. It reads the file only when it can show the
   file is this account's: on POSIX through a check of the owner and mode; on Windows it uses only
   the folder under the home directory, and a set `XDG_RUNTIME_DIR` means no connection. The address
   must name this board and `127.0.0.1`. Anything else leaves the card on Copy.
