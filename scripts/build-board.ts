@@ -13,7 +13,7 @@ import { bundleModules, missingFromPackage, moduleBudget, staleParts } from './b
 
 // Each part after the first starts at this module banner line; boundaries move only when a maintainer edits this
 // list. An entry must be a line that appears once in the bundle: Bun repeats a banner such as `// scripts/board-cli.ts`.
-const PART_STARTS = ['// hooks/digest.ts']
+const PART_STARTS = ['// scripts/codex-host.ts', '// hooks/digest.ts']
 
 const root = join(import.meta.dir, '..')
 const version: string = JSON.parse(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8')).version
