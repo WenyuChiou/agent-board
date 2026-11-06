@@ -22,6 +22,7 @@ import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { createMessaging } from './board-messaging'
+import { startCodexReceiver } from './codex-receiver.mjs'
 import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
 
@@ -29,6 +30,9 @@ export type ServeOptions = {
   allowResume?: boolean
   messagesDirectory: string
   isDefaultMessagesDirectory?: boolean
+  // The Codex receiver (#318): the Codex session ids the board knows, the Codex program to run (null: none found,
+  // so nothing runs), and whether a message may steer a running turn (off by default, L2).
+  codex?: { threads: () => string[]; executable: string | null; isSteerOn: boolean }
   reports?: (isFresh?: boolean) => ProgressBinding[]
   s: Strings
   port: number
@@ -303,15 +307,25 @@ export const startServer = (o: ServeOptions): void => {
     lan = null
   }
 
+  let codexReceiver: ReturnType<typeof startCodexReceiver> | null = null
+
   const stop = (): void => {
     if (isStopping) return
     isStopping = true
-    // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
-    try { messaging.close() } catch {}
-    closeLan()
-    server.close()
-    server.closeAllConnections()
-    o.onStop()
+    const finish = (): void => {
+      // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
+      try { messaging.close() } catch {}
+      closeLan()
+      server.close()
+      server.closeAllConnections()
+      o.onStop()
+    }
+    if (codexReceiver === null) {
+      finish()
+      return
+    }
+    // The receiver says goodbye to the board before it goes, and the Codex program it runs is ended; the wait is short.
+    void Promise.race([codexReceiver.close().catch(() => undefined), new Promise(done => setTimeout(done, 1500))]).then(finish)
   }
 
   // On the same port as the computer's page when it is free there, else on any.
@@ -574,6 +588,12 @@ export const startServer = (o: ServeOptions): void => {
     }
     // Preparing a private address can block; inactivity starts once that address is ready.
     lastSeen = Date.now()
+    if (o.codex?.executable) {
+      // The address and token stay in this process: the Codex program is given neither.
+      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable, isSteerOn: o.codex.isSteerOn })
+      // A process that exits another way (Windows sends no SIGTERM) still ends the Codex program it started.
+      process.once('exit', () => codexReceiver?.kill())
+    }
     // The idle timer starts only once the server is listening: a listen failure
     // throws before this point, and a timer made earlier would keep the failed
     // child alive instead of letting it exit.

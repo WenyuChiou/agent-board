@@ -177,7 +177,7 @@ Hooks 只說對話在做事還是在等；步驟和什麼時候算完成，來�
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Codex | CLI | 3 | 未知 | Implemented（已實作） | 未測試 | [hooks/receivers/hook-mailbox-codex.ts](hooks/receivers/hook-mailbox-codex.ts) |
-| Codex | Daemon | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
+| Codex | Daemon | 1 | &#91;P1&#93; | Implemented（已實作） | 未測試 | [scripts/codex-receiver.mjs](scripts/codex-receiver.mjs) |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed（規劃中） | 未測試 | 無 |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented（已實作） | 早期執行（不計入）： [docs/validation/2026-10-19-native-hooks.md](docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](scripts/codex-session-connector.mjs) |
 | Codex | Existing-owner proxy (active turn only) | 2 | 未知 | Verified（已驗證） | [docs/validation/2026-11-04-codex-cli-proxy-live.md](docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](scripts/codex-message-connector.mjs) |

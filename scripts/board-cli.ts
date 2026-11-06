@@ -15,13 +15,14 @@ import { legacyConnect } from './connect-transaction'
 import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside } from './board-messaging'
+import { resolveCodexExecutable } from './codex-receiver.mjs'
 import { claimMessageStore, hasLiveClaims } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
@@ -1774,6 +1775,15 @@ const pageIsOpen = async (server: RunningServer): Promise<boolean> => {
   return answer !== null && answer !== 'silent' && typeof answer.pageAgo === 'number' && answer.pageAgo >= 0 && answer.pageAgo < PAGE_OPEN_MS()
 }
 
+// The Codex program the receiver runs (#318): AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else,
+// it turns the receiver off), else the one on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names
+// its own, so it never reaches the real ~/.codex.
+const codexReceiverExecutable = (): string | null => {
+  const given = process.env.AGENT_BOARD_CODEX_BIN
+  if (given !== undefined) return isAbsolute(given) ? given : null
+  return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
+}
+
 const serveChild = (): void => {
   // Resolve the protected address before asynchronous callbacks can run.
   const file = serveFile()
@@ -1799,6 +1809,11 @@ const serveChild = (): void => {
       allowResume: args.includes('--allow-resume'),
       messagesDirectory: messagesDirectory(),
       isDefaultMessagesDirectory: flag('--messages-dir') === undefined,
+      codex: {
+        threads: () => (progressProjectCache?.projects ?? parseProgress(read(path))).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
+        executable: codexReceiverExecutable(),
+        isSteerOn: args.includes('--codex-steer'),
+      },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests
         // still read current bytes instead of accepting an older page's baseline.
@@ -1807,7 +1822,7 @@ const serveChild = (): void => {
       },
       s,
       port: Number(flag('--port') ?? 0) || 0,
-      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
+      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSteer: args.includes('--codex-steer'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       pending: (isFresh = true) => pending(undefined, isFresh),
@@ -1912,7 +1927,7 @@ const runningPage = async (isStarting = false): Promise<{ page: Running; isKept:
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
   const requestedStale = staleTimeoutMs()
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (answer.codexSteer ?? false) === args.includes('--codex-steer') && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
@@ -1973,6 +1988,7 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
+  if (args.includes('--codex-steer')) rest.push('--codex-steer')
   // On Windows the server child is told which folders were just checked, so it does not check them again.
   const handoff = runtimeFolderHandoff()
   // The default message folder is checked here, so its whoami and icacls starts are not among

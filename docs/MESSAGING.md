@@ -316,7 +316,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) |
-| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Codex | Daemon | 1 | &#91;P1&#93; | Implemented | Not tested | [scripts/codex-receiver.mjs](../scripts/codex-receiver.mjs) |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) |
 | Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |

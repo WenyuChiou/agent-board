@@ -14,6 +14,8 @@ import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/messag
 import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
+import { resolveCodexExecutable, startCodexReceiver } from '../scripts/codex-receiver.mjs'
+import { fileURLToPath } from 'node:url'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
 import { claimMessageStore } from '../scripts/message-store-claim.ts'
 import { classifyMessageStoreFiles, isMessageStoreClean, readMessageStoreFiles } from './e2e/lib/message-store-files.mjs'
@@ -31,6 +33,7 @@ const { createMessaging, moveLockAside } = await import('../scripts/board-messag
 const { hookMailbox, parseMessageStore } = await import('../scripts/board-messaging.ts')
 const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
 const { serveModel } = await import('../hooks/serve.ts')
+const { boardRequestWords, isBoardRequest } = await import('../hooks/board-commands.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
 const { EN } = await import('../hooks/strings-en.ts')
@@ -664,7 +667,7 @@ const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messa
   // A restart in the same folder starts a new trace, so a report names only its own child.
   writeFileSync(tracer, START_TRACE); writeFileSync(trace, '')
   const startedAt = performance.now()
-  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }) }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, AGENT_BOARD_CODEX_BIN: process.env.AGENT_BOARD_CODEX_BIN ?? '', CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }) }, stdio: ['ignore', 'pipe', 'pipe'] })
   const exited = new Promise(done => child.once('exit', done))
   let address
   try { address = await new Promise((done, fail) => {
@@ -3775,5 +3778,267 @@ test('an overlapping poll leaves the page waiting for a reply at the deadline de
     assert.equal(listener, null)
     store.close()
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Send to Codex (#318): the receiver the board runs for a Codex thread on the shared daemon. The Codex program is a
+// stand-in (tests/helpers/codex-daemon-mock.mjs) that speaks WebSocket over stdio like `codex app-server proxy`.
+const codexThread = '11111111-2222-4333-8444-555555555555'
+const codexMock = new URL('./helpers/codex-daemon-mock.mjs', import.meta.url)
+const codexDaemon = (dir, config) => {
+  const file = join(dir, 'mock.json'), log = join(dir, 'rpc.log')
+  writeFileSync(file, JSON.stringify({ log, loaded: [codexThread], status: 'idle', start: 'ack', steer: 'ack', turn: 'turn-busy', ...config }))
+  return { executable: fileURLToPath(codexMock), env: { ...process.env, CODEX_MOCK_CONFIG: file }, log, calls: () => (readFileSyncSafe(log) ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line)) }
+}
+const codexConnection = async (board, thread = codexThread) => waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === thread))
+const codexMessage = async (board, id) => (await board.call('/api/board')).body.messaging.messages.find(one => one.id === id)
+const codexSend = async (board, connection, id = 'AB-CX-001') => (await board.call('/api/messages/send', { id, target: connection.id, turn: 'session', text: 'Check the build and tell me what failed.' })).status
+const codexReceiver = (board, daemon, options = {}) => startCodexReceiver({ boardUrl: board.address, threads: () => [codexThread], executable: daemon.executable, env: daemon.env, tickMs: 100, ...options })
+
+test('a Codex message is sent only to a thread the running daemon has loaded, with no shell', async () => fixture(async (board, dir) => {
+  const other = '99999999-2222-4333-8444-555555555555'
+  // A folder name a shell would take apart: the Codex program is started by its path, as one argument.
+  const folder = join(dir, 'a b & c'); mkdirSync(folder)
+  const wrapper = join(folder, 'proxy.mjs')
+  writeFileSync(wrapper, `import ${JSON.stringify(codexMock.href)}\n`)
+  const daemon = { ...codexDaemon(dir, { loaded: [codexThread] }), executable: wrapper }
+  const receiver = codexReceiver(board, daemon, { threads: () => [codexThread, other] })
+  try {
+    const connection = await codexConnection(board)
+    await pause(600)
+    // The thread the daemon has not loaded gets no connection and is never resumed from disk.
+    assert.deepEqual((await board.call('/api/board')).body.messaging.connections.map(one => one.session), [codexThread])
+    const calls = daemon.calls()
+    assert.deepEqual(calls[0].argv, ['app-server', 'proxy'])
+    assert.deepEqual(calls.filter(one => one.method === 'thread/resume').map(one => one.params.threadId), [codexThread])
+    assert.equal(connection.agent, 'codex')
+    assert.equal(connection.scope, 'session')
+  } finally { await receiver.close() }
+  assert.equal((await board.call('/api/board')).body.messaging.connections.length, 0)
+  // Windows leaves a `.cmd` shell script: it is run by Node through the script beside it, or refused.
+  const exists = known => path => known.includes(path.split('\\').join('/'))
+  const env = { PATH: 'C:\\bin' }
+  assert.equal(resolveCodexExecutable({ env, platform: 'win32', exists: exists(['C:/bin/codex.cmd']) }), null)
+  assert.equal(resolveCodexExecutable({ env, platform: 'win32', exists: exists(['C:/bin/codex.cmd', 'C:/bin/node_modules/@openai/codex/bin/codex.js']) }).split('\\').join('/'), 'C:/bin/node_modules/@openai/codex/bin/codex.js')
+  assert.equal(resolveCodexExecutable({ env, platform: 'win32', exists: exists(['C:/bin/codex.exe']) }).split('\\').join('/'), 'C:/bin/codex.exe')
+  assert.throws(() => startCodexReceiver({ boardUrl: board.address, threads: () => [], executable: 'codex' }), /EXPLICIT_EXECUTABLE_REQUIRED/)
+}))
+
+test('an idle Codex thread gets the message through turn/start, not the queue', async () => fixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, {})
+  const receiver = codexReceiver(board, daemon)
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    const done = await waitFor(async () => { const one = await codexMessage(board, 'AB-CX-001'); return one?.status === 'acknowledged' && one })
+    const calls = daemon.calls().filter(one => one.method)
+    const starts = calls.filter(one => one.method === 'turn/start')
+    assert.equal(starts.length, 1)
+    assert.ok(!calls.some(one => /^thread\/queue|^turn\/steer/.test(one.method)))
+    const text = starts[0].params.input[0].text
+    // The claim nonce is the message id Codex records, and the header tells a thread that answered already what to do.
+    assert.equal(starts[0].params.clientUserMessageId, nonceOf(text))
+    assert.ok(text.includes('Check the build and tell me what failed.'))
+    assert.ok(text.includes(`If you have already answered message ${nonceOf(text)}, reply only ACK ${nonceOf(text)} and do nothing else.`))
+    assert.equal(done.reply, '')
+    assert.equal(storedReply(dir, 'AB-CX-001'), 'ACK ' + nonceOf(text))
+    // The turn ended: the next message starts another turn.
+    await codexSend(board, connection, 'AB-CX-002')
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-002'))?.status === 'acknowledged')
+    assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 2)
+  } finally { await receiver.close() }
+}))
+
+test('a busy Codex thread gets the message only after its running turn ends', async () => fixture(async (board, dir) => {
+  const endFlag = join(dir, 'end-turn')
+  const daemon = codexDaemon(dir, { status: 'active', endFlag })
+  const receiver = codexReceiver(board, daemon)
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    // Two polls pass: the board keeps the connection and the message, and Codex is sent nothing.
+    await pause(4500)
+    assert.equal((await codexMessage(board, 'AB-CX-001')).status, 'queued')
+    assert.ok((await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
+    assert.equal(daemon.calls().filter(one => one.method === 'turn/start' || one.method === 'turn/steer').length, 0)
+    writeFileSync(endFlag, '')
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 1)
+  } finally { await receiver.close() }
+}))
+
+test('turn/steer is used only when the setting is on, with the expected turn id', async () => {
+  await fixture(async (board, dir) => {
+    const daemon = codexDaemon(dir, { status: 'active' })
+    const receiver = codexReceiver(board, daemon)
+    try {
+      const connection = await codexConnection(board)
+      await codexSend(board, connection)
+      await pause(4500)
+      assert.equal((await codexMessage(board, 'AB-CX-001')).status, 'queued')
+      assert.equal(daemon.calls().filter(one => /^turn\//.test(one.method ?? '')).length, 0)
+    } finally { await receiver.close() }
+  })
+  await fixture(async (board, dir) => {
+    const daemon = codexDaemon(dir, { status: 'active' })
+    const receiver = codexReceiver(board, daemon, { isSteerOn: true })
+    try {
+      const connection = await codexConnection(board)
+      await codexSend(board, connection)
+      await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+      const steers = daemon.calls().filter(one => one.method === 'turn/steer')
+      assert.equal(steers.length, 1)
+      assert.equal(steers[0].params.expectedTurnId, 'turn-busy')
+      assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 0)
+    } finally { await receiver.close() }
+  })
+})
+
+test('a steer that leaves the turn silent becomes uncertain and is not sent again', async () => fixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, { status: 'active', steer: 'silent' })
+  const receiver = codexReceiver(board, daemon, { isSteerOn: true, steerSilenceMs: 300 })
+  try {
+    const connection = await codexConnection(board)
+    await codexSend(board, connection)
+    const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
+    assert.equal(one.error, 'STEER_SILENT')
+    await pause(2500)
+    assert.equal(daemon.calls().filter(call => call.method === 'turn/steer').length, 1)
+  } finally { await receiver.close() }
+}))
+
+test('turn/start success is accepted, never acknowledged', async () => fixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, { start: 'silent' })
+  const receiver = codexReceiver(board, daemon)
+  try {
+    const connection = await codexConnection(board)
+    await codexSend(board, connection)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'accepted')
+    // The turn runs on and says nothing: the answer of turn/start is all the board has.
+    await pause(3000)
+    const one = await codexMessage(board, 'AB-CX-001')
+    assert.equal(one.status, 'accepted')
+    assert.equal(one.reply, '')
+  } finally { await receiver.close() }
+}))
+
+test('an unclear result is marked uncertain and nothing else is tried', async () => {
+  for (const start of ['error', 'empty']) await fixture(async (board, dir) => {
+    const daemon = codexDaemon(dir, { start })
+    const receiver = codexReceiver(board, daemon)
+    try {
+      const connection = await codexConnection(board)
+      await codexSend(board, connection)
+      const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
+      assert.equal(one.error, start === 'error' ? 'OWNER_REJECTED' : 'INVALID_TURN_RESPONSE')
+      await pause(3000)
+      const methods = daemon.calls().filter(call => call.method).map(call => call.method)
+      assert.equal(methods.filter(method => method === 'turn/start').length, 1)
+      assert.ok(!methods.some(method => /^thread\/queue|^turn\/steer/.test(method)))
+    } finally { await receiver.close() }
+  })
+})
+
+test('a Codex turn that ends without the ACK or fails after it never reads as acknowledged', async () => fixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, { start: 'silent', endFlag: join(dir, 'end-turn') })
+  const receiver = codexReceiver(board, daemon)
+  try {
+    const connection = await codexConnection(board)
+    await codexSend(board, connection)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'accepted')
+    writeFileSync(join(dir, 'end-turn'), '')
+    const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
+    assert.equal(one.error, 'ACK_MISSING')
+  } finally { await receiver.close() }
+}))
+
+test('a joined receiver leaves approval requests to the person\'s own client', async () => fixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, { approval: true })
+  const receiver = codexReceiver(board, daemon)
+  try {
+    const connection = await codexConnection(board)
+    await codexSend(board, connection)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    // The daemon asked its clients for an approval (id 999) during the turn; this one never answers it.
+    assert.ok(daemon.calls().every(one => one.id !== 999))
+    assert.ok(!daemon.calls().some(one => /requestApproval|approval/i.test(one.method ?? '')))
+  } finally { await receiver.close() }
+}))
+
+test('the board token never appears in the receiver\'s stdin or the agent transcript', async () => fixture(async (board, dir) => {
+  const token = new URL(board.address).searchParams.get('t')
+  const daemon = codexDaemon(dir, {})
+  daemon.env.AGENT_BOARD_SECRET = token
+  const receiver = codexReceiver(board, daemon)
+  try {
+    const connection = await codexConnection(board)
+    await codexSend(board, connection)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    const log = readFileSync(daemon.log, 'utf8')
+    // Everything the Codex program was given: its arguments, its environment, the handshake and every request.
+    assert.ok(!log.includes(token) && !log.includes(board.address) && !log.includes(new URL(board.address).port + '/'))
+    assert.ok(Object.keys(daemon.calls()[0].env).every(name => !/^AGENT_BOARD_/i.test(name)))
+  } finally { await receiver.close() }
+}))
+
+test('a hard-killed receiver releases its lease on Windows', async () => fixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, { pidFile: join(dir, 'proxy.pid') })
+  const module = new URL('../scripts/codex-receiver.mjs', import.meta.url).href
+  const runner = join(dir, 'runner.mjs')
+  writeFileSync(runner, `import { startCodexReceiver } from ${JSON.stringify(module)}
+startCodexReceiver({ boardUrl: process.argv[2], threads: () => [${JSON.stringify(codexThread)}], executable: ${JSON.stringify(daemon.executable)}, env: ${JSON.stringify(daemon.env)}, tickMs: 100 })
+setInterval(() => undefined, 1000)
+`)
+  const child = spawn(process.execPath, [runner, board.address], { windowsHide: true, stdio: 'ignore' })
+  const exited = new Promise(done => child.once('exit', done))
+  try {
+    await codexConnection(board)
+    const proxy = Number(readFileSync(join(dir, 'proxy.pid'), 'utf8'))
+    const isAlive = () => { try { process.kill(proxy, 0); return true } catch { return false } }
+    assert.ok(isAlive())
+    // No signal reaches a process that is killed this way (Windows never sends SIGTERM): the Codex program
+    // ends with the receiver's pipes, and the daemon drops the connection it held.
+    child.kill('SIGKILL')
+    await exited
+    await waitFor(async () => !isAlive())
+    // Without its poll the connection ends with its 15-second lease, and a new message is turned away meanwhile.
+    await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.length === 0)
+  } finally { if (child.exitCode === null && child.signalCode === null) child.kill(); await exited }
+}))
+
+test('a delivery prompt does not answer the person\'s question', () => {
+  const words = boardRequestWords([EN, ZH_TW, ZH_CN])
+  for (const strings of [EN, ZH_TW, ZH_CN]) {
+    const message = { id: 'AB-1', from: 'board', to: 'codex:' + codexThread, nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' }
+    const fromAgent = { ...message, from: 'claude:abcdef12' }
+    for (const one of [message, fromAgent]) assert.equal(isBoardRequest({ prompt: deliveryText(one, strings) }, words), true)
+  }
+  // What the person types as an answer is still theirs.
+  assert.equal(isBoardRequest({ prompt: 'Use the second plan.' }, words), false)
+})
+
+test('the board runs the Codex receiver for a Codex session it knows and ends it with the page', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-receiver-'))
+  const progress = join(dir, 'progress.md')
+  writeFileSync(progress, `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${codexThread} state=waiting updated=${new Date().toISOString()} -->\n### A Codex task\n- [~] Keep going\n<!-- /auto session=abcdef01 -->\n`)
+  const daemon = codexDaemon(dir, { pidFile: join(dir, 'proxy.pid') })
+  process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
+  process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
+  let board
+  try {
+    board = await start(dir)
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await codexConnection(board)
+    assert.equal(connection.surface, 'Codex CLI')
+    await codexSend(board, connection)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    const proxy = Number(readFileSync(join(dir, 'proxy.pid'), 'utf8'))
+    await board.close()
+    // The page took the connection and the Codex program it started away with it.
+    await waitFor(async () => { try { process.kill(proxy, 0); return false } catch { return true } })
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG
+    await board?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
   }
 })

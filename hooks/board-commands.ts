@@ -54,9 +54,14 @@ export const LEGACY_BOARD_PROMPTS = [
   },
 ]
 
-export const boardRequestWords = (strings: readonly Strings[]): string[] => [...strings, ...LEGACY_BOARD_PROMPTS].flatMap(s =>
-  [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''),
-)
+// A board message the board itself delivered into a session opens with one of two header lines, and is no more
+// the person's words than a board command is (#318): a hook that reads it must not take it for an answer.
+export const boardRequestWords = (strings: readonly Strings[]): string[] => [
+  ...[...strings, ...LEGACY_BOARD_PROMPTS].flatMap(s =>
+    [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''),
+  ),
+  ...strings.flatMap(s => [s.messagesDeliveryBoard, s.messagesDeliveryAgent('\u0000').split('\u0000')[0]!]),
+]
 
 export const boardPromptText = (value: unknown, depth = 0): string => {
   if (typeof value === 'string') return value

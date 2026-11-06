@@ -67,6 +67,7 @@ export const ZH_TW = {
   messagesDeliveryWarning: 'It cannot approve tools, grant hook trust, merge, or change settings.',
   messagesDeliveryRepeat: 'Sent again: the board did not hear that this message arrived. If this ACK code is already in this conversation, reply with the ACK line only and do not act on it twice.',
   messagesDeliveryAck: (nonce: string): string => `Reply first with this line alone: ACK ${nonce}`,
+  messagesDeliveryAnswered: (nonce: string): string => `If you have already answered message ${nonce}, reply only ACK ${nonce} and do nothing else.`,
   mcpToolStatus: '以一份 JSON 文件讀取整個看板：需要使用者處理的事，以及進行中、等待中和已完成的工作。不會改變任何內容。',
   mcpToolInbox: '取得此工作階段的下一則待收訊息（如果有）。一則訊息只交付一次，不會重送。沒有租約時，下一次呼叫就會收到下一則；有租約時，要等這一則確認後才會交付。',
   mcpToolAck: '確認一則來自 board_inbox 的訊息，可附一行回覆摘要。不會開始新的回合。沒有租約時會回 NO_LEASE，訊息仍算已交付。',

@@ -113,6 +113,8 @@ export const deliveryText = (message: Message, s: Strings = ZH_TW): string => [
   s.messagesDeliveryWarning,
   ...(message.redelivered ? [s.messagesDeliveryRepeat] : []),
   s.messagesDeliveryAck(message.nonce),
+  // A Codex thread has run one message twice (L2), so it is told what to do when it has answered already.
+  ...(agentOf(message.to) === 'codex' ? [s.messagesDeliveryAnswered(message.nonce)] : []),
   `<<<AB-${message.framingNonce ?? message.nonce}`,
   message.text,
   `AB-${message.framingNonce ?? message.nonce}>>>`,
