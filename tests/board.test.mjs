@@ -3418,7 +3418,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
           const answer = await getBoard(options)
           return { ...answer, json: async () => { const data = await answer.json(); return data.model ? { ...data, model: viewed(data.model) } : data } }
         }
-        requests.push({ path: target, body: JSON.parse(options.body) })
+        requests.push({ path: target, body: JSON.parse(options.body), headers: options.headers, keepalive: options.keepalive })
         if (post) return post(requests.at(-1))
         return { ok: true, json: async () => ({ note: '' }) }
       })()
@@ -3460,6 +3460,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     title: () => document.title,
     delays,
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
+    leave: () => windowEvents.pagehide?.(),
+    requests,
     flush,
     settle,
     redraw: async next => {
@@ -4469,6 +4471,25 @@ test('the phone page explains how to open a new address in every language withou
     await dom.settle()
     assert.equal(dom.node('offline').textContent, line)
   }
+})
+
+test('the board page marks its polls as the page and tells the board when it leaves (#265)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  const polls = []
+  const dom = await pageDom(html, null, { width: 1000, getBoard: async options => { polls.push(options.headers); return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], now: 1 }, now: 1 }) } } })
+  await dom.settle()
+  assert.ok(polls.length > 0, 'the page polls the board')
+  for (const headers of polls) assert.equal(headers['x-board-page'], '1', 'a poll says it comes from the page, so scripts reading the board do not count as one')
+  assert.equal(dom.requests.length, 0)
+  dom.leave()
+  await dom.settle()
+  const gone = dom.requests.filter(one => one.path === '/api/page-gone')
+  assert.equal(gone.length, 1, 'leaving tells the board once')
+  assert.equal(gone[0].keepalive, true, 'the request outlives the closing page')
+  assert.equal(gone[0].headers['x-board-token'], 'x')
 })
 
 test('an old page rejected by a restarted server shows the offline line', async () => {
