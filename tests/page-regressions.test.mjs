@@ -512,3 +512,25 @@ test('JSON and print clip an untrusted field at six hundred characters', async (
     }
   } finally { await f.close() }
 })
+
+test('a question in a block updated 30 minutes ago is shown as 30 minutes old, not as new as the page', async () => {
+  const f = await fixture(`## demo\n<!-- auto session=abcdef12 agent=codex state=working updated=${new Date(NOW - 30 * 60000).toISOString()} -->\n### Release task\n- [?] Ship the synthetic build or wait\n<!-- /auto session=abcdef12 -->\n`)
+  try {
+    const model = await f.api()
+    assert.equal(model.asks.length, 1, JSON.stringify(model.asks))
+    assert.match(model.asks[0].when, /30/, model.asks[0].when)
+  } finally { await f.close() }
+})
+
+test('a hand-kept task with a due date shows it on its row in place of the unknown age', async () => {
+  const f = await fixture('## demo\n### Pay the synthetic invoice\n> 截止 11-06\n- [ ] Open the invoice\n')
+  try {
+    const model = await f.api()
+    const row = model.groups.flatMap(group => group.rows).find(one => one.title === 'Pay the synthetic invoice')
+    assert.ok(row?.due, JSON.stringify(model.groups))
+    const dom = await pageDom(f.runtime.servePage(EN, 'synthetic'), model)
+    const text = dom.node('board').readText
+    assert.ok(text.includes(row.due), text)
+    assert.ok(!text.includes(EN.pgUnknownAge), text)
+  } finally { await f.close() }
+})
