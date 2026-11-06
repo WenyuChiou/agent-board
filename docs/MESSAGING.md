@@ -515,6 +515,20 @@ Tests: `node --test tests/messaging.test.mjs`. They cover synthetic routing, ide
 conflicts, offline/expired bindings, stale turns, crash uncertainty, fake approvals, and a
 mock Codex proxy. A real `AB-TEST-001` ACK must be verified separately with consent.
 
+## Codex daemon receiver (Send to Codex)
+
+`scripts/codex-receiver.mjs` is run by the board's page server, not by the person. Every 3 seconds it reads the Codex sessions the board knows. If the Codex program is on `PATH` (or `AGENT_BOARD_CODEX_BIN` names it by full path; set to anything else it turns the receiver off), it starts `codex app-server proxy` once and asks `thread/loaded/list` which threads the running daemon has loaded.
+
+- **Only a loaded thread.** For each known thread the daemon has loaded, it calls `thread/resume` with `excludeTurns: true`, which only subscribes the connection, and registers a `session`-scope connection. A thread the daemon has not loaded is never resumed from disk, and a thread with no turn yet (no saved history) is joined after its first turn. Until then the message waits for the session's next step.
+- **Idle:** `turn/start` with the claim nonce as `clientUserMessageId`. `accepted` is that call's answer. Nothing goes through Codex's queue.
+- **Busy:** the connection keeps its lease with `receive: false`, the message stays in the board, and `turn/start` follows when the thread's status is idle again.
+- **`--codex-steer`** (off by default): a busy thread is steered with `turn/steer` and `expectedTurnId`. A steered turn that says nothing for 60 seconds is `uncertain` (`STEER_SILENT`) and is never sent again.
+- **Receipt.** `acknowledged` needs an `ACK <nonce>` line in an agent message of the delivery turn and that turn ending `completed`. A turn that ends without the line is `uncertain` (`ACK_MISSING`), and one that failed or was stopped after it is `uncertain` (`TURN_NOT_COMPLETED`). An unclear answer to `turn/start` is `uncertain`, and nothing else is tried.
+- **No shell, no token.** The Codex program is run by its path (on Windows an npm `codex.cmd` is run through the Node script beside it, or refused). It gets neither the board address nor `AGENT_BOARD_*` variables. Approval requests that the daemon makes of its clients are never answered.
+- **Ending.** The page says goodbye to the board and ends the Codex program when it stops. A process that is killed leaves no program behind: the proxy ends with its pipes.
+
+Tests: `node --test tests/messaging.test.mjs` (the Codex daemon receiver tests use `tests/helpers/codex-daemon-mock.mjs`). What a real run showed and what it did not: [validation/2026-11-06-send-to-codex.md](validation/2026-11-06-send-to-codex.md).
+
 ## Codex exclusive-owner adapter
 
 An application that already owns a loaded Codex session and receives its native

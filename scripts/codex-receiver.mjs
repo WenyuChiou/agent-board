@@ -259,7 +259,9 @@ export const startCodexReceiver = ({
       for (const [thread, one] of [...attached]) if (one.isLost || !loaded.has(thread) || !wanted.includes(thread)) await drop(thread)
       for (const thread of wanted) {
         if (isClosed || attached.has(thread) || !loaded.has(thread)) continue
-        try { await attach(thread) } catch (error) { onError(error) }
+        // A thread with no turn yet has no saved history, and the daemon refuses to resume it (live check, 0.164.0): it is joined
+        // on a later tick, after its first turn, and until then the message waits for the session's next step.
+        try { await attach(thread) } catch (error) { if (error.message !== 'OWNER_REJECTED') onError(error) }
       }
     } finally { isTicking = false }
   }
