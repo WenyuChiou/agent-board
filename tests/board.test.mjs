@@ -5396,6 +5396,27 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([]) }
 })
 
+test('a Windows page start names a runtime-folder access check that ran out of time instead of a protection failure', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'stalled-acls-empty.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+cp.execFileSync = (file, ...args) => { if (/powershell\\\\.exe$/i.test(String(file))) throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: '' }); return original(file, ...args) }
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    for (const mode of ['--serve', '--serve-child']) {
+      const ran = spawnSync(process.execPath, [board.script, mode, '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+      assert.equal(ran.status, 1, ran.stderr)
+      assert.equal(mode === '--serve-child' ? ran.stderr.trim() : ran.stdout.trim(), EN.serveRuntimeCheckTimeout)
+      assert.equal(mode === '--serve-child' ? ran.stdout : ran.stderr, '')
+      assert.ok(!(ran.stdout + ran.stderr).includes(board.dir) && !(ran.stdout + ran.stderr).includes('http:'))
+      assert.ok(!existsSync(board.served))
+      assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [])
+    }
+  } finally { await board.end([]) }
+})
+
 test('the board command in a read-only sandbox reuses a running page\'s link', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'acl-denied.cjs')
@@ -5760,6 +5781,43 @@ require('node:module').syncBuiltinESMExports()
     assert.deepEqual(calls.filter(line => line.startsWith('child ')), [], 'the server child checked it again')
     const acl = windowsAcl(messages, board.env)
     assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the message folder is private')
+  } finally { await board.end([url]) }
+})
+
+// The address lines PowerShell printed before its limit are the whole answer, so a start
+// whose PowerShell has not exited still opens the page (#799).
+test('a Windows page start opens the page when its PowerShell printed every address line but has not exited', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  const preload = join(board.dir, 'stalled-acls.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const path = require('node:path'); const original = cp.execFileSync
+let sid = null
+const sddl = target => {
+  if (sid === null) {
+    const row = original(path.join(process.env.SystemRoot ?? 'C:\\\\Windows', 'System32', 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
+    sid = /"(S-\\d+(?:-\\d+)+)"\\s*$/.exec(row)?.[1]
+  }
+  let isDir = false
+  try { isDir = fs.statSync(target).isDirectory() } catch {}
+  return 'O:' + sid + 'G:SYD:' + (isDir ? 'P(A;OICI;' : 'AI(A;ID;') + 'FA;;;' + sid
+}
+cp.execFileSync = (file, args, options) => {
+  if (/powershell\\\\.exe$/i.test(String(file))) {
+    const lines = String(options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH).split('|').map(sddl).join('\\n')
+    throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
+  }
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(url)
+    assert.ok(existsSync(board.served))
+    const acl = windowsAcl(folder, board.env)
+    assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the runtime folder is private')
   } finally { await board.end([url]) }
 })
 

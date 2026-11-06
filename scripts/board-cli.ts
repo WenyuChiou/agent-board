@@ -27,7 +27,7 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { isTimeout, privateFolderHandoff } from './private-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
@@ -1652,8 +1652,12 @@ const paste = (text: string, reviewToken = '') => {
 // never the caller's whole runtime directory, before a token can be written.
 // `name` is the address file: it is read in the same check as the folder when it is already there.
 let runtimeUnprotected = false
+// Whether the folder check that failed ran out of time: the person is told the check did not
+// finish, not that the file could not be protected (#799).
+let runtimeCheckTimedOut = false
 const readOnlyRunFolder = (folder: string, error: unknown): string => {
   if (!(error instanceof RuntimeFolderError)) throw error
+  if (error instanceof RuntimeFolderTimeoutError) runtimeCheckTimedOut = true
   // A process that cannot protect the folder may reuse a running page, but every later
   // step must refuse to start one or write through this unprotected path.
   runtimeUnprotected = true
@@ -1779,7 +1783,7 @@ const serveChild = (): void => {
   const file = serveFile()
   // A child that could not protect the folder cannot start a page: its address file would
   // be unprotected. The parent reuses a running page itself; a child on its own refuses.
-  if (runtimeUnprotected) throw new RuntimeFolderError()
+  if (runtimeUnprotected) throw runtimeCheckTimedOut ? new RuntimeFolderTimeoutError() : new RuntimeFolderError()
   // A page a test started stops once that test's process is gone, even after a killed run (#959).
   // Only tests set AGENT_BOARD_TEST_PID, to their own process id.
   const testPid = Number(process.env.AGENT_BOARD_TEST_PID)
@@ -1962,7 +1966,7 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
   if (runtimeUnprotected) {
     const kept = (await keptPage(oldServeFile)) ?? (await keptPage(file))
     if (kept !== null) return { url: kept.url, port: kept.port, isKept: true, isNew: false }
-    throw new RuntimeFolderError()
+    throw runtimeCheckTimedOut ? new RuntimeFolderTimeoutError() : new RuntimeFolderError()
   }
   const old = readRunning(oldServeFile)
   if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
@@ -2456,6 +2460,10 @@ try {
   } else if (args.includes('--mcp')) {
     process.exitCode = 1
     process.stderr.write('MCP_START_FAILED\n')
+  } else if (error instanceof RuntimeFolderTimeoutError) {
+    process.exitCode = 1
+    const output = args.includes('--serve-child') ? process.stderr : process.stdout
+    output.write(`${s.serveRuntimeCheckTimeout}\n`)
   } else if (error instanceof RuntimeFolderError) {
     process.exitCode = 1
     const output = args.includes('--serve-child') ? process.stderr : process.stdout

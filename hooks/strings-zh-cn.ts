@@ -693,6 +693,7 @@ export const ZH_CN: Strings = {
   invalidStaleMs: '闲置判定时间必须为大于零的毫秒数。',
   serveFailed: (why: string): string => `打不开看板网页：${why}`,
   serveRuntimePrivate: '无法将看板网页的地址文件保护为仅此账号可用；没有启动网页。',
+  serveRuntimeCheckTimeout: 'Windows 检查看板网页的地址文件花了太久；电脑可能正忙，请稍后再试一次。',
   serveLanAt: (url: string): string => `同一网络上的手机，打开 ${url} 或扫这个二维码：`,
   serveLanNone: '找不到这台电脑在局域网上的地址，手机打不开这个看板。',
   serveLanNotOurs: (address: string): string => `${address} 不是这台电脑在局域网上的私有地址，看板没办法开在那里。`,
