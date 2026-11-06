@@ -5400,7 +5400,7 @@ test('a Windows page start names a runtime-folder access check that ran out of t
   const board = serveIn()
   const preload = join(board.dir, 'stalled-acls-empty.cjs')
   writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
-cp.execFileSync = (file, ...args) => { if (/powershell\\\\.exe$/i.test(String(file))) throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: '' }); return original(file, ...args) }
+cp.execFileSync = (file, ...args) => { if (/powershell\\.exe$/i.test(String(file))) throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: '' }); return original(file, ...args) }
 require('node:module').syncBuiltinESMExports()
 `)
   board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
@@ -5799,10 +5799,10 @@ const sddl = target => {
   }
   let isDir = false
   try { isDir = fs.statSync(target).isDirectory() } catch {}
-  return 'O:' + sid + 'G:SYD:' + (isDir ? 'P(A;OICI;' : 'AI(A;ID;') + 'FA;;;' + sid
+  return 'O:' + sid + 'G:SYD:' + (isDir ? 'P(A;OICI;' : 'AI(A;ID;') + 'FA;;;' + sid + ')'
 }
 cp.execFileSync = (file, args, options) => {
-  if (/powershell\\\\.exe$/i.test(String(file))) {
+  if (/powershell\\.exe$/i.test(String(file))) {
     const lines = String(options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH).split('|').map(sddl).join('\\n')
     throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
   }
