@@ -4061,20 +4061,13 @@ test('the sh reporter logs CLEANUP_FAILED when its sweep fails, but not for a fi
   assert.equal(readdirSync(inbox).filter(name => name.endsWith('.json')).length, 4)
 }))
 
-test('a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board', () => fixture(async f => {
-  const isWindows = process.platform === 'win32'
-  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
-  const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
-  const exitProof = join(f.home, 'classifier-exit.json')
-  f.save(script, isWindows ? observeClassifierExit(reporterPs1(), exitProof) : reporterSh(inbox))
-  f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
-  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
-  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
-  // Only the words outside the folder paths count: a project folder named agent-board is no board request.
-  // The sh reporter keeps only plain ASCII values; PowerShell keeps every value.
-  // `kept` lists keys in the receipt's order (RECEIPT_KEYS); the POSIX check also compares the bytes.
+// Only the words outside the folder paths count: a project folder named agent-board is no board request.
+// The sh reporter keeps only plain ASCII values; PowerShell keeps every value.
+// `kept` lists keys in the receipt's order (RECEIPT_KEYS); the POSIX check also compares the bytes.
+// One test per case, so CI spreads the cases over its parts instead of one part taking about 21 s (#910).
+const timedOutClassifierCases = isWindows => {
   const grok = { hookEventName: 'UserPromptSubmit' }
-  const cases = [
+  return [
     { payload: { cwd: '/synthetic/中文', prompt: '/board', transcript_path: '/synthetic/中文/PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: '/synthetic/中文' } : {}, isBoard: true },
     { payload: { cwd: '/synthetic/中文', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: '/synthetic/中文/PRIVATE_TRANSCRIPT.jsonl' }, kept: isWindows ? { cwd: '/synthetic/中文' } : {} },
     { payload: { cwd: '/synthetic/agent-board', prompt: 'PRIVATE_RAW_PROMPT', transcript_path: '/synthetic/agent-board/PRIVATE_TRANSCRIPT.jsonl' }, kept: { cwd: '/synthetic/agent-board' } },
@@ -4086,7 +4079,17 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
     { payload: { hookEventName: 'UserPromptSubmit', hook_event_name: 'UserPromptSubmit', directory: '/synthetic/dir *', project_dir: '/synthetic/project', workspace: '/synthetic/work', workspaceRoot: '/synthetic/root', cwd: '/synthetic/cwd', conversationId: 'synthetic-conversation', conversation_id: 'synthetic-conversation-underscore', 'thread-id': 'synthetic-thread-dash', thread_id: 'synthetic-thread', extra: { sessionID: 'synthetic-upper' }, sessionId: 'synthetic-camel', prompt: 'PRIVATE_RAW_PROMPT' }, kept: { sessionId: 'synthetic-camel', sessionID: 'synthetic-upper', 'thread-id': 'synthetic-thread-dash', thread_id: 'synthetic-thread', conversation_id: 'synthetic-conversation-underscore', conversationId: 'synthetic-conversation', cwd: '/synthetic/cwd', workspaceRoot: '/synthetic/root', workspace: '/synthetic/work', project_dir: '/synthetic/project', directory: '/synthetic/dir *', hook_event_name: 'UserPromptSubmit', hookEventName: 'UserPromptSubmit' } },
     { key: null, payload: { cwd: '/synthetic/project', prompt: 'PRIVATE_RAW_PROMPT' } },
   ]
-  for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of cases.entries()) {
+}
+for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of timedOutClassifierCases(process.platform === 'win32').entries()) {
+  test(`a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board, case ${index}`, () => fixture(async f => {
+    const isWindows = process.platform === 'win32'
+    const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
+    const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
+    const exitProof = join(f.home, 'classifier-exit.json')
+    f.save(script, isWindows ? observeClassifierExit(reporterPs1(), exitProof) : reporterSh(inbox))
+    f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+    const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+    const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
     const session = `synthetic-timeout-${index}`
     rmSync(pidFile, { force: true })
     rmSync(exitProof, { force: true })
@@ -4107,7 +4110,7 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
       const log = hookLog(f)
       assert.match(log, /REPORTER_TIMEOUT/)
       assert.doesNotMatch(log, /REPORTER_FAILED/)
-      if (key === null) { assert.deepEqual(files, []); continue }
+      if (key === null) { assert.deepEqual(files, []); return }
       assert.equal(files.length, 1)
       assert.ok(files[0].endsWith('.json'))
       const body = readFileSync(join(inbox, files[0]), 'utf8')
@@ -4120,8 +4123,8 @@ test('a timed-out prompt classifier saves a metadata receipt that marks a board 
     } finally {
       if (!isGone && existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
     }
-  }
-}))
+  }))
+}
 
 test('a classifier interrupted while publishing its PID marker still proves its owned process exited', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), pidFile = join(f.home, 'classifier.pid')
@@ -4686,9 +4689,10 @@ test('Codex hook replays are no-ops and a Stop never invents task completion', (
   assert.match(readFileSync(f.progress, 'utf8'), /state=done/)
 }))
 
-test('native lifecycle events retain a board-confirmed completion in session JSON instead of reopening old steps', () => fixture(f => {
-  assert.equal(f.install('--apply').status, 0)
-  for (const agent of ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']) {
+// One test per agent, so CI spreads them over its parts (#910).
+for (const agent of ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']) {
+  test(`native lifecycle events retain a board-confirmed completion in session JSON instead of reopening old steps: ${agent}`, () => fixture(f => {
+    assert.equal(f.install('--apply').status, 0)
     const id = `native-confirm-${agent}-123`
     const report = (state, steps) => f.command(['--codex-report', '--agent', agent, '--session', id], { title: `${agent} task`, state, steps })
     assert.equal(report('ended', ['- [ ] Old task', '- [-] Canceled']).status, 0)
@@ -4710,8 +4714,8 @@ test('native lifecycle events retain a board-confirmed completion in session JSO
     assert.equal(report('working', ['- [ ] Genuinely new work']).status, 0)
     assert.deepEqual(JSON.parse(readFileSync(recordPath)).steps, ['- [ ] Genuinely new work'], agent)
     assert.equal(report('done', ['- [x] Genuinely new work']).status, 0)
-  }
-}))
+  }))
+}
 
 test('Codex lifecycle hooks never retain conversation and approval payloads, and open nothing that is not a Codex history file', () => fixture(f => {
   f.install('--apply')
