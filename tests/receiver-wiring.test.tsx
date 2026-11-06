@@ -53,6 +53,25 @@ test('a board message runs as one turn whose words and reply stay out of the boa
   expect(JSON.stringify(sent)).not.toContain('The reply body')
 })
 
+test('a board message whose reply ends on a question waits on you in a session with a Task list, without the ACK or the message words', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { submitted } = hub(on, world)
+  await start($, 'name the pets')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Pick a fish name', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2100)
+  expect(submitted.length).toBe(1)
+  await $.turn.start({ text: PROMPT, turnId: 'd1' })
+  await $.turn.complete({ answer: `ACK ${NONCE} Should I pick a third name?`, durationMs: 1, isAborted: false, turnId: 'd1', reason: 'answer' })
+  await clock.advance(10)
+  const board = world.files.get(FILE) ?? ''
+  expect(board).toContain('- [?] Should I pick a third name?')
+  for (const leak of [WORDS, NONCE, 'ACK']) expect(board).not.toContain(leak)
+})
+
 test('a busy session keeps its address and does not take a message until its turn ends', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: false }
   const clock = engineBeneath(on, world)

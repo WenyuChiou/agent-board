@@ -4791,3 +4791,21 @@ test('the rule in every language asks for one-line steps of at most 120 characte
   expect(RULES['zh-CN']).toContain('其他时候不要手改这个文件')
   expect(RULES.en).not.toContain('goes into progress.md by hand')
 })
+
+test('a native ask reaches the page model with its options and where to answer, and offers no answer button or reply', () => {
+  const now = Date.parse('2026-10-16T12:00:00.000Z')
+  const base = applyTaskCreate(emptyMirror('2be48af2-6193-5040', 'synthetic_project', now), { subject: 'Blue or green?' }, '1', now)
+  const mirror = { ...base, state: 'waiting' as const, source: 'tasks' as const, tasks: base.tasks.map(task => ({ ...task, waiting: 'you' as const, ask: 'choose', options: ['Blue', 'Green'], native: { agent: 'claude', options: ['Blue', 'Green'] } })) }
+  const projects = parseProgress(upsertAutoBlock('', mirror, STRINGS.en))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], now, true, 'fixture:native').ledger
+  const view = buildView(projects, [], null, now, 0, {}, STRINGS.en, [], {}, ledger)
+  const ask = serveModel(view, [], STRINGS.en).asks[0]
+  expect(ask?.native).toEqual({ options: ['Blue', 'Green'], line: "Answer in Claude Code's window." })
+  expect(ask?.answers).toEqual([])
+  const text = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  expect(text).toContain("Answer in Claude Code's window.")
+  expect(text).toContain('· Blue')
+  const page = servePage(STRINGS.en, 'n')
+  expect(page).toContain('} else if (ask.native) {')
+  expect(page.slice(page.indexOf('} else if (ask.native) {'), page.indexOf('} else if (ask.isOwn) {'))).not.toContain('canWrite = true')
+})

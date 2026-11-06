@@ -286,6 +286,19 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
 
   // What the person can do about one waiting step, by what it asks and whose it is.
   const askActions = (item: WaitingItem) => {
+    // A native ask waits in the agent's own dialog (#1048, #1049): an answer sent from here would reach
+    // the model while that dialog is still open, so the pane only lists the options and says where.
+    const native = item.native
+    if (native !== undefined) {
+      return (
+        <Box flexDirection="column">
+          {native.options.map(option => (
+            <Text key={`${item.key}::native::${option}`} color={palette.muted} wrap="wrap">{`· ${option}`}</Text>
+          ))}
+          <Text color={palette.muted} wrap="wrap">{s.nativeAnswerIn(agentLabel(native.agent, s))}</Text>
+        </Box>
+      )
+    }
     // Another session's (or agent's) question is answered there, but a command to run or a
     // link to open is the person's to use from here, whoever asked.
     if (item.where === 'other') {

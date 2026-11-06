@@ -4,7 +4,7 @@ import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiv
 import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
-import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
+import { LEDGER_LINK, LEDGER_RENAMES, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
 import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
 import { atom, read, update } from 'claude-code'
@@ -97,9 +97,9 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, toolQuestions, turnTools } from './digest'
+import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, markApproval, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
-import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
+import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
 import { liveBoardArgv, liveBoardPage, liveBoardScript, pageDoneHash, pageDonePath, pageStatePath, readPageDone, readPageState } from './live-page'
 import {
@@ -205,9 +205,46 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 
 const wordsOf = async ($: EngineInterface): Promise<Strings> => STRINGS[langOf(await read($, lang)) ?? 'zh-TW']
 
+// The step for an approval that has waited long enough, only in a session that keeps a Task list (the
+// same rule as a closing question); a failed save leaves the tool's own dialog untouched.
+const showApproval = async ($: EngineInterface, id: string, tool: string): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || mirror.source !== 'tasks' || mirror.tasks.length === 0) return
+  const step = (await wordsOf($)).claudeApprovalStep(tool)
+  // The dialog can end while the words are read: the save checks again, and the flag is set first
+  // so a turn ending during the save still takes the step back.
+  if (!pendingApprovals.has(id)) return
+  hasApprovalStep = true
+  await saveMine($, one => pendingApprovals.has(id) ? markApproval(one, step) : one)
+  await settle($)
+}
+
+// The step goes once no approval is pending (no id = the turn or session ended, whatever is pending).
+const dropApproval = async ($: EngineInterface, id?: string): Promise<void> => {
+  if (id === undefined) pendingApprovals.clear()
+  else pendingApprovals.delete(id)
+  if (!hasApprovalStep || pendingApprovals.size > 0) return
+  hasApprovalStep = false
+  // The ledger keeps a question whose step only vanished, so it must read the step
+  // as closed before the step goes away.
+  await saveMine($, closeApproval).catch(() => undefined)
+  await settle($).catch(() => undefined)
+  await progressPath($).then(async path => pollQuestions($, path, parseProgress(await readText($, path)))).catch(() => false)
+  // A new approval can be shown during the waits above; its step must stay.
+  if (hasApprovalStep || pendingApprovals.size > 0) return
+  await saveMine($, clearApproval).catch(() => undefined)
+  await settle($).catch(() => undefined)
+}
+
 // Module state: reset by a reload, which only happens between turns.
 let isPolling = false
 let isTurnRunning = false
+// Tools the person is being asked to approve (#1048): tool_use_id to tool name. One that is still here
+// after APPROVAL_MS puts a waiting step on the board; its tool.call ending, or the turn or session
+// ending, takes the step back. `hasApprovalStep` is whether this session has written one.
+const APPROVAL_MS = 3000
+const pendingApprovals = new Map<string, string>()
+let hasApprovalStep = false
 let receiver: Receiver | null = null
 let receiverTimer: { cancel: () => void } | null = null
 // A hub that does not answer within this holds no tick up: it is a poll that failed.
@@ -376,6 +413,38 @@ const replaceFile = async ($: EngineInterface, from: string, to: string, isWin: 
   const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
 
   return ran !== null && ran.exitCode === 0
+}
+
+// A batch of replacements in one Node start: each PowerShell start can take over 10 s on a slow
+// Windows machine, and 50 of them in a row made a receipt batch fail half way. The argv of one
+// run stays under ARGV_BUDGET characters, well inside Windows' 32,767-character command line with
+// the script itself, so a batch of 50 deep paths is still one start. A pair still not placed
+// afterwards (a failed rename, a missing or failing `node`) goes through the per-file move. The
+// answer is what the files hold, so the exit code alone never counts. True for each pair whose
+// source is gone.
+const ARGV_BUDGET = 24000
+const replaceFiles = async ($: EngineInterface, pairs: readonly (readonly [string, string])[], isWin: boolean): Promise<boolean[]> => {
+  const chunks: (readonly [string, string])[][] = []
+  let used = 0
+  for (const pair of pairs) {
+    const size = pair[0].length + pair[1].length + 4
+    if (chunks.length === 0 || used + size > ARGV_BUDGET) {
+      chunks.push([])
+      used = 0
+    }
+    chunks[chunks.length - 1]?.push(pair)
+    used += size
+  }
+  const placed: boolean[] = []
+  for (const chunk of chunks) {
+    await $.process.run(['node', '-e', LEDGER_RENAMES, '--', ...chunk.flat()], { timeoutMs: 10000 }).catch(() => null)
+    for (const [from, to] of chunk) {
+      if (await $.fs.exists(from)) placed.push(await replaceFile($, from, to, isWin) && !(await $.fs.exists(from)))
+      else placed.push(true)
+    }
+  }
+
+  return placed
 }
 
 type Completion = Awaited<ReturnType<EngineInterface['model']['complete']>>
@@ -1241,19 +1310,30 @@ const syncPageState = async ($: EngineInterface, done?: Record<string, string>):
       .filter(({ file }) => !verifiedPageDone.has(file))
     const dir = path.replace(/[\\/][^\\/]*$/, '')
     const existing = receipts.length === 0 ? new Set<string>() : new Set((await $.fs.list(dir)).filter(entry => entry.kind === 'file').map(entry => entry.name))
+    const isWin = await isWindows($, path)
+    const pending: { text: string; file: string; temporary: string }[] = []
     for (const { text, file } of receipts.slice(0, 50)) {
-      if (!existing.has(file.replace(/^.*[\\/]/, '')) || await readText($, file) !== text) {
-        const temporary = `${file}.tmp-${await $.session.id()}-${questionWrite++}`
-        const isWin = await isWindows($, path)
-        try {
-          await $.fs.write(temporary, text)
-          if (await $.fs.read(temporary) !== text || !(await replaceFile($, temporary, file, isWin))) throw new Error('PAGE_STATE_NOT_VERIFIED')
-          if (await $.fs.read(file).catch(() => null) !== text) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
-        } finally {
-          if (await $.fs.exists(temporary)) await removeFiles($, [temporary], isWin)
-        }
+      if (!existing.has(file.replace(/^.*[\\/]/, '')) || await readText($, file) !== text) pending.push({ text, file, temporary: `${file}.tmp-${await $.session.id()}-${questionWrite++}` })
+      else verifiedPageDone.add(file)
+    }
+    // Every temp is written and read back first; one process then places the whole batch.
+    try {
+      let isWhole = true
+      for (const { text, temporary } of pending) {
+        await $.fs.write(temporary, text)
+        if (await $.fs.read(temporary) !== text) isWhole = false
       }
-      verifiedPageDone.add(file)
+      if (isWhole) await replaceFiles($, pending.map(one => [one.temporary, one.file] as const), isWin)
+      let isVerified = isWhole
+      for (const { text, file } of pending) {
+        if (await $.fs.read(file).catch(() => null) === text) verifiedPageDone.add(file)
+        else isVerified = false
+      }
+      if (!isVerified) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
+    } finally {
+      const left: string[] = []
+      for (const { temporary } of pending) if (await $.fs.exists(temporary)) left.push(temporary)
+      await removeFiles($, left, isWin)
     }
     let before = ''
     let hasLanded = false
@@ -1324,7 +1404,7 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInt
   // and the CLI's existing running-page check.
   const script = liveBoardScript(path)
   const installed = await readText($, script).catch(() => '')
-  if (!Object.values(STRINGS).some(words => installed === boardScript(path, words.lang))) return { page: null, needsInstall: true }
+  if (!isOwnBoard(installed, path)) return { page: null, needsInstall: true }
   try {
     // Worst case: 2 s for the 0.19.0 address check + 8.5 s of checks + 10 s child
     // wait + 8.5 s of checks = 29 s, plus Node start. Going over is safe: the
@@ -4187,6 +4267,7 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     journal($).catch(() => undefined)
     isTurnRunning = true
+    await dropApproval($)
     hasTurnBackgroundLaunch = false
     observedTurnTools = []
     turnBackgroundJobIds = new Set()
@@ -4248,13 +4329,16 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     if (hasBackgroundActivity) await backgroundChanges
     isTurnRunning = false
+    await dropApproval($)
     const isDelivery = (await receiver?.turnEnded(e.turnId, e.answer, e.isAborted).catch(() => false)) === true
     const mirror = await read($, mine)
     const hasRunningTurnBackgroundJob = (mirror?.backgroundJobIds ?? []).some(id => turnBackgroundJobIds.has(id)) ||
       (turnBackgroundLaunchesWithoutId > 0 && (mirror?.backgroundJobs ?? 0) > (mirror?.backgroundJobIds?.length ?? 0))
     if ((mirror?.backgroundReleases?.length ?? 0) > 0 || (mirror?.backgroundReleaseCount ?? 0) > 0)
       await saveBackground($, one => ({ ...one, backgroundReleases: [], backgroundReleaseCount: 0 })).catch(() => undefined)
-    const question = e.isAborted || isDelivery ? null : lastQuestion(e.answer)
+    // A board message's ACK stays off the board, but a question its reply ends on waits on the
+    // person like any turn's, so answering from the board can go on past one round (#1050).
+    const question = e.isAborted ? null : lastQuestion(isDelivery ? e.answer.replace(/^\s*ACK \S+[ \t]*/, '') : e.answer)
     if (mirror !== null && mirror.tasks.length > 0) {
       const branch = await branchName($)
       await saveMine($, one => ({ ...one, branch }))
@@ -4308,6 +4392,8 @@ export const register: Register = (on, options) => {
     if (boardToolName !== null && e.tool === boardToolName) return { result: (await openBoard($)).text }
     if (e.agentId !== undefined) return next(e)
     const ran = await next(e)
+    // Answered, declined or failed: the dialog this call waited on is over.
+    if (e.tool_use_id && pendingApprovals.has(e.tool_use_id)) await dropApproval($, e.tool_use_id)
     if (ran.deny !== undefined || ran.isError === true) return ran
     if (e.tool !== 'AskUserQuestion' && e.tool !== 'TaskList') observedTurnTools.push(e.tool)
     if (e.tool === 'Agent' || !('run_in_background' in e) || e.run_in_background !== true) return ran
@@ -4317,6 +4403,22 @@ export const register: Register = (on, options) => {
     // turn.complete drains the queue; the tool's result need not wait for pane reads.
     saveBackground($, one => startBackgroundJob(one, e.tool_use_id || undefined)).catch(() => undefined)
     return ran
+  })
+
+  // A tool that waits for the person's yes in Claude's own dialog (#1048). Only a main-loop call the
+  // person answers counts; a question or a plan has its own handling. The step comes after APPROVAL_MS,
+  // so an approval answered at once never reaches the board.
+  on('tool.check', async ($, e, next) => {
+    const checked = await next(e)
+    if (checked.decision !== 'ask' || e.approver !== 'person' || e.agentId !== undefined || !e.tool_use_id) return checked
+    if (e.tool === 'AskUserQuestion' || e.tool === 'ExitPlanMode') return checked
+    const id = e.tool_use_id
+    pendingApprovals.set(id, e.tool)
+    $.clock.after(APPROVAL_MS, () => {
+      if (pendingApprovals.has(id)) showApproval($, id, e.tool).catch(() => undefined)
+    })
+
+    return checked
   })
 
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
@@ -4412,6 +4514,7 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     if (hasBackgroundActivity) await backgroundChanges
+    await dropApproval($)
     await journal($)
     const mirror = await read($, mine)
     if (mirror !== null && (mirror.tasks.length > 0 || (mirror.backgroundJobs ?? 0) > 0)) {

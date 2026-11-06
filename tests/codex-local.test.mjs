@@ -4732,6 +4732,126 @@ test('Codex lifecycle hooks never retain conversation and approval payloads, and
   assert.ok(!existsSync(transcript))
 }))
 
+test('a Codex PermissionRequest adds a waiting approval step with a native line, and Stop closes it', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('PermissionRequest', 'turn-1').status, 0)
+  const asked = readFileSync(f.progress, 'utf8')
+  assert.match(asked, /- \[\?\] Codex (asks to run a command|請你核准指令)\n<!-- native=codex -->\n/)
+  const approval = asked.match(/- \[\?\] Codex [^\n]*/)?.[0]
+  assert.ok(approval)
+  assert.equal(f.event('Stop', 'turn-1').status, 0)
+  const stopped = readFileSync(f.progress, 'utf8')
+  assert.ok(stopped.includes(approval.replace('[?]', '[x]')))
+  assert.ok(!stopped.includes('native=codex'))
+  assert.ok(!/- \[\?\]/.test(stopped))
+}))
+
+test('a second Codex PermissionRequest after a report reuses the approval step', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('PermissionRequest', 'turn-1').status, 0)
+  const approval = readFileSync(f.progress, 'utf8').match(/- \[\?\] Codex [^\n]*/)?.[0]
+  assert.ok(approval)
+  assert.equal(f.report('working', ['- [~] Real task', '- [ ] Next task']).status, 0)
+  const reported = readFileSync(f.progress, 'utf8')
+  assert.ok(!reported.includes('native=codex'))
+  assert.ok(reported.includes('- [~] Real task'))
+  assert.ok(reported.includes(approval.replace('[?]', '[x]')))
+  assert.equal(f.event('PermissionRequest', 'turn-1').status, 0)
+  const again = readFileSync(f.progress, 'utf8')
+  assert.match(again, /- \[ \] Next task\n- \[\?\] Codex [^\n]*\n<!-- native=codex -->\n/)
+  assert.equal(again.match(/- \[[?x]\] Codex [^\n]*/g)?.length, 1)
+  assert.equal(f.event('Stop', 'turn-1').status, 0)
+  const stopped = readFileSync(f.progress, 'utf8')
+  assert.ok(stopped.includes(approval.replace('[?]', '[x]')))
+  assert.ok(!stopped.includes('native=codex'))
+}))
+
+test('a Codex report after an approval keeps the approval closed, not waiting', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('PermissionRequest', 'turn-1').status, 0)
+  const approval = readFileSync(f.progress, 'utf8').match(/- \[\?\] Codex [^\n]*/)?.[0]
+  assert.ok(approval)
+  assert.equal(f.report('working', ['- [~] Real task']).status, 0)
+  const reported = readFileSync(f.progress, 'utf8')
+  assert.ok(reported.includes('- [~] Real task'))
+  assert.ok(reported.includes(approval.replace('[?]', '[x]')))
+  assert.ok(!/- \[\?\]/.test(reported))
+  assert.ok(!reported.includes('native=codex'))
+}))
+
+test('a Codex Stop whose last message ends on a question adds a waiting step with that question, and the next prompt closes it', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'The change is ready.\n\nShall I open the pull request now?' }).status, 0)
+  const asked = readFileSync(f.progress, 'utf8')
+  assert.match(asked, /- \[\?\] Shall I open the pull request now\?\n/)
+  assert.ok(!asked.includes('native=codex'))
+  assert.equal(f.event('UserPromptSubmit', 'turn-2').status, 0)
+  const answered = readFileSync(f.progress, 'utf8')
+  assert.ok(answered.includes('- [x] Shall I open the pull request now?'))
+  assert.ok(!/- \[\?\]/.test(answered))
+  assert.ok(!answered.includes('native=codex'))
+}))
+
+test('a Codex question stays owned through a board prompt, and the next prompt closes it', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which folder should I use?' }).status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-2', { prompt: '/agent-board' }).status, 0)
+  assert.ok(readFileSync(f.progress, 'utf8').includes('- [?] Which folder should I use?'))
+  assert.equal(f.event('UserPromptSubmit', 'turn-3').status, 0)
+  const answered = readFileSync(f.progress, 'utf8')
+  assert.ok(answered.includes('- [x] Which folder should I use?'))
+  assert.ok(!/- \[\?\]/.test(answered))
+  assert.ok(!answered.includes('native=codex'))
+}))
+
+test('a Codex Stop whose last message ends on a statement adds no waiting step', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which folder should I use?\n\nI used the existing folder. The change is ready.' }).status, 0)
+  assert.ok(!/- \[\?\]/.test(readFileSync(f.progress, 'utf8')))
+}))
+
+test('a Codex Stop keeps nothing of the last message but its closing question', () => fixture(f => {
+  f.install('--apply')
+  const secret = 'DO-NOT-STORE-THIS-EARLIER-SENTENCE'
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: `${secret} stays out.\n\nKeep the old name, or rename it?` }).status, 0)
+  const digest = createHash('sha256').update(`codex:${session}`).digest('hex')
+  const record = readFileSync(join(f.root, 'sessions', `${digest}.json`), 'utf8')
+  assert.ok(record.includes('Keep the old name, or rename it?'))
+  assert.ok(!record.includes(secret))
+  assert.ok(!readFileSync(f.progress, 'utf8').includes(secret))
+  assert.ok(!existsSync(join(f.root, 'pending')) || readdirSync(join(f.root, 'pending')).every(name => !readFileSync(join(f.root, 'pending', name), 'utf8').includes(secret)))
+}))
+
+test('the approval step and the question step close and reuse their own lines in either order', () => fixture(f => {
+  f.install('--apply')
+  const question = { last_assistant_message: 'Which folder should I use?' }
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-1', question).status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-2').status, 0)
+  assert.equal(f.event('PermissionRequest', 'turn-2').status, 0)
+  const approval = readFileSync(f.progress, 'utf8')
+  assert.ok(approval.includes('- [x] Which folder should I use?'))
+  assert.match(approval, /- \[\?\] Codex [^\n]*\n<!-- native=codex -->\n/)
+  assert.equal(f.event('Stop', 'turn-2', question).status, 0)
+  const second = readFileSync(f.progress, 'utf8')
+  assert.ok(!second.includes('native=codex'))
+  assert.match(second, /- \[x\] Codex [^\n]*\n/)
+  assert.equal(second.match(/- \[\?\]/g)?.length, 1)
+  assert.equal(second.match(/- \[[?x]\] Which folder should I use\?/g)?.length, 1)
+  assert.ok(second.includes('- [?] Which folder should I use?'))
+  assert.equal(f.event('UserPromptSubmit', 'turn-3').status, 0)
+  const answered = readFileSync(f.progress, 'utf8')
+  assert.ok(answered.includes('- [x] Which folder should I use?'))
+  assert.ok(!/- \[\?\]/.test(answered))
+}))
+
 // These synthetic full ids have distinct SHA-256 owners with the same eight-character prefix.
 const collisionSessions = ['collision-fixture-9342', 'collision-fixture-29381']
 const collisionOwner = id => createHash('sha256').update(`codex:${id}`).digest('hex')

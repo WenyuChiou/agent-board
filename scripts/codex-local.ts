@@ -35,6 +35,7 @@ import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
 import { currentPart } from '../hooks/retention'
+import { lastQuestion } from '../hooks/digest'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -544,7 +545,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // Read before Cursor's adapter drops workspace_roots; a queued raw event keeps cwd and workspace_roots for this (#246).
       const folder = filesByFolder(mode, agent) ? folderProject(rawCwd) : ''
       // Only metadata selected below is retained. Save no prompts, tool inputs,
-      // last_assistant_message, or permission decisions from a hook payload. The plan mirror is the
+      // or permission decisions from a hook payload, and nothing of last_assistant_message but the
+      // one line its closing question makes (#1045), read here and only at a Codex Stop. The plan mirror is the
       // one place a tool input is read (--plan-event, before this): only each step's text and status,
       // which a report carries. transcript_path is
       // opened, when it is this session's own history file, for its first record at a session's
@@ -574,6 +576,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path, session) : null) : undefined
       const identity = mode !== '--codex-report' ? folderIdentity(rawCwd) : undefined
       // A queued event keeps metadata only: the host's own fields stay out, as they do above.
+      const question = agent === 'codex' && mode === '--codex-event' && raw.hook_event_name === 'Stop' ? lastQuestion(String(raw.last_assistant_message ?? '')) : null
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
         ...(filesByFolder(mode, agent) ? { folder } : {}),
@@ -582,6 +585,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
           turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
+          ...(question === null ? {} : { question }),
         } : {},
       }
     }
@@ -699,7 +703,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? { folder: name, folderDigest, folderCanonicalDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
-      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
       if (entry === current) reportCut = cut
       const saveFullText = (): void => {

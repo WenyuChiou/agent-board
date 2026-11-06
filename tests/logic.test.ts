@@ -1171,3 +1171,42 @@ test('CJK characters and emoji each count as one code point when a step is cut',
   expect(file).toContain(`- [ ] ${emoji}\n`)
   expect(cutEntries({ ...mirror, title: 'Synthetic title' }).map(entry => entry.step)).toEqual([cjk])
 })
+
+const askedMirror = (options: string[], line?: string): { text: string; mirror: ProgressMirror } => {
+  const base = applyTaskCreate(emptyMirror('2be48af2-6193-5040', 'persona_framework', NOW), { subject: 'Pick a palette' }, '1', NOW)
+  const mirror = { ...base, tasks: base.tasks.map(task => ({ ...task, waiting: 'you' as const, native: { agent: 'claude', options } })) }
+  const block = renderAutoBlock(mirror, STRINGS.en)
+  if (line !== undefined) block.splice(block.findIndex(one => one.startsWith('<!-- native=')), 1, line)
+
+  return { text: `## persona_framework\n${block.join('\n')}\n`, mirror }
+}
+
+test('a native ask is written after its step and read back with its options, even ones holding -- and >', () => {
+  const options = ['Blue --> dark', 'Green > light', 'a-b']
+  const { text } = askedMirror(options)
+  const native = text.split('\n').find(one => one.startsWith('<!-- native='))
+  expect(native).toBeDefined()
+  expect(native!.slice(4, -4)).not.toContain('--')
+  expect(native!.slice(4, -4)).not.toContain('>')
+  const step = parseProgress(text)[0]!.tasks[0]!.steps[0]!
+  expect(step.status).toBe('waiting')
+  expect(step.native).toEqual({ agent: 'claude', options })
+  expect(parseProgress(text)[0]!.tasks[0]!.notes.length).toBe(1)
+})
+
+test('a native line that cannot be read is ignored and never becomes a step or a note', () => {
+  for (const line of ['<!-- native=claude options=[1,2] -->', '<!-- native=claude options=not-json -->', '<!-- native=gemini -->', '<!-- native= options=["a"] -->']) {
+    const { text } = askedMirror(['a'], line)
+    const task = parseProgress(text)[0]!.tasks[0]!
+    expect(task.steps.length).toBe(1)
+    expect(task.steps[0]!.native).toBeUndefined()
+    expect(task.notes.length).toBe(1)
+  }
+})
+
+test('a native line keeps at most 8 options of 120 characters each', () => {
+  const { text } = askedMirror(Array.from({ length: 10 }, (_, index) => `${index}${'x'.repeat(200)}`))
+  const step = parseProgress(text)[0]!.tasks[0]!.steps[0]!
+  expect(step.native?.options.length).toBe(8)
+  expect(step.native?.options.every(one => one.length <= 120)).toBe(true)
+})
