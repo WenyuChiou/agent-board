@@ -228,7 +228,9 @@ OpenClaw receives `session_start`, `session_end` and sanitized lifecycle start/e
 events. Only the native session/run ids and state are reported; stale runs cannot replace
 the current one. It explicitly denies conversation access. Hosts lacking the subscription
 API fail visibly rather than falling back to transcript access. Reload the plugin in each
-host; installation cannot enumerate every previously open session.
+host; installation cannot enumerate every previously open session. When OpenClaw's
+`progress_card` (or the older `update_plan`) call succeeds with a plan, the plugin copies each
+step's text and status into the board's steps; OpenCode's plugin does the same with its todo list.
 
 DeepSeek uses `agent/created`, `agent/status` (running/idle) and `agent/disposed`, retaining
 its own agent identity. Its owned entry is appended to a plain root YAML patch sequence;
