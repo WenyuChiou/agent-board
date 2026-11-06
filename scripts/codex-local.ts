@@ -393,9 +393,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (!(mode === '--codex-report' ? Object.hasOwn(s.agentNames, agent) : localAgents.includes(agent))) throw new Error('UNSUPPORTED_AGENT')
   if (mode === '--plan-event') {
     if (planEvents[agent] === undefined && !planPlugins.includes(agent)) throw new Error('UNSUPPORTED_AGENT')
-    const plan = planReport(await input())
+    const rawPlan = await input()
+    const plan = planReport(rawPlan)
     if (plan === null) return true
-    return runCodexLocal([...args.filter(arg => arg !== '--plan-event'), '--codex-report', '--session', plan.session], boardPath, s, plan.input)
+    // A plan with no block yet files like this agent's own status events: by the session's folder
+    // for the agents that name one, else under the agent's own heading (never Codex's for another agent).
+    const planProject = ['codex', 'cursor', 'opencode'].includes(agent) ? folderProject(rawPlan.cwd) || agent : agent
+    return runCodexLocal([...args.filter(arg => arg !== '--plan-event'), '--codex-report', '--session', plan.session], boardPath, s, { ...plan.input, planProject })
   }
   const home = resolve(flag('--home') ?? homedir())
   const root = resolve(flag('--data-dir') ?? baked?.codexRoot ?? join(home, '.agent-board'))
@@ -660,6 +664,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const given = typeof payload.planTitle !== 'string' ? payload : {
         state: payload.state, steps: payload.steps,
         title: previous !== null && !Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(previous.title)) ? previous.title : payload.planTitle,
+        ...(typeof payload.planProject === 'string' ? { project: previous?.project ?? payload.planProject } : {}),
       }
       const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s) : codexReport(previous, session, mode === '--agent-status' ? {
         title: previous?.title ?? s.localAgentTask(agent), project: previous?.project ?? agent,

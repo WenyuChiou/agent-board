@@ -702,7 +702,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           </Box>
         ) : (
           <Box flexDirection="column">
-            {now !== undefined && !current.status.includes(now.text) && <Text wrap="truncate-end">{s.nowStep(now.text)}</Text>}
+            {now !== undefined && !current.status.includes(now.text) && now.text.trim() !== current.title.trim() && <Text wrap="truncate-end">{s.nowStep(now.text)}</Text>}
             {next !== undefined && muted(s.nextStepLine(next.text), 'truncate-end')}
           </Box>
         )}

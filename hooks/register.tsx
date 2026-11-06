@@ -38,6 +38,7 @@ import {
   cutEntries,
 } from './blocks'
 import type { ConfirmedTask, ConfirmRef } from './blocks'
+import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from './history'
 import { withRunMark } from './runs'
 import { ciFinished, GH_FIELDS, prFromGh } from './github'
 import {
@@ -3061,6 +3062,8 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   // A person's Clean up goes by the record on disk alone: one that stopped reading since the press
   // began moves no hand-kept task, rather than falling back to the times the pane kept in memory.
   const observed = isCleanUp ? (parseSeen(await readText($, seenPath(path))) ?? {}) : await read($, firstSeen)
+  // Read on the sweep only, never on a poll; a missing or unreadable file means the default.
+  const historyDays = isNow || isCleanUp ? HISTORY_DAYS : historyDaysOf(await readText($, settingsPath(path)).catch(() => ''))
   // Counted with their number: two done blocks with the same title and steps make one entry text,
   // and both leave (#231).
   const archived = new Map<string, number>()
@@ -3101,12 +3104,15 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
     const manual = !isNow && !isCleanUp && !isHandKeptMoveOn
       ? { text: blocks.text, entries: [], keys: [] }
       : takeManualDone(blocks.text, at, isNow ? key => seen[key] : (_key, project, task) => handKeptSeenAt(observed, project, task, at), s, isNow)
-    const entries = [...blocks.entries, ...manual.entries]
-    if (entries.length === 0) return null
+    // The unattended sweep also dates the finished steps of hand-kept tasks it has not seen done,
+    // and moves the ones dated more than the history days ago (#922).
+    const history = isNow || isCleanUp ? null : sweepHistory(manual.text, at, historyDays, s)
+    const entries = [...blocks.entries, ...manual.entries, ...(history?.entries ?? [])]
+    if (entries.length === 0 && (history === null || history.text === manual.text)) return null
     pendingEntries = entries
     pendingKeys = manual.keys
     pendingMoved = asking.filter(({ span }) => kept.has(span.start)).map(({ span, text }) => ({ session: span.session, text }))
-    return manual.text
+    return history?.text ?? manual.text
   }, undefined, async (path, text) => {
     // Made again after another session's write, the same blocks are not archived twice.
     const fresh = unwrittenEntries(pendingEntries, archived)
@@ -3746,7 +3752,7 @@ const handOverPrompt = (row: TaskRow, s: Strings): string =>
 // A press on 完成: the step is ticked in the file, by the person's own hand, and journaled
 // like a step Claude finished.
 const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
-  const wrote = await rewrite($, await progressPath($), before => setManualStep(before, ref, 'x'))
+  const wrote = await rewrite($, await progressPath($), async before => setManualStep(before, ref, 'x', await $.clock.now()))
   await poll($)
 
   return wrote !== null
