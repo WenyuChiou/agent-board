@@ -129,8 +129,8 @@ export const checkResults = (plan, results) => {
 
 // The time check (#902 step 4): a board part that takes longer than its budget, or one of its files
 // longer than its own budget, fails the plan check and names the slow files. The file budgets come
-// from step 1's Windows board job logs (run 41985005370, main 63c29bb): a file's total there is summed
-// across the eight board jobs, so one job's share is the total / 8 for a self-parted file (a quarter
+// from step 1's Windows board job logs (run 41985005370, main 63c29bb, then four parts): a file's total
+// there is summed across the eight board jobs, so one job's share is the total / 8 for a self-parted file (a quarter
 // of its tests in every job) and / 2 for a file that runs in one part per Node version. Each budget
 // is that share x 1.5, rounded up to five seconds, with a sixty-second floor: the floor covers the
 // board files step 1 never measured (added since) and keeps a small file from tripping on runner

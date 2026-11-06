@@ -49,9 +49,10 @@ jobs:
       # The same pairs for the board job and the journeys. On Windows each part runs its files one at a
       # time (CI_TEST_SERIAL): three spawn-heavy files side by side on a 4-vCPU runner slowed every test
       # about 1.35x and failed the tightest timing budgets in turn (#910). The board set takes about
-      # 21 minutes there one file at a time, so four parts keep the ten-minute budget; the journeys
+      # 21 minutes there one file at a time, and Windows runners vary 1.5-1.9x between jobs of one
+      # commit, so six parts keep each file and part under its time budget (#1059); the journeys
       # take about 7, so two.
-      board_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/4"},{"os":"windows-latest","node":24,"part":"2/4"},{"os":"windows-latest","node":24,"part":"3/4"},{"os":"windows-latest","node":24,"part":"4/4"}]' || '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/4"},{"os":"windows-latest","node":22,"part":"2/4"},{"os":"windows-latest","node":22,"part":"3/4"},{"os":"windows-latest","node":22,"part":"4/4"},{"os":"windows-latest","node":24,"part":"1/4"},{"os":"windows-latest","node":24,"part":"2/4"},{"os":"windows-latest","node":24,"part":"3/4"},{"os":"windows-latest","node":24,"part":"4/4"}]' }}
+      board_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/6"},{"os":"windows-latest","node":24,"part":"2/6"},{"os":"windows-latest","node":24,"part":"3/6"},{"os":"windows-latest","node":24,"part":"4/6"},{"os":"windows-latest","node":24,"part":"5/6"},{"os":"windows-latest","node":24,"part":"6/6"}]' || '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/6"},{"os":"windows-latest","node":22,"part":"2/6"},{"os":"windows-latest","node":22,"part":"3/6"},{"os":"windows-latest","node":22,"part":"4/6"},{"os":"windows-latest","node":22,"part":"5/6"},{"os":"windows-latest","node":22,"part":"6/6"},{"os":"windows-latest","node":24,"part":"1/6"},{"os":"windows-latest","node":24,"part":"2/6"},{"os":"windows-latest","node":24,"part":"3/6"},{"os":"windows-latest","node":24,"part":"4/6"},{"os":"windows-latest","node":24,"part":"5/6"},{"os":"windows-latest","node":24,"part":"6/6"}]' }}
       journeys_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]' || '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/2"},{"os":"windows-latest","node":22,"part":"2/2"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]' }}
       # An empty planner output (the base selector predates plugin_os) falls through to both systems.
       plugin_os: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}
@@ -134,7 +135,7 @@ jobs:
         # 22.18 and in 24. Both lines run so an import Node cannot load fails here.
         include: ${{ fromJSON(needs.impact.outputs.board_matrix) }}
     runs-on: ${{ matrix.os }}
-    # Split board and messaging, and the Windows board set in four serial parts, so each job keeps the ten-minute budget.
+    # Split board and messaging, and the Windows board set in six serial parts, so each job keeps the ten-minute budget.
     timeout-minutes: 10
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
