@@ -3,7 +3,7 @@
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -1796,6 +1796,403 @@ test('the page keeps a source copy for the archived same-title peer alone', { ti
   } finally { await board.close() }
 })
 
+// #921: the first view of a big board queues its question captures instead of
+// writing all 500 inside the request, and the server answers a mailbox poll
+// while they drain. The 150 ms poll budget is the hook's own (a mailbox turn
+// gives up after 150 ms); it is asserted only while the flush drains, where
+// one tick writes 5 files and the event loop is free between ticks. A poll
+// issued while the first view itself still computes is printed, not asserted:
+// the view computation alone is ~120-180 ms on this VM (T0), so that number
+// is machine-dependent and not something the queue changes.
+test('the first view of the synthetic big board queues its captures and the server answers a mailbox poll while they drain', { timeout: 60_000 }, async () => {
+  const board = await page()
+  try {
+    writeFileSync(board.path, bigBoard(460))
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'a1b2c3d4', surface: '921 T1', turn: 'turn1' } })).json()
+    const poll = async () => {
+      const start = performance.now()
+      const reply = await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })
+      return { status: reply.status, ms: performance.now() - start, messages: reply.json().messages }
+    }
+    const captures = () => readdirSync(board.dir).filter(name => name.includes('-questions-source-')).length
+    const firstStart = performance.now()
+    const first = board.call('GET', '/api/board')
+    await delay(30)
+    const during = await poll()
+    const firstReply = await first
+    const firstMs = performance.now() - firstStart
+    assert.equal(firstReply.status, 200, firstReply.body)
+    assert.equal(during.status, 200, JSON.stringify(during))
+    assert.ok(Array.isArray(during.messages), JSON.stringify(during))
+    // The view returned without writing all 500 captures synchronously: the
+    // flush is still draining them in the background.
+    const queued = captures()
+    assert.ok(queued < 500, `the first view must queue the captures instead of writing them all, got ${queued} on disk at once`)
+    const drainPoll = await poll()
+    assert.equal(drainPoll.status, 200, JSON.stringify(drainPoll))
+    assert.ok(drainPoll.ms < 150, `a poll while the flush drains must answer inside the 150 ms hook budget, took ${drainPoll.ms.toFixed(1)} ms`)
+    for (let tries = 0; tries < 1200; tries++) {
+      if (captures() >= 500) break
+      await delay(25)
+    }
+    assert.equal(captures(), 500, 'the flush must land every queued capture')
+    console.log(`first view of the big board: ${firstMs.toFixed(1)} ms; poll during the first view: ${during.ms.toFixed(1)} ms (printed, not asserted — the view computation alone is ~120-180 ms here); poll while the flush drains: ${drainPoll.ms.toFixed(1)} ms`)
+  } finally { await board.close() }
+})
+
+test('the first view of the synthetic big board shows the same model as the view after its captures drain, and every capture lands as a valid content-addressed file', { timeout: 60_000 }, async () => {
+  // Dynamic import: questions.ts uses extensionless imports, which resolve
+  // only through a registerHooks resolve hook (as tests/messaging.test.mjs
+  // does); the hook is process-wide, so registering it here covers the import.
+  registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  const { parseCapture } = await import('../hooks/questions.ts')
+  const board = await page()
+  try {
+    writeFileSync(board.path, bigBoard(460))
+    const first = (await board.call('GET', '/api/board')).json()
+    assert.equal(first.model !== undefined, true)
+    for (let tries = 0; tries < 1200; tries++) {
+      if (readdirSync(board.dir).filter(name => name.includes('-questions-source-')).length >= 500) break
+      await delay(25)
+    }
+    const second = (await board.call('GET', '/api/board')).json()
+    // Only the request timestamps differ: the two views are seconds apart, and
+    // this fixture's relative times are days old, so no minute boundary bites.
+    delete first.now
+    delete second.now
+    delete first.model.view.now
+    delete second.model.view.now
+    assert.deepEqual(second, first)
+    const names = readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json'))
+    assert.equal(names.length, 500, 'the flush must land one capture per new question')
+    for (const name of names) {
+      const text = readFileSync(join(board.dir, name), 'utf8')
+      const hash = name.match(/([a-f0-9]{64})\.json$/)?.[1]
+      assert.ok(hash !== undefined, name)
+      assert.equal(createHash('sha256').update(text).digest('hex'), hash, name)
+      assert.ok(parseCapture(text, hash) !== null, name)
+    }
+  } finally { await board.close() }
+})
+
+test('archiving a block while its captures are still pending writes the archived copies first and takes the block', { timeout: 60_000 }, async () => {
+  // Dynamic import: questions.ts uses extensionless imports, which resolve
+  // only through a registerHooks resolve hook (as tests/messaging.test.mjs
+  // does); the hook is process-wide, so registering it here covers the import.
+  registerHooks({ resolve(specifier, context, next) {
+    try { return next(specifier, context) } catch (error) {
+      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  } })
+  const { parseCapture } = await import('../hooks/questions.ts')
+  const board = await page()
+  try {
+    const source = bigBoard(460)
+    writeFileSync(board.path, source)
+    const model = (await board.call('GET', '/api/board')).json().model
+    const row = [...model.stopped, ...model.groups.flatMap(group => group.rows)].find(one => one.canArchive === true)
+    assert.ok(row !== undefined, 'the big board must have an archivable row')
+    // The first view queued the captures; the archive press must drain them
+    // synchronously before taking the block (R3), so all 500 are on disk the
+    // moment the press returns.
+    const reply = await board.call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: '', fp: row.fp } })
+    assert.equal(reply.status, 200, reply.body)
+    const names = readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json'))
+    const parsed = names.map(name => JSON.parse(readFileSync(join(board.dir, name), 'utf8')))
+    const archived = parsed.filter(one => one.disposition === 'archived')
+    // The press drained the 500 pending captures first (R3); the archived
+    // copies are extra files, one per question of the archived block.
+    assert.equal(parsed.filter(one => one.disposition !== 'archived').length, 500, 'the archive must drain the pending captures first')
+    assert.equal(names.length, 500 + archived.length)
+    const left = readFileSync(board.path, 'utf8')
+    assert.ok(!left.includes(row.title), `the archived block must be gone: ${row.title}`)
+    const lines = source.split('\n')
+    const at = lines.findIndex(line => line === `### ${row.title}`)
+    const expected = []
+    if (at !== -1) for (let i = at + 1; i < lines.length && !lines[i].startsWith('<!-- /auto'); i++) {
+      const match = lines[i].match(/^- \[\?\] (.*)$/)
+      if (match !== null) expected.push(match[1])
+    }
+    assert.ok(expected.length > 0, `the archived row must ask a question: ${row.title}`)
+    assert.deepEqual(archived.map(one => one.record.words).sort(), [...expected].sort(), 'the archive must write an archived copy of each of the block\u2019s questions')
+    for (const name of names) {
+      const text = readFileSync(join(board.dir, name), 'utf8')
+      const hash = name.match(/([a-f0-9]{64})\.json$/)?.[1]
+      assert.ok(hash !== undefined && parseCapture(text, hash) !== null, name)
+    }
+  } finally { await board.close() }
+})
+
+// #921 T6: killing the page mid-flush and restarting it re-queues the missing
+// captures from the ledger (the records persist in the ledger file).
+// Linux-only: kill/restart timing is racy on Windows file locks.
+test('killing the page mid-flush and restarting it re-queues the missing captures from the ledger', { timeout: 60_000, skip: process.platform !== 'linux' && 'kill/restart timing is racy on Windows file locks (#921 T6)' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-921-t6-'))
+  const path = join(dir, 'progress.md')
+  writeFileSync(path, bigBoard(460))
+  const script = join(dir, 'agent-board.mjs')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+  const captures = () => readdirSync(dir).filter(name => name.includes('-questions-source-')).length
+  const serve = async runDir => {
+    const child = spawn(process.execPath, [script, '--serve-child'], {
+      cwd: dir,
+      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, APPDATA: dir, LOCALAPPDATA: dir, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid), XDG_RUNTIME_DIR: runDir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', chunk => { stderr += chunk })
+    const exited = new Promise(done => child.once('exit', code => done(code)))
+    const url = await new Promise((done, fail) => {
+      let out = ''
+      child.stdout.setEncoding('utf8')
+      child.stdout.on('data', chunk => {
+        out += chunk
+        if (out.includes('\n')) done(new URL(out.split('\n')[0].trim()))
+      })
+      exited.then(code => fail(new Error(`the server exited with ${code}: ${stderr}`)))
+    })
+    const port = Number(url.port)
+    const token = url.searchParams.get('t')
+    const call = (method, target, body) => new Promise((done, fail) => {
+      const req = request({ host: '127.0.0.1', port, method, path: target, headers: { host: `127.0.0.1:${port}`, 'x-board-token': token, ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, agent: false }, res => {
+        let data = ''
+        res.setEncoding('utf8')
+        res.on('data', chunk => { data += chunk })
+        res.on('end', () => done({ status: res.statusCode, body: data, json: () => JSON.parse(data) }))
+      })
+      req.setTimeout(10_000, () => req.destroy(new Error('T6 HTTP request timed out')))
+      req.on('error', fail)
+      req.end(body === undefined ? undefined : JSON.stringify(body))
+    })
+    return { child, exited, call, stderr: () => stderr }
+  }
+  try {
+    const run1 = join(dir, 'run1')
+    mkdirSync(run1, { mode: 0o700 })
+    const first = await serve(run1)
+    try {
+      const reply = await first.call('GET', '/api/board')
+      assert.equal(reply.status, 200, reply.body)
+      // Kill it mid-flush: the drain needs ~100 ticks, so only a few captures
+      // have landed this soon after the first view.
+      first.child.kill()
+      await first.exited
+      const atKill = captures()
+      assert.ok(atKill < 500, `the kill must catch the flush mid-drain, got ${atKill} captures`)
+    } finally {
+      if (first.child.exitCode === null) first.child.kill()
+    }
+    // A fresh runtime folder, so the killed page's address file does not stop
+    // the restart; the ledger and the partial captures are in the same dir.
+    const run2 = join(dir, 'run2')
+    mkdirSync(run2, { mode: 0o700 })
+    const second = await serve(run2)
+    try {
+      const reply = await second.call('GET', '/api/board')
+      assert.equal(reply.status, 200, reply.body)
+      for (let tries = 0; tries < 1200; tries++) {
+        if (captures() >= 500) break
+        await delay(25)
+      }
+      assert.equal(captures(), 500, 'the restart must re-derive the missing captures from the ledger')
+    } finally {
+      await second.call('POST', '/api/close', {}).catch(() => undefined)
+      await Promise.race([second.exited, delay(5000)])
+      if (second.child.exitCode === null) second.child.kill()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// #921: a resolved capture is written synchronously inside the resolving view,
+// not queued for the background flush. After a restart copiesToKeep emits
+// nothing for a record the ledger already holds resolved, so a queued resolved
+// copy lost to an exit is never re-derived. The view here runs in-process, so
+// the assertions run in the same tick as the view: no flush tick can have run
+// yet, and a resolved file on disk can only be the synchronous write.
+test('a view that resolves a question writes its resolved capture synchronously, before the flush runs', { timeout: 30_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-921-resolved-'))
+  const path = join(dir, 'progress.md')
+  const source = `# Progress\n\n## Synthetic\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${ago(60000)} resume=a1b2c3d4 -->\n### Answer this\n- [?] Ship it, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
+  writeFileSync(path, source)
+  const script = join(dir, 'worker.mjs')
+  const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${skipped}\nexport { view, path };\n`)
+  const previousArgs = process.argv
+  const previousBoard = globalThis.AGENT_BOARD
+  const previousProgress = process.env.CLAUDE_PROGRESS_FILE
+  let runtime
+  try {
+    process.argv = [process.execPath, script, '--keys', 'q']
+    delete process.env.CLAUDE_PROGRESS_FILE
+    runtime = await import(pathToFileURL(script).href)
+  } finally {
+    globalThis.AGENT_BOARD = previousBoard; process.argv = previousArgs
+    if (previousProgress === undefined) delete process.env.CLAUDE_PROGRESS_FILE
+    else process.env.CLAUDE_PROGRESS_FILE = previousProgress
+  }
+  try {
+    const captures = () => readdirSync(dir).filter(name => name.includes('-questions-source-')).map(name => JSON.parse(readFileSync(join(dir, name), 'utf8')))
+    // The first view opens the question, so its unresolved capture is queued,
+    // not written — and no flush tick has run yet, so nothing is on disk.
+    runtime.view()
+    assert.equal(captures().length, 0, 'no capture may land before the flush runs')
+    // Tick the question done: the next view observes the open-to-resolved
+    // transition, and the resolved capture must be on disk the moment that
+    // view returns, with no drain wait.
+    writeFileSync(path, source.replace('- [?] Ship it, OK?', '- [x] Ship it, OK?'))
+    runtime.view()
+    const landed = captures()
+    const resolved = landed.filter(one => one.disposition === 'resolved')
+    assert.equal(resolved.length, 1, `the resolving view must write the resolved capture synchronously, got ${JSON.stringify(landed.map(one => one.disposition))}`)
+    assert.equal(resolved[0].record.isUnresolved, false)
+    // The control: the unresolved capture is still queued, not on disk — no
+    // flush tick ran, so the resolved file above is the synchronous write.
+    assert.equal(landed.filter(one => one.disposition === 'unresolved').length, 0, 'the flush must not have run yet')
+    // The same pass retires the record (its block no longer waits on it), so
+    // the ledger keeps it unresolved with a retirement proof — and a restart
+    // emits no resolved copy for it. The file above is the only receipt.
+    const ledger = JSON.parse(readFileSync(join(dir, 'progress-questions.json'), 'utf8'))
+    const record = ledger.records.find(one => one.id === resolved[0].record.id)
+    assert.equal(record?.isWaiting, false)
+    assert.equal(record?.isPresent, false)
+    const retired = readdirSync(dir).filter(name => name.startsWith('progress-questions-retired-'))
+    assert.equal(retired.length, 1, `the resolving view must retire the record, got ${JSON.stringify(retired)}`)
+    assert.equal(JSON.parse(readFileSync(join(dir, retired[0]), 'utf8')).hash, createHash('sha256').update(resolved[0].record.id).digest('hex'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// #921 dot P1/P2: an in-process board worker whose flush helpers are exposed,
+// so a test can call flushQuestionCaptures directly and read the queue. The
+// bundle text is the generated board script; the entry point is disabled and
+// the helpers are exported, as the resolved-capture test does for view/path.
+const flushWorker = async (source) => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-921-dot-'))
+  const path = join(dir, 'progress.md')
+  writeFileSync(path, source)
+  const script = join(dir, 'worker.mjs')
+  const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${skipped}\nexport { view, path, flushQuestionCaptures, pendingQuestionCaptures };\n`)
+  const previousArgs = process.argv
+  const previousBoard = globalThis.AGENT_BOARD
+  const previousProgress = process.env.CLAUDE_PROGRESS_FILE
+  let runtime
+  try {
+    process.argv = [process.execPath, script, '--keys', 'q']
+    delete process.env.CLAUDE_PROGRESS_FILE
+    runtime = await import(pathToFileURL(script).href)
+  } finally {
+    globalThis.AGENT_BOARD = previousBoard; process.argv = previousArgs
+    if (previousProgress === undefined) delete process.env.CLAUDE_PROGRESS_FILE
+    else process.env.CLAUDE_PROGRESS_FILE = previousProgress
+  }
+  return { runtime, dir, path }
+}
+
+// Runs fn synchronously and returns how many flush-failure lines it wrote to
+// stderr — one per capture the flush attempted and could not write.
+const countFlushFailures = (fn) => {
+  let lines = 0
+  const real = process.stderr.write.bind(process.stderr)
+  process.stderr.write = (chunk, ...rest) => {
+    if (String(chunk).includes('could not write queued question capture')) lines += 1
+    return real(chunk, ...rest)
+  }
+  try { fn() } finally { process.stderr.write = real }
+  return lines
+}
+
+// #921 dot P1: a flush write failure must not drop a capture whose record is
+// no longer in the ledger. A stale replay empties the ledger while the
+// captures are still pending, so the queued copies are the only remaining
+// evidence; dropping them on a transient failure loses the question for good.
+// The view here runs in-process, so the flush is called directly and no
+// scheduled tick can run in between.
+test('a failed flush keeps the pending captures, so a question survives a stale-ledger replay and a transient write failure', { timeout: 60_000 }, async () => {
+  const { runtime, dir, path } = await flushWorker(bigBoard(460))
+  try {
+    const ledgerPath = join(dir, 'progress-questions.json')
+    const landed = () => readdirSync(dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json') && statSync(join(dir, name)).isFile()).length
+    const captureFile = key => join(dir, `progress-questions-source-${createHash('sha256').update(key).digest('hex')}.json`)
+    // The first view queues 500 captures; one flush tick lands 5.
+    runtime.view()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(landed(), 5, 'one flush tick must land 5 captures')
+    assert.equal(runtime.pendingQuestionCaptures.size, 495, 'the rest must still be queued')
+    const targetKey = [...runtime.pendingQuestionCaptures.keys()][0]
+    const target = runtime.pendingQuestionCaptures.get(targetKey)
+    // Replay a stale empty ledger and remove the reporter blocks: the
+    // persisted ledger now holds only the 5 landed captures, but the view
+    // still shows the target from the pending queue.
+    writeFileSync(ledgerPath, '{"version":1,"next":1,"records":[],"legacy":{}}\n')
+    writeFileSync(path, '# Synthetic big board\n')
+    const second = runtime.view()
+    assert.equal(JSON.stringify(second).includes(target.record.words), true, 'the target must still be displayed from the pending captures')
+    assert.equal(JSON.parse(readFileSync(ledgerPath, 'utf8')).records.length, 5, 'only the 5 landed captures may be persisted')
+    // Block every pending capture path, then one direct flush call: every
+    // write fails.
+    const blocked = []
+    for (const key of [...runtime.pendingQuestionCaptures.keys()]) { const file = captureFile(key); mkdirSync(file); blocked.push(file) }
+    const failures = countFlushFailures(() => runtime.flushQuestionCaptures(5))
+    assert.equal(failures, 5, `one flush call must attempt only its budget, got ${failures} attempts`)
+    assert.equal(runtime.pendingQuestionCaptures.size, 495, 'the failed entries must stay queued')
+    // Restore writes and view again: the target must still be displayed, and
+    // the retry must land its capture.
+    for (const file of blocked) rmdirSync(file)
+    const third = runtime.view()
+    assert.equal(JSON.stringify(third).includes(target.record.words), true, 'the target must survive the failed flush')
+    for (let tries = 0; tries < 1200; tries++) {
+      if (landed() >= 500) break
+      await delay(25)
+    }
+    assert.equal(landed(), 500, 'the retry must land every queued capture')
+    assert.equal(readFileSync(captureFile(targetKey), 'utf8').includes(target.record.words), true, 'the target capture must land')
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// #921 dot P2: a flush that cannot write must count its failed attempts
+// toward the per-tick budget. Counting only successes let one tick attempt
+// the whole queue when every write failed, defeating the bounded background
+// work the first view depends on.
+test('a flush that cannot write counts its failed attempts toward the per-tick budget', { timeout: 30_000 }, async () => {
+  const source = `# Progress\n\n## Synthetic\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${ago(60000)} resume=a1b2c3d4 -->\n### Ten questions\n${Array.from({ length: 10 }, (_, i) => `- [?] Question ${i + 1}, OK?`).join('\n')}\n<!-- /auto session=a1b2c3d4 -->\n`
+  const { runtime, dir } = await flushWorker(source)
+  try {
+    const landed = () => readdirSync(dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json') && statSync(join(dir, name)).isFile()).length
+    const captureFile = key => join(dir, `progress-questions-source-${createHash('sha256').update(key).digest('hex')}.json`)
+    runtime.view()
+    assert.equal(runtime.pendingQuestionCaptures.size, 10, 'the first view must queue one capture per question')
+    assert.equal(landed(), 0, 'no capture may land before the flush runs')
+    const blocked = []
+    for (const key of [...runtime.pendingQuestionCaptures.keys()]) { const file = captureFile(key); mkdirSync(file); blocked.push(file) }
+    const failures = countFlushFailures(() => runtime.flushQuestionCaptures(5))
+    assert.equal(failures, 5, `one flush call must attempt only its budget, got ${failures} attempts`)
+    assert.equal(runtime.pendingQuestionCaptures.size, 10, 'the failed entries must stay queued')
+    for (const file of blocked) rmdirSync(file)
+    for (let tries = 0; tries < 1200; tries++) {
+      if (landed() >= 10) break
+      await delay(25)
+    }
+    assert.equal(landed(), 10, 'the retry must land every queued capture')
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
 test('live blocks of every agent refuse forged web archives without writes and terminal a and tidy preserve them', { timeout: 30_000 }, async () => {
   const agents = ['claude', 'codex', 'gemini', 'cursor', 'grok', 'muse', 'hermes', 'openclaw', 'opencode', 'antigravity', 'deepseek', 'custom-agent']
   const blocks = agents.flatMap((agent, index) => ['working', 'waiting'].map((state, n) => {
@@ -1911,6 +2308,17 @@ test('unseen inbox questions survive same-batch end and restart after a stale mu
     const file = join(board.dir, 'progress-questions.json')
     const records = JSON.parse(readFileSync(file, 'utf8')).records.filter(one => texts.includes(one.words))
     assert.equal(records.length, 3)
+    // #921 queues the captures instead of writing them inside the view: wait
+    // for the background flush to land the capture for each question before
+    // asserting on the files. A file seen mid-write parses as nothing yet.
+    const hasCapture = text => {
+      try {
+        return readdirSync(board.dir).filter(name => /^progress-questions-source-[a-f0-9]{64}\.json$/.test(name)).some(name => JSON.parse(readFileSync(join(board.dir, name), 'utf8')).record.source.text === text)
+      } catch {
+        return false
+      }
+    }
+    for (let tries = 0; tries < 400 && !texts.every(hasCapture); tries++) await delay(25)
     const captures = readdirSync(board.dir).filter(name => /^progress-questions-source-[a-f0-9]{64}\.json$/.test(name))
     for (const text of texts) assert.ok(captures.some(name => JSON.parse(readFileSync(join(board.dir, name), 'utf8')).record.source.text === text))
     for (const name of names) rmSync(join(inbox, name))
@@ -7540,6 +7948,14 @@ test('unchanged page polls reuse canonical question evidence without reparsing t
     assert.equal(readFileSync(keptFile, 'utf8'), kept)
     fs.unlinkSync(keptFile)
     await poll()
+    // #921 queues the recreated capture instead of writing it inside the
+    // poll: wait for the background flush to land it before asserting.
+    for (let tries = 0; tries < 400; tries++) {
+      try {
+        if (readFileSync(keptFile, 'utf8') === kept) break
+      } catch {}
+      await delay(25)
+    }
     assert.equal(readFileSync(keptFile, 'utf8'), kept, 'a removed durable source must be recreated before the ledger is accepted')
     const restored = JSON.parse(readFileSync(join(board.dir, 'progress-questions.json'), 'utf8')).records.find(record => record.id === old.id)
     assert.equal(restored.firstObserved, old.firstObserved)
@@ -10020,7 +10436,13 @@ global.setInterval = callback => { callback(); return { unref() {} } }
 `),
   })
   assert.equal(ran.status, 1, ran.stderr)
-  assert.ok(Object.keys(ran.files).some(name => name.startsWith('progress-questions-source-')), JSON.stringify(Object.keys(ran.files)))
+  // #921 queues the capture instead of writing it inside the view, so no
+  // capture file exists yet when this run exits before the flush — but the
+  // view did capture the question: the ledger it rewrote holds the record,
+  // and the background flush lands the capture file on a run that does not
+  // exit first (see the T1/T3 serve tests).
+  const ledger = JSON.parse(ran.files['progress-questions.json'])
+  assert.ok(ledger.records.some(record => record.words === 'Per-key limit — 100 or 300 a minute?'), JSON.stringify(ledger.records))
   assert.match(ran.stderr, /some changes may already be saved/)
   assert.doesNotMatch(ran.stderr, /nothing was changed/)
 })

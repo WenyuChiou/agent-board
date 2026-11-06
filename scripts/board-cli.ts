@@ -313,6 +313,11 @@ const captureFiles = immutableQuestionFiles<QuestionCapture>({
     const hash = captureHashOf(path, name)
     return hash === null ? null : parseCapture(text, hash)
   },
+  // A partial capture left by a process killed mid-flush cannot invalidate
+  // the captures that did land: the record stays in the ledger, so the next
+  // view re-derives the missing copy instead of stalling the writer path
+  // (#921 T6). A genuine read failure still returns null.
+  isValidationIndependent: true,
 })
 const readQuestionCaptures = (): QuestionCapture[] | null => captureFiles.read(!isViewQuestionRead)
 const proofFiles = immutableQuestionFiles<{ kind: keyof QuestionProofs; hash: string }>({
@@ -328,15 +333,27 @@ let questionProofCache: { files: { kind: keyof QuestionProofs; hash: string }[];
 const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCapture['disposition']): void => {
   const text = captureJson(record, disposition)
   const file = capturePath(path, sha256(text))
-  try {
-    const fd = openSync(file, 'wx', 0o600)
-    try { writeFileSync(fd, text) } finally { closeSync(fd) }
-    writes += 1
-  } catch (error) {
-    if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
+  // The name is the hash of the bytes, so a file whose bytes differ is a
+  // partial write from a process killed mid-flush (#921 T6): no valid capture
+  // can mismatch its own name. Remove it and write the capture again instead
+  // of failing the flush for a record the ledger still holds. A live writer's
+  // in-flight write goes through its own descriptor and holds the same bytes,
+  // so removing the name cannot corrupt it.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = openSync(file, 'wx', 0o600)
+      try { writeFileSync(fd, text) } finally { closeSync(fd) }
+      writes += 1
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
+    }
+    if (read(file) === text) {
+      captureFiles.invalidate(basename(file))
+      return
+    }
+    try { unlinkSync(file) } catch {}
   }
-  if (read(file) !== text) throw fileError(file, { code: 'EAGAIN' })
-  captureFiles.invalidate(basename(file))
+  throw fileError(file, { code: 'EAGAIN' })
 }
 const readQuestionProofs = (): QuestionProofs | null => {
   if (pendingQuestionProofs.size > 0) return null
@@ -349,6 +366,73 @@ const readQuestionProofs = (): QuestionProofs | null => {
   return proofs
 }
 const pendingQuestionProofs = new Map<string, { kind: keyof QuestionProofs; hash: string }>()
+// The captures a view queued but has not written yet. A first view of a big
+// board queues one capture per new question (500 on the synthetic big board);
+// writing them all inside the request blocks the page server for seconds
+// (#921), so the view enqueues them and a background flush writes a few per
+// tick. Keyed by the capture bytes, so a rewrite retry re-enqueueing the same
+// copies is a no-op; the ledger already holds the records, so a crash loses
+// at most the pending files and the next view re-derives them.
+const pendingQuestionCaptures = new Map<string, QuestionCapture>()
+// How many queued captures one background tick writes. One tick stays well
+// under the 150 ms mailbox budget: ~0.45 ms per file on this VM (T0), ~10 ms
+// per file on Windows under antivirus (the issue's figure), so 5 files are
+// ~2 ms here and ~50 ms there.
+const QUESTION_CAPTURE_FLUSH_PER_TICK = 5
+let questionCaptureFlushScheduled = false
+const scheduleQuestionCaptureFlush = (): void => {
+  if (questionCaptureFlushScheduled || pendingQuestionCaptures.size === 0) return
+  questionCaptureFlushScheduled = true
+  setImmediate(() => {
+    questionCaptureFlushScheduled = false
+    flushQuestionCaptures(QUESTION_CAPTURE_FLUSH_PER_TICK)
+  })
+}
+const queueQuestionCaptures = (copies: readonly { record: QuestionRecord; disposition: 'unresolved' | 'resolved' }[]): void => {
+  for (const copy of copies) {
+    const capture: QuestionCapture = { version: 1, disposition: copy.disposition, record: copy.record }
+    pendingQuestionCaptures.set(captureJson(copy.record, copy.disposition), capture)
+  }
+  scheduleQuestionCaptureFlush()
+}
+// Writes up to `budget` queued captures, in queue order, with the same
+// per-file semantics as a synchronous write (keepQuestionCapture also bumps
+// `writes` per landed file, so a locked read after a flush still says files
+// may have changed). Every attempt counts toward the budget, failed or not:
+// counting only successes let one tick attempt the whole queue when every
+// write failed (#921 dot P2). A file that cannot be written stays queued and
+// is named on stderr: the record may no longer be in the ledger (a stale
+// replay can drop it while its capture is still pending), so dropping it here
+// would lose the only remaining evidence (#921 dot P1). The empty-copy cache
+// is cleared so the next view looks again instead of trusting the earlier
+// empty decision, and that view restarts the flush while entries remain.
+const flushQuestionCaptures = (budget: number): void => {
+  let attempted = 0
+  let landed = 0
+  for (const [key, capture] of [...pendingQuestionCaptures]) {
+    if (attempted >= budget) break
+    attempted += 1
+    try {
+      keepQuestionCapture(capture.record, capture.disposition)
+    } catch (error) {
+      emptyCopyCache = null
+      process.stderr.write(`agent-board: could not write queued question capture ${basename(capturePath(path, sha256(key)))}: ${error instanceof Error ? error.message : String(error)}\n`)
+      continue
+    }
+    pendingQuestionCaptures.delete(key)
+    landed += 1
+  }
+  // Only keep the chain running while it makes progress: retrying a tick
+  // that landed nothing would spin the setImmediate loop on a failure that
+  // is not going away. A later view restarts the flush while entries remain.
+  if (landed > 0 && pendingQuestionCaptures.size > 0) scheduleQuestionCaptureFlush()
+}
+// Drains the whole queued-capture backlog synchronously. Only deliberate acts
+// call this (archive, tidy, sweep): the view never waits for the queue, but a
+// block must not be taken while its durable copy is still pending (#921).
+const drainQuestionCaptures = (): void => {
+  flushQuestionCaptures(Number.POSITIVE_INFINITY)
+}
 const keepQuestionProof = (kind: keyof QuestionProofs, hash: string): void => {
   const file = questionProofPath(path, kind, hash)
   pendingQuestionProofs.set(file, { kind, hash })
@@ -379,6 +463,8 @@ const isCutSettledAt = (now: number): boolean => {
 // answered one) may not be in it yet: the sources are looked at as a settling pass would, and a
 // block with a question that pass would add stays.
 const keepAskedQuestions = (projects: ReturnType<typeof parseProgress>, ref: TaskRef, now: number, frozen: ReadonlySet<string>): boolean => {
+  // Archive must not take a block whose durable copy is still pending (#921).
+  drainQuestionCaptures()
   const latest = readQuestions(questionsPath(path))
   const proofs = readQuestionProofs()
   if (latest === null || proofs === null || !archiveQuestionsKept(projects, ref, latest)) return false
@@ -474,8 +560,15 @@ const readBoardView = (source: string, now: number) => {
       // Only a completed empty decision is reusable, with the same validated inputs and every
       // observed field unchanged. Missing or changed companions still force the durable-copy check.
       if (emptyCopyCache?.current !== current || emptyCopyCache.captures !== captures || emptyCopyCache.observed !== nextText) {
-        const copies = copiesToKeep(current, next, captures)
-        for (const copy of copies) keepQuestionCapture(copy.record, copy.disposition)
+        // Pending captures count as held: a copy already queued is not queued
+        // again, and the view returns without waiting for the flush (#921).
+        // A resolved copy is written synchronously instead: after a restart
+        // copiesToKeep emits nothing for a record the ledger already holds
+        // resolved, so a queued resolved copy lost to an exit is never
+        // re-derived. Unresolved copies are re-derived, so only they queue.
+        const copies = copiesToKeep(current, next, [...captures, ...pendingQuestionCaptures.values()])
+        for (const copy of copies) if (copy.disposition === 'resolved') keepQuestionCapture(copy.record, copy.disposition)
+        queueQuestionCaptures(copies.filter(copy => copy.disposition === 'unresolved'))
         if (copies.length === 0) emptyCopyCache = { current, captures, observed: nextText }
       }
       for (const id of identitiesToRetire(current, next, resolvedQuestionsToRetire(current, projects, null, turns, frozen), proofs?.retired)) keepQuestionProof('retired', sha256(id))
@@ -521,6 +614,16 @@ const readBoardView = (source: string, now: number) => {
     }
   }
   questions ??= observeWriterQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', previewProofs ?? undefined, turns, [], frozen).ledger
+  // A record that left the ledger while its capture is still pending (retired
+  // in a later pass) stays visible until the flush lands, as a synchronous
+  // write would have shown it. View-only: the persisted ledger never sees
+  // pending captures (#921).
+  const viewQuestions = pendingQuestionCaptures.size === 0 ? questions : withCaptures(questions, [...pendingQuestionCaptures.values()])
+  // A flush that stopped after a tick that landed nothing (every write
+  // failed) restarts here: the queue still holds the evidence, and the next
+  // view is the retry. Without this, a retained failed entry would sit until
+  // a new copy arrived. A no-op while a flush is already scheduled.
+  if (pendingQuestionCaptures.size > 0) scheduleQuestionCaptureFlush()
   // A question marked answered in a pane on this machine is kept off the board too.
   const tail = progressHealthCache.tail
   const sizes = { progress: Buffer.byteLength(source), store: pageState.store }
@@ -536,7 +639,7 @@ const readBoardView = (source: string, now: number) => {
   const dropped = inboxDropped(droppedLogCache.text, prunedSince(now))
   const pruned = prunedNote({ ...prunedTotal(pageState.pruned, now), turns: dropped.age + dropped.cap }, s)
   // Proof writes above refresh this snapshot; drawing need not list the directory again.
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, questions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, viewQuestions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const view = (source = read(path), now = Date.now()) => {
@@ -1038,6 +1141,8 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
 // Scheduled sweeps keep the plugin's age rules. An explicit interactive tidy may move
 // finished work at once; neither mode discards a stopped session before its three days.
 const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?: (finished: number) => void): number | null => {
+  // The sweep and the tidy take blocks; a pending capture must land first (#921).
+  drainQuestionCaptures()
   const now = Date.now()
   let seen: Record<string, number> = {}
   if (!isNow) {
