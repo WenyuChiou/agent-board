@@ -134,6 +134,8 @@ export const ZH_TW = {
     "preview": "將更新 {count} 個設定檔案",
     "applied": "已更新 {count} 個設定檔案",
     "current": "{count} 個已是最新",
+    "retire": "{file}（舊的 /board 命令；setup 會移除）",
+    "keptEdited": "{file}（你改過的舊 /board 命令；setup 不動它；命令已改成 /agent-board）",
     "ready": "已設定完成",
     "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案，再執行 {command} 重試。",
     "retry": "修正衝突的檔案後重試：{command}",

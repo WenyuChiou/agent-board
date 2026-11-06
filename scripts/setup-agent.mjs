@@ -38,6 +38,8 @@ const summaries = [
     "preview": "would update {count} setup files",
     "applied": "updated {count} setup files",
     "current": "{count} already current",
+    "retire": "{file} (the old /board command; setup removes it)",
+    "keptEdited": "{file} (your edited old /board command; setup leaves it; the command is now /agent-board)",
     "ready": "already set up",
     "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry with {command}.",
     "retry": "Retry after fixing the conflicting files: {command}",
@@ -64,6 +66,8 @@ const summaries = [
     "preview": "將更新 {count} 個設定檔案",
     "applied": "已更新 {count} 個設定檔案",
     "current": "{count} 個已是最新",
+    "retire": "{file}（舊的 /board 命令；setup 會移除）",
+    "keptEdited": "{file}（你改過的舊 /board 命令；setup 不動它；命令已改成 /agent-board）",
     "ready": "已設定完成",
     "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案，再執行 {command} 重試。",
     "retry": "修正衝突的檔案後重試：{command}",
@@ -90,6 +94,8 @@ const summaries = [
     "preview": "将更新 {count} 个设置文件",
     "applied": "已更新 {count} 个设置文件",
     "current": "{count} 个已是最新",
+    "retire": "{file}（旧的 /board 命令；setup 会移除）",
+    "keptEdited": "{file}（你改过的旧 /board 命令；setup 不动它；命令已改成 /agent-board）",
     "ready": "已设置完成",
     "skipped": "已跳过：无法安全更新 {files}。请修复或移走冲突的文件，再运行 {command} 重试。",
     "retry": "修复冲突的文件后重试：{command}",
@@ -310,8 +316,14 @@ const main = () => {
     const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.join(', '), command: setupCommand(['--agent', agent, '--apply']) })
       : !plan.changes.length ? words('ready') : words(apply ? 'applied' : 'preview', { count: plan.changes.length })
     const capability = plan.managedBy !== 'connector' && !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
-    const files = !apply && !plan.conflicts.length ? [...plan.changes.map(change => change.file), ...records(plan)].map(file => `  ${shortPath(file)}`) : []
-    return [`${names[agent]}: ${status}${current}${capability}`, ...files].join('\n')
+    // An install plan removes a file only to retire the old /board command (#868), so the preview says so.
+    const files = !apply && !plan.conflicts.length ? [
+      ...plan.changes.map(change => change.action === 'remove' ? words('retire', { file: shortPath(change.file) }) : shortPath(change.file)),
+      ...records(plan).map(shortPath),
+    ].map(line => `  ${line}`) : []
+    // An old /board file the person edited stays; say so in the preview and after applying.
+    const kept = plan.conflicts.length ? [] : (plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`)
+    return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
   })
   if (hasClaude) lines.push(`Claude Code: ${words('claude')}`)
   const steps = []

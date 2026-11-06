@@ -96,6 +96,8 @@ export const ZH_CN: Strings = {
     "preview": "将更新 {count} 个设置文件",
     "applied": "已更新 {count} 个设置文件",
     "current": "{count} 个已是最新",
+    "retire": "{file}（旧的 /board 命令；setup 会移除）",
+    "keptEdited": "{file}（你改过的旧 /board 命令；setup 不动它；命令已改成 /agent-board）",
     "ready": "已设置完成",
     "skipped": "已跳过：无法安全更新 {files}。请修复或移走冲突的文件，再运行 {command} 重试。",
     "retry": "修复冲突的文件后重试：{command}",
