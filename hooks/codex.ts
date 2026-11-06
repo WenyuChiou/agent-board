@@ -22,11 +22,11 @@ export type CodexReport = Origin & {
   title: string
   project: string
   steps: string[]
-  // The index of the step a PermissionRequest added (#1048): it waits on the person in Codex's own window, and the block
-  // carries a native line after it. Any explicit report drops it with the steps.
+  // The index of the step a PermissionRequest added (#1048): while it waits, the block carries a native line after it.
+  // The hook closes and reuses the line so the question ledger can see the change.
   approval?: number
-  // The index of the step a Stop added for the question the last message closed on (#1045). Like `approval`, it is
-  // the hook's own and any explicit report drops it with the steps.
+  // The index of the step a Stop added for the question the last message closed on (#1045).
+  // Like `approval`, it belongs to the hook and stays available to close or reuse.
   asked?: number
   updated: string
   events?: string[]
@@ -136,24 +136,30 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   if (previous?.turn && turn && previous.turn !== turn && event !== 'UserPromptSubmit') throw new Error('STALE_TURN')
   const working = event === 'UserPromptSubmit'
   const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' ? 'done' : 'waiting'
-  // The approval step is the hook's own: every event but a start of the hook's tracking takes it back, and a new
-  // request puts one in its place.
+  // Keep the hook's own steps in place: the ledger needs to see their original words closed.
+  // A session ending does not answer its last question, but it does end an approval.
   const held = previous?.steps ?? [`- [ ] ${s.codexLifecycle}`]
   const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
-  // The question step is the hook's own the same way. Both go together on any event but SessionStart, so the
-  // index of a step put after them is the length of what is left.
   const earlierAsked = previous?.asked !== undefined && previous.asked < held.length ? previous.asked : undefined
-  const rest = event === 'SessionStart' || (earlier === undefined && earlierAsked === undefined) ? held : held.filter((_, index) => index !== earlier && index !== earlierAsked)
-  const approval = event === 'PermissionRequest' ? rest.length : event === 'SessionStart' ? earlier : undefined
+  const steps = held.map((step, index) => event !== 'SessionStart' && (index === earlier || (event !== 'SessionEnd' && index === earlierAsked)) ? step.replace(/^- \[\?\] /, '- [x] ') : step)
+  let approval = earlier
+  let asked = earlierAsked
   // Only the closing question reaches here from the last message (scripts/codex-local.ts), one line, cut like other step text.
   const question = event === 'Stop' && state !== 'done' && typeof input.question === 'string' ? cutLine(input.question.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
-  const asked = question !== '' ? rest.length : event === 'SessionStart' ? earlierAsked : undefined
+  if (event === 'PermissionRequest') {
+    if (approval === undefined) approval = steps.length
+    steps[approval] = `- [?] ${s.codexApprovalStep}`
+  }
+  if (question !== '') {
+    if (asked === undefined) asked = steps.length
+    steps[asked] = `- [?] ${question}`
+  }
   return {
     session, turn: turn ?? previous?.turn ?? null, state,
     title: previous?.title ?? s.codexTask,
     project: previous?.project ?? s.codexProject,
-    // The hook never reads the prompt, so only a report or the board can confirm an answer (#243).
-    steps: event === 'PermissionRequest' ? [...rest, `- [?] ${s.codexApprovalStep}`] : question !== '' ? [...rest, `- [?] ${question}`] : rest,
+    // The hook never reads the prompt, so reported steps remain unchanged here (#243).
+    steps,
     ...(approval === undefined ? {} : { approval }),
     ...(asked === undefined ? {} : { asked }),
     updated: now,
@@ -172,11 +178,23 @@ export const codexReport = (previous: CodexReport | null, session: string, input
     return text
   })
   if (input.state === 'done' && steps.some(step => !/^- \[[x\-]\]/.test(step))) throw new Error('UNFINISHED_STEPS')
+  let approval: number | undefined
+  let asked: number | undefined
+  for (const kind of ['approval', 'asked'] as const) {
+    const index = previous?.[kind]
+    const held = index === undefined ? undefined : previous?.steps[index]
+    if (held === undefined || !/^- \[[?x]\] /.test(held) || steps.length >= 40) continue
+    const carried = steps.push(`- [x] ${held.slice(6)}`) - 1
+    if (kind === 'approval') approval = carried
+    else asked = carried
+  }
   return {
     session: line(session), turn: previous?.turn ?? null,
     state: input.state as CodexReport['state'],
     title: line(input.title), project: input.project === undefined ? previous?.project ?? s.codexProject : line(input.project),
     steps, updated: now,
+    ...(approval === undefined ? {} : { approval }),
+    ...(asked === undefined ? {} : { asked }),
     events: previous?.events ?? [], retiredTurns: previous?.retiredTurns ?? [],
     ...(previous?.activity === undefined ? {} : { activity: previous.activity }),
   }

@@ -97,7 +97,7 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, clearApproval, markApproval, toolQuestions, turnTools } from './digest'
+import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, markApproval, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
 import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
@@ -225,6 +225,13 @@ const dropApproval = async ($: EngineInterface, id?: string): Promise<void> => {
   else pendingApprovals.delete(id)
   if (!hasApprovalStep || pendingApprovals.size > 0) return
   hasApprovalStep = false
+  // The ledger keeps a question whose step only vanished, so it must read the step
+  // as closed before the step goes away.
+  await saveMine($, closeApproval).catch(() => undefined)
+  await settle($).catch(() => undefined)
+  await progressPath($).then(async path => pollQuestions($, path, parseProgress(await readText($, path)))).catch(() => false)
+  // A new approval can be shown during the waits above; its step must stay.
+  if (hasApprovalStep || pendingApprovals.size > 0) return
   await saveMine($, clearApproval).catch(() => undefined)
   await settle($).catch(() => undefined)
 }
