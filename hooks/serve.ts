@@ -759,7 +759,7 @@ const PAGE_WORDS = [
   'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
-  'awayFinished', 'awayFinishedOne', 'awayOnlineNamed', 'awayOnline', 'awayOnlineOne', 'awayOffline', 'awayOfflineOne',
+  'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
@@ -801,12 +801,13 @@ body:has(#offline:not(:empty)) .live{display:none}
 #offline{position:sticky;top:0;color:var(--alert);overflow-wrap:anywhere;padding:var(--s2) 0;border-bottom:1px solid var(--line)}
 #offline:empty{display:none}
 #offline:not(:empty){top:var(--head-h,56px);z-index:5;padding:var(--s3) max(var(--s4),calc((100vw - 808px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--ground))}
-/* The away line: one line at the top of the content column, above the can't-read line. Each part stays whole when the line wraps, and the " · " separator ends a line, never starts one. */
-#away-line{display:block}
-#away-line:empty{display:none}
+/* The away line: one line at the top of the content column, above the can't-read line. Each part stays whole when the line wraps, and the " · " separator ends a line, never starts one. It folds away on its own row track when the × is pressed. */
+#away-line[hidden]{display:none}
 #away-line .away-seg{white-space:nowrap}
 #away-line .away-lead{color:var(--muted)}
 #away-line .away-bold{font-weight:600;color:var(--ink)}
+#away-line .away-x{flex:none;width:28px;height:28px;display:inline-grid;place-items:center;vertical-align:middle;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer}
+#away-line .away-x::before{content:"×";font-size:18px;line-height:1}
 #offline:not(:empty)::before{content:'!';display:inline-grid;place-items:center;width:20px;height:20px;border:1px solid currentColor;border-radius:var(--radius-round);margin-right:var(--s3);font-weight:600}
 button,.btn{font:inherit;color:inherit}
 button:hover,.btn:hover,summary:hover{background-color:var(--hover)}
@@ -1031,6 +1032,7 @@ ${CLIP_CSS}
   .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet{flex:0 0 auto;min-height:44px}
   .s-toggle{width:44px;height:44px}
+  #away-line .away-x{width:44px;height:44px}
   textarea{min-height:96px}
 }
 ${motionCss}
@@ -1077,7 +1079,7 @@ ${PAGE_CSS}
 <div class="stage">
 <header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i><span class="lbl">${esc(s.serveLive)}</span></span></div></div></header>
 <div id="offline" role="status" aria-live="polite"></div>
-<nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note" id="away-line" role="status" hidden></div><div class="col agent-note" id="agent-note"></div></nav>
+<nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
 <details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" class="btn" id="connect-web-chat" data-static>${esc(s.webChatConnect)}</button><button type="button" class="btn" id="import-clipboard" data-static>${esc(s.importClipboard)}</button>`}<button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
@@ -1953,14 +1955,27 @@ const PAGE_SCRIPT = String.raw`
   }
   // The line under the row for an agent the board cannot read: while that agent is pressed, or for all of them when nothing is.
   // The away line: when the tab is hidden, the page records a snapshot of the world it
-  // shows (the open questions by agent, the tasks already done, each agent's presence).
-  // When the tab is visible again after 5 minutes or more, the next refresh compares the
-  // world with the snapshot and shows one line with what changed. Nothing is kept across
-  // reloads, and the line never shows on the first load.
+  // shows (the open questions by agent, the tasks already done, each agent's presence and
+  // whether it can be read). When the tab is visible again after 5 minutes or more, the
+  // next refresh compares the world with the snapshot and shows one line with what
+  // changed. Nothing is kept across reloads, and the line never shows on the first load.
+  // It never hides by itself: only the × on the line folds it away.
   var AWAY_MS = 5 * 60 * 1000;
   // An officer is an agent the board knows by name (its guarded name); any other agent is
   // counted but never named on the line.
   function isOfficer(id) { return Object.prototype.hasOwnProperty.call(W, 'agent:' + String(id).toLowerCase()); }
+  // The agents that are unreadable or offline now, by id: 'unreadable' when the board
+  // cannot read the agent, 'offline' when its sessions are closed and none is open.
+  function awayBadNow() {
+    var bad = {};
+    var unreadable = {};
+    latest.view.agents.forEach(function (one) { if (one.isUnreadable) unreadable[String(one.agent).toLowerCase()] = true; });
+    Object.keys(agentPresence).forEach(function (id) {
+      if (unreadable[id]) bad[id] = 'unreadable';
+      else if (agentPresence[id] === 'offline') bad[id] = 'offline';
+    });
+    return bad;
+  }
   function awaySnapshot() {
     if (!latest || !latest.view) return null;
     var questions = {};
@@ -1971,7 +1986,7 @@ const PAGE_SCRIPT = String.raw`
     });
     var done = {};
     latest.view.all.done.concat(latest.view.own.done).forEach(function (ref) { done[ref.key] = true; });
-    return { at: Date.now(), questions: questions, done: done, presence: Object.assign({}, agentPresence) };
+    return { at: Date.now(), questions: questions, done: done, bad: awayBadNow() };
   }
   function awayDiff(snap) {
     if (!latest || !latest.view) return null;
@@ -1979,30 +1994,31 @@ const PAGE_SCRIPT = String.raw`
     var seen = {};
     Object.keys(snap.questions).forEach(function (id) { Object.keys(snap.questions[id]).forEach(function (key) { seen[key] = true; }); });
     var questions = {};
+    var newKeys = [];
     view.needs.cards.forEach(function (ref) {
       if (seen[ref.key]) return;
       var id = agentOf(ref);
       questions[id] = (questions[id] || 0) + 1;
+      newKeys.push(ref.key);
     });
-    // Finished tasks count within the current filter, and never name the task.
+    // Finished tasks count within the current filter, and never name the task. Their keys
+    // are kept so the Done list can light up the rows that finished while away.
     var finished = 0;
+    var finishedKeys = [];
     view.all.done.concat(view.own.done).forEach(function (ref) {
       if (snap.done[ref.key]) return;
       if (!matches(agentOf(ref), projectOf(ref))) return;
       finished += 1;
+      finishedKeys.push(ref.key);
     });
-    var online = [];
-    var offline = [];
-    Object.keys(agentPresence).forEach(function (id) {
-      var was = snap.presence[id];
-      var is = agentPresence[id];
-      if (was === is || was === undefined) return;
-      var wasOn = was === 'connected' || was === 'open';
-      var isOn = is === 'connected' || is === 'open';
-      if (wasOn === isOn) return;
-      (isOn ? online : offline).push(id);
-    });
-    return { questions: questions, finished: finished, online: online, offline: offline };
+    // The line reports the agents that are unreadable or offline now, and shows for
+    // presence only when that set changed. An agent coming online leaves the set, and
+    // with nothing to name the line stays away.
+    var bad = awayBadNow();
+    var badKeys = Object.keys(bad).sort();
+    var snapKeys = Object.keys(snap.bad).sort();
+    var badChanged = badKeys.length !== snapKeys.length || badKeys.some(function (id, index) { return id !== snapKeys[index] || bad[id] !== snap.bad[id]; });
+    return { questions: questions, newKeys: newKeys, finished: finished, finishedKeys: finishedKeys, bad: bad, badChanged: badChanged };
   }
   function awayParts(diff, minutes) {
     var segs = [{ text: minutes < 60 ? w('awayForMinutes', minutes) : w('awayForHours', Math.floor(minutes / 60)), bold: false }];
@@ -2015,32 +2031,69 @@ const PAGE_SCRIPT = String.raw`
       if (isOfficer(id)) segs.push({ text: n === 1 ? w('awayAskedNamedOne', agentName(id)) : w('awayAskedNamed', agentName(id), n), bold: true });
       else segs.push({ text: n === 1 ? w('awayAskedGenericOne') : w('awayAskedGenericOneAgent', n), bold: true });
     } else if (agents.length > 1) segs.push({ text: w('awayAskedGeneric', agents.length, total), bold: true });
-    if (diff.finished > 0) segs.push({ text: plural('awayFinished', diff.finished), bold: true });
-    if (diff.online.length === 1 && diff.offline.length === 0) {
-      var one = diff.online[0];
-      segs.push({ text: isOfficer(one) ? w('awayOnlineNamed', agentName(one)) : plural('awayOnline', 1), bold: true });
-    } else if (diff.online.length > 1 && diff.offline.length === 0) segs.push({ text: plural('awayOnline', diff.online.length), bold: true });
-    else if (diff.online.length === 0 && diff.offline.length > 0) segs.push({ text: plural('awayOffline', diff.offline.length), bold: true });
-    else if (diff.online.length > 0 && diff.offline.length > 0) segs.push({ text: plural('awayOnline', diff.online.length) + ', ' + plural('awayOffline', diff.offline.length), bold: true });
+    if (diff.finished > 0) segs.push({ text: plural('awayFinished', diff.finished), bold: true, done: true });
+    // Agents that can't be read or are offline: officers by name, any others counted.
+    var badIds = Object.keys(diff.bad);
+    if (badIds.length) {
+      var named = [];
+      var unreadable = 0;
+      var offline = 0;
+      badIds.forEach(function (id) {
+        if (isOfficer(id)) named.push(diff.bad[id] === 'unreadable' ? w('awayUnreadableNamed', agentName(id)) : w('awayOfflineNamed', agentName(id)));
+        else if (diff.bad[id] === 'unreadable') unreadable += 1;
+        else offline += 1;
+      });
+      if (unreadable > 0) named.push(plural('awayUnreadable', unreadable));
+      if (offline > 0) named.push(plural('awayOffline', offline));
+      segs.push({ text: named.join(', '), bold: true });
+    }
     return segs;
   }
   function clearAwayLine() {
     var box = document.getElementById('away-line');
-    if (box) { box.textContent = ''; box.hidden = true; }
+    var inner = document.getElementById('away-line-in');
+    if (inner) inner.textContent = '';
+    if (box) box.hidden = true;
   }
-  function showAway(segs) {
+  // The × folds the line away with the page's fold motion; the next return replaces it.
+  function dismissAwayLine() {
     var box = document.getElementById('away-line');
     if (!box) return;
-    box.textContent = '';
+    reveal(box, false, function () { clearAwayLine(); });
+  }
+  // The finished part opens the Done list: Overview first, then the list, scrolled into
+  // view, with the rows that finished while away lit with the arrive glow.
+  function openDoneFromAway(keys) {
+    if (pg.view !== 'all') setView('all');
+    if (pg.openShelf.done) pg.openShelf.done(true);
+    if (moving()) (keys || []).forEach(function (key) {
+      pg.lis.forEach(function (one) {
+        if (one.list === 'done' && one.key === key) toggleClass(one.li, 'arrived', true);
+      });
+    });
+    var done = pg.sections.filter(function (one) { return one.list === 'done'; })[0];
+    if (done && done.block && typeof done.block.scrollIntoView === 'function') done.block.scrollIntoView();
+  }
+  function showAway(segs, diff) {
+    var box = document.getElementById('away-line');
+    var inner = document.getElementById('away-line-in');
+    if (!box || !inner) return;
+    inner.textContent = '';
     box.setAttribute('title', segs.map(function (seg) { return seg.text; }).join(' · '));
     segs.forEach(function (seg, index) {
-      add(box, el('span', 'away-seg' + (seg.bold ? ' away-bold' : ' away-lead'), seg.text + (index < segs.length - 1 ? ' · ' : '')));
+      // The separator lives inside the part's own span, so it ends a line and never starts one.
+      var wrap = el('span', 'away-seg' + (seg.bold ? ' away-bold' : ' away-lead'));
+      if (seg.done) add(wrap, button(seg.text, function () { openDoneFromAway(diff.finishedKeys); }, 'link', true, true));
+      else add(wrap, document.createTextNode(seg.text));
+      if (index < segs.length - 1) add(wrap, document.createTextNode(' · '));
+      add(inner, wrap);
     });
+    var close = button('', dismissAwayLine, 'away-x', true, true);
+    close.setAttribute('aria-label', w('awayDismiss'));
+    close.setAttribute('title', w('awayDismiss'));
+    add(inner, close);
     box.hidden = false;
-  }
-  function hideAway() {
-    clearAwayLine();
-    awaySnap = null;
+    reveal(box, true);
   }
   function maybeShowAway() {
     if (!awaySnap) return;
@@ -2048,12 +2101,17 @@ const PAGE_SCRIPT = String.raw`
     if (document.hidden) return;
     var snap = awaySnap;
     awaySnap = null;
+    if (Date.now() - snap.at < AWAY_MS) { clearAwayLine(); return; }
     var minutes = Math.floor((Date.now() - snap.at) / 60000);
-    if (minutes < 5) { clearAwayLine(); return; }
     var diff = awayDiff(snap);
-    var hasChange = !!diff && (Object.keys(diff.questions).length > 0 || diff.finished > 0 || diff.online.length > 0 || diff.offline.length > 0);
+    var hasChange = !!diff && (Object.keys(diff.questions).length > 0 || diff.finished > 0 || (Object.keys(diff.bad).length > 0 && diff.badChanged));
     if (!hasChange) { clearAwayLine(); return; }
-    showAway(awayParts(diff, minutes));
+    showAway(awayParts(diff, minutes), diff);
+    // New question cards get the arrive glow once.
+    if (moving()) diff.newKeys.forEach(function (key) {
+      var li = pg.cardNodes[key];
+      if (li) toggleClass(li, 'arrived', true);
+    });
   }
   function drawNote(entries) {
     var box = document.getElementById('agent-note');
@@ -2069,7 +2127,6 @@ const PAGE_SCRIPT = String.raw`
     });
   }
   function setFilter(id) {
-    hideAway();
     pg.filter = id;
     saveFilter(id);
     paintFilter();
@@ -2159,7 +2216,6 @@ const PAGE_SCRIPT = String.raw`
     if (group) group.hidden = wanted.length === 0;
   }
   function setProject(name) {
-    hideAway();
     pg.project = pg.project === name ? '' : name;
     layout();
   }
@@ -2173,7 +2229,6 @@ const PAGE_SCRIPT = String.raw`
     node.addEventListener('animationend', function () { toggleClass(node, 'enter', false); }, { once: true });
   }
   function setView(name) {
-    hideAway();
     pg.view = name;
     var shell = document.getElementById('shell');
     shell.setAttribute('data-view', name);
