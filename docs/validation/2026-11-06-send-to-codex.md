@@ -13,7 +13,7 @@ An isolated home (all 13 variables of the 2026-10-20 spike under one short folde
 What it showed:
 
 - **`clientUserMessageId` accepts the 6-hex claim nonce.** The daemon echoes it as `clientId` on the `userMessage` item.
-- **`thread/resume` of a thread with no turn yet is refused** (`no rollout found for thread id …`, -32600). The receiver therefore joins a thread after its first turn; until then the message waits for the session's next step.
+- **`thread/resume` of a thread with no turn yet is refused** (`no rollout found for thread id …`, -32600). The receiver therefore joins a thread after its first turn; until then the board offers the existing next-turn mailbox send ("Queue for next turn", never "Delivered"), so the card does not claim a delivery the receiver could not make.
 - **A second client that has not resumed gets `thread/status/changed` and `thread/goal/*` but none of `turn/started`, `item/*` or `turn/completed`.** After `thread/resume` with `excludeTurns: true` the resume answer carries `thread.status` (`{"type":"active","activeFlags":[]}`) and the later events arrive.
 - **`turn/start` on a thread whose turn is running does not start a second turn.** It answers with the running turn's id and the text joins that turn, like a steer. So the receiver waits for idle on purpose; if a turn starts between its check and its call, the message enters that turn, and the ACK is matched on that turn's id.
 - `turn/completed` carried `status: "interrupted"` after `turn/interrupt`, and `thread/status/changed` went to `idle`.
