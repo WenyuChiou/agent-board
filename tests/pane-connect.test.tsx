@@ -588,26 +588,26 @@ test('a board command that cannot be written is named as one, and the agent is s
   expect(connected.text).not.toContain('的設定檔寫不進去')
 })
 
-test('a hand-run connect names each approval it needs once', { options: { autoConnect: false } }, async ($, on) => {
+// One test per language: the three languages ran in one test and shared its 5,000 ms limit, so a slow runner
+// that took 7,287 ms for the whole loop (#798) cannot do so now; each language is a third of that work.
+for (const s of Object.values(STRINGS)) test(`a hand-run connect names each approval it needs once, in ${s.lang}`, { options: { autoConnect: false } }, async ($, on) => {
   const world: World = { files: new Map([['/home/me/.codex/config.toml', ''], ['/home/me/.hermes/config.yaml', '']]), mtime: 1, hasTasks: true }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  for (const s of Object.values(STRINGS)) {
-    await $.command.run({ ...TIDY, args: `lang ${s.lang}` })
-    for (let run = 0; run < 2; run++) {
-      const connected = await $.command.run({ ...TIDY, args: 'connect' })
-      expect(connected.text.split(s.setupCodexTrust)).toHaveLength(2)
-      expect(connected.text.split(s.setupHermesTrust)).toHaveLength(2)
-      expect(connected.text.split('--accept-hooks')).toHaveLength(2)
-      expect(connected.text).toContain(s.setupCodexTrust)
-      expect(connected.text).toContain(s.setupHermesTrust)
-      expect(connected.text).not.toContain(s.connectCodexTrust)
-      expect(connected.text).not.toContain(s.connectHermesTrust)
-    }
-    const status = await $.command.run({ ...TIDY, args: 'connect status' })
-    expect(status.text.split(s.setupCodexTrust)).toHaveLength(2)
-    expect(status.text.split(s.setupHermesTrust)).toHaveLength(2)
+  await $.command.run({ ...TIDY, args: `lang ${s.lang}` })
+  for (let run = 0; run < 2; run++) {
+    const connected = await $.command.run({ ...TIDY, args: 'connect' })
+    expect(connected.text.split(s.setupCodexTrust)).toHaveLength(2)
+    expect(connected.text.split(s.setupHermesTrust)).toHaveLength(2)
+    expect(connected.text.split('--accept-hooks')).toHaveLength(2)
+    expect(connected.text).toContain(s.setupCodexTrust)
+    expect(connected.text).toContain(s.setupHermesTrust)
+    expect(connected.text).not.toContain(s.connectCodexTrust)
+    expect(connected.text).not.toContain(s.connectHermesTrust)
   }
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text.split(s.setupCodexTrust)).toHaveLength(2)
+  expect(status.text.split(s.setupHermesTrust)).toHaveLength(2)
 })
 
 for (const [kind, file] of [
