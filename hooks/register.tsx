@@ -99,7 +99,7 @@ import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, clearApproval, markApproval, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
-import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
+import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
 import { liveBoardArgv, liveBoardPage, liveBoardScript, pageDoneHash, pageDonePath, pageStatePath, readPageDone, readPageState } from './live-page'
 import {
@@ -1354,7 +1354,7 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInt
   // and the CLI's existing running-page check.
   const script = liveBoardScript(path)
   const installed = await readText($, script).catch(() => '')
-  if (!Object.values(STRINGS).some(words => installed === boardScript(path, words.lang))) return { page: null, needsInstall: true }
+  if (!isOwnBoard(installed, path)) return { page: null, needsInstall: true }
   try {
     // Worst case: 2 s for the 0.19.0 address check + 8.5 s of checks + 10 s child
     // wait + 8.5 s of checks = 29 s, plus Node start. Going over is safe: the
@@ -4286,7 +4286,9 @@ export const register: Register = (on, options) => {
       (turnBackgroundLaunchesWithoutId > 0 && (mirror?.backgroundJobs ?? 0) > (mirror?.backgroundJobIds?.length ?? 0))
     if ((mirror?.backgroundReleases?.length ?? 0) > 0 || (mirror?.backgroundReleaseCount ?? 0) > 0)
       await saveBackground($, one => ({ ...one, backgroundReleases: [], backgroundReleaseCount: 0 })).catch(() => undefined)
-    const question = e.isAborted || isDelivery ? null : lastQuestion(e.answer)
+    // A board message's ACK stays off the board, but a question its reply ends on waits on the
+    // person like any turn's, so answering from the board can go on past one round (#1050).
+    const question = e.isAborted ? null : lastQuestion(isDelivery ? e.answer.replace(/^\s*ACK \S+[ \t]*/, '') : e.answer)
     if (mirror !== null && mirror.tasks.length > 0) {
       const branch = await branchName($)
       await saveMine($, one => ({ ...one, branch }))
