@@ -3,6 +3,7 @@ import { groupBoard } from '../hooks/grouping'
 import type { Grouping, GroupingAsk, GroupingDone, GroupingInput, GroupingRetained, GroupingRow, GroupingTurn } from '../hooks/grouping'
 import type { ServeModel } from '../hooks/serve'
 import { EN } from '../hooks/strings-en'
+import { ZH_TW } from '../hooks/i18n'
 
 const NOW = Date.parse('2026-10-28T12:00:00Z')
 const MIN = 60_000
@@ -311,6 +312,19 @@ test('grouping puts every task and question under its agent with open, needs, st
   expect(titles(undated.all.stopped)).toEqual(['Idle synthetic task', 'Shelved synthetic task'])
   expect(titles(undated.all.done)).toEqual(['Finished synthetic task', 'Finished by Claude'])
   expect(undated.working).toEqual([])
+})
+
+test('Working now leaves out a row whose only step is a hook placeholder, and a doing step quiet for over two hours', () => {
+  const step = (text: string, status: string) => ({ text, note: '', status, isCurrent: status === 'doing' })
+  const rows = [
+    row('codex', 'demo', 'Idle Codex', { at: ago(MIN), steps: [step(EN.codexLifecycle, 'todo')] }),
+    row('cursor', 'demo', 'Idle Cursor', { at: ago(MIN), steps: [step(ZH_TW.localAgentLifecycle, 'todo')] }),
+    row('codex', 'demo', 'Codex turn with no plan yet', { at: ago(MIN) }),
+    row('', 'demo', 'Long step', { at: ago(90 * MIN), steps: [step('Run the build', 'doing')] }),
+    row('', 'demo', 'Killed mid-step', { at: ago(3 * HOUR), steps: [step('Run the build', 'doing')] }),
+  ]
+  const result = groupBoard(board({ groups: grouped(rows) }), NOW, none, EN)
+  expect(titles(result.working)).toEqual(['Codex turn with no plan yet', 'Long step'])
 })
 
 test('two folders asking the same words under one agent show two Needs you cards on the agent-first page', () => {
