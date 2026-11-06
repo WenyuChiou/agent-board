@@ -86,7 +86,21 @@ test('fetching compares only a release pull request with main to learn how far b
   }
   const data = fetchQueue({ repo: 'alice/board' }, { run })
   assert.deepEqual(data.prs.map(pr => pr.behindBy), [4, undefined])
-  assert.equal(calls.filter(args => args.at(-1)?.includes('/compare/')).length, 1)
+  const compares = calls.filter(args => args.at(-1)?.includes('/compare/'))
+  assert.equal(compares.length, 1)
+  // behind_by counts the base's commits missing from the head, so main is the base and the release head the head.
+  assert.equal(compares[0].at(-1), `repos/alice/board/compare/main...${head}`)
+  const failing = (program, args) => {
+    if (args[0] === 'pr') return JSON.stringify([pull(1, { title: 'chore(release): Agent Board 9.9.9' })])
+    if (args.includes('.behind_by')) throw new Error('network')
+    return ''
+  }
+  const unsure = fetchQueue({ repo: 'alice/board' }, { run: failing })
+  assert.equal(unsure.prs[0].behindBy, null)
+  const comments = { 1: [ready(), verdict('APPROVE', head, '2026-10-20T10:00:00Z')] }
+  const queue = classify(unsure.prs, comments, now)
+  assert.deepEqual(queue.approved, [])
+  assert.match(queue.needsMain[0].detail, /could not check/)
 })
 
 test('the reviewer queue lists the smallest pull request first and marks one Ready for more than four hours', () => {

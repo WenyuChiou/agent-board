@@ -241,8 +241,8 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
       // A release must contain current main before it merges (docs/RELEASING.md, step 5), so an approved one that is behind waits.
-      if (/^chore\(release\):/.test(item.title) && (pr.mergeStateStatus === 'BEHIND' || pr.behindBy > 0)) {
-        result.needsMain.push({ ...item, detail: 'approved; merge main first (a release must contain current main)' })
+      if (/^chore\(release\):/.test(item.title) && (pr.mergeStateStatus === 'BEHIND' || pr.behindBy > 0 || pr.behindBy === null)) {
+        result.needsMain.push({ ...item, detail: pr.behindBy === null ? 'approved; could not check whether it contains current main, so merge main first if unsure' : 'approved; merge main first (a release must contain current main)' })
         continue
       }
       const isOneAtATime = !Array.isArray(pr.files) || pr.files.some(file => isSharedPath(file?.path ?? ''))
@@ -274,8 +274,8 @@ export const fetchQueue = ({ repo }, { run = execFileSync } = {}) => {
   for (const pr of prs) {
     if (!/^chore\(release\):/.test(pr.title ?? '') || pr.mergeStateStatus === 'BEHIND') continue
     try {
-      pr.behindBy = Number(run('gh', ['api', '--jq', '.behind_by', `repos/${repo}/compare/${pr.headRefOid}...main`], options).trim()) || 0
-    } catch { pr.behindBy = 0 }
+      pr.behindBy = Number(run('gh', ['api', '--jq', '.behind_by', `repos/${repo}/compare/main...${pr.headRefOid}`], options).trim()) || 0
+    } catch { pr.behindBy = null }
   }
   return { prs, commentsByNumber }
 }
