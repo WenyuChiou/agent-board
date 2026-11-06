@@ -75,10 +75,9 @@ describe('L1 first run', () => {
       }
       const source = world.read('progress.md')
       assert.equal((source.match(/<!-- auto /g) ?? []).length, 3)
-      await knownFailure('hold:codex-project-headings', () => {
-        assert.equal((source.match(/^## alpha-web$/gm) ?? []).length, 1, source)
-        assert.equal((source.match(/^## /gm) ?? []).length, 1, source)
-      })
+      // #922: a report for a project already headed joins that section.
+      assert.equal((source.match(/^## alpha-web$/gm) ?? []).length, 1, source)
+      assert.equal((source.match(/^## /gm) ?? []).length, 1, source)
       const text = await terminal.screen(world)
       for (let index = 0; index < 3; index++) assert.ok(text.includes(`Gateway report ${index + 1}`))
       noMachineIds(text, world)

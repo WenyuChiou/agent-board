@@ -396,6 +396,37 @@ test('fetching requests pull request descriptions and reads paginated comment re
   assert.ok(calls[1].args.includes('--paginate'))
   assert.equal(calls[1].args.at(-1), 'repos/alice/board/issues/1/comments?per_page=100')
   assert.equal(data.commentsByNumber[1].length, 2)
+  assert.equal(data.prListComplete, true)
+})
+
+// A list at the cap may omit a pull request that names an issue, and a missing body cannot prove it names
+// none, so neither counts as a complete list for deciding whether a claim has an open pull request.
+test('a pull request list at its cap or with a missing body is reported incomplete', () => {
+  const atCap = Array.from({ length: 100 }, (_, index) => pull(index + 1))
+  const run = (program, args) => {
+    if (args[0] === 'pr') return JSON.stringify(atCap)
+    return ''
+  }
+  assert.equal(fetchQueue({ repo: 'alice/board' }, { run }).prListComplete, false)
+  const belowCap = atCap.slice(0, 99)
+  const short = (program, args) => {
+    if (args[0] === 'pr') return JSON.stringify(belowCap)
+    return ''
+  }
+  assert.equal(fetchQueue({ repo: 'alice/board' }, { run: short }).prListComplete, true)
+  const missingBody = [pull(1, { body: null }), pull(2)]
+  const missing = (program, args) => {
+    if (args[0] === 'pr') return JSON.stringify(missingBody)
+    return ''
+  }
+  assert.equal(fetchQueue({ repo: 'alice/board' }, { run: missing }).prListComplete, false)
+  const undefinedBody = [pull(1), { ...pull(2), body: undefined }]
+  const undefinedRun = (program, args) => {
+    if (args[0] === 'pr') return JSON.stringify(undefinedBody)
+    return ''
+  }
+  // JSON cannot carry undefined, so a body the transport drops reads back as missing.
+  assert.equal(fetchQueue({ repo: 'alice/board' }, { run: undefinedRun }).prListComplete, false)
 })
 
 test('a GitHub failure is reported without printing raw diagnostics', () => {
@@ -846,6 +877,30 @@ test('away notices and expired claims print after the queue and appear in the JS
   assert.deepEqual(queue.away, [{ login: 'Bob', until: '2026-10-22' }])
   assert.deepEqual(queue.expiredClaims, [{ number: 10, login: 'carol' }])
   assert.equal('notes' in queue, false)
+})
+
+// An incomplete pull request list cannot prove an issue has no open pull request, so the queue lists no expired
+// claim from it and says why, instead of presenting the truncated list as complete.
+test('an incomplete pull request list lists no expired claim and notes the truncation', () => {
+  const extra = {
+    roadmapComments: [], collaborators: [], claimed: [claimIssue(10, claimBy('carol', 'Claim: codex, fix/x, until 2026-10-19 09:00 UTC', '2026-10-18T09:00:00Z'))],
+    notes: [],
+  }
+  const run = argv => {
+    const output = []
+    const status = main(argv, {
+      fetch: () => ({ prs: [pull(1)], commentsByNumber: { 1: [ready()] }, prListComplete: false }), context: () => extra, bundle: noBundle,
+      lanes: () => ({ stale: [], notes: [] }), now: () => now, log: text => output.push(text), error: text => assert.fail(text),
+    })
+    assert.equal(status, 0)
+    return output[0]
+  }
+  const lines = run(['--repo', 'owner1/board']).split('\n')
+  assert.deepEqual(lines.slice(lines.indexOf('Drafts: 0') + 1), ['Note: Pull request list may be truncated (at its 100-item limit, or a pull request body could not be read), so expired claims are not listed.'])
+  const queue = JSON.parse(run(['--repo', 'owner1/board', '--json']))
+  assert.deepEqual(queue.expiredClaims, [])
+  assert.equal(queue.notes.length, 1)
+  assert.match(queue.notes[0], /Pull request list may be truncated/)
 })
 
 test('JSON lists the bots of each pull request', () => {

@@ -19,6 +19,7 @@ const claim = (login, until, createdAt = '2026-10-18T09:00:00Z') => ({ body: `Cl
 const posted = { issues: [{ number: 42, user: bot, body: `${issueMarker}\nSynthetic queue issue` }], issueComments: { 42: [{ id: 8, user: bot, body: `${commentMarker}\nold` }] } }
 
 // A GitHub stand-in for gh: it answers the reads the queue makes and records every write, so no test reaches the network.
+// It respects the requested --limit on a pull request list, as gh does, so a list longer than the cap reads back truncated.
 const gitHub = ({ prs = [], prComments = {}, claimed = [], issues = [], issueComments = {}, failOn = null } = {}) => {
   const calls = []
   const run = (command, args, options = {}) => {
@@ -26,7 +27,10 @@ const gitHub = ({ prs = [], prComments = {}, claimed = [], issues = [], issueCom
     const method = args[1] === '--method' ? args[2] : null
     const path = method ? args[3] : args.at(-1)
     if (failOn?.({ args, method, path })) throw new Error('synthetic gh failure, token ghp_000000000000000000000000')
-    if (args[0] === 'pr' && args[1] === 'list') return JSON.stringify(prs)
+    if (args[0] === 'pr' && args[1] === 'list') {
+      const limit = Number(args[args.indexOf('--limit') + 1])
+      return JSON.stringify(Number.isFinite(limit) ? prs.slice(0, limit) : prs)
+    }
     if (args[0] === 'issue' && args[1] === 'list') return JSON.stringify(claimed)
     if (args[0] === 'issue' && args[1] === 'pin') return ''
     if (method === 'POST' && path === `repos/${repo}/issues`) return JSON.stringify({ number: 900, ...calls.at(-1).input })
@@ -144,6 +148,38 @@ test('a live claim, or one an open pull request names, keeps its label and gets 
   const github = gitHub({ ...posted, claimed: [live, named], prs: [pull(6, { body: 'Fixes #14\nAuthor: codex (x), fix/14' })] })
   assert.equal(post(github).code, 0)
   assert.deepEqual(targets(github), [['PATCH', `repos/${repo}/issues/comments/8`]])
+})
+
+// A truncated pull request list cannot prove an issue has no open pull request, so the run fails closed: no expiry
+// comment, no label removal, and the queue still posts with the reason noted.
+test('a pull request list at its cap releases no claim and the run fails without unsafe writes', () => {
+  // The issue's synthetic reproduction: 101 open pull requests, the first 100 do not name #12, only the 101st
+  // says Fixes #12. The stand-in respects --limit, so the poster sees only the first 100.
+  const many = Array.from({ length: 100 }, (_, index) => pull(index + 1, { body: `Author: codex (x), fix/${index + 1}` }))
+  const linked = pull(101, { body: 'Fixes #12\nAuthor: codex (x), fix/12' })
+  const expired = claimedIssue(12, [claim('ana', '2026-10-19 09:00')])
+  const github = gitHub({ ...posted, claimed: [expired], prs: [...many, linked] })
+  const { code, err } = post(github)
+  assert.equal(code, 1)
+  assert.match(err, /Pull request list may be truncated.*so claimed was not taken off any issue; the next run tries again\./)
+  // Only the queue comment is written: no expiry comment on #12 and no label removal.
+  assert.deepEqual(targets(github), [['PATCH', `repos/${repo}/issues/comments/8`]])
+  assert.match(github.writes()[0][2].body, /Note: Pull request list may be truncated.*so expired claims are not listed\./)
+  assert.doesNotMatch(github.writes()[0][2].body, /claim expired: #12/)
+  // Exactly 100 is the cap too: the list may be complete or truncated, and the run still fails closed.
+  const atCap = gitHub({ ...posted, claimed: [expired], prs: many })
+  assert.equal(post(atCap).code, 1)
+  assert.deepEqual(targets(atCap), [['PATCH', `repos/${repo}/issues/comments/8`]])
+})
+
+test('a pull request whose body could not be read releases no claim', () => {
+  const expired = claimedIssue(12, [claim('ana', '2026-10-19 09:00')])
+  const github = gitHub({ ...posted, claimed: [expired], prs: [pull(6, { body: null })] })
+  const { code, err } = post(github)
+  assert.equal(code, 1)
+  assert.match(err, /Pull request list may be truncated.*so claimed was not taken off any issue; the next run tries again\./)
+  assert.deepEqual(targets(github), [['PATCH', `repos/${repo}/issues/comments/8`]])
+  assert.doesNotMatch(github.writes()[0][2].body, /claim expired: #12/)
 })
 
 test('a queue whose text fails the private-data check is not posted and the run fails', () => {

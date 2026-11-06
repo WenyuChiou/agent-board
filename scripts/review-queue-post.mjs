@@ -110,10 +110,14 @@ export const main = (argv = process.argv.slice(2), { run = execFileSync, now = (
   }
   // fetchContext turns a failed lookup into a note; for the claims that would hide that step (2) stopped, so the run fails.
   if (!context.claimed) fail('Claims could not be read, so claimed was not taken off any issue; the next run tries again.')
+  // A truncated pull request list cannot prove an issue has no open pull request, so no claim is released from
+  // it. A fetch that does not report completeness keeps the old reading.
+  const prListComplete = queue.prListComplete !== false
+  if (!prListComplete) fail('Pull request list may be truncated (at its 100-item limit, or a pull request body could not be read), so claimed was not taken off any issue; the next run tries again.')
 
   // The queue's own rule decides which claims ran out (CONTRIBUTING rule 3).
   const released = []
-  for (const { number, login } of context.claimed ? readClaims(context.claimed, queue.prs, current) : []) {
+  for (const { number, login } of prListComplete && context.claimed ? readClaims(context.claimed, queue.prs, current) : []) {
     const isNoticed = hasClaimNotice(context.claimed.find(issue => issue.number === number)?.comments)
     if (isDryRun) {
       log(`Would ${isNoticed ? '' : `comment on #${number} and `}take claimed off #${number}`)
