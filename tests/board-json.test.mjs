@@ -379,3 +379,28 @@ test('--project narrows the finished work to that project\'s heading (#1024)', (
   assert.ok(document.finished.every(t => t.project === 'synthetic-api'))
   assert.ok(!document.finished.some(t => t.project === 'personal'))
 })
+
+test('collectFinished collects finished tasks from archives using heading date and preserves auto agent (#1024)', () => {
+  const archiveText = `## synthetic-api · 2026-11-02
+<!-- auto session=a3000001 agent=codex state=done updated=2026-11-02T10:00:00.000Z -->
+### Database refactor
+- [x] Migrated schemas
+<!-- /auto session=a3000001 -->
+`
+  const finished = collectFinished('', [], [archiveText], 7, NOW, undefined, '/synthetic-home', false)
+  assert.equal(finished.length, 1)
+  assert.equal(finished[0].title, 'Database refactor')
+  assert.equal(finished[0].project, 'synthetic-api')
+  assert.equal(finished[0].agent, 'codex')
+  assert.equal(finished[0].finishedDate, '2026-11-02')
+  assert.deepEqual(finished[0].steps, [{ text: 'Migrated schemas', date: '2026-11-02' }])
+})
+
+test('undated manual completed tasks in progress.md are not fabricated as today (#1024)', () => {
+  const manualUndated = `## synthetic-api
+### Old manual task without stamp
+- [x] Finished without stamp
+`
+  const finished = collectFinished(manualUndated, [], [], 1, NOW, undefined, '/synthetic-home', false)
+  assert.equal(finished.length, 0, 'undated tasks should not be fabricated as today')
+})

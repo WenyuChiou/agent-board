@@ -12,16 +12,13 @@ export const BOARD_JSON_SCHEMA = 1
 
 export type FinishedStep = {
   text: string
-  step: string
-  date: string
+  date?: string
 }
 
 export type FinishedTask = {
   project: string
   title: string
-  task: string
   agent: string
-  date: string
   finishedDate: string
   steps: FinishedStep[]
 }
@@ -170,8 +167,7 @@ export const collectFinished = (
         } else {
           for (const step of task.steps) {
             if (step.status !== 'done' && step.status !== 'cancelled') continue
-            let stDate = stampOf(step.raw)
-            if (stDate === null && isTaskComplete(task)) stDate = toDay
+            const stDate = stampOf(step.raw)
             if (stDate !== null && stDate >= fromDay && stDate <= toDay) {
               const stText = clean(withoutStamp(step.text))
               const held = tasks.get(key) ?? {
@@ -201,23 +197,28 @@ export const collectFinished = (
     if (!text) continue
     const parsed = parseProgress(text)
     for (const project of parsed) {
+      const headingDate = project.name.match(/\s*·\s*(\d{4}-\d\d-\d\d)$/)?.[1] ?? null
       const baseProjectName = project.name.replace(/\s*·\s*\d{4}-\d\d-\d\d$/, '')
       const proj = named(baseProjectName)
       for (const task of project.tasks) {
         const title = clean(task.title)
         const key = keyOf(proj, title)
+        const autoAgent = task.auto ? clean(task.auto.agent) : ''
+        const autoDate = task.auto ? localDay(task.auto.updated || now) : null
+        const taskFallbackDate = autoDate ?? headingDate
         for (const step of task.steps) {
           if (step.status !== 'done' && step.status !== 'cancelled') continue
-          const stDate = stampOf(step.raw)
+          const stDate = stampOf(step.raw) ?? taskFallbackDate
           if (stDate !== null && stDate >= fromDay && stDate <= toDay) {
             const stText = clean(withoutStamp(step.text))
             const held = tasks.get(key) ?? {
               project: proj,
               title,
-              agent: '',
+              agent: autoAgent,
               date: stDate,
               steps: new Map(),
             }
+            if (!held.agent && autoAgent) held.agent = autoAgent
             if (stDate > held.date) held.date = stDate
             const stepKey = stText.toLowerCase()
             const existingStep = held.steps.get(stepKey)
@@ -246,7 +247,11 @@ export const collectFinished = (
 
   if (projectFilter) {
     const filterClean = clean(projectFilter).toLowerCase()
-    result = result.filter(t => t.project.toLowerCase() === filterClean || clean(t.project).toLowerCase() === filterClean)
+    const filterNamed = named(projectFilter).toLowerCase()
+    result = result.filter(t => {
+      const p = t.project.toLowerCase()
+      return p === filterClean || p === filterNamed || clean(t.project).toLowerCase() === filterClean
+    })
   }
 
   return result.sort((a, b) => b.finishedDate.localeCompare(a.finishedDate) || a.project.localeCompare(b.project) || a.title.localeCompare(b.title))
