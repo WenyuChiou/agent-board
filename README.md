@@ -118,7 +118,7 @@ In the Claude desktop app the agent can open the board too: ask it to open the b
 | Where | Command |
 |---|---|
 | A terminal or desktop | `node "$HOME/.agent-board/agent-board.mjs"` (terminal board over SSH or without a display, page otherwise) |
-| A browser | `node "$HOME/.agent-board/agent-board.mjs"` |
+| A phone on the same Wi-Fi | `node "$HOME/.agent-board/agent-board.mjs" --lan` (scan the QR code it prints) |
 | An agent reading the board | `node "$HOME/.agent-board/agent-board.mjs" --json` ([field reference](docs/BOARD-JSON.md)) |
 | Check one agent's setup | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 

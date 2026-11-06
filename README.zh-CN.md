@@ -118,7 +118,7 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | 在哪里 | 命令 |
 |---|---|
 | 终端或桌面 | `node "$HOME/.agent-board/agent-board.mjs"`（SSH 或没有图形显示时打开终端看板，其他情况打开网页） |
-| 浏览器 | `node "$HOME/.agent-board/agent-board.mjs"` |
+| 同一个 Wi-Fi 的手机 | `node "$HOME/.agent-board/agent-board.mjs" --lan`（扫它打印的二维码） |
 | Agent 读取看板 | `node "$HOME/.agent-board/agent-board.mjs" --json`（[字段说明](docs/BOARD-JSON.md)） |
 | 检查某个 agent 的设置 | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 
