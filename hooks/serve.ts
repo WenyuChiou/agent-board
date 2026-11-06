@@ -1290,7 +1290,8 @@ const PAGE_SCRIPT = String.raw`
     last = '';
   }
   // Names this page to the board, so it can tell one open page from another (#265).
-  var pageId = (function () { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } })();
+  function newPageId() { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } }
+  var pageId = newPageId();
   function call(path, body) {
     if (isUnreachable && body !== undefined) return Promise.reject();
     var headers = { 'x-board-token': token, 'x-board-page': pageId, 'x-board-visible': document.hidden ? '0' : '1' };
@@ -1308,6 +1309,12 @@ const PAGE_SCRIPT = String.raw`
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
     try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
+  });
+  // A page the browser kept in its back/forward cache and shows again is the same document, but the board forgot its id when it left: it names itself anew and asks at once (#1028).
+  if (typeof window.addEventListener === 'function') window.addEventListener('pageshow', function (event) {
+    if (!event || !event.persisted || isClosed) return;
+    pageId = newPageId();
+    refresh();
   });
   // onCopied: what to do once the text is on the clipboard; the card then says where to paste it. Without it the
   // result line says Copied. That line, and the card's after-copy line, show only after a copy was confirmed
