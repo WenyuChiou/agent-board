@@ -57,9 +57,18 @@ test('the default page scopes empty Waiting wording and preserves older-question
           const empty = page.locator('#needs .empty').first()
           await empty.waitFor({ state: 'visible' })
           assert.ok((await empty.innerText()).includes(expected), lang)
+          // Below 560 px the sidebar is a closed drawer, so the agent button in it is off screen; open it first.
+          // A pick closes the drawer, so each click needs it open again.
+          const openDrawer = async () => {
+            await page.locator('#drawer-btn').click()
+            await page.locator('#shell[data-drawer="1"]').waitFor()
+            assert.equal(await page.locator('#drawer-btn').getAttribute('aria-expanded'), 'true')
+          }
           const agent = page.locator('[data-agent="codex"]:visible').first()
+          if (width < 560) await openDrawer()
           await agent.click()
           assert.ok((await empty.innerText()).includes(s.pgNoQuestions('Codex')))
+          if (width < 560) await openDrawer()
           await agent.click()
           assert.ok((await empty.innerText()).includes(expected))
           const older = page.locator('#needs .older-line')
