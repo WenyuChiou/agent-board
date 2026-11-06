@@ -268,7 +268,7 @@ export const startServer = (o: ServeOptions): void => {
   const replies = new Map<string, Result & { at: number; key: string }>()
   let port = 0
   let lastSeen = Date.now()
-  // When the board page itself (not a script pinging it) last loaded or asked for the board; 0 once it said it left (#265).
+  // When the board page itself (its address, or its poll with x-board-page; not a script or the terminal board reading the board) last loaded or asked for the board; 0 once it said it left (#265).
   let pageAt = 0
   let isStopping = false
   // The page on the local network: its own server, address and token, so the computer's token
@@ -374,7 +374,7 @@ export const startServer = (o: ServeOptions): void => {
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
-    if (!isLan && (isPage || req.method === 'GET' && url.pathname === '/api/board')) pageAt = Date.now()
+    if (!isLan && (isPage || req.method === 'GET' && url.pathname === '/api/board' && req.headers['x-board-page'] === '1')) pageAt = Date.now()
     if (!url.pathname.startsWith('/api/messages/')) {
       lastSeen = Date.now()
       if (side !== null) side.lastSeen = lastSeen

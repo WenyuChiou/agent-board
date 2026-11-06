@@ -1265,7 +1265,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function call(path, body) {
     if (isUnreachable && body !== undefined) return Promise.reject();
-    var headers = { 'x-board-token': token };
+    var headers = { 'x-board-token': token, 'x-board-page': '1' };
     if (path === '/api/board' && body === undefined && boardEtag) headers['if-none-match'] = boardEtag;
     if (body !== undefined) headers['content-type'] = 'application/json';
     return fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' }).then(function (res) {

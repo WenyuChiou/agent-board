@@ -69,12 +69,16 @@ describe('L3 across agents and sessions', () => {
       const server = await serve.start(world)
       const outputs = []
       outputs.push(await command(world, ['--serve', '--idle-minutes', '1']))
-      // The opened window loads the page and asks for the board, as a real page does.
+      // The terminal board reads the board from the running page too; that is not a window.
       assert.equal((await server.get('/api/board')).status, 200)
+      outputs.push(await command(world, ['--serve', '--idle-minutes', '1']))
+      assert.equal((outputs[1].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1, 'a script reading the board is not an open window')
+      // The opened window loads the page, as a real one does.
+      await server.page()
       outputs.push(await command(world, ['--serve', '--idle-minutes', '1']))
       for (const output of outputs) assert.ok(output.includes(server.url), 'The same isolated server address must be reused')
       assert.equal((outputs[0].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1)
-      assert.equal((outputs[1].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, outputs[1])
+      assert.equal((outputs[2].match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, outputs[2])
       // The agent's own way to open the page (--html, the same code /agent-board uses) points at the open window too.
       const html = await command(world, ['--html'])
       assert.equal((html.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, html)
@@ -83,6 +87,11 @@ describe('L3 across agents and sessions', () => {
       assert.equal((await server.post('/api/page-gone', {})).status, 200)
       const third = await command(world, ['--serve', '--idle-minutes', '1'])
       assert.equal((third.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 1, third)
+      // A page that keeps asking (its poll carries x-board-page) counts as open again.
+      const page = new URL(server.url)
+      assert.equal((await fetch(new URL('/api/board', page), { headers: { 'x-board-token': page.searchParams.get('t'), 'x-board-page': '1' } })).status, 200)
+      const fourth = await command(world, ['--serve', '--idle-minutes', '1'])
+      assert.equal((fourth.match(/E2E_BROWSER_REQUEST/g) ?? []).length, 0, fourth)
       noMachineIds(await server.page(), world)
     } finally { await world.close() }
   })
