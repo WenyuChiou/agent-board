@@ -949,7 +949,7 @@ test('connecting by hand from a second data folder moves the hosts and says so',
   const output = f.run(f.request('connect', { progress: join(f.home, 'other-root', 'progress.md'), openclawVersion: '2026.10.1' }))
   assert.match(output.result.text, /These agents now report to this board/)
   assert.equal(output.result.problems.some(problem => problem.message === 'connectOtherData' || problem.message === 'connectPreserved'), false)
-  for (const path of [f.config, join(f.home, '.gemini/settings.json'), join(f.home, '.cursor/hooks.json'), join(f.home, '.hermes/config.yaml'), join(f.home, '.agents/skills/agent-board/SKILL.md'), join(f.home, '.gemini/commands/board.toml')]) {
+  for (const path of [f.config, join(f.home, '.gemini/settings.json'), join(f.home, '.cursor/hooks.json'), join(f.home, '.hermes/config.yaml'), join(f.home, '.agents/skills/agent-board/SKILL.md'), join(f.home, '.gemini/commands/agent-board.toml')]) {
     assert.ok(decoded(readFileSync(path, 'utf8')).includes('other-root'), path)
   }
 }))

@@ -145,7 +145,11 @@ export const apply = async (f, ids, source = repoRoot) => {
   const plan = await setup(f, ['--apply', '--json'], source)
   assert.deepEqual(plan.targets, ids)
   assert.equal(plan.applied, true)
-  for (const target of plan.plans) for (const change of target.changes) assert.ok(existsSync(change.file), `${target.agent}: ${change.file} exists`)
+  // An install removes a file only to retire the old /board command (#868): that one is gone, the rest exist.
+  for (const target of plan.plans) for (const change of target.changes) {
+    const isRemoved = change.action === 'remove'
+    assert.equal(existsSync(change.file), !isRemoved, `${target.agent}: ${change.file} ${isRemoved ? 'is gone' : 'exists'}`)
+  }
   assert.ok(existsSync(f.script))
   assert.ok(existsSync(f.progress))
   return plan
