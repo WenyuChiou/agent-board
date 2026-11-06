@@ -1,10 +1,19 @@
 import childProcess from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { syncBuiltinESMExports } from 'node:module'
+import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+
+// The message-folder module uses the host's extensionless imports; resolve only those local
+// paths, as tests/messaging.test.mjs does.
+registerHooks({ resolve(specifier, context, next) {
+  try { return next(specifier, context) } catch (error) {
+    if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+    return next(`${specifier}.ts`, context)
+  }
+} })
 
 const sid = 'S-1-5-21-100-200-300-1001'
 const freshRuntime = name => import(`../scripts/runtime-folder.ts?${name}`)
