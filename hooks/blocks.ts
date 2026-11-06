@@ -2,6 +2,7 @@ import type { CutBlock, ProgressMirror, ProgressMirrorTask, ProgressSessionState
 import { prWords } from './github'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
+import { stamped, stampOf, withoutStamp } from './done-stamp'
 import { localDay } from './journal'
 import { splitLines } from './lines'
 import { fallbackTitle, isAnswered, questionToken, retainedCancelledOf } from './mirror'
@@ -173,15 +174,15 @@ export type BlockSpan = {
   isClosed: boolean
 }
 
-const eolOf = (text: string): string => (text.includes('\r\n') ? '\r\n' : '\n')
+export const eolOf = (text: string): string => (text.includes('\r\n') ? '\r\n' : '\n')
 
-const linesOf = (text: string): string[] => (text === '' ? [] : splitLines(text.replace(/\r?\n$/, '')))
+export const linesOf = (text: string): string[] => (text === '' ? [] : splitLines(text.replace(/\r?\n$/, '')))
 
 // The lines as the parser reads them: what sits in a code fence or a comment is never taken
 // for a marker or a heading, so a block pasted there as an example is left alone.
-const HIDDEN = '\u0000'
+export const HIDDEN = '\u0000'
 
-const seenOf = (lines: readonly string[]): string[] => readable(lines).map(line => line ?? HIDDEN)
+export const seenOf = (lines: readonly string[]): string[] => readable(lines).map(line => line ?? HIDDEN)
 
 const endsBlock = (line: string, session: string): boolean => {
   if (!AUTO_END.test(line)) return false
@@ -740,12 +741,16 @@ export const manualTaskCount = (text: string, entry: QuickEntry): number => {
 
 // Ticks one step of a hand-kept task (a press in the pane): the line the pane showed, if it
 // still reads as it did; else the one line in the file that does, if there is exactly one.
-// Anything else (the step changed, or has a twin) leaves the file alone.
-export const setManualStep = (text: string, ref: StepRef, mark: string): string => {
+// Anything else (the step changed, or has a twin) leaves the file alone. A line is compared
+// without its hidden done date (done-stamp.ts), so a press on a line drawn before the board
+// stamped it still finds it. With `now`, a step the press makes done or cancelled is stamped
+// that day (one that was already done keeps its date); any other mark carries no stamp.
+export const setManualStep = (text: string, ref: StepRef, mark: string, now?: number): string => {
   const eol = eolOf(text)
   const lines = linesOf(text)
   const seen = seenOf(lines)
-  const isStep = (index: number): boolean => lines[index] === ref.raw && seen[index] !== HIDDEN
+  const wanted = withoutStamp(ref.raw)
+  const isStep = (index: number): boolean => withoutStamp(lines[index] ?? '') === wanted && seen[index] !== HIDDEN
   let at = isStep(ref.line) ? ref.line : -1
   if (at < 0) {
     const same = lines.flatMap((_line, index) => (isStep(index) ? [index] : []))
@@ -753,7 +758,15 @@ export const setManualStep = (text: string, ref: StepRef, mark: string): string 
   }
   const line = lines[at]
   if (at < 0 || line === undefined || !STEP.test(line)) return text
-  lines[at] = line.replace(STEP, (_all, lead: string, _mark: string, close: string, rest: string) => `${lead}${mark}${close}${rest}`)
+  const remark = (from: string): string => from.replace(STEP, (_all, lead: string, _mark: string, close: string, rest: string) => `${lead}${mark}${close}${rest}`)
+  if (now === undefined) {
+    lines[at] = remark(line)
+  } else {
+    const isFinished = mark === 'x' || mark === 'X' || mark === '-'
+    const wasFinished = /^[xX-]$/.test(STEP.exec(line)?.[2] ?? '')
+    const day = wasFinished ? stampOf(line) ?? localDay(now) : localDay(now)
+    lines[at] = isFinished ? stamped(remark(withoutStamp(line)), day) : remark(withoutStamp(line))
+  }
 
   return lines.join(eol) + eol
 }
