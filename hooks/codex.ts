@@ -126,6 +126,22 @@ export const LIFECYCLE_STEPS: ReadonlySet<string> = new Set([
 ])
 export const isLifecycleStep = (text: string): boolean => LIFECYCLE_STEPS.has(text.trim())
 
+// The hook keeps one line so the ledger sees the same words when a prompt answers it.
+export const questionSteps = (held: readonly string[], previousAsked: number | undefined, state: unknown, value: unknown, isBoardPrompt = false, previousRevision?: string): { steps: string[]; asked: number | undefined; askedRevision: string | undefined } => {
+  const steps = [...held]
+  let asked = previousAsked !== undefined && Number.isInteger(previousAsked) && previousAsked >= 0 && previousAsked < steps.length ? previousAsked : undefined
+  let askedRevision = previousRevision
+  if (isBoardPrompt) return { steps, asked, askedRevision }
+  if (state === 'working' && asked !== undefined) steps[asked] = steps[asked]!.replace(/^- \[\?\] /, '- [x] ')
+  const question = state === 'waiting' && typeof value === 'string' ? cutLine(value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
+  if (question !== '' && (asked !== undefined || steps.length < 40)) {
+    askedRevision = nextRevision(askedRevision)
+    if (asked === undefined) asked = steps.length
+    steps[asked] = `- [?] ${question}`
+  }
+  return { steps, asked, askedRevision }
+}
+
 // Hooks describe lifecycle, not task completion. Only an explicit report can say done.
 export const codexEvent = (previous: CodexReport | null, input: Record<string, unknown>, now: string, s: Strings): CodexReport => {
   const session = line(input.session_id)
@@ -137,8 +153,8 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   if (event !== 'SessionStart' && event !== 'SessionEnd' && turn === null) throw new Error('MISSING_TURN')
   const key = `${String(event)}:${turn ?? ''}`
   if (turn && previous?.retiredTurns?.includes(turn)) throw new Error('STALE_TURN')
-  // A second ask in the same turn is a new question, not a replay.
-  if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest') return previous
+  // Cursor can send its reply after Stop with the same generation id.
+  if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest' && !(event === 'Stop' && typeof input.question === 'string' && input.question.trim() !== '')) return previous
   if (previous?.turn && turn && previous.turn !== turn && event !== 'UserPromptSubmit') throw new Error('STALE_TURN')
   const working = event === 'UserPromptSubmit'
   const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' ? 'done' : 'waiting'
@@ -146,24 +162,16 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   // A session ending does not answer its last question, but it does end an approval.
   const held = previous?.steps ?? [`- [ ] ${s.codexLifecycle}`]
   const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
-  const earlierAsked = previous?.asked !== undefined && previous.asked < held.length ? previous.asked : undefined
-  const steps = held.map((step, index) => event !== 'SessionStart' && (index === earlier || (event !== 'SessionEnd' && index === earlierAsked)) ? step.replace(/^- \[\?\] /, '- [x] ') : step)
+  const approvalSteps = held.map((step, index) => event !== 'SessionStart' && index === earlier ? step.replace(/^- \[\?\] /, '- [x] ') : step)
+  const { steps, asked, askedRevision } = questionSteps(approvalSteps, previous?.asked, working ? 'working' : event === 'Stop' ? state : 'ended', event === 'Stop' ? input.question : undefined, working && input.prompt_submitted === false, previous?.askedRevision)
   let approval = earlier
-  let asked = earlierAsked
   let approvalRevision = previous?.approvalRevision
-  let askedRevision = previous?.askedRevision
-  // Only the closing question reaches here from the last message (scripts/codex-local.ts), one line, cut like other step text.
-  const question = event === 'Stop' && state !== 'done' && typeof input.question === 'string' ? cutLine(input.question.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
   if (event === 'PermissionRequest') {
     approvalRevision = nextRevision(approvalRevision)
     if (approval === undefined) approval = steps.length
     steps[approval] = `- [?] ${s.codexApprovalStep}`
   }
-  if (question !== '') {
-    askedRevision = nextRevision(askedRevision)
-    if (asked === undefined) asked = steps.length
-    steps[asked] = `- [?] ${question}`
-  }
+
   return {
     session, turn: turn ?? previous?.turn ?? null, state,
     title: previous?.title ?? s.codexTask,
@@ -180,16 +188,31 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   }
 }
 
-export const codexReport = (previous: CodexReport | null, session: string, input: Record<string, unknown>, now: string, s: Strings): CodexReport => {
-  if (previous !== null && previous.session !== session) throw new Error('SESSION_CONFLICT')
-  if (!['working', 'waiting', 'done', 'ended'].includes(String(input.state))) throw new Error('INVALID_STATE')
-  if (!Array.isArray(input.steps) || input.steps.length === 0 || input.steps.length > 40) throw new Error('INVALID_STEPS')
-  const steps = input.steps.map(step => {
+// Explicit input remains limited to forty user steps. Internal lifecycle updates may
+// additionally retain their separately owned lines, without dropping cache validation.
+const reportSteps = (state: unknown, given: unknown, maximum: number): string[] => {
+  if (!['working', 'waiting', 'done', 'ended'].includes(String(state))) throw new Error('INVALID_STATE')
+  if (!Array.isArray(given) || given.length === 0 || given.length > maximum) throw new Error('INVALID_STEPS')
+  const steps = given.map(step => {
     const text = line(step)
     if (!/^- \[[ x~?>!\-]\] .+/.test(text)) throw new Error('INVALID_STEP')
     return text
   })
-  if (input.state === 'done' && steps.some(step => !/^- \[[x\-]\]/.test(step))) throw new Error('UNFINISHED_STEPS')
+  if (state === 'done' && steps.some(step => !/^- \[[x\-]\]/.test(step))) throw new Error('UNFINISHED_STEPS')
+  return steps
+}
+
+export const validateCodexReport = (report: CodexReport, session: string): CodexReport => {
+  if (report.session !== session) throw new Error('SESSION_CONFLICT')
+  const owned = new Set([report.approval, report.asked].filter((index): index is number =>
+    index !== undefined && Number.isInteger(index) && index >= 0 && Array.isArray(report.steps) && index < report.steps.length))
+  return { ...report, session: line(session), title: line(report.title), project: line(report.project),
+    steps: reportSteps(report.state, report.steps, 40 + owned.size) }
+}
+
+export const codexReport = (previous: CodexReport | null, session: string, input: Record<string, unknown>, now: string, s: Strings): CodexReport => {
+  if (previous !== null && previous.session !== session) throw new Error('SESSION_CONFLICT')
+  const steps = reportSteps(input.state, input.steps, 40)
   let approval: number | undefined
   let asked: number | undefined
   for (const kind of ['approval', 'asked'] as const) {

@@ -154,8 +154,8 @@ export const cursorEvent = (input: Record<string, unknown>): Record<string, unkn
   return { session_id: input.conversation_id ?? input.session_id, turn_id: input.generation_id, hook_event_name: event }
 }
 
-// OpenCode supplies session status but no stable turn id on those status events. Keep
-// that limit explicit instead of manufacturing a turn id or fetching conversation text.
+// OpenCode supplies no stable turn id on status events. At idle, its last reply goes only
+// to the board script's stdin, which keeps just its closing question.
 export const opencodePlugin = (node: string, script: string, progress: string, description: string, home: string, stepFormat = STRINGS.en.localAgentStepFormat): string => `import { spawnSync } from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
 ${hookGuardSource(home, 'opencode')}
@@ -247,7 +247,29 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
     if (state === 'ended') open.delete(session)
     else if (known) known.where = where
     else open.set(session, { isReplying: state === 'working', where })
-    run('--agent-status', { session_id: session, state, ...where }, undefined, deadline)
+    let reply
+    if (event.type === 'session.idle' || event.type === 'session.status' && p.status?.type === 'idle') {
+      // Leave time for the status even if the messages request never settles.
+      const wait = deadline - Date.now() - 1000
+      if (wait > 0) {
+        let timer
+        try {
+          const listed = await Promise.race([
+            client.session.messages({ path: { id: session } }),
+            new Promise(resolve => { timer = setTimeout(() => resolve(null), wait) }),
+          ])
+          if (!listed?.error && Array.isArray(listed?.data)) {
+            const last = [...listed.data].reverse().find(message => message.info?.role === 'assistant')
+            if (Array.isArray(last?.parts)) {
+              const text = last.parts.filter(part => part?.type === 'text' && !part.synthetic && !part.ignored && typeof part.text === 'string').map(part => part.text).join('\\n')
+              // An oversized message must not make the worker refuse the status with it.
+              if (Buffer.byteLength(JSON.stringify({ session_id: session, state, ...where, last_assistant_message: text }), 'utf8') <= 1048576) reply = text
+            }
+          }
+        } catch {} finally { clearTimeout(timer) }
+      }
+    }
+    run('--agent-status', { session_id: session, state, ...where, ...(reply === undefined ? {} : { last_assistant_message: reply }) }, undefined, deadline)
   }),
   tool: {
     agent_board_progress: tool({

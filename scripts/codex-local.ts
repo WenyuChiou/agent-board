@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, planReport, putCodexBlock, sessionTitle } from '../hooks/codex'
+import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, planReport, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { agentHooks, BOARD_FOR, isReleased, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
@@ -77,6 +77,42 @@ export const removeCodexTrustEntries = (text: string, keys: string[]): { text: s
 }
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
+
+// Antigravity hooks name their own transcript but do not carry the reply text.
+const antigravityQuestion = (path: unknown): string | null => {
+  if (typeof path !== 'string' || !isAbsolute(path) || basename(path) !== 'transcript.jsonl') return null
+  try {
+    if (!lstatSync(path).isFile()) return null
+    const fd = openSync(path, 'r')
+    try {
+      const stat = fstatSync(fd)
+      if (!stat.isFile()) return null
+      const size = Math.min(stat.size, 256 * 1024), start = stat.size - size
+      const bytes = Buffer.alloc(size)
+      if (readSync(fd, bytes, 0, size, start) !== size) return null
+      let text = bytes.toString('utf8')
+      if (start > 0) {
+        const end = text.indexOf('\n')
+        if (end < 0) return null
+        text = text.slice(end + 1)
+      }
+      let reply: string | null = null
+      for (const line of text.split(/\r?\n/)) {
+        if (line.trim() === '') continue
+        const item: unknown = JSON.parse(line)
+        if (typeof item !== 'object' || item === null || Array.isArray(item)) return null
+        const entry = item as Json
+        if (typeof entry.source !== 'string' || typeof entry.type !== 'string') return null
+        if (entry.type === 'USER_INPUT') reply = null
+        else if (entry.source === 'MODEL' && entry.type === 'PLANNER_RESPONSE') {
+          if (typeof entry.content !== 'string') return null
+          if (entry.content.trim() !== '') reply = entry.content
+        }
+      }
+      return reply === null ? null : lastQuestion(reply)
+    } finally { closeSync(fd) }
+  } catch { return null }
+}
 
 const pad2 = (value: number): string => String(value).padStart(2, '0')
 const pad3 = (value: number): string => String(value).padStart(3, '0')
@@ -545,12 +581,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // Read before Cursor's adapter drops workspace_roots; a queued raw event keeps cwd and workspace_roots for this (#246).
       const folder = filesByFolder(mode, agent) ? folderProject(rawCwd) : ''
       // Only metadata selected below is retained. Save no prompts, tool inputs,
-      // or permission decisions from a hook payload, and nothing of last_assistant_message but the
-      // one line its closing question makes (#1045), read here and only at a Codex Stop. The plan mirror is the
+      // or permission decisions from a hook payload, and nothing of a reply but its closing question.
+      // The plan mirror is the
       // one place a tool input is read (--plan-event, before this): only each step's text and status,
       // which a report carries. transcript_path is
       // opened, when it is this session's own history file, for its first record at a session's
-      // start or prompt, which says whether a person started it (#399), and for nothing else.
+      // start or prompt, which says whether a person started it (#399). Antigravity's own transcript
+      // supplies its last reply at Stop because its hook does not include that text.
       const session = mode !== '--codex-report'
         ? agent === 'antigravity'
           ? (typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID)
@@ -575,8 +612,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const path = payload.transcript_path
       const run = opens ? codexSignal(Object.hasOwn(payload, 'transcript_path'), path, typeof path === 'string' && path !== '' ? readSessionMeta(path, session) : null) : undefined
       const identity = mode !== '--codex-report' ? folderIdentity(rawCwd) : undefined
-      // A queued event keeps metadata only: the host's own fields stay out, as they do above.
-      const question = agent === 'codex' && mode === '--codex-event' && raw.hook_event_name === 'Stop' ? lastQuestion(String(raw.last_assistant_message ?? '')) : null
+      // A queued event keeps only metadata and the closing question, not the host's other fields.
+      const message = typeof raw.last_assistant_message === 'string' ? raw.last_assistant_message : typeof raw.lastAssistantMessage === 'string' ? raw.lastAssistantMessage : ''
+      const question = mode === '--codex-event' && agent === 'codex' && raw.hook_event_name === 'Stop' ? lastQuestion(String(raw.last_assistant_message ?? ''))
+        : mode === '--codex-event' && agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' ? lastQuestion(String(raw.text ?? ''))
+          : mode === '--agent-status' && status === 'waiting' && (agent === 'grok' || agent === 'opencode') ? lastQuestion(message)
+            : mode === '--agent-status' && status === 'waiting' && agent === 'antigravity' && (event === undefined || event === 'Stop') ? antigravityQuestion(raw.transcriptPath) : null
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
         ...(filesByFolder(mode, agent) ? { folder } : {}),
@@ -586,7 +627,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
           turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
           ...(question === null ? {} : { question }),
-        } : {},
+        } : { ...(question === null ? {} : { question }) },
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
@@ -672,11 +713,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         title: previous !== null && !Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(previous.title)) ? previous.title : payload.planTitle,
         ...(typeof payload.planProject === 'string' ? { project: previous?.project ?? payload.planProject } : {}),
       }
-      const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s) : codexReport(previous, session, mode === '--agent-status' ? {
-        title: previous?.title ?? s.localAgentTask(agent), project: previous?.project ?? agent,
-        state: isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status,
-        steps: previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`],
-      } : given, clock, s)
+      const state = isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status
+      const question = questionSteps(previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`], previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
+      const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s)
+        : mode === '--agent-status' ? validateCodexReport({
+          // These are already validated stored steps, including up to two owned lines beyond
+          // the explicit report's forty user steps. A status is not a fresh task report.
+          ...(previous ?? codexReport(null, session, { title: s.localAgentTask(agent), project: agent, state, steps: question.steps }, clock, s)),
+          state: state as CodexReport['state'], steps: question.steps, updated: clock, asked: question.asked,
+          ...(question.askedRevision === undefined ? {} : { askedRevision: question.askedRevision }),
+        }, session) : codexReport(previous, session, given, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)
       // An Antigravity session keeps no folder (its hook binds only the conversation
@@ -691,9 +737,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // translated fallback needs no new string.
       const stillGeneric = previous !== null && Object.values(STRINGS).some(one => one.localAgentTask(agent) === previous.title)
       const distinctAntigravity = mode === '--agent-status' && agent === 'antigravity' && (previous === null || stillGeneric)
-      const initial = (filesByFolder(mode, agent) && !previous) || distinctAntigravity ? codexReport(base, session, {
+      const initial = (filesByFolder(mode, agent) && !previous) || distinctAntigravity ? validateCodexReport({
         ...base, title: sessionTitle(name, s.localAgentTask(agent), distinctAntigravity ? distinctStarted(at ?? Date.parse(now)) : ''), project: previous?.project ?? (name || agent),
-      }, clock, s) : base
+      }, session) : base
       const priorActivity = previous?.activity ?? []
       // Only a weak hint needs a parent; a strong run keeps its record without a block.
       const parent = origin.origin !== 'run' ? undefined : isRun ? origin.parent : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner, owner.slice(0, 8), session]) ?? undefined

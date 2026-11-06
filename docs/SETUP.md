@@ -258,7 +258,10 @@ its rows too; a resumed session reopens its row. New OpenCode blocks are filed u
 folder the session ran in. The progress tool takes each step as one Markdown task line
 (`- [~] Current step`); a refused report names the board's reason, such as `INVALID_STEP`.
 
-All these hooks report activity only. Semantic steps need a host-proven own-session
+These hooks report activity; Codex, Grok Build, Cursor CLI, OpenCode and Antigravity CLI
+also put a reply's closing question under Needs you. Antigravity's hooks carry no reply text,
+so the board reads the last reply from its own transcript file, whose format is undocumented
+(checked on agy 1.5.2); it keeps only the closing question. Other semantic steps need a host-proven own-session
 report; only OpenCode's generated tool supplies that context directly. This setup does
 not make the other hosts' incoming message transports available. See the
 [portable acceptance record](validation/2026-10-19-portable-hosts.md).

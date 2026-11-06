@@ -97,13 +97,16 @@ unfinished work waiting. `ended` is reserved for observed session termination or
 decision to stop that work permanently.
 
 Hooks keep only selected metadata. They ignore prompts, tool inputs and
-permission decisions, and call no model. At Stop they keep one thing of the last assistant message: the
-question it closes on, found as the Claude Code plugin finds a turn's (the last sentence ending in a question mark
-on the last line, cut to one line), which shows as a waiting step until a later work event closes it. A board-only
-prompt keeps it waiting. The hook marks its question and approval steps done when they end, then reuses their lines
-for later asks; ending a session leaves its question waiting. Nothing else of the message is saved. A Stop the hook
-wrapper copied raw to its queue has no question; one the reporter queued itself keeps its one line. The one thing
-they open from `transcript_path` is the
+permission decisions, and call no model. Codex, Grok Build, Cursor CLI, OpenCode and Antigravity CLI keep one thing
+of the last assistant reply: its closing question, found as the Claude Code plugin finds a turn's (the last sentence
+ending in a question mark on the last line, cut to one line). It shows under Needs you until a later work event
+closes it. A board-only prompt keeps it waiting. The hook marks its question and approval steps done when they end,
+then reuses their lines for later asks; ending a session leaves its question waiting. OpenCode fetches its last
+assistant message on idle and passes its text to the board script. Antigravity's hooks carry no reply text, so
+the board reads the last 256 KiB of its own `transcript.jsonl`, and ignores an earlier reply if a newer user prompt
+has appeared. This format is undocumented and was checked on agy 1.5.2. Nothing of any reply but its closing question
+is saved. A Stop the hook wrapper copied raw to its queue has no question; one the reporter queued itself keeps its
+one line. For Codex, what they open from `transcript_path` is the
 first record of the session's own Codex history file (the `rollout-<time>-<session id>.jsonl` file named for the
 session; another session's file is never opened), at a session's start and at each prompt. The
 file is read in pieces of 4 KiB until the one that holds the first line break, so up to 4 KiB
@@ -230,8 +233,9 @@ Generation ids bind turns. Missing generation ids fail explicitly instead of sil
 claiming equivalent support across Cursor IDE and CLI versions.
 
 OpenCode installs `~/.config/opencode/plugins/agent-board-local.js` (plural `plugins`, as
-the current official documentation specifies). Its event adapter reads session metadata
-only, skips child sessions, and never calls `session.messages`. `session.status` has no
+the current official documentation specifies). Its event adapter reads session metadata,
+skips child sessions, and calls `session.messages` only when a session goes idle, to pass the
+last assistant reply to the board script, which keeps only its closing question. `session.status` has no
 turn id, so its capability report explicitly lists that limitation. It also copies the
 session's own todo list (`todo.updated`: each item's text and status only) into the board's steps. The plugin exposes
 `agent_board_progress`; semantic reports bind to `context.sessionID`, not an id chosen by

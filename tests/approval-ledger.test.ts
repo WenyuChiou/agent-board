@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 import { renderAutoBlock } from '../hooks/blocks'
-import { boardConfirmedReport, codexEvent, codexReport, putCodexBlock } from '../hooks/codex'
+import { boardConfirmedReport, codexEvent, codexReport, putCodexBlock, questionSteps, validateCodexReport } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { clearApproval, closeApproval, markApproval, retainApproval } from '../hooks/digest'
 import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
@@ -180,4 +180,54 @@ test('Codex producer counters remain distinct beyond safe integer precision afte
   const question = event(third, 'Stop', 'turn-1', { question: 'Which folder?' })
   expect(question.askedRevision).toBe('9007199254740994')
   expect(question.approvalRevision).toBe(third.approvalRevision)
+})
+
+
+test('a Codex approval renewal preserves the independent unanswered question token', () => {
+  const first = event(event(null, 'UserPromptSubmit', 'turn-1'), 'Stop', 'turn-1', { question: 'Which folder?' })
+  const initial = observeQuestions(emptyQuestions(), codexProjects(first), null, [], NOW, true).ledger
+  const approval = event(first, 'PermissionRequest', 'turn-1')
+  const open = observeQuestions(initial, codexProjects(approval), null, [], NOW + 1, true).ledger
+  const closedApproval = event(approval, 'Interrupt', 'turn-1')
+  const renewed = event(closedApproval, 'PermissionRequest', 'turn-1')
+  const projects = codexProjects(renewed)
+  const ledger = observeQuestions(open, projects, null, [], NOW + 2, true).ledger
+  expect(renewed.askedRevision).toBe(first.askedRevision)
+  expect(renewed.steps[renewed.asked!]).toBe('- [?] Which folder?')
+  expect(ledger.records.filter(record => record.isUnresolved)).toHaveLength(2)
+  expect(ledger.records.find(record => record.id === initial.records[0]!.id)?.isUnresolved).toBe(true)
+  expect(buildView(projects, [], null, NOW + 2, 0, {}, words, [], {}, ledger).waiting).toHaveLength(2)
+})
+
+test('host question metadata survives owned-slot capacity and leaves the new-slot policy unchanged', () => {
+  const steps = Array.from({ length: 40 }, (_, index) => `- [ ] Task ${index}`)
+  const held = [...steps, '- [x] Which folder?']
+  const reopened = questionSteps(held, 40, 'waiting', 'Which folder?', false, '9')
+  expect(reopened.steps.slice(0, 40)).toEqual(steps)
+  expect(reopened.steps).toHaveLength(41)
+  expect(reopened.askedRevision).toBe('10')
+  const board = questionSteps(reopened.steps, reopened.asked, 'working', undefined, true, reopened.askedRevision)
+  expect(board).toEqual(reopened)
+  const closed = questionSteps(board.steps, board.asked, 'working', undefined, false, board.askedRevision)
+  expect(closed.steps[40]).toBe('- [x] Which folder?')
+  expect(closed.askedRevision).toBe('10')
+  const noSlot = questionSteps(steps, undefined, 'waiting', 'Brand-new question?')
+  expect(noSlot.steps).toEqual(steps)
+  expect(noSlot.asked).toBe(undefined)
+  expect(noSlot.askedRevision).toBe(undefined)
+})
+
+
+test('internal report validation allows only bounded owned extras and retains input guards', () => {
+  const first = event(event(null, 'UserPromptSubmit', 'turn-1'), 'PermissionRequest', 'turn-1')
+  const question = event(first, 'Stop', 'turn-1', { question: 'Which folder?' })
+  const input = { title: 'Task', state: 'working', steps: Array.from({ length: 40 }, (_, index) => `- [ ] Task ${index}`) }
+  const report = codexReport(question, session, input, new Date(NOW).toISOString(), words)
+  expect(validateCodexReport(report, session)).toEqual(report)
+  expect(() => validateCodexReport({ ...report, session: 'synthetic-other-session' }, session)).toThrow('SESSION_CONFLICT')
+  expect(() => validateCodexReport({ ...report, steps: [...report.steps, '- [ ] Overflow'] }, session)).toThrow('INVALID_STEPS')
+  expect(() => validateCodexReport({ ...report, approval: undefined }, session)).toThrow('INVALID_STEPS')
+  expect(() => validateCodexReport({ ...report, state: 'invalid' as CodexReport['state'] }, session)).toThrow('INVALID_STATE')
+  expect(() => validateCodexReport({ ...report, steps: ['not a step'] }, session)).toThrow('INVALID_STEP')
+  expect(() => codexReport(report, session, { ...input, steps: report.steps }, report.updated, words)).toThrow('INVALID_STEPS')
 })

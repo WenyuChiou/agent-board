@@ -148,18 +148,18 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | | Agent | 在哪里运行 | 看板上有什么 | 从看板回复 |
 |:-:|---|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | 它自己的面板：每件工作、每个回合 | 在面板里 |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI、App | 七个 hooks，加上它报告的步骤 | 复制；可发送给[已连接的对话](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI、App、IDE | 四个 hooks，加上它报告的步骤 | 复制；可发送给[已连接的 CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | 对话事件，加上它的进度工具报告的步骤 | 复制 |
-| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE、CLI | Hooks | 复制 |
-| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | 四个 hooks | 复制；对话结束后可用 `--allow-resume` |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI、App | 七个 hooks、结尾问题和报告的步骤 | 复制；可发送给[已连接的对话](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI、App、IDE | 四个 hooks、CLI 结尾问题和报告的步骤 | 复制；可发送给[已连接的 CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | 对话事件、结尾问题和进度工具报告的步骤 | 复制 |
+| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE、CLI | Hooks 和 CLI 结尾问题 | 复制 |
+| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | 四个 hooks 和结尾问题 | 复制；对话结束后可用 `--allow-resume` |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | CLI | 两个 hooks（停下、结束） | 复制 |
 | <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | 聊天软件 | 看板和它的 skill；它自己的 hooks 还没做好 | 复制 |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | 聊天软件 | 它的插件发来的对话事件 | 复制 |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | CLI | 它的插件发来的对话事件 | 复制 |
 | | dot、其他网页聊天 | 网页 | 你合并进来的区块 | 在它的对话里回 |
 
-Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来自 agent 自己的报告。Gemini CLI 仍保留为付费和企业用的目标（`--agent gemini`），见[安装指南](docs/SETUP.md#legacy-gemini-cli-compatibility)（英文）。
+Hooks 说明对话在做事还是在等；任务步骤和什么时候算完成，来自 agent 自己的报告。上列结尾问题会由 hook 加入“需要你”。Antigravity CLI 的 hook 不带回复文字，所以看板从该对话自己的记录文件读取最后回复；格式没有文档，已在 agy 1.5.2 检查，只保留结尾问题。Gemini CLI 仍保留为付费和企业用的目标（`--agent gemini`），见[安装指南](docs/SETUP.md#legacy-gemini-cli-compatibility)（英文）。
 
 ### 已连接对话的消息能力
 
@@ -259,7 +259,7 @@ Hooks 只说对话在做事还是在等；步骤和什么时候算完成，来�
 
 <img alt="Claude Code 对话、通过 hook 的其他 agent、和你，都写进同一个 Markdown 文件 progress.md；面板、看板网页、归档和状态栏都读它。合成数据。" src="docs/images/flow-zh-CN.svg" width="100%">
 
-每个 agent 的 hooks 把它的对话正在做什么，写进本地同一个 `progress.md` 里它自己的区块（全新安装用 `~/.agent-board/progress.md`）。任务步骤只来自 agent 自己的报告，不读任何私人对话。看板读这个文件不需要调用模型；可选的 Claude 插件可以用 Claude 的模型总结每个回合，细节见[使用指南](docs/GUIDE.zh-CN.md#会把数据传出去吗要花多少钱)。这个文件你也可以自己看、自己改：[文件格式](docs/FORMAT.md)（英文）。支持 English、繁體中文、简体中文。
+每个 agent 的 hooks 把它的对话正在做什么，写进本地同一个 `progress.md` 里它自己的区块（全新安装用 `~/.agent-board/progress.md`）。任务步骤来自 agent 自己的报告；支持的 hooks 也会读取最后回复，只保留结尾问题。看板读这个文件不需要调用模型；可选的 Claude 插件可以用 Claude 的模型总结每个回合，细节见[使用指南](docs/GUIDE.zh-CN.md#会把数据传出去吗要花多少钱)。这个文件你也可以自己看、自己改：[文件格式](docs/FORMAT.md)（英文）。支持 English、繁體中文、简体中文。
 
 ### 三大核心支柱
 
