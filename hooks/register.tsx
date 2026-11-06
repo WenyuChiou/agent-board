@@ -4,7 +4,7 @@ import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiv
 import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
-import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
+import { LEDGER_LINK, LEDGER_RENAMES, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
 import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
 import { atom, read, update } from 'claude-code'
@@ -406,6 +406,38 @@ const replaceFile = async ($: EngineInterface, from: string, to: string, isWin: 
   const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => null)
 
   return ran !== null && ran.exitCode === 0
+}
+
+// A batch of replacements in one Node start: each PowerShell start can take over 10 s on a slow
+// Windows machine, and 50 of them in a row made a receipt batch fail half way. The argv of one
+// run stays under ARGV_BUDGET characters, well inside Windows' 32,767-character command line with
+// the script itself, so a batch of 50 deep paths is still one start. A pair still not placed
+// afterwards (a failed rename, a missing or failing `node`) goes through the per-file move. The
+// answer is what the files hold, so the exit code alone never counts. True for each pair whose
+// source is gone.
+const ARGV_BUDGET = 24000
+const replaceFiles = async ($: EngineInterface, pairs: readonly (readonly [string, string])[], isWin: boolean): Promise<boolean[]> => {
+  const chunks: (readonly [string, string])[][] = []
+  let used = 0
+  for (const pair of pairs) {
+    const size = pair[0].length + pair[1].length + 4
+    if (chunks.length === 0 || used + size > ARGV_BUDGET) {
+      chunks.push([])
+      used = 0
+    }
+    chunks[chunks.length - 1]?.push(pair)
+    used += size
+  }
+  const placed: boolean[] = []
+  for (const chunk of chunks) {
+    await $.process.run(['node', '-e', LEDGER_RENAMES, '--', ...chunk.flat()], { timeoutMs: 10000 }).catch(() => null)
+    for (const [from, to] of chunk) {
+      if (await $.fs.exists(from)) placed.push(await replaceFile($, from, to, isWin) && !(await $.fs.exists(from)))
+      else placed.push(true)
+    }
+  }
+
+  return placed
 }
 
 type Completion = Awaited<ReturnType<EngineInterface['model']['complete']>>
@@ -1271,19 +1303,30 @@ const syncPageState = async ($: EngineInterface, done?: Record<string, string>):
       .filter(({ file }) => !verifiedPageDone.has(file))
     const dir = path.replace(/[\\/][^\\/]*$/, '')
     const existing = receipts.length === 0 ? new Set<string>() : new Set((await $.fs.list(dir)).filter(entry => entry.kind === 'file').map(entry => entry.name))
+    const isWin = await isWindows($, path)
+    const pending: { text: string; file: string; temporary: string }[] = []
     for (const { text, file } of receipts.slice(0, 50)) {
-      if (!existing.has(file.replace(/^.*[\\/]/, '')) || await readText($, file) !== text) {
-        const temporary = `${file}.tmp-${await $.session.id()}-${questionWrite++}`
-        const isWin = await isWindows($, path)
-        try {
-          await $.fs.write(temporary, text)
-          if (await $.fs.read(temporary) !== text || !(await replaceFile($, temporary, file, isWin))) throw new Error('PAGE_STATE_NOT_VERIFIED')
-          if (await $.fs.read(file).catch(() => null) !== text) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
-        } finally {
-          if (await $.fs.exists(temporary)) await removeFiles($, [temporary], isWin)
-        }
+      if (!existing.has(file.replace(/^.*[\\/]/, '')) || await readText($, file) !== text) pending.push({ text, file, temporary: `${file}.tmp-${await $.session.id()}-${questionWrite++}` })
+      else verifiedPageDone.add(file)
+    }
+    // Every temp is written and read back first; one process then places the whole batch.
+    try {
+      let isWhole = true
+      for (const { text, temporary } of pending) {
+        await $.fs.write(temporary, text)
+        if (await $.fs.read(temporary) !== text) isWhole = false
       }
-      verifiedPageDone.add(file)
+      if (isWhole) await replaceFiles($, pending.map(one => [one.temporary, one.file] as const), isWin)
+      let isVerified = isWhole
+      for (const { text, file } of pending) {
+        if (await $.fs.read(file).catch(() => null) === text) verifiedPageDone.add(file)
+        else isVerified = false
+      }
+      if (!isVerified) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
+    } finally {
+      const left: string[] = []
+      for (const { temporary } of pending) if (await $.fs.exists(temporary)) left.push(temporary)
+      await removeFiles($, left, isWin)
     }
     let before = ''
     let hasLanded = false

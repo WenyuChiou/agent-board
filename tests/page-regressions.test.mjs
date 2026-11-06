@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { registerHooks, stripTypeScriptTypes } from 'node:module'
 import { spawnSync } from 'node:child_process'
@@ -18,6 +18,7 @@ registerHooks({ resolve(specifier, context, next) {
 const livePage = await import('../hooks/live-page.ts')
 const { liveBoardArgv, liveBoardPage, pageStatePath } = livePage
 const { keepInboxDone, isInboxFile } = await import('../hooks/inbox.ts')
+const { LEDGER_RENAMES } = await import('../hooks/ledger-move.ts')
 const { addPruned, sizeWarnings, storageDetails, prunedNote } = await import('../hooks/retention.ts')
 const { turnsFor, redact } = await import('../hooks/board.ts')
 const { countManualDone, cutBlockLines } = await import('../hooks/blocks.ts')
@@ -43,7 +44,7 @@ const publisher = () => {
     return source.slice(start, stop)
   }
   const selected = [
-    'const REWRITE_TRIES = 3; const AGAIN = Symbol("again"); let measuredStore = 0; let measuredPruned = { agent: 0, mirror: 0, turns: 0 }; let pendingCache = null; let pageStateFailure = null; let pageBacklogDueAt = null; let publishedPageDone = null; let publishedPageState = null; const verifiedPageDone = new Set(); let questionWrite = 0;',
+    'const REWRITE_TRIES = 3; const AGAIN = Symbol("again"); let measuredStore = 0; let measuredPruned = { agent: 0, mirror: 0, turns: 0 }; let pendingCache = null; let pageStateFailure = null; let pageBacklogDueAt = null; let publishedPageDone = null; let publishedPageState = null; const verifiedPageDone = new Set(); let questionWrite = 0; const LEDGER_RENAMES = d.LEDGER_RENAMES;',
     extract('const POLL_MS =', '\n'),
     extract('const PRUNED_PER_SWEEP =', '\n'),
     extract('const readText =', '\n\n// Every write this session'),
@@ -58,7 +59,7 @@ const publisher = () => {
     extract('const stalePageDone =', '\n\n// When each inbox file'),
   ].join('\n')
   return new Function('d', `const { pageStatePath, pageDonePath, pageDoneHash, readPageDone, readPageState, keepInboxDone, addPruned, progressPath, inboxPath, turnsFor, wordsOf, isInboxFile, sepOf, redact, isWindows, sha256, psQuote, sizeWarnings, storageDetails, prunedNote, countManualDone, cutBlockLines, handKeptSeenAt, messageOf } = d;\n${stripTypeScriptTypes(selected)}\nreturn { syncPageState, pendingTurns, stalePageDone, isVerified: file => verifiedPageDone.has(file), warning: () => warningOf({ size: 0, projects: [] }, d.s, {}, d.at).warning }`)({
-    ...livePage, keepInboxDone, addPruned, turnsFor, redact, isInboxFile, sha256, psQuote,
+    ...livePage, LEDGER_RENAMES, keepInboxDone, addPruned, turnsFor, redact, isInboxFile, sha256, psQuote,
     sizeWarnings, storageDetails, prunedNote, countManualDone, cutBlockLines, handKeptSeenAt,
     progressPath: async engine => engine.taskPath,
     inboxPath: path => join(dirname(path), 'progress-inbox'),
@@ -205,6 +206,59 @@ test('five publication calls inside one poll write only one batch of a 60-name b
     for (const name of names) assert.equal(readFileSync(livePage.pageDonePath(f.path, sha256(receipt(name))), 'utf8'), receipt(name))
     assert.equal(production.warning(), undefined)
   } finally { await f.close() }
+})
+
+test('a batch of 50 receipts starts one rename process, not one per file', async () => {
+  const names = Array.from({ length: 50 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
+  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 50 + n}`]))
+  const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
+  const f = await fixture('', {}, { version: 1, inboxDone: done, store: 0, pruned: {} })
+  try {
+    const production = publisher()
+    const engine = publishingEngine(f)
+    const run = engine.process.run
+    const starts = []
+    engine.process.run = async (argv, options) => { starts.push(argv.includes(LEDGER_RENAMES) ? 'rename' : argv[0]); return run(argv, options) }
+    await production.syncPageState(engine, {})
+    assert.equal(production.warning(), undefined)
+    // One start for the batch; a CI runner's deeper temp folder may split it in two, never one per file.
+    const renames = starts.filter(one => one === 'rename').length
+    assert.ok(renames >= 1 && renames <= 2, `rename starts: ${renames}`)
+    assert.deepEqual(starts.filter(one => one !== 'rename' && one !== 'node'), [], 'no per-file move command starts')
+    for (const name of names) assert.equal(readFileSync(livePage.pageDonePath(f.path, sha256(receipt(name))), 'utf8'), receipt(name))
+  } finally { await f.close() }
+})
+
+test('when the batch rename process is missing or fails, every receipt is still placed by the per-file move', async () => {
+  const names = Array.from({ length: 5 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
+  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 5 + n}`]))
+  const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
+  for (const mode of ['missing', 'fails']) {
+    const f = await fixture('', {}, { version: 1, inboxDone: done, store: 0, pruned: {} })
+    try {
+      const production = publisher()
+      const engine = publishingEngine(f)
+      const run = engine.process.run
+      let moves = 0
+      // A stand-in for the system's move command keeps the test off a slow PowerShell start.
+      engine.process.run = async (argv, options) => {
+        if (argv[0] === 'node') {
+          if (mode === 'missing') throw new Error('ENOENT: synthetic missing node')
+          return { exitCode: 1, stdout: '', stderr: 'synthetic failure' }
+        }
+        const quoted = [...argv.join(' ').matchAll(/'([^']+)'/g)].map(one => one[1])
+        const [from, to] = argv[0] === 'mv' ? argv.slice(-2) : quoted
+        if (from === undefined || to === undefined || !argv.join(' ').includes(argv[0] === 'mv' ? 'mv' : 'Move-Item')) return run(argv, options)
+        moves += 1
+        renameSync(from, to)
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
+      await production.syncPageState(engine, {})
+      assert.equal(production.warning(), undefined)
+      assert.equal(moves, 5)
+      for (const name of names) assert.equal(readFileSync(livePage.pageDonePath(f.path, sha256(receipt(name))), 'utf8'), receipt(name))
+    } finally { await f.close() }
+  }
 })
 
 test('a concurrent successor at the 2000-name cap may replace the oldest acknowledgement without a warning', async () => {
