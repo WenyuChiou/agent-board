@@ -243,13 +243,18 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const append = (text: string): string => {
     const all = text.split('\n')
     const section = sectionOfProject(all, report.project)
-    if (section === null) return `${text}${text && !text.endsWith('\n') ? eol : ''}${eol}## ${report.project}${eol}${block}${eol}`
+    // A section holding a block cut off before its closing marker would swallow a block put after it,
+    // so such a project gets a section of its own at the end, as before.
+    const inside = section === null ? [] : all.slice(section.heading + 1, section.end)
+    const isCut = inside.filter(one => /^\s*<!-- auto\b/.test(one)).length !== inside.filter(one => /^\s*<!-- \/auto\b/.test(one)).length
+    if (section === null || isCut) return `${text}${text && !text.endsWith('\n') ? eol : ''}${eol}## ${report.project}${eol}${block}${eol}`
     let at = section.end
     while (at > section.heading + 1 && all[at - 1]?.trim() === '') at -= 1
     const pos = Math.min(all.slice(0, at).reduce((total, one) => total + one.length + 1, 0), text.length)
     const before = text.slice(0, pos)
-    const after = text.slice(pos)
-    return `${before}${before.endsWith('\n') ? '' : eol}${eol}${block}${eol}${after === '' || /^[ \t]*\r?\n/.test(after) ? '' : eol}${after}`
+    // What follows is a blank line, the next heading or the end, so the one blank line put before the
+    // block is all it adds besides itself, and dropCodexBlock takes that line back with it.
+    return `${before}${before.endsWith('\n') ? '' : eol}${eol}${block}${eol}${text.slice(pos)}`
   }
   let next: string
   if (existing) {
@@ -292,6 +297,12 @@ export const dropCodexBlock = (text: string, owner: string): string => {
   if (first > 0 && PROJECT_HEADING.test(lines[first - 1] ?? '') && (next === undefined || PROJECT_HEADING.test(next))) {
     first -= 1
     if (first > 0 && (lines[first - 1] ?? '').trim() === '') first -= 1
+  } else if (span.isClosed && first > 0 && (lines[first - 1] ?? '').trim() === '') {
+    // A block put into a section that was already there came with one blank line before it. When a
+    // blank line, a heading or the end follows the block, that line goes too, and the section is left
+    // as it was.
+    const following = lines[last + 1]
+    if (following === undefined || following.trim() === '' || PROJECT_HEADING.test(following)) first -= 1
   }
   return text.slice(0, offset(first)) + text.slice(offset(last + 1))
 }

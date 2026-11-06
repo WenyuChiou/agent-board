@@ -9737,6 +9737,24 @@ test('#922 dropping one of two blocks in a shared section keeps the heading', as
   assert.ok(second.includes('### Task 0') && !second.includes('### Task 1'), second)
 })
 
+test('#922 a block put into an existing section and dropped leaves the file byte for byte, and a cut-off block gets a section of its own', async () => {
+  const { putCodexBlock, dropCodexBlock } = await importTs('../hooks/codex.ts')
+  const owner = 'c'.repeat(64)
+  const report = { session: 'dx', turn: null, state: 'working', title: 'Joined', project: 'demo', steps: ['- [~] Step'], updated: '2026-11-06T00:00:00.000Z' }
+  // The section ends the file, is followed by a blank line and a heading, or by a heading at once.
+  for (const original of ['## demo\r\n### Mine\r\n- [ ] Keep\r\n', '## demo\r\n### Mine\r\n- [ ] Keep\r\n\r\n## other\r\nx\r\n', '## demo\n### Mine\n- [ ] Keep\n## other\nx\n']) {
+    const put = putCodexBlock(original, report, owner)
+    assert.equal(put.match(/^## demo\r?$/gm).length, 1, put)
+    assert.ok(put.indexOf('### Joined') < (put.indexOf('## other') === -1 ? Infinity : put.indexOf('## other')), put)
+    assert.equal(dropCodexBlock(put, owner), original)
+  }
+  // A block cut off before its closing marker would swallow what follows it in its section.
+  const cut = '## demo\n<!-- auto session=aaaaaaaa agent=codex state=working -->\n### Cut\n- [ ] Half\n\n## other\nx\n'
+  const put = putCodexBlock(cut, report, owner)
+  assert.ok(put.startsWith(cut), put)
+  assert.match(put.slice(cut.length), /^\n## demo\n<!-- auto /)
+})
+
 test('#922 a Codex plan event with a cwd and no earlier block files under the folder name, not Codex', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   const ran = f.command(['--plan-event'], planCall('plan-folder-session-1', 'update_plan', [{ step: 'Folder step', status: 'in_progress' }], { cwd: join(f.home, 'synthetic-plan-folder') }))
