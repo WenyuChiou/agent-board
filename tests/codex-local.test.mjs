@@ -5542,7 +5542,7 @@ test('OpenClaw native metadata callbacks fence stale runs and never request conv
     const hooks = new Map()
     let subscription
     plugin.register({ on: (name, fn) => hooks.set(name, fn), agent: { events: { registerAgentEventSubscription: value => { subscription = value } } } })
-    assert.deepEqual([...hooks.keys()], ['session_start', 'session_end'])
+    assert.deepEqual([...hooks.keys()], ['session_start', 'session_end', 'after_tool_call'])
     assert.equal(subscription.payload, 'metadata')
     assert.deepEqual(subscription.streams, ['lifecycle'])
     const sessionId = 'openclaw-native-session-123'
