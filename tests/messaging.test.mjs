@@ -2059,6 +2059,24 @@ test('a transient message-store rename failure recovers polling without replayin
   }, failingRename)
 })
 
+// #914: one busy moment cost a whole 2 s poll period, the slack a delivery has on a slow runner.
+test('a receiver whose claim meets a busy message store polls again within a second, not a poll period later', async () => fixture(async (board, dir) => {
+  let busyAt, deliveredAt
+  const receiver = await boardClient(board.address).attach({
+    agent: 'fixture', session: 'busy-retry', turn: 'turn1', surface: 'Synthetic busy retry', verify: async () => true,
+    onError: error => { if (error.message === 'MESSAGE_STORE_BUSY') busyAt ??= Date.now() },
+    deliver: async message => { deliveredAt ??= Date.now(); return 'ACK ' + message.nonce },
+  })
+  try {
+    // Five failing renames use up one claim's own waits, so the store answers busy once, then clears.
+    writeFileSync(join(dir, 'fail-message-rename'), 'EBUSY 5')
+    await board.call('/api/messages/send', { ...input, target: receiver.id })
+    await waitFor(() => deliveredAt !== undefined)
+    assert.ok(busyAt !== undefined, 'the claim never met the busy store')
+    assert.ok(deliveredAt - busyAt < 1000, `delivered ${deliveredAt - busyAt} ms after the busy answer`)
+  } finally { await receiver.close() }
+}, failingRename))
+
 test('a store held for a moment by another program is written on a retry, and the receiver never sees it busy', async () => {
   for (const code of ['EPERM', 'EBUSY', 'EAGAIN']) await fixture(async (board, dir) => {
     const errors = [], deliveries = []
