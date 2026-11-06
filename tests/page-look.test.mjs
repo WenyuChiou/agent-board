@@ -111,7 +111,7 @@ const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input)(?=$|[:[\s])/.test
 
 test('the page uses only colour, size, radius, spacing and motion tokens from page-look', () => {
   const expected = {
-    text: { 'text-xs': 'max(14px,.875rem)', 'text-sm': 'max(16px,1rem)', 'text-md': 'max(18px,1.125rem)', 'text-lg': 'max(22px,1.375rem)' },
+    text: { 'text-xs': 'max(13px,.8125rem)', 'text-sm': 'max(14px,.875rem)', 'text-md': 'max(16px,1rem)', 'text-lg': 'max(20px,1.25rem)' },
     radius: { 'radius-s': '6px', 'radius-m': '10px', 'radius-round': '999px' },
     dur: { 'dur-fast': '120ms', 'dur-base': '200ms', 'dur-layout': '260ms', 'dur-glow': '1.6s', 'dur-dots': '1.2s', 'dur-theme': '.28s' },
     ease: { 'ease-out': 'cubic-bezier(.2,0,0,1)', 'ease-in': 'cubic-bezier(.4,0,1,1)' },
@@ -123,11 +123,11 @@ test('the page uses only colour, size, radius, spacing and motion tokens from pa
   }
   assert.deepEqual(Object.fromEntries(Object.entries(light).filter(([name]) => /^s\d$/.test(name))), { s1: '4px', s2: '8px', s3: '12px', s4: '16px', s5: '24px', s6: '32px', s7: '48px' }, 'spacing is the 4px scale')
   assert.equal(light.hit, '36px', 'a control is at least 36px tall')
-  // Every text size is a floor that follows the reader's own font size, and nothing is below 14px.
+  // Every text size is a floor that follows the reader's own font size, and nothing is below 13px.
   for (const value of Object.values(expected.text)) assert.match(value, /^max\((\d+)px,[\d.]+rem\)$/, 'text sizes are max(px floor, rem)')
-  assert.ok(Object.values(expected.text).every(value => Number(/^max\((\d+)px/.exec(value)[1]) >= 14), 'no text size is below 14px')
+  assert.ok(Object.values(expected.text).every(value => Number(/^max\((\d+)px/.exec(value)[1]) >= 13), 'no text size is below 13px')
   const phone = tokenRules.find(rule => rule.ancestors.some(ancestor => /max-width\s*:\s*640px/.test(ancestor)))
-  assert.deepEqual(phone?.declarations, [{ property: '--text-lg', value: 'max(20px,1.25rem)' }], 'the question size is 20px on a phone')
+  assert.deepEqual(phone?.declarations, [{ property: '--text-lg', value: 'max(18px,1.125rem)' }], 'the question size is 18px on a phone')
   for (const icon of AGENT_ICONS) {
     assert.equal(light[`ag-${icon.file}`], icon.tile, `the ${icon.file} tile is a token`)
     assert.equal(tokenRules.flatMap(rule => rule.declarations).filter(item => item.property === `--ag-${icon.file}`).length, 1, `${icon.file} is declared once, outside theme overrides`)
@@ -167,7 +167,7 @@ test('the page uses only colour, size, radius, spacing and motion tokens from pa
     }
     assert.ok(rules.some(rule => rule.selector === '.sheet' && rule.declarations.some(item => /^(?:background|background-color)$/.test(item.property) && item.value === 'var(--surface)')), `${name}: .sheet retains its surface background`)
     const bodyFont = rules.filter(rule => rule.selector === 'body').flatMap(rule => rule.declarations.filter(item => item.property === 'font')).at(-1)
-    assert.equal(bodyFont?.value, 'var(--text-sm)/1.5 var(--font-sans)', `${name}: body uses the 16px text size and line height`)
+    assert.equal(bodyFont?.value, 'var(--text-sm)/1.5 var(--font-sans)', `${name}: body uses the 14px text size and line height`)
     assert.ok(rules.some(rule => rule.selector === ':focus-visible' && rule.declarations.some(item => item.property === 'outline')), `${name}: keyboard focus keeps its outline`)
     const reduced = rules.filter(rule => rule.ancestors.some(ancestor => ancestor.includes('prefers-reduced-motion:reduce')))
     assert.ok(reduced.some(rule => rule.declarations.some(item => item.property === 'transition' && item.value === 'none') && rule.declarations.some(item => item.property === 'animation' && item.value === 'none')), `${name}: reduced motion turns every transition and animation off`)
@@ -222,7 +222,7 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
       }
     }
     // The count on an agent's badge and on the Needs you flag (on-accent on the amber fill), the "!" badge (on-accent on
-    // the alert colour), the primary button, and the glyph on an offline agent's muted tile. The 14px semibold numerals
+    // the alert colour), the primary button, and the glyph on an offline agent's muted tile. The 13px semibold numerals
     // are not "large text", so the badge pairs need the full 4.5:1.
     // 'surface' on 'ink' is a primary button: its text (--on-act) on its fill (--act), both of which are the ink pair.
     for (const [token, surface, threshold] of [['on-accent', 'accent', 4.5], ['on-accent', 'waiting-fill', 4.5], ['on-accent', 'alert', 4.5], ['on-accent', 'muted', 3], ['ground', 'ink', 4.5], ['surface', 'ink', 4.5]]) pairs.push({ mode, rule: `${token}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })

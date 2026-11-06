@@ -9,12 +9,13 @@ export const pageTokens = (headHeight = '54px'): string => {
   const shared = {
     'font-sans': '"Atkinson Hyperlegible Next",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans TC","Noto Sans SC","Hiragino Sans","PingFang TC","PingFang SC","Microsoft JhengHei","Microsoft YaHei",sans-serif',
     'font-mono': 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace',
-    // Nothing on the page is smaller than 14px, and each size grows with the reader's own font size (max of the
-    // floor and a rem value). xs (14) is the floor: ages, counts, small labels. sm (16) is body, buttons, meta
-    // lines, steps and inputs. md (18) is row titles, shelf heads and the brand. lg (22; 20 on a phone, below)
-    // is the card question, section headings and the empty-page heading. Line height is 1.5 up to 16px and 1.4
-    // from 18px; headings differ from row titles by size and space, not by weight.
-    'text-xs': 'max(14px,.875rem)', 'text-sm': 'max(16px,1rem)', 'text-md': 'max(18px,1.125rem)', 'text-lg': 'max(22px,1.375rem)',
+    // Nothing on the page is smaller than 13px, and each size grows with the reader's own font size (max of the
+    // floor and a rem value). xs (13) is the floor: ages, counts, small labels. sm (14) is body, buttons, meta
+    // lines, steps and inputs. md (16) is row titles, shelf heads and the brand. lg (20; 18 on a phone, below)
+    // is the card question, section headings and the empty-page heading. The owner asked for a smaller page
+    // (11-06), so the scale is one step below the 14/16/18/22 it had. Line height is 1.5 up to 16px and 1.4
+    // above; headings differ from row titles by size and space, not by weight.
+    'text-xs': 'max(13px,.8125rem)', 'text-sm': 'max(14px,.875rem)', 'text-md': 'max(16px,1rem)', 'text-lg': 'max(20px,1.25rem)',
     'radius-s': '6px', 'radius-m': '10px', 'radius-round': '999px',
     // Spacing on a 4px scale; a control is at least 36px tall (44px under a coarse pointer, in the page's CSS).
     's1': '4px', 's2': '8px', 's3': '12px', 's4': '16px', 's5': '24px', 's6': '32px', 's7': '48px', 'hit': '36px',
@@ -36,7 +37,7 @@ export const pageTokens = (headHeight = '54px'): string => {
   return `:root{${cssVars(LIGHT)};${cssVars(PAGE_LIGHT)};${cssVars(shared)};color-scheme:light}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){${dark}}}
 :root[data-theme="dark"]{${dark}}
-@media (max-width:640px){:root{--text-lg:max(20px,1.25rem)}}`
+@media (max-width:640px){:root{--text-lg:max(18px,1.125rem)}}`
 }
 
 // This runs before styles and delegates presses because the switch is parsed later.
