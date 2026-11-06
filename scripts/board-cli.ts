@@ -38,6 +38,7 @@ import { BOARD_JSON_SCHEMA, boardDocument } from '../hooks/board-json'
 import { RELEASED } from '../hooks/released'
 import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
 import { LOG_TAIL, isInboxFile, keepInboxDone } from '../hooks/inbox'
+import { oldMonthFiles, OLD_MONTHS_FOLDER } from '../hooks/old-months'
 import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import type { PendingArchiveRecord } from '../hooks/journal'
 import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, RETENTION, sizeWarnings, storageDetails } from '../hooks/retention'
@@ -1187,6 +1188,27 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
   return s.pressNothing
 }
 
+// Archive and journal months before the last three move to an archives folder beside them (#922).
+// A name the folder already holds, or a move that fails, leaves the file for the next pass.
+const moveOldMonths = (): void => {
+  try {
+    const dir = dirname(path)
+    const stem = basename(path).replace(/\.md$/i, '')
+    const now = Date.now()
+    const names = readdirSync(dir)
+    if (!names.some(name => oldMonthFiles(stem, [name], [], now).length > 0)) return
+    const folder = join(dir, OLD_MONTHS_FOLDER)
+    const taken = existsSync(folder) ? readdirSync(folder) : []
+    for (const name of oldMonthFiles(stem, names, taken, now)) {
+      try {
+        mkdirSync(folder, { recursive: true })
+        const target = join(folder, name)
+        if (!existsSync(target)) renameSync(join(dir, name), target)
+      } catch {}
+    }
+  } catch {}
+}
+
 // Scheduled sweeps keep the plugin's age rules. An explicit interactive tidy may move
 // finished work at once; neither mode discards a stopped session before its three days.
 const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?: (finished: number) => void): number | null => {
@@ -1423,6 +1445,7 @@ const tidyNote = (count: number | null, isNow: boolean, finished = 0): string =>
 const tidy = (isNow = true): string => {
   let finished = 0
   const count = tidyCount(isNow, false, false, count => { finished = count })
+  if (!isNow) moveOldMonths()
   if (count === null && !isNow) process.exitCode = 1
   return tidyNote(count, isNow, finished)
 }
@@ -1770,7 +1793,7 @@ const serveChild = (): void => {
       paste,
       clean: cleanUp,
       bulkTidy,
-      sweep: () => { tidyCount(false, true) },
+      sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.
       sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,
       // The page names a file it could not read or write the way the terminal board does, for a

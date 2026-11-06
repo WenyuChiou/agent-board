@@ -135,6 +135,7 @@ import {
 } from './inbox'
 import type { AgentTurn } from './inbox'
 import { keepRecent, liveToldKeys, remindersOf } from './remind'
+import { oldMonthFiles, OLD_MONTHS_FOLDER } from './old-months'
 import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, doneRecord, inboxDropped, isExpiredRecord, isSameWrite, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, readMonthParts, RETENTION, sizeWarnings, storageDetails, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, STORE_FILE, unseenFailedInbox } from './retention'
 import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
@@ -3611,6 +3612,33 @@ const dropGeneratedSeed = async ($: EngineInterface, keys: readonly string[]): P
   for (const key of generated) await $.store.delete(key)
 }
 
+// Archive and journal months before the last three move to an archives folder beside them (#922).
+// A name the folder already holds, or a move that fails, leaves the file where it is for the next
+// pass; nothing here deletes.
+const moveOldMonths = async ($: EngineInterface): Promise<void> => {
+  const path = await progressPath($)
+  const at = await $.clock.now()
+  const dir = path.replace(/[\\/][^\\/]*$/, '')
+  const stem = path.slice(dir.length + 1).replace(/\.md$/i, '')
+  const names = (await $.fs.list(dir).catch(() => [])).filter(entry => entry.kind === 'file').map(entry => entry.name)
+  if (!names.some(name => oldMonthFiles(stem, [name], [], at).length > 0)) return
+  const folder = `${dir}${sepOf(dir)}${OLD_MONTHS_FOLDER}`
+  const taken = (await $.fs.list(folder).catch(() => [])).map(entry => entry.name)
+  const isWin = await isWindows($, path)
+  for (const name of oldMonthFiles(stem, names, taken, at)) {
+    const from = `${dir}${sepOf(dir)}${name}`
+    const to = `${folder}${sepOf(dir)}${name}`
+    const made = await $.process.run(isWin
+      ? ['powershell', '-NoProfile', '-Command', `New-Item -ItemType Directory -Force -LiteralPath ${psQuote(folder)} | Out-Null`]
+      : ['mkdir', '-p', folder], { timeoutMs: 10000 }).catch(() => null)
+    if (made === null || made.exitCode !== 0) continue
+    // `mv -n` skips a name that appeared meanwhile; a failed move leaves the file for the next pass.
+    await $.process.run(isWin
+      ? ['powershell', '-NoProfile', '-Command', `Move-Item -LiteralPath ${psQuote(from)} -Destination ${psQuote(to)} -ErrorAction Stop`]
+      : ['mv', '-n', from, to], { timeoutMs: 10000 }).catch(() => null)
+  }
+}
+
 // Files that the board's own writes leave behind: the store's cut-off temporary copies and the
 // reporters' (inbox ones) after a day, and inbox files the drain gave up on a week after it did
 // (#373). The sh and PowerShell reporters also remove their own scratch files a minute old; the
@@ -4003,6 +4031,7 @@ export const register: Register = (on, options) => {
     // A session left open for days still clears out old work.
     $.clock.every(ARCHIVE_MS, () => {
       enqueue(() => archiveOld($)).then(() => trimQuestionFiles($)).catch(() => undefined)
+      moveOldMonths($).catch(() => undefined)
       sweepFiles($).catch(() => undefined)
       $.clock.now().then(at => pruneStore($, at, 10)).catch(() => undefined)
     })
