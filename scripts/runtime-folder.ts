@@ -240,9 +240,11 @@ const checks = {
       if (identity === undefined) throw new RuntimeFolderError()
       const { sid, aliases: own } = yield* commands.account()
       const icacls = join(system(), 'icacls.exe')
+      // The grant comes first: a folder that only grants Modify has no WRITE_OWNER, so taking
+      // ownership first fails with access denied, while the owner may always change the list.
       // As in the message hub, /L never changes the destination of a planted link.
-      yield command(icacls, [root, '/setowner', `*${sid}`, '/L'])
       yield command(icacls, [root, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '/L'])
+      yield command(icacls, [root, '/setowner', `*${sid}`, '/L'])
       // A file that is gone or not a plain file by now is left to the later read, which refuses it.
       const present: string[] = []
       const stamps: Stats[] = []

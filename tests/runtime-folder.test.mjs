@@ -1,5 +1,5 @@
 import childProcess from 'node:child_process'
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -65,6 +65,11 @@ test('sync and async runtime checks run identical commands, remove extra grants 
       syncBuiltinESMExports()
     }
     assert.deepEqual(histories[0], histories[1])
+    for (const history of histories) {
+      const grant = history.findIndex(one => one.args.includes('/grant:r'))
+      const owner = history.findIndex(one => one.args.includes('/setowner'))
+      assert.ok(grant !== -1 && owner !== -1 && grant < owner, 'the grant comes before taking ownership')
+    }
   } finally {
     t.mock.restoreAll()
     syncBuiltinESMExports()
@@ -101,5 +106,34 @@ test('async runtime reads refuse failed or untrusted ACLs and files replaced whi
     t.mock.restoreAll()
     syncBuiltinESMExports()
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// A folder made outside the user profile may grant the account only Modify: taking ownership
+// first then fails with access denied, while granting first works because the owner may always
+// change the list (#1042).
+test('on Windows a folder that only grants Modify becomes private for both folder checks', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const { privateFolder } = await import('../scripts/private-folder.ts')
+  const runtime = await freshRuntime('modify-only')
+  const dir = mkdtempSync(join(tmpdir(), 'runtime-modify-only-'))
+  try {
+    const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+    const whoami = childProcess.execFileSync(join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
+    const sid = /"(S-\d+(?:-\d+)+)"\s*$/.exec(whoami)?.[1]
+    assert.ok(sid)
+    const options = { encoding: 'utf8', windowsHide: true, timeout: 10_000 }
+    const icacls = join(system, 'icacls.exe')
+    const modifyOnly = folder => {
+      mkdirSync(folder)
+      childProcess.execFileSync(icacls, [folder, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)M`, '/L'], options)
+    }
+    const runtimeFolder = join(dir, 'runtime')
+    modifyOnly(runtimeFolder)
+    assert.equal(runtime.privateRuntimeFolder(runtimeFolder), runtimeFolder)
+    const messageFolder = join(dir, 'messages')
+    modifyOnly(messageFolder)
+    privateFolder(messageFolder)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })
