@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, renameSync, statSync } from 'node:fs'
+import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { EN } from '../../hooks/strings-en.ts'
 import { makeWorld } from './lib/world.mjs'
@@ -90,6 +90,33 @@ describe('L2 a working day', { concurrency: 2 }, () => {
       await server.page()
       await terminal.screen(world)
       for (const agent of agents) assert.equal(lines().filter(line => line.includes(`Journal ${agent} report`)).length, 1, `${agent}: completion must be journaled exactly once after repeated reads`)
+    } finally { await world.close() }
+  })
+
+  test('L2 day: a finished task whose journal line cannot be saved still counts and the board says the history was not saved', async () => {
+    const world = makeWorld()
+    try {
+      // Every move onto the month's journal fails, as a disk error would.
+      const preload = join(world.root, 'journal-fault.cjs')
+      writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+for (const name of ['renameSync', 'linkSync', 'copyFileSync']) {
+  const original = fs[name]
+  fs[name] = (from, to, ...rest) => {
+    if (String(to).includes('progress-journal')) throw Object.assign(new Error('synthetic disk error'), { code: 'EIO' })
+    return original(from, to, ...rest)
+  }
+}
+syncBuiltinESMExports()
+`)
+      world.env.NODE_OPTIONS += ` --require=${JSON.stringify(preload)}`
+      block(world, { agent: 'codex', session: 'b3000000', title: 'Finish codex report', updated: new Date(world.now - 1).toISOString() })
+      const server = await serve.start(world)
+      await server.page()
+      block(world, { agent: 'codex', session: 'b3000000', title: 'Finish codex report', updated: new Date(world.now - 1).toISOString(), state: 'done', steps: ['- [x] Check routes'] })
+      const screens = await inspectSurfaces(world, server)
+      assert.match(screens.terminal, /1\s+done today|done today\s*1/i, screens.terminal)
+      assert.ok(squash(screens.page).includes(EN.journalFailed), screens.page)
     } finally { await world.close() }
   })
 

@@ -179,15 +179,18 @@ const journalToday = (now: number): string => {
 }
 
 // An interactive board also saves those lines to the month's journal, which the weekly report reads.
+let isDoneSaveFailed = false
 const saveDoneBlocks = (projects: readonly ProgressProject[], now: number): void => {
   try {
+    isDoneSaveFailed = false
     if (doneBlockLines(projects, journalRaw(now), now).length === 0) return
     rewrite(partOf(journalPath(path, now)), past => {
       const missing = doneBlockLines(projects, `${journalRaw(now)}\n${past}`, now)
       return missing.length === 0 ? null : appendJournal(past, missing, s)
     })
   } catch {
-    // A journal that cannot be written still counts through journalToday; the next read tries again.
+    // The board still counts the task through journalToday and tries again on the next read; the warning says the history is not saved.
+    isDoneSaveFailed = true
   }
 }
 
@@ -570,7 +573,7 @@ const readBoardView = (source: string, now: number) => {
   const tail = progressHealthCache.tail
   const sizes = { progress: Buffer.byteLength(source), store: pageState.store }
   const large = sizeWarnings(sizes, s)
-  const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...large]
+  const warnings = [...(tail === null ? [] : [s.progressIncomplete(tail.tasks)]), ...(isDoneSaveFailed ? [s.journalFailed] : []), ...large]
   const finished = countManualDone(projects, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now))
   const details = storageDetails(sizes, finished, s)
   const health = progressHealthCache.lines
