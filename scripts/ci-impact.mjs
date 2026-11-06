@@ -377,13 +377,27 @@ export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
 // tightest timing budgets failed in turn (#910). Two files at a time leaves them room; serial stays one.
 export const testArgs = (files, { isSerial = false, isWindows = false } = {}) => ['--test', ...(isSerial ? ['--test-concurrency=1'] : isWindows ? ['--test-concurrency=2'] : []), ...files]
 
-// The Node run of one part: every nth of the other files, and every self-parted file, which keeps its own
+// Taking every nth file by its place in the list put all four budgeted files in Windows part 2 of 6, which ran
+// 445-497 s while the other parts ran 145-250 s (#1059, run 42281474369). So the files go out slowest first, by
+// their budget, each to the part with the least so far; a file with no budget counts as 15 s (the slowest of
+// them, mcp-tools, took 12.6 s on Linux). When every file weighs the same, this is the old every-nth split. Every job works out
+// the same split, so the parts together still run each file once.
+const partWeight = path => BOARD_FILE_BUDGETS_MS[path] ?? 15_000
+
+// The Node run of one part: its share of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
 export const partFiles = (files, part = '') => {
   const { index, total } = parsePart(part)
   if (total === 1) return [...files]
-  const rest = files.filter(path => !selfPartedTests.includes(path)).filter((path, ordinal) => ordinal % total === index - 1)
-  return [...rest, ...files.filter(path => selfPartedTests.includes(path))]
+  const rest = files.filter(path => !selfPartedTests.includes(path))
+  const loads = Array(total).fill(0)
+  const mine = new Set()
+  for (const path of [...rest].sort((a, b) => partWeight(b) - partWeight(a))) {
+    const lightest = loads.indexOf(Math.min(...loads))
+    loads[lightest] += partWeight(path)
+    if (lightest === index - 1) mine.add(path)
+  }
+  return [...rest.filter(path => mine.has(path)), ...files.filter(path => selfPartedTests.includes(path))]
 }
 
 export const testRuns = (files, { isSerial = false, isWindows = false, part = '' } = {}) => {
