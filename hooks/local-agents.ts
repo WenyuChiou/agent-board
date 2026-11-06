@@ -49,6 +49,8 @@ export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> =
 export const planEvents: Partial<Record<LocalAgent, { event: string; matcher: string }>> = {
   codex: { event: 'PostToolUse', matcher: 'update_plan' },
   gemini: { event: 'AfterTool', matcher: '^write_todos$' },
+  // Grok runs PostToolUse as a gate (600 s by default) and reads stdout: the hook prints nothing, timeout 5.
+  grok: { event: 'PostToolUse', matcher: '^todo_write$' },
 }
 // Plugin hosts have no hook groups: OpenCode's plugin sends todo.updated and OpenClaw's after_tool_call,
 // each as a --plan-event with the plan in the same shape as Codex's or Gemini's (#922).
