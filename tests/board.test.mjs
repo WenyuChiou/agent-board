@@ -10993,7 +10993,8 @@ test('the page uses ink for actions and amber only for what needs you', async ()
   assert.ok(primary.includes('var(--act)') && primary.includes('var(--on-act)'), primary)
   // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words, the Needs you view, and a progress-bar cell for a step that waits on the person (#1085).
   assert.deepEqual(using('waiting'), ['.badge', '.flag', '.pbar .c-w', '.pbar.cont u.c-w', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
-  assert.deepEqual(using('accent'), [], 'the blue accent is not on the live page')
+  // The blue accent is on the live page only when the person picks the Blue progress-bar style (#1085), and on its swatch in the look menu.
+  assert.deepEqual(using('accent'), [':root[data-bar="blue"]', '[data-sw="blue"] .sw'].sort(), 'the blue accent is only the Blue bar style')
   // Green is for what is alive, red for what is wrong, and a finished task is muted.
   assert.ok(html.includes('--alive:var(--done)'))
   assert.deepEqual(using('alive'), ['.chip.working::after', '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', '.s-agent.working .ag::after', '.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after', '.s-running', '.v-working>svg.i'].sort())

@@ -36,6 +36,9 @@ export const pageTokens = (headHeight = '54px'): string => {
     'hover': 'color-mix(in srgb,var(--ink) 5%,transparent)', 'current': 'color-mix(in srgb,var(--ink) 8%,transparent)', 'press': 'color-mix(in srgb,var(--ink) 12%,transparent)',
     // Colour roles. Everything you press is ink, so the only colours on the page carry news: amber needs you, green is alive, red is wrong.
     'act': 'var(--ink)', 'on-act': 'var(--surface)', 'alive': 'var(--done)',
+    // The progress bar's done and current cells (#1085) in the default Ink style: the ink at 60 % and full ink.
+    // The page's `data-bar` picks Blue or Green over them.
+    'bar-done': 'color-mix(in srgb,var(--ink) 60%,var(--surface))', 'bar-now': 'var(--ink)',
     'btn-line': 'color-mix(in srgb,var(--ink) 55%,var(--surface))',
     'ring': '0 0 0 3px color-mix(in srgb,var(--ink) 18%,transparent)',
     'head-h': headHeight,

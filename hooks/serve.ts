@@ -914,7 +914,6 @@ div.row-btn .r-chev{visibility:hidden}
 /* the progress bar (#1085): one cell per step, 6px tall, 96px wide (72px on a narrow page), 2px gaps.
    Shape carries the state as well as colour: done and current are filled (current 2px taller), todo
    and cancelled hollow. Amber and red match the flags in every style; only done and current follow it. */
-:root{--bar-done:color-mix(in srgb,var(--ink) 60%,var(--surface));--bar-now:var(--ink)}
 :root[data-bar="blue"]{--bar-done:var(--accent);--bar-now:var(--accent)}
 :root[data-bar="green"]{--bar-done:var(--done);--bar-now:var(--done)}
 .r-meta .prog{display:inline-flex;align-items:center;gap:var(--s2);vertical-align:-1px}

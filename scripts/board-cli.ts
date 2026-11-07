@@ -713,13 +713,23 @@ let routes: Record<string, AnswerRoute> = {}
 
 // The progress bar's style, from the board's settings file (#1085); one the page or the pane
 // picked shows at the next draw. A file that cannot be read means the default.
-const barStyleNow = () => {
-  try { return barStyleOf(read(settingsPath(path))) } catch { return barStyleOf(null) }
+// Read at most every 10 s, so the page's idle poll does not read the file each time; a pick made
+// here is kept at once.
+const BAR_STYLE_MS = 10_000
+let barStyleKept: { style: BarStyle; at: number } | null = null
+const barStyleNow = (): BarStyle => {
+  const now = Date.now()
+  if (barStyleKept !== null && now - barStyleKept.at < BAR_STYLE_MS) return barStyleKept.style
+  let style: BarStyle
+  try { style = barStyleOf(read(settingsPath(path))) } catch { style = barStyleOf(null) }
+  barStyleKept = { style, at: now }
+  return style
 }
 // The pick from the page, the pane or the `s` key: the settings file's other keys are kept.
 const saveBarStyle = (style: BarStyle): void => {
   const file = settingsPath(path)
   writeFileSync(file, withBarStyle(read(file), style))
+  barStyleKept = { style, at: Date.now() }
 }
 
 const options = () => ({
