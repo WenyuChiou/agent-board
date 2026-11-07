@@ -2594,7 +2594,7 @@ test('served questions keep hidden identities across reordered reports and a fre
 test('the terminal board and the page retire a resolution once the agent ticks its step', { timeout: 30_000 }, async () => {
   for (const surface of ['terminal', 'page']) {
     const dir = surface === 'terminal' ? mkdtempSync(join(tmpdir(), 'board-resolve-')) : null
-    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true }) }
+    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
     try {
       const script = join(board.dir, 'agent-board.mjs')
       if (surface === 'terminal') writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: board.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
@@ -3837,7 +3837,8 @@ const pressRuntime = async () => {
         syncBuiltinESMExports()
         process.exitCode = 0
         assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep))
-        rmSync(root, { recursive: true, force: true })
+        // A held file on Windows refuses the delete; retry it the way the page fixture does (#991).
+        rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
       },
     }
   } catch (error) {
@@ -3849,7 +3850,7 @@ const pressRuntime = async () => {
     fs.unlinkSync = originalUnlink
     childProcess.spawnSync = originalSpawn
     syncBuiltinESMExports()
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     throw error
   }
 }
