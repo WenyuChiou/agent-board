@@ -31,6 +31,12 @@ export class RuntimeFolderError extends Error {
 // not that the file could not be protected.
 export class RuntimeFolderTimeoutError extends RuntimeFolderError {}
 
+// The folder could not be made, or the address file not created, because access was refused: an AI
+// whose sandbox writes only inside its workspace is the usual cause. The person is told to open the
+// board another way, not that the file could not be protected.
+export class RuntimeFolderDeniedError extends RuntimeFolderError {}
+export const isAccessRefused = (error: unknown): boolean => ['EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException | null)?.code ?? '')
+
 // A command killed by its own limit: the sync runner's error says ETIMEDOUT, the async
 // runner's says the process was killed by a signal with no exit code. A command that failed
 // on its own has an exit code and no signal.
@@ -270,7 +276,8 @@ const checks = {
         remember(root, handed.identity)
         return root
       }
-      mkdirSync(root, { recursive: true, mode: 0o700 })
+      try { mkdirSync(root, { recursive: true, mode: 0o700 }) }
+      catch (error) { throw isAccessRefused(error) ? new RuntimeFolderDeniedError() : error }
       plainParents(root)
       if (!isPlain(root, true)) throw new RuntimeFolderError()
       const identity = identityOf(root)
@@ -324,6 +331,7 @@ const checks = {
       return root
     } catch (error) {
       if (isKilled(error)) throw new RuntimeFolderTimeoutError()
+      if (error instanceof RuntimeFolderDeniedError) throw error
       throw new RuntimeFolderError()
     }
   },
@@ -377,7 +385,8 @@ export const writePrivateRuntimeFile = (file: string, text: string): void => {
     // The folder was checked by `privateRuntimeFolder` in this process; one that was not (a call
     // on its own) is read in full.
     if (!isCheckedFolder(folder) && (!isPlain(folder, true) || !isPrivateRuntimeSddl(acl(folder), sid, true, aliases))) throw new RuntimeFolderError()
-    fd = openSync(file, 'wx', 0o600)
+    try { fd = openSync(file, 'wx', 0o600) }
+    catch (error) { throw isAccessRefused(error) ? new RuntimeFolderDeniedError() : error }
     created = fstatSync(fd)
     const opened = lstatSync(file)
     if (!isPlain(file, false) || opened.dev !== created.dev || opened.ino !== created.ino) throw new RuntimeFolderError()

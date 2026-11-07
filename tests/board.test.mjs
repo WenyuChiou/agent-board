@@ -6307,6 +6307,36 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
+// An AI whose sandbox writes only inside its workspace is refused the address folder: the line says so
+// and names the way out, instead of saying the file could not be protected.
+test('Windows page start refused access to its address folder says this AI cannot write there', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  const preload = join(board.dir, 'folder-refused.cjs')
+  writeFileSync(preload, `const fs = require('node:fs'); const original = fs.mkdirSync
+fs.mkdirSync = (path, ...rest) => { if (String(path).toLowerCase() === ${JSON.stringify(folder.toLowerCase())}) throw Object.assign(new Error('synthetic sandbox denial'), { code: 'EPERM' }); return original(path, ...rest) }
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    for (const mode of ['--serve', '--serve-child']) {
+      const ran = spawnSync(process.execPath, [board.script, mode, '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+      assert.equal(ran.status, 1, ran.stderr)
+      assert.equal(mode === '--serve-child' ? ran.stderr.trim() : ran.stdout.trim(), EN.serveRuntimeDenied)
+      assert.ok(!(ran.stdout + ran.stderr).includes(board.dir) && !(ran.stdout + ran.stderr).includes('http:'))
+      assert.ok(!existsSync(board.served))
+    }
+  } finally { await board.end([]) }
+})
+
+test('the refused-access line exists in every language and is not the protect-the-file line', () => {
+  assert.match(EN.serveRuntimeDenied, /sandbox can't write/)
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    assert.ok(words.serveRuntimeDenied && words.serveRuntimeDenied !== words.serveRuntimePrivate)
+    assert.ok(!words.serveRuntimeDenied.includes(words.serveRuntimePrivate), 'the parent tells the two apart by what the child prints')
+  }
+})
+
 // The server child used to stop without a word here, so the command could only say the server
 // did not start; it now names the check that refused (#799).
 test('Windows page start discards a new address file whose owner cannot be set or whose access list is not private, and says why', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {

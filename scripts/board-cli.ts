@@ -29,7 +29,7 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { isTimeout, privateFolderHandoff } from './private-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
@@ -1723,9 +1723,13 @@ let runtimeUnprotected = false
 // Whether the folder check that failed ran out of time: the person is told the check did not
 // finish, not that the file could not be protected (#799).
 let runtimeCheckTimedOut = false
+// Whether it was refused access to the folder: the person is told this AI cannot write there.
+let runtimeCheckDenied = false
+const runtimeFolderFailure = (): RuntimeFolderError => runtimeCheckTimedOut ? new RuntimeFolderTimeoutError() : runtimeCheckDenied ? new RuntimeFolderDeniedError() : new RuntimeFolderError()
 const readOnlyRunFolder = (folder: string, error: unknown): string => {
   if (!(error instanceof RuntimeFolderError)) throw error
   if (error instanceof RuntimeFolderTimeoutError) runtimeCheckTimedOut = true
+  if (error instanceof RuntimeFolderDeniedError) runtimeCheckDenied = true
   // A process that cannot protect the folder may reuse a running page, but every later
   // step must refuse to start one or write through this unprotected path.
   runtimeUnprotected = true
@@ -1851,7 +1855,7 @@ const serveChild = (): void => {
   const file = serveFile()
   // A child that could not protect the folder cannot start a page: its address file would
   // be unprotected. The parent reuses a running page itself; a child on its own refuses.
-  if (runtimeUnprotected) throw runtimeCheckTimedOut ? new RuntimeFolderTimeoutError() : new RuntimeFolderError()
+  if (runtimeUnprotected) throw runtimeFolderFailure()
   // A page a test started stops once that test's process is gone, even after a killed run (#959).
   // Only tests set AGENT_BOARD_TEST_PID, to their own process id.
   const testPid = Number(process.env.AGENT_BOARD_TEST_PID)
@@ -1913,7 +1917,8 @@ const serveChild = (): void => {
           // failure says why, as a child whose folder check failed does, instead of stopping without
           // a word (#799): the command shows the same reason, not the generic line.
           // The file's own icacls calls end in their raw time-out error, not the folder check's.
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') process.stderr.write(`${error instanceof RuntimeFolderTimeoutError || isTimeout(error) ? s.serveRuntimeCheckTimeout : s.serveRuntimePrivate}\n`)
+          const isDenied = error instanceof RuntimeFolderDeniedError || (process.platform !== 'win32' && isAccessRefused(error))
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') process.stderr.write(`${error instanceof RuntimeFolderTimeoutError || isTimeout(error) ? s.serveRuntimeCheckTimeout : isDenied ? s.serveRuntimeDenied : s.serveRuntimePrivate}\n`)
           return false
         }
         // The one line `--serve` waits for. Its pipe closes once it has read it.
@@ -2027,7 +2032,7 @@ interface RunningServer {
   idleMs?: number | undefined
 }
 
-type ServeFailure = { storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckPrivate?: boolean }
+type ServeFailure = { storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
 
 // The note a failed start prints: the message folder's failure first, then the child's
 // own folder failure, then the generic line. The child prints its folder failure in the
@@ -2035,6 +2040,7 @@ type ServeFailure = { storeCode?: string; isChildCheckTimeout?: boolean; isChild
 const serveFailureNote = (failure: ServeFailure): string => {
   if (failure.storeCode !== undefined) return s.serveStoreFailed(failure.storeCode, messagesDirectory())
   if (failure.isChildCheckTimeout) return s.serveFailed(s.serveRuntimeCheckTimeout)
+  if (failure.isChildCheckDenied) return s.serveFailed(s.serveRuntimeDenied)
   if (failure.isChildCheckPrivate) return s.serveFailed(s.serveRuntimePrivate)
   return s.serveFailed(s.serveNotStarted)
 }
@@ -2055,7 +2061,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   if (runtimeUnprotected) {
     const kept = (await keptPage(oldServeFile)) ?? (await keptPage(file))
     if (kept !== null) return { url: kept.url, port: kept.port, isKept: true, isNew: false }
-    throw runtimeCheckTimedOut ? new RuntimeFolderTimeoutError() : new RuntimeFolderError()
+    throw runtimeFolderFailure()
   }
   const old = readRunning(oldServeFile)
   if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
@@ -2190,6 +2196,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     // reason instead of the generic line, so the person is told the check did not finish.
     if (failure !== undefined && code === undefined) {
       if (stderr.includes(s.serveRuntimeCheckTimeout)) failure.isChildCheckTimeout = true
+      else if (stderr.includes(s.serveRuntimeDenied)) failure.isChildCheckDenied = true
       else if (stderr.includes(s.serveRuntimePrivate)) failure.isChildCheckPrivate = true
     }
     return null
@@ -2649,7 +2656,7 @@ try {
   } else if (error instanceof RuntimeFolderError) {
     process.exitCode = 1
     const output = args.includes('--serve-child') ? process.stderr : process.stdout
-    output.write(`${s.serveRuntimePrivate}\n`)
+    output.write(`${error instanceof RuntimeFolderDeniedError ? s.serveRuntimeDenied : s.serveRuntimePrivate}\n`)
   } else if (flag('--legacy-connect-request') !== undefined && typeof (globalThis as { AGENT_BOARD_WORKER_SOURCE?: unknown }).AGENT_BOARD_WORKER_SOURCE === 'string') {
     // The verified worker wrapper bounds data-URL errors and owns stage cleanup.
     throw error
