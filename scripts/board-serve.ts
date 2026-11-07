@@ -24,6 +24,8 @@ import { RELEASED } from '../hooks/released'
 import { createMessaging } from './board-messaging'
 import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
+import { isBarStyle } from '../hooks/progress-bar'
+import type { BarStyle } from '../hooks/progress-bar'
 
 export type ServeOptions = {
   allowResume?: boolean
@@ -45,6 +47,10 @@ export type ServeOptions = {
   // The Clean up button: the sweep `--tidy` runs (agent blocks by age; hand-kept tasks only once the
   // move is on, #464), the line to show.
   clean: () => string
+  // The progress bar's style (#1085): read from the board's settings file, and written there by
+  // the page's theme menu so the pane and the terminal board show the same pick.
+  barStyle?: () => BarStyle
+  setBarStyle?: (style: BarStyle) => boolean
   sweep: () => void
   sweepMs: number
   paste: (text: string, reviewToken?: string) => { isAdded: boolean; note: string; review?: { token: string; current: string; incoming: string } }
@@ -431,7 +437,7 @@ export const startServer = (o: ServeOptions): void => {
           const view = o.view()
           const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now }
+          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', now }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.
           const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
@@ -521,6 +527,11 @@ export const startServer = (o: ServeOptions): void => {
         if (o.bulkTidy === undefined) return json(res, 400, { note: o.s.pressFailed })
         const result = o.bulkTidy(body as unknown as Parameters<Exclude<typeof o.bulkTidy, undefined>>[0])
         return json(res, result.ok ? 200 : 409, result)
+      }
+      if (url.pathname === '/api/style') {
+        const style = body.style
+        if (!isBarStyle(style) || o.setBarStyle === undefined) return json(res, 400, { note: o.s.pressFailed })
+        return o.setBarStyle(style) ? json(res, 200, { style }) : json(res, 409, { note: o.s.pressFailed })
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()

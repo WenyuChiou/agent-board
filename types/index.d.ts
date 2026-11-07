@@ -263,6 +263,8 @@ declare module 'claude-code' {
       theme: string
       today: number
       isLegendOpen: boolean
+      // The progress bar's style (#1085), as the board's settings file last said.
+      barStyle: 'ink' | 'blue' | 'green'
       opened: string[]
       doneSeen: Record<string, number>
       hiddenAsks: string[]

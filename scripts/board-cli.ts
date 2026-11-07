@@ -17,6 +17,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
+import { barStyleName, barStyleOf, nextBarStyle, withBarStyle } from '../hooks/progress-bar'
+import type { BarStyle } from '../hooks/progress-bar'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
@@ -710,9 +712,35 @@ const freshView = () => {
 // The questions the running page can answer into their session, as it last said (`refreshRoutes`).
 let routes: Record<string, AnswerRoute> = {}
 
+// The progress bar's style, from the board's settings file (#1085); one the page or the pane
+// picked shows at the next draw. A file that cannot be read means the default.
+// Read at most every 10 s, so the page's idle poll does not read the file each time; a pick made
+// here is kept at once.
+const BAR_STYLE_MS = 10_000
+let barStyleKept: { style: BarStyle; at: number } | null = null
+const barStyleNow = (): BarStyle => {
+  const now = Date.now()
+  if (barStyleKept !== null && now - barStyleKept.at < BAR_STYLE_MS) return barStyleKept.style
+  let style: BarStyle
+  try { style = barStyleOf(read(settingsPath(path))) } catch { style = barStyleOf(null) }
+  barStyleKept = { style, at: now }
+  return style
+}
+// The pick from the page or the `s` key: the settings file's other keys are kept. False when the
+// file exists but does not read as a JSON object: it is left as it is. A read or write error throws.
+const saveBarStyle = (style: BarStyle): boolean => {
+  const file = settingsPath(path)
+  const next = withBarStyle(read(file), style)
+  if (next === null) return false
+  writeFileSync(file, next)
+  barStyleKept = { style, at: Date.now() }
+  return true
+}
+
 const options = () => ({
   width: Math.max(40, Math.min(process.stdout.columns || 80, 120)),
   ...terminalLook(process.env, args, process.stdout.isTTY === true),
+  barStyle: barStyleNow(),
   isIdleOpen: args.includes('--all'),
   routes,
 })
@@ -778,17 +806,42 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
           isOwned = false
           continue
         }
+        let isChanged = false
         try {
           // A virus scanner or indexer can hold the just-written temp file, or the file it
           // replaces, for a moment on Windows (#696): the rename is tried again after short
           // waits, since the three tight retries of the whole change never outlast that hold.
-          patiently(() => renameSync(temp, file))
+          // Look at the file again before each retry so a write that landed while the rename
+          // was refused is not overwritten by the old temp (#1103).
+          let lastError: unknown
+          patiently(() => {
+            if (lastError !== undefined) {
+              if (isLedger && !existsSync(file)) return
+              if (read(file) !== before) {
+                isChanged = true
+                return
+              }
+            }
+            try {
+              renameSync(temp, file)
+              lastError = undefined
+            } catch (error) {
+              lastError = error
+              throw error
+            }
+          })
+          if (!isChanged && lastError !== undefined) throw lastError
         } catch (error) {
           if (!isLedger || existsSync(file)) throw error
           if (!placeOwnedQuestionFile(temp, file)) {
             if (!existsSync(file)) isOwned = false
             throw error
           }
+        }
+        if (isChanged) {
+          unlinkSync(temp)
+          isOwned = false
+          continue
         }
       }
     } catch (error) {
@@ -1528,6 +1581,17 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
   if (action.type === 'html') return { state: { ...next, note: s.pressPending, tone: 'quiet' }, isQuit: false, isHtml: true, isWrite: false }
   // The page sends it; the note says so until its answer comes back.
   if (action.type === 'send') return { state: { ...next, note: s.serveSending(agentLabel(action.route.agent || 'claude', s)), tone: 'quiet' }, isQuit: false, isHtml: false, isWrite: false, send: action }
+  if (action.type === 'style') {
+    // The next style after the one in the file now, not after a pick this board kept up to 10 s ago.
+    barStyleKept = null
+    const style = nextBarStyle(barStyleNow())
+    try {
+      if (!saveBarStyle(style)) return { state: { ...next, note: s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+    } catch (error) {
+      return { state: { ...next, note: failureNote(error), tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+    }
+    return { state: { ...next, note: s.barStyleKey(barStyleName(style, s)), tone: 'done' }, isQuit: false, isHtml: false, isWrite: false }
+  }
   if (action.type === 'tidy') {
     let note: string
     try {
@@ -1828,6 +1892,10 @@ const serveChild = (): void => {
       paste,
       clean: cleanUp,
       bulkTidy,
+      barStyle: barStyleNow,
+      setBarStyle: style => {
+        try { return saveBarStyle(style) } catch { return false }
+      },
       sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.
       sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,
