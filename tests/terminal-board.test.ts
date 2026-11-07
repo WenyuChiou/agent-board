@@ -496,6 +496,21 @@ test('a silence-classified row does not offer confirmation or archive that the w
   }
 })
 
+test('a silence-classified row past the stale time offers confirmation and archive that the write guard accepts (#898)', () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+    const file = `## scratch\n<!-- auto session=ab770011 agent=antigravity state=working updated=${at(13 * 60)} -->\n### Local antigravity task\n- [ ] ${s.localAgentLifecycle}\n<!-- /auto session=ab770011 -->\n`
+    const view = viewOf(file, lang)
+    expect(view.stopped.length).toBe(1)
+    const stoppedRow = view.stopped[0]!
+    expect(stoppedRow.confirm).not.toBeNull()
+    expect(stoppedRow.archive).not.toBeNull()
+    // Both write guards accept a row past STALE_MS, so the row's offers land
+    expect(confirmTask(file, stoppedRow.confirm!, NOW, s)).not.toBeNull()
+    expect(takeTask(file, stoppedRow.archive!, NOW, s)).not.toBeNull()
+  }
+})
+
 test('a working row with a doing step remains counted after thirty minutes', () => {
   for (const agent of ['antigravity', 'codex'] as const) {
     for (const age of [5, 30, 31, 58]) {
