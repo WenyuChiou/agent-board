@@ -38,8 +38,8 @@ import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, c
 import { BOARD_JSON_SCHEMA, boardDocument, collectFinished } from '../hooks/board-json'
 import type { FinishedTask } from '../hooks/board-json'
 import { RELEASED } from '../hooks/released'
-import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
-import { LOG_TAIL, isInboxFile, keepInboxDone } from '../hooks/inbox'
+import type { AnswerRoute, BoardAction, BoardState, PendingTurn } from '../hooks/board'
+import { inboxTime, LOG_TAIL, isInboxFile, keepInboxDone } from '../hooks/inbox'
 import { oldMonthFiles, OLD_MONTHS_FOLDER } from '../hooks/old-months'
 import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import type { PendingArchiveRecord } from '../hooks/journal'
@@ -2449,7 +2449,28 @@ const run = async (): Promise<void> => {
     }
     const answeredText = safeSidecar(answeredPath(path))
     const questionsText = safeSidecar(questionsPath(path))
-    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), answeredText, questionsText)}\n`)
+    // A turn waiting in the inbox counts on the page and the terminal: --status reads the
+    // same inbox files, read-only and size-capped, so its line agrees (#1000). No session
+    // log is read: a turn file alone names its question.
+    let turns: PendingTurn[] = []
+    try {
+      const inboxDir = join(dirname(path), 'progress-inbox')
+      const files = readdirSync(inboxDir)
+        .filter(name => isInboxFile(name))
+        .map(name => {
+          try {
+            const text = readFileSync(join(inboxDir, name), 'utf8')
+            return { name, body: text.length > RETENTION.progressSoftBytes ? text.slice(0, RETENTION.progressSoftBytes) : text, at: inboxTime(name) ?? Date.now() }
+          } catch {
+            return null
+          }
+        })
+        .filter((file): file is { name: string; body: string; at: number } => file !== null)
+      turns = peekInbox(files, () => '', undefined, s)
+    } catch {
+      turns = []
+    }
+    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), answeredText, questionsText, turns)}\n`)
     return
   }
   const request = flag('--legacy-connect-request')

@@ -24,6 +24,7 @@ import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
 import { qrModules, qrText } from '../hooks/qr'
 import { STALE_MS } from '../hooks/parse'
+import { DOING_QUIET_MS, WORKING_MS } from '../hooks/grouping'
 import { confirmMatches, confirmTask } from '../hooks/blocks'
 import { applyCompletionOverlay, completionKey, completionOfBlock, completionOverlay, isCompletionOverlay } from '../hooks/mirror'
 import { RELEASED } from '../hooks/released'
@@ -403,11 +404,13 @@ test('Confirm done preserves canceled and hidden steps and guards every agent at
   }
 })
 
-test('every agent keeps live blocks safe across terminal and page at the twelve-hour boundary in every language', () => {
+test('every agent keeps live blocks safe across terminal and page at the working limit and the twelve-hour boundary in every language', () => {
   const now = Date.parse('2026-10-19T12:00:00Z')
   for (const s of Object.values(STRINGS)) for (const agent of ARCHIVE_AGENTS) {
     for (const state of ['working', 'waiting', 'ended']) for (const age of [0, STALE_MS, STALE_MS + 1]) {
-      const live = state !== 'ended' && age <= STALE_MS
+      // A working row with no doing step stops being live after thirty minutes (#1000);
+      // a waiting row stays live until the twelve-hour stale time.
+      const live = state !== 'ended' && (state === 'working' ? age <= WORKING_MS : age <= STALE_MS)
       const file = `## Demo\n<!-- auto session=11223344 agent=${agent} state=${state} updated=${new Date(now - age).toISOString()} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
       const view = buildView(parseProgress(file), [], null, now, 0, {}, s)
       const items = boardItems(view, [])
@@ -432,6 +435,42 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
       expect(takeTask(file, ref, now, s) === null).toBe(live)
       expect(takeArchivable(file, now, undefined, s, true).text).toBe(file)
     }
+    // A working row with no readable `updated` has unknown age: ordinary age rules never
+    // archive it, whatever its state (#1000, Codex P1 on #1087).
+    for (const marker of ['', ' updated=not-a-date']) {
+      const unknown = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working${marker} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
+      const unknownView = buildView(parseProgress(unknown), [], null, now, 0, {}, s)
+      const unknownItems = boardItems(unknownView, [])
+      const unknownItem = unknownItems[0]
+      expect(unknownItem?.type).toBe('row')
+      if (unknownItem?.type !== 'row') throw new Error('Missing synthetic row')
+      expect(unknownItem.row.archive).toBe(null)
+      const unknownDrawn = pinned({ ...emptyBoardState, isIdleOpen: true }, unknownItems)
+      expect(boardKey(unknownDrawn, 'a', unknownItems, s).action?.type ?? null).toBe(null)
+      expect(boardScreen(unknownView, [], unknownDrawn, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(false)
+      const unknownModel = serveModel(unknownView, [], s)
+      const unknownPage = [...unknownModel.groups.flatMap(group => group.rows), ...unknownModel.stopped][0]
+      expect(unknownPage?.canArchive).toBe(false)
+      expect(unknownPage?.archiveNote === s.archiveLive).toBe(true)
+      expect(serveAction(unknownItems, { key: unknownItem.key, type: 'archive', text: '', session: '', fp: fingerprint(unknownItem, unknownItems) }, s)).toEqual({ type: 'refuse', note: s.archiveLive })
+      expect(takeTask(unknown, { project: 'Demo', title: 'Synthetic task', line: 2, session: '11223344' }, now, s)).toBe(null)
+    }
+    // The local observation a display falls back to proves nothing here either: the gate
+    // reads the writer time, like the write guard (#1000, lane review on #1087).
+    for (const marker of ['', ' updated=not-a-date']) {
+      const unknown = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working${marker} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
+      const parsed = parseProgress(unknown)
+      const task = parsed[0]?.tasks[0]
+      if (task === undefined) throw new Error('Missing synthetic task')
+      const seen = { [taskFingerprint('Demo', task)]: now - 10 * 60 * 60 * 1000 }
+      const seenView = buildView(parsed, [], null, now, 0, {}, s, [], seen)
+      const seenItems = boardItems(seenView, [])
+      const seenItem = seenItems[0]
+      expect(seenItem?.type).toBe('row')
+      if (seenItem?.type !== 'row') throw new Error('Missing synthetic row')
+      expect(seenItem.row.archive).toBe(null)
+      expect(takeTask(unknown, { project: 'Demo', title: 'Synthetic task', line: 2, session: '11223344' }, now, s, seen)).toBe(null)
+    }
     const asked = `## Demo\n<!-- auto session=11223344 agent=${agent} state=waiting updated=${new Date(now).toISOString()} -->\n### Question\n- [?] Choose a limit?\n<!-- /auto session=11223344 -->\n`
     const view = buildView(parseProgress(asked), [], null, now, 0, {}, s)
     expect(boardScreen(view, [], emptyBoardState, s, { width: 160, isColor: false })).not.toContain(s.archiveLive)
@@ -440,6 +479,39 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
     // A selected stopped block that resumes before the queued write stays owned.
     expect(takeTask(asked, { project: 'Demo', title: 'Question', line: 2, session: '11223344' }, now, s)).toBe(null)
     expect(takeTask(asked.replace(/ updated=[^ ]+/, ''), { project: 'Demo', title: 'Question', line: 2, session: '11223344' }, now, s)).toBe(null)
+  }
+})
+
+test('a working row quiet past the Working now limit can be archived on the terminal and the page (#1000)', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  // A doing step counts for two quiet hours, any other activity for thirty minutes (#1054):
+  // past that the row is no longer at work, so a session killed mid-step can be archived
+  // instead of waiting out the twelve-hour stale time.
+  const cases: Array<[string, string, number, boolean]> = [
+    ['- [~] Write a test\n', DOING_QUIET_MS / 60_000 - 60, false],
+    ['- [~] Write a test\n', DOING_QUIET_MS / 60_000 + 60, true],
+    ['- [ ] Next step\n', WORKING_MS / 60_000 - 20, false],
+    ['- [ ] Next step\n', WORKING_MS / 60_000 + 10, true],
+  ]
+  for (const s of Object.values(STRINGS)) for (const agent of ['codex', 'claude']) for (const [steps, minutes, archivable] of cases) {
+    const file = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working updated=${new Date(now - minutes * 60_000).toISOString()} -->\n### Synthetic task\n${steps}<!-- /auto session=11223344 -->\n`
+    const view = buildView(parseProgress(file), [], null, now, 0, {}, s)
+    const items = boardItems(view, [])
+    const item = items.find(one => one.type === 'row')
+    expect(item?.type).toBe('row')
+    if (item?.type !== 'row') throw new Error('Missing synthetic row')
+    expect(item.row.archive === null).toBe(!archivable)
+    const drawn = pinned({ ...emptyBoardState, isIdleOpen: true }, items)
+    const pressed = boardKey(drawn, 'a', items, s)
+    expect(pressed.action?.type ?? null).toBe(archivable ? 'archive' : null)
+    expect(boardScreen(view, [], pressed.state, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(!archivable)
+    const model = serveModel(view, [], s)
+    const page = [...model.groups.flatMap(group => group.rows), ...model.stopped][0]
+    expect(page?.canArchive).toBe(archivable)
+    expect(page?.archiveNote === s.archiveLive).toBe(!archivable)
+    const action = serveAction(items, { key: item.key, type: 'archive', text: '', session: '', fp: fingerprint(item, items) }, s)
+    expect(action.type).toBe(archivable ? 'archive' : 'refuse')
+    if (!archivable) expect(action).toEqual({ type: 'refuse', note: s.archiveLive })
   }
 })
 
@@ -1276,7 +1348,8 @@ test('封存 leaves the file alone when it cannot be sure which task it means', 
   const twins = '# 專案進度\n\n## a\n### 同名\n- [ ] 一\n\n## b\n### 同名\n- [ ] 二\n'
   expect(takeTask(twins, { project: 'a', title: '同名', line: 0, session: null }, NOW)).toBeNull()
   // A title inside some session's block is that session's, not the person's.
-  const inside = '## p\n<!-- auto session=aaaaaaaa state=working updated=2026-10-16T11:00:00.000Z -->\n### 修 CI\n- [ ] 修\n<!-- /auto session=aaaaaaaa -->\n'
+  // The session reported fifteen minutes ago, so its row is live and has no 封存 (#1000).
+  const inside = '## p\n<!-- auto session=aaaaaaaa state=working updated=2026-10-16T11:45:00.000Z -->\n### 修 CI\n- [ ] 修\n<!-- /auto session=aaaaaaaa -->\n'
   expect(takeTask(inside, { project: 'p', title: '修 CI', line: 0, session: null }, NOW)).toBeNull()
   // A block that lost its end marker.
   expect(takeTask('## p\n<!-- auto session=bbbbbbbb state=ended updated=2026-10-16T11:00:00.000Z -->\n### x\n', { project: 'p', title: 'x', line: 2, session: 'bbbbbbbb' }, NOW)).toBeNull()
