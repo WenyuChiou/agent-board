@@ -1836,7 +1836,11 @@ const serveChild = (): void => {
           const text = JSON.stringify({ pid: process.pid, port, url, path, built })
           if (process.platform === 'win32') writePrivateRuntimeFile(file, text)
           else writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
-        } catch {
+        } catch (error) {
+          // Another `--serve` that wrote first is the page, so that start stops quietly. Any other
+          // failure says why, as a child whose folder check failed does, instead of stopping without
+          // a word (#799): the command shows the same reason, not the generic line.
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') process.stderr.write(`${error instanceof RuntimeFolderTimeoutError ? s.serveRuntimeCheckTimeout : s.serveRuntimePrivate}\n`)
           return false
         }
         // The one line `--serve` waits for. Its pipe closes once it has read it.
