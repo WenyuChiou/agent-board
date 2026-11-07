@@ -113,7 +113,7 @@ claude plugin marketplace add WenyuChiou/agent-board
 claude plugin install agent-board@agent-board
 ```
 
-開啟新 Claude Code session，使用 `/progress`。側欄鏡像 Task 工具，也可透過它的模型整理回合。問題與決策顯示於任務上方；側欄跟隨 Claude 主題，網頁跟隨系統主題，除非你在網頁上選了亮色或暗色。
+開啟新 Claude Code session，使用 `/progress`。側欄鏡像 Task 工具，也可透過它的模型整理回合。問題與決策顯示於任務上方；從 Claude Code 2.1.319 起，有任務清單的工作階段裡，等你核准的工具也會出現在「等你處理」，更早的版本不會告訴外掛需要你核准，核准只會出現在 Claude Code 裡；側欄跟隨 Claude 主題，網頁跟隨系統主題，除非你在網頁上選了亮色或暗色。
 
 `/agent-board` 會啟動（或沿用）可回覆問題、封存工作的看板網頁並提供連結，不動面板，每個工作階段都能用。Claude 桌面 App 的 Code 分頁沒有顯示面板時，底部狀態列會顯示等你的數量和「/agent-board 開啟看板」；那裡的 `/progress` 做同樣的事；互動網頁無法啟動時，兩者都會說明原因，並顯示啟動網頁的指令。網頁啟動最多約需半分鐘，期間底部狀態列會顯示正在開啟。互動網頁需要由 `/progress connect` 安裝看板腳本，或在下次工作階段開始時更新。使用同一份已安裝的看板腳本的工作階段與 agent 會共用執行中的網頁。`/progress` 或 `/agent-board` 開的網頁在最後一個分頁關掉 30 分鐘後關閉，再執行一次該指令就有新連結；你自己用 `agent-board` 開的網頁照它自己的設定。`/progress` 和 `/agent-board` 會換掉用 `--allow-resume` 開的網頁，除非那裡還有回覆正在送出；需要接續回覆時，之後再執行一次 `--allow-resume`。Claude Code CLI 則顯示側欄。
 
