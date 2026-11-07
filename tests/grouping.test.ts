@@ -322,9 +322,14 @@ test('Working now leaves out a row whose only step is a hook placeholder, and a 
     row('codex', 'demo', 'Codex turn with no plan yet', { at: ago(MIN) }),
     row('', 'demo', 'Long step', { at: ago(90 * MIN), steps: [step('Run the build', 'doing')] }),
     row('', 'demo', 'Killed mid-step', { at: ago(3 * HOUR), steps: [step('Run the build', 'doing')] }),
+    // An idle row keeps its placeholder beside the question the hook closed once it was answered (#1067).
+    row('codex', 'demo', 'Idle Codex after an answer', { at: ago(MIN), steps: [step(EN.codexLifecycle, 'todo'), step('Which folder should I use?', 'done')] }),
+    row('grok', 'demo', 'Idle Grok after an answer', { at: ago(MIN), steps: [step(ZH_TW.localAgentLifecycle, 'todo'), step('Should I pick tea or coffee?', 'done')] }),
+    // A working row's placeholder is left out of its steps, so the answered question alone keeps it in Working.
+    row('codex', 'demo', 'Codex at work after an answer', { at: ago(MIN), steps: [step('Which folder should I use?', 'done')] }),
   ]
   const result = groupBoard(board({ groups: grouped(rows) }), NOW, none, EN)
-  expect(titles(result.working)).toEqual(['Codex turn with no plan yet', 'Long step'])
+  expect(titles(result.working)).toEqual(['Codex turn with no plan yet', 'Codex at work after an answer', 'Long step'])
 })
 
 test('two folders asking the same words under one agent show two Needs you cards on the agent-first page', () => {

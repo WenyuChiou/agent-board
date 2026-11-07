@@ -2920,7 +2920,7 @@ export const LINES = [
 "        return false;",
 "      const source = task.source;",
 "      const steps = typeof source === \"object\" && source !== null && \"steps\" in source && Array.isArray(source.steps) ? source.steps : [];",
-"      if (steps.length > 0 && steps.every((step) => isLifecycleStep(step.text)))",
+"      if (steps.some((step) => isLifecycleStep(step.text)) && steps.every((step) => isLifecycleStep(step.text) || step.status === \"done\" || step.status === \"cancelled\"))",
 "        return false;",
 "      const isDoing = steps.some((step) => step.status === \"doing\") && (task.at <= 0 || now - task.at <= DOING_QUIET_MS);",
 "      return isDoing || task.at > 0 && now - task.at <= WORKING_MS2;",

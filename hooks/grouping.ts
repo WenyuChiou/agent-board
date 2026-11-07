@@ -432,12 +432,13 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
     // Rows that wait on the person are on the Needs you list, and a hand-kept task is not an agent at work.
     // A working row with a doing step remains counted past 30 minutes, up to two quiet hours.
     // A row whose only step is a hook's placeholder waits for its next instruction: it is not at
-    // work, whether the agent is idle or was closed without saying so (#1051).
+    // work, whether the agent is idle or was closed without saying so (#1051). The same holds when
+    // the only other steps are closed, such as a question the hook marked answered (#1067).
     working: sortedTasks.filter(task => {
       if (task.shelf !== 'open' || task.hasCard || task.isOwn) return false
       const source = task.source
       const steps = typeof source === 'object' && source !== null && 'steps' in source && Array.isArray(source.steps) ? source.steps : []
-      if (steps.length > 0 && steps.every(step => isLifecycleStep(step.text))) return false
+      if (steps.some(step => isLifecycleStep(step.text)) && steps.every(step => isLifecycleStep(step.text) || step.status === 'done' || step.status === 'cancelled')) return false
       const isDoing = steps.some(step => step.status === 'doing') && (task.at <= 0 || now - task.at <= DOING_QUIET_MS)
       return isDoing || (task.at > 0 && now - task.at <= WORKING_MS)
     }),
