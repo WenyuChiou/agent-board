@@ -11124,7 +11124,7 @@ export const LINES = [
 "  });",
 "  const found = latest;",
 "  if (found !== null && \"problem\" in found) {",
-"    const why = found.problem === \"oldTime\" ? s.pasteOldTime(found.daysBehind) : { noBlock: s.pasteNoBlock, mixed: s.pasteMixed, badBlock: s.pasteBadBlock, noProject: s.pasteNoProject, notYours: s.pasteNotYours, badTime: s.pasteBadTime, futureTime: s.pasteFutureTime, older: s.pasteOlder, conflict: s.pasteConflict, unknownOrder: s.pasteUnknownOrder }[found.problem];",
+"    const why = found.problem === \"oldTime\" ? s.pasteOldTime(found.daysBehind) : { noBlock: s.pasteNoBlock, mixed: s.pasteMixed, badBlock: s.pasteBadBlock, reservedAgent: s.pasteReservedAgent, noProject: s.pasteNoProject, notYours: s.pasteNotYours, badTime: s.pasteBadTime, futureTime: s.pasteFutureTime, older: s.pasteOlder, conflict: s.pasteConflict, unknownOrder: s.pasteUnknownOrder }[found.problem];",
 "    return { isAdded: false, note: s.servePasteRefused(why), review: found.review };",
 "  }",
 "  if (wrote === null || found === null)",

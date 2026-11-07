@@ -2832,6 +2832,44 @@ await import(${JSON.stringify(new URL('../scripts/board-cli.ts', import.meta.url
   } finally { await board.close() }
 })
 
+test('a pasted block naming itself claude is refused with a line that says so', { timeout: 30_000 }, async () => {
+  const words = {
+    en: 'The agent name "claude" is reserved for Claude Code. Ask the web chat to use "claude-web", then paste again.',
+    'zh-TW': '代理名稱「claude」保留給 Claude Code 使用。請網頁聊天改用「claude-web」，再貼一次。',
+    'zh-CN': '代理名称“claude”保留给 Claude Code 使用。请网页聊天改用“claude-web”，再粘贴一次。',
+  }
+  for (const [lang, reason] of Object.entries(words)) {
+    const board = await page('', {}, ['--lang', lang])
+    try {
+      const before = '# Progress\n\n## launch\n'
+      writeFileSync(board.path, before)
+      await board.call('GET', '/api/board')
+      const files = readdirSync(board.dir).sort()
+      const mtime = statSync(board.path).mtimeMs
+      const text = relayFragment(ago(60_000)).replace('agent=muse', 'agent=claude')
+      const refused = await board.call('POST', '/api/paste', { body: { text } })
+      assert.equal(refused.status, 409, refused.body)
+      assert.ok(refused.json().note.includes(reason), refused.json().note)
+      assert.equal(readFileSync(board.path, 'utf8'), before)
+      assert.equal(statSync(board.path).mtimeMs, mtime)
+      assert.deepEqual(readdirSync(board.dir).sort(), files)
+      const model = (await board.call('GET', '/api/board')).json().model
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      const dom = await pageDom(html, model, { post: async request => {
+        const result = await board.call('POST', request.path, { body: request.body })
+        return { ok: result.status === 200, json: async () => result.json() }
+      } })
+      dom.paste(text)
+      await dom.settle()
+      assert.ok(dom.node('note').textContent.includes(reason), dom.node('note').textContent)
+      assert.equal(readFileSync(board.path, 'utf8'), before)
+      const accepted = await board.call('POST', '/api/paste', { body: { text: text.replace('agent=claude', 'agent=claude-web') } })
+      assert.equal(accepted.status, 200, accepted.body)
+      assert.match(readFileSync(board.path, 'utf8'), /agent=claude-web/)
+    } finally { await board.close() }
+  }
+})
+
 test('the board script refuses a pasted working block with a weeks-old clock in every language and writes nothing', { timeout: 30_000 }, async () => {
   const notes = { en: /21 days behind.*nothing was written/i, 'zh-TW': /慢了 21 天.*未寫入/, 'zh-CN': /慢了 21 天.*未写入/ }
   for (const [lang, note] of Object.entries(notes)) {
