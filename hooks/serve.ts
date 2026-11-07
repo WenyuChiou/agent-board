@@ -786,8 +786,8 @@ const PAGE_WORDS = [
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
-  'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
+  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -860,12 +860,18 @@ ${sheetCss}
 .note,.context{margin:0;color:var(--muted)}
 .native-options{margin:0;padding-left:var(--s5);color:var(--muted)}
 .answers{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;padding-top:var(--s1)}
+.answers:has(.answer-picks){flex-wrap:nowrap}
+.answer-picks{display:flex;flex:1 1 auto;min-width:0;flex-wrap:wrap;gap:var(--s2);align-items:center}
 .btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)}
 button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
 .btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover,.pfoot #close:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
 button.quiet:hover,.side .pfoot #close:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
+.answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);box-shadow:inset 0 0 0 1px var(--act);background:color-mix(in srgb,var(--act) 10%,var(--surface))}
+.answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-lg)}
+.answers button.answer-send:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
+.answers button.answer-send:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:.35;cursor:default}
 .chev{display:inline-block;transition:transform var(--dur-base) var(--ease-out)}.chev::before{content:"▸"}
 .open>.shelf-head .chev{transform:rotate(90deg)}
 code{display:block;max-width:100%;overflow-x:auto;white-space:pre;font:var(--text-xs)/1.5 var(--font-mono);padding:6px var(--s2);border:1px solid var(--line);border-radius:var(--radius-s);background:var(--inset);color:var(--ink)}
@@ -1062,6 +1068,7 @@ ${CLIP_CSS}
   .link{min-height:44px}
   .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet{flex:0 0 auto;min-height:44px}
+  .answers button.answer-send{flex:0 0 48px;width:48px;min-width:48px;justify-content:center}
   .s-toggle{width:44px;height:44px}
   #away-line .away-x{width:44px;height:44px}
   textarea{min-height:96px}
@@ -1569,6 +1576,7 @@ const PAGE_SCRIPT = String.raw`
   var pg = { filter: '', project: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
   var cardState = {};
   var cardParts = {};
+  var cardChoices = Object.create(null);
   // The first screen describes work, so diagnostic identifiers and logs stay out of its labels.
   function clean(value) {
     var text = String(value || '').trim();
@@ -1719,6 +1727,8 @@ const PAGE_SCRIPT = String.raw`
     if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
     var mode = ask.send;
     var answers = el('div', 'answers');
+    var choiceArea = answers;
+    var pickerSend = null;
     var others = [];
     var canWrite = false;
     if (isStuck) {
@@ -1740,12 +1750,33 @@ const PAGE_SCRIPT = String.raw`
     } else {
       var options = ask.answers || [];
       canWrite = true;
-      options.slice(0, 3).forEach(function (answer, index) {
-        var node = button(w(sends(mode) ? 'pgSendReply' : 'pgCopyReply', clean(answer)), function () { pressAnswer(ask, key, answer, node); }, '', !sends(mode));
-        node.disabled = sends(mode) && ask.isSending === true;
-        add(answers, node);
-      });
-      options.slice(3).forEach(function (answer) { others.push(button(w(sends(mode) ? 'pgSendReply' : 'pgCopyReply', clean(answer)), function () { pressAnswer(ask, key, answer, null); }, '', !sends(mode))); });
+      if (options.length) {
+        var identity = JSON.stringify([ask.session || '', ask.text || '', ask.fp || '', ask.delivery ? [ask.delivery.id, ask.delivery.turn] : '', options]);
+        var savedChoice = cardChoices[key];
+        var selected = savedChoice && savedChoice.identity === identity ? savedChoice.index : -1;
+        var choiceNodes = [];
+        choiceArea = el('div', 'answer-picks');
+        add(answers, choiceArea);
+        var makeChoice = function (answer, index) {
+          var node = navButton(clean(answer), function () {
+            if (pickerSend.dotsNode) return;
+            selected = index;
+            cardChoices[key] = { identity: identity, index: index };
+            choiceNodes.forEach(function (choice, i) { choice.setAttribute('aria-pressed', String(i === selected)); });
+            pickerSend.disabled = sends(mode) && (ask.isSending === true || isUnreachable);
+          });
+          node.className = 'choice';
+          node.setAttribute('aria-pressed', String(index === selected));
+          node.disabled = sends(mode) && ask.isSending === true;
+          choiceNodes.push(node);
+          return node;
+        };
+        options.slice(0, 3).forEach(function (answer, index) { add(choiceArea, makeChoice(answer, index)); });
+        options.slice(3).forEach(function (answer, index) { others.push(makeChoice(answer, index + 3)); });
+        pickerSend = button('↑', function () { if (selected >= 0) pressAnswer(ask, key, options[selected], pickerSend); }, 'answer-send', !sends(mode));
+        pickerSend.setAttribute('aria-label', w(sends(mode) ? 'pgSendChoice' : 'pgCopyChoice'));
+        pickerSend.disabled = selected < 0 || sends(mode) && ask.isSending === true;
+      }
       if (ask.command) others.push(button(w('serveCopyCommand'), function () { copy(ask.command, key); }, '', true));
       if (ask.link && /^https:\/\//i.test(ask.link)) {
         var link = el('a', 'btn', w('serveOpenLink'));
@@ -1776,14 +1807,15 @@ const PAGE_SCRIPT = String.raw`
       toggle.className = 'quiet';
       pg.mores.push({ key: key, box: more, fold: fold, toggle: toggle });
       toggle.setAttribute('aria-expanded', String(opened['more:' + key] === true));
-      add(answers, toggle);
+      add(choiceArea, toggle);
       add(askBlock, more);
     }
     if (canWrite) {
       var write = navButton(w('pgWriteOwn'), function () { setMode(key, 'write'); });
       write.className = 'quiet';
-      add(answers, write);
+      add(choiceArea, write);
     }
+    if (pickerSend) add(answers, pickerSend);
     parts.ask = fx(askBlock);
     if (canWrite) {
       parts.reply = fx(replyBox(key, w('serveReplyPlaceholder'), sends(mode) ? mode : 'copy', agent, sends(mode) ? ask.where : '', ask.isSending, ask.session, ask.text, ask.fp, ask.delivery, {
@@ -2648,6 +2680,9 @@ const PAGE_SCRIPT = String.raw`
     view.agents.forEach(function (agent) { if (pg.ids.indexOf(agent.agent) === -1) pg.ids.push(agent.agent); });
     pg.sources = {};
     [].concat(model.asks || [], model.reminder || [], model.older || [], model.idle || [], model.stopped || [], (model.groups || []).flatMap(function (group) { return group.rows; }), model.turns || [], model.recent || [], model.finished || []).forEach(function (item) { if (item.key) pg.sources[item.key] = Object.assign({}, pg.sources[item.key], item); });
+    var questionKeys = Object.create(null);
+    (model.asks || []).forEach(function (ask) { questionKeys[ask.key] = true; });
+    Object.keys(cardChoices).forEach(function (key) { if (!questionKeys[key]) delete cardChoices[key]; });
     if (!hasDrawn) pg.filter = savedFilter();
     // An answer that was sent stops counting as waiting for the person (tab title, flag, agent badges) until it comes back.
     pg.sentBy = Object.create(null);
