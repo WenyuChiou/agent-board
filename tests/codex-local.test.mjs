@@ -1548,7 +1548,9 @@ test('setup prints a plain summary with each agent and the next steps, and --jso
   }
   assert.equal(new Set(summaries).size, 3)
 
-  assert.match(summaries[0], /Hermes Agent.*automatic reporting is unavailable/i)
+  assert.match(summaries[0], /Hermes Agent: (?:would update|updated) \d+ setup files/)
+  assert.doesNotMatch(summaries[0], /automatic reporting is unavailable/i)
+  assert.match(summaries[0], /^\d+\. Hermes Agent: start a new session\. Hermes asks once whether to trust the board's hooks; answer y\..*--hermes-trust.*--apply/m)
   const childPlans = ['codex', 'hermes'].map(agent => JSON.parse(f.install('--lang', 'zh-CN', '--agent', agent).stdout))
   const json = setupAgent(f, '--lang', 'zh-CN', '--agent', 'codex,hermes', '--json')
   assert.equal(json.status, 0, json.stderr)
@@ -2073,11 +2075,12 @@ test('doctor and removal say plainly when an adapter is pending, a connector hol
   }
 
   assert.equal(f.install('--agent', 'hermes', '--lang', 'en', '--apply').status, 0)
-  const pending = board(runner, '--codex-doctor', '--agent', 'hermes', '--lang', 'en')
-  assert.equal(pending.status, 0, pending.stderr)
-  assert.ok(pending.stdout.includes('Automatic reporting adapter is not available yet.'), pending.stdout)
-  assert.ok(pending.stdout.includes('Next: open the board with the agent-board skill'), pending.stdout)
-  assert.ok(isOneNext(pending.stdout), pending.stdout)
+  // Hermes has its hooks now, so it is no longer a host whose adapter is pending (#1115).
+  const hermes = board(runner, '--codex-doctor', '--agent', 'hermes', '--lang', 'en')
+  assert.equal(hermes.status, 0, hermes.stderr)
+  assert.ok(!hermes.stdout.includes('Automatic reporting adapter is not available yet.'), hermes.stdout)
+  assert.ok(hermes.stdout.includes('Next: start a new Hermes Agent session'), hermes.stdout)
+  assert.ok(isOneNext(hermes.stdout), hermes.stdout)
 
   mkdirSync(join(f.home, '.codex'), { recursive: true })
   const connected = legacyConnect(f, join(f.home, '.claude', 'progress.md'))
@@ -4717,6 +4720,268 @@ for (const agent of ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'h
   }))
 }
 
+// Hermes Agent runs a hook command as shlex.split(command) with no shell (#1115). This is that split for the
+// quoting setup writes: double quotes, and a backslash escapes only a quote or a backslash inside them.
+const shlexSplit = text => {
+  const words = []
+  let word = null, quoted = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (quoted) {
+      if (c === '"') quoted = false
+      else if (c === '\\' && (text[i + 1] === '"' || text[i + 1] === '\\')) word += text[++i]
+      else word += c
+    } else if (c === '"') { quoted = true; word ??= '' }
+    else if (/\s/.test(c)) { if (word !== null) words.push(word); word = null }
+    else if (c === '\\') word = (word ?? '') + (text[++i] ?? '')
+    else word = (word ?? '') + c
+  }
+  assert.equal(quoted, false, 'unterminated quote')
+  if (word !== null) words.push(word)
+  return words
+}
+const hermesHooksOf = text => Object.fromEntries([...text.matchAll(/^\s+(\w+):\s*\n\s+- \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+)\}\s*$/gm)].filter(match => /agent-board-hook\.mjs/.test(match[2])).map(match => [match[1], { command: JSON.parse(match[2]), timeout: Number(match[3]) }]))
+const hermesEvents = ['on_session_start', 'pre_llm_call', 'post_llm_call', 'on_session_end']
+const hermesConfig = f => join(f.home, '.hermes', 'config.yaml')
+const hermesAllowlist = f => join(f.home, '.hermes', 'shell-hooks-allowlist.json')
+// Fire a Hermes hook the way Hermes does: its command split by shlex, no shell, the event's JSON on stdin.
+const fireHermes = (f, event, payload) => {
+  const hook = hermesHooksOf(readFileSync(hermesConfig(f), 'utf8'))[event]
+  assert.ok(hook, event)
+  const argv = shlexSplit(hook.command)
+  return spawnSync(argv[0], argv.slice(1), { env: f.env, input: JSON.stringify({ hook_event_name: event, tool_name: null, tool_input: null, ...payload }), encoding: 'utf8', windowsHide: true, timeout: 30000 })
+}
+
+test('Hermes setup writes its four hooks into a fresh config.yaml, quoted for shlex, trusts nothing, and a re-run changes nothing (#1115)', () => fixture(f => {
+  const installed = f.install('--agent', 'hermes', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const text = readFileSync(hermesConfig(f), 'utf8')
+  assert.match(text, /^hooks:\n/)
+  const hooks = hermesHooksOf(text)
+  assert.deepEqual(Object.keys(hooks), hermesEvents)
+  for (const event of hermesEvents) {
+    assert.equal(hooks[event].timeout, 10)
+    const argv = shlexSplit(hooks[event].command)
+    // The program, the worker and the board file each survive the split as one word, whatever the folder holds (a space, here).
+    assert.equal(argv[0], process.platform === 'win32' ? process.execPath.replaceAll('\\', '/') : process.execPath)
+    assert.ok(argv[0].length > 0 && argv.includes('--hook-event') && argv[argv.indexOf('--hook-event') + 1] === event)
+    assert.deepEqual(argv.slice(argv.indexOf('--agent-status')), ['--agent-status', '--agent', 'hermes', '--state', event === 'pre_llm_call' ? 'working' : 'waiting', '--progress-file', process.platform === 'win32' ? f.progress.replaceAll('\\', '/') : f.progress])
+    assert.equal(argv[4], process.platform === 'win32' ? join(f.root, 'agent-board-hook.mjs').replaceAll('\\', '/') : join(f.root, 'agent-board-hook.mjs'))
+    // Every word is double-quoted, so no raw backslash, dollar or backtick is left for the split to read.
+    assert.doesNotMatch(hooks[event].command, /\\|\$|`/)
+  }
+  assert.doesNotMatch(text, /hooks_auto_accept|accept/i)
+  assert.equal(existsSync(hermesAllowlist(f)), false)
+  const manifest = JSON.parse(readFileSync(join(f.root, 'install-hermes.json'), 'utf8'))
+  assert.ok(manifest.files[join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')])
+  assert.deepEqual(Object.keys(manifest.groups.hooks), hermesEvents)
+  assert.equal(manifest.config, hermesConfig(f))
+  const again = f.install('--agent', 'hermes', '--apply')
+  assert.equal(again.status, 0, again.stderr)
+  assert.deepEqual(JSON.parse(again.stdout).changes, [])
+  assert.equal(readFileSync(hermesConfig(f), 'utf8'), text)
+}))
+
+test('Hermes setup keeps a config.yaml with other keys and other hooks, and removal takes out only its own (#1115)', () => fixture(f => {
+  const original = [
+    'model: synthetic/model',
+    'hooks_auto_accept: false',
+    'hooks:',
+    '  pre_tool_call:',
+    '    - {command: "my-guard.sh", timeout: 5}',
+    '  on_session_start:',
+    '    - command: "my-start.sh"',
+    '      timeout: 3',
+    'display:',
+    '  skin: plain',
+    '',
+  ].join('\n')
+  f.save(hermesConfig(f), original)
+  const installed = f.install('--agent', 'hermes', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const text = readFileSync(hermesConfig(f), 'utf8')
+  for (const line of original.split('\n').filter(Boolean)) assert.ok(text.split('\n').includes(line), line)
+  assert.deepEqual(Object.keys(hermesHooksOf(text)).sort(), [...hermesEvents].sort())
+  // The person's own on_session_start entry still sits under that event, with ours beside it.
+  const start = text.slice(text.indexOf('  on_session_start:'), text.indexOf('display:'))
+  assert.match(start, /my-start\.sh/)
+  assert.match(start, /agent-board-hook\.mjs/)
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  assert.equal(readFileSync(hermesConfig(f), 'utf8'), text)
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(hermesConfig(f), 'utf8'), original)
+  assert.equal(existsSync(join(f.root, 'install-hermes.json')), false)
+}))
+
+test('Hermes setup leaves a config.yaml it cannot merge into byte for byte and reports a conflict (#1115)', () => fixture(f => {
+  for (const original of ['hooks: {pre_tool_call: [{command: "mine.sh"}]}\nmodel: x\n', '- not\n- a mapping\n', 'hooks:\n  on_session_start: [{command: "mine.sh"}]\n']) {
+    f.save(hermesConfig(f), original)
+    const preview = f.install('--agent', 'hermes')
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.deepEqual(JSON.parse(preview.stdout).conflicts, [hermesConfig(f)], original)
+    const applied = f.install('--agent', 'hermes', '--apply')
+    assert.notEqual(applied.status, 0)
+    assert.equal(readFileSync(hermesConfig(f), 'utf8'), original)
+    assert.equal(existsSync(join(f.root, 'install-hermes.json')), false)
+  }
+}))
+
+test('Hermes hook events open a session block with its folder, show a closing question as a card, and idle keeps it (#1115)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const id = '20261107_101010_ab12cd'
+  const project = join(f.home, 'a project')
+  mkdirSync(project)
+  const fire = (event, extra) => {
+    const result = fireHermes(f, event, { session_id: id, cwd: project, extra })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, '')
+  }
+  fire('on_session_start', { model: 'synthetic', platform: 'cli' })
+  const opened = readFileSync(f.progress, 'utf8')
+  assert.match(opened, /^## hermes$/m)
+  assert.match(opened, new RegExp(`state=waiting .*resume=${id}`))
+  assert.doesNotMatch(opened, /- \[\?\]/)
+  const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`hermes:${id}`).digest('hex')}.json`), 'utf8'))
+  assert.equal(record.folderDigest, createHash('sha256').update(process.platform === 'win32' ? project.toLowerCase() : project).digest('hex'))
+  const secret = 'DO-NOT-STORE-THIS-PRIVATE-TEXT'
+  fire('post_llm_call', { user_message: secret, assistant_response: 'I built the page.\n\nBlue or green?', conversation_history: [{ role: 'user', content: secret }] })
+  const asked = readFileSync(f.progress, 'utf8')
+  assert.match(asked, /- \[\?\] Blue or green\?/)
+  assert.ok(!asked.includes(secret) && !JSON.stringify(record).includes(secret))
+  fire('on_session_end', { completed: true, interrupted: false })
+  const idle = readFileSync(f.progress, 'utf8')
+  assert.match(idle, /- \[\?\] Blue or green\?/)
+  assert.match(idle, /state=waiting/)
+  // A reply that asks nothing opens no card for a new session.
+  const other = fireHermes(f, 'post_llm_call', { session_id: '20261107_111111_ef34ab', cwd: project, extra: { assistant_response: 'Done.' } })
+  assert.equal(other.status, 0, other.stderr)
+  assert.equal((readFileSync(f.progress, 'utf8').match(/- \[\?\]/g) ?? []).length, 1)
+  // The hook files its events under the session Hermes names, so a report from inside that session binds to it.
+  const reported = f.command(['--codex-report', '--agent', 'hermes'], { title: 'Page', state: 'working', steps: ['- [x] Built the page', '- [~] Asking about colour'] }, { HERMES_SESSION_ID: id, CODEX_THREAD_ID: '', AGENT_BOARD_AGENT: '', AGENT_BOARD_SESSION_ID: '' })
+  assert.equal(reported.status, 0, reported.stderr)
+  assert.equal(JSON.parse(reported.stdout).block, createHash('sha256').update(`hermes:${id}`).digest('hex').slice(0, 8))
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[~\] Asking about colour/)
+  // With no Hermes session id and no one session in this folder, a report is refused instead of guessed.
+  const unbound = f.command(['--codex-report', '--agent', 'hermes'], { title: 'Page', state: 'working', steps: ['- [~] Step'] }, { HERMES_SESSION_ID: '', CODEX_THREAD_ID: '', AGENT_BOARD_AGENT: '', AGENT_BOARD_SESSION_ID: '' })
+  assert.notEqual(unbound.status, 0)
+}))
+
+test('Hermes trust is only what the person asks for: the board\'s exact commands, others kept, removed with the hooks (#1115)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  // Without an owned Hermes install there is nothing to trust.
+  assert.notEqual(f.command(['--hermes-trust', '--apply']).status, 0)
+  assert.equal(existsSync(hermesAllowlist(f)), false)
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const doctor = () => JSON.parse(f.command(['--codex-doctor', '--agent', 'hermes', '--json']).stdout)
+  assert.equal(doctor().hooksTrusted, false)
+  const preview = f.command(['--hermes-trust', '--json'])
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.deepEqual(JSON.parse(preview.stdout).entries.map(entry => [entry.event, entry.trusted]), hermesEvents.map(event => [event, false]))
+  assert.equal(existsSync(hermesAllowlist(f)), false)
+  // A non-ASCII command: Hermes reads this file in the system code page, so it must stay ASCII.
+  const foreign = { approvals: [{ approved_at: '2026-01-01T00:00:00Z', command: 'C:/使用者/my-guard.sh', event: 'pre_tool_call', script_mtime_at_approval: null }] }
+  const isAscii = () => [...readFileSync(hermesAllowlist(f))].every(byte => byte < 0x80)
+  f.save(hermesAllowlist(f), JSON.stringify(foreign, null, 2))
+  const applied = f.command(['--hermes-trust', '--apply', '--json'])
+  assert.equal(applied.status, 0, applied.stderr)
+  const approvals = JSON.parse(readFileSync(hermesAllowlist(f), 'utf8')).approvals
+  const hooks = hermesHooksOf(readFileSync(hermesConfig(f), 'utf8'))
+  assert.deepEqual(approvals[0], foreign.approvals[0])
+  assert.ok(isAscii(), 'the trust file stays ASCII after --apply')
+  assert.deepEqual(approvals.slice(1).map(entry => [entry.event, entry.command]), hermesEvents.map(event => [event, hooks[event].command]))
+  assert.equal(doctor().hooksTrusted, true)
+  assert.doesNotMatch(readFileSync(hermesConfig(f), 'utf8'), /accept/i)
+  const before = readFileSync(hermesAllowlist(f), 'utf8')
+  assert.equal(f.command(['--hermes-trust', '--apply', '--json']).status, 0)
+  assert.equal(readFileSync(hermesAllowlist(f), 'utf8'), before)
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(hermesAllowlist(f), 'utf8')), foreign)
+  assert.ok(isAscii(), 'the trust file stays ASCII after removal')
+}))
+
+test('Hermes pre_llm_call marks the session working, prints nothing for Hermes to inject, and closes an answered question (#1115)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const id = '20261107_121212_cd56ef'
+  const project = join(f.home, 'project')
+  mkdirSync(project)
+  assert.equal(fireHermes(f, 'on_session_start', { session_id: id, cwd: project, extra: {} }).status, 0)
+  const asked = fireHermes(f, 'post_llm_call', { session_id: id, cwd: project, extra: { assistant_response: 'Built it.\n\nBlue or green?' } })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Blue or green\?/)
+  // Hermes reads this hook's stdout as context to put in front of the model, so it must stay empty.
+  const next = fireHermes(f, 'pre_llm_call', { session_id: id, cwd: project, extra: { user_message: 'green', is_first_turn: false } })
+  assert.equal(next.status, 0, next.stderr)
+  assert.equal(next.stdout, '')
+  assert.equal(next.stderr, '')
+  const working = readFileSync(f.progress, 'utf8')
+  assert.match(working, /state=working/)
+  assert.doesNotMatch(working, /- \[\?\]/)
+}))
+
+test('Hermes post_llm_call with a 3 MB conversation_history still lands its status and question, and keeps none of the history (#1115)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const project = join(f.home, 'project')
+  mkdirSync(project)
+  const marker = 'HISTORY-MARKER-DO-NOT-KEEP'
+  const history = [{ role: 'user', content: marker + ' ' + 'h'.repeat(3 * 1024 * 1024) }]
+  const big = fireHermes(f, 'post_llm_call', { session_id: '20261107_131313_aa11bb', cwd: project, extra: { assistant_response: 'Done.\n\nShip it now?', conversation_history: history } })
+  assert.equal(big.status, 0, big.stderr + hookLog(f))
+  assert.equal(big.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^## hermes$/m, hookLog(f))
+  assert.match(text, /- \[\?\] Ship it now\?/)
+  assert.equal(hookLog(f).includes('INPUT_TOO_LARGE'), false)
+  // A reply that is itself cut by the 1 MB limit gives a status and no question.
+  const cut = fireHermes(f, 'post_llm_call', { session_id: '20261107_141414_bb22cc', cwd: project, extra: { assistant_response: 'r'.repeat(2 * 1024 * 1024) + ' Which one?', conversation_history: history } })
+  assert.equal(cut.status, 0, cut.stderr)
+  const after = readFileSync(f.progress, 'utf8')
+  assert.match(after, /state=waiting .*resume=20261107_141414_bb22cc/)
+  assert.equal((after.match(/- \[\?\]/g) ?? []).length, 1)
+  assert.ok(!after.includes('Which one?'))
+  // Nothing from the history reaches the progress file, a session record or a queued copy.
+  for (const name of readdirSync(f.root, { recursive: true })) {
+    const path = join(f.root, name)
+    if (statSync(path).isFile() && statSync(path).size < 5e6) assert.ok(!readFileSync(path, 'utf8').includes(marker), name)
+  }
+  assert.ok(!after.includes(marker))
+}))
+
+test('a Codex hook input past 1 MB is still refused as INPUT_TOO_LARGE, only Hermes keeps reading (#1115)', () => fixture(f => {
+  f.install('--apply')
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  spawnSync(process.execPath, [worker, '--hook-version', '1', '--hook-event', 'UserPromptSubmit', '--codex-event', '--agent', 'codex', '--progress-file', f.progress, '--hook-started', String(Date.now())], { env: f.env, input: JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-big', prompt: 'x'.repeat(2 * 1024 * 1024) }), encoding: 'utf8', windowsHide: true, timeout: 30000 })
+  assert.match(hookLog(f), /INPUT_TOO_LARGE/)
+}))
+
+test('the Hermes folder follows Hermes itself: HERMES_HOME, then LOCALAPPDATA on Windows, then ~/.hermes (#1115)', async () => {
+  const { hermesHome } = await importTs('../hooks/hermes-home.ts')
+  const posix = hermesHome('/home/ann', '/', {}, 'linux')
+  assert.equal(posix, '/home/ann/.hermes')
+  assert.equal(hermesHome('/home/ann', '/', { LOCALAPPDATA: '/x' }, 'darwin'), '/home/ann/.hermes')
+  const own = { USERPROFILE: 'C:\\Users\\ann', LOCALAPPDATA: 'C:\\Users\\ann\\AppData\\Local' }
+  assert.equal(hermesHome('C:\\Users\\ann', '\\', own, 'win32'), 'C:\\Users\\ann\\AppData\\Local\\hermes')
+  // Same folder spelled differently still counts as the running account's.
+  assert.equal(hermesHome('c:/users/ANN/', '\\', own, 'win32'), 'C:\\Users\\ann\\AppData\\Local\\hermes')
+  // No LOCALAPPDATA: Hermes's own fallback under the profile.
+  assert.equal(hermesHome('C:\\Users\\ann', '\\', { USERPROFILE: 'C:\\Users\\ann' }, 'win32'), 'C:\\Users\\ann\\AppData\\Local\\hermes')
+  // Another account's folder never borrows this account's LOCALAPPDATA.
+  assert.equal(hermesHome('C:\\Users\\bob', '\\', own, 'win32'), 'C:\\Users\\bob\\AppData\\Local\\hermes')
+  // HERMES_HOME wins everywhere, trimmed; an empty one is ignored.
+  assert.equal(hermesHome('C:\\Users\\ann', '\\', { ...own, HERMES_HOME: ' D:\\h ' }, 'win32'), 'D:\\h')
+  assert.equal(hermesHome('/home/ann', '/', { HERMES_HOME: '/srv/h' }, 'linux'), '/srv/h')
+  assert.equal(hermesHome('/home/ann', '/', { HERMES_HOME: '  ' }, 'linux'), '/home/ann/.hermes')
+})
+
+test('setup writes Hermes config where --hermes-dir says, ahead of HERMES_HOME (#1115)', () => fixture(f => {
+  const elsewhere = join(f.home, 'elsewhere')
+  const installed = spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', elsewhere, '--agent', 'hermes', '--apply'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  assert.ok(existsSync(join(elsewhere, 'config.yaml')))
+  assert.equal(existsSync(hermesConfig(f)), false)
+}))
+
 test('Codex lifecycle hooks never retain conversation and approval payloads, and open nothing that is not a Codex history file', () => fixture(f => {
   f.install('--apply')
   const secret = 'DO-NOT-STORE-THIS-PRIVATE-TEXT'
@@ -6315,18 +6580,19 @@ test('auto setup does not mistake an Antigravity profile or the shared gemini di
   assert.deepEqual(JSON.parse(run().stdout).targets, ['gemini', 'antigravity'])
 }))
 
-test('all targets initialize one shared board and explicitly name unfinished native adapters', () => fixture(f => {
+test('all targets initialize one shared board and name each adapter capability', () => fixture(f => {
   const installer = resolve('scripts/setup-agent.mjs')
   const result = spawnSync(process.execPath, [installer, '--agent', 'all', '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply', '--json'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
   assert.equal(result.status, 0, `${JSON.stringify({ error: result.error?.code, signal: result.signal })}\n${result.stderr}`)
   const plans = JSON.parse(result.stdout).plans
   assert.equal(plans.length, 10)
   assert.equal(new Set(plans.map(plan => plan.progress)).size, 1)
-  assert.equal(plans.find(plan => plan.agent === 'hermes').capabilities.lifecycle, 'adapter-pending')
+  assert.equal(plans.find(plan => plan.agent === 'hermes').capabilities.lifecycle, 'adapter-installed-unverified')
   for (const agent of ['openclaw', 'deepseek']) assert.equal(plans.find(plan => plan.agent === agent).capabilities.lifecycle, 'adapter-installed-unverified')
   assert.equal(plans.find(plan => plan.agent === 'antigravity').capabilities.lifecycle, 'adapter-installed-unverified')
   assert.ok(existsSync(join(f.home, '.gemini', 'commands', 'agent-board.toml')))
   assert.ok(existsSync(join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')))
+  assert.match(readFileSync(join(f.home, '.hermes', 'config.yaml'), 'utf8'), /^hooks:\n {2}on_session_start:\n/)
   for (const agent of ['gemini', 'grok', 'muse']) {
     const response = f.command(['--agent-status', '--agent', agent, '--state', 'waiting'], { session_id: `shared-${agent}-session-123`, prompt: 'PRIVATE_PAYLOAD' })
     assert.equal(response.status, 0, response.stderr)

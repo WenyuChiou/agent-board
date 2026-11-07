@@ -114,6 +114,7 @@ export const EN: Strings = {
     "antigravity": "Antigravity: start a new conversation; setup has already configured its reporting hooks.",
     "cursor": "Cursor: start a new chat in Cursor or cursor-agent; setup has already configured its reporting hooks.",
     "grok": "Grok Build: start a new session; setup has already configured its reporting hooks.",
+    "hermes": "Hermes Agent: start a new session. Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command} --hermes-trust, then run it again with --apply.",
     "muse": "Muse Code: start a new session; setup has already configured its reporting hooks.",
     "gemini": "Gemini CLI: start a new session; setup has already configured its reporting hooks.",
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin, then start a new session.",

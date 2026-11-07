@@ -63,7 +63,7 @@ import { runMcp } from './board-mcp'
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
 
 const args = process.argv.slice(2)
-const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust'].includes(arg))
+const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust'].includes(arg))
 const flag = (name: string): string | undefined => {
   const at = args.indexOf(name)
   return at === -1 ? undefined : args[at + 1]
@@ -2667,7 +2667,7 @@ try {
     const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : 'UNKNOWN'
     // A plan mirror's stderr only feeds the hook log, so it always names its code (#962 review).
     process.stderr.write(`${args.includes('--plan-event') ? s.reporterFailed(reason) : reason === 'UNBOUND_REPORT' ? s.codexReportUnbound : reason === 'LOCK_DENIED' ? s.reporterLockDenied : reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
-  } else if (args.some(arg => ['--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust'].includes(arg))) {
+  } else if (args.some(arg => ['--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust'].includes(arg))) {
     process.exitCode = 1
     const failure = setupFailure(error, flag('--agent') ?? 'codex', s)
     process.stderr.write(`${args.includes('--json') ? JSON.stringify({ error: failure }) : failure.message}\n`)

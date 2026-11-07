@@ -53,6 +53,7 @@ const summaries = [
     "antigravity": "Antigravity: start a new conversation; setup has already configured its reporting hooks.",
     "cursor": "Cursor: start a new chat in Cursor or cursor-agent; setup has already configured its reporting hooks.",
     "grok": "Grok Build: start a new session; setup has already configured its reporting hooks.",
+    "hermes": "Hermes Agent: start a new session. Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command} --hermes-trust, then run it again with --apply.",
     "muse": "Muse Code: start a new session; setup has already configured its reporting hooks.",
     "gemini": "Gemini CLI: start a new session; setup has already configured its reporting hooks.",
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin, then start a new session.",
@@ -81,6 +82,7 @@ const summaries = [
     "antigravity": "Antigravity：開始新的對話；setup 已設定回報 hooks。",
     "cursor": "Cursor：在 Cursor 或 cursor-agent 開始新的對話；setup 已設定回報 hooks。",
     "grok": "Grok Build：開始新的工作階段；setup 已設定回報 hooks。",
+    "hermes": "Hermes Agent：開始新的工作階段。Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} --hermes-trust 預覽，再加上 --apply 重新執行同一命令。",
     "muse": "Muse Code：開始新的工作階段；setup 已設定回報 hooks。",
     "gemini": "Gemini CLI：開始新的工作階段；setup 已設定回報 hooks。",
     "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛，再開始新的工作階段。",
@@ -109,6 +111,7 @@ const summaries = [
     "antigravity": "Antigravity：开始新的对话；setup 已配置报告 hooks。",
     "cursor": "Cursor：在 Cursor 或 cursor-agent 开始新的对话；setup 已配置报告 hooks。",
     "grok": "Grok Build：开始新的会话；setup 已配置报告 hooks。",
+    "hermes": "Hermes Agent：开始新的会话。Hermes 会问一次是否信任看板的 hooks，请回答 y。在无法询问的聊天渠道中，先运行 {command} --hermes-trust 预览，再加上 --apply 重新运行同一命令。",
     "muse": "Muse Code：开始新的会话；setup 已配置报告 hooks。",
     "gemini": "Gemini CLI：开始新的会话；setup 已配置报告 hooks。",
     "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件，再开始新的会话。",
@@ -206,6 +209,18 @@ const findOnPath = (commands, extensions = ['.exe', '.cmd', '.bat', '.com', '.ps
   }
 }
 
+// The folder Hermes Agent reads, chosen as Hermes does (keep in step with hooks/hermes-home.ts): HERMES_HOME,
+// else %LOCALAPPDATA%\hermes on Windows for the running account, else ~/.hermes.
+const hermesHome = home => {
+  const named = process.env.HERMES_HOME?.trim()
+  if (named) return named
+  if (process.platform !== 'win32') return join(home, '.hermes')
+  const clean = path => path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const local = process.env.LOCALAPPDATA?.trim()
+  const own = process.env.USERPROFILE ?? process.env.HOME
+  return local && own !== undefined && clean(own) === clean(home) ? join(local, 'hermes') : join(home, 'AppData', 'Local', 'hermes')
+}
+
 const main = () => {
   const at = args.indexOf('--agent')
   const selector = at < 0 ? 'auto' : args[at + 1]
@@ -235,7 +250,7 @@ const main = () => {
   const hostDirs = {
     codex: flag('--codex-dir') || process.env.CODEX_HOME,
     grok: flag('--grok-dir') || process.env.GROK_HOME,
-    hermes: flag('--hermes-dir') || process.env.HERMES_HOME,
+    hermes: flag('--hermes-dir') || hermesHome(home),
     opencode: flag('--opencode-dir') || process.env.OPENCODE_CONFIG_DIR || (process.env.XDG_CONFIG_HOME ? join(process.env.XDG_CONFIG_HOME, 'opencode') : undefined),
     openclaw: flag('--openclaw-dir') || process.env.OPENCLAW_STATE_DIR,
     deepseek: flag('--deepseek-dir') || process.env.DSH_HOME,

@@ -42,6 +42,10 @@ export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> =
   gemini: { SessionStart: 'waiting', BeforeAgent: 'working', AfterAgent: 'waiting', SessionEnd: 'ended' },
   grok: { SessionStart: 'waiting', UserPromptSubmit: 'working', Stop: 'waiting', SessionEnd: 'ended' },
   muse: { UserPromptSubmit: 'working', Stop: 'waiting', SessionEnd: 'ended' },
+  // Hermes Agent's shell hooks (#1115): a session starts, a turn begins (pre_llm_call; it prints nothing, since Hermes
+  // reads its output as context for the model), a turn ends (the reply rides on post_llm_call),
+  // and on_session_end fires after every turn, so it is idle and not the end of the session.
+  hermes: { on_session_start: 'waiting', pre_llm_call: 'working', post_llm_call: 'waiting', on_session_end: 'waiting' },
   antigravity: { SessionStart: 'waiting', PreInvocation: 'working', PostInvocation: 'working', Stop: 'waiting' },
 }
 // The one tool call each agent's plan list rides on (#922): the group's own matcher picks it, so
@@ -55,8 +59,7 @@ export const planEvents: Partial<Record<LocalAgent, { event: string; matcher: st
 // Plugin hosts have no hook groups: OpenCode's plugin sends todo.updated and OpenClaw's after_tool_call,
 // each as a --plan-event with the plan in the same shape as Codex's or Gemini's (#922).
 export const planPlugins: readonly LocalAgent[] = ['opencode', 'openclaw']
-export const lifecycleCapability = (agent: LocalAgent): string =>
-  agent === 'hermes' ? 'adapter-pending' : 'adapter-installed-unverified'
+export const lifecycleCapability = (_agent: LocalAgent): string => 'adapter-installed-unverified'
 
 // Antigravity groups events under a named definition, rather than hooks.<event>.
 // Stop ends an execution loop, not the conversation. No session-end event is invented.

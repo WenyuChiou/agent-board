@@ -154,7 +154,7 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE、CLI | Hooks 和 CLI 结尾问题 | 复制 |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | 四个 hooks 和结尾问题 | 复制；对话结束后可用 `--allow-resume` |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | CLI | 两个 hooks（停下、结束） | 复制 |
-| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | 聊天软件 | 看板和它的 skill；它自己的 hooks 还没做好 | 复制 |
+| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | 聊天软件 | 四个 shell hooks、结尾问题和汇报的步骤 | 复制 |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | 聊天软件 | 它的插件发来的对话事件 | 复制 |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | CLI | 它的插件发来的对话事件 | 复制 |
 | | dot、其他网页聊天 | 网页 | 你合并进来的区块 | 在它的对话里回 |

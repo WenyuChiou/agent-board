@@ -287,7 +287,7 @@ and cloud bots still need a host-proven binding; accepting their names does not 
 | Legacy Gemini CLI | SessionStart, BeforeAgent, AfterAgent, SessionEnd | Separate enterprise/API compatibility; not Antigravity |
 | Grok Build | SessionStart, Stop, SessionEnd | Coarse status; no working-turn event |
 | Muse Code | Stop, SessionEnd | Coarse status; no working-turn event |
-| Hermes Agent | Board and agent-specific skill installed | Native adapter pending |
+| Hermes Agent | Board, skill and four shell hooks installed | Hermes asks once to trust the hooks; native execution unverified |
 | OpenClaw | Shared board and skill installed | Native adapter pending; no conversation grant added |
 | DeepSeek Harness | Cordis lifecycle plugin with the session folder, an `agent_board` tool (open, report) and skill | Runs outside the shell sandbox; checked live on Windows in dsh web 0.2.2-rc.1, CLI and Desktop unchecked |
 | Antigravity | Named native lifecycle hooks and board skill | No session-end event or turn fence; verify CLI/App/IDE separately |
