@@ -1187,13 +1187,15 @@ export const buildView = (
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142). Nor does a row whose block state is
         // already done offer confirm (#876).
-        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && !isSilence)))
+        // A silence row past the stale time is accepted by both write guards (blocks.ts),
+        // so it offers what they accept instead of nothing (#898).
+        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && (!isSilence || stale))))
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
-            : auto === 'ended' && !isSilence && task.auto !== null
+            : auto === 'ended' && (!isSilence || stale) && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               // A working row quiet past the Working now limit is no longer at work: the
               // person can archive it instead of waiting out the 12 h stale time (#1000).

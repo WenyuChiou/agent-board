@@ -299,9 +299,9 @@ ${block('a9970002', 'cursor', 'ended', 'Synthetic card', '- [?] Synthetic ask: b
 })
 
 test('collectFinished pure function collects finished tasks from journal within N days', () => {
-  const journalText = `- 2026-11-03 14:00 · synthetic-api · Shipped the auth endpoint · Added unit tests (opencode)
-- 2026-11-01 10:00 · synthetic-api · Added database migrations · Ran migrate (codex)
-- 2026-10-20 08:00 · old-project · Outdated task · Done long ago (cursor)
+  const journalText = `- 2026-11-03 14:00 · synthetic-api · Shipped the auth endpoint · Added unit tests
+- 2026-11-01 10:00 · synthetic-api · Added database migrations · Ran migrate
+- 2026-10-20 08:00 · old-project · Outdated task · Done long ago
 `
   const source = progress(NOW)
   const finished = collectFinished(source, [journalText], [], 7, NOW, undefined, '/synthetic-home', false)
@@ -309,7 +309,7 @@ test('collectFinished pure function collects finished tasks from journal within 
   const auth = finished.find(t => t.title === 'Shipped the auth endpoint')
   assert.ok(auth)
   assert.equal(auth.project, 'synthetic-api')
-  assert.equal(auth.agent, 'opencode')
+  assert.equal(auth.agent, '')
   assert.equal(auth.finishedDate, '2026-11-03')
   assert.deepEqual(auth.steps, [{ text: 'Added unit tests', date: '2026-11-03 14:00' }])
 
@@ -327,7 +327,7 @@ test('an agent reads the week\'s finished work from the journal without the boar
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
   const month = new Date().toISOString().slice(0, 7)
   const journalName = `progress-journal-${month}.md`
-  const journalContent = `- ${yesterday} 14:00 · synthetic-api · Shipped the auth endpoint · Added unit tests (opencode)\n- ${twoDaysAgo} 10:30 · personal · Archived photo album · Scaled thumbnails\n`
+  const journalContent = `- ${yesterday} 14:00 · synthetic-api · Shipped the auth endpoint · Added unit tests\n- ${twoDaysAgo} 10:30 · personal · Archived photo album · Scaled thumbnails\n`
 
   const ran = jsonRun(['--json', '--days', '7'], { files: { [journalName]: journalContent } })
   assert.equal(ran.status, 0, ran.stderr || ran.stdout)
@@ -343,9 +343,19 @@ test('an agent reads the week\'s finished work from the journal without the boar
   const auth = document.finished.find(t => t.title === 'Shipped the auth endpoint')
   assert.ok(auth)
   assert.equal(auth.project, 'synthetic-api')
-  assert.equal(auth.agent, 'opencode')
+  assert.equal(auth.agent, '')
   assert.equal(auth.finishedDate, yesterday)
   assert.deepEqual(auth.steps, [{ text: 'Added unit tests', date: `${yesterday} 14:00` }])
+})
+
+test('a journal step ending in a word in brackets keeps its words and names no agent (#1052)', () => {
+  // A journal line is date · project · task · step; nothing in it names an agent (docs/FORMAT.md).
+  const journalText = `- 2026-11-03 14:00 · synthetic-api · Ship the build · Deploy (Windows)\n`
+  const finished = collectFinished('', [journalText], [], 7, NOW, undefined, '/synthetic-home', false)
+  const ship = finished.find(t => t.title === 'Ship the build')
+  assert.ok(ship)
+  assert.equal(ship.agent, '')
+  assert.deepEqual(ship.steps, [{ text: 'Deploy (Windows)', date: '2026-11-03 14:00' }])
 })
 
 test('--days 0 or a bad value is refused with the usage line (#1024)', () => {
@@ -368,7 +378,7 @@ test('--project narrows the finished work to that project\'s heading (#1024)', (
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
   const month = new Date().toISOString().slice(0, 7)
   const journalName = `progress-journal-${month}.md`
-  const journalContent = `- ${yesterday} 14:00 · synthetic-api · Shipped the auth endpoint · Added unit tests (opencode)\n- ${twoDaysAgo} 10:30 · personal · Archived photo album · Scaled thumbnails\n`
+  const journalContent = `- ${yesterday} 14:00 · synthetic-api · Shipped the auth endpoint · Added unit tests\n- ${twoDaysAgo} 10:30 · personal · Archived photo album · Scaled thumbnails\n`
 
   const ran = jsonRun(['--json', '--days', '7', '--project', 'synthetic-api'], { files: { [journalName]: journalContent } })
   assert.equal(ran.status, 0, ran.stderr || ran.stdout)
