@@ -40,7 +40,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const cp = require('node:child_process')
 const { syncBuiltinESMExports } = require('node:module')
-const { resolve, dirname } = require('node:path')
+const { resolve, dirname, sep } = require('node:path')
 const read = fs.readFileSync
 const readdir = fs.readdirSync
 const progressFile = resolve(process.env.STATUS_PROGRESS)
@@ -66,7 +66,7 @@ fs.readFileSync = (file, ...args) => {
     if (process.env.STATUS_DENIED_SIDECAR === 'questions') throw Object.assign(new Error('denied'), { code: 'EACCES' })
     return read(file, ...args)
   }
-  if (target.startsWith(inboxDir + '/')) {
+  if (target.startsWith(inboxDir + sep)) {
     reads.inbox[target] = (reads.inbox[target] ?? 0) + 1
     return read(file, ...args)
   }
