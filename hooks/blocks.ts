@@ -786,7 +786,7 @@ export const setManualStep = (text: string, ref: StepRef, mark: string, now?: nu
 // place of the earlier block with its id, or under its `## project` when new. It never takes
 // the place of a Claude block, another agent's block or one whose end marker is missing.
 // Arrival time cannot make a delayed report fresh or give it precedence over newer work.
-export type PasteProblem = 'noBlock' | 'mixed' | 'badBlock' | 'noProject' | 'notYours' | 'badTime' | 'futureTime' | 'oldTime' | 'older' | 'conflict' | 'unknownOrder'
+export type PasteProblem = 'noBlock' | 'mixed' | 'badBlock' | 'reservedAgent' | 'noProject' | 'notYours' | 'badTime' | 'futureTime' | 'oldTime' | 'older' | 'conflict' | 'unknownOrder'
 export type PasteReview = { token: string; current: string; incoming: string }
 export type PasteResult = { text: string; title: string; isUnchanged: boolean }
   | { problem: Exclude<PasteProblem, 'oldTime'>; review?: PasteReview }
@@ -822,9 +822,10 @@ export const mergeBlock = (text: string, pasted: string, now: number, s: Strings
   const body = raw.slice(start + 1, end)
   const title = TASK.exec(body[0] ?? '')?.[1]
   // The chat names itself in lower case; a block without an agent would read as Claude's.
-  if (title === undefined || !HEX8.test(auto.session) || named === undefined || named !== auto.agent || !AGENT_NAME.test(named) || auto.agent === 'claude' || body.some(isHiding)) {
+  if (title === undefined || !HEX8.test(auto.session) || named === undefined || named !== auto.agent || !AGENT_NAME.test(named) || body.some(isHiding)) {
     return { problem: 'badBlock' }
   }
+  if (auto.agent === 'claude') return { problem: 'reservedAgent' }
   const eol = eolOf(text)
   const lines = linesOf(text)
   const matching = scanBlocks(lines).filter(span => span.session === auto.session)

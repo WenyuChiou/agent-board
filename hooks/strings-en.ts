@@ -775,6 +775,7 @@ export const EN: Strings = {
   pasteNoBlock: 'No block with both a <!-- auto … --> start and a <!-- /auto … --> end.',
   pasteMixed: 'The start and end markers name different session ids.',
   pasteBadBlock: 'The line after the start marker must be a "### title", and the block cannot hold ```, <!-- -->, # headings or a second block.',
+  pasteReservedAgent: 'The agent name "claude" is reserved for Claude Code. Ask the web chat to use "claude-web", then paste again.',
   pasteNoProject: 'A new block needs a "## project" line first.',
   pasteNotYours: "That id belongs to a local reporter, a session with a resume binding, another agent, or an unclosed block; it can't be replaced.",
   pasteBadTime: 'Source time is missing or invalid. Ask the reporter for its current full report with a real UTC updated= time ending in Z, then paste again.',
