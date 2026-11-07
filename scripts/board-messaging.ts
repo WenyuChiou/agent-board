@@ -145,9 +145,12 @@ const openMessaging = (directory: string, isDefault = false) => {
   const isFreshDefault = isDefault && isCreated
   try {
     if (lstatSync(root).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_DIRECTORY')
+    // A start that created the folder secures it before any claim file is written inside it.
+    // A parallel start that found the default folder already there without a handoff waits if
+    // another start is still setting its ACL (#1100), then claims it.
     if (process.platform === 'win32' && trusted === undefined && (isCreated || isDefault)) {
       try {
-        privateFolder(root)
+        privateFolder(root, !isCreated)
       } catch (error) { throw new Error(isTimeout(error) ? 'ACL_CHECK_TIMEOUT' : 'MESSAGE_STORE_ACL', { cause: error }) }
     }
     const claim = claimMessageStore(root)

@@ -1,5 +1,5 @@
 import childProcess from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -329,5 +329,81 @@ test('a PowerShell that failed without a timeout is not recovered even when its 
     t.mock.restoreAll()
     syncBuiltinESMExports()
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a parallel start that finds the default folder between mkdir and its permission step waits instead of reporting MESSAGE_STORE_ACL, and a failed handoff removes only a folder it created', { skip: process.platform !== 'win32' && 'Windows ACLs only' }, async () => {
+  const { createMessaging } = await import('../scripts/board-messaging.ts')
+  const { privateFolderHandoff } = await import('../scripts/private-folder.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'board-store-acl-race-'))
+  const originalMkdir = fs.mkdirSync
+  const originalExec = childProcess.execFileSync
+  let store
+  try {
+    const folder = join(dir, 'default-messages')
+    let isHeld = false
+    let tries = 0
+    // The creator makes the folder, and the second start opens the default folder before the
+    // creator's permission step finishes: its first check sees the folder while inheritance is
+    // still being removed, and its retry succeeds without reporting MESSAGE_STORE_ACL (#1100).
+    fs.mkdirSync = (target, ...rest) => {
+      const created = originalMkdir(target, ...rest)
+      if (!isHeld && String(target) === folder) {
+        isHeld = true
+        childProcess.execFileSync = (file, args, ...execRest) => {
+          if (basename(String(file)).toLowerCase() === 'whoami.exe') return `"SYNTHETIC\\user","${sid}"\n`
+          if (Array.isArray(args) && args.includes('/save')) {
+            tries++
+            const saved = args[args.indexOf('/save') + 1]
+            // First check (two /save reads in privateFolder): inheritance not removed yet (D:AI).
+            // Retry check: inheritance removed and sole grant in place (D:P).
+            const sddl = tries <= 2 ? `D:AI(A;OICI;FA;;;${sid})` : `D:P(A;OICI;FA;;;${sid})`
+            writeFileSync(saved, `${basename(folder)}\r\n${sddl}\r\n`, 'utf16le')
+            return ''
+          }
+          return ''
+        }
+        syncBuiltinESMExports()
+        const second = createMessaging(folder, true)
+        second.close()
+      }
+      return created
+    }
+    syncBuiltinESMExports()
+    store = createMessaging(folder, true)
+    assert.equal(isHeld, true)
+    assert.equal(tries, 6)
+    store.close()
+    store = undefined
+
+    // A start that did not create the folder still refuses with MESSAGE_STORE_ACL when the folder stays non-private.
+    mkdirSync(folder)
+    let persistent = 0
+    childProcess.execFileSync = () => {
+      persistent++
+      return ''
+    }
+    syncBuiltinESMExports()
+    assert.throws(() => createMessaging(folder, true), /MESSAGE_STORE_ACL/)
+    assert.equal(persistent, 7)
+
+    // A handoff for an existing folder that fails its check must not remove the folder or report isCreated.
+    fs.mkdirSync = originalMkdir
+    const existing = join(dir, 'existing')
+    mkdirSync(existing)
+    syncBuiltinESMExports()
+    assert.throws(() => privateFolderHandoff(existing), /PRIVATE_FOLDER/)
+    assert.equal(existsSync(existing), true)
+    childProcess.execFileSync = originalExec
+    syncBuiltinESMExports()
+    assert.equal(JSON.parse(privateFolderHandoff(existing)).isCreated, false)
+    const fresh = join(dir, 'fresh')
+    assert.equal(JSON.parse(privateFolderHandoff(fresh)).isCreated, true)
+  } finally {
+    fs.mkdirSync = originalMkdir
+    childProcess.execFileSync = originalExec
+    syncBuiltinESMExports()
+    store?.close()
+    rmSync(dir, { recursive: true, force: true })
   }
 })
