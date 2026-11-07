@@ -1189,6 +1189,38 @@ test('a choice with a comma before 還是 / or still reads both options', () => 
   })
 })
 
+test('an English "Should X be A or B?" question offers A and B as the answers, without the question words', () => {
+  expect(askOf('Should the retry limit be 3 or 5?', '')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
+  expect(askOf('Retry limit', 'Should the retry limit be 3 or 5?')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
+  // An imperative lead is not a question frame: it stays whole.
+  expect(askOf('Keep the old screenshots or redraw them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Keep the old screenshots', 'redraw them'],
+  })
+})
+
+test('an English question with a relative clause keeps its words and does not strip to the clause\'s verb', () => {
+  expect(askOf('Should I keep files that are backed up or delete them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep files that are backed up', 'delete them'],
+  })
+  expect(askOf('Should I keep files which are backed up or delete them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep files which are backed up', 'delete them'],
+  })
+  expect(askOf('Should I keep the person who is responsible or let them go?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep the person who is responsible', 'let them go'],
+  })
+  // A copula in an if-clause is not the main verb either.
+  expect(askOf('Should I keep files if they are backed up or delete them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep files if they are backed up', 'delete them'],
+  })
+  // A leading `that` is the subject itself, not a clause: it still strips.
+  expect(askOf('Should that file be deleted or kept?', '')).toMatchObject({ kind: 'choose', options: ['deleted', 'kept'] })
+})
+
 test('archiving never ages out a block with no time, and keeps a section someone left empty', () => {
   const text = `# P
 
