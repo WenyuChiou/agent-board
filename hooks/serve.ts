@@ -39,8 +39,9 @@ const reachable = (agent: string, session: string | undefined, target: AgentTarg
   const found = liveTarget(agent, session, targets)
   return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
 }
-const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[], now: number, s: Strings): { receipt?: Receipt } => {
-  const one = session === undefined ? undefined : messages.filter(message => message.to === address(agent || 'claude', session)).at(-1)
+const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[], now: number, s: Strings, answers?: string): { receipt?: Receipt } => {
+  // A kept question names the one message that answered it; a message with no such link is no receipt for it.
+  const one = session === undefined ? undefined : messages.filter(message => message.to === address(agent || 'claude', session) && (answers === undefined || message.answers === answers)).at(-1)
   return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerCase() === 'claude'
@@ -215,7 +216,7 @@ export type ServeRow = {
 // A question marked answered, listed so it can be shown again.
 export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string; questionId?: string }
 // key names the line in the action route; canHide is false for a retained source that is only for review.
-export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null }
+export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null; receipt?: Receipt }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
@@ -326,7 +327,8 @@ const noteLined = (text?: string): { noteLine?: string } => {
 // agent on the computer is offered as a copy instead.
 // A question on the reminder or Older shelf. The page may hide it under the key the action route names,
 // unless it is a retained source kept for review only.
-const retainedOf = (item: WaitingItem): ServeRetained => ({
+const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): ServeRetained => ({
+  ...receipt,
   key: olderKey(item),
   canHide: item.hideKey !== '' && item.canHide !== false,
   ...(item.hideKey !== '' && item.canHide !== false ? { unhideKey: `hidden:${item.hideKey}` } : {}),
@@ -347,6 +349,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
+  // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
+  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, item.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId))
   const asks: ServeAsk[] = []
   const groups = new Map<string, ServeRow[]>()
   const idle: ServeRow[] = []
@@ -513,14 +517,14 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     idle,
     stopped,
     hidden: view.hidden.map(item => ({ key: `hidden:${item.hideKey}`, project: item.project, agent: item.agent, ...(item.where === 'manual' ? { isOwn: true as const } : {}), task: item.task, text: item.text, ...(item.questionId === undefined ? {} : { questionId: item.questionId }) })),
-    reminder: (view.reminder ?? []).map(retainedOf),
-    older: (view.older ?? []).map(retainedOf),
+    reminder: (view.reminder ?? []).map(retained),
+    older: (view.older ?? []).map(retained),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
     recent: view.recent.map(item => ({ project: item.project, title: item.title, ...lined(item.title), when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')), ...askingFp(item.key) })),
   }
   if (group === undefined) return model
-  const extra = (item: WaitingItem): ServeRetained => ({ ...retainedOf(item), ...(item.at === undefined ? {} : { at: item.at }), dir: item.dir ?? null })
+  const extra = (item: WaitingItem): ServeRetained => ({ ...retained(item), ...(item.at === undefined ? {} : { at: item.at }), dir: item.dir ?? null })
   model.reminder = (view.reminder ?? []).map(extra)
   model.older = (view.older ?? []).map(extra)
   model.finished = (view.finished ?? []).map(item => ({ ...item, key: `row:${item.key}`, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')), ...askingFp(item.key) }))
@@ -576,7 +580,7 @@ export type ServeAction =
   | { type: 'hide'; key: string; text: string }
   | { type: 'unhide'; key: string | null }
   | { type: 'send'; target: AgentTarget; text: string; title: string }
-  | { type: 'message'; connection: Delivery; text: string; title: string }
+  | { type: 'message'; connection: Delivery; text: string; title: string; answers?: string }
   | { type: 'refuse'; note: string }
 
 const MAX_REPLY = 4000
@@ -660,7 +664,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'message') {
     const question = item.type === 'ask' ? item.ask.text : item.row.question ?? ''
     if (isLan || !connected || connected.id !== request.connection || connected.turn !== request.turn || connected.session !== request.session || (request.asked ?? '') !== question || !text) return { type: 'refuse', note: s.messagesFailed }
-    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title }
+    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
   }
   if (connected) return { type: 'refuse', note: s.boardLineChanged }
   if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }

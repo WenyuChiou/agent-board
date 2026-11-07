@@ -29,6 +29,8 @@ export type Message = {
   // The name a hook gave its claim, and how many times a claim nobody accepted was handed out again (#990).
   ref?: string
   redelivered?: number
+  // The id of the question this message answers, set only by the board: a kept question finds its own receipt by it.
+  answers?: string
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 export const isMailboxTarget = (id: string): boolean => /^mailbox_[0-9a-f]{24}$/.test(id)
@@ -137,6 +139,7 @@ export const messageText = (value: unknown, max = 8000): string => {
   if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0')) throw new Error('INVALID_TEXT')
   return value
 }
+export const isAnswersId = (value: unknown): value is string => typeof value === 'string' && value.length >= 1 && value.length <= 200 && !/[\r\n\0]/.test(value)
 export const messageId = (value: unknown): string => {
   if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) throw new Error('INVALID_ID')
   return value
@@ -156,7 +159,9 @@ export const dismissMessage = (state: MessageState, id: string, now: number): Me
 }
 
 export const queueMessage = (state: MessageState, input: Record<string, unknown>, from: string, target: Connection | undefined, now: number, origin: Origin = 'local', framingNonce?: string): { state: MessageState; message: Message } => {
-  messageFields(input, ['id', 'target', 'turn', 'text'])
+  messageFields(input, ['id', 'target', 'turn', 'text', 'answers'])
+  if (input.answers !== undefined && !isAnswersId(input.answers)) throw new Error('INVALID_ID')
+  const answers = from === 'board' ? input.answers : undefined
   const request = { id: messageId(input.id), target: messageId(input.target), turn: messageId(input.turn), from, text: messageText(input.text) }
   if (/^\s*agent board message(?:,| from )/im.test(request.text) || /reply first with this line alone|<<<\s*AB-|AB-[0-9a-f]{6,32}\s*>>>/i.test(request.text)) throw new Error('TEXT_REFUSED')
   const existing = state.messages.find(one => one.id === request.id)
@@ -188,7 +193,7 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
   if (state.messages.filter(isOpen).length >= OPEN_CAP || state.messages.length >= OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('MESSAGE_LIMIT')
-  const message: Message = { ...request, ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
+  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
   return { state: { ...state, messages: [...state.messages, message] }, message }
 }
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string): { state: MessageState; messages: Message[] } => {

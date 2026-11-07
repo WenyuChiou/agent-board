@@ -117,7 +117,7 @@ export const lastQuestion = (answer: string, isFull = false): string | null => {
 
 // A web link, without the punctuation or closing quote that follows it in a sentence
 // (`… at https://x.dev/a?`, `“Review https://x.dev/a?”`).
-const LINK = /https?:\/\/[^\s<>"'`“”‘’「」『』]*[^\s<>"'`“”‘’「」『』.,;:!?？。！，、)\]）]/g
+const LINK = /https?:\/\/[^\s<>"'`“”‘’「」『』，。！？、；：（）]*[^\s<>"'`“”‘’「」『』.,;:!?？。！，、；：（)\]）]/g
 
 // For callers that already normalized the reply: do not parse it a second time.
 export const lastQuestionInProse = (answer: string, isFull = false): string | null => {

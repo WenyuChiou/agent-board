@@ -120,6 +120,41 @@ test('the task gets a line of background with its name, and a step that needs yo
   expect(world.files.get(FILE)).toContain('- [ ] 選版號\n')
 })
 
+test('a naming refusal keeps the fallback title and background without creating a store key', async ($, on) => {
+  const request = '整理合成測試資料'
+  const context = '保留原有的測試背景'
+  const mirror = { ...emptyMirror(SESSION, 'persona_framework', Date.parse('2026-10-16T11:00:00Z')), firstPrompt: request, context }
+  const store: Record<string, unknown> = { autoConnectOff: true, inboxDone: {}, [`mirror:${SESSION}`]: mirror }
+  const world: World = {
+    files: new Map(), mtime: 1, hasTasks: true, store, asked: [],
+    named: '我無法讀取 claude-one.txt，對話中也沒有附上檔案\n請把檔案內容貼到對話中，我會依照你的格式要求回覆兩行',
+  }
+  const clock = engineBeneath(on, world)
+  await start($, request)
+  await $.tool.call({ tool: 'TaskCreate', subject: '讀取資料', description: '' })
+  const before = world.files.get(FILE) ?? ''
+  const keys = Object.keys(store).sort()
+  expect(before).toContain(`### ${request}`)
+  expect(before).toContain(`> 背景：${context}`)
+
+  await clock.advance(10)
+  expect(world.asked).toHaveLength(1)
+  expect(world.files.get(FILE)).toBe(before)
+  expect(Object.keys(store).sort()).toEqual(keys)
+  expect(store[`mirror:${SESSION}`]).toMatchObject({ title: request, context, isTitleFinal: true })
+
+  for (const subject of ['整理資料', '檢查結果', '完成測試']) await $.tool.call({ tool: 'TaskCreate', subject, description: '' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.asked).toHaveLength(2)
+  expect(world.files.get(FILE) ?? '').toContain(`### ${request}`)
+  expect(world.files.get(FILE) ?? '').toContain(`> 背景：${context}`)
+  expect(store[`mirror:${SESSION}`]).toMatchObject({ title: request, context, namedSteps: 4 })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.asked).toHaveLength(2)
+})
+
 test('the request a task is named and named again from stays inside its fence, whatever tags it holds', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true, asked: [], named: '重做進度面板\n背景：想在右側一眼看到各專案做到哪' }
   const clock = engineBeneath(on, world)
