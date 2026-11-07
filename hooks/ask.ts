@@ -68,8 +68,13 @@ const questionWords = (text: string): string => {
 // (`Keep the old screenshots`) and a lead with no such verb (`Should I set the limit to 3`)
 // stay whole. The option after `want` must not be an infinitive (`want to go`).
 const QUESTION_FRAMES = [
-  // `Should the retry limit be 3` — the option follows the copula.
-  /^(?:should|shall|can|could|may|might|will|would|do|does|did|is|are|was|were)\b.+?\b(?:be|is|are|was|were)\s+/i,
+  // `Should the retry limit be 3` — the option follows the copula. The copula must be
+  // the question's main verb: the scan stops at a word that opens a subordinate clause
+  // (`that`, `which`, `who`, `if`, …), so a copula buried in a relative or conditional
+  // clause (`files that are backed up`) never strips. A leading `that` is the subject
+  // itself (`Should that file be deleted`), not a clause. Words that head a noun-phrase
+  // modifier (`after`, `before`, `as`) are not clause openers and do not stop the scan.
+  /^(?:should|shall|can|could|may|might|will|would|do|does|did|is|are|was|were)\b(?:\s*that\s+)?(?:(?!\b(?:that|which|who|whom|whose|if|when|while|where|because|unless|although|though)\b).)*?\b(?:be|is|are|was|were)\s+/i,
   // `Is it 3` — the option follows a pronoun subject.
   /^(?:is|are|was|were)\s+(?:it|this|that|they|he|she|we|you|i)\s+/i,
   // `Do you want 3` — the option is the verb's direct object.

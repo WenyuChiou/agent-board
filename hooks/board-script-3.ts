@@ -3390,7 +3390,7 @@ export const LINES = [
 "  return question;",
 "};",
 "var QUESTION_FRAMES = [",
-"  /^(?:should|shall|can|could|may|might|will|would|do|does|did|is|are|was|were)\\b.+?\\b(?:be|is|are|was|were)\\s+/i,",
+"  /^(?:should|shall|can|could|may|might|will|would|do|does|did|is|are|was|were)\\b(?:\\s*that\\s+)?(?:(?!\\b(?:that|which|who|whom|whose|if|when|while|where|because|unless|although|though)\\b).)*?\\b(?:be|is|are|was|were)\\s+/i,",
 "  /^(?:is|are|was|were)\\s+(?:it|this|that|they|he|she|we|you|i)\\s+/i,",
 "  /^(?:do|does|did|would|will|shall|should|can|could|may|might)\\s+(?:you|we|they|he|she|it|i)\\s+(?:want|prefer|like|need|choose|pick|take|use)\\b\\s+(?!to\\b)/i,",
 "  /^which\\b[^,]*?\\b(?:prefer|like|want|choose|pick|need)\\b\\s+(?!to\\b)/i",
