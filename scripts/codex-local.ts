@@ -11,7 +11,7 @@ import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { parseProgress, STALE_MS } from '../hooks/parse'
 import { reporterTail } from './reporter-tail'
-import { othersNote } from '../hooks/others'
+import { othersNote, sessionPushNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, planEvents, planPlugins, statusEvents, windowsHookCommand } from '../hooks/local-agents'
@@ -684,7 +684,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
-      const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number }
+      const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number; pushed?: string[] }
       if (entry === current && original === null) isFirstSessionEvent = true
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
       // Direct events can arrive out of order too, before they ever enter the pending queue.
@@ -752,7 +752,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? { folder: name, folderDigest, folderCanonicalDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
-      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
       if (entry === current) reportCut = cut
       const saveFullText = (): void => {
@@ -994,14 +994,45 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       } else if (isTurnStart(agent, event)) {
         let message = null
         try { message = await mailbox?.turn(agent, session, agent === 'cursor' ? 'IDE (Composer)' : agent === 'antigravity' ? 'IDE' : 'CLI', Date.now()) ?? null } catch {}
-        if (message !== null) {
+        const owner = hash(`${agent}:${session}`)
+        const recordFile = join(root, 'sessions', `${owner}.json`)
+        let pushed: string[] = []
+        try {
+          const saved = readLocal(recordFile)
+          const parsed = saved === null ? null : JSON.parse(saved) as { pushed?: unknown }
+          if (Array.isArray(parsed?.pushed)) pushed = parsed.pushed.filter((one): one is string => typeof one === 'string')
+        } catch {}
+        let pushResult: { note: string | null; keys: string[] } = { note: null, keys: [] }
+        try {
+          const text = readLocal(progress)
+          if (text !== null) {
+            const here = [...hereNames(raw.cwd ?? current.folder), report.project].filter(name => name !== '')
+            const isGeneric = Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(report!.title))
+            pushResult = sessionPushNote(parseProgress(text), here, {
+              sessionId: owner.slice(0, 8), agent, resume: session,
+              ...(isGeneric ? {} : { title: report.title }), steps: report.steps,
+            }, new Set(pushed), Date.now(), s)
+          }
+        } catch {}
+        if (message !== null || pushResult.note !== null) {
           let hasWritten = false
           try {
-            const envelope = turnStartEnvelope(agent, event, deliveryText(message, s), base, session)
+            const combined = [message === null ? '' : deliveryText(message, s), pushResult.note ?? ''].filter(Boolean).join('\n\n')
+            const envelope = turnStartEnvelope(agent, event, combined, base, session)
             await new Promise<void>((done, fail) => process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`, error => error ? fail(error) : done()))
             hasWritten = true
           } catch {}
-          if (hasWritten) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
+          if (hasWritten && message !== null) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
+          if (hasWritten && pushResult.keys.length > 0) {
+            try {
+              const saved = readLocal(recordFile)
+              if (saved !== null) {
+                const record = JSON.parse(saved) as Json
+                const nextPushed = [...new Set([...pushed, ...pushResult.keys])].slice(-64)
+                atomic(recordFile, `${JSON.stringify({ ...record, pushed: nextPushed }, null, 2)}\n`, checkDeadline, true)
+              }
+            } catch {}
+          }
           return true
         }
         if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
