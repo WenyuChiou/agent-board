@@ -10507,7 +10507,7 @@ export const LINES = [
 "          continue;",
 "        }",
 "        try {",
-"          renameSync6(temp, file);",
+"          patiently(() => renameSync6(temp, file));",
 "        } catch (error) {",
 "          if (!isLedger || existsSync6(file))",
 "            throw error;",
