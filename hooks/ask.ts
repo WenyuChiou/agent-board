@@ -90,12 +90,45 @@ const stripQuestionFrame = (lead: string): string => {
   return lead
 }
 
+// A list item never opens like a clause or a question: a subject, an auxiliary, a question
+// word or a joining word marks the words before the list (`Which size`, `If it fails`).
+const CLAUSE_OPENING =
+  /^(?:i|we|you|he|she|they|should|shall|can|could|may|might|will|would|do|does|did|is|are|was|were|which|what|how|who|where|when|why|whether|if|once|after|before|since|because|unless|although|though|while|so|then|but|and)\b/i
+const CJK = /[㐀-鿿]/
+// `Small, medium, large or huge?` and `A、B 還是 C？` list every option before the last one
+// (#1111). The list is the run after the last colon or full stop: items split at `、`, or at
+// commas in a text with no Chinese (where a comma joins clauses). Short words opening a
+// question (`Which size, small, medium or large?`) lead it and are dropped. A comma also
+// follows a lead-in (`Great, ship or hold?`, `Tests pass, merge now or wait?`), so a comma
+// run is a list only with three items before `or`, a comma before `or`, or a question that
+// opens it. Anything else, such as a clause (`A first, or B?`, `先開旗標，還是全部開？`), is
+// not a list: null.
+const listBefore = (before: string): string[] | null => {
+  const run = (before.split(/[：:；;。]/).at(-1) ?? '').trim()
+  const isListed = run.includes('、')
+  if (!isListed && (CJK.test(run) || !run.includes(','))) return null
+  const items = run.split(isListed ? '、' : ',').map(one => one.trim())
+  const isSerial = items.at(-1) === ''
+  if (isSerial) items.pop()
+  const first = stripQuestionFrame(items[0] ?? '').replace(/^(要|用|選|是)/, '').trim()
+  const isAsked = first !== items[0] || CLAUSE_OPENING.test(first)
+  if (first === items[0] && CLAUSE_OPENING.test(first)) {
+    if (first.split(/\s+/).length > 4) return null
+    items.shift()
+  } else items[0] = first
+  const isItem = (one: string): boolean => one !== '' && one.length <= 40 && one.split(/\s+/).length <= 4 && !CLAUSE_OPENING.test(one)
+  const isList = isListed || items.length >= 3 || isSerial || isAsked
+  return isList && items.length >= 2 && items.every(isItem) ? items : null
+}
+
 // Splits `0.6.0 還是 1.0.0？` or a list Claude gave into options. The first option is the
 // clause right before 還是 / or, so `先開旗標，還是全部開？` and `A first, or B?` read too.
 const optionsOf = (text: string): string[] => {
   if (!CHOICE_MARKER.test(text)) return []
   const match = CHOICE.exec(text)
   if (match === null) return []
+  const listed = listBefore(match[1] ?? '')
+  if (listed !== null) return [...listed, (match[2] ?? '').trim()].filter(one => one !== '')
   const clauses = (match[1] ?? '')
     .split(/[，,：:；;。]/)
     .map(one => one.trim())
