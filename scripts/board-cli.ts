@@ -24,7 +24,7 @@ import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside } from './board-messaging'
-import { claimMessageStore, hasLiveClaims } from './message-store-claim'
+import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -37,10 +37,11 @@ import { pickSurface } from '../hooks/surface'
 import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
 import { boardStatus } from '../hooks/board-status'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, clipped, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, plain, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
-import { BOARD_JSON_SCHEMA, boardDocument } from '../hooks/board-json'
+import { BOARD_JSON_SCHEMA, boardDocument, collectFinished } from '../hooks/board-json'
+import type { FinishedTask } from '../hooks/board-json'
 import { RELEASED } from '../hooks/released'
-import type { AnswerRoute, BoardAction, BoardState } from '../hooks/board'
-import { LOG_TAIL, isInboxFile, keepInboxDone } from '../hooks/inbox'
+import type { AnswerRoute, BoardAction, BoardState, PendingTurn } from '../hooks/board'
+import { inboxTime, LOG_TAIL, isInboxFile, keepInboxDone } from '../hooks/inbox'
 import { oldMonthFiles, OLD_MONTHS_FOLDER } from '../hooks/old-months'
 import { appendJournal, archivePath, countDay, journalLine, journalPath, localDay, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, unwrittenEntries } from '../hooks/journal'
 import type { PendingArchiveRecord } from '../hooks/journal'
@@ -802,7 +803,10 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
           continue
         }
         try {
-          renameSync(temp, file)
+          // A virus scanner or indexer can hold the just-written temp file, or the file it
+          // replaces, for a moment on Windows (#696): the rename is tried again after short
+          // waits, since the three tight retries of the whole change never outlast that hold.
+          patiently(() => renameSync(temp, file))
         } catch (error) {
           if (!isLedger || existsSync(file)) throw error
           if (!placeOwnedQuestionFile(temp, file)) {
@@ -2283,7 +2287,7 @@ const jsonFailure = (error: unknown): void => {
 }
 
 // The one document for an agent's read: --json prints it and MCP's board_status returns it.
-const boardJson = () => {
+const boardJson = (days?: number, projectFilter?: string) => {
   // --mcp keeps running and --json does not: each read starts from what a new process would hold.
   lastSeen = {}
   lastStat = { stat: '', at: 0 }
@@ -2310,10 +2314,61 @@ const boardJson = () => {
     versions: { board, package: /^\d+\.\d+\.\d+$/.test(packageVersion) ? packageVersion : null },
     unreadable: current.unreadable ?? [],
   }
-  return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group)
+  let finished: FinishedTask[] | undefined
+  if (days !== undefined) {
+    const journalTexts: string[] = []
+    const archiveTexts: string[] = []
+    const stem = path.replace(/\.md$/i, '')
+    const fromTime = now - (days - 1) * 24 * 60 * 60 * 1000
+    const months = new Set<string>()
+    for (let t = fromTime; t <= now; t += 24 * 60 * 60 * 1000) {
+      months.add(localDay(t).slice(0, 7))
+    }
+    months.add(localDay(now).slice(0, 7))
+
+    const isThere = (file: string): boolean => {
+      try { return statSync(file).isFile() } catch { return false }
+    }
+
+    const archivesDir = join(dirname(path), OLD_MONTHS_FOLDER)
+    for (const m of months) {
+      const jBase = `${stem}-journal-${m}.md`
+      for (const f of monthParts(jBase, isThere)) {
+        const t = read(f)
+        if (t) journalTexts.push(t)
+      }
+      const jArchive = join(archivesDir, `${basename(stem)}-journal-${m}.md`)
+      for (const f of monthParts(jArchive, isThere)) {
+        const t = read(f)
+        if (t) journalTexts.push(t)
+      }
+
+      const aBase = `${stem}-archive-${m}.md`
+      for (const f of monthParts(aBase, isThere)) {
+        const t = read(f)
+        if (t) archiveTexts.push(t)
+      }
+      const aArchive = join(archivesDir, `${basename(stem)}-archive-${m}.md`)
+      for (const f of monthParts(aArchive, isThere)) {
+        const t = read(f)
+        if (t) archiveTexts.push(t)
+      }
+    }
+    finished = collectFinished(source, journalTexts, archiveTexts, days, now, projectFilter, home, isWin)
+  }
+  return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group, finished)
 }
 const json = (): void => {
-  try { process.stdout.write(`${JSON.stringify(boardJson())}\n`) } catch (error) { jsonFailure(error) }
+  try {
+    const daysIndex = args.indexOf('--days')
+    let days: number | undefined
+    if (daysIndex !== -1) {
+      const nextArg = args[daysIndex + 1]
+      days = (nextArg === undefined || nextArg.startsWith('--')) ? 7 : Number(nextArg)
+    }
+    const project = flag('--project')
+    process.stdout.write(`${JSON.stringify(boardJson(days, project))}\n`)
+  } catch (error) { jsonFailure(error) }
 }
 
 const runWatchTerminal = async (): Promise<void> => {
@@ -2402,6 +2457,21 @@ const runWatchTerminal = async (): Promise<void> => {
 }
 
 const run = async (): Promise<void> => {
+  if (args.includes('--days')) {
+    const daysIndex = args.indexOf('--days')
+    const nextArg = args[daysIndex + 1]
+    let isValid = true
+    if (nextArg !== undefined && !nextArg.startsWith('--')) {
+      if (!/^\d+$/.test(nextArg) || Number(nextArg) < 1 || Number(nextArg) > 90) {
+        isValid = false
+      }
+    }
+    if (!isValid) {
+      process.exitCode = 1
+      process.stderr.write(`${s.boardUsage}\n`)
+      return
+    }
+  }
   // Setup keeps its own --json protocol; a board read wins over every action flag.
   if (isJsonBoard) {
     json()
@@ -2422,7 +2492,28 @@ const run = async (): Promise<void> => {
     }
     const answeredText = safeSidecar(answeredPath(path))
     const questionsText = safeSidecar(questionsPath(path))
-    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), answeredText, questionsText)}\n`)
+    // A turn waiting in the inbox counts on the page and the terminal: --status reads the
+    // same inbox files, read-only and size-capped, so its line agrees (#1000). No session
+    // log is read: a turn file alone names its question.
+    let turns: PendingTurn[] = []
+    try {
+      const inboxDir = join(dirname(path), 'progress-inbox')
+      const files = readdirSync(inboxDir)
+        .filter(name => isInboxFile(name))
+        .map(name => {
+          try {
+            const text = readFileSync(join(inboxDir, name), 'utf8')
+            return { name, body: text.length > RETENTION.progressSoftBytes ? text.slice(0, RETENTION.progressSoftBytes) : text, at: inboxTime(name) ?? Date.now() }
+          } catch {
+            return null
+          }
+        })
+        .filter((file): file is { name: string; body: string; at: number } => file !== null)
+      turns = peekInbox(files, () => '', undefined, s)
+    } catch {
+      turns = []
+    }
+    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), answeredText, questionsText, turns)}\n`)
     return
   }
   const request = flag('--legacy-connect-request')

@@ -20,7 +20,7 @@ const loadSources = async () => {
   } finally { loader.deregister() }
 }
 
-const [{ BOARD_JSON_SCHEMA, boardDocument }, { serveModel }, { buildView }, { parseProgress }, { STRINGS }, { clipped, plain, redact }] = await loadSources()
+const [{ BOARD_JSON_SCHEMA, boardDocument, collectFinished }, { serveModel }, { buildView }, { parseProgress }, { STRINGS }, { clipped, plain, redact }] = await loadSources()
 const NOW = Date.parse('2026-11-04T12:00:00Z')
 const MINUTE = 60_000
 const block = (id, agent, state, title, steps, at = NOW) => `<!-- auto session=${id} agent=${agent} state=${state} updated=${new Date(at).toISOString()} -->
@@ -163,7 +163,7 @@ const snapshot = root => {
   return entries
 }
 
-const jsonRun = (args, { isFolder = false, lang = 'en', hasClockFailure = false } = {}) => {
+const jsonRun = (args, { isFolder = false, lang = 'en', hasClockFailure = false, files = {} } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'board-json-'))
   try {
     const home = join(root, 'Jane Doe')
@@ -172,7 +172,7 @@ const jsonRun = (args, { isFolder = false, lang = 'en', hasClockFailure = false 
     const path = join(dirs['.claude'], 'progress.md')
     if (isFolder) mkdirSync(path)
     else writeFileSync(path, progress(Date.now()).replace('Compare responses', `Open ${home} and set OPENAI_API_KEY=sk-test1234567890abcdef`))
-    for (const [name, text] of Object.entries({ 'progress-seen.json': '{"seen":{}}', 'progress-questions.json': '{', 'progress-questions-retired-synthetic.json': '{' })) writeFileSync(join(dirs['.claude'], name), text)
+    for (const [name, text] of Object.entries({ 'progress-seen.json': '{"seen":{}}', 'progress-questions.json': '{', 'progress-questions-retired-synthetic.json': '{', ...files })) writeFileSync(join(dirs['.claude'], name), text)
     const script = join(dirs['.claude'], 'agent-board.mjs')
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT}`)
     const prelude = join(root, 'read-only.cjs')
@@ -296,4 +296,111 @@ ${block('a9970002', 'cursor', 'ended', 'Synthetic card', '- [?] Synthetic ask: b
   const document = boardDocument(view, [], [], STRINGS.en, '', false, NOW, groupOptions())
   assert.equal(document.counts.stuck, 0)
   assert.ok(!document.needs.some(one => one.kind === 'stuck'))
+})
+
+test('collectFinished pure function collects finished tasks from journal within N days', () => {
+  const journalText = `- 2026-11-03 14:00 · synthetic-api · Shipped the auth endpoint · Added unit tests (opencode)
+- 2026-11-01 10:00 · synthetic-api · Added database migrations · Ran migrate (codex)
+- 2026-10-20 08:00 · old-project · Outdated task · Done long ago (cursor)
+`
+  const source = progress(NOW)
+  const finished = collectFinished(source, [journalText], [], 7, NOW, undefined, '/synthetic-home', false)
+  assert.ok(finished.length >= 2)
+  const auth = finished.find(t => t.title === 'Shipped the auth endpoint')
+  assert.ok(auth)
+  assert.equal(auth.project, 'synthetic-api')
+  assert.equal(auth.agent, 'opencode')
+  assert.equal(auth.finishedDate, '2026-11-03')
+  assert.deepEqual(auth.steps, [{ text: 'Added unit tests', date: '2026-11-03 14:00' }])
+
+  const outdated = finished.find(t => t.title === 'Outdated task')
+  assert.equal(outdated, undefined, 'tasks older than 7 days are excluded')
+
+  // Project filter
+  const filtered = collectFinished(source, [journalText], [], 7, NOW, 'synthetic-api', '/synthetic-home', false)
+  assert.ok(filtered.every(t => t.project === 'synthetic-api'))
+})
+
+test('an agent reads the week\'s finished work from the journal without the board text (#1024)', () => {
+  const today = new Date().toISOString().slice(0, 10)
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  const month = new Date().toISOString().slice(0, 7)
+  const journalName = `progress-journal-${month}.md`
+  const journalContent = `- ${yesterday} 14:00 · synthetic-api · Shipped the auth endpoint · Added unit tests (opencode)\n- ${twoDaysAgo} 10:30 · personal · Archived photo album · Scaled thumbnails\n`
+
+  const ran = jsonRun(['--json', '--days', '7'], { files: { [journalName]: journalContent } })
+  assert.equal(ran.status, 0, ran.stderr || ran.stdout)
+  assert.equal(ran.stderr, '')
+  assert.equal(ran.stdout.trimEnd().split('\n').length, 1)
+  assert.ok(ran.stdout.endsWith('\n'))
+  assert.ok(!ran.stdout.includes('Updates every 2 seconds'))
+  assert.ok(!ran.stdout.includes('needs you ·'))
+
+  const document = JSON.parse(ran.stdout)
+  assert.equal(document.schemaVersion, 1)
+  assert.ok(Array.isArray(document.finished))
+  const auth = document.finished.find(t => t.title === 'Shipped the auth endpoint')
+  assert.ok(auth)
+  assert.equal(auth.project, 'synthetic-api')
+  assert.equal(auth.agent, 'opencode')
+  assert.equal(auth.finishedDate, yesterday)
+  assert.deepEqual(auth.steps, [{ text: 'Added unit tests', date: `${yesterday} 14:00` }])
+})
+
+test('--days 0 or a bad value is refused with the usage line (#1024)', () => {
+  const badArgs = [
+    ['--json', '--days', '0'],
+    ['--json', '--days', '-1'],
+    ['--json', '--days', '91'],
+    ['--json', '--days', 'invalid'],
+    ['--json', '--days', '3.14'],
+  ]
+  for (const args of badArgs) {
+    const ran = jsonRun(args)
+    assert.equal(ran.status, 1, `expected status 1 for ${args.join(' ')}`)
+    assert.ok(ran.stderr.includes(STRINGS.en.boardUsage), `stderr should contain usage line: ${ran.stderr}`)
+  }
+})
+
+test('--project narrows the finished work to that project\'s heading (#1024)', () => {
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  const month = new Date().toISOString().slice(0, 7)
+  const journalName = `progress-journal-${month}.md`
+  const journalContent = `- ${yesterday} 14:00 · synthetic-api · Shipped the auth endpoint · Added unit tests (opencode)\n- ${twoDaysAgo} 10:30 · personal · Archived photo album · Scaled thumbnails\n`
+
+  const ran = jsonRun(['--json', '--days', '7', '--project', 'synthetic-api'], { files: { [journalName]: journalContent } })
+  assert.equal(ran.status, 0, ran.stderr || ran.stdout)
+  assert.equal(ran.stderr, '')
+  const document = JSON.parse(ran.stdout)
+  assert.ok(Array.isArray(document.finished))
+  assert.ok(document.finished.length > 0)
+  assert.ok(document.finished.every(t => t.project === 'synthetic-api'))
+  assert.ok(!document.finished.some(t => t.project === 'personal'))
+})
+
+test('collectFinished collects finished tasks from archives using heading date and preserves auto agent (#1024)', () => {
+  const archiveText = `## synthetic-api · 2026-11-02
+<!-- auto session=a3000001 agent=codex state=done updated=2026-11-02T10:00:00.000Z -->
+### Database refactor
+- [x] Migrated schemas
+<!-- /auto session=a3000001 -->
+`
+  const finished = collectFinished('', [], [archiveText], 7, NOW, undefined, '/synthetic-home', false)
+  assert.equal(finished.length, 1)
+  assert.equal(finished[0].title, 'Database refactor')
+  assert.equal(finished[0].project, 'synthetic-api')
+  assert.equal(finished[0].agent, 'codex')
+  assert.equal(finished[0].finishedDate, '2026-11-02')
+  assert.deepEqual(finished[0].steps, [{ text: 'Migrated schemas', date: '2026-11-02' }])
+})
+
+test('undated manual completed tasks in progress.md are not fabricated as today (#1024)', () => {
+  const manualUndated = `## synthetic-api
+### Old manual task without stamp
+- [x] Finished without stamp
+`
+  const finished = collectFinished(manualUndated, [], [], 1, NOW, undefined, '/synthetic-home', false)
+  assert.equal(finished.length, 0, 'undated tasks should not be fabricated as today')
 })

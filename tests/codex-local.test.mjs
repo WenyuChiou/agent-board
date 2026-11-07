@@ -5150,6 +5150,12 @@ test('Antigravity reads only a current closing question from a bounded transcrip
   save([model('a'.repeat(300000)), user, model('A long transcript.\n\nUse the blue one?')])
   assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting'], { conversationId: 'synthetic-agy-long-tail', transcriptPath: file }).status, 0)
   assert.ok(record('synthetic-agy-long-tail').steps.includes('- [?] Use the blue one?'))
+  // agy 1.5.2 hooks name transcript_full.jsonl, with the same line shape.
+  const full = join(f.home, 'conversation', 'transcript_full.jsonl')
+  f.save(full, [user, model('SYNTHETIC-PRIVATE-REPLY\n\nShould I pick a third name?')].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+  assert.equal(send('synthetic-agy-full-transcript', 'waiting', 'Stop', full).status, 0)
+  assert.ok(record('synthetic-agy-full-transcript').steps.includes('- [?] Should I pick a third name?'))
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-PRIVATE'))
 }))
 
 test('queued Grok status retains only the closing question and replays it', () => fixture(f => {
@@ -6185,6 +6191,24 @@ test('Windows Antigravity verified Node commands bypass PowerShell and preserve 
     assert.equal(actual.dev, expected.dev)
     assert.equal(actual.ino, expected.ino)
     assert.ok(!/powershell(?:\.exe)?/i.test(hook.command), hook.command)
+  }
+}))
+
+test('Windows Muse Code hooks run when the host escapes each quote for cmd, as Muse Code 1.4.14 does', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const home = join(f.home, 'muse home')
+  mkdirSync(home)
+  const env = isolatedEnv(home)
+  const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'muse', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const hooks = JSON.parse(readFileSync(join(home, '.config', 'muse', 'settings.json'), 'utf8')).hooks
+  const record = join(home, '.agent-board', 'sessions', createHash('sha256').update('muse:synthetic-muse-session').digest('hex') + '.json')
+  for (const [event, state] of [['UserPromptSubmit', 'working'], ['Stop', 'waiting'], ['SessionEnd', 'ended']]) {
+    const command = hooks[event][0].hooks[0].command
+    assert.ok(!command.includes('"'), command)
+    // Without verbatim arguments Node quotes this one argument as Muse does: each quote inside becomes \".
+    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', command], { env, input: JSON.stringify({ session_id: 'synthetic-muse-session' }), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    assert.equal(result.status, 0, hookFailure(result))
+    assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, state, event)
   }
 }))
 

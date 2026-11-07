@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
-import { emptyQuestions, observeQuestions, questionScope } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, questionScope, sourceSnapshot } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 
 const NOW = Date.parse('2026-10-16T12:00:00Z')
@@ -84,6 +84,30 @@ test('a move beside a same-prefix peer supersedes the mover alone', () => {
   expect(after.records.filter(record => record.isUnresolved).map(record => record.words).sort()).toEqual(['Mover question?', 'Peer question?'])
   const frozen = new Set([questionScope('NewProject', 'codex', 'deadbeef')])
   expect(observe(before, text, true, frozen).records.find(record => record.id === original.id)?.isUnresolved).toBe(true)
+})
+
+test('same-prefix sessions with the same title and question keep separate asks after a project move', () => {
+  const before = initial(A)
+  const original = { ...before.records[0]!, producerSources: ['synthetic receipt'], isArchived: true }
+  const ledger = { ...before, records: [original] }
+  const snapshot = JSON.stringify(ledger)
+  const text = block({ project: 'NewProject', resume: A }) + block({ project: 'NewProject', resume: B })
+  const after = observe(ledger, text)
+  expect(after.records.find(record => record.id === original.id)).toEqual({ ...original, isUnresolved: false, isPresent: false, isWaiting: false })
+  const unanswered = after.records.filter(record => record.isUnresolved)
+  expect(unanswered).toHaveLength(2)
+  expect(new Set(unanswered.map(record => record.id)).size).toBe(2)
+  expect(unanswered.map(record => record.words)).toEqual(['Confirm the synthetic plan, OK?', 'Confirm the synthetic plan, OK?'])
+  for (const resume of [A, B]) {
+    const record = unanswered.find(record => record.scope === questionScope('NewProject', 'codex', resume))!
+    expect(record.isPresent).toBe(true)
+    expect(record.isWaiting).toBe(true)
+    expect(record.source?.project).toBe('NewProject')
+    expect(record.source?.task).toBe('Synthetic task')
+    expect(record.source?.session).toBe('deadbeef')
+    expect(sourceSnapshot(record.source!.data)?.auto?.resume).toBe(resume)
+  }
+  expect(JSON.stringify(ledger)).toBe(snapshot)
 })
 
 test('a moved block without question steps still supersedes its previous project question', () => {

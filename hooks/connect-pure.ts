@@ -1015,6 +1015,10 @@ const setupHookRoots = (text: string): string[] => {
   const decoded = [...text.matchAll(/-EncodedCommand\s+([A-Za-z0-9+/]+={0,2})/g)].flatMap(match => {
     try { return [encodedCommandText(match[1]!)] } catch { return [] }
   })
+  // A quote-free direct line (Antigravity's, and Muse Code's on Windows) keeps its paths in base64.
+  for (const match of text.matchAll(/--input-type=commonjs\s+-e\s+eval\(Buffer\.from\('[A-Za-z0-9+/]+={0,2}','base64'\)\.toString\('utf8'\)\)/g)) {
+    decoded.push(...(directHookArgs(match[0]) ?? []))
+  }
   return [...new Set([text.replace(/\\(["\\])/g, '$1'), ...decoded].flatMap(source => [
     // A quoted path can hold an apostrophe: doubled for PowerShell, closed and reopened for a POSIX shell.
     ...[...source.matchAll(new RegExp(`'(${start}(?:[^'\\r\\n]|''|'\\\\'')*?)${worker}'`, 'g'))].map(match => match[1]!.replace(/'\\''|''/g, "'")),

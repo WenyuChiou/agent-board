@@ -886,6 +886,39 @@ test('the terminal board quarantines torn ledgers and rebuilds captured identiti
   }
 })
 
+// A virus scanner or indexer can hold the ledger for a moment on Windows (#696): the
+// rename is refused, then lands after a short wait, instead of failing the press. The
+// refusal here is a stubbed rename, not a held file: it stands in for the transient
+// EPERM the scanner gives, so the retry itself runs on every system, while the test
+// below it holds the file open for real on Windows. The tick rewrites the ledger (the
+// answered question's record changes); a hide writes only the hidden list, and the
+// default file's choice question has no tickable step, so neither would meet the rename.
+const HAND_FILE = '# Progress\n\n## demo\n### Hand task\n- [?] Ship it, OK?\n'
+test('a ledger rename refused for a moment waits and lands instead of failing the press', () => {
+  const seed = chatRun(['--keys', ''], { file: () => HAND_FILE, inspect: questionFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const original = JSON.parse(seed.files['progress-questions.json'])
+  assert.equal(original.records.length, 1)
+  const inspect = dir => ({ ...questionFiles(dir), progress: readFileSync(join(dir, 'progress.md'), 'utf8') })
+  const ran = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    // Four refusals: the three tight retries of the old code all meet one, and the
+    // rename after the waits is the one that lands.
+    preload: questionFault(`let refused = 0
+const originalRename = fs.renameSync
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === ledger && refused < 4) {
+    refused += 1
+    throw Object.assign(new Error('synthetic held ledger'), { code: 'EPERM' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.progress.includes('- [x] Ship it, OK?'), ran.progress)
+  assert.notEqual(ran.files['progress-questions.json'], seed.files['progress-questions.json'], 'the tick rewrote the ledger')
+})
+
 test('the terminal board preserves unknown JSON ledgers and never overwrites a quarantine collision', () => {
   const unknown = '{"version":99,"future":"keep these bytes"}\n'
   const kept = chatRun(['--keys', 'down h'], { beside: { 'progress-questions.json': unknown }, inspect: questionFiles })
@@ -4056,6 +4089,71 @@ test('a press on the terminal board shows its result under the pressed card', as
     assert.equal(footer.at(-1), 'Page opened')
     assert.match(footer.at(-2), /[↑↓]/)
   } finally { fixture.close() }
+})
+
+// A virus scanner or indexer can hold the ledger for a moment on Windows (#696), and the
+// rename onto it is refused until the hold lifts. This holds the ledger open the way a
+// scanner does — readable, but not renameable — and the press still lands. The rename
+// count proves the hold was in the rename's way: a rename that lands on the first try
+// means the hold was never there, and the test proved nothing.
+test('a press whose ledger is held open for a moment still lands on Windows', { skip: process.platform !== 'win32' && 'Windows file holds only', timeout: 60_000 }, async () => {
+  const fixture = await pressRuntime()
+  const { runtime } = fixture
+  const ledger = join(fixture.root, 'progress-questions.json')
+  const marker = join(fixture.root, 'ledger-held')
+  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const quote = text => `'${text.replaceAll("'", "''")}'`
+  let holder = null
+  try {
+    // A hand-kept question, ticked: the tick answers it, so the next view rewrites the
+    // ledger, which is the rename the hold must meet.
+    let found = null
+    for (const cell of PRESS_CELLS.filter(one => one.kind === 'hand-kept')) {
+      fixture.reset(cell)
+      const view = runtime.view()
+      const items = runtime.boardItems(view, runtime.pending(), true, true)
+      const item = pressItemFor(items, cell.title)
+      if (item === undefined) continue
+      if (!pressKeysFor(item).includes('x')) continue
+      found = { cell, items, item }
+      break
+    }
+    assert.ok(found, 'a tickable hand-kept question is offered')
+    const { items, item } = found
+    const at = items.indexOf(item)
+    const state = runtime.pinned({ ...runtime.emptyBoardState, selected: at, isIdleOpen: true, isOlderOpen: true }, items)
+    const offered = runtime.boardKey(state, 'x', items, runtime.s)
+    assert.equal(offered.action?.type, 'tick')
+    // Count the ledger renames from here: the search above may already have rewritten
+    // it, and only the renames under the hold prove anything.
+    let ledgerRenames = 0
+    const patchedRename = fs.renameSync
+    fs.renameSync = (from, to, ...rest) => {
+      if (resolve(String(to)) === resolve(ledger)) ledgerRenames += 1
+      return patchedRename(from, to, ...rest)
+    }
+    syncBuiltinESMExports()
+    // Readable, but not renameable, for 500 ms: inside the waits the rename allows, and
+    // long past the three tight retries that used to meet the hold.
+    let holderErr = ''
+    holder = spawn(powershell, ['-NoProfile', '-NonInteractive', '-Command',
+      `$fs = [System.IO.File]::Open(${quote(ledger)}, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read); [System.IO.File]::WriteAllText(${quote(marker)}, 'held'); Start-Sleep -Milliseconds 500; $fs.Close()`],
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    holder.stderr.on('data', chunk => { holderErr += chunk })
+    for (let tries = 0; !existsSync(marker) && tries < 300; tries++) await delay(100)
+    assert.ok(existsSync(marker), `the holder never took hold: ${holderErr}`)
+    const pressed = runtime.press(state, 'x')
+    assert.equal(pressed.state.note, pressExpected(runtime, offered.action), 'the tick lands while the ledger is held')
+    runtime.view()
+    pressChanged(fixture, offered.action, 'held ledger tick')
+    assert.ok(ledgerRenames >= 2, `the hold was in the rename's way: ${ledgerRenames} ledger renames`)
+    const exited = holder.exitCode !== null ? Promise.resolve() : new Promise(resolve => holder.once('exit', resolve))
+    await Promise.race([exited, delay(10_000)])
+    assert.ok(holder.exitCode !== null, 'the holder is still running')
+  } finally {
+    if (holder !== null && holder.exitCode === null) holder.kill()
+    fixture.close()
+  }
 })
 
 test('a long press result under a card wraps to the width instead of being cut', async () => {

@@ -161,7 +161,8 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   if (/^\s*agent board message(?:,| from )/im.test(request.text) || /reply first with this line alone|<<<\s*AB-|AB-[0-9a-f]{6,32}\s*>>>/i.test(request.text)) throw new Error('TEXT_REFUSED')
   const existing = state.messages.find(one => one.id === request.id)
   if (existing) {
-    if (existing.target !== request.target || existing.turn !== request.turn || existing.from !== request.from || existing.hash !== textHash(request.text)) throw new Error('ID_CONFLICT')
+    const isMovedMailbox = request.target === `mailbox_${sha256(existing.to).slice(0, 24)}` && request.turn === 'session'
+    if ((!isMovedMailbox && (existing.target !== request.target || existing.turn !== request.turn)) || existing.from !== request.from || existing.hash !== textHash(request.text)) throw new Error('ID_CONFLICT')
     return { state, message: existing }
   }
   if (from !== 'board') {
@@ -192,14 +193,17 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
 }
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string): { state: MessageState; messages: Message[] } => {
   if (target.contested || target.expires <= now) return { state, messages: [] }
+  const to = address(target.agent, target.session)
   // A lapsed claim stops blocking only the binding that takes it again; any other still waits behind it.
   const isRetaken = (one: Message): boolean => isLapsed(one, now) && one.target === target.id && one.turn === target.turn
-  const busy = state.messages.some(one => one.to === address(target.agent, target.session) && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isRetaken(one))
-  const messages = busy ? [] : state.messages.filter(one => one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))).slice(0, 1)
+  const busy = state.messages.some(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isRetaken(one))
+  const canClaim = (one: Message): boolean => one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))
+    || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === 'queued'
+  const messages = busy ? [] : state.messages.filter(canClaim).slice(0, 1)
   if (messages.length === 0) return { state, messages }
   // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.
   const claimed = messages.map(({ ref: _ref, ...one }) => ({
-    ...one, status: 'uncertain' as const, claimed: now, nonce: one.nonce || nonce, updated: now,
+    ...one, target: target.id, turn: target.turn, status: 'uncertain' as const, claimed: now, nonce: one.nonce || nonce, updated: now,
     ...(one.status === 'uncertain' ? { redelivered: (one.redelivered ?? 0) + 1 } : {}), ...(ref === undefined ? {} : { ref }),
   }))
   return { state: { ...state, messages: state.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }
