@@ -45,15 +45,27 @@ const measure = world => {
 // On a busy machine a reporter can give up at its own time limit before it writes its file, and
 // exits 0 without having cleaned up (the host-timeout problem #241 describes). The next turn of
 // the agent would run it again, so this does too, up to three times.
+// A busy Windows runner can also leave PowerShell slow to exit after it wrote its turn file
+// (the #799 shape: the answer is written but the process has not exited when the driver's 20 s
+// limit runs out), so a driver timeout is not proof the turn was lost: the file below says
+// whether it was written. A timeout with no new file still fails — the reporter did not finish
+// in its budget, and no longer wait is the fix for that (R6).
 const reportTurn = async (world, session) => {
   const payload = JSON.stringify({ session_id: session, cwd: world.root, last_assistant_message: 'Synced the list.' })
   const before = new Set(readdirSync(world.inbox))
+  const wroteTurn = () => readdirSync(world.inbox).some(name => !before.has(name) && name.endsWith('.json'))
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const result = process.platform === 'win32'
-      ? await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', world.write('progress-report.ps1', reporterPs1()), 'hermes', 'turn'], { env: world.env, cwd: world.root, input: payload })
-      : await runProcess('/bin/sh', [world.write('progress-report.sh', reporterSh(join(world.claudeDir, 'progress-inbox'))), 'hermes', 'turn'], { env: world.env, cwd: world.root, input: payload })
+    let result
+    try {
+      result = process.platform === 'win32'
+        ? await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', world.write('progress-report.ps1', reporterPs1()), 'hermes', 'turn'], { env: world.env, cwd: world.root, input: payload })
+        : await runProcess('/bin/sh', [world.write('progress-report.sh', reporterSh(join(world.claudeDir, 'progress-inbox'))), 'hermes', 'turn'], { env: world.env, cwd: world.root, input: payload })
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.startsWith('Driver timed out after ') || !wroteTurn()) throw error
+      return
+    }
     assert.equal(result.status, 0, result.stderr || result.stdout)
-    if (readdirSync(world.inbox).some(name => !before.has(name) && name.endsWith('.json'))) return
+    if (wroteTurn()) return
   }
   assert.fail('The reporter wrote no turn file in three tries')
 }
