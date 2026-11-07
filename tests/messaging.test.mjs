@@ -134,6 +134,65 @@ test('a mailbox message a hook claimed but never accepted is handed out again af
   assert.equal(takeMailboxMessage(inbox, 'codex', 'mailbox-session', 'CLI', now + 10 * MAILBOX_LEASE_MS, '555555', 'a1b2c3d4e5f6').message, null)
 })
 
+test('a queued mailbox message shows busy on the card when a live poller connects, then moves to the poller in order without replay', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-live-poller-'))
+  let hub
+  try {
+    const now = Date.now()
+    const session = '00000001-2222-4333-8444-555555555555'
+    hub = createMessaging(dir)
+    hub.act('mailbox-turn', { agent: 'codex', session, surface: 'CLI' }, now)
+    hub.act('send', { id: 'mailbox-first', target: mailboxId('codex', session), turn: 'session', text: 'first from mailbox' }, now)
+    const live = hub.act('register', { agent: 'codex', session, surface: 'CLI', turn: 'turn1' }, now + 1)
+    const peer = hub.act('register', { agent: 'gemini', session: 'peer-session', surface: 'CLI', turn: 'peer-turn' }, now + 1)
+
+    const { servePage } = await import('../hooks/serve.ts')
+    const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+    const file = `## Synthetic
+<!-- auto session=abcdef01 agent=codex resume=${session} state=waiting updated=${new Date(now + 1).toISOString()} -->
+### Mailbox handoff
+- [?] Pick a path — A) Fast B) Safe
+<!-- /auto session=abcdef01 -->
+`
+    const view = buildView(parseProgress(file), [], null, now + 1, 0, {}, EN)
+    const model = serveModel(view, [], EN, new Set(), false, hub.snapshot(now + 1), false, { now: now + 1, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+    assert.equal(model.asks[0].send, 'connected')
+    assert.equal(model.asks[0].isSending, true)
+    const workingFile = file.replace('state=waiting', 'state=working').replace('- [?] Pick a path — A) Fast B) Safe', '- [~] Working on the path')
+    const workingModel = serveModel(buildView(parseProgress(workingFile), [], null, now + 1, 0, {}, EN), [], EN, new Set(), false, hub.snapshot(now + 1), false, { now: now + 1, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+    assert.equal(workingModel.groups[0].rows[0].send, 'connected')
+    assert.equal(workingModel.groups[0].rows[0].isSending, true)
+    const page = await pageDom(servePage(EN, 'synthetic'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
+    assert.equal(page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.serveSend('Codex')).disabled, true)
+    assert.ok(page.text().includes(EN.serveSendBusy('Codex')), page.text())
+
+    // A peer queues a live message behind the mailbox message; the poller takes them in order.
+    hub.act('send', { id: 'live-second', target: live.id, turn: 'turn1', text: 'second from peer', source: peer.id, secret: peer.secret }, now + 2)
+    const firstPoll = hub.act('poll', { connection: live.id, secret: live.secret, turn: 'turn1' }, now + 3)
+    assert.equal(firstPoll.messages.length, 1)
+    assert.deepEqual([firstPoll.messages[0].id, firstPoll.messages[0].target, firstPoll.messages[0].turn], ['mailbox-first', live.id, 'turn1'])
+    // Retrying the original mailbox send while moved returns the same message instead of conflicting.
+    assert.equal(hub.act('send', { id: 'mailbox-first', target: mailboxId('codex', session), turn: 'session', text: 'first from mailbox' }, now + 3).id, 'mailbox-first')
+
+    hub.act('receipt', { id: 'mailbox-first', connection: live.id, secret: live.secret, nonce: firstPoll.messages[0].nonce, status: 'acknowledged', reply: `ACK ${firstPoll.messages[0].nonce} done first` }, now + 4)
+    // Sending from the board to the live poller now succeeds instead of failing with PAIR_BUSY.
+    const third = hub.act('send', { id: 'live-third', target: live.id, turn: 'turn1', text: 'third from board' }, now + 5)
+    assert.equal(third.status, 'queued')
+
+    const secondPoll = hub.act('poll', { connection: live.id, secret: live.secret, turn: 'turn1' }, now + 6)
+    assert.deepEqual(secondPoll.messages.map(one => one.id), ['live-second'])
+    hub.act('receipt', { id: 'live-second', connection: live.id, secret: live.secret, nonce: secondPoll.messages[0].nonce, status: 'acknowledged', reply: `ACK ${secondPoll.messages[0].nonce} done second` }, now + 7)
+
+    const thirdPoll = hub.act('poll', { connection: live.id, secret: live.secret, turn: 'turn1' }, now + 8)
+    assert.deepEqual(thirdPoll.messages.map(one => one.id), ['live-third'])
+    hub.act('receipt', { id: 'live-third', connection: live.id, secret: live.secret, nonce: thirdPoll.messages[0].nonce, status: 'acknowledged', reply: `ACK ${thirdPoll.messages[0].nonce} done third` }, now + 9)
+
+    // None of the messages replay on a later mailbox turn.
+    assert.equal(hub.act('mailbox-turn', { agent: 'codex', session, surface: 'CLI' }, now + 10).message, null)
+  } finally { hub?.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('a hook that stops waiting after a running board claimed its message hands the claim back, so the message is not held', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mailbox-release-'))
   let hub, server
