@@ -454,7 +454,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         ...(row.next === null ? {} : { nextFileLine: row.next.line }),
         canArchive: row.archive !== null,
         canConfirm: row.confirm != null,
-        archiveNote: row.auto === 'working' || row.auto === 'waiting' ? s.archiveLive : '',
+        archiveNote: row.archive === null && (row.auto === 'working' || row.auto === 'waiting') ? s.archiveLive : '',
         // The command to resume a session names its folder, and the account with it: the computer's only.
         resume: isLan ? null : row.resume,
         handoff: row.handoff,
