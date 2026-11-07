@@ -25,6 +25,6 @@ An earlier brief on #561 says all five enforce a strict `connect-src`. I found n
 
 ## Still to run, on real chats
 
-About 10 minutes per platform, signed in: paste the prompt from **Connect a web chat**, ask for one update, press the chat's Copy, press Ctrl+V on the board, and see the card. Record the date and the browser version here.
+About 10 minutes per platform, signed in: paste the prompt from the [chat relay guide](../REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste), ask for one update, copy the chat's block, paste it on the board with Ctrl+V (Cmd+V on a Mac), and see the card. Record the date and the browser version here.
 
 For the link route, also click a synthetic `http://127.0.0.1` link from the chat, and note whether it is clickable and whether its `#fragment` survives.

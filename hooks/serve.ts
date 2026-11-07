@@ -748,40 +748,9 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
   return null
 }
 
-// The chat prompt goes as it is in every language: the chat reads it, not the person.
-const RELAY_PROMPT = `Report your progress on this work as one Agent Board block. After each step, and
-whenever you stop to wait for me, end your reply with the whole block again, inside
-a code block, written exactly like this:
-
-## <project>
-<!-- auto session=<ID> agent=<name> state=<working|waiting|done|ended> updated=<UTC time, like 2026-10-17T08:10:52Z> -->
-### <the outcome, in plain words>
-> Context: <one line on why this work exists>
-- [x] <a finished step>
-- [~] <the step you are on>
-- [?] <a step that needs me> — <one line saying what you need>
-- [ ] <the next step>
-<!-- /auto session=<ID> -->
-
-Rules:
-- <ID> is 8 random lower-case hex characters (0-9, a-f). Pick it once and keep it
-  for the whole conversation.
-- <name> is your own name in lower case, for example muse or dot.
-- If you are Claude, write claude-web. The name claude alone is refused.
-- <project> is the project's name; keep it the same every time.
-- Write the two marker lines exactly as shown, starting at the beginning of the line.
-  No other marker names.
-- The line after the start marker is the ### title. No other # headings, code
-  fences or HTML comments inside the block.
-- Marks: [x] done, [~] doing, [ ] to do, [?] needs me, [>] waiting on someone else,
-  [!] blocked, [-] cancelled. End a yes/no question in a [?] step with "OK?".
-- state=waiting when you hand back to me with steps left, working when you start
-  again, done when every step is [x] or [-], ended if you stop for good with steps
-  left. updated= is the time of this update in UTC, ending in Z.`
-
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
-  'webChatConnect', 'webChatCopied', 'importClipboard', 'importNoBlock', 'importUseKeys', 'pasteReview',
+  'importNoBlock', 'pasteReview',
   'claudeSendNow', 'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
   'serveQueueNextTurn', 'serveNextTurnHint', 'serveQueueNextOpen', 'serveNextOpenHint', 'messagesHandedNextTurn', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
@@ -872,11 +841,11 @@ ${sheetCss}
 .answers{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;padding-top:var(--s1)}
 .answers:has(.answer-picks){flex-wrap:nowrap}
 .answer-picks{display:flex;flex:1 1 auto;min-width:0;flex-wrap:wrap;gap:var(--s2);align-items:center}
-.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
+.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)}
 button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
-.btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover,.pfoot #close:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
+.btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
 button.quiet:hover,.side .pfoot #close:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
 .answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);background:color-mix(in srgb,var(--act) 12%,var(--hover))}
 .answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-lg)}
@@ -1024,7 +993,8 @@ ${CLIP_CSS}
 .side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
 .side .pfoot .set-row{order:-1;flex-basis:100%;margin-left:calc(var(--s2) * -1)}
 .side .pfoot .grow{display:none}
-.side .pfoot #close,.side .pfoot .btn{min-height:24px;padding-inline:var(--s2);font-size:var(--text-xs);color:var(--muted)}
+.pfoot #close{width:var(--hit);height:var(--hit);min-width:var(--hit);min-height:var(--hit)}
+.side .pfoot .btn{min-height:24px;padding-inline:var(--s2);font-size:var(--text-xs);color:var(--muted)}
 .side .pfoot #close:hover,.side .pfoot .btn:hover{color:var(--ink)}
 .side .pfoot p{order:3;flex-basis:100%}
 .ver-link{display:inline-flex;align-items:center;gap:var(--s1);color:color-mix(in srgb,var(--muted) 75%,var(--surface));font-size:var(--text-xs);line-height:1.2;text-decoration:none;border-radius:var(--radius-s);white-space:nowrap}
@@ -1100,6 +1070,7 @@ ${CLIP_CSS}
   .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet{flex:0 0 auto;min-height:44px}
   .answers button.answer-send{flex:0 0 48px;width:48px;min-width:48px;justify-content:center}
+  .pfoot #close{width:48px;height:48px;min-width:48px;min-height:48px}
   .s-toggle{width:44px;height:44px}
   #away-line .away-x{width:44px;height:44px}
   textarea{min-height:96px}
@@ -1151,12 +1122,11 @@ ${PAGE_CSS}
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" class="btn" id="connect-web-chat" data-static>${esc(s.webChatConnect)}</button><button type="button" class="btn" id="import-clipboard" data-static>${esc(s.importClipboard)}</button>`}<button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
+<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static aria-label="${esc(s.serveClose)}" title="${esc(s.serveClose)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
 </div>
-${isLan ? '' : `<script type="application/json" id="relay-prompt">${JSON.stringify(RELAY_PROMPT).replace(/</g, '\\u003c')}</script>`}
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
@@ -2997,22 +2967,6 @@ const PAGE_SCRIPT = String.raw`
     event.preventDefault();
     beginPress();
     importBlock(text, true);
-  });
-  var connectWebChat = document.getElementById('connect-web-chat');
-  if (connectWebChat) connectWebChat.addEventListener('click', function () {
-    if (isUnreachable) return;
-    beginPress();
-    var prompt = JSON.parse(document.getElementById('relay-prompt').textContent);
-    copy(prompt, 'close', function () { say(w('webChatCopied'), 'done', 'close'); });
-  });
-  var importClipboard = document.getElementById('import-clipboard');
-  if (importClipboard) importClipboard.addEventListener('click', function () {
-    if (isUnreachable) return;
-    beginPress();
-    function useKeys() { say(w('importUseKeys'), 'alert', 'close'); }
-    if (navigator.clipboard && navigator.clipboard.readText && window.isSecureContext) {
-      navigator.clipboard.readText().then(function (text) { importBlock(text); }, useKeys);
-    } else useKeys();
   });
   if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
     if (event.key !== 'Escape') return;
