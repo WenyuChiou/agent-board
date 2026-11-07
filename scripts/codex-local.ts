@@ -79,8 +79,10 @@ export const removeCodexTrustEntries = (text: string, keys: string[]): { text: s
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
 
 // Antigravity hooks name their own transcript but do not carry the reply text.
+// agy 1.5.2 names transcript_full.jsonl, which has the same line shape as transcript.jsonl.
+const antigravityTranscripts = new Set(['transcript.jsonl', 'transcript_full.jsonl'])
 const antigravityQuestion = (path: unknown): string | null => {
-  if (typeof path !== 'string' || !isAbsolute(path) || basename(path) !== 'transcript.jsonl') return null
+  if (typeof path !== 'string' || !isAbsolute(path) || !antigravityTranscripts.has(basename(path))) return null
   try {
     if (!lstatSync(path).isFile()) return null
     const fd = openSync(path, 'r')
