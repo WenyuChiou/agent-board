@@ -1662,14 +1662,23 @@ test('a closed Codex session keeps resume-Send when the hub is on', () => fixtur
 
 test('a second registration for the same agent and session leaves the card on Copy', async () => {
   for (const extra of [[], ['--allow-resume']]) await fixture(async (board, dir) => {
+    // A refused board read has a note instead of a model. Preserve that response
+    // before the card assertion hides it behind an undefined-model error (#835).
+    const readBoard = async phase => {
+      const response = await board.call('/api/board')
+      const diagnostic = JSON.stringify({ phase, allowResume: extra.length > 0, status: response.status, note: response.body?.note ?? null })
+      assert.equal(response.status, 200, diagnostic)
+      assert.ok(response.body?.model, diagnostic)
+      return response.body
+    }
     writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=11111111-2222-4333-8444-555555555555 dir=${encodeURIComponent(dir)} state=ended updated=${new Date().toISOString()} -->\n### Contested\n- [?] Continue, OK?\n<!-- /auto session=abcdef01 -->\n`)
-    assert.equal((await board.call('/api/board')).body.model.stopped[0].send, extra.length ? 'send' : 'open')
+    assert.equal((await readBoard('initial ended card')).model.stopped[0].send, extra.length ? 'send' : 'open')
     const registration = { agent: 'codex', session: '11111111-2222-4333-8444-555555555555', turn: 'turn1', surface: 'Synthetic' }
     const a = (await board.call('/api/messages/register', registration)).body
     await board.call('/api/messages/send', { ...input, target: a.id })
     const b = (await board.call('/api/messages/register', registration)).body
     assert.equal(b.contested, true)
-    assert.ok((await board.call('/api/board')).body.messaging.connections.every(one => one.contested))
+    assert.ok((await readBoard('contested registrations')).messaging.connections.every(one => one.contested))
     for (const one of [a, b]) {
       assert.deepEqual((await board.call('/api/messages/poll', { connection: one.id, secret: one.secret, turn: one.turn, receive: true })).body.messages, [])
       assert.equal((await board.call('/api/messages/send', { ...input, id: 'new-' + one.id, target: one.id })).body.error, 'CONTESTED')
@@ -1679,7 +1688,7 @@ test('a second registration for the same agent and session leaves the card on Co
       const isAsk = step.startsWith('- [?]')
       const state = isAsk ? 'waiting' : 'ended'
       writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=11111111-2222-4333-8444-555555555555 dir=${encodeURIComponent(dir)} state=${state} updated=${new Date().toISOString()} -->\n### Contested\n${step}\n<!-- /auto session=abcdef01 -->\n`)
-      const model = (await board.call('/api/board')).body.model
+      const model = (await readBoard(isAsk ? 'waiting ask after disconnect' : 'ended card after disconnect')).model
       const card = isAsk ? model.asks.find(one => one.session !== '') : model.stopped[0]
       assert.equal(card.send, 'open')
       assert.equal(card.delivery, undefined)
