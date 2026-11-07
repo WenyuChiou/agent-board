@@ -5,7 +5,10 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 
-const NOW = Date.parse('2026-11-04T12:00:00Z')
+// The fixture clock follows the real one: the page reader keeps receipts and questions for
+// three days by the real clock, so a fixed date breaks these tests three days after it.
+export const PAGE_NOW = Math.floor(Date.now() / 1000) * 1000
+const NOW = PAGE_NOW
 
 // Only the CLI's entry call is disabled. The reader, API handler and page script are shipped code.
 export const pageFixture = async (file = '', inbox = {}, state) => {
