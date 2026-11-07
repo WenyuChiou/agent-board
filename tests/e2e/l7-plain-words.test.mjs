@@ -48,7 +48,8 @@ test('L7 words: no session id, hash or file path on the default pane, terminal, 
       const screens = await inspectSurfaces(world)
       assert.ok(world.exists('progress-questions.json'), 'The question list is present')
       for (const text of Object.values(screens)) noMachineIds(text, world)
-      assert.ok(screens.page.includes(s.serveClose))
+      // The page drew in this language. Close is an icon now; its words are its name, checked in tests/board.test.mjs.
+      assert.ok(screens.page.includes(s.pgNeeds))
       const copied = await terminal.keys(world, 'c')
       assert.ok(copied.includes(s.copied), copied)
       noMachineIds(copied, world)
