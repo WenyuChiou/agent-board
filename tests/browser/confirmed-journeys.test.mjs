@@ -91,7 +91,19 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
         assert.equal((await paste(corrected)).status(), 200)
         await note.filter({ hasText: `${added}${title}` }).waitFor({ state: 'visible' })
         assert.equal(await note.innerText(), `${added}${title}`)
-        await board.task(title).waitFor({ state: 'visible' })
+        await board.task(title).getByText(title, { exact: true }).waitFor({ state: 'visible' })
+        // The arriving row expands a clipped grid track and glows. A nonzero row box alone
+        // can still be a grey sliver; capture only after its title fits and finite motion ends.
+        await page.waitForFunction(expected => {
+          const title = [...document.querySelectorAll('li.row .r-title')].find(node => node.textContent === expected)
+          const row = title?.closest('li.row')
+          const clip = row?.querySelector(':scope > .fx > .fx-in')
+          if (!clip || clip.parentElement.inert || clip.parentElement.classList.contains('gone')) return false
+          const text = title.getBoundingClientRect(), visible = clip.getBoundingClientRect()
+          return text.height > 0 && text.top >= visible.top && text.bottom <= visible.bottom
+            && row.getAnimations({ subtree: true }).every(animation =>
+              !Number.isFinite(animation.effect.getComputedTiming().endTime) || animation.playState === 'finished')
+        }, title, { timeout: 15_000 })
         assert.match(readFileSync(progress, 'utf8'), /agent=claude-web/)
         assert.deepEqual(requests, [report, corrected])
         await page.screenshot({ path: join(evidence, 'reserved-agent-corrected.png'), fullPage: true })
