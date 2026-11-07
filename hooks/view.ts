@@ -12,6 +12,8 @@ import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
 import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
+import { cellsOf, plainBar } from './progress-bar'
+import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
 import { observeQuestions, partsKey2, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
@@ -54,6 +56,8 @@ export type CurrentView = {
   done: number
   total: number
   steps: ViewStep[]
+  // One cell per step, unfolded, for the progress bar (#1085).
+  cells: Cell[]
   // The runs this session started for itself, as one line; absent when it started none (#399).
   runs?: string
 }
@@ -161,6 +165,8 @@ export type TaskRow = {
   // stale or silent block, which does not mean the session is closed.
   isRecordedEnded?: true
   steps: ViewStep[]
+  // One cell per step, unfolded, for the progress bar (#1085).
+  cells: Cell[]
   // Every open step, unfolded: what a take-over hands on.
   left: string[]
   next: StepRef | null
@@ -460,6 +466,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     done,
     total: mirror.tasks.filter(task => !task.handoffTo).length,
     steps: foldSteps(steps, 6, s),
+    cells: cellsOf(withCurrent(steps)),
   }
 }
 
@@ -563,6 +570,19 @@ const contextFor = (mirror: ProgressMirror): string => {
   if (title === '') return request
 
   return request === title || request.startsWith(title.replace(/…$/, '')) ? '' : request
+}
+
+// A plan with no step in progress still shows where it stands: its first open step is the current one.
+const withCurrent = (steps: readonly ViewStep[]): ViewStep[] => {
+  if (steps.some(step => step.isCurrent)) return [...steps]
+  const open = steps.findIndex(step => step.status !== 'done' && step.status !== 'cancelled')
+  return steps.map((step, index) => (index === open ? { ...step, isCurrent: true } : step))
+}
+
+const rowCells = (task: ProgressTask): Cell[] => {
+  const current = currentStepIndex(task)
+
+  return cellsOf(task.steps.map((step, index) => ({ status: step.status, isCurrent: index === current })))
 }
 
 const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
@@ -1168,6 +1188,7 @@ export const buildView = (
         isHere,
         auto,
         steps: rowSteps(shown, s),
+        cells: rowCells(shown),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
         questions: isInactive ? unresolved : [],
         question: isInactive ? unresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
@@ -1250,7 +1271,7 @@ export const buildView = (
       row: {
         key,
         project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
-        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], left: [], next: null, due: null, pr: '',
+        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], cells: [], left: [], next: null, due: null, pr: '',
         agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
         archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
       },
@@ -1472,15 +1493,22 @@ const clip = (text: string, room: number): string => {
   return chars.length > room ? `${chars.slice(0, room - 1).join('')}…` : text
 }
 
+// The session's task on the line under the prompt. With two steps or more the bar takes the place
+// of the clipped status words (#1085): `建立兩個內容為 hi… ━━━━╸── 5/7`. One step keeps the words.
+const currentPart = (current: CurrentView): string => {
+  const bar = plainBar(current.cells ?? [])
+  return bar === ''
+    ? `${clip(current.title, 14)} ${current.done}/${current.total} · ${clip(current.status, 18)}`
+    : `${clip(current.title, 14)} ${bar} ${current.done}/${current.total}`
+}
+
 // One line under the prompt for when the pane is not on screen: this session's task, what
 // waits on you, what is due soon, and the pull request.
 export const statusLine = (view: View, s: Strings = ZH_TW): string | undefined => {
   const current = view.current
   const urgent = view.overview.due
   const parts = [
-    current === null || current.state === 'done'
-      ? ''
-      : `${clip(current.title, 14)} ${current.done}/${current.total} · ${clip(current.status, 18)}`,
+    current === null || current.state === 'done' ? '' : currentPart(current),
     view.overview.waiting > 0 ? s.statusWaiting(view.overview.waiting) : '',
     urgent > 0 ? s.statusDue(urgent) : '',
     view.pr === null ? '' : view.pr.text,

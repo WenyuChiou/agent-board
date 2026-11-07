@@ -705,8 +705,13 @@ test('an ended session offers the command that reopens it where it ran', () => {
 test('the status line says where things stand, and nothing when nothing does', () => {
   const projects = parseProgress('## 求職\n### Google 暑期實習\n> 截止 10-18\n- [?] 推薦信\n')
   const line = statusLine(buildView(projects, [], { ...working(), pr: PR }, NOW))
-  expect(line).toBe('進度 · 重做進度面板 1/2 · Claude 正在做 · 1 件等你 · 1 件快到期 · PR #12 · CI 失敗 2 · 要求修改')
+  // Two steps or more: the bar takes the place of the status words, and the title stays (#1085).
+  expect(line).toBe('進度 · 重做進度面板 ━╸ 1/2 · 1 件等你 · 1 件快到期 · PR #12 · CI 失敗 2 · 要求修改')
   expect(statusLine(buildView([], [], null, NOW))).toBe(undefined)
+  // One step keeps its words: there is no bar to draw.
+  let one = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
+  one = applyTaskCreate(one, { subject: '讀 API' }, '1', NOW)
+  expect(statusLine(buildView([], [], { ...one, title: '只有一步', state: 'working' }, NOW))).toBe('進度 · 只有一步 0/1 · Claude 正在做')
 })
 
 test('two 和色 sets: the light one under a light theme, the dark one otherwise', () => {
@@ -4772,8 +4777,8 @@ test("the redesigned pages speak the page's language in every new word", () => {
   const keys = ['pgNeeds', 'pgWorking', 'pgOthers', 'pgStopped', 'pgDone', 'pgAgents', 'pgOlder', 'pgOlderOne', 'pgSideFold', 'pgSideOpen', 'showAllQuestions'] as const
   for (const s of Object.values(STRINGS)) {
     const live = servePage(s, 'synthetic')
-    // One icon button switches between light and dark; it names the theme it switches to, in the page's language.
-    for (const label of [s.themeToDark, s.themeToLight]) expect(live).toContain(label)
+    // One icon button opens the look menu (#1085): the three themes and the three progress-bar styles, in the page's language.
+    for (const label of [s.themeMenu, s.themeLight, s.themeDark, s.themeSystem, s.barStyleHead, s.barStyleInk, s.barStyleBlue, s.barStyleGreen]) expect(live).toContain(label)
     expect(live).toContain('data-theme-toggle')
     expect(live).not.toContain('data-theme-pick')
     for (const label of [s.pgViews, s.pgOverview, s.pgNeeds, s.pgWorking, s.pgOthers, s.pgDone, s.pgProjects, s.pgAgents, s.pgSideFold]) expect(live).toContain(label)

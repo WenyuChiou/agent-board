@@ -39,6 +39,8 @@ import {
 } from './blocks'
 import type { ConfirmedTask, ConfirmRef } from './blocks'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from './history'
+import { barStyleFrom, barStyleName, barStyleOf, DEFAULT_BAR_STYLE, withBarStyle } from './progress-bar'
+import type { BarStyle } from './progress-bar'
 import { withRunMark } from './runs'
 import { ciFinished, GH_FIELDS, prFromGh } from './github'
 import {
@@ -185,6 +187,9 @@ const theme = atom({ plugin: 'agent-board', key: 'theme' } as const, 'dark')
 // Steps finished today, from the journal.
 const today = atom({ plugin: 'agent-board', key: 'today' } as const, 0)
 const isLegendOpen = atom({ plugin: 'agent-board', key: 'isLegendOpen' } as const, false)
+// The progress bar's style (#1085), as the board's settings file last said: the page, the pane and
+// the terminal board all write it there, and each poll looks again.
+const barStyle = atom({ plugin: 'agent-board', key: 'barStyle' } as const, DEFAULT_BAR_STYLE as BarStyle)
 // The language the pane speaks (strings.ts resolveLang), settled at session start.
 const lang = atom({ plugin: 'agent-board', key: 'lang' } as const, 'zh-TW')
 // Which folded sections the person opened; kept across sessions in $.store.
@@ -1148,6 +1153,21 @@ const questionPass = async ($: EngineInterface, path: string, projects: readonly
 // Re-reads the file only when its mtime or size moved, so the 2s timer is a stat. Only the 2s
 // timer (`canReplace`) takes a held poll's place: the polls the write queue runs return at once,
 // as before, so no write waits behind a second held read.
+// A stat per poll; the file is read only when it changed. A pick made on the page or the terminal
+// board redraws the pane at the next poll.
+let barStyleSeen = ''
+const pollBarStyle = async ($: EngineInterface, path: string): Promise<void> => {
+  const file = settingsPath(path)
+  const stat = await $.fs.stat(file).catch(() => undefined)
+  const seen = stat === undefined ? '' : `${stat.mtimeMs}:${stat.size}`
+  if (seen === barStyleSeen) return
+  const style = barStyleOf(stat === undefined ? null : await readText($, file).catch(() => null))
+  barStyleSeen = seen
+  if ((await read($, barStyle)) === style) return
+  await update($, barStyle, () => style)
+  $.ui.invalidate('ui.render')
+}
+
 const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
   if (isPolling) {
     if (!canReplace || replacedPoll !== null) return
@@ -1164,6 +1184,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
     pollStartedAt = await $.clock.now()
     const path = await progressPath($)
     await pollAnswered($, path).catch(() => undefined)
+    await pollBarStyle($, path).catch(() => undefined)
     const previous = await read($, snapshot)
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (!isCurrent()) return
@@ -4218,6 +4239,19 @@ export const register: Register = (on, options) => {
       return { text: (await wordsOf($)).langSet }
     }
     const s = await wordsOf($)
+    // One style for every surface (#1085): the pick is the `style` key of the board's settings file,
+    // which the page and the terminal board read too.
+    const styleArg = /^(?:style|樣式|样式)\s*(\S*)$/i.exec(arg)
+    if (styleArg !== null) {
+      const style = barStyleFrom(styleArg[1] ?? '')
+      if (style === null) return { text: s.barStyleUnknown }
+      const file = settingsPath(await progressPath($))
+      const text = await readText($, file).catch(() => null)
+      try { await $.fs.write(file, withBarStyle(text, style)) } catch { return { text: s.pressFailed } }
+      await update($, barStyle, () => style)
+      $.ui.invalidate('ui.render')
+      return { text: s.barStyleSet(barStyleName(style, s)) }
+    }
     if (/^(整理|archive|tidy)$/i.test(arg)) {
       const moved = await enqueue(() => archiveOld($, true)).catch(() => null)
       if (moved === null) return { text: s.tidyUnreadable }
@@ -4685,6 +4719,7 @@ export const register: Register = (on, options) => {
       isLegendOpen: await read($, isLegendOpen),
       hasQuestionsProblem: await read($, hasQuestionsProblem),
       palette,
+      barStyle: await read($, barStyle),
       s,
     }
     const failure = (text: string): PressOutcome => ({ text, tone: 'alert' })

@@ -9,6 +9,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { agentLabel } from './strings'
 import type { Tone } from './palette'
+import { cellCode } from './progress-bar'
 import { RESUME } from './parse'
 import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
@@ -179,6 +180,8 @@ export type ServeRow = {
   agent: string
   done: number
   total: number
+  // One character per step for the progress bar (#1085, `hooks/progress-bar.ts` cellCode); '' with no steps.
+  cells: string
   due: string | null
   dueTone: Tone | null
   pr: string
@@ -445,6 +448,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         ...(row.auto === null ? { isOwn: true as const } : {}),
         done: row.done,
         total: row.total,
+        cells: cellCode(row.cells ?? []),
         due: row.due?.left ?? null,
         dueTone: row.due?.tone ?? null,
         pr: row.pr,
@@ -782,7 +786,7 @@ const PAGE_WORDS = [
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
-  'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
+  'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
@@ -907,6 +911,27 @@ div.row-btn{cursor:default}
 .row-btn[aria-expanded="true"] .r-chev{transform:rotate(90deg)}
 div.row-btn .r-chev{visibility:hidden}
 .r-meta .st{color:var(--ink)}
+.r-meta .prog{display:inline-flex;align-items:center;gap:var(--s2);vertical-align:-1px}
+.r-meta .prog span{margin-left:0}
+.pbar{display:inline-flex;align-items:center;gap:2px;width:96px;height:8px;flex:none}
+.pbar i,.sw i{flex:1 1 0;min-width:5px;height:6px;border-radius:var(--radius-round);background:var(--bar-done);transition:background-color var(--dur-layout) var(--ease-out),height var(--dur-layout) var(--ease-out)}
+.pbar .c-c,.sw .c-c{height:8px;background:var(--bar-now)}
+.pbar .c-w{background:var(--waiting)}
+.pbar .c-b{background:var(--alert)}
+.pbar .c-r{background:var(--alive)}
+.pbar .c-t,.sw .c-t{background:transparent;border:1px solid var(--line-strong)}
+.pbar .c-n{background:transparent;border:1px solid var(--line)}
+.pbar.cont{position:relative;display:block;height:6px;border-radius:var(--radius-round);border:1px solid var(--line-strong)}
+.pbar.cont b{position:absolute;left:0;top:0;bottom:0;border-radius:var(--radius-round);background:var(--bar-done);transition:width var(--dur-layout) var(--ease-out)}
+.pbar.cont u{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--bar-now)}
+.pbar.cont u.c-w{background:var(--waiting)}
+.pbar.cont u.c-b{background:var(--alert)}
+.pbar.cont u.c-r{background:var(--alive)}
+[data-bar="blue"] .pbar .c-x,[data-bar="blue"] .pbar .c-c,[data-bar="blue"] .pbar.cont b,[data-bar="blue"] .pbar.cont u.c-c,[data-sw="blue"] .sw .c-x,[data-sw="blue"] .sw .c-c{background:var(--accent)}
+[data-bar="green"] .pbar .c-x,[data-bar="green"] .pbar .c-c,[data-bar="green"] .pbar.cont b,[data-bar="green"] .pbar.cont u.c-c,[data-sw="green"] .sw .c-x,[data-sw="green"] .sw .c-c{background:var(--done)}
+.pcount{font-variant-numeric:tabular-nums;color:var(--ink)}
+.sw{display:inline-flex;align-items:center;gap:2px;width:36px;height:8px;flex:none}
+@media (max-width:560px){.pbar{width:72px}}
 .r-right.t-alert{color:var(--alert)}
 .r-right{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;max-width:9em;overflow:hidden;text-overflow:ellipsis}
 .row-open{background:var(--current);border-radius:0 0 var(--radius-m) var(--radius-m);padding:var(--s1) var(--s2) var(--s3) calc(var(--s2) + 36px);display:grid;gap:var(--s3);min-width:0;opacity:0;transition:opacity var(--dur-base) var(--ease-out)}
@@ -1310,6 +1335,23 @@ const PAGE_SCRIPT = String.raw`
       });
     }).catch(function (error) { unreachable(); throw error; });
   }
+  // The progress bar's style (#1085): the root's data-bar picks the colours, so a pick shows on every
+  // bar at once. A pick in the theme menu goes to the board, which keeps it for the pane and the
+  // terminal board too; one that does not land goes back to what it was.
+  function barStyleShown(style) {
+    var root = document.documentElement;
+    if (!root || (style !== 'ink' && style !== 'blue' && style !== 'green')) return;
+    if (root.getAttribute('data-bar') !== style) root.setAttribute('data-bar', style);
+    document.querySelectorAll('[data-bar-set]').forEach(function (item) { item.setAttribute('aria-checked', String(item.getAttribute('data-bar-set') === style)); });
+  }
+  document.querySelectorAll('[data-bar-set]').forEach(function (node) {
+    node.addEventListener('click', function () {
+      var before = document.documentElement && document.documentElement.getAttribute('data-bar') || 'ink';
+      var style = node.getAttribute('data-bar-set');
+      barStyleShown(style);
+      call('/api/style', { style: style }).then(function (data) { if (!data.ok) barStyleShown(before); }, function () { barStyleShown(before); });
+    });
+  });
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
     try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
@@ -1821,6 +1863,41 @@ const PAGE_SCRIPT = String.raw`
   // A task as one row: its mark, title, one line (the step, with the project where no heading stands above it,
   // and a status word only when the section does not already say it) and its age. Pressing it opens its steps and
   // actions in place; the message box for a connected or sendable session is inside the open row.
+  // The progress bar (#1085): one cell per step up to 12, above that one fill with a mark at the
+  // current step, "n/m" beside it. One step: the text alone. The bar is aria-hidden; the label says it.
+  var BAR_CELLS = { x: 'c-x', '~': 'c-c', '?': 'c-w', '!': 'c-b', '>': 'c-r', ' ': 'c-t', '-': 'c-n' };
+  function progressNode(code, done, total, step) {
+    var node = el('span', 'prog');
+    node.setAttribute('role', 'img');
+    node.setAttribute('aria-label', step ? w('pgBarLabel', done + '/' + total, step) : done + '/' + total);
+    var cells = String(code).split('');
+    if (cells.length > 1 && cells.length <= 12) {
+      var bar = el('span', 'pbar');
+      cells.forEach(function (one) { add(bar, el('i', BAR_CELLS[one] || 'c-t')); });
+      bar.setAttribute('aria-hidden', 'true');
+      add(node, bar);
+    } else if (cells.length > 12) {
+      var counted = cells.filter(function (one) { return one !== '-'; });
+      var open = -1;
+      counted.some(function (one, index) { if (one !== 'x') { open = index; return true; } return false; });
+      var finished = counted.filter(function (one) { return one === 'x'; }).length;
+      var track = el('span', 'pbar cont');
+      var fill = el('b');
+      fill.style.width = (counted.length ? Math.round(finished / counted.length * 1000) / 10 : 0) + '%';
+      add(track, fill);
+      if (open >= 0) {
+        var mark = el('u', BAR_CELLS[counted[open]] === 'c-t' ? 'c-c' : BAR_CELLS[counted[open]] || 'c-c');
+        mark.style.left = 'calc(' + Math.round(open / counted.length * 1000) / 10 + '% - 1px)';
+        add(track, mark);
+      }
+      track.setAttribute('aria-hidden', 'true');
+      add(node, track);
+    }
+    var count = el('span', 'pcount', done + '/' + total);
+    count.setAttribute('aria-hidden', 'true');
+    add(node, count);
+    return node;
+  }
   function buildRow(ref, section, showProject) {
     var row = source(ref);
     var key = row.key || ref.key;
@@ -1879,7 +1956,8 @@ const PAGE_SCRIPT = String.raw`
     var title = clean(fullTitle(ref));
     var project = showProject ? clean(ref.repo || row.project) : '';
     if (sameName(project, title)) project = '';
-    var meta = add(el('span', 'r-meta'), status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
+    var progress = isTask && row.total > 0 && (section === 'working' || section === 'stopped' || section === 'others') ? progressNode(row.cells || '', row.done, row.total, current ? clean(current.text) : '') : null;
+    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
     var titleNode = el('span', 'r-title', title);
     titleNode.setAttribute('title', title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
@@ -2789,6 +2867,7 @@ const PAGE_SCRIPT = String.raw`
         return;
       }
       reachable();
+      if (data.barStyle) barStyleShown(data.barStyle);
       connections = data.messaging && data.messaging.connections || [];
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; })], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
       if (text !== last) {

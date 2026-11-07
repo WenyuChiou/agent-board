@@ -51,7 +51,7 @@ agent-board --help all
 | `agent-board stop` | 停止此进度文件的看板网页服务器 |
 | `--serve` | 单纯 `agent-board` 的旧写法：仍可使用，只打印网页网址，不打印文字看板 |
 | `--lan` | 打开网页并同时显示手机用的网址；不必加 `--serve` |
-| `--watch` | 终端看板：方向键或 `j`／`k` 加 Enter 选择，`x` 勾选，`d` 确认完成，`a` 归档，`t` 立即归档已完成列表，`y`／`n` 或 `1`–`9` 回答，`h` 隐藏，`u` 恢复，`i` 闲置工作，`c` 复制，`o` 打开网页，`q` 退出。输出接到管道时只打印一次纯文本 |
+| `--watch` | 终端看板：方向键或 `j`／`k` 加 Enter 选择，`x` 勾选，`d` 确认完成，`a` 归档，`t` 立即归档已完成列表，`s` 换进度条样式，`y`／`n` 或 `1`–`9` 回答，`h` 隐藏，`u` 恢复，`i` 闲置工作，`c` 复制，`o` 打开网页，`q` 退出。输出接到管道时只打印一次纯文本 |
 | `--json` | 给 agent 读的带版本、已隐藏私密数据的只读看板数据；见 [Board JSON](BOARD-JSON.md)（英文） |
 | `--status` | 给 tmux 或 shell 提示的一行摘要，例如 `2 项等你 · 3 项进行中`。只读一次 `progress.md`，不读辅助文件或收件箱、不写文件、不开浏览器或服务。此快照沿用网页的“等你”与“正在做”规则；只保留在辅助文件的问题不计入。即使设置 `FORCE_COLOR` 也输出纯文本。 |
 
@@ -126,6 +126,7 @@ claude plugin install agent-board@agent-board
 | `/progress tidy`、`/progress sync` | 归档符合条件工作；重读 Task／PR |
 | `/progress report`、`/progress today` | 复制周报／日报 |
 | `/progress lang en`、`zh-TW`、`zh-CN`、`auto` | 侧栏语言 |
+| `/progress style ink`、`blue`、`green` | 进度条样式，网页、侧栏和终端看板都一样 |
 | `/progress notify on`、`off` | 桌面通知 |
 
 可选连接器需要 Node.js 18+；迁移前请重新加载较旧的 plugin 会话。原生 worker 跨数据目录共用安装锁，持续记住移除停用意图，并保留外部修改。侧栏与轮询先启动，版本检查在后台进行；缺少 Node 或设置记录损坏时不修改设置。`connect status` 表示设置结果，不证明原生执行。
