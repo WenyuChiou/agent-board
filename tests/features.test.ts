@@ -1194,6 +1194,33 @@ test('a choice with a comma before 還是 / or still reads both options', () => 
   })
 })
 
+test('a list of options before or / 還是 offers every option, and a clause before it stays one option (#1111)', () => {
+  for (const [question, options] of [
+    ['Small, medium, large or huge?', ['Small', 'medium', 'large', 'huge']],
+    ['Small, medium, large, or huge?', ['Small', 'medium', 'large', 'huge']],
+    ['Should the size be small, medium, large or huge?', ['small', 'medium', 'large', 'huge']],
+    ['Which size, small, medium or large?', ['small', 'medium', 'large']],
+    ['A、B 還是 C？', ['A', 'B', 'C']],
+    ['用 A、B 还是 C？', ['A', 'B', 'C']],
+    // A clause before or / 還是 is still one option, as before.
+    ['A first, or B?', ['A first', 'B']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['Which metric, win rate or Elo?', ['win rate', 'Elo']],
+    ['I checked the logs, restart or wait?', ['restart', 'wait']],
+    ['If it fails, retry or stop?', ['retry', 'stop']],
+    ['我看了日誌，要重啟還是等？', ['重啟', '等']],
+    // A lead-in before the comma is not an option.
+    ['Tests pass, merge now or wait?', ['merge now', 'wait']],
+    ['Great, ship or hold?', ['ship', 'hold']],
+    ['Quick question, A or B?', ['A', 'B']],
+    ['Done, ready to merge or not?', ['ready to merge', 'not']],
+    ['Do you want X, Y or Z?', ['X', 'Y', 'Z']],
+  ] as const) {
+    expect(askOf(question, '')).toMatchObject({ kind: 'choose', options: [...options] })
+    expect(askOf('Pick', question)).toMatchObject({ kind: 'choose', options: [...options] })
+  }
+})
+
 test('an English "Should X be A or B?" question offers A and B as the answers, without the question words', () => {
   expect(askOf('Should the retry limit be 3 or 5?', '')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
   expect(askOf('Retry limit', 'Should the retry limit be 3 or 5?')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
@@ -1554,6 +1581,15 @@ test('the question a reply ends on: its last paragraph only, without code or mar
   // An underscore inside a word belongs to it (a name, a token); at the edge of one it is markdown.
   expect(lastQuestion('Should I rename `snake_case` to ghp_16C7e42F in CI?')).toBe('Should I rename snake_case to ghp_16C7e42F in CI?')
   expect(lastQuestion('Use _this_ or __that__, not my__name?')).toBe('Use this or that, not my__name?')
+})
+
+test('a link\'s own question mark is not a question, and a question with a link keeps it whole (#1108)', () => {
+  expect(lastQuestion('http://127.0.0.1:58561/?t=abc123')).toBeNull()
+  expect(lastQuestion('The board is open at http://127.0.0.1:58561/?t=abc123')).toBeNull()
+  expect(lastQuestion('See https://example.com/?q=1.')).toBeNull()
+  expect(lastQuestion('Done.\n\nCan you open https://example.com/a?q=1&b=2.html?')).toBe('Can you open https://example.com/a?q=1&b=2.html?')
+  expect(lastQuestion('I opened http://127.0.0.1:5173/?t=x. Ship it?')).toBe('Ship it?')
+  expect(lastQuestion('預覽在 https://example.com/?p=1，可以合併嗎？')).toBe('預覽在 https://example.com/?p=1，可以合併嗎？')
 })
 
 test('a reply that is JSON is not cut at its question mark and shown as a question', () => {

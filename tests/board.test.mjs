@@ -919,6 +919,115 @@ fs.renameSync = (from, to, ...rest) => {
   assert.notEqual(ran.files['progress-questions.json'], seed.files['progress-questions.json'], 'the tick rewrote the ledger')
 })
 
+test('a refused rename retry rechecks the destination and preserves another writer\'s progress or question update', () => {
+  const seed = chatRun(['--keys', ''], { file: () => HAND_FILE, inspect: questionFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const peerFile = '# Progress\n\n## demo\n### Concurrent task\n- [?] Keep peer question, OK?\n'
+  const peerAnswered = chatRun(['--keys', 'x'], { file: () => peerFile, inspect: questionFiles })
+  assert.equal(peerAnswered.status, 0, peerAnswered.stderr)
+  const peerRecord = JSON.parse(peerAnswered.files['progress-questions.json']).records[0]
+  assert.equal(peerRecord.isWaiting, false)
+  const concurrentLedger = JSON.stringify({
+    ...JSON.parse(seed.files['progress-questions.json']),
+    records: [...JSON.parse(seed.files['progress-questions.json']).records, peerRecord],
+  })
+  const inspect = dir => ({
+    ...questionFiles(dir),
+    progress: readFileSync(join(dir, 'progress.md'), 'utf8'),
+    temps: readdirSync(dir).filter(name => name.endsWith('.board-tmp')),
+  })
+
+  // 1. A refused progress rename preserves another writer's task and the requested tick.
+  const progressRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+let refused = false
+fs.renameSync = (from, to, ...rest) => {
+  if (!refused && String(to) === progress) {
+    refused = true
+    fs.writeFileSync(progress, fs.readFileSync(progress, 'utf8') + '\\n### Concurrent task\\n- [~] Added while progress rename was refused\\n')
+    throw Object.assign(new Error('synthetic held progress'), { code: 'EPERM' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(progressRan.status, 0, progressRan.stderr)
+  assert.ok(progressRan.progress.includes('- [x] Ship it, OK?'), progressRan.progress)
+  assert.ok(progressRan.progress.includes('### Concurrent task\n- [~] Added while progress rename was refused'), progressRan.progress)
+  assert.deepEqual(progressRan.temps, [])
+
+  // 2. A refused question-ledger rename preserves a concurrent question update and the requested answer,
+  // without running the missing-ledger fallback or leaving stale temp files.
+  const ledgerRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+const originalLink = fs.linkSync
+const originalSpawn = cp.spawnSync
+const probe = { links: 0, moves: 0, sources: [] }
+let refused = false
+fs.linkSync = (from, to) => {
+  if (String(to) === ledger && String(from).endsWith('.board-tmp')) probe.links += 1
+  return originalLink(from, to)
+}
+cp.spawnSync = (tool, argv, options) => {
+  if (Array.isArray(argv) && argv.some(arg => String(arg).includes('.board-tmp'))) probe.moves += 1
+  return originalSpawn(tool, argv, options)
+}
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === ledger && fs.readFileSync(progress, 'utf8').includes('- [x] Ship it, OK?')) {
+    probe.sources.push(path.basename(String(from)))
+    if (!refused) {
+      refused = true
+      fs.writeFileSync(ledger, ${JSON.stringify(concurrentLedger)})
+      throw Object.assign(new Error('synthetic held ledger'), { code: 'EPERM' })
+    }
+  }
+  return originalRename(from, to, ...rest)
+}
+process.on('exit', () => fs.writeFileSync(ledger + '.probe', JSON.stringify(probe)))`),
+  })
+  assert.equal(ledgerRan.status, 0, ledgerRan.stderr)
+  const finalLedger = JSON.parse(ledgerRan.files['progress-questions.json'])
+  const tickedRecord = finalLedger.records.find(one => one.words.includes('Ship it'))
+  const concurrentRecord = finalLedger.records.find(one => one.words.includes('Keep peer question'))
+  assert.ok(tickedRecord, ledgerRan.files['progress-questions.json'])
+  assert.equal(tickedRecord.isWaiting, false)
+  assert.ok(concurrentRecord, ledgerRan.files['progress-questions.json'])
+  const probe = JSON.parse(ledgerRan.files['progress-questions.json.probe'])
+  assert.equal(probe.links, 0)
+  assert.equal(probe.moves, 0)
+  assert.equal(probe.sources.length, 2)
+  assert.notEqual(probe.sources[0], probe.sources[1], 'the stale temp was discarded and a fresh temp was written from current contents')
+  assert.deepEqual(ledgerRan.temps, [])
+
+  // 3. A changed destination after a refused rename does not count a replacement or run onReplaced:
+  // if the restarted rewrite then fails persistently, the journal line is still rolled back.
+  const rollbackRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+let refused = false
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === progress) {
+    if (!refused) {
+      refused = true
+      fs.writeFileSync(progress, fs.readFileSync(progress, 'utf8') + '\\n### Concurrent task\\n- [~] Still preserved\\n')
+      throw Object.assign(new Error('synthetic held progress'), { code: 'EPERM' })
+    }
+    throw Object.assign(new Error('persistent progress refusal'), { code: 'EACCES' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(rollbackRan.status, 1)
+  assert.match(rollbackRan.stdout + rollbackRan.stderr, /nothing was changed/)
+  assert.ok(rollbackRan.progress.includes('- [?] Ship it, OK?'), rollbackRan.progress)
+  assert.ok(rollbackRan.progress.includes('### Concurrent task\n- [~] Still preserved'), rollbackRan.progress)
+  assert.deepEqual(rollbackRan.temps, [])
+})
+
 test('the terminal board preserves unknown JSON ledgers and never overwrites a quarantine collision', () => {
   const unknown = '{"version":99,"future":"keep these bytes"}\n'
   const kept = chatRun(['--keys', 'down h'], { beside: { 'progress-questions.json': unknown }, inspect: questionFiles })
@@ -2594,7 +2703,7 @@ test('served questions keep hidden identities across reordered reports and a fre
 test('the terminal board and the page retire a resolution once the agent ticks its step', { timeout: 30_000 }, async () => {
   for (const surface of ['terminal', 'page']) {
     const dir = surface === 'terminal' ? mkdtempSync(join(tmpdir(), 'board-resolve-')) : null
-    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true }) }
+    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
     try {
       const script = join(board.dir, 'agent-board.mjs')
       if (surface === 'terminal') writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: board.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
@@ -3629,12 +3738,13 @@ test('the serve page and the terminal board answer every action with a visible l
       dom.boxes().forEach(box => { box.value = 'A synthetic reply' })
       const button = dom.buttons()[index]
       const key = pageCard(button).getAttribute('data-card-key')
+      if (button.className === 'answer-send') selectAnswer(pageCard(button), 'Yes')
       button.click()
       await dom.flush()
       await dom.flush()
       // An answer that copies has its own failure line; the other copies show the text in a box to copy from.
       const isInCard = (() => { for (let node = button; node; node = node.parentNode) if (node.tag === 'article') return true; return false })()
-      const isAnswer = label.startsWith('Copy "') || label === words.pgCopyAnswer && isInCard
+      const isAnswer = button.className === 'answer-send' || label === words.pgCopyAnswer && isInCard
       const isCopy = isAnswer || /Copy/.test(label)
       // Read the board again at once so the offline advice becomes the plain failure.
       if (!isCopy) await dom.redraw(model)
@@ -3673,6 +3783,15 @@ const PRESS_KINDS = ['needs-you', 'live-ask', 'stopped', 'unknown-session', 'blo
 const PRESS_CELLS = PRESS_HOSTS.flatMap(agent => ['own', 'other'].flatMap(source => PRESS_KINDS.map(kind => ({ agent, source, kind, title: `${kind} ${agent} ${source}` }))))
 const PRESS_NOW = Date.parse('2026-10-17T09:00:00Z')
 const pressWalk = node => [node, ...node.childNodes.flatMap(pressWalk)]
+const selectAnswer = (card, answer) => {
+  const nodes = pressWalk(card)
+  const choice = nodes.find(node => node.className === 'choice' && node.textContent === answer)
+  const send = nodes.find(node => node.className === 'answer-send')
+  assert.ok(choice, `missing choice ${answer}`)
+  assert.ok(send, 'missing answer send button')
+  choice.click()
+  return send
+}
 
 // Exercise the generated entry point's real actions without launching its interactive loop.
 // Only the external clipboard and filesystem boundaries are replaced during an action.
@@ -3827,7 +3946,8 @@ const pressRuntime = async () => {
         syncBuiltinESMExports()
         process.exitCode = 0
         assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep))
-        rmSync(root, { recursive: true, force: true })
+        // A held file on Windows refuses the delete; retry it the way the page fixture does (#991).
+        rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
       },
     }
   } catch (error) {
@@ -3839,7 +3959,7 @@ const pressRuntime = async () => {
     fs.unlinkSync = originalUnlink
     childProcess.spawnSync = originalSpawn
     syncBuiltinESMExports()
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     throw error
   }
 }
@@ -4009,11 +4129,16 @@ test('every serve page action on every card kind from every agent answers with a
         } })
         // The line after a copy (Copy again, Answered) only exists once something was copied; it is not an offered action.
         const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain, runtime.s.pgAnswered]
-        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent))
+        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent)).flatMap(button =>
+          button.className === 'answer-send'
+            ? pressWalk(pageCard(button)).filter(node => node.className === 'choice').map(choice => ({ button, choice }))
+            : [{ button, choice: null }],
+        )
         assert.equal(actionButtons.length, projected.expected, `${cell.title}: exact offered button set`)
         dom.boxes().forEach(box => { box.value = 'Synthetic reply' })
-        const button = actionButtons[index]
+        const { button, choice } = actionButtons[index] ?? {}
         assert.ok(button, `${cell.title}: button ${index}`)
+        if (choice) choice.click()
         button.click()
         await dom.flush(); await dom.flush()
         const key = pageCard(button).getAttribute('data-card-key')
@@ -4021,7 +4146,7 @@ test('every serve page action on every card kind from every agent answers with a
         const label = key === 'recent' ? runtime.s.pgDone : card?.task || card?.title || card?.project
         assert.notEqual(label, undefined, `${cell.title}: the original card has a label`)
         const results = pageHasCard(refreshed, key) ? pageCardResults(dom, key) : pageLostResults(dom, label)
-        const context = `${cell.title} / ${button.textContent} / ${failing ? 'refused' : 'normal'}`
+        const context = `${cell.title} / ${choice?.textContent ?? button.textContent} / ${failing ? 'refused' : 'normal'}`
         if (serverNote !== undefined) {
           const result = results.find(node => node.text === serverNote)
           assert.ok(result, `${context}: the complete result line stays beside its card`)
@@ -4036,14 +4161,14 @@ test('every serve page action on every card kind from every agent answers with a
         } else {
           // An answer copied from a card has its own failure line and, on success, the card's line about where to paste.
           const isInCard = (() => { for (let node = button; node; node = node.parentNode) if (node.tag === 'article') return true; return false })()
-          const isAnswer = button.textContent.startsWith('Copy "') || button.textContent === runtime.s.pgCopyAnswer && isInCard
+          const isAnswer = !!choice || button.textContent === runtime.s.pgCopyAnswer && isInCard
           const expected = failing ? isAnswer ? runtime.s.pgCopyFailed : runtime.s.boardCopyFailedBelow : runtime.s.copied
           if (isAnswer && !failing) assert.ok(!results.some(node => node.textContent), `${context}: the card says where to paste, not a result line`)
           else assert.ok(results.some(node => node.textContent === expected), context)
           {
             const text = button.textContent === runtime.s.serveCopyResume ? projected.ask?.reopen ?? projected.row?.resume
               : button.textContent === runtime.s.serveCopyCommand ? projected.ask?.command : button.textContent === runtime.s.pgCopyAnswer ? 'Synthetic reply'
-                : button.textContent.startsWith('Copy "') ? button.textContent.slice(6, -1) : button.textContent
+                : choice ? choice.textContent : button.textContent
             assert.deepEqual(dom.copies, [text], `${context}: exact text reached the clipboard`)
             if (failing && !isAnswer) assert.ok(results.some(node => node.childNodes.some(child => child.tag === 'textarea' && child.value === text && child.isSelected)), context)
           }
@@ -4841,7 +4966,7 @@ test('L5 restarted server: an old page tab disables its buttons and says how to 
           await dom.settle()
         }
         assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).every(button => button.disabled), `${lang}: ${failure}`)
-        assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') !== null).every(button => !button.disabled))
+        assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') !== null && button.className !== 'answer-send').every(button => !button.disabled))
         assert.equal(dom.node('offline').textContent, line)
         // The line stays in view under the header while the page scrolls, with a rule under it.
         assert.match(html, /#offline\{[^}]*position:sticky;top:0;/)
@@ -4920,12 +5045,16 @@ test('an old page tab keeps its copy buttons working while the board is unreacha
     await dom.settle()
     const local = dom.allButtons().filter(button => button.getAttribute('data-local') !== null)
     assert.ok(local.length >= 6, 'reply, answers, command and both resume buttons are local')
-    assert.ok(local.every(button => !button.disabled), 'copy buttons enabled')
+    assert.ok(local.filter(button => button.className !== 'answer-send').every(button => !button.disabled), 'local controls enabled')
     assert.ok(dom.allButtons().filter(button => !local.includes(button)).every(button => button.disabled), 'server buttons disabled')
-    // The buttons that only open or reveal something (More, Write your own, a row) work without the server too, but copy nothing.
+    const choiceSend = local.find(button => button.className === 'answer-send')
+    assert.equal(choiceSend.disabled, true, 'copy needs a choice even when offline')
+    local.find(button => button.className === 'choice').click()
+    assert.equal(choiceSend.disabled, false)
+    // The buttons that only open or reveal something work without the server too, but copy nothing.
     for (const button of local.filter(button => button.getAttribute('data-nav') === null)) button.click()
     await dom.settle()
-    for (const text of ['Synthetic copied reply', 'synthetic command', 'synthetic resume', 'synthetic row resume', ...ask.answers]) assert.ok(dom.copied.includes(text), text)
+    for (const text of ['Synthetic copied reply', 'synthetic command', 'synthetic resume', 'synthetic row resume', ask.answers[0]]) assert.ok(dom.copied.includes(text), text)
     assert.deepEqual(dom.requests, [])
   } finally { await board.close() }
 })
@@ -9558,13 +9687,14 @@ test("every card kind on the page carries its agent's mark", async () => {
   assert.ok(pressWalk(hidden).find(node => node.className === 'c-meta').textContent.includes('Codex'))
 })
 
-test('a question card puts the answer buttons first and the hide button last', async () => {
+test('a question card puts choices before its copy button and the hide button last', async () => {
   const dom = await pageDom(await sourcePage(), cardsModel())
   const card = cardWithKey(dom, 'ask')
   // The answers come first; what More holds follows: the command, the link, the resume command, then Already answered, hide.
-  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), ['Copy "Yes"', 'Copy "No"', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
   const answers = card.childNodes.flatMap(node => pressWalk(node)).find(node => node.className === 'answers')
-  assert.deepEqual(answers.childNodes.map(node => node.textContent).slice(0, 2), ['Copy "Yes"', 'Copy "No"'])
+  assert.deepEqual(answers.childNodes[0].childNodes.slice(0, 2).map(node => node.textContent), ['Yes', 'No'])
+  assert.equal(answers.childNodes.at(-1).getAttribute('aria-label'), EN.pgCopyChoice)
   // The box for the person's own words comes after the answers, and the line after a copy last.
   const kinds = card.childNodes.map(node => pressWalk(node).find(one => ['answers', 'composer', 'state'].includes(one.className))?.className)
   assert.deepEqual(kinds.filter(Boolean), ['answers', 'composer', 'state'])
@@ -9581,7 +9711,8 @@ test('a card with more than three actions shows three and the rest behind More',
   const card = cardWithKey(dom, 'ask')
   const actions = cardActionNodes(card)
   // Three answers show; the command, the link, the resume command and Already answered, hide wait behind More.
-  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), ['Copy "Yes"', 'Copy "No"', 'Copy "Maybe"'])
+  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), ['↑'])
+  assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No', 'Maybe'])
   const more = cardMore(card)
   assert.equal(more.length, 1)
   assert.equal(more[0].getAttribute('aria-expanded'), 'false')
@@ -9594,6 +9725,58 @@ test('a card with more than three actions shows three and the rest behind More',
   assert.ok(cardActionNodes(cardWithKey(dom, 'row')).length > 0)
 })
 
+test('a choose question selects one option and sends it only when its arrow is pressed', async () => {
+  const model = cardsModel()
+  model.asks[0] = { ...model.asks[0], text: 'Choose a colour', answers: ['Blue', 'Green', 'Red', 'Gold'], send: 'send', session: 'synthetic-session' }
+  let release
+  const dom = await pageDom(await sourcePage(), model, { post: () => new Promise(done => { release = () => done({ ok: true, json: async () => ({ ok: true }) }) }) })
+  const card = () => cardWithKey(dom, 'ask')
+  const choices = () => pressWalk(card()).filter(node => node.className === 'choice')
+  const send = () => pressWalk(card()).find(node => node.className === 'answer-send')
+  assert.deepEqual(choices().map(node => node.textContent), ['Blue', 'Green', 'Red', 'Gold'])
+  assert.ok(choices().every(node => node.getAttribute('aria-pressed') === 'false'))
+  assert.equal(send().getAttribute('aria-label'), EN.pgSendChoice)
+  assert.equal(send().textContent, '↑')
+  assert.equal(send().disabled, true)
+  send().click()
+  assert.deepEqual(dom.requests, [])
+  choices()[0].focus()
+  dom.key({ key: ' ' })
+  assert.deepEqual(choices().map(node => node.getAttribute('aria-pressed')), ['true', 'false', 'false', 'false'])
+  assert.equal(send().disabled, false)
+  assert.deepEqual(dom.requests, [])
+  cardMore(card())[0].click()
+  choices()[3].focus()
+  dom.key({ key: 'Enter' })
+  assert.deepEqual(choices().map(node => node.getAttribute('aria-pressed')), ['false', 'false', 'false', 'true'])
+  await dom.redraw(model)
+  assert.deepEqual(choices().map(node => node.getAttribute('aria-pressed')), ['false', 'false', 'false', 'true'])
+  const changed = { ...model, asks: [{ ...model.asks[0], fp: 'changed' }] }
+  await dom.redraw(changed)
+  assert.ok(choices().every(node => node.getAttribute('aria-pressed') === 'false'))
+  assert.equal(send().disabled, true)
+  selectAnswer(card(), 'Gold').click()
+  await dom.flush()
+  assert.deepEqual(dom.requests.map(request => [request.body.type, request.body.text]), [['send', 'Gold']])
+  assert.equal(send().disabled, true)
+  choices()[0].click()
+  send().click()
+  assert.deepEqual(dom.requests.map(request => request.body.text), ['Gold'])
+  release()
+  await dom.settle()
+})
+
+test('a question already sending disables every choice and its send arrow', async () => {
+  for (const mode of ['send', 'connected', 'mailbox']) {
+    const model = cardsModel()
+    model.asks[0] = { ...model.asks[0], answers: ['One', 'Two', 'Three', 'Four'], send: mode, isSending: true }
+    const dom = await pageDom(await sourcePage(), model)
+    const controls = pressWalk(cardWithKey(dom, 'ask'))
+    assert.ok(controls.filter(node => node.className === 'choice').every(node => node.disabled), mode)
+    assert.equal(controls.find(node => node.className === 'answer-send').disabled, true, mode)
+  }
+})
+
 test('a card with nothing behind More shows no More button', async () => {
   const html = await sourcePage()
   for (const canHide of [false, true]) {
@@ -9602,10 +9785,11 @@ test('a card with nothing behind More shows no More button', async () => {
     model.groups[0].rows[0] = { ...model.groups[0].rows[0], resume: null, canConfirm: canHide }
     const dom = await pageDom(html, model)
     const card = cardWithKey(dom, 'ask')
-    // With nothing to hide the two answers are all there is; Already answered, hide alone still goes behind More.
-    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['Copy "Yes"', 'Copy "No"'])
+    // Already answered, hide alone still goes behind More.
+    assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice').map(node => node.textContent), ['Yes', 'No'])
+    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
     assert.equal(cardMore(card).length, canHide ? 1 : 0)
-    assert.equal(cardActionNodes(card).length, canHide ? 3 : 2)
+    assert.equal(cardActionNodes(card).length, canHide ? 2 : 1)
     const row = cardWithKey(dom, 'row')
     assert.equal(cardActionNodes(row).length, canHide ? 2 : 1)
     assert.ok(cardActionNodes(row).every(isPageVisible) || !isPageVisible(row))
@@ -9618,12 +9802,15 @@ test('a question with four answers shows three and keeps the fourth behind More'
   model.asks[0] = { ...model.asks[0], kind: 'choose', answers: ['A', 'B', 'C', 'D'] }
   const dom = await pageDom(await sourcePage(), model)
   const card = cardWithKey(dom, 'ask')
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['Copy "A"', 'Copy "B"', 'Copy "C"'])
+  const visibleChoices = () => pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent)
+  assert.deepEqual(visibleChoices(), ['A', 'B', 'C'])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
   const more = cardMore(card)[0]
   assert.ok(more)
   more.click()
   assert.equal(more.getAttribute('aria-expanded'), 'true')
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['Copy "A"', 'Copy "B"', 'Copy "C"', 'Copy "D"', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(visibleChoices(), ['A', 'B', 'C', 'D'])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
 })
 
 test('More opens and closes by keyboard and keeps its state across a refresh', async () => {
@@ -9957,18 +10144,18 @@ test('a reply button on an unconnected question says it copies and the card then
     const dom = await pageDom(html, model, { copyAllowed: true })
     assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
     const card = key => dom.node('needs').querySelectorAll('[data-ref-key]').find(one => shownWords(one).includes(key))
-    // No message button on a question the board cannot send to: every answer is a Copy button.
-    const labels = dom.buttons().map(button => button.textContent)
-    assert.ok(labels.includes(EN.pgCopyReply('Blue')), labels.join())
-    assert.ok(!labels.some(label => label.startsWith('Send "')), labels.join())
+    // A question the board cannot send to has one Copy button for its choices.
+    const labels = dom.buttons().map(button => button.getAttribute('aria-label'))
+    assert.ok(labels.includes(EN.pgCopyChoice), labels.join())
+    assert.ok(!labels.includes(EN.pgSendChoice), labels.join())
     // An agent that is open (Codex has working tasks) is told to paste into it; the answer is copied.
-    dom.buttons().find(button => button.textContent === EN.pgCopyReply('Blue')).click()
+    selectAnswer(card('Blue or green?'), 'Blue').click()
     await dom.settle()
     assert.ok(dom.copies.includes('Blue'))
     assert.deepEqual(dom.requests, [])
     assert.ok(shownWords(card('Blue or green?')).includes(EN.pgPasteIn('Blue', EN.agentNames.codex)), shownWords(card('Blue or green?')))
     // An agent the board has not seen lately is told to paste once it is open again.
-    dom.buttons().find(button => button.textContent === EN.pgCopyReply('Short')).click()
+    selectAnswer(card('Short or detailed?'), 'Short').click()
     await dom.settle()
     assert.ok(shownWords(card('Short or detailed?')).includes(EN.pgPasteLater('Short', EN.agentNames.gemini)), shownWords(card('Short or detailed?')))
     // And the same lines in the other two languages.
@@ -10188,7 +10375,7 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   // The message is sent: the card says it is sending, then that it was sent; the next board brings the reply.
   let release
   const dom = await pageDom(html, model, { post: () => new Promise(done => { release = () => done({ ok: true, json: async () => ({ note: '' }) }) }) })
-  dom.buttons().find(button => button.textContent === EN.pgSendReply('Yes')).click()
+  selectAnswer(card(dom), 'Yes').click()
   await dom.flush()
   assert.deepEqual(dom.requests.map(request => request.body.text), ['Yes'])
   assert.equal(pageCardResults(dom, 'ask-send')[0].textContent, EN.serveSending(EN.agentNames.codex))
@@ -10201,7 +10388,7 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   assert.ok(shownWords(card(dom)).includes(`${EN.messagesAcknowledged} · Shipped`), shownWords(card(dom)))
   // A message the board refused: the line says so and the card offers Send again and Copy message.
   const refused = await pageDom(html, model, { post: async () => ({ ok: false, json: async () => ({ note: 'Synthetic refusal' }) }) })
-  refused.buttons().find(button => button.textContent === EN.pgSendReply('No')).click()
+  selectAnswer(card(refused), 'No').click()
   await refused.settle()
   const failure = pageCardResults(refused, 'ask-send').find(node => node.textContent.startsWith('Synthetic refusal'))
   assert.ok(failure, pageCardResults(refused, 'ask-send').map(node => node.textContent).join())
@@ -10226,7 +10413,7 @@ test('words sent again after a Claude message went nowhere are a new message, no
   model.asks = [ask]
   const dom = await pageDom(html, model, { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
   const answer = ask.answers[0]
-  const press = () => dom.buttons().find(button => button.textContent === EN.pgSendReply(answer)).click()
+  const press = () => selectAnswer(cardWithKey(dom, ask.key), answer).click()
   const ids = []
   for (const ending of [{ status: 'uncertain', error: 'DISMISSED' }, { status: 'uncertain', error: 'EXPIRED' }, { status: 'rejected', error: 'STOPPED' }, { status: 'acknowledged', error: '' }]) {
     await dom.redraw(model)
@@ -10296,13 +10483,12 @@ test('an agent with no open session shows as offline and its answers copy', asyn
   assert.equal(rowAgent(dom, 'codex').getAttribute('data-presence'), 'open')
   assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label').includes(EN.pgOffline), false)
   // Its question offers Copy, never Send; the card then says to paste once it is open again.
-  const labels = dom.buttons().map(button => button.textContent)
-  assert.ok(labels.includes(EN.pgCopyReply('Yes')), labels.join())
-  assert.ok(!labels.some(label => label.startsWith('Send "')), labels.join())
+  const labels = dom.buttons().map(button => button.getAttribute('aria-label'))
+  assert.ok(labels.includes(EN.pgCopyChoice), labels.join())
+  assert.ok(!labels.includes(EN.pgSendChoice), labels.join())
   const copying = await pageDom(await sourcePage(), model, { copyAllowed: true })
   const card = copying.node('needs').querySelectorAll('[data-ref-key]').find(one => shownWords(one).includes('Beta question'))
-  const yes = pressWalk(card).find(node => node.tag === 'button' && node.textContent === EN.pgCopyReply('Yes'))
-  yes.click()
+  selectAnswer(card, 'Yes').click()
   await copying.settle()
   assert.ok(copying.copies.includes('Yes'))
   assert.ok(shownWords(card).includes(EN.pgPasteLater('Yes', EN.agentNames.gemini)), shownWords(card))
@@ -11100,6 +11286,9 @@ test('the page uses ink for actions and amber only for what needs you', async ()
   assert.deepEqual(using('waiting'), ['.badge', '.flag', '.pbar .c-w', '.pbar.cont u.c-w', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
   // The blue accent is on the live page only when the person picks the Blue progress-bar style (#1085), and on its swatch in the look menu.
   assert.deepEqual(using('accent'), ['[data-bar="blue"] .pbar .c-x,[data-bar="blue"] .pbar .c-c,[data-bar="blue"] .pbar.cont b,[data-bar="blue"] .pbar.cont u.c-c,[data-sw="blue"] .sw .c-x,[data-sw="blue"] .sw .c-c'], 'the blue accent is only the Blue bar style')
+  // The question card's send arrow is an action, so it is ink on the page colour, like a primary button (#1107).
+  const arrow = rules.find(([selector]) => selector === '.answers button.answer-send')[1]
+  assert.ok(arrow.includes('var(--act)') && arrow.includes('var(--on-act)'), arrow)
   // Green is for what is alive, red for what is wrong, and a finished task is muted.
   assert.ok(html.includes('--alive:var(--done)'))
   // A progress-bar cell for a step that runs (CI, handed over) is alive too (#1085).
@@ -11597,9 +11786,9 @@ test('the page of a grouped board draws each question once, copies an answer and
     assert.ok(working.length > 0)
     assert.equal(working.length, model.view.working.length)
     assert.doesNotMatch(drawn, /\b(?:Send|Undo|Message (?:Codex|Gemini|Cursor))\b/)
-    const answer = dom.buttons().find(button => button.textContent === 'Copy "Blue"')
-    assert.ok(answer, drawn)
-    answer.click()
+    const ask = model.asks.find(one => one.text === 'Blue or green?')
+    assert.ok(ask, drawn)
+    selectAnswer(cardWithKey(dom, ask.key), 'Blue').click()
     await dom.settle()
     assert.ok(dom.copies.includes('Blue') || dom.copied.includes('Blue'))
     assert.deepEqual(dom.requests, [])
@@ -12190,12 +12379,13 @@ test('after Send the hide button named by each README is visible without More', 
     const model = cardsModel()
     model.asks[0].send = 'send'
     const dom = await pageDom(html, model, { confirm: () => true, post: async () => ({ ok: true, json: async () => ({ ok: true, note: 'Synthetic sent notice' }) }) })
-    const send = dom.buttons().find(button => button.textContent === words.pgSendReply.replace('\u0001', 'Yes'))
+    const card = pressWalk(dom.node('board')).find(node => node.getAttribute('data-ref-key') === 'ask')
+    const send = selectAnswer(card, 'Yes')
+    assert.equal(send.getAttribute('aria-label'), words.pgSendChoice)
     assert.ok(send)
     send.click()
     await dom.flush()
     await dom.flush()
-    const card = pressWalk(dom.node('board')).find(node => node.getAttribute('data-ref-key') === 'ask')
     const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
     assert.ok(hide, 'the documented hide button is visible after sending')
     assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), readme)

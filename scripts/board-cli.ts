@@ -806,17 +806,42 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
           isOwned = false
           continue
         }
+        let isChanged = false
         try {
           // A virus scanner or indexer can hold the just-written temp file, or the file it
           // replaces, for a moment on Windows (#696): the rename is tried again after short
           // waits, since the three tight retries of the whole change never outlast that hold.
-          patiently(() => renameSync(temp, file))
+          // Look at the file again before each retry so a write that landed while the rename
+          // was refused is not overwritten by the old temp (#1103).
+          let lastError: unknown
+          patiently(() => {
+            if (lastError !== undefined) {
+              if (isLedger && !existsSync(file)) return
+              if (read(file) !== before) {
+                isChanged = true
+                return
+              }
+            }
+            try {
+              renameSync(temp, file)
+              lastError = undefined
+            } catch (error) {
+              lastError = error
+              throw error
+            }
+          })
+          if (!isChanged && lastError !== undefined) throw lastError
         } catch (error) {
           if (!isLedger || existsSync(file)) throw error
           if (!placeOwnedQuestionFile(temp, file)) {
             if (!existsSync(file)) isOwned = false
             throw error
           }
+        }
+        if (isChanged) {
+          unlinkSync(temp)
+          isOwned = false
+          continue
         }
       }
     } catch (error) {
