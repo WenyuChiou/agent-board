@@ -187,6 +187,8 @@ syncBuiltinESMExports()
         assert.ok(card, `${title}: ${label}`)
         const button = page.buttons(card).find(one => one.textContent === label && one.getAttribute('data-nav') === null)
         assert.ok(page.reveal(button), `${title}: ${label} is not on screen`)
+        // The send arrow acts on the chosen answer, so the person picks one first, as on the real page (#1107).
+        if (button.className === 'answer-send') page.buttons(card).find(one => one.className === 'choice').click()
         const before = page.visible()
         button.click()
         await page.flush()
