@@ -5,6 +5,7 @@ import type { ConnectTransaction, LegacyConnectRequest } from './connect-transac
 import { codexApproval } from './codex-approval'
 import type { CodexCheck, CodexFound } from './codex-approval'
 import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback'
+import { hermesHome as defaultHermesHome } from '../hooks/hermes-home'
 import { sha256 } from '../hooks/sha256'
 import { hookWorker } from '../hooks/hook-safety'
 import { boardPromptHelper, boardRequestWords } from '../hooks/board-commands'
@@ -35,7 +36,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     try { return sha256(readLocal(codexConfig)) } catch { return undefined }
   }
   const grokHome = request.dirs?.grok ?? [home, '.grok'].join(sep)
-  const hermesHome = request.dirs?.hermes ?? [home, '.hermes'].join(sep)
+  const hermesHome = request.dirs?.hermes ?? defaultHermesHome(home, sep, process.env, isWin ? 'win32' : 'posix')
   const openclawHome = request.dirs?.openclaw ?? [home, '.openclaw'].join(sep)
   const opencodeHome = request.dirs?.opencode ?? [home, '.config', 'opencode'].join(sep)
   const folder = path.replace(/[\\/][^\\/]*$/, '')

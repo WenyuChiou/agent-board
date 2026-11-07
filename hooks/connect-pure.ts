@@ -1,7 +1,7 @@
 import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from './board-commands'
 import { HOOK_VERSION, hookGuardSource, hostHookTimeout } from './hook-safety'
 import { INBOX_DROPPED_COPY, INBOX_DROPPED_FILE, INBOX_DROPPED_FOLD_BYTES, INBOX_DROPPED_KEEP_DAYS, INBOX_DROPPED_STALE_MINUTES, INBOX_MAX_BYTES, INBOX_MAX_FILES } from './hook-reporters'
-import { antigravityCommand, antigravityHooks, directHookArgs, encodedCommandText, hookCommandArgs, lifecycleCapability } from './local-agents'
+import { antigravityCommand, antigravityHooks, directHookArgs, encodedCommandText, hookCommandArgs } from './local-agents'
 import { legacyOpenClawPlugin, legacyOpenCodePlugin } from './legacy-hook-plugins'
 import { LANGS, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -300,7 +300,7 @@ const jsonEdit =
 // is left alone. The empty map `hooks: {}` is the one flow-style value it can follow: Hermes
 // writes that into a new config.yaml, and it holds nothing to keep.
 // A comment runs to the line end, a Windows `\r` included.
-const HERMES_KEY = /^\s+(?:pre_llm_call|post_llm_call|on_session_finalize)\s*:\s*(?:#[^\n]*)?$/
+const HERMES_KEY = /^\s+(?:pre_llm_call|post_llm_call|on_session_start|on_session_end|on_session_finalize)\s*:\s*(?:#[^\n]*)?$/
 const TOP_HOOKS = /^hooks\s*:\s*(?:#[^\n]*)?$/
 const EMPTY_HOOKS = /^hooks\s*:\s*\{\s*\}\s*(?:#[^\n]*)?$/
 
@@ -323,23 +323,25 @@ const hasChildren = (lines: string[], at: number): boolean => {
 // Our list items, each with the lines that continue it: a YAML dumper (Hermes' own setup,
 // or a person tidying the file) writes our flow-style item in block style, its timeout on a
 // line of its own. A comment or another line that names the script is no item of ours.
-const hermesItems = (lines: readonly string[]): Array<[number, number]> => {
+// `owns` tells an item of ours from a person's: the connector's reporter script by default, or the
+// installed worker for setup's hooks (#1115).
+const hermesItems = (lines: readonly string[], owns: RegExp = OURS): Array<[number, number]> => {
   const items: Array<[number, number]> = []
   lines.forEach((line, at) => {
     if (!line.trimStart().startsWith('- ')) return
     const indent = indentOf(line)
     let end = at + 1
     while (end < lines.length && isContent(lines[end] ?? '') && indentOf(lines[end] ?? '') > indent) end += 1
-    if (lines.slice(at, end).some(one => isContent(one) && OURS.test(one))) items.push([at, end])
+    if (lines.slice(at, end).some(one => isContent(one) && owns.test(one))) items.push([at, end])
   })
 
   return items
 }
 
-const stripHermesHooks = (text: string, isKeepingTop: boolean): string => {
+const stripHermesHooks = (text: string, isKeepingTop: boolean, owns: RegExp = OURS): string => {
   const lines = text.split('\n')
   const drop = new Set<number>()
-  for (const [start, end] of hermesItems(lines)) for (let index = start; index < end; index += 1) drop.add(index)
+  for (const [start, end] of hermesItems(lines, owns)) for (let index = start; index < end; index += 1) drop.add(index)
   const kept = lines.filter((_, at) => !drop.has(at))
   if (kept.length === lines.length) return text
   const keys = kept.filter((line, at) => !(HERMES_KEY.test(line) && !hasChildren(kept, at)))
@@ -348,13 +350,13 @@ const stripHermesHooks = (text: string, isKeepingTop: boolean): string => {
   return `${rest.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '')}\n`.replace(/^\n$/, '')
 }
 
-export const withoutHermesHooks = (text: string): string => stripHermesHooks(text, false)
+export const withoutHermesHooks = (text: string, owns: RegExp = OURS): string => stripHermesHooks(text, false, owns)
 
-export const withHermesHooks = (text: string, events: Array<[string, string]>): string | null => {
+export const withHermesHooks = (text: string, events: Array<[string, string]>, owns: RegExp = OURS): string | null => {
   // Ours all there already, in whatever style Hermes last wrote them: nothing to change, so
   // a session start neither rewrites the file nor says it connected Hermes again.
   const lines0 = text.split('\n')
-  const items = hermesItems(lines0).map(([start, end]) => lines0.slice(start, end).join('\n'))
+  const items = hermesItems(lines0, owns).map(([start, end]) => lines0.slice(start, end).join('\n'))
   // A dumper folds a long command onto the next line at a space (PyYAML at 80 columns, the
   // way Hermes saves config.yaml, splits the Windows command), so a run of spaces and line
   // breaks counts as one space.
@@ -363,7 +365,7 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>): 
     [command, JSON.stringify(command), `'${command.replace(/'/g, "''")}'`].some(form => flat(item).includes(flat(form)))
   const hasTimeout = (item: string): boolean => [...item.matchAll(/(?:^|[,{\n])\s*timeout\s*:\s*(\d+)/g)].some(match => Number(match[1]) >= hostHookTimeout('hermes'))
   if (items.length === events.length && events.every(([, command]) => items.some(item => isItemOf(item, command) && hasTimeout(item)))) return text
-  const base = stripHermesHooks(text, true)
+  const base = stripHermesHooks(text, true, owns)
   const item = (command: string): string => `- {command: ${JSON.stringify(command)}, timeout: ${hostHookTimeout('hermes')}}`
   // Lines of ours end the way the file's own lines do.
   const eol = text.includes('\r\n') ? '\r' : ''
@@ -1050,9 +1052,7 @@ export const setupOwnership = (hooks: readonly AgentHook[], home: string, sep: s
       if (paths === null) { held.set(hook.agent, file); continue }
       const isHere = paths.some(path => dirs.some(dir => connectPath(path, isWindows).startsWith(`${dir}/`)))
       if (!isHere && !named.includes(connectPath(root, isWindows))) continue
-      // Setup gives Hermes a skill and no reporter yet, so its hooks stay the connector's to keep.
-      if (hook.agent === 'hermes' && lifecycleCapability('hermes') === 'adapter-pending') skillOnly.add(hook.agent)
-      else managed.add(hook.agent)
+      managed.add(hook.agent)
     }
   }
   return { managed, skillOnly, held }

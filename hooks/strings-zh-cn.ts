@@ -112,6 +112,7 @@ export const ZH_CN: Strings = {
     "antigravity": "Antigravity：开始新的对话；setup 已配置报告 hooks。",
     "cursor": "Cursor：在 Cursor 或 cursor-agent 开始新的对话；setup 已配置报告 hooks。",
     "grok": "Grok Build：开始新的会话；setup 已配置报告 hooks。",
+    "hermes": "Hermes Agent：开始新的会话。Hermes 会问一次是否信任看板的 hooks，请回答 y。在无法询问的聊天渠道中，先运行 {command} --hermes-trust 预览，再加上 --apply 重新运行同一命令。",
     "muse": "Muse Code：开始新的会话；setup 已配置报告 hooks。",
     "gemini": "Gemini CLI：开始新的会话；setup 已配置报告 hooks。",
     "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件，再开始新的会话。",

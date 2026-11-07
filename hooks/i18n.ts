@@ -150,6 +150,7 @@ export const ZH_TW = {
     "antigravity": "Antigravity：開始新的對話；setup 已設定回報 hooks。",
     "cursor": "Cursor：在 Cursor 或 cursor-agent 開始新的對話；setup 已設定回報 hooks。",
     "grok": "Grok Build：開始新的工作階段；setup 已設定回報 hooks。",
+    "hermes": "Hermes Agent：開始新的工作階段。Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} --hermes-trust 預覽，再加上 --apply 重新執行同一命令。",
     "muse": "Muse Code：開始新的工作階段；setup 已設定回報 hooks。",
     "gemini": "Gemini CLI：開始新的工作階段；setup 已設定回報 hooks。",
     "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛，再開始新的工作階段。",
