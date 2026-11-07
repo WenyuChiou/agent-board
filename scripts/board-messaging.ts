@@ -7,7 +7,7 @@ import { address, claimMessages, deliveryText, disconnectMessages, dismissMessag
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
-import { claimMessageStore } from './message-store-claim'
+import { claimMessageStore, patiently } from './message-store-claim'
 import type { MessageStoreClaim } from './message-store-claim'
 
 // The name a hook gives its mailbox claim, so it can hand back a claim it stopped waiting for (#990).
@@ -144,9 +144,18 @@ const openMessaging = (directory: string, isDefault = false) => {
   const isFreshDefault = isDefault && isCreated
   try {
     if (lstatSync(root).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_DIRECTORY')
+    // A start that created the folder secures it before any claim file is written inside it.
+    // A parallel start that found the default folder already there without a handoff waits if
+    // another start is still setting its ACL (#1100), then claims it.
     if (process.platform === 'win32' && trusted === undefined && (isCreated || isDefault)) {
       try {
-        privateFolder(root)
+        if (isCreated) privateFolder(root)
+        else patiently(() => {
+          try { privateFolder(root) } catch (error) {
+            if (!isTimeout(error)) throw Object.assign(error as Error, { code: 'EBUSY' })
+            throw error
+          }
+        })
       } catch (error) { throw new Error(isTimeout(error) ? 'ACL_CHECK_TIMEOUT' : 'MESSAGE_STORE_ACL', { cause: error }) }
     }
     const claim = claimMessageStore(root)

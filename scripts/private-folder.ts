@@ -123,9 +123,9 @@ export const privateFolder = (dir: string): void => {
 // have had it made the folder itself.
 export const privateFolderHandoff = (dir: string): string => {
   const root = resolve(dir)
-  const isCreated = !isPresent(root)
+  let isCreated = false
   try {
-    mkdirSync(root, { recursive: true, mode: 0o700 })
+    isCreated = mkdirSync(root, { recursive: true, mode: 0o700 }) !== undefined
     // The folder checked must be the folder handed over, whoever else could reach its parent.
     const identity = identityOf(root)
     privateFolder(root)
