@@ -103,8 +103,9 @@ ending in a question mark on the last line, cut to one line). It shows under Nee
 closes it. A board-only prompt keeps it waiting. The hook marks its question and approval steps done when they end,
 then reuses their lines for later asks; ending a session leaves its question waiting. OpenCode fetches its last
 assistant message on idle and passes its text to the board script. Antigravity's hooks carry no reply text, so
-the board reads the last 256 KiB of its own `transcript.jsonl`, and ignores an earlier reply if a newer user prompt
-has appeared. This format is undocumented and was checked on agy 1.5.2. Nothing of any reply but its closing question
+the board reads the last 256 KiB of the transcript its hook names (`transcript.jsonl`, or `transcript_full.jsonl`,
+which agy 1.5.2 names, with the same line shape), and ignores an earlier reply if a newer user prompt
+has appeared. This format is undocumented and was checked live on agy 1.5.2. Nothing of any reply but its closing question
 is saved. A Stop the hook wrapper copied raw to its queue has no question; one the reporter queued itself keeps its
 one line. For Codex, what they open from `transcript_path` is the
 first record of the session's own Codex history file (the `rollout-<time>-<session id>.jsonl` file named for the

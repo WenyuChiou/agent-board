@@ -5150,6 +5150,12 @@ test('Antigravity reads only a current closing question from a bounded transcrip
   save([model('a'.repeat(300000)), user, model('A long transcript.\n\nUse the blue one?')])
   assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting'], { conversationId: 'synthetic-agy-long-tail', transcriptPath: file }).status, 0)
   assert.ok(record('synthetic-agy-long-tail').steps.includes('- [?] Use the blue one?'))
+  // agy 1.5.2 hooks name transcript_full.jsonl, with the same line shape.
+  const full = join(f.home, 'conversation', 'transcript_full.jsonl')
+  f.save(full, [user, model('SYNTHETIC-PRIVATE-REPLY\n\nShould I pick a third name?')].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+  assert.equal(send('synthetic-agy-full-transcript', 'waiting', 'Stop', full).status, 0)
+  assert.ok(record('synthetic-agy-full-transcript').steps.includes('- [?] Should I pick a third name?'))
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-PRIVATE'))
 }))
 
 test('queued Grok status retains only the closing question and replays it', () => fixture(f => {
