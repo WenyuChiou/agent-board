@@ -1228,8 +1228,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat)
   if (agent === 'openclaw') {
-    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home)
-    files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
+    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
+    files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {
