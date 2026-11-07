@@ -5796,7 +5796,9 @@ test('a Windows page start opens the page when its PowerShell printed every addr
   const board = serveIn()
   const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
   const preload = join(board.dir, 'stalled-acls.cjs')
+  const marker = join(board.dir, 'stalled-acls-fired')
   writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+const marker = ${JSON.stringify(marker)}
 cp.execFileSync = (file, args, options) => {
   // Only the folder check stalls: it is the one call that carries the file list, and the
   // recovery is about that call. Any other PowerShell use runs for real.
@@ -5805,6 +5807,7 @@ cp.execFileSync = (file, args, options) => {
     // lines would hide what the folder really allows (#799: an admin runner's folder
     // still holds SYSTEM and Administrators until the check removes them).
     const lines = original(file, args, options)
+    fs.writeFileSync(marker, 'stalled')
     throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
   }
   return original(file, args, options)
@@ -5818,6 +5821,7 @@ require('node:module').syncBuiltinESMExports()
     url = board.urlOf(out)
     // The parent's output names the check that refused, when one did.
     assert.ok(url, `${out}\n${url === null ? runtimeFolderState(folder, board.env) : ''}`)
+    assert.ok(existsSync(marker), 'the stalled PowerShell mock fired')
     assert.ok(existsSync(board.served))
     const acl = windowsAcl(folder, board.env)
     assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the runtime folder is private')
@@ -6095,7 +6099,7 @@ require('node:module').syncBuiltinESMExports()
 // The server child used to stop without a word here, so the command could only say the server
 // did not start; it now names the check that refused (#799).
 test('Windows page start discards a new address file whose owner cannot be set or whose access list is not private, and says why', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
-  for (const fault of ['owner', 'access']) {
+  for (const fault of ['owner', 'access', 'timeout']) {
     const board = serveIn()
     const preload = join(board.dir, `new-file-${fault}.cjs`)
     writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
@@ -6103,6 +6107,7 @@ const target = ${JSON.stringify(board.served)}.toLowerCase()
 cp.execFileSync = (file, args, options) => {
   const isNewFile = /icacls\\.exe$/i.test(String(file)) && String(args[0]).toLowerCase() === target && args.includes('/setowner')
   if (isNewFile && ${fault === 'owner'}) throw Object.assign(new Error('synthetic owner denial'), { code: 'EACCES' })
+  if (isNewFile && ${fault === 'timeout'}) throw Object.assign(new Error('synthetic owner time-out'), { code: 'ETIMEDOUT', signal: 'SIGTERM' })
   const result = original(file, args, options)
   // As if the filesystem had not inherited the private list.
   if (isNewFile && ${fault === 'access'}) original(file, [args[0], '/grant', '*S-1-1-0:R', '/L'], options)
@@ -6113,7 +6118,7 @@ require('node:module').syncBuiltinESMExports()
     board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
     try {
       const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 30_000 })
-      assert.equal(ran.stdout.trim(), EN.serveFailed(EN.serveRuntimePrivate), fault)
+      assert.equal(ran.stdout.trim(), EN.serveFailed(fault === 'timeout' ? EN.serveRuntimeCheckTimeout : EN.serveRuntimePrivate), fault)
       assert.ok(!existsSync(board.served), 'the empty file is discarded')
       assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [], fault)
       assert.ok(!ran.stdout.includes('http:'))

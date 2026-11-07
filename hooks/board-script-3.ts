@@ -11230,7 +11230,7 @@ export const LINES = [
 "            writeFileSync8(file, text, { mode: 384, flag: \"wx\" });",
 "        } catch (error) {",
 "          if (error.code !== \"EEXIST\")",
-"            process.stderr.write(`${error instanceof RuntimeFolderTimeoutError ? s.serveRuntimeCheckTimeout : s.serveRuntimePrivate}",
+"            process.stderr.write(`${error instanceof RuntimeFolderTimeoutError || isTimeout(error) ? s.serveRuntimeCheckTimeout : s.serveRuntimePrivate}",
 "`);",
 "          return false;",
 "        }",

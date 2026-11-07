@@ -166,7 +166,7 @@ test('a PowerShell that printed every address line but has not exited still chec
       // stdout, as Node's does.
       t.mock.method(childProcess, 'execFileSync', (program, args, options) => {
         if (basename(program).toLowerCase() === 'powershell.exe') {
-          const lines = options.env.AGENT_BOARD_RUNTIME_ACL_PATH.split('|').map(sddl).join('\n')
+          const lines = options.env.AGENT_BOARD_RUNTIME_ACL_PATH.split('|').map(sddl).join('\n') + '\n'
           throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
         }
         return other(program)
@@ -174,7 +174,7 @@ test('a PowerShell that printed every address line but has not exited still chec
       t.mock.method(childProcess, 'execFile', (program, args, options, callback) => {
         queueMicrotask(() => {
           if (basename(program).toLowerCase() === 'powershell.exe') {
-            const lines = options.env.AGENT_BOARD_RUNTIME_ACL_PATH.split('|').map(sddl).join('\n')
+            const lines = options.env.AGENT_BOARD_RUNTIME_ACL_PATH.split('|').map(sddl).join('\n') + '\n'
             callback(Object.assign(new Error('synthetic PowerShell stall'), { code: null, signal: 'SIGTERM', killed: true }), lines)
             return
           }
@@ -217,8 +217,8 @@ test('a PowerShell that printed only some address lines before its limit still f
           return
         }
         assert.equal(name, 'powershell.exe')
-        // One line where two were asked for (the folder and its address file).
-        const line = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`
+        // One full line where two were asked for (the folder and its address file).
+        const line = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})\n`
         if (callback === undefined) throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: line })
         callback(Object.assign(new Error('synthetic PowerShell stall'), { code: null, signal: 'SIGTERM', killed: true }), line)
       }
@@ -230,6 +230,52 @@ test('a PowerShell that printed only some address lines before its limit still f
       syncBuiltinESMExports()
       const folder = mode === 'sync' ? runtime.privateRuntimeFolder : runtime.privateRuntimeFolderAsync
       // The sync check throws outright; only the async one rejects a promise.
+      if (mode === 'sync') assert.throws(() => folder(root, ['address.json']), error => error instanceof runtime.RuntimeFolderTimeoutError)
+      else await assert.rejects(() => folder(root, ['address.json']), error => error instanceof runtime.RuntimeFolderTimeoutError)
+      t.mock.restoreAll()
+      syncBuiltinESMExports()
+    }
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// One line per file but no line end after the last: the limit may have cut that line after this
+// account's own entry, so it is not taken even though what is left reads as private (#799).
+test('a PowerShell whose last address line has no line end before its limit still fails the folder check as a timeout', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'runtime-stalled-cut-'))
+  const address = join(root, 'address.json')
+  writeFileSync(address, '{"url":"http://127.0.0.1:1"}')
+  try {
+    for (const mode of ['sync', 'async']) {
+      const runtime = await freshRuntime(`stalled-cut-${mode}`)
+      const stalled = (program, args, options, callback) => {
+        const name = basename(program).toLowerCase()
+        if (name === 'whoami.exe') {
+          if (callback === undefined) return `"SYNTHETIC\\user","${sid}"\n`
+          callback(null, `"SYNTHETIC\\user","${sid}"\n`)
+          return
+        }
+        if (name === 'icacls.exe') {
+          if (callback === undefined) return ''
+          callback(null, '')
+          return
+        }
+        assert.equal(name, 'powershell.exe')
+        // Both lines, the second one as far as this account's entry and no further.
+        const lines = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})\nO:${sid}G:SYD:AI(A;ID;FA;;;${sid})`
+        if (callback === undefined) throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
+        callback(Object.assign(new Error('synthetic PowerShell stall'), { code: null, signal: 'SIGTERM', killed: true }), lines)
+      }
+      t.mock.method(childProcess, 'execFileSync', (program, args, options) => stalled(program, args, options))
+      t.mock.method(childProcess, 'execFile', (program, args, options, callback) => {
+        queueMicrotask(() => stalled(program, args, options, callback))
+        return {}
+      })
+      syncBuiltinESMExports()
+      const folder = mode === 'sync' ? runtime.privateRuntimeFolder : runtime.privateRuntimeFolderAsync
       if (mode === 'sync') assert.throws(() => folder(root, ['address.json']), error => error instanceof runtime.RuntimeFolderTimeoutError)
       else await assert.rejects(() => folder(root, ['address.json']), error => error instanceof runtime.RuntimeFolderTimeoutError)
       t.mock.restoreAll()

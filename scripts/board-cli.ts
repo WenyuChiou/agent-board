@@ -1840,7 +1840,8 @@ const serveChild = (): void => {
           // Another `--serve` that wrote first is the page, so that start stops quietly. Any other
           // failure says why, as a child whose folder check failed does, instead of stopping without
           // a word (#799): the command shows the same reason, not the generic line.
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') process.stderr.write(`${error instanceof RuntimeFolderTimeoutError ? s.serveRuntimeCheckTimeout : s.serveRuntimePrivate}\n`)
+          // The file's own icacls calls end in their raw time-out error, not the folder check's.
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') process.stderr.write(`${error instanceof RuntimeFolderTimeoutError || isTimeout(error) ? s.serveRuntimeCheckTimeout : s.serveRuntimePrivate}\n`)
           return false
         }
         // The one line `--serve` waits for. Its pipe closes once it has read it.

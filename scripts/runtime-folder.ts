@@ -128,9 +128,11 @@ const commands = {
       // out: the answer is complete without the exit, so take the lines it left behind. A
       // shorter answer is still a failure, and so is any other error; the original error is
       // kept, so the caller can still tell the check did not finish. A blank line is never a
-      // complete answer: the command prints exactly one SDDL line, or '-', per file.
+      // complete answer: the command prints exactly one SDDL line, or '-', per file. Nor is an
+      // answer whose last line has no line end: the limit may have cut it after this account's
+      // own entry, and a cut access list can read as private.
       const printed = (error as { stdout?: unknown } | null)?.stdout
-      if (!isKilled(error) || typeof printed !== 'string') throw error
+      if (!isKilled(error) || typeof printed !== 'string' || !printed.endsWith('\n')) throw error
       const lines = printed.trim().split(/\r?\n/).map(line => line.trim())
       if (lines.length !== files.length || lines.some(line => line === '')) throw error
       return lines
