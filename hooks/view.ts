@@ -11,12 +11,12 @@ import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, WORKING_MS } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
 import { sha256 } from './sha256'
 import { observeQuestions, partsKey2, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
-import { identity } from './grouping'
+import { identity, isSilenceTask, isWorkingTask } from './grouping'
 import { closedCopies, mergeCopies, recordFolder } from './question-merge'
 import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
 import type { RunGroup } from './runs'
@@ -958,7 +958,7 @@ export const buildView = (
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now, updated, staleMs)
-      const isSilence = task.auto?.state === 'working' && hasTime(lastActive) && now - lastActive > WORKING_MS && (task.steps.length === 0 || task.steps.every(step => isLifecycleStep(step.text)))
+      const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
@@ -1195,7 +1195,12 @@ export const buildView = (
             ? { project: name, title: task.title, line: task.line, session: null }
             : auto === 'ended' && !isSilence && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
-              : null,
+              // A working row quiet past the Working now limit is no longer at work: the
+              // person can archive it instead of waiting out the 12 h stale time (#1000).
+              // A row waiting on the person keeps today's refusal.
+              : auto === 'working' && !isSilence && task.auto !== null && !isWorkingTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
+                ? { project: name, title: task.title, line: task.line, session: task.auto.session }
+                : null,
         target: targetOf(task.auto),
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         ...(group === undefined ? {} : { runs: runsText(group, now, s) }),

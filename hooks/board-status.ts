@@ -41,11 +41,12 @@ export const boardStatus = (
   staleMs = STALE_MS,
   answeredText = '',
   questionsText = '',
+  pending: readonly PendingTurn[] = [],
 ): string => {
   const answered = parseAnswered(answeredText) ?? []
   const questions = parseQuestions(questionsText) ?? undefined
   const view = buildView(parseProgress(markdown), [], null, now, 0, {}, s, answered, {}, questions, undefined, [], new Set(), undefined, staleMs)
-  const counts = boardCounts(view, [], s, now)
+  const counts = boardCounts(view, pending, s, now)
 
   return s.boardStatusLine(counts.needs, counts.working)
 }
