@@ -10589,6 +10589,13 @@ test('a new question from an agent the board does not know by name uses the gene
   assert.equal(awayLine(dom), 'Away for 10 min · 1 agent asked a question')
 })
 
+test('a new question from an agent named like an object member counts as one question (#974)', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-ctor', agent: 'constructor', task: 'Ctor plan', text: 'Ctor, OK?' }] }
+  const dom = await awayAfter(base, later, 10)
+  assert.equal(awayLine(dom), 'Away for 10 min · 1 agent asked a question')
+})
+
 test('new questions from two agents show the agent count', async () => {
   const base = cardsModel('codex')
   const later = {
