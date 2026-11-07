@@ -1117,6 +1117,16 @@ test('a choice with a comma before 還是 / or still reads both options', () => 
   })
 })
 
+test('an English "Should X be A or B?" question offers A and B as the answers, without the question words', () => {
+  expect(askOf('Should the retry limit be 3 or 5?', '')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
+  expect(askOf('Retry limit', 'Should the retry limit be 3 or 5?')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
+  // An imperative lead is not a question frame: it stays whole.
+  expect(askOf('Keep the old screenshots or redraw them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Keep the old screenshots', 'redraw them'],
+  })
+})
+
 test('archiving never ages out a block with no time, and keeps a section someone left empty', () => {
   const text = `# P
 
