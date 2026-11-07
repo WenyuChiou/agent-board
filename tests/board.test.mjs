@@ -919,6 +919,115 @@ fs.renameSync = (from, to, ...rest) => {
   assert.notEqual(ran.files['progress-questions.json'], seed.files['progress-questions.json'], 'the tick rewrote the ledger')
 })
 
+test('a refused rename retry rechecks the destination and preserves another writer\'s progress or question update', () => {
+  const seed = chatRun(['--keys', ''], { file: () => HAND_FILE, inspect: questionFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const peerFile = '# Progress\n\n## demo\n### Concurrent task\n- [?] Keep peer question, OK?\n'
+  const peerAnswered = chatRun(['--keys', 'x'], { file: () => peerFile, inspect: questionFiles })
+  assert.equal(peerAnswered.status, 0, peerAnswered.stderr)
+  const peerRecord = JSON.parse(peerAnswered.files['progress-questions.json']).records[0]
+  assert.equal(peerRecord.isWaiting, false)
+  const concurrentLedger = JSON.stringify({
+    ...JSON.parse(seed.files['progress-questions.json']),
+    records: [...JSON.parse(seed.files['progress-questions.json']).records, peerRecord],
+  })
+  const inspect = dir => ({
+    ...questionFiles(dir),
+    progress: readFileSync(join(dir, 'progress.md'), 'utf8'),
+    temps: readdirSync(dir).filter(name => name.endsWith('.board-tmp')),
+  })
+
+  // 1. A refused progress rename preserves another writer's task and the requested tick.
+  const progressRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+let refused = false
+fs.renameSync = (from, to, ...rest) => {
+  if (!refused && String(to) === progress) {
+    refused = true
+    fs.writeFileSync(progress, fs.readFileSync(progress, 'utf8') + '\\n### Concurrent task\\n- [~] Added while progress rename was refused\\n')
+    throw Object.assign(new Error('synthetic held progress'), { code: 'EPERM' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(progressRan.status, 0, progressRan.stderr)
+  assert.ok(progressRan.progress.includes('- [x] Ship it, OK?'), progressRan.progress)
+  assert.ok(progressRan.progress.includes('### Concurrent task\n- [~] Added while progress rename was refused'), progressRan.progress)
+  assert.deepEqual(progressRan.temps, [])
+
+  // 2. A refused question-ledger rename preserves a concurrent question update and the requested answer,
+  // without running the missing-ledger fallback or leaving stale temp files.
+  const ledgerRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+const originalLink = fs.linkSync
+const originalSpawn = cp.spawnSync
+const probe = { links: 0, moves: 0, sources: [] }
+let refused = false
+fs.linkSync = (from, to) => {
+  if (String(to) === ledger && String(from).endsWith('.board-tmp')) probe.links += 1
+  return originalLink(from, to)
+}
+cp.spawnSync = (tool, argv, options) => {
+  if (Array.isArray(argv) && argv.some(arg => String(arg).includes('.board-tmp'))) probe.moves += 1
+  return originalSpawn(tool, argv, options)
+}
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === ledger && fs.readFileSync(progress, 'utf8').includes('- [x] Ship it, OK?')) {
+    probe.sources.push(path.basename(String(from)))
+    if (!refused) {
+      refused = true
+      fs.writeFileSync(ledger, ${JSON.stringify(concurrentLedger)})
+      throw Object.assign(new Error('synthetic held ledger'), { code: 'EPERM' })
+    }
+  }
+  return originalRename(from, to, ...rest)
+}
+process.on('exit', () => fs.writeFileSync(ledger + '.probe', JSON.stringify(probe)))`),
+  })
+  assert.equal(ledgerRan.status, 0, ledgerRan.stderr)
+  const finalLedger = JSON.parse(ledgerRan.files['progress-questions.json'])
+  const tickedRecord = finalLedger.records.find(one => one.words.includes('Ship it'))
+  const concurrentRecord = finalLedger.records.find(one => one.words.includes('Keep peer question'))
+  assert.ok(tickedRecord, ledgerRan.files['progress-questions.json'])
+  assert.equal(tickedRecord.isWaiting, false)
+  assert.ok(concurrentRecord, ledgerRan.files['progress-questions.json'])
+  const probe = JSON.parse(ledgerRan.files['progress-questions.json.probe'])
+  assert.equal(probe.links, 0)
+  assert.equal(probe.moves, 0)
+  assert.equal(probe.sources.length, 2)
+  assert.notEqual(probe.sources[0], probe.sources[1], 'the stale temp was discarded and a fresh temp was written from current contents')
+  assert.deepEqual(ledgerRan.temps, [])
+
+  // 3. A changed destination after a refused rename does not count a replacement or run onReplaced:
+  // if the restarted rewrite then fails persistently, the journal line is still rolled back.
+  const rollbackRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+let refused = false
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === progress) {
+    if (!refused) {
+      refused = true
+      fs.writeFileSync(progress, fs.readFileSync(progress, 'utf8') + '\\n### Concurrent task\\n- [~] Still preserved\\n')
+      throw Object.assign(new Error('synthetic held progress'), { code: 'EPERM' })
+    }
+    throw Object.assign(new Error('persistent progress refusal'), { code: 'EACCES' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(rollbackRan.status, 1)
+  assert.match(rollbackRan.stdout + rollbackRan.stderr, /nothing was changed/)
+  assert.ok(rollbackRan.progress.includes('- [?] Ship it, OK?'), rollbackRan.progress)
+  assert.ok(rollbackRan.progress.includes('### Concurrent task\n- [~] Still preserved'), rollbackRan.progress)
+  assert.deepEqual(rollbackRan.temps, [])
+})
+
 test('the terminal board preserves unknown JSON ledgers and never overwrites a quarantine collision', () => {
   const unknown = '{"version":99,"future":"keep these bytes"}\n'
   const kept = chatRun(['--keys', 'down h'], { beside: { 'progress-questions.json': unknown }, inspect: questionFiles })
