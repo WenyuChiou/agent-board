@@ -22,7 +22,7 @@ import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside } from './board-messaging'
-import { claimMessageStore, hasLiveClaims } from './message-store-claim'
+import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -779,7 +779,10 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
           continue
         }
         try {
-          renameSync(temp, file)
+          // A virus scanner or indexer can hold the just-written temp file, or the file it
+          // replaces, for a moment on Windows (#696): the rename is tried again after short
+          // waits, since the three tight retries of the whole change never outlast that hold.
+          patiently(() => renameSync(temp, file))
         } catch (error) {
           if (!isLedger || existsSync(file)) throw error
           if (!placeOwnedQuestionFile(temp, file)) {
