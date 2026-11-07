@@ -40,8 +40,10 @@ const reachable = (agent: string, session: string | undefined, target: AgentTarg
   return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
 }
 const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[], now: number, s: Strings, answers?: string): { receipt?: Receipt } => {
-  // A kept question names the one message that answered it; a message with no such link is no receipt for it.
-  const one = session === undefined ? undefined : messages.filter(message => message.to === address(agent || 'claude', session) && (answers === undefined || message.answers === answers)).at(-1)
+  // A kept question is found by the one message the board sent to answer it; a message with no such link is no
+  // receipt for it. Only the board sets that link, so the question id alone names the message.
+  const one = answers !== undefined ? messages.filter(message => message.answers === answers).at(-1)
+    : session === undefined ? undefined : messages.filter(message => message.to === address(agent || 'claude', session)).at(-1)
   return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerCase() === 'claude'
@@ -350,7 +352,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
-  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, item.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId))
+  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId))
   const asks: ServeAsk[] = []
   const groups = new Map<string, ServeRow[]>()
   const idle: ServeRow[] = []

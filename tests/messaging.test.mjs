@@ -450,7 +450,8 @@ test('the page offers Queue for next turn beside Copy, prefers a live poller, an
 // A question the agent moved on from, kept on the Older shelf under the session that asked it (synthetic data).
 const keptQuestion = (id = 'synthetic-q1', text = 'Continue?') => ({ key: `retained::${id}`, questionId: id, ageStage: 'older', project: 'Synthetic', task: 'Mailbox page', context: '', text, note: '', when: '1h', at: 1, kind: 'open', options: [], command: null, link: null, where: 'other', agent: 'codex', session: 'abcdef01', nativeSession: 'mailbox-session', sessionId: null, resumeVia: null, reopen: null, hideKey: id, canHide: true, step: null, target: null })
 const keptModel = (messages, now, kept = [keptQuestion()]) => {
-  const view = { ...buildView(parseProgress('## Synthetic\n'), [], null, now, 0, {}, EN), older: kept }
+  // A kept question from the view carries no live-session marker (#192): its receipt is found by the question id alone.
+  const view = { ...buildView(parseProgress('## Synthetic\n'), [], null, now, 0, {}, EN), older: kept.map(({ nativeSession: _live, ...item }) => item) }
   const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
   return serveModel(view, [], EN, new Set(), false, { connections: [], mailboxes: enrollMailbox({ messages: [] }, 'codex', 'mailbox-session', 'CLI', now, 43_200_000).mailboxes, messages }, false, group)
 }
