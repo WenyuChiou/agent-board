@@ -61,6 +61,30 @@ const questionWords = (text: string): string => {
   return question
 }
 
+// An English choice that opens with a question word keeps the whole question frame in
+// its first option (`Should the retry limit be 3` for `Should the retry limit be 3 or 5?`),
+// and the button then sends that frame as the person's answer. Each frame below leaves
+// the option itself after a verb the option directly follows, so an imperative
+// (`Keep the old screenshots`) and a lead with no such verb (`Should I set the limit to 3`)
+// stay whole. The option after `want` must not be an infinitive (`want to go`).
+const QUESTION_FRAMES = [
+  // `Should the retry limit be 3` — the option follows the copula.
+  /^(?:should|shall|can|could|may|might|will|would|do|does|did|is|are|was|were)\b.+?\b(?:be|is|are|was|were)\s+/i,
+  // `Is it 3` — the option follows a pronoun subject.
+  /^(?:is|are|was|were)\s+(?:it|this|that|they|he|she|we|you|i)\s+/i,
+  // `Do you want 3` — the option is the verb's direct object.
+  /^(?:do|does|did|would|will|shall|should|can|could|may|might)\s+(?:you|we|they|he|she|it|i)\s+(?:want|prefer|like|need|choose|pick|take|use)\b\s+(?!to\b)/i,
+  // `Which do you prefer 3` — the same direct object after a which-clause.
+  /^which\b[^,]*?\b(?:prefer|like|want|choose|pick|need)\b\s+(?!to\b)/i,
+]
+const stripQuestionFrame = (lead: string): string => {
+  for (const frame of QUESTION_FRAMES) {
+    const stripped = lead.replace(frame, '').trim()
+    if (stripped !== '' && stripped !== lead) return stripped
+  }
+  return lead
+}
+
 // Splits `0.6.0 還是 1.0.0？` or a list Claude gave into options. The first option is the
 // clause right before 還是 / or, so `先開旗標，還是全部開？` and `A first, or B?` read too.
 const optionsOf = (text: string): string[] => {
@@ -74,7 +98,7 @@ const optionsOf = (text: string): string[] => {
   const lead = clauses[clauses.length - 1] ?? ''
   const rest = (match[2] ?? '').trim()
   // Reply length must not turn a real choice into a yes/no question; interfaces clip labels.
-  return [lead.replace(/^(要|用|選|是)/, '').trim(), rest].filter(one => one !== '')
+  return [stripQuestionFrame(lead).replace(/^(要|用|選|是)/, '').trim(), rest].filter(one => one !== '')
 }
 
 // A note that opens by asking for a look or an action. These are stricter than REVIEW and DO, which
