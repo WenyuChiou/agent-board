@@ -58,8 +58,17 @@ const isPresent = (file: string): boolean => {
   }
 }
 
-export const privateFolder = (dir: string): void => {
+export const privateFolder = (dir: string, isWait = false): void => {
   if (process.platform !== 'win32') return
+  if (isWait) {
+    patiently(() => {
+      try { privateFolder(dir) } catch (error) {
+        if (!isTimeout(error)) throw Object.assign(error as Error, { code: 'EBUSY' })
+        throw error
+      }
+    })
+    return
+  }
   try {
     const root = resolve(dir)
     mkdirSync(root, { recursive: true, mode: 0o700 })
