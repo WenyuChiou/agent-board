@@ -4102,9 +4102,14 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
       assert.equal(out.error, undefined, hookFailure(out))
       assert.equal(out.status, 0, hookFailure(out))
       assert.equal(out.stdout.trim(), '{}')
-      assert.equal(existsSync(pidFile), true, `exercise the real classifier process, case ${index}: ${hookLog(f)}`)
+      // On Windows the 2 s budget is shared with the reporter's own JSON work, so on a loaded runner Node can be
+      // killed at the deadline before its preload writes a PID (#1080). The reporter's own record that it started
+      // and ended the process is the proof there, as in the interrupted-PID test below.
       if (isWindows) assertClassifierExited(exitProof)
-      else assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+      else {
+        assert.equal(existsSync(pidFile), true, `exercise the real classifier process, case ${index}: ${hookLog(f)}`)
+        assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+      }
       isGone = true
       const files = readdirSync(inbox)
       const log = hookLog(f)
@@ -4143,6 +4148,26 @@ test('a classifier interrupted while publishing its PID marker still proves its 
   const files = readdirSync(inbox)
   assert.equal(files.length, 1)
   assert.deepEqual(JSON.parse(readFileSync(join(inbox, files[0]), 'utf8')), { session_id: 'synthetic-partial-pid' })
+  assert.match(hookLog(f), /REPORTER_TIMEOUT/)
+}))
+
+// A loaded machine can kill the classifier at the deadline before it runs any code of its own (#1080).
+test('a classifier killed before it runs any code still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const script = join(f.root, 'progress-report.ps1'), exitProof = join(f.home, 'classifier-exit.json')
+  const preload = join(f.home, 'silent-classifier.cjs')
+  f.save(script, observeClassifierExit(reporterPs1(), exitProof))
+  f.save(preload, 'setInterval(() => {}, 1000)\n')
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
+    JSON.stringify({ session_id: 'synthetic-silent-classifier', prompt: 'PRIVATE_RAW_PROMPT' }))
+  assertClassifierExited(exitProof)
+  assert.equal(out.error, undefined, hookFailure(out))
+  assert.equal(out.status, 0, hookFailure(out))
+  assert.equal(out.stdout.trim(), '{}')
+  const inbox = join(f.root, 'progress-inbox')
+  const files = readdirSync(inbox)
+  assert.equal(files.length, 1)
+  assert.deepEqual(JSON.parse(readFileSync(join(inbox, files[0]), 'utf8')), { session_id: 'synthetic-silent-classifier' })
   assert.match(hookLog(f), /REPORTER_TIMEOUT/)
 }))
 
