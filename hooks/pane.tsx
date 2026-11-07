@@ -16,7 +16,9 @@ import { displayColumns } from './board'
 import { agentLabel } from './strings'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { OLDER_SHOWN, progressBar, questionHead, replyHint } from './view'
+import { OLDER_SHOWN, questionHead, replyHint } from './view'
+import { barPieces, barRole, DEFAULT_BAR_STYLE } from './progress-bar'
+import type { BarStyle, Cell } from './progress-bar'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
 // The pane's drawing, from the view and a set of actions; it never touches the engine,
@@ -96,6 +98,8 @@ export type PaneModel = {
   hasQuestionsProblem?: boolean
   hasPendingQuestionsProblem?: boolean
   palette: Palette
+  // The progress bar's style, from the board's settings file (#1085); absent means Ink.
+  barStyle?: BarStyle
   s: Strings
 }
 
@@ -227,19 +231,21 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     </Box>
   )
 
-  // `━━━━───` in the accent, or in 若竹 once it is full.
-  const bar = (done: number, total: number, width: number, showPercent: boolean) => {
-    const { filled, rest } = progressBar(done, total, width)
-    const percent = total === 0 ? 0 : Math.round((done / total) * 100)
-
-    return (
-      <Box flexDirection="row">
-        <Text color={done === total && total > 0 ? palette.done : palette.accent}>{filled}</Text>
-        <Text color={palette.frame}>{rest}</Text>
-        {showPercent && <Text color={palette.muted}>{` ${percent}%`}</Text>}
-      </Box>
-    )
-  }
+  // One cell per step (#1085): `━` done, `╸` current, `─` todo, amber or red `━` for a step that
+  // waits on the person or is blocked, in the person's style; "n/m" stays beside it. One step: the text alone.
+  const style = model.barStyle ?? DEFAULT_BAR_STYLE
+  const barText = (cells: readonly Cell[], done: number, total: number, room: number, lead = '') => [
+    ...barPieces(cells, room).map((piece, index) => {
+      const role = barRole(piece.cell, style)
+      return (
+        <Text key={`bar${index}`} color={role === 'ink' ? undefined : palette[role]} bold={role === 'ink'}>
+          {index === 0 ? `${lead}${piece.text}` : piece.text}
+        </Text>
+      )
+    }),
+    ...(total > 0 ? [<Text key="count" color={palette.muted}>{`${cells.length > 1 ? ' ' : lead}${done}/${total}`}</Text>] : []),
+  ]
+  const bar = (cells: readonly Cell[], done: number, total: number, room: number) => <Box flexDirection="row">{barText(cells, done, total, room)}</Box>
 
   const stepRow = (step: ViewStep, room: number) => (
     <Box flexDirection="column">
@@ -572,7 +578,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   // every step and what can be done with it.
   const taskRow = (row: TaskRow, showProject: boolean) => {
     const isRowOpen = model.expanded === row.key
-    const tail = row.due === null ? `${row.done}/${row.total}` : row.due.left
+    const tail = row.due?.left ?? ''
     const meta = [row.due === null ? '' : row.due.date, showProject ? row.project : '', row.auto === null ? '' : agentLabel(row.agent || 'claude', s), row.status, row.pr, row.when].filter(
       part => part !== '',
     )
@@ -584,7 +590,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             {`${isRowOpen ? '▾' : '▸'} ${row.title}`}
           </Button>
           {spacer()}
-          <Text color={row.due === null ? palette.muted : color(row.due.tone)}>{` ${tail}`}</Text>
+          {row.due === null ? (
+            barText(row.cells ?? [], row.done, row.total, 12, ' ')
+          ) : (
+            <Text color={color(row.due.tone)}>{` ${tail}`}</Text>
+          )}
         </Box>
         <Box paddingLeft={2}>
           <Text color={row.tone === 'quiet' ? palette.muted : color(row.tone)} wrap="truncate-end">
@@ -599,7 +609,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         {!isRowOpen && cardResult(row.key)}
         {isRowOpen && (
           <Box paddingLeft={2} flexDirection="column" marginTop={1}>
-            {bar(row.done, row.total, 12, true)}
+            {row.due !== null && bar(row.cells ?? [], row.done, row.total, 12)}
             {row.context !== '' && muted(s.contextLine(row.context))}
             {row.handoff !== '' && muted(s.handoffLine(row.handoff))}
             {steps(row.steps)}
@@ -693,8 +703,6 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           <Text color={palette.project} wrap="truncate-end">
             {current.branch === '' ? current.project : `${current.project} · ${current.branch}`}
           </Text>
-          {spacer()}
-          <Text color={palette.muted}>{`${current.done}/${current.total}`}</Text>
         </Box>
         <Text bold wrap="wrap">
           {current.title}
@@ -704,7 +712,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             {s.contextLine(current.context)}
           </Text>
         )}
-        {bar(current.done, current.total, model.width, true)}
+        {bar(current.cells ?? [], current.done, current.total, model.width)}
         <Text color={current.tone === 'quiet' ? palette.muted : color(current.tone)} wrap="wrap">
           {current.status}
         </Text>
