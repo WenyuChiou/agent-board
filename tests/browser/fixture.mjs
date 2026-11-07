@@ -269,8 +269,8 @@ export const browserFixture = async (name, run) => {
     context = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
     await context.tracing.start({ screenshots: true, snapshots: true, sources: true })
     page = await context.newPage()
-    const startServer = async ({ messages = false } = {}) => {
-      const args = ['--serve', '--no-open', '--quiet-board', '--lang', 'en', ...(messages ? ['--messages-dir', join(root, 'messages')] : [])]
+    const startServer = async ({ messages = false, lang = 'en' } = {}) => {
+      const args = ['--serve', '--no-open', '--quiet-board', '--lang', lang, ...(messages ? ['--messages-dir', join(root, 'messages')] : [])]
       const result = await commandEvidence(evidence, 'serve', installedScript, args, env, boardRoot)
       const url = result.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
       assert.ok(url, result.stdout)

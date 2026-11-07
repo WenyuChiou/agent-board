@@ -57,6 +57,48 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
     })
   })
 
+  for (const [lang, refused, added] of [
+    ['en', 'Not added: The agent name "claude" is reserved for Claude Code. Ask the web chat to use "claude-web", then paste again.', 'Added to the board: '],
+    ['zh-TW', '沒加進去：代理名稱「claude」保留給 Claude Code 使用。請網頁聊天改用「claude-web」，再貼一次。', '已加進看板：'],
+    ['zh-CN', '没加进去：代理名称“claude”保留给 Claude Code 使用。请网页聊天改用“claude-web”，再粘贴一次。', '已加进看板：'],
+  ]) {
+    test(`a real clipboard paste naming itself claude explains the refusal and accepts claude-web in ${lang}`, { concurrency: false, timeout: 120_000 }, async () => {
+      await browserFixture(`reserved-agent-clipboard-${lang}`, async ({ page, progress, evidence, startServer }) => {
+        await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+        const board = new BoardPage(page)
+        await board.open(await startServer({ lang }))
+        const before = readFileSync(progress)
+        const title = 'Synthetic corrected web chat report'
+        const report = block('a823cafe', 'claude', 'working', 'Synthetic clipboard', title, ['- [~] Check synthetic relay'])
+        const requests = []
+        page.on('request', request => { if (new URL(request.url()).pathname === '/api/paste') requests.push(request.postDataJSON().text.replaceAll('\r\n', '\n')) })
+        const paste = async text => {
+          await page.evaluate(value => navigator.clipboard.writeText(value), text)
+          await page.locator('body').click({ position: { x: 2, y: 2 } })
+          const response = page.waitForResponse(result => new URL(result.url()).pathname === '/api/paste' && result.request().method() === 'POST')
+          await page.keyboard.press('ControlOrMeta+V')
+          return response
+        }
+        assert.equal((await paste(report)).status(), 409)
+        const note = page.locator('#note')
+        await note.filter({ hasText: refused }).waitFor({ state: 'visible' })
+        assert.equal(await note.innerText(), refused)
+        assert.deepEqual(readFileSync(progress), before)
+        assert.equal(await board.task(title).count(), 0)
+        await page.screenshot({ path: join(evidence, 'reserved-agent-refused.png'), fullPage: true })
+
+        const corrected = report.replace('agent=claude', 'agent=claude-web')
+        assert.equal((await paste(corrected)).status(), 200)
+        await note.filter({ hasText: `${added}${title}` }).waitFor({ state: 'visible' })
+        assert.equal(await note.innerText(), `${added}${title}`)
+        await board.task(title).waitFor({ state: 'visible' })
+        assert.match(readFileSync(progress, 'utf8'), /agent=claude-web/)
+        assert.deepEqual(requests, [report, corrected])
+        await page.screenshot({ path: join(evidence, 'reserved-agent-corrected.png'), fullPage: true })
+      })
+    })
+  }
+
   test('on a 375 px phone every step and note is one line and opens to the whole text', { concurrency: false, timeout: 120_000 }, async () => {
     await browserFixture('phone-one-line', async ({ page, progress, startServer }) => {
       await page.setViewportSize({ width: 375, height: 812 })
