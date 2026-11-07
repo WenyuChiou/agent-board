@@ -266,9 +266,8 @@ svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .icon-btn:active{background:var(--press)}
 [data-theme-toggle] .i-sun,[data-theme-toggle][data-now="dark"] .i-moon{display:none}
 [data-theme-toggle][data-now="dark"] .i-sun{display:block}
-/* the look menu (#1085): it opens above the button, which sits in the page's foot */
 .look{position:relative;display:inline-flex}
-.look-menu{position:absolute;bottom:calc(100% + var(--s1));left:0;z-index:20;min-width:176px;display:grid;padding:var(--s1);background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-m);box-shadow:var(--shadow)}
+.look-menu{position:absolute;bottom:calc(100% + var(--s1));left:0;z-index:20;min-width:176px;display:grid;padding:var(--s1);background:var(--inset);border:1px solid var(--line-strong);border-radius:var(--radius-m)}
 .look-menu button{display:flex;align-items:center;gap:var(--s2);min-height:var(--hit);padding:0 var(--s2);border:0;border-radius:var(--radius-s);background:transparent;text-align:left;cursor:pointer;font-size:var(--text-sm);white-space:nowrap}
 .look-menu button[aria-checked="true"]{font-weight:600}
 .look-menu button[aria-checked="true"]::after{content:'';margin-left:auto;width:8px;height:4px;border-left:2px solid currentColor;border-bottom:2px solid currentColor;transform:translateY(-2px) rotate(-45deg)}

@@ -911,30 +911,26 @@ div.row-btn{cursor:default}
 .row-btn[aria-expanded="true"] .r-chev{transform:rotate(90deg)}
 div.row-btn .r-chev{visibility:hidden}
 .r-meta .st{color:var(--ink)}
-/* the progress bar (#1085): one cell per step, 6px tall, 96px wide (72px on a narrow page), 2px gaps.
-   Shape carries the state as well as colour: done and current are filled (current 2px taller), todo
-   and cancelled hollow. Amber and red match the flags in every style; only done and current follow it. */
-:root[data-bar="blue"]{--bar-done:var(--accent);--bar-now:var(--accent)}
-:root[data-bar="green"]{--bar-done:var(--done);--bar-now:var(--done)}
 .r-meta .prog{display:inline-flex;align-items:center;gap:var(--s2);vertical-align:-1px}
+.r-meta .prog span{margin-left:0}
 .pbar{display:inline-flex;align-items:center;gap:2px;width:96px;height:8px;flex:none}
-.pbar i,.sw i{flex:1 1 0;min-width:5px;height:6px;border-radius:3px;background:var(--bar-done);transition:background-color var(--dur-layout) var(--ease-out),height var(--dur-layout) var(--ease-out)}
+.pbar i,.sw i{flex:1 1 0;min-width:5px;height:6px;border-radius:var(--radius-round);background:var(--bar-done);transition:background-color var(--dur-layout) var(--ease-out),height var(--dur-layout) var(--ease-out)}
 .pbar .c-c,.sw .c-c{height:8px;background:var(--bar-now)}
 .pbar .c-w{background:var(--waiting)}
 .pbar .c-b{background:var(--alert)}
 .pbar .c-r{background:var(--alive)}
-.pbar .c-t,.sw .c-t{background:transparent;box-shadow:inset 0 0 0 1px var(--line-strong)}
-.pbar .c-n{background:transparent;box-shadow:inset 0 0 0 1px var(--line)}
-.pbar.cont{position:relative;display:block;height:6px;border-radius:3px;box-shadow:inset 0 0 0 1px var(--line-strong)}
-.pbar.cont b{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--bar-done);transition:width var(--dur-layout) var(--ease-out)}
-.pbar.cont u{position:absolute;top:-1px;bottom:-1px;width:2px;border-radius:1px;background:var(--bar-now)}
-.pbar.cont u.c-w{background:var(--waiting)}.pbar.cont u.c-b{background:var(--alert)}.pbar.cont u.c-r{background:var(--alive)}
+.pbar .c-t,.sw .c-t{background:transparent;border:1px solid var(--line-strong)}
+.pbar .c-n{background:transparent;border:1px solid var(--line)}
+.pbar.cont{position:relative;display:block;height:6px;border-radius:var(--radius-round);border:1px solid var(--line-strong)}
+.pbar.cont b{position:absolute;left:0;top:0;bottom:0;border-radius:var(--radius-round);background:var(--bar-done);transition:width var(--dur-layout) var(--ease-out)}
+.pbar.cont u{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--bar-now)}
+.pbar.cont u.c-w{background:var(--waiting)}
+.pbar.cont u.c-b{background:var(--alert)}
+.pbar.cont u.c-r{background:var(--alive)}
+[data-bar="blue"] .pbar .c-x,[data-bar="blue"] .pbar .c-c,[data-bar="blue"] .pbar.cont b,[data-bar="blue"] .pbar.cont u.c-c,[data-sw="blue"] .sw .c-x,[data-sw="blue"] .sw .c-c{background:var(--accent)}
+[data-bar="green"] .pbar .c-x,[data-bar="green"] .pbar .c-c,[data-bar="green"] .pbar.cont b,[data-bar="green"] .pbar.cont u.c-c,[data-sw="green"] .sw .c-x,[data-sw="green"] .sw .c-c{background:var(--done)}
 .pcount{font-variant-numeric:tabular-nums;color:var(--ink)}
-.r-meta .prog span{margin-left:0}
 .sw{display:inline-flex;align-items:center;gap:2px;width:36px;height:8px;flex:none}
-[data-sw="ink"] .sw{--bar-done:color-mix(in srgb,var(--ink) 60%,var(--surface));--bar-now:var(--ink)}
-[data-sw="blue"] .sw{--bar-done:var(--accent);--bar-now:var(--accent)}
-[data-sw="green"] .sw{--bar-done:var(--done);--bar-now:var(--done)}
 @media (max-width:560px){.pbar{width:72px}}
 .r-right.t-alert{color:var(--alert)}
 .r-right{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;max-width:9em;overflow:hidden;text-overflow:ellipsis}
