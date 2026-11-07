@@ -1197,8 +1197,10 @@ export const buildView = (
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               // A working row quiet past the Working now limit is no longer at work: the
               // person can archive it instead of waiting out the 12 h stale time (#1000).
-              // A row waiting on the person keeps today's refusal.
-              : auto === 'working' && !isSilence && task.auto !== null && !isWorkingTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
+              // A row waiting on the person keeps today's refusal. The gate reads the
+              // writer time, like the write guard: an unknown age never archives, and
+              // the local observation the display falls back to proves nothing here.
+              : auto === 'working' && !isSilence && task.auto !== null && hasTime(updated) && !isWorkingTask(task.steps, updated, now)
                 ? { project: name, title: task.title, line: task.line, session: task.auto.session }
                 : null,
         target: targetOf(task.auto),

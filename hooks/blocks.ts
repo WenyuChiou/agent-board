@@ -709,7 +709,8 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       // A silence-classified row is kept for review: the write guard refuses its archive
       // as the row does (#1051, #1000).
       const isSilence = span.state === 'working' && task !== undefined && isSilenceTask(task.steps, updated, now)
-      const stopped = isTwin || auto !== null && isStale(auto, now, updated, staleMs) || span.state === 'working' && task !== undefined && !isSilence && !isWorkingTask(task.steps, updated, now)
+      // The quiet-time path needs a readable time: unknown age never archives (#1000).
+      const stopped = isTwin || auto !== null && isStale(auto, now, updated, staleMs) || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
       if (auto === null || !stopped) return null
     }
 

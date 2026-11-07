@@ -283,3 +283,38 @@ test('one count across all three surfaces: page, terminal board and --status mat
   assert.ok(countLine.includes('● 1 waiting'), `terminal waiting count line: ${countLine}`)
   assert.ok(countLine.includes('▸ 4 in progress'), `terminal active count line: ${countLine}`)
 })
+
+test('the status line counts a new inbox question when a valid questions ledger exists (#1000)', async () => {
+  const turnFile = `codex-turn-${Math.floor(NOW / 1000)}-1.json`
+  const turnBody = JSON.stringify({ 'thread-id': 'zzzz0000', cwd: '/tmp/api-gateway', 'last-assistant-message': 'Should I continue with the rollout?' })
+  const questions = JSON.stringify({ version: 1, next: 1, records: [], legacy: {} })
+  const result = run([], { questions, inbox: [{ name: turnFile, body: turnBody }] })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '3 need you · 3 working\n')
+  assert.equal(result.stderr, '')
+
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { parseQuestions } = await import('../hooks/questions.ts')
+  const { buildView } = await import('../hooks/view.ts')
+  const { serveModel } = await import('../hooks/serve.ts')
+  const { boardText, peekInbox } = await import('../hooks/board.ts')
+  const { STRINGS } = await import('../hooks/strings.ts')
+  const s = STRINGS.en
+
+  const turns = peekInbox([{ name: turnFile, body: turnBody, at: NOW }], () => '', undefined, s)
+  const ledger = parseQuestions(questions) ?? undefined
+  const view = buildView(parseProgress(FILE), [], null, NOW, 0, {}, s, [], {}, ledger, undefined, turns)
+
+  // Page surface, from the same root and the same turns.
+  const pageModel = serveModel(view, turns, s, new Set(), false, undefined, false, {
+    now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [],
+  })
+  assert.equal(pageModel.view.n, 3, 'page needs count matches')
+  assert.equal(pageModel.view.working.length, 3, 'page working count matches')
+
+  // Terminal board surface, from the same root and the same turns.
+  const terminalText = boardText(view, turns, s, { width: 100, isColor: false })
+  const countLine = terminalText.split('\n')[0]
+  assert.ok(countLine.includes('● 3 waiting'), `terminal waiting count line: ${countLine}`)
+  assert.ok(countLine.includes('▸ 3 in progress'), `terminal active count line: ${countLine}`)
+})

@@ -435,6 +435,42 @@ test('every agent keeps live blocks safe across terminal and page at the working
       expect(takeTask(file, ref, now, s) === null).toBe(live)
       expect(takeArchivable(file, now, undefined, s, true).text).toBe(file)
     }
+    // A working row with no readable `updated` has unknown age: ordinary age rules never
+    // archive it, whatever its state (#1000, Codex P1 on #1087).
+    for (const marker of ['', ' updated=not-a-date']) {
+      const unknown = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working${marker} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
+      const unknownView = buildView(parseProgress(unknown), [], null, now, 0, {}, s)
+      const unknownItems = boardItems(unknownView, [])
+      const unknownItem = unknownItems[0]
+      expect(unknownItem?.type).toBe('row')
+      if (unknownItem?.type !== 'row') throw new Error('Missing synthetic row')
+      expect(unknownItem.row.archive).toBe(null)
+      const unknownDrawn = pinned({ ...emptyBoardState, isIdleOpen: true }, unknownItems)
+      expect(boardKey(unknownDrawn, 'a', unknownItems, s).action?.type ?? null).toBe(null)
+      expect(boardScreen(unknownView, [], unknownDrawn, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(false)
+      const unknownModel = serveModel(unknownView, [], s)
+      const unknownPage = [...unknownModel.groups.flatMap(group => group.rows), ...unknownModel.stopped][0]
+      expect(unknownPage?.canArchive).toBe(false)
+      expect(unknownPage?.archiveNote === s.archiveLive).toBe(true)
+      expect(serveAction(unknownItems, { key: unknownItem.key, type: 'archive', text: '', session: '', fp: fingerprint(unknownItem, unknownItems) }, s)).toEqual({ type: 'refuse', note: s.archiveLive })
+      expect(takeTask(unknown, { project: 'Demo', title: 'Synthetic task', line: 2, session: '11223344' }, now, s)).toBe(null)
+    }
+    // The local observation a display falls back to proves nothing here either: the gate
+    // reads the writer time, like the write guard (#1000, lane review on #1087).
+    for (const marker of ['', ' updated=not-a-date']) {
+      const unknown = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working${marker} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
+      const parsed = parseProgress(unknown)
+      const task = parsed[0]?.tasks[0]
+      if (task === undefined) throw new Error('Missing synthetic task')
+      const seen = { [taskFingerprint('Demo', task)]: now - 10 * 60 * 60 * 1000 }
+      const seenView = buildView(parsed, [], null, now, 0, {}, s, [], seen)
+      const seenItems = boardItems(seenView, [])
+      const seenItem = seenItems[0]
+      expect(seenItem?.type).toBe('row')
+      if (seenItem?.type !== 'row') throw new Error('Missing synthetic row')
+      expect(seenItem.row.archive).toBe(null)
+      expect(takeTask(unknown, { project: 'Demo', title: 'Synthetic task', line: 2, session: '11223344' }, now, s, seen)).toBe(null)
+    }
     const asked = `## Demo\n<!-- auto session=11223344 agent=${agent} state=waiting updated=${new Date(now).toISOString()} -->\n### Question\n- [?] Choose a limit?\n<!-- /auto session=11223344 -->\n`
     const view = buildView(parseProgress(asked), [], null, now, 0, {}, s)
     expect(boardScreen(view, [], emptyBoardState, s, { width: 160, isColor: false })).not.toContain(s.archiveLive)

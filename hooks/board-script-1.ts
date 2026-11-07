@@ -5569,7 +5569,7 @@ export const LINES = [
 "      const isTwin = ref.isDuplicate === true && task !== undefined && isOutranked(tasks, task);",
 "      const updated = auto === null ? 0 : observedTime(auto, now, observations).updated;",
 "      const isSilence = span.state === \"working\" && task !== undefined && isSilenceTask(task.steps, updated, now);",
-"      const stopped = isTwin || auto !== null && isStale(auto, now, updated, staleMs) || span.state === \"working\" && task !== undefined && !isSilence && !isWorkingTask(task.steps, updated, now);",
+"      const stopped = isTwin || auto !== null && isStale(auto, now, updated, staleMs) || span.state === \"working\" && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now);",
 "      if (auto === null || !stopped)",
 "        return null;",
 "    }",
