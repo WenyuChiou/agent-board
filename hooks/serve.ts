@@ -868,7 +868,7 @@ button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface))
 button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
 .btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover,.pfoot #close:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
 button.quiet:hover,.side .pfoot #close:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
-.answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);box-shadow:inset 0 0 0 1px var(--act);background:color-mix(in srgb,var(--act) 10%,var(--surface))}
+.answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);background:color-mix(in srgb,var(--act) 12%,var(--hover))}
 .answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-lg)}
 .answers button.answer-send:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 .answers button.answer-send:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:.35;cursor:default}

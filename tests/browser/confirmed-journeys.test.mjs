@@ -138,7 +138,9 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
 
       const question = board.question('Bold or quiet?')
       await question.waitFor()
-      await question.getByRole('button', { name: 'Copy "Bold"', exact: true }).waitFor()
+      // A Copy-only question: its options are choices and one Copy arrow, never a Send (#1107).
+      await question.getByRole('button', { name: 'Bold', exact: true }).waitFor()
+      await question.getByRole('button', { name: 'Copy', exact: true }).waitFor()
       assert.equal(await question.getByRole('button', { name: /^Send/ }).count(), 0)
       await question.getByRole('button', { name: 'More', exact: true }).click()
       await question.getByRole('button', { name: 'Already answered, hide', exact: true }).click()
