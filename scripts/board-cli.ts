@@ -17,6 +17,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
+import { barStyleName, barStyleOf, nextBarStyle, withBarStyle } from '../hooks/progress-bar'
+import type { BarStyle } from '../hooks/progress-bar'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
@@ -709,9 +711,21 @@ const freshView = () => {
 // The questions the running page can answer into their session, as it last said (`refreshRoutes`).
 let routes: Record<string, AnswerRoute> = {}
 
+// The progress bar's style, from the board's settings file (#1085); one the page or the pane
+// picked shows at the next draw. A file that cannot be read means the default.
+const barStyleNow = () => {
+  try { return barStyleOf(read(settingsPath(path))) } catch { return barStyleOf(null) }
+}
+// The pick from the page, the pane or the `s` key: the settings file's other keys are kept.
+const saveBarStyle = (style: BarStyle): void => {
+  const file = settingsPath(path)
+  writeFileSync(file, withBarStyle(read(file), style))
+}
+
 const options = () => ({
   width: Math.max(40, Math.min(process.stdout.columns || 80, 120)),
   ...terminalLook(process.env, args, process.stdout.isTTY === true),
+  barStyle: barStyleNow(),
   isIdleOpen: args.includes('--all'),
   routes,
 })
@@ -1524,6 +1538,15 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
   if (action.type === 'html') return { state: { ...next, note: s.pressPending, tone: 'quiet' }, isQuit: false, isHtml: true, isWrite: false }
   // The page sends it; the note says so until its answer comes back.
   if (action.type === 'send') return { state: { ...next, note: s.serveSending(agentLabel(action.route.agent || 'claude', s)), tone: 'quiet' }, isQuit: false, isHtml: false, isWrite: false, send: action }
+  if (action.type === 'style') {
+    const style = nextBarStyle(barStyleNow())
+    try {
+      saveBarStyle(style)
+    } catch (error) {
+      return { state: { ...next, note: failureNote(error), tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+    }
+    return { state: { ...next, note: s.barStyleKey(barStyleName(style, s)), tone: 'done' }, isQuit: false, isHtml: false, isWrite: false }
+  }
   if (action.type === 'tidy') {
     let note: string
     try {
@@ -1820,6 +1843,13 @@ const serveChild = (): void => {
       paste,
       clean: cleanUp,
       bulkTidy,
+      barStyle: barStyleNow,
+      setBarStyle: style => {
+        try {
+          saveBarStyle(style)
+          return true
+        } catch { return false }
+      },
       sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.
       sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,

@@ -32,12 +32,13 @@ export class BoardPage {
     await this.page.locator(`[data-agent="${agent}"]:visible`).first().click()
   }
 
-  // One icon button switches between the two themes; it shows the theme it will switch to.
+  // One icon button opens the look menu (#1085); its icon is the theme on screen.
   async chooseTheme(theme) {
     const want = theme.toLowerCase()
     const toggle = this.page.locator('[data-theme-toggle]:visible').first()
     if ((await toggle.getAttribute('data-now')) === want) return
     await toggle.click()
+    await this.page.locator(`[data-theme-set="${want}"]:visible`).first().click()
     await this.page.waitForFunction(value => document.documentElement.getAttribute('data-theme') === value, want)
   }
 }

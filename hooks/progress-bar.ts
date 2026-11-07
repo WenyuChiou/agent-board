@@ -1,4 +1,5 @@
 import type { ProgressStepStatus } from '../types'
+import type { Strings } from './i18n'
 
 // Progress as a bar of one cell per step (#1085), the same rule on the page, the pane, the
 // terminal board and the line under the prompt. Nothing here reads a file or the clock: the
@@ -144,3 +145,10 @@ export const withBarStyle = (text: string | null, style: BarStyle): string => {
 
   return `${JSON.stringify({ ...data, style }, null, 2)}\n`
 }
+
+// A style's name in the person's language.
+export const barStyleName = (style: BarStyle, s: Strings): string => (style === 'blue' ? s.barStyleBlue : style === 'green' ? s.barStyleGreen : s.barStyleInk)
+
+// The style a typed word names: its English key or its name in any of the three languages.
+const NAMES: Record<string, BarStyle> = { ink: 'ink', 墨: 'ink', blue: 'blue', 藍: 'blue', 蓝: 'blue', green: 'green', 綠: 'green', 绿: 'green' }
+export const barStyleFrom = (word: string): BarStyle | null => NAMES[word.trim().toLowerCase()] ?? null

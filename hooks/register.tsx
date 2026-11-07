@@ -39,6 +39,7 @@ import {
 } from './blocks'
 import type { ConfirmedTask, ConfirmRef } from './blocks'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from './history'
+import { barStyleFrom, barStyleName, barStyleOf, withBarStyle } from './progress-bar'
 import { withRunMark } from './runs'
 import { ciFinished, GH_FIELDS, prFromGh } from './github'
 import {
@@ -4190,6 +4191,18 @@ export const register: Register = (on, options) => {
       return { text: (await wordsOf($)).langSet }
     }
     const s = await wordsOf($)
+    // One style for every surface (#1085): the pick is the `style` key of the board's settings file,
+    // which the page and the terminal board read too.
+    const styleArg = /^(?:style|樣式|样式)\s*(\S*)$/i.exec(arg)
+    if (styleArg !== null) {
+      const style = barStyleFrom(styleArg[1] ?? '')
+      if (style === null) return { text: s.barStyleUnknown }
+      const file = settingsPath(await progressPath($))
+      const text = await readText($, file).catch(() => null)
+      try { await $.fs.write(file, withBarStyle(text, style)) } catch { return { text: s.pressFailed } }
+      $.ui.invalidate('ui.render')
+      return { text: s.barStyleSet(barStyleName(style, s)) }
+    }
     if (/^(整理|archive|tidy)$/i.test(arg)) {
       const moved = await enqueue(() => archiveOld($, true)).catch(() => null)
       if (moved === null) return { text: s.tidyUnreadable }
@@ -4650,6 +4663,7 @@ export const register: Register = (on, options) => {
       isLegendOpen: await read($, isLegendOpen),
       hasQuestionsProblem: await read($, hasQuestionsProblem),
       palette,
+      barStyle: barStyleOf(await readText($, settingsPath(snap.path || (await progressPath($)))).catch(() => null)),
       s,
     }
     const failure = (text: string): PressOutcome => ({ text, tone: 'alert' })

@@ -466,7 +466,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     done,
     total: mirror.tasks.filter(task => !task.handoffTo).length,
     steps: foldSteps(steps, 6, s),
-    cells: cellsOf(steps),
+    cells: cellsOf(withCurrent(steps)),
   }
 }
 
@@ -570,6 +570,13 @@ const contextFor = (mirror: ProgressMirror): string => {
   if (title === '') return request
 
   return request === title || request.startsWith(title.replace(/…$/, '')) ? '' : request
+}
+
+// A plan with no step in progress still shows where it stands: its first open step is the current one.
+const withCurrent = (steps: readonly ViewStep[]): ViewStep[] => {
+  if (steps.some(step => step.isCurrent)) return [...steps]
+  const open = steps.findIndex(step => step.status !== 'done' && step.status !== 'cancelled')
+  return steps.map((step, index) => (index === open ? { ...step, isCurrent: true } : step))
 }
 
 const rowCells = (task: ProgressTask): Cell[] => {

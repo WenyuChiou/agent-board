@@ -5,6 +5,8 @@ import { lastQuestionInProse, normalizeReply } from './digest'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
 import { DARK, LIGHT } from './palette'
+import { barPieces, barRole, DEFAULT_BAR_STYLE } from './progress-bar'
+import type { BarRole, BarStyle } from './progress-bar'
 import type { Tone } from './palette'
 import { sha256 } from './sha256'
 import { agentLabel } from './strings'
@@ -100,7 +102,7 @@ export type AnswerRoute = { mode: 'connected' | 'send'; agent: string; session: 
 // `depth` and `theme` pick the page's colours for a terminal; `routes` are the questions the
 // running page can answer into their session, by line key; `agents` the agents that reported to
 // this board, which an empty board names.
-export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; isQuestionsOpen?: boolean; depth?: ColorDepth; theme?: Theme; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
+export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; isQuestionsOpen?: boolean; depth?: ColorDepth; theme?: Theme; barStyle?: BarStyle; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
 
 export const remainingInbox = (view: View, pending: readonly PendingTurn[]): readonly PendingTurn[] => view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
 
@@ -139,7 +141,7 @@ export const nearest256 = (hex: string): number => {
 
 // Each ink is a role of the page's palette. Secondary text is `muted`, never the terminal's own
 // dim, which turns faint grey on a light background.
-const ROLE = { waiting: 'waiting', accent: 'accent', done: 'done', alert: 'alert', quiet: 'muted', project: 'project', running: 'running', soon: 'soon' } as const
+const ROLE = { waiting: 'waiting', accent: 'accent', done: 'done', alert: 'alert', quiet: 'muted', project: 'project', running: 'running', soon: 'soon', frame: 'frame' } as const
 type Ink = keyof typeof ROLE | 'bold'
 
 const paint = (o: { isColor: boolean; depth?: ColorDepth; theme?: Theme }) => (ink: Ink, text: string, isBold = false): string => {
@@ -149,6 +151,17 @@ const paint = (o: { isColor: boolean; depth?: ColorDepth; theme?: Theme }) => (i
   const codes = [...(ink === 'bold' || isBold ? ['1'] : []), ...(hex === null ? [] : [o.depth === 'truecolor' ? `38;2;${r};${g};${b}` : `38;5;${nearest256(hex)}`])]
 
   return `\u001b[${codes.join(';')}m${text}\u001b[0m`
+}
+
+// A row's progress bar (#1085), one cell per step in the person's style, with its width in
+// columns; '' for a row of one step or none, which keeps its "n/m" alone.
+const barInk = (role: BarRole): Ink => (role === 'muted' ? 'quiet' : role === 'ink' ? 'bold' : role)
+const rowBar = (row: TaskRow, o: BoardOptions): { text: string; width: number } => {
+  const c = paint(o)
+  const pieces = barPieces(row.cells ?? [], 12)
+  const style = o.barStyle ?? DEFAULT_BAR_STYLE
+
+  return { text: pieces.map(piece => c(barInk(barRole(piece.cell, style)), piece.text)).join(''), width: pieces.reduce((sum, piece) => sum + [...piece.text].length, 0) }
 }
 
 // Secondary text in the board's muted colour, for a line the script adds below the board.
@@ -249,7 +262,9 @@ const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelv
   const count = row.total > 0 ? `${row.done}/${row.total} ` : ''
   const needs = boardNeeds(view, row, isShelved)
   const status = needs === null ? row.status : needsWords(needs, s)
-  const lines = [`  ${c('bold', cut(row.title, o.width - 4))}`, `    ${c('quiet', cut(`${count}${status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6))}`]
+  const bar = rowBar(row, o)
+  const lead = bar.width === 0 ? '' : `${bar.text} `
+  const lines = [`  ${c('bold', cut(row.title, o.width - 4))}`, `    ${lead}${c('quiet', cut(`${count}${status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6 - (bar.width === 0 ? 0 : bar.width + 1)))}`]
   if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
   if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
   for (const step of row.steps) {
@@ -618,6 +633,8 @@ export type BoardAction =
   | { type: 'send'; key: string; text: string; route: AnswerRoute }
   // Archive now: every finished task, as the page's button under Done recently.
   | { type: 'tidy' }
+  // The next progress-bar style, written to the board's settings file for every surface (#1085).
+  | { type: 'style' }
 
 export const emptyBoardState: BoardState = { selected: 0, key: null, open: null, note: '', seen: null }
 
@@ -732,6 +749,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (key === 'u') return { state, action: { type: 'unhide', key: null } }
   // Archive now, as the page's button under Done recently does: every finished task goes at once.
   if (key === 't') return { state, action: { type: 'tidy' } }
+  if (key === 's') return { state, action: { type: 'style' } }
   if (item === undefined) return { state: { ...state, note: s.pressNothing }, action: null }
   state = { ...state, result: { key: item.key, revision: fingerprint(item, items), label: item.type === 'ask' ? item.ask.task : item.type === 'row' ? item.row.title : item.turn.project } }
   // The line under the cursor changed since the screen was drawn: choose what is there now and
@@ -984,9 +1002,11 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const lead = [(isWorking || isStuck) && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
       // The step it is on, in the accent colour, where its status only says that it works.
       const step = needs === null && (row.tone === 'quiet' || row.tone === 'accent') ? row.steps.find(one => one.isCurrent && (one.status === 'doing' || one.status === 'todo')) : undefined
-      const status = cut(`${lead}${needs !== null ? needsWords(needs, s) : step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve)
+      const bar = rowBar(row, o)
+      const barRoom = bar.width === 0 ? 0 : bar.width + 1
+      const status = cut(`${lead}${needs !== null ? needsWords(needs, s) : step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve - barRoom)
       const quiet = status.startsWith(lead) ? lead : ''
-      lines.push(`    ${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
+      lines.push(`    ${bar.width === 0 ? '' : `${bar.text} `}${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
       if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
       if (isOpen) rowDetails(row)
       return

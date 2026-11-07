@@ -9203,18 +9203,30 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
     removeAttribute: name => { delete attributes[name] },
     classList: { add: name => classes.add(name), remove: name => classes.delete(name) },
   }
-  // One icon button switches the theme on the live page.
-  const buttons = [...html.matchAll(/<button\b([^>]*data-theme-toggle[^>]*)>/g)].map(found => {
-    assert.match(found[1], /data-local/)
-    const attrs = { ...Object.fromEntries([...found[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]])), 'data-theme-toggle': '' }
-    return { getAttribute: name => attrs[name] ?? null, setAttribute: (name, value) => { attrs[name] = value } }
-  })
+  const node = (tag, raw, flag) => {
+    assert.match(raw, /data-local/)
+    const attrs = { ...Object.fromEntries([...raw.matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]])), [flag]: attrs0(raw, flag) }
+    return { tag, focused: 0, getAttribute: name => attrs[name] ?? null, setAttribute: (name, value) => { attrs[name] = value }, focus() { this.focused += 1 } }
+  }
+  const attrs0 = (raw, flag) => (new RegExp(`${flag}="([^"]*)"`).exec(raw)?.[1] ?? '')
+  // One icon button opens the look menu (#1085): three themes, then the three progress-bar styles.
+  const buttons = [...html.matchAll(/<button\b([^>]*data-theme-toggle[^>]*)>/g)].map(found => node('button', found[1], 'data-theme-toggle'))
   assert.equal(buttons.length, 1)
+  const themes = [...html.matchAll(/<button\b([^>]*data-theme-set[^>]*)>/g)].map(found => node('button', found[1], 'data-theme-set'))
+  assert.deepEqual(themes.map(item => item.getAttribute('data-theme-set')), ['light', 'dark', 'system'])
+  const styles = [...html.matchAll(/<button\b([^>]*data-bar-set[^>]*)>/g)].map(found => node('button', found[1], 'data-bar-set'))
+  assert.deepEqual(styles.map(item => item.getAttribute('data-bar-set')), ['ink', 'blue', 'green'])
+  const menu = { hidden: true, getAttribute: name => (name === 'data-look-menu' ? '' : null), querySelector: selector => (selector.includes('aria-checked') ? themes.find(item => item.getAttribute('aria-checked') === 'true') ?? null : themes[0]) }
+  const look = { querySelector: selector => (selector === '[data-look-menu]' ? menu : null) }
+  buttons[0].parentNode = look
+  for (const item of [...themes, ...styles]) item.parentNode = menu
+  menu.parentNode = look
+  const select = selector => selector === '[data-theme-toggle]' ? buttons : selector === '[data-theme-set]' ? themes : selector === '[data-look-menu]' ? [menu] : []
   const events = {}
   let finish
   runInNewContext(themeScript(html), {
     document: {
-      documentElement: root, querySelectorAll: () => buttons, addEventListener: (name, run) => { events[name] = run },
+      documentElement: root, querySelectorAll: select, addEventListener: (name, run) => { events[name] = run },
       get cookie() { return jar.value },
       set cookie(line) {
         const pair = line.split(';')[0]
@@ -9232,30 +9244,45 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
   }, { timeout: 1000 })
   events.DOMContentLoaded()
   return {
-    attributes, classes, button: buttons[0],
-    toggle: () => events.click({ target: { parentNode: buttons[0] } }),
+    attributes, classes, menu, themes, styles, button: buttons[0],
+    open: () => events.click({ target: { parentNode: buttons[0] } }),
+    pick: theme => events.click({ target: themes.find(item => item.getAttribute('data-theme-set') === theme) }),
+    outside: () => events.click({ target: { parentNode: null } }),
+    escape: () => events.keydown({ key: 'Escape' }),
     finish: () => finish(),
   }
 }
 
-test('the serve page offers a light and a dark theme, follows the system until one is picked, and remembers the choice', () => {
+test('the serve page offers light, dark and system themes in one menu, follows the system until one is picked, and remembers the choice', () => {
   const html = redesignPage()
   const storage = new Map()
   const jar = { value: '' }
   const dom = themeDom(html, storage, false, jar)
-  // One icon button; a first visit follows the system, and the button names the theme it switches to.
+  // One icon button; a first visit follows the system, and its icon is the theme on screen.
   assert.equal(dom.attributes['data-theme'], undefined)
   assert.equal(dom.button.getAttribute('data-now'), 'light')
-  assert.equal(dom.button.getAttribute('aria-label'), EN.themeToDark)
-  assert.equal(dom.button.getAttribute('title'), EN.themeToDark)
-  const onDark = themeDom(html, new Map(), false, { value: '' }, 'dark')
-  assert.equal(onDark.button.getAttribute('data-now'), 'dark')
-  assert.equal(onDark.button.getAttribute('aria-label'), EN.themeToLight)
-  dom.toggle()
+  assert.equal(dom.button.getAttribute('aria-label'), EN.themeMenu)
+  assert.equal(dom.button.getAttribute('aria-haspopup'), 'menu')
+  assert.deepEqual(dom.themes.map(item => item.getAttribute('aria-checked')), ['false', 'false', 'true'])
+  assert.equal(themeDom(html, new Map(), false, { value: '' }, 'dark').button.getAttribute('data-now'), 'dark')
+  // The button opens the menu and puts focus on the current pick; a press outside or Escape closes it.
+  dom.open()
+  assert.equal(dom.menu.hidden, false)
+  assert.equal(dom.button.getAttribute('aria-expanded'), 'true')
+  assert.equal(dom.themes[2].focused, 1)
+  dom.outside()
+  assert.equal(dom.menu.hidden, true)
+  dom.open()
+  dom.escape()
+  assert.equal(dom.menu.hidden, true)
+  assert.equal(dom.button.focused, 1)
+  dom.open()
+  dom.pick('dark')
+  assert.equal(dom.menu.hidden, true)
   assert.equal(storage.get('agent-board.theme'), 'dark')
   assert.equal(dom.attributes['data-theme'], 'dark')
   assert.equal(dom.button.getAttribute('data-now'), 'dark')
-  assert.equal(dom.button.getAttribute('aria-label'), EN.themeToLight)
+  assert.deepEqual(dom.themes.map(item => item.getAttribute('aria-checked')), ['false', 'true', 'false'])
   assert.ok(dom.classes.has('theming'))
   dom.finish()
   assert.ok(!dom.classes.has('theming'))
@@ -9263,14 +9290,14 @@ test('the serve page offers a light and a dark theme, follows the system until o
   assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], 'dark')
   const reload = themeDom(html, storage, false, jar)
   assert.equal(reload.attributes['data-theme'], 'dark')
-  reload.toggle()
+  reload.pick('light')
   assert.equal(storage.get('agent-board.theme'), 'light')
   assert.equal(reload.attributes['data-theme'], 'light')
-  assert.equal(reload.button.getAttribute('aria-label'), EN.themeToDark)
-  // A dark system flips to light on the first press.
-  const first = themeDom(html, new Map(), false, { value: '' }, 'dark')
-  first.toggle()
-  assert.equal(first.attributes['data-theme'], 'light')
+  // System forgets the pick: the page follows the system again, on this port and the next.
+  reload.pick('system')
+  assert.equal(storage.has('agent-board.theme'), false)
+  assert.equal(reload.attributes['data-theme'], undefined)
+  assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], undefined)
   assert.match(html, /<script nonce="synthetic">[\s\S]*agent-board.theme/)
   assert.match(html, /prefers-reduced-motion:reduce/)
 })
@@ -9282,7 +9309,7 @@ test('the theme is applied before the page paints and survives blocked browser s
     assert.ok(!themeScript(html).includes('(function ()'))
     const dom = themeDom(html, new Map(), true)
     assert.equal(dom.attributes['data-theme'], undefined)
-    dom.toggle()
+    dom.pick('dark')
     assert.equal(dom.attributes['data-theme'], 'dark')
     assert.equal(dom.button.getAttribute('data-now'), 'dark')
     assert.equal(themeDom(html, new Map([['agent-board.theme', 'unknown']])).attributes['data-theme'], undefined)

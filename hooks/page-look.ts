@@ -49,7 +49,10 @@ export const pageTokens = (headHeight = '54px'): string => {
 @media (max-width:640px){:root{--text-lg:max(18px,1.125rem)}}`
 }
 
-// This runs before styles and delegates presses because the switch is parsed later.
+// This runs before styles and delegates presses because the menu is parsed later. The theme button
+// opens a small menu (#1085): Light / Dark / System, then the progress bar's three styles. The
+// theme pick is this browser's; a style pick goes to the board (the page's own script sends it),
+// so the pane and the terminal board show the same one.
 export const themeHead = String.raw`
 (() => {
   var root = document.documentElement;
@@ -68,37 +71,62 @@ export const themeHead = String.raw`
   }
   if (saved === 'light' || saved === 'dark') choice = saved;
   var scheme = typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  function each(selector, run) { try { Array.prototype.forEach.call(document.querySelectorAll(selector) || [], run); } catch (e) {} }
   function apply() {
     if (choice) root.setAttribute('data-theme', choice);
     else root.removeAttribute('data-theme');
     var shown = choice || (scheme && scheme.matches ? 'dark' : 'light');
-    // The button shows the theme it switches to: a moon while the page is light, a sun while it is dark.
-    document.querySelectorAll('[data-theme-toggle]').forEach(function (button) {
-      var label = button.getAttribute(shown === 'dark' ? 'data-to-light' : 'data-to-dark') || '';
-      button.setAttribute('data-now', shown);
-      button.setAttribute('aria-label', label);
-      button.setAttribute('title', label);
+    // The button's icon follows the theme on screen; each theme item says whether it is the pick.
+    each('[data-theme-toggle]', function (button) { button.setAttribute('data-now', shown); });
+    each('[data-theme-set]', function (item) { item.setAttribute('aria-checked', String(item.getAttribute('data-theme-set') === (choice || 'system'))); });
+  }
+  function menuOf(button) { return button && button.parentNode && button.parentNode.querySelector ? button.parentNode.querySelector('[data-look-menu]') : null; }
+  function close(focus) {
+    each('[data-look-menu]', function (menu) { menu.hidden = true; });
+    each('[data-theme-toggle]', function (button) {
+      if (focus && button.getAttribute('aria-expanded') === 'true' && button.focus) button.focus();
+      button.setAttribute('aria-expanded', 'false');
     });
+  }
+  function pick(next) {
+    choice = next === 'system' ? '' : next;
+    // Blocked storage only means the pick is not kept: this page still shows it.
+    try { if (choice) localStorage.setItem('agent-board.theme', choice); else localStorage.removeItem('agent-board.theme'); } catch (e) {}
+    try { document.cookie = 'agent-board.theme=' + (choice || 'system') + '; Path=/; SameSite=Strict; Max-Age=' + (choice ? 365 * 24 * 3600 : 0); } catch (e) {}
+    root.classList.add('theming');
+    clearTimeout(timer);
+    apply();
+    timer = setTimeout(() => { root.classList.remove('theming'); }, 300);
   }
   apply();
   try { if (scheme && scheme.addEventListener) scheme.addEventListener('change', apply); } catch (e) {}
   document.addEventListener('DOMContentLoaded', apply);
+  document.addEventListener('keydown', function (event) { if (event && event.key === 'Escape') close(true); });
   document.addEventListener('click', function (event) {
     var node = event.target;
     while (node && node !== document) {
       if (node.getAttribute && node.getAttribute('data-theme-toggle') !== null) {
-        choice = (choice || (scheme && scheme.matches ? 'dark' : 'light')) === 'dark' ? 'light' : 'dark';
-        // Blocked storage only means the pick is not kept: this page still shows it.
-        try { localStorage.setItem('agent-board.theme', choice); } catch (e) {}
-        try { document.cookie = 'agent-board.theme=' + choice + '; Path=/; SameSite=Strict; Max-Age=' + 365 * 24 * 3600; } catch (e) {}
-        root.classList.add('theming');
-        clearTimeout(timer);
-        apply();
-        timer = setTimeout(() => { root.classList.remove('theming'); }, 300);
+        var menu = menuOf(node);
+        var isOpen = node.getAttribute('aria-expanded') === 'true';
+        close(false);
+        if (menu && !isOpen) {
+          menu.hidden = false;
+          node.setAttribute('aria-expanded', 'true');
+          var first = menu.querySelector('[aria-checked="true"]') || menu.querySelector('button');
+          if (first && first.focus) first.focus();
+        }
         return;
       }
+      if (node.getAttribute && node.getAttribute('data-theme-set') !== null) {
+        pick(node.getAttribute('data-theme-set'));
+        close(true);
+        return;
+      }
+      if (node.getAttribute && node.getAttribute('data-bar-set') !== null) { close(true); return; }
+      if (node.getAttribute && node.getAttribute('data-look-menu') !== null) return;
       node = node.parentNode;
     }
+    close(false);
   });
 })();
 `
@@ -110,9 +138,16 @@ const THEME_ICONS = {
   sun: '<circle cx="8" cy="8" r="3"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/>',
 } as const
 
-// One icon button for the theme: it shows the theme it switches to (a moon on a light page, a sun on a dark one).
+// One icon button for the look: its icon follows the theme on screen, and it opens a menu of the
+// three themes and the progress bar's three styles (#1085). Each style item shows a small bar in its colours.
+const SWATCH = '<span class="sw" aria-hidden="true"><i class="c-x"></i><i class="c-x"></i><i class="c-c"></i><i class="c-t"></i></span>'
 export const themeToggle = (s: Strings): string =>
-  `<button type="button" class="icon-btn" data-local data-theme-toggle data-now="light" data-to-dark="${esc(s.themeToDark)}" data-to-light="${esc(s.themeToLight)}" aria-label="${esc(s.themeToDark)}" title="${esc(s.themeToDark)}"><svg class="i i-moon" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS.moon}</svg><svg class="i i-sun" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS.sun}</svg></button>`
+  `<span class="look"><button type="button" class="icon-btn" data-local data-theme-toggle data-now="light" aria-haspopup="menu" aria-expanded="false" aria-label="${esc(s.themeMenu)}" title="${esc(s.themeMenu)}"><svg class="i i-moon" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS.moon}</svg><svg class="i i-sun" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS.sun}</svg></button>` +
+  `<span class="look-menu" role="menu" data-look-menu aria-label="${esc(s.themeMenu)}" hidden>` +
+  (['light', 'dark', 'system'] as const).map(theme => `<button type="button" role="menuitemradio" aria-checked="false" data-local data-theme-set="${theme}">${esc(theme === 'light' ? s.themeLight : theme === 'dark' ? s.themeDark : s.themeSystem)}</button>`).join('') +
+  `<span class="look-head" role="presentation">${esc(s.barStyleHead)}</span>` +
+  (['ink', 'blue', 'green'] as const).map(style => `<button type="button" role="menuitemradio" aria-checked="${style === 'ink'}" data-local data-bar-set="${style}" data-sw="${style}">${SWATCH}${esc(style === 'blue' ? s.barStyleBlue : style === 'green' ? s.barStyleGreen : s.barStyleInk)}</button>`).join('') +
+  `</span></span>`
 
 // Bubble a, the board's mark: a lowercase a whose foot turns out into a speech-bubble tail, an agent
 // talking to you. One path on a 64 grid, in the brand colour.
@@ -228,6 +263,14 @@ svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .icon-btn:active{background:var(--press)}
 [data-theme-toggle] .i-sun,[data-theme-toggle][data-now="dark"] .i-moon{display:none}
 [data-theme-toggle][data-now="dark"] .i-sun{display:block}
+/* the look menu (#1085): it opens above the button, which sits in the page's foot */
+.look{position:relative;display:inline-flex}
+.look-menu{position:absolute;bottom:calc(100% + var(--s1));left:0;z-index:20;min-width:176px;display:grid;padding:var(--s1);background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-m);box-shadow:var(--shadow)}
+.look-menu button{display:flex;align-items:center;gap:var(--s2);min-height:var(--hit);padding:0 var(--s2);border:0;border-radius:var(--radius-s);background:transparent;text-align:left;cursor:pointer;font-size:var(--text-sm);white-space:nowrap}
+.look-menu button[aria-checked="true"]{font-weight:600}
+.look-menu button[aria-checked="true"]::after{content:'';margin-left:auto;width:8px;height:4px;border-left:2px solid currentColor;border-bottom:2px solid currentColor;transform:translateY(-2px) rotate(-45deg)}
+.look-head{padding:var(--s2) var(--s2) var(--s1);margin-top:var(--s1);border-top:1px solid var(--line);font-size:var(--text-xs);color:var(--muted)}
+@media (pointer:coarse){.look-menu button{min-height:44px}}
 @media (pointer:coarse){.icon-btn{width:44px;height:44px}}
 .quiet,.meta{color:var(--muted)}
 button:hover,.btn:hover,summary:hover{background-color:var(--hover)}
