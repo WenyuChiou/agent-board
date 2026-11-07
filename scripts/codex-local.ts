@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, planReport, putCodexBlock, questionSteps, sessionTitle } from '../hooks/codex'
+import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, planReport, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { agentHooks, BOARD_FOR, isReleased, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
@@ -714,14 +714,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ...(typeof payload.planProject === 'string' ? { project: previous?.project ?? payload.planProject } : {}),
       }
       const state = isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status
-      const question = questionSteps(previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`], previous?.asked, state, payload.question, isBoardPrompt)
-      const statusPrevious = previous === null ? null : { ...previous, approval: undefined, asked: undefined }
+      const question = questionSteps(previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`], previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
       const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s)
-        : mode === '--agent-status' ? {
-          ...codexReport(statusPrevious, session, { title: previous?.title ?? s.localAgentTask(agent), project: previous?.project ?? agent, state, steps: question.steps }, clock, s),
-          ...(previous?.approval === undefined ? {} : { approval: previous.approval }),
-          ...(question.asked === undefined ? {} : { asked: question.asked }),
-        } : codexReport(previous, session, given, clock, s)
+        : mode === '--agent-status' ? validateCodexReport({
+          // These are already validated stored steps, including up to two owned lines beyond
+          // the explicit report's forty user steps. A status is not a fresh task report.
+          ...(previous ?? codexReport(null, session, { title: s.localAgentTask(agent), project: agent, state, steps: question.steps }, clock, s)),
+          state: state as CodexReport['state'], steps: question.steps, updated: clock, asked: question.asked,
+          ...(question.askedRevision === undefined ? {} : { askedRevision: question.askedRevision }),
+        }, session) : codexReport(previous, session, given, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)
       // An Antigravity session keeps no folder (its hook binds only the conversation
@@ -736,13 +737,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // translated fallback needs no new string.
       const stillGeneric = previous !== null && Object.values(STRINGS).some(one => one.localAgentTask(agent) === previous.title)
       const distinctAntigravity = mode === '--agent-status' && agent === 'antigravity' && (previous === null || stillGeneric)
-      const initial = (filesByFolder(mode, agent) && !previous) || distinctAntigravity ? {
-        ...codexReport({ ...base, approval: undefined, asked: undefined }, session, {
-          ...base, title: sessionTitle(name, s.localAgentTask(agent), distinctAntigravity ? distinctStarted(at ?? Date.parse(now)) : ''), project: previous?.project ?? (name || agent),
-        }, clock, s),
-        ...(base.approval === undefined ? {} : { approval: base.approval }),
-        ...(base.asked === undefined ? {} : { asked: base.asked }),
-      } : base
+      const initial = (filesByFolder(mode, agent) && !previous) || distinctAntigravity ? validateCodexReport({
+        ...base, title: sessionTitle(name, s.localAgentTask(agent), distinctAntigravity ? distinctStarted(at ?? Date.parse(now)) : ''), project: previous?.project ?? (name || agent),
+      }, session) : base
       const priorActivity = previous?.activity ?? []
       // Only a weak hint needs a parent; a strong run keeps its record without a block.
       const parent = origin.origin !== 'run' ? undefined : isRun ? origin.parent : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner, owner.slice(0, 8), session]) ?? undefined

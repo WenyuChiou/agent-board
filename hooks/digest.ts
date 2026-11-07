@@ -265,6 +265,13 @@ export const markApproval = (mirror: ProgressMirror, step: string): ProgressMirr
 export const clearApproval = (mirror: ProgressMirror): ProgressMirror =>
   mirror.tasks.some(one => one.id === APPROVAL) ? { ...mirror, tasks: mirror.tasks.filter(one => one.id !== APPROVAL) } : mirror
 
+// A TaskList refresh must not remove the only closure evidence before the ledger saves it.
+export const retainApproval = (previous: ProgressMirror, next: ProgressMirror): ProgressMirror => {
+  const approval = previous.tasks.find(one => one.id === APPROVAL)
+  return approval === undefined || next.tasks.some(one => one.id === APPROVAL)
+    ? next : { ...next, tasks: [...next.tasks, approval] }
+}
+
 // The ledger needs to see the approval closed before its temporary step goes away.
 export const closeApproval = (mirror: ProgressMirror): ProgressMirror =>
   mirror.tasks.some(one => one.id === APPROVAL) ? {
