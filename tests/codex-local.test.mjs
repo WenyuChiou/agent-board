@@ -4151,8 +4151,8 @@ test('a classifier interrupted while publishing its PID marker still proves its 
   assert.match(hookLog(f), /REPORTER_TIMEOUT/)
 }))
 
-// A loaded machine can kill the classifier at the deadline before it runs any code of its own (#1080).
-test('a classifier killed before it runs any code still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+// A loaded machine can kill the classifier before its own code writes anything, so the proof must not need it (#1080).
+test('a classifier that never writes anything still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), exitProof = join(f.home, 'classifier-exit.json')
   const preload = join(f.home, 'silent-classifier.cjs')
   f.save(script, observeClassifierExit(reporterPs1(), exitProof))
