@@ -5837,6 +5837,51 @@ const startChild = (board, handoff, extra = {}) => new Promise(done => {
   child.once('exit', code => done({ url: null, code, out, err }))
 })
 
+// The child started on its own checks the folder in full: with no handoff, its own
+// PowerShell start is the one that stalls, so this splits the child's own check from
+// the parent-child handoff when the parent-mode recovery test fails.
+test('a Windows server child started on its own opens the page when its PowerShell printed every address line but has not exited', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  const preload = join(board.dir, 'stalled-acls-child.cjs')
+  const marker = join(board.dir, 'stalled-acls-child-fired')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const path = require('node:path'); const original = cp.execFileSync
+const marker = ${JSON.stringify(marker)}
+let sid = null
+const sddl = target => {
+  if (sid === null) {
+    const row = original(path.join(process.env.SystemRoot ?? 'C:\\\\Windows', 'System32', 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
+    sid = /"(S-\\d+(?:-\\d+)+)"\\s*$/.exec(row)?.[1]
+  }
+  let isDir = false
+  try { isDir = fs.statSync(target).isDirectory() } catch {}
+  return 'O:' + sid + 'G:SYD:' + (isDir ? 'P(A;OICI;' : 'AI(A;ID;') + 'FA;;;' + sid + ')'
+}
+cp.execFileSync = (file, args, options) => {
+  // Only the folder check stalls: it is the one call that carries the file list, and the
+  // recovery is about that call. Any other PowerShell use runs for real.
+  if (/powershell\\.exe$/i.test(String(file)) && typeof options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH === 'string') {
+    const lines = String(options.env.AGENT_BOARD_RUNTIME_ACL_PATH).split('|').map(sddl).join('\\n')
+    fs.writeFileSync(marker, 'stalled')
+    throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
+  }
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    const started = await startChild(board, undefined)
+    url = started.url
+    assert.ok(url, started.err)
+    assert.ok(existsSync(marker), 'the stalled PowerShell mock fired in the child')
+    assert.ok(existsSync(board.served))
+    const acl = windowsAcl(folder, board.env)
+    assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the runtime folder is private')
+  } finally { await board.end([url]) }
+})
+
 test('a Windows server child reuses the folder its command checked and checks any other folder in full', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 90_000 }, async () => {
   const board = serveIn()
   const starts = countPowerShell(board)

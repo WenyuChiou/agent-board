@@ -1950,7 +1950,19 @@ interface RunningServer {
   idleMs?: number | undefined
 }
 
-const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningServer | null> => {
+type ServeFailure = { storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckPrivate?: boolean }
+
+// The note a failed start prints: the message folder's failure first, then the child's
+// own folder failure, then the generic line. The child prints its folder failure in the
+// command's language, so the parent matches the same words.
+const serveFailureNote = (failure: ServeFailure): string => {
+  if (failure.storeCode !== undefined) return s.serveStoreFailed(failure.storeCode, messagesDirectory())
+  if (failure.isChildCheckTimeout) return s.serveFailed(s.serveRuntimeCheckTimeout)
+  if (failure.isChildCheckPrivate) return s.serveFailed(s.serveRuntimePrivate)
+  return s.serveFailed(s.serveNotStarted)
+}
+
+const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | null> => {
   const file = serveFile()
   // A folder that could not be protected is read-only: no legacy address is ever moved into
   // it, and no page is ever started from it. Only a page already running is reused.
@@ -2097,6 +2109,12 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
     }
     const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
     if (failure !== undefined && code !== undefined) failure.storeCode = code
+    // The child names its own folder failure on its stderr; the command carries that
+    // reason instead of the generic line, so the person is told the check did not finish.
+    if (failure !== undefined && code === undefined) {
+      if (stderr.includes(s.serveRuntimeCheckTimeout)) failure.isChildCheckTimeout = true
+      else if (stderr.includes(s.serveRuntimePrivate)) failure.isChildCheckPrivate = true
+    }
     return null
   }
   return null
@@ -2108,7 +2126,7 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
 const serveBoard = async (): Promise<void> => {
   const requestedIdle = idleMs()
   const requestedStale = staleTimeoutMs()
-  const failure: { storeCode?: string } = {}
+  const failure: ServeFailure = {}
   // `--serve` is what older command files and scripts still run: it opens the page like the plain
   // command and prints no text board before the address (#868). `--quiet-board` is now a no-op.
   const serverPromise = ensureServer(failure)
@@ -2123,18 +2141,18 @@ const serveBoard = async (): Promise<void> => {
   }
   const server = await serverPromise
   if (server === null) {
-    process.stdout.write(`\n${failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted)}\n`)
+    process.stdout.write(`\n${serveFailureNote(failure)}\n`)
     return
   }
   await show(server.url, server.isKept, server.idleMs, await pageIsOpen(server))
 }
 
 const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string }> => {
-  const failure: { storeCode?: string } = {}
+  const failure: ServeFailure = {}
   const server = await ensureServer(failure)
   if (server === null) {
     process.exitCode = 1
-    return { note: failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted), isOpen: false }
+    return { note: serveFailureNote(failure), isOpen: false }
   }
   const address = server.url
   const isShape = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
