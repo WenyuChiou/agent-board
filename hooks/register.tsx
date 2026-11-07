@@ -64,8 +64,6 @@ import {
   applyTaskUpdate,
   applyTodoWrite,
   asData,
-  cleanContext,
-  cleanTitle,
   clip,
   completedSince,
   applyCompletionOverlay,
@@ -80,6 +78,7 @@ import {
   isAllDone,
   fromTaskList,
   markAnswered,
+  nameReply,
   noticesOf,
   resumeNote,
   stateOf,
@@ -2082,10 +2081,9 @@ const nameTask = async ($: EngineInterface): Promise<void> => {
     effort: 'low',
     prompt: (await wordsOf($)).namePrompt(requestData(mirror.firstPrompt), steps),
   })
-  const lines = asked?.isAnswered === true ? asked.text.split(/\r?\n/).filter(line => line.trim() !== '') : []
-  const title = cleanTitle(lines[0] ?? '')
-  const context = cleanContext(lines[1] ?? '')
-  if (title === '' && context === '') return
+  const named = asked?.isAnswered === true ? nameReply(asked.text) : null
+  if (named === null) return
+  const { title, context } = named
   await saveMine($, one => ({ ...one, title: title || one.title, context: context || one.context }))
   await queueWrite($)
 }
@@ -2104,10 +2102,9 @@ const refreshName = async ($: EngineInterface): Promise<void> => {
     effort: 'low',
     prompt: s.refreshPrompt(requestData(mirror.firstPrompt), steps, mirror.title || fallbackTitle(mirror), mirror.context),
   })
-  const lines = asked?.isAnswered === true ? asked.text.split(/\r?\n/).filter(line => line.trim() !== '') : []
-  const title = cleanTitle(lines[0] ?? '')
-  const context = cleanContext(lines[1] ?? '')
-  if (title === '' && context === '') return
+  const named = asked?.isAnswered === true ? nameReply(asked.text) : null
+  if (named === null) return
+  const { title, context } = named
   await saveMine($, one => ({ ...one, title: title || one.title, context: context || one.context }), true)
   await queueWrite($)
 }

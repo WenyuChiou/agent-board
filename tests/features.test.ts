@@ -14,7 +14,7 @@ import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, 
 import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, progressReport, unwrittenEntries } from '../hooks/journal'
-import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, nameReply, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
 import { LANGS, ZH_TW } from '../hooks/i18n'
@@ -1369,6 +1369,41 @@ test('titles and background are cut by terminal width, at a word in English, nev
   expect(clip('Add a README.md to this repo describing index.js', 38)).toBe('Add a README.md to this repo…')
 })
 
+test('a naming reply accepts short titles and background in Chinese and English', () => {
+  expect(nameReply('「重做進度面板」\n背景：讓大家一眼看到工作進度')).toEqual({ title: '重做進度面板', context: '讓大家一眼看到工作進度' })
+  expect(nameReply('Build the progress board\nContext: Make the work visible to everyone.')).toEqual({ title: 'Build the progress board', context: 'Make the work visible to everyone.' })
+  expect(nameReply('Build the progress board')).toEqual({ title: 'Build the progress board', context: '' })
+  expect(nameReply('測試'.repeat(2))).not.toBeNull()
+  expect(nameReply('測試'.repeat(7))).not.toBeNull()
+  expect(nameReply('one two three')).not.toBeNull()
+  expect(nameReply('Fix README.md links')).toEqual({ title: 'Fix README.md links', context: '' })
+  expect(nameReply('Release 0.24.3 notes')).not.toBeNull()
+  expect(nameReply('v0.24.3 發版準備')).not.toBeNull()
+  expect(nameReply('Update the claude-one.txt notes')).not.toBeNull()
+  expect(nameReply('one two three four five six seven')).not.toBeNull()
+  expect(nameReply(`重做進度面板\n${'字'.repeat(40)}`)).not.toBeNull()
+  expect(nameReply(`Build the progress board\n${Array(19).fill('word').join(' ')}`)).not.toBeNull()
+})
+
+test('a naming reply rejects refusals, sentences, extra lines and answers outside the prompt limits', () => {
+  expect(nameReply('我無法讀取 claude-one.txt，對話中也沒有附上檔案\n請把檔案內容貼到對話中，我會依照你的格式要求回覆兩行')).toBeNull()
+  expect(nameReply('重做進度面板\n說明背景\n多出一行')).toBeNull()
+  expect(nameReply('重做進度面板。')).toBeNull()
+  expect(nameReply('Can you provide the file?')).toBeNull()
+  expect(nameReply('Fix the links. Then ship it')).toBeNull()
+  expect(nameReply('')).toBeNull()
+  expect(nameReply('短標題')).toBeNull()
+  expect(nameReply('長'.repeat(15))).toBeNull()
+  expect(nameReply(`修復命名保護 ${'a'.repeat(70)}`)).toBeNull()
+  expect(nameReply('two words')).toBeNull()
+  expect(nameReply('one two three four five six seven eight')).toBeNull()
+  expect(nameReply(`${'word'.repeat(10)} ${'word'.repeat(10)} end`)).toBeNull()
+  expect(nameReply(`重做進度面板\n${'字'.repeat(41)}`)).toBeNull()
+  expect(nameReply(`Build the progress board\n${Array(20).fill('word').join(' ')}`)).toBeNull()
+  expect(nameReply(`Build the progress board\n${Array(20).fill('lengthyword').join(' ')}`)).toBeNull()
+  expect(nameReply('重做進度面板\n背景：')).toBeNull()
+})
+
 test('封存 takes out one task now: an ended block by its session, a hand-kept task by its heading', () => {
   const text = `# 專案進度
 
@@ -1590,6 +1625,9 @@ test('a link\'s own question mark is not a question, and a question with a link 
   expect(lastQuestion('Done.\n\nCan you open https://example.com/a?q=1&b=2.html?')).toBe('Can you open https://example.com/a?q=1&b=2.html?')
   expect(lastQuestion('I opened http://127.0.0.1:5173/?t=x. Ship it?')).toBe('Ship it?')
   expect(lastQuestion('預覽在 https://example.com/?p=1，可以合併嗎？')).toBe('預覽在 https://example.com/?p=1，可以合併嗎？')
+  // A link ends at Chinese punctuation, so text after the question no longer hides it (#1121).
+  expect(lastQuestion('預覽在 https://example.com，可以合併嗎？（測試已通過）')).toBe('預覽在 https://example.com，可以合併嗎？')
+  expect(lastQuestion('預覽在 https://example.com/?p=1，可以合併嗎？請回覆。')).toBe('預覽在 https://example.com/?p=1，可以合併嗎？')
 })
 
 test('a reply that is JSON is not cut at its question mark and shown as a question', () => {

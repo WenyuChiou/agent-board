@@ -447,6 +447,80 @@ test('the page offers Queue for next turn beside Copy, prefers a live poller, an
   assert.ok(page.text().includes(EN.messagesHandedNextTurn))
 })
 
+// A question the agent moved on from, kept on the Older shelf under the session that asked it (synthetic data).
+const keptQuestion = (id = 'synthetic-q1', text = 'Continue?') => ({ key: `retained::${id}`, questionId: id, ageStage: 'older', project: 'Synthetic', task: 'Mailbox page', context: '', text, note: '', when: '1h', at: 1, kind: 'open', options: [], command: null, link: null, where: 'other', agent: 'codex', session: 'abcdef01', nativeSession: 'mailbox-session', sessionId: null, resumeVia: null, reopen: null, hideKey: id, canHide: true, step: null, target: null })
+const keptModel = (messages, now, kept = [keptQuestion()]) => {
+  // A kept question from the view carries no live-session marker (#192): its receipt is found by the question id alone.
+  const view = { ...buildView(parseProgress('## Synthetic\n'), [], null, now, 0, {}, EN), older: kept.map(({ nativeSession: _live, ...item }) => item) }
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  return serveModel(view, [], EN, new Set(), false, { connections: [], mailboxes: enrollMailbox({ messages: [] }, 'codex', 'mailbox-session', 'CLI', now, 43_200_000).mailboxes, messages }, false, group)
+}
+// The board's message for one question, handed over at the session's next turn start.
+const answeredBy = (state, id, question, now) => {
+  const queued = queueMessage(state, { id, target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: id, answers: question }, 'board', state.mailboxes[0], now).state
+  return acceptMailboxMessage(mailboxTake(queued, now).state, 'codex', 'mailbox-session', id, 'abcdef', now + 2)
+}
+
+test('an answered question kept on the Older shelf still says its answer was handed to the session at its turn start', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now()
+  const accepted = answeredBy(mailboxSeed(now), 'kept-accepted', 'synthetic-q1', now)
+  const model = keptModel(accepted.messages, now)
+  assert.equal(model.older[0].receipt.status, 'accepted')
+  assert.equal(model.older[0].receipt.isMailbox, true)
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  assert.ok(page.text().includes(EN.messagesHandedNextTurn))
+})
+
+test('a question kept on the Older shelf shows no delivery line when nothing was sent to its session from the board', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const model = keptModel([], Date.now())
+  assert.equal(model.older[0].receipt, undefined)
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  assert.ok(!page.text().includes(EN.messagesHandedNextTurn))
+})
+
+test('of two answered questions from one session, each kept card shows the receipt of its own answer and no card borrows the other\'s', () => {
+  const now = Date.now()
+  const first = answeredBy(mailboxSeed(now), 'answer-one', 'synthetic-q1', now)
+  const second = answeredBy({ messages: first.messages, mailboxes: mailboxSeed(now).mailboxes }, 'answer-two', 'synthetic-q2', now + 10)
+  const model = keptModel(second.messages, now, [keptQuestion('synthetic-q1', 'First?'), keptQuestion('synthetic-q2', 'Second?')])
+  assert.deepEqual(model.older.map(one => one.receipt.id), ['answer-one', 'answer-two'])
+  // A message to the same session that names neither question is no receipt for either.
+  const unlinked = keptModel(second.messages.map(one => ({ ...one, answers: undefined })), now, [keptQuestion('synthetic-q1', 'First?')])
+  assert.equal(unlinked.older[0].receipt, undefined)
+})
+
+test('only the board marks which question a message answers: an agent\'s send loses the mark, so it is no receipt for a kept question', () => {
+  const now = Date.now()
+  const input = { id: 'agent-said', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'agent-said', answers: 'synthetic-q1' }
+  const seed = mailboxSeed(now)
+  const fromAgent = queueMessage(seed, input, 'gemini:synthetic-sender', seed.mailboxes[0], now).message
+  assert.equal(fromAgent.answers, undefined)
+  assert.equal(queueMessage(seed, input, 'board', seed.mailboxes[0], now).message.answers, 'synthetic-q1')
+  const accepted = acceptMailboxMessage(mailboxTake(queueMessage(seed, input, 'gemini:synthetic-sender', seed.mailboxes[0], now).state, now).state, 'codex', 'mailbox-session', 'agent-said', 'abcdef', now + 2)
+  assert.equal(keptModel(accepted.messages, now).older[0].receipt, undefined)
+})
+
+test('a page cannot name the question its message answers: the board takes it from the card it drew', async () => {
+  const { serveAction } = await import('../hooks/serve.ts')
+  const { fingerprint } = await import('../hooks/board.ts')
+  const mailbox = mailboxSeed().mailboxes[0]
+  const ask = keptQuestion('synthetic-q1', 'Continue?')
+  const items = [{ type: 'ask', key: 'ask::synthetic', ask }]
+  const request = { key: 'ask::synthetic', type: 'message', text: 'Yes', session: mailbox.session, asked: ask.text, fp: fingerprint(items[0], items), connection: mailbox.id, turn: mailbox.turn, answers: 'forged-question' }
+  const action = serveAction(items, request, EN, false, deliveryTargets([], [mailbox]), true)
+  assert.equal(action.type, 'message')
+  assert.equal(action.answers, 'synthetic-q1')
+  const unnamed = { ...ask, questionId: undefined }
+  const plain = [{ type: 'ask', key: 'ask::synthetic', ask: unnamed }]
+  const bare = serveAction(plain, { ...request, fp: fingerprint(plain[0], plain) }, EN, false, deliveryTargets([], [mailbox]), true)
+  assert.equal(bare.type, 'message')
+  assert.equal(bare.answers, undefined)
+})
+
 test('a private folder check accepts only a protected folder with one full-control entry for the current user', () => {
   const sid = 'S-1-5-21-123-456-789-1001'
   const entry = `(A;OICI;FA;;;${sid})`
