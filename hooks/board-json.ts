@@ -99,22 +99,17 @@ export const collectFinished = (
       if (entry.at < fromDay || entry.at > toDay) continue
       const proj = named(entry.project)
       const title = clean(entry.task)
-      let stepText = clean(entry.step)
-      let agent = ''
-      const agentMatch = /\s+\(([a-z0-9_-]+)\)$/i.exec(stepText)
-      if (agentMatch) {
-        agent = agentMatch[1]!
-        stepText = stepText.slice(0, agentMatch.index).trim()
-      }
+      // A journal line names no agent (docs/FORMAT.md, Journal): a step such as "Deploy (Windows)"
+      // keeps its words, and the agent comes only from a progress.md or archive block below.
+      const stepText = clean(entry.step)
       const key = keyOf(proj, title)
       const held = tasks.get(key) ?? {
         project: proj,
         title,
-        agent,
+        agent: '',
         date: entry.at,
         steps: new Map(),
       }
-      if (!held.agent && agent) held.agent = agent
       if (entry.at > held.date) held.date = entry.at
       const stepDate = entry.stamp || entry.at
       const stepKey = stepText.toLowerCase()

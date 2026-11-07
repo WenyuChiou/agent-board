@@ -143,9 +143,11 @@ export const sessionPushNote = (
 
   if (lines.length === 0) return { note: null, keys: [] }
   const more = lines.length > OTHERS_CAP ? [s.othersMore(lines.length - OTHERS_CAP)] : []
+  // Only the lines sent count as pushed: a change past the cap stays unpushed and is sent at
+  // the next step, instead of being saved as delivered and never shown.
   return {
     note: [s.othersPushHead, ...dataBlock(lines.slice(0, OTHERS_CAP), s), ...more, s.othersPushTail].join('\n'),
-    keys,
+    keys: keys.slice(0, OTHERS_CAP),
   }
 }
 

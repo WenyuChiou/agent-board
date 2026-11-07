@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { OTHERS_CAP, othersNote } from '../hooks/others'
+import { OTHERS_CAP, othersNote, sessionPushNote } from '../hooks/others'
 import { parseProgress } from '../hooks/parse'
 import { STRINGS } from '../hooks/strings'
 import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
@@ -42,6 +42,20 @@ test('the others note shows at most eight tasks, says how many more there are, a
     expect(lines.at(-2)).toBe(s.othersMore(3))
     expect(lines.at(-1)).toBe(s.othersTailCodex)
   }
+})
+
+test('a step start with more than eight changes marks only the eight it sends as pushed, and the rest arrive at the next step (#1086)', () => {
+  const s = STRINGS.en
+  const own = 'a1b2c5ff'
+  const file = '## demo\n' + Array.from({ length: OTHERS_CAP + 1 }, (_, index) => block(`a1b2c6${index.toString(16).padStart(2, '0')}`, 'working', `Ask ${index}`, `- [?] ${own}: synthetic question ${index}, OK?`)).join('\n')
+  const projects = parseProgress(file)
+  const first = sessionPushNote(projects, ['demo'], own, new Set(), NOW, s)
+  expect(first.keys.length).toBe(OTHERS_CAP)
+  expect(first.note ?? '').toContain(s.othersMore(1))
+  const second = sessionPushNote(projects, ['demo'], own, new Set(first.keys), NOW, s)
+  expect(second.keys.length).toBe(1)
+  expect(second.note ?? '').toContain(`synthetic question ${OTHERS_CAP}`)
+  expect(sessionPushNote(projects, ['demo'], own, new Set([...first.keys, ...second.keys]), NOW, s).note).toBe(null)
 })
 
 test('independent same-prefix peers stay on the current session board across agents and keep their runs', () => {

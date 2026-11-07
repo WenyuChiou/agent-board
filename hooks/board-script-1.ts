@@ -8416,7 +8416,7 @@ export const LINES = [
 "  return {",
 "    note: [s.othersPushHead, ...dataBlock(lines.slice(0, OTHERS_CAP), s), ...more, s.othersPushTail].join(`",
 "`),",
-"    keys",
+"    keys: keys.slice(0, OTHERS_CAP)",
 "  };",
 "};",
 "var othersNote = (projects, here, own, now, s = ZH_TW, tail = s.othersTail) => {",

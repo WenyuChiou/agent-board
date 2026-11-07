@@ -2124,9 +2124,11 @@ const PAGE_SCRIPT = String.raw`
   function isOfficer(id) { return Object.prototype.hasOwnProperty.call(W, 'agent:' + String(id).toLowerCase()); }
   // The agents that are unreadable or offline now, by id: 'unreadable' when the board
   // cannot read the agent, 'offline' when its sessions are closed and none is open.
+  // Maps keyed by agent name have no prototype: a custom agent may be named constructor
+  // or valueof, and a plain object would read Object's own members for it.
   function awayBadNow() {
-    var bad = {};
-    var unreadable = {};
+    var bad = Object.create(null);
+    var unreadable = Object.create(null);
     latest.view.agents.forEach(function (one) { if (one.isUnreadable) unreadable[String(one.agent).toLowerCase()] = true; });
     Object.keys(agentPresence).forEach(function (id) {
       if (unreadable[id]) bad[id] = 'unreadable';
@@ -2136,7 +2138,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function awaySnapshot() {
     if (!latest || !latest.view) return null;
-    var questions = {};
+    var questions = Object.create(null);
     latest.view.needs.cards.forEach(function (ref) {
       var id = agentOf(ref);
       if (!questions[id]) questions[id] = {};
@@ -2151,7 +2153,7 @@ const PAGE_SCRIPT = String.raw`
     var view = latest.view;
     var seen = {};
     Object.keys(snap.questions).forEach(function (id) { Object.keys(snap.questions[id]).forEach(function (key) { seen[key] = true; }); });
-    var questions = {};
+    var questions = Object.create(null);
     var newKeys = [];
     view.needs.cards.forEach(function (ref) {
       if (seen[ref.key]) return;
