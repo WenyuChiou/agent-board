@@ -255,7 +255,7 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
     if (name === 'page') {
       assert.equal(declared(rules, 'button.primary', 'background'), 'var(--act)', `${name}: a primary button is the ink fill`)
       assert.equal(declared(rules, 'button.primary', 'color'), 'var(--on-act)', `${name}: its text is the surface colour`)
-      assert.ok(declared(rules, '.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close', 'border')?.includes('var(--btn-line)'), `${name}: an outlined button has its 3:1 border`)
+      assert.ok(declared(rules, '.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn', 'border')?.includes('var(--btn-line)'), `${name}: an outlined button has its 3:1 border`)
       assert.equal(declared(rules, '.s-running', 'color'), 'var(--alive)', `${name}: a running step is the alive green`)
       assert.equal(declared(rules, '.s-blocked', 'color'), 'var(--alert)', `${name}: a blocked step is the alert red`)
     }

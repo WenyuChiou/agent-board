@@ -122,9 +122,8 @@ Rules:
   left. updated= is the time of this update in UTC, ending in Z.
 ```
 
-On the board's page, **Connect a web chat** copies this prompt. After that, press
-Copy on the assistant's block and press Ctrl+V (Cmd+V on a Mac) on the board's page, or press
-**Import from clipboard**. Text that is not a block stays in the page. Without
+Copy the assistant's block and paste it on the board's page with Ctrl+V (Cmd+V on a Mac).
+Text that is not a block stays in the page. Without
 the page, save and merge it:
 
 Save each block the assistant prints, from `## <project>` to the end marker,

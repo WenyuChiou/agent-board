@@ -2820,7 +2820,7 @@ test('ticking the next step from the page still works when the step list folded 
 
 const relayFragment = (at, state = 'waiting', step = '- [?] Ship it Friday, OK?') => `## launch\n<!-- auto session=c0ffee12 agent=muse state=${state} updated=${at} -->\n### Draft the launch post\n${step}\n<!-- /auto session=c0ffee12 -->`
 
-test('Connect a web chat copies the prompt in the guide, and a block filled in from it is accepted', { timeout: 30_000 }, async () => {
+test('a block filled in from the web-chat guide is accepted', { timeout: 30_000 }, async () => {
   // Run the actual CLI sources in the scratch directory, before the maintainer rebuilds the bundle.
   const root = new URL('../', import.meta.url).href
   const source = `import { registerHooks, stripTypeScriptTypes } from 'node:module'
@@ -2840,15 +2840,6 @@ await import(${JSON.stringify(new URL('../scripts/board-cli.ts', import.meta.url
     assert.equal(home.status, 200, home.body)
     const guide = readFileSync(new URL('../docs/REMOTE_REPORTERS.md', import.meta.url), 'utf8').replaceAll('\r\n', '\n')
     const prompt = guide.split('### Chat relay: a prompt to paste')[1].split('```text\n')[1].split('\n```')[0]
-    const encoded = home.body.match(/<script type="application\/json" id="relay-prompt">([\s\S]*?)<\/script>/)?.[1]
-    assert.ok(encoded)
-    assert.ok(!encoded.includes('<'))
-    assert.equal(JSON.parse(encoded), prompt)
-    const dom = await pageDom(home.body, redesignModel(), { clipboard: true })
-    dom.node('connect-web-chat').click()
-    await dom.settle()
-    assert.deepEqual(dom.copied, [prompt])
-    assert.ok(dom.node('.pfoot').textContent.includes(EN.webChatCopied))
     // One second in the past: the board refuses any source time ahead of its own clock, and this test's
     // process and the board's can read a few milliseconds apart on Windows (#954).
     const text = prompt.slice(prompt.indexOf('## <project>'), prompt.indexOf('<!-- /auto session=<ID> -->') + '<!-- /auto session=<ID> -->'.length)
@@ -3441,13 +3432,6 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     return nodes.get(id)
   }
   get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
-  const relay = html.match(/<script[^>]*id="relay-prompt"[^>]*>([\s\S]*?)<\/script>/)
-  if (relay) get('relay-prompt').textContent = relay[1]
-  for (const id of ['connect-web-chat', 'import-clipboard']) {
-    if (!html.includes(`id="${id}"`)) continue
-    get(id).tag = 'button'
-    get('.pfoot').appendChild(get(id))
-  }
   get('.pfoot').appendChild(get('close'))
   for (const id of ['close']) get(id).tag = 'button'
   const matches = (node, selector) => {
@@ -3469,7 +3453,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   const copied = []
   const copies = []
   const document = {
-    getElementById: id => ['relay-prompt', 'connect-web-chat', 'import-clipboard'].includes(id) && !nodes.has(id) ? null : get(id),
+    getElementById: id => get(id),
     createElement: tag => new Element(tag),
     createTextNode: text => {
       const node = new Element('text')
@@ -10105,35 +10089,6 @@ test('Ctrl+V in a text field pastes there and imports nothing', async () => {
   assert.equal(dom.requests.length, 0)
 })
 
-test('Import from clipboard posts a block, says when there is none, and says to use Ctrl+V when the browser refuses', async () => {
-  let text = relayFragment(ago(60_000))
-  let isRefused = false
-  const html = await sourcePage()
-  const dom = await pageDom(html, redesignModel(), { clipboard: true, readClipboard: async () => {
-    if (isRefused) throw new Error('Synthetic refusal')
-    return text
-  } })
-  dom.node('import-clipboard').click()
-  await dom.settle()
-  assert.deepEqual(dom.requests, [{ path: '/api/paste', body: { text } }])
-  text = 'not a block'
-  dom.node('import-clipboard').click()
-  await dom.settle()
-  assert.ok(dom.node('.pfoot').textContent.includes(EN.importNoBlock))
-  assert.equal(dom.requests.length, 1)
-  isRefused = true
-  dom.node('import-clipboard').click()
-  await dom.settle()
-  assert.ok(dom.node('.pfoot').textContent.includes(EN.importUseKeys))
-  for (const clipboard of [false, true]) {
-    const missing = await pageDom(html, redesignModel(), { clipboard })
-    missing.node('import-clipboard').click()
-    await missing.settle()
-    assert.ok(missing.node('.pfoot').textContent.includes(EN.importUseKeys))
-    assert.equal(missing.requests.length, 0)
-  }
-})
-
 test('a block the parser would read is posted once while it is on its way, and not at all on a closed page', async () => {
   const html = await sourcePage()
   const text = relayFragment(ago(60_000)).replace('<!-- auto', '<!--auto')
@@ -11174,32 +11129,43 @@ test('buttons keep desktop size in a narrow window with a mouse', async () => {
   assert.ok(narrow.includes('.col{padding-left') && !/\.btn|\.answers button/.test(narrow))
 })
 
-test('the actions at the foot of the sidebar look like buttons, not underlined links', () => {
+test('the Close icon uses the quiet button look and the page hit size', () => {
   const html = redesignPage()
-  // The owner's rule (product principles): an action is a button. Only GitHub stays a link.
-  const rules = [...html.matchAll(/([^{}]*\.side \.pfoot[^{}]*)\{([^}]*)\}/g)].map(found => ({ selector: found[1], body: found[2] }))
-  const actions = rules.filter(rule => /#close|\.btn\b/.test(rule.selector))
-  assert.ok(actions.length > 0)
-  for (const rule of actions) assert.doesNotMatch(rule.body, /underline|background:transparent|border-color:transparent/, rule.selector)
-  assert.match(html, /\.btn,[^{}]*\.pfoot #close[^{}]*\{[^}]*border:1px solid var\(--btn-line\)/)
-  const foot = html.match(/<footer class="pfoot"[\s\S]*?<\/footer>/)[0]
-  for (const id of ['connect-web-chat', 'import-clipboard', 'close']) assert.match(foot, new RegExp('<button type="button"[^>]*id="' + id + '"'))
+  const rule = html.match(/\.pfoot #close\{([^}]*)\}/)[1]
+  assert.match(rule, /width:var\(--hit\)/)
+  assert.match(rule, /height:var\(--hit\)/)
+  const touch = mediaBlocks(html, '(pointer:coarse)').join('\n')
+  assert.match(touch, /\.pfoot #close\{[^}]*width:48px;[^}]*height:48px/)
+  assert.match(html, /\.icon-btn\{[^}]*background:transparent;[^}]*color:var\(--muted\)/)
 })
 
-test('the sidebar foot actions are small quiet buttons and the version line is quieter', () => {
+test('the sidebar version line is quiet', () => {
   const html = redesignPage()
-  const rule = html.match(/\.side \.pfoot #close,\.side \.pfoot \.btn\{([^}]*)\}/)[1]
-  // The page's smallest text size, a token and not a number; at least 24px tall; still a button.
-  assert.match(rule, /font-size:var\(--text-xs\)/)
-  assert.match(rule, /color:var\(--muted\)/)
-  const height = Number(rule.match(/min-height:(\d+)px/)[1])
-  assert.ok(height >= 24 && height <= 28, rule)
-  assert.doesNotMatch(rule, /font-size:\d/)
   // The version line takes the smallest size and a colour fainter than the muted one, in both themes (the colour mixes tokens).
   const ver = html.match(/\.ver-link\{([^}]*)\}/)[1]
   assert.match(ver, /font-size:var\(--text-xs\)/)
   assert.match(ver, /color:color-mix\(in srgb,var\(--muted\) \d+%,var\(--surface\)\)/)
   assert.match(html, /\.ver-link svg\.i\{width:12px;height:12px\}/)
+})
+
+test('the page footer has no web-chat or clipboard button and Close is an accessible icon in every language', async () => {
+  const { servePage } = await sourceBoard()
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    for (const isLan of [false, true]) {
+      const html = servePage(words, 'synthetic', isLan)
+      const foot = html.match(/<footer class="pfoot"[\s\S]*?<\/footer>/)?.[0]
+      assert.ok(foot)
+      for (const id of ['connect-web-chat', 'import-clipboard']) assert.ok(!foot.includes(`id="${id}"`))
+      const close = foot.match(/<button\b([^>]*\bid="close"[^>]*)>([\s\S]*?)<\/button>/)
+      assert.ok(close)
+      assert.match(close[1], /\btype="button"/)
+      assert.match(close[1], /\bclass="icon-btn"/)
+      assert.match(close[1], /\bdata-static\b/)
+      assert.ok(close[1].includes(`aria-label="${words.serveClose}"`))
+      assert.ok(close[1].includes(`title="${words.serveClose}"`))
+      assert.match(close[2], /^<svg class="i"[^>]*aria-hidden="true"><path d="[^"]+"\/><\/svg>$/)
+    }
+  }
 })
 
 test('a row whose title is its current step shows the step once', async () => {
