@@ -156,12 +156,14 @@ const paint = (o: { isColor: boolean; depth?: ColorDepth; theme?: Theme }) => (i
 // A row's progress bar (#1085), one cell per step in the person's style, with its width in
 // columns; '' for a row of one step or none, which keeps its "n/m" alone.
 const barInk = (role: BarRole): Ink => (role === 'muted' ? 'quiet' : role === 'ink' ? 'bold' : role)
-const rowBar = (row: TaskRow, o: BoardOptions): { text: string; width: number } => {
+// The box-drawing cells are East Asian ambiguous width: the Chinese boards count them as two
+// columns, as they count ● and ✓, and give a long task's single fill 8 cells instead of 12.
+const rowBar = (row: TaskRow, o: BoardOptions, isWide: boolean): { text: string; width: number } => {
   const c = paint(o)
-  const pieces = barPieces(row.cells ?? [], 12)
+  const pieces = barPieces(row.cells ?? [], isWide ? 8 : 12)
   const style = o.barStyle ?? DEFAULT_BAR_STYLE
 
-  return { text: pieces.map(piece => c(barInk(barRole(piece.cell, style)), piece.text)).join(''), width: pieces.reduce((sum, piece) => sum + [...piece.text].length, 0) }
+  return { text: pieces.map(piece => c(barInk(barRole(piece.cell, style)), piece.text)).join(''), width: displayColumns(pieces.map(piece => piece.text).join(''), isWide) }
 }
 
 // Secondary text in the board's muted colour, for a line the script adds below the board.
@@ -262,7 +264,7 @@ const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelv
   const count = row.total > 0 ? `${row.done}/${row.total} ` : ''
   const needs = boardNeeds(view, row, isShelved)
   const status = needs === null ? row.status : needsWords(needs, s)
-  const bar = rowBar(row, o)
+  const bar = rowBar(row, o, isWide)
   const lead = bar.width === 0 ? '' : `${bar.text} `
   const lines = [`  ${c('bold', cut(row.title, o.width - 4))}`, `    ${lead}${c('quiet', cut(`${count}${status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6 - (bar.width === 0 ? 0 : bar.width + 1)))}`]
   if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
@@ -1002,7 +1004,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const lead = [(isWorking || isStuck) && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
       // The step it is on, in the accent colour, where its status only says that it works.
       const step = needs === null && (row.tone === 'quiet' || row.tone === 'accent') ? row.steps.find(one => one.isCurrent && (one.status === 'doing' || one.status === 'todo')) : undefined
-      const bar = rowBar(row, o)
+      const bar = rowBar(row, o, isWide)
       const barRoom = bar.width === 0 ? 0 : bar.width + 1
       const status = cut(`${lead}${needs !== null ? needsWords(needs, s) : step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve - barRoom)
       const quiet = status.startsWith(lead) ? lead : ''

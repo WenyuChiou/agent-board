@@ -14,7 +14,7 @@ type Drawn = { type: string; text?: string; props?: { color?: string; bold?: boo
 
 test('#1085: a pane row shows a cell per step with n/m beside it, in the style /progress style picks', async ($, on) => {
   const world: World = { files: new Map([[FILE, board(SEVEN)]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
-  engineBeneath(on, world)
+  const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
@@ -37,8 +37,10 @@ test('#1085: a pane row shows a cell per step with n/m beside it, in the style /
     const blue = (await texts()).find(node => pressTexts(node as never).join('').endsWith('━━━━'))
     expect([DARK.accent, LIGHT.accent]).toContain(blue?.props?.color)
 
-    // A pick made elsewhere (the page, the terminal board) shows at the next draw; other keys stay.
+    // A pick made elsewhere (the page, the terminal board) shows after the next poll.
     world.files.set(SETTINGS, '{"historyDays":3,"style":"green"}')
+    world.mtime += 1
+    await clock.advance(2100)
     const green = await texts()
     expect([DARK.done, LIGHT.done]).toContain(green.find(node => pressTexts(node as never).join('').endsWith('━━━━'))?.props?.color)
   } finally { await ui.unmount() }
