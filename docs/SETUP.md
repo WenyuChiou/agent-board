@@ -216,7 +216,7 @@ dependencies and no install scripts. Pre-releases are on the `next` tag
 | Muse Code | Stop, SessionEnd | Coarse status and native execution unverified |
 | Hermes Agent | Board and skill | Independent native hook adapter pending |
 | OpenClaw | Independent metadata plugin and native skill | Native host execution unverified; requires sanitized lifecycle subscription API |
-| DeepSeek Harness | Native Cordis lifecycle plugin and skill | Loader/event contract checked; full CLI/Web/Desktop execution unverified |
+| DeepSeek Harness | Native Cordis lifecycle plugin, `agent_board` tool and skill | Checked live on Windows in dsh web 0.2.2-rc.1 (report, open, page stays up after dsh closes); CLI and Desktop unchecked |
 
 ## Portable host paths and lifecycle
 
@@ -243,7 +243,7 @@ board's steps; the plugin reads no reply text, so the installed skill and the to
 send a closing question as a `- [?] <the question>` step before the turn ends; OpenCode's plugin does the same with its todo list, and Grok Build's `PostToolUse` hook (matcher `^todo_write$`, timeout 5 s, prints nothing) copies the full list from the tool's result.
 
 DeepSeek uses `agent/created`, `agent/status` (running/idle) and `agent/disposed`, retaining
-its own agent identity. Its owned entry is appended to a plain root YAML patch sequence;
+its own agent identity and sending the session's folder (`cwd` from the session header), so its block is filed under the workspace. The plugin runs in the Harness process, outside the shell sandbox, and registers one tool, `agent_board`: `action: open` starts the board page (detached) and returns the one line it prints, and `action: report` (`title`, `state`, `steps`) reports to the board's writer by the tool's own session id; the session start already told the board its folder. The installed skill tells DeepSeek to call that tool instead of a shell command, because its Windows sandbox writes only inside the workspace and cannot reach the board's address folder or progress file. No prompt, message or model hook is registered. Its owned entry is appended to a plain root YAML patch sequence;
 complex/edited YAML is a conflict requiring review. Existing entries remain untouched.
 A JSON config that is not a JSON object, or holds a number JSON cannot keep exactly (such as
 an id past 2^53), is a conflict too, and is left untouched.

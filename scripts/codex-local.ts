@@ -412,8 +412,8 @@ const saveReporterTail = (progress: string, fragment: Buffer): string => {
 }
 
 // Codex and Cursor events name the session's folder. Of the status hooks, only OpenCode's plugin
-// sends one for that (#217); the others keep their agent's heading.
-const filesByFolder = (mode: string, agent: string): boolean => mode === '--codex-event' || mode === '--agent-status' && agent === 'opencode'
+// (#217) and DeepSeek's (#1118) send one for that; the others keep their agent's heading.
+const filesByFolder = (mode: string, agent: string): boolean => mode === '--codex-event' || mode === '--agent-status' && (agent === 'opencode' || agent === 'deepseek')
 
 // `planInput` is a plan the --plan-event step already turned into a report's input: the report then
 // runs as --report does and prints nothing, because Codex and Gemini read a hook's stdout as a decision.
@@ -1233,7 +1233,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {
-    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(process.execPath, worker, progress, home)
+    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(process.execPath, worker, progress, home, script, fileWords.deepseekBoardTool, fileWords.localAgentStepFormat)
     files[join(deepseekDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'hermes') files[join(flag('--hermes-dir') ?? (process.env.HERMES_HOME || join(home, '.hermes')), 'skills', 'agent-board', 'SKILL.md')] = skillText

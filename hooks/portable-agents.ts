@@ -5,11 +5,11 @@ import { HOOK_VERSION, HOOK_WORKER_GRACE, hookGuardSource, hookTimeout } from '.
 // or receiving connection is installed by these generated plugins.
 const runner = (node: string, script: string, progress: string, agent: string, home: string): string => `import { spawnSync } from 'node:child_process'
 ${hookGuardSource(home, agent)}
-const report = (mode, payload, deadline, session) => {
+const report = (mode, payload, deadline, session, cwd) => {
   const remaining = deadline - Date.now()
   if (remaining <= 0) throw Error('HOOK_TIMEOUT')
   const result = spawnSync(${JSON.stringify(node)}, [${JSON.stringify(script)}, '--hook-version', '${HOOK_VERSION}', '--hook-deadline', String(deadline), mode, '--agent', '${agent}', '--progress-file', ${JSON.stringify(progress)}, ...(session ? ['--session', session] : [])], {
-    input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: remaining + ${HOOK_WORKER_GRACE}, killSignal: 'SIGKILL',
+    input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: remaining + ${HOOK_WORKER_GRACE}, killSignal: 'SIGKILL', ...(cwd ? { cwd } : {}),
   })
   if (result.error?.code === 'ETIMEDOUT') throw Error('HOOK_TIMEOUT')
   // A refused report names the board's reason (INVALID_STEP, say), so the model can correct it.
@@ -100,16 +100,90 @@ export default {
 }
 `
 
-export const deepseekLocalPlugin = (node: string, script: string, progress: string, home: string): string => `${runner(node, script, progress, 'deepseek', home)}
+// DeepSeek's shell sandbox on Windows writes only inside the workspace, so a board command cannot open
+// the board page or write progress.md from there. This plugin runs in the dsh process, outside that
+// sandbox, and gives the agent one tool, agent_board, for both. The tool is bound to the session the
+// host gives it (its id and folder); no hook that receives the prompt, messages or model is registered.
+export const deepseekLocalPlugin = (node: string, script: string, progress: string, home: string, board: string, description = STRINGS.en.deepseekBoardTool, stepFormat = STRINGS.en.localAgentStepFormat): string => `${runner(node, script, progress, 'deepseek', home)}
+import { spawn } from 'node:child_process'
 export const name = 'agent-board-local'
+const folderOf = agent => {
+  const cwd = agent?.session?.header?.cwd
+  return typeof cwd === 'string' && cwd !== '' ? { cwd } : {}
+}
+// The board's own page start, from this process: detached, so the page outlives the call. The one line it
+// prints (the page link, or why there is no page) is the tool's answer and is kept nowhere else.
+const openBoard = () => new Promise((resolve, reject) => {
+  let child, timer, output = '', done = false
+  const finish = (error, text) => {
+    if (done) return
+    done = true
+    clearTimeout(timer)
+    try { child?.stdout?.destroy() } catch {}
+    if (error) reject(error)
+    else resolve(text)
+  }
+  try {
+    child = spawn(${JSON.stringify(node)}, [${JSON.stringify(board)}, '--html'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+    child.unref()
+  } catch { return reject(new Error('AGENT_BOARD_OPEN_FAILED')) }
+  timer = setTimeout(() => finish(new Error('AGENT_BOARD_OPEN_FAILED: TIMEOUT')), 20000)
+  child.on('error', () => finish(new Error('AGENT_BOARD_OPEN_FAILED')))
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', chunk => { if (output.length < 4096) output += chunk })
+  child.on('close', code => {
+    const line = output.trim().split(/\\r?\\n/).filter(Boolean).slice(0, 2).join('\\n')
+    if (code !== 0 || line === '') finish(new Error('AGENT_BOARD_OPEN_FAILED' + (line === '' ? '' : ': ' + line)))
+    else finish(undefined, line)
+  })
+})
 export const apply = ctx => {
-  const save = (agent, state) => withHook((_current, deadline) => report('--agent-status', { session_id: agent.session.header.id, state }, deadline))
+  const save = (agent, state) => withHook((_current, deadline) => report('--agent-status', { session_id: agent.session.header.id, state, ...folderOf(agent) }, deadline))
   ctx.on('agent/created', ({ agent }) => { save(agent, agent.status === 'running' ? 'working' : 'waiting') })
   ctx.on('agent/status', ({ agent, status }) => {
     if (!['running', 'idle'].includes(status)) return
     save(agent, status === 'running' ? 'working' : 'waiting')
   })
   ctx.on('agent/disposed', ({ agent }) => { save(agent, 'ended') })
+  // Tools are optional: a host without the service still gets the lifecycle events above.
+  if (typeof ctx.inject !== 'function') return
+  // The shape that defineTool of @deepseek-ai/dsh-tools returns, built by hand: a plugin loaded by file
+  // URL cannot import that package.
+  ctx.inject(['tools'], c => c.tools.register({
+    name: 'agent_board',
+    description: ${JSON.stringify(description)},
+    parameters: {
+      type: 'object', required: ['action'],
+      properties: {
+        action: { type: 'string', enum: ['report', 'open'], description: 'open: start the board page. report: send the progress of this task.' },
+        title: { type: 'string' },
+        state: { type: 'string', enum: ['working', 'waiting', 'done', 'ended'] },
+        steps: { type: 'array', items: { type: 'string', description: ${JSON.stringify(stepFormat)} } },
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, required: ['text'], properties: { text: { type: 'string' } } },
+      render: (_args, value) => [{ type: 'text', text: value.text }],
+    },
+    timeoutMs: 30000,
+    execute: async (args, exec) => {
+      try {
+        if (args?.action === 'open') return { text: await openBoard() }
+        if (args?.action !== 'report') throw new Error('AGENT_BOARD_REPORT_FAILED: INVALID_ACTION')
+        const header = exec?.agent?.session?.header
+        if (typeof header?.id !== 'string' || header.id === '') throw new Error('AGENT_BOARD_REPORT_FAILED: NO_SESSION')
+        if (!Array.isArray(args.steps) || args.steps.some(step => typeof step !== 'string')) throw new Error('AGENT_BOARD_REPORT_FAILED: INVALID_STEPS')
+        const payload = { steps: args.steps }
+        if (typeof args.title === 'string') payload.title = args.title
+        if (['working', 'waiting', 'done', 'ended'].includes(args.state)) payload.state = args.state
+        report('--codex-report', payload, Date.now() + 20000, header.id)
+        return { text: 'OK' }
+      } catch (error) {
+        hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
+        throw error
+      }
+    },
+  }))
 }
 `
 

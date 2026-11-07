@@ -289,6 +289,7 @@ and cloud bots still need a host-proven binding; accepting their names does not 
 | Muse Code | Stop, SessionEnd | Coarse status; no working-turn event |
 | Hermes Agent | Board and agent-specific skill installed | Native adapter pending |
 | OpenClaw | Shared board and skill installed | Native adapter pending; no conversation grant added |
+| DeepSeek Harness | Cordis lifecycle plugin with the session folder, an `agent_board` tool (open, report) and skill | Runs outside the shell sandbox; checked live on Windows in dsh web 0.2.2-rc.1, CLI and Desktop unchecked |
 | Antigravity | Named native lifecycle hooks and board skill | No session-end event or turn fence; verify CLI/App/IDE separately |
 
 Doctor's `--json` result distinguishes `installed`, `ready` and `connected`. Pending native adapters never

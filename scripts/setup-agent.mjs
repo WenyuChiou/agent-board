@@ -57,7 +57,7 @@ const summaries = [
     "gemini": "Gemini CLI: start a new session; setup has already configured its reporting hooks.",
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin, then start a new session.",
     "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin, then start a new chat.",
-    "deepseek": "DeepSeek: restart the Cordis CLI to load its generated agent-board plugin, then start a new session.",
+    "deepseek": "DeepSeek: close and reopen DeepSeek Harness (dsh) so it loads the agent-board plugin setup wrote, then start a new conversation.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
     "board": "Open the board: {command}"
@@ -85,7 +85,7 @@ const summaries = [
     "gemini": "Gemini CLI：開始新的工作階段；setup 已設定回報 hooks。",
     "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛，再開始新的工作階段。",
     "openclaw": "OpenClaw：重新啟動 OpenClaw，載入 setup 產生的 agent-board 外掛，再開始新的對話。",
-    "deepseek": "DeepSeek：重新啟動 Cordis CLI，載入 setup 產生的 agent-board 外掛，再開始新的工作階段。",
+    "deepseek": "DeepSeek：關掉 DeepSeek Harness（dsh）再重新打開，讓它載入 setup 產生的 agent-board 外掛，然後開一個新的對話。",
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
     "plugin": "Claude Code：執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。",
     "board": "開啟看板：{command}"
@@ -113,7 +113,7 @@ const summaries = [
     "gemini": "Gemini CLI：开始新的会话；setup 已配置报告 hooks。",
     "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件，再开始新的会话。",
     "openclaw": "OpenClaw：重新启动 OpenClaw，加载 setup 生成的 agent-board 插件，再开始新的对话。",
-    "deepseek": "DeepSeek：重新启动 Cordis CLI，加载 setup 生成的 agent-board 插件，再开始新的会话。",
+    "deepseek": "DeepSeek：关掉 DeepSeek Harness（dsh）再重新打开，让它加载 setup 生成的 agent-board 插件，然后开一个新的对话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",
     "board": "打开看板：{command}"

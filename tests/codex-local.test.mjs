@@ -3009,7 +3009,7 @@ test('a queued event from every host is replayed by the next hook', async t => {
         }
       } else {
         const callbacks = new Map()
-        const apply = instantiate(deepseekLocalPlugin(process.execPath, worker, f.progress, f.home), 'return apply')
+        const apply = instantiate(deepseekLocalPlugin(process.execPath, worker, f.progress, f.home, f.script), 'return apply')
         apply({ on: (name, callback) => callbacks.set(name, callback) })
         await callbacks.get('agent/status')({ agent: { session: { header: { id: payload.session_id } } }, status: 'running' })
       }
@@ -6147,6 +6147,144 @@ test('DeepSeek native callbacks report their own identity and preserve task comp
     assert.match(read(), /state=ended/)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
+
+test('DeepSeek session events carry the session folder and the agent_board tool reports to the plugin session', () => fixture(async f => {
+  f.env.DSH_HOME = join(f.home, '.dsh')
+  assert.equal(f.install('--agent', 'deepseek', '--apply').status, 0)
+  const plugin = await import(pathToFileURL(join(f.root, 'adapters', 'deepseek.mjs')))
+  assert.equal(plugin.inject, undefined, 'tools stay optional: a missing service must not stop the lifecycle events')
+  const work = join(f.home, 'work')
+  mkdirSync(work)
+  const hooks = new Map(), tools = []
+  plugin.apply({ on: (name, fn) => hooks.set(name, fn), inject: (_names, fn) => fn({ tools: { register: tool => tools.push(tool) } }) })
+  // No hook that receives the prompt, the messages or the model is registered.
+  assert.deepEqual([...hooks.keys()].sort(), ['agent/created', 'agent/disposed', 'agent/status'])
+  assert.equal(tools.length, 1)
+  const [tool] = tools
+  assert.equal(tool.name, 'agent_board')
+  assert.deepEqual(tool.parameters.required, ['action'])
+  assert.deepEqual(tool.parameters.properties.action.enum, ['report', 'open'])
+  assert.match(tool.description, /- \[\?\] <the question>/)
+  const id = 'deepseek-folder-session-1'
+  const agent = { session: { header: { id, cwd: work } }, status: 'idle' }
+  const record = () => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`deepseek:${id}`).digest('hex') + '.json'), 'utf8'))
+  await hooks.get('agent/created')({ agent })
+  const digestOf = folder => createHash('sha256').update(process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)).digest('hex')
+  assert.equal(record().folderDigest, digestOf(work))
+  assert.equal(record().project, 'work')
+  assert.equal(record().agent, 'deepseek')
+  const skillText = readFileSync(join(f.env.DSH_HOME, 'skills', 'agent-board', 'SKILL.md'), 'utf8')
+  assert.match(skillText, /In DeepSeek, do not run the board command in a shell; use the agent_board tool/)
+  assert.match(skillText, /action open to open the board/)
+  await tool.execute({ action: 'report', title: 'DeepSeek task', state: 'waiting', steps: ['- [?] Pick one', '- [ ] Continue'] }, { agent })
+  assert.equal(record().state, 'waiting')
+  assert.equal(record().title, 'DeepSeek task')
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[\?\] Pick one$/m)
+  await assert.rejects(tool.execute({ action: 'report', steps: 'not a list' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_STEPS/)
+  await assert.rejects(tool.execute({ action: 'report', steps: ['not a task line'] }, { agent }), /^Error: AGENT_BOARD_REPORT_FAILED: [A-Z][A-Z0-9_]+$/)
+  await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] Done'] }, {}), /AGENT_BOARD_REPORT_FAILED: NO_SESSION/)
+  await assert.rejects(tool.execute({ action: 'close' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_ACTION/)
+}))
+
+test('DeepSeek lifecycle events still save when the host has no tools service', () => fixture(async f => {
+  f.env.DSH_HOME = join(f.home, '.dsh')
+  assert.equal(f.install('--agent', 'deepseek', '--apply').status, 0)
+  const plugin = await import(pathToFileURL(join(f.root, 'adapters', 'deepseek.mjs')))
+  const hooks = new Map()
+  let injected = 0
+  // A bare context: inject is there but never runs its callback, as with no tools service.
+  plugin.apply({ on: (name, fn) => hooks.set(name, fn), inject: () => { injected++ } })
+  assert.equal(injected, 1)
+  const id = 'deepseek-no-tools-session'
+  await hooks.get('agent/created')({ agent: { session: { header: { id } }, status: 'idle' } })
+  assert.match(readFileSync(f.progress, 'utf8'), /agent=deepseek .*state=waiting/)
+  await hooks.get('agent/disposed')({ agent: { session: { header: { id } } } })
+  assert.match(readFileSync(f.progress, 'utf8'), /state=ended/)
+}))
+
+test('the DeepSeek tool reports by session id, and opens the board detached without keeping its address', () => fixture(async f => {
+  const portable = await (async () => {
+    const resolver = registerHooks({ resolve(specifier, context, next) {
+      try { return next(specifier, context) } catch (error) {
+        if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+        return next(`${specifier}.ts`, context)
+      }
+    } })
+    try { return await import('../hooks/portable-agents.ts') } finally { resolver.deregister() }
+  })()
+  const worker = join(f.root, 'agent-board-hook.mjs'), board = join(f.root, 'agent-board.mjs')
+  const calls = [], children = []
+  let answer = { status: 0, stdout: '', stderr: '' }
+  const spawned = (command, args, options) => {
+    const listeners = {}, outputs = {}
+    const child = {
+      unrefs: 0, command, args: [...args], options,
+      on: (name, fn) => { listeners[name] = fn },
+      fail: () => listeners.error?.(new Error('synthetic spawn failure')),
+      unref() { child.unrefs++ },
+      stdout: { setEncoding() {}, on: (name, fn) => { outputs[name] = fn }, destroy() { child.destroyed = true } },
+      print: (text, code) => { outputs.data?.(Buffer.from(text)); listeners.close?.(code) },
+    }
+    children.push(child)
+    return child
+  }
+  const source = portable.deepseekLocalPlugin(process.execPath, worker, f.progress, f.home, board)
+  const { apply } = new Function('createRequire', 'spawnSync', 'spawn', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, (command, args, options) => { calls.push({ command, args: [...args], options, input: options.input }); return answer }, spawned)
+  const hooks = new Map(), tools = []
+  apply({ on: (name, fn) => hooks.set(name, fn), inject: (_names, fn) => fn({ tools: { register: tool => tools.push(tool) } }) })
+  const [tool] = tools
+  const work = join(f.home, 'session-folder')
+  const agent = { session: { header: { id: 'deepseek-tool-session-2', cwd: work } }, status: 'idle' }
+  // Lifecycle payloads carry the folder from the session header, and only when it has one.
+  await hooks.get('agent/created')({ agent })
+  await hooks.get('agent/created')({ agent: { session: { header: { id: 'deepseek-no-folder' } }, status: 'idle' } })
+  assert.equal(JSON.parse(calls[0].input).cwd, work)
+  assert.equal('cwd' in JSON.parse(calls[1].input), false)
+  calls.length = 0
+  // The report names the agent and the session and runs from the session folder.
+  const done = await tool.execute({ action: 'report', title: 'T', state: 'done', steps: ['- [x] One'] }, { agent })
+  assert.deepEqual(done, { text: 'OK' })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].command, process.execPath)
+  assert.equal(calls[0].args[0], worker)
+  for (const word of ['--codex-report', '--agent', 'deepseek', '--session', 'deepseek-tool-session-2']) assert.ok(calls[0].args.includes(word), word)
+  assert.equal(calls[0].args[calls[0].args.indexOf('--agent') + 1], 'deepseek')
+  assert.equal(calls[0].args[calls[0].args.indexOf('--session') + 1], 'deepseek-tool-session-2')
+  assert.equal(calls[0].options.cwd, undefined, 'the writer binds by session id, so a missing folder cannot fail the report')
+  assert.deepEqual(JSON.parse(calls[0].input), { steps: ['- [x] One'], title: 'T', state: 'done' })
+  // A refused report names the board's reason.
+  answer = { status: 1, stdout: '', stderr: 'AGENT_BOARD_REASON INVALID_STEP\n' }
+  await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] One'] }, { agent }), { message: 'AGENT_BOARD_REPORT_FAILED: INVALID_STEP' })
+  answer = { status: 1, stdout: '', stderr: 'free text\n' }
+  await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] One'] }, { agent }), { message: 'AGENT_BOARD_REPORT_FAILED' })
+  // open starts the board's own command detached and returns the one line it prints.
+  const link = 'http://127.0.0.1:43210/?t=synthetic-token'
+  const opened = tool.execute({ action: 'open' }, { agent })
+  const [child] = children
+  assert.equal(child.command, process.execPath)
+  assert.deepEqual(child.args, [board, '--html'])
+  assert.equal(child.options.detached, true)
+  assert.equal(child.options.windowsHide, true)
+  assert.equal(child.options.stdio[0], 'ignore')
+  assert.equal(child.unrefs, 1)
+  child.print(`${link}\n`, 0)
+  assert.deepEqual(await opened, { text: link })
+  assert.equal(child.destroyed, true)
+  // A failed start returns its line and no address; the address is in no log.
+  const refused = tool.execute({ action: 'open' }, { agent })
+  children[1].print('This AI\'s sandbox can\'t write the board page\'s address folder.\n', 1)
+  await assert.rejects(refused, /^Error: AGENT_BOARD_OPEN_FAILED: This AI's sandbox/)
+  // A spawn error, and an exit 0 with nothing printed, both fail the call.
+  const broken = tool.execute({ action: 'open' }, { agent })
+  children[2].fail()
+  await assert.rejects(broken, { message: 'AGENT_BOARD_OPEN_FAILED' })
+  const silent = tool.execute({ action: 'open' }, { agent })
+  children[3].print('', 0)
+  await assert.rejects(silent, { message: 'AGENT_BOARD_OPEN_FAILED' })
+  const log = join(f.root, 'hook-errors.log')
+  if (existsSync(log)) assert.ok(!readFileSync(log, 'utf8').includes('127.0.0.1'))
+  assert.equal(tool.output.render({}, { text: link })[0].text, link)
+}))
 
 test('Grok prompt hooks return a waiting session to working through the native shell shape', () => fixture(f => {
   assert.equal(f.install('--agent', 'grok', '--apply').status, 0)

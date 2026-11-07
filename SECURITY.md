@@ -42,6 +42,8 @@ The pane runs local Git and `gh pr view` to read branch, PR and CI state. Throug
 
 Its older `/progress connect` flow installs conversation-inbox reporters and can set OpenClaw's `allowConversationAccess: true`. This grant belongs to that optional connector, not independent OpenClaw setup. Session startup can run auto-connect unless disabled. Its setup scripts can change Claude settings, shell profiles and global instructions; backups may contain private settings. Inspect the [guide](docs/GUIDE.md) and the exact plan before applying changes.
 
+DeepSeek's plugin adds an `agent_board` tool that runs only the board and the progress writer, with fixed arguments, outside DeepSeek's sandbox.
+
 ## Network access
 
 The default listener is `127.0.0.1`. Any local program with its bearer URL can use the permitted controls. Host, origin, token and JSON checks restrict requests but do not identify a human user.
