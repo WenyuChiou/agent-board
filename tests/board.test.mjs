@@ -5796,22 +5796,15 @@ test('a Windows page start opens the page when its PowerShell printed every addr
   const board = serveIn()
   const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
   const preload = join(board.dir, 'stalled-acls.cjs')
-  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const path = require('node:path'); const original = cp.execFileSync
-let sid = null
-const sddl = target => {
-  if (sid === null) {
-    const row = original(path.join(process.env.SystemRoot ?? 'C:\\\\Windows', 'System32', 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
-    sid = /"(S-\\d+(?:-\\d+)+)"\\s*$/.exec(row)?.[1]
-  }
-  let isDir = false
-  try { isDir = fs.statSync(target).isDirectory() } catch {}
-  return 'O:' + sid + 'G:SYD:' + (isDir ? 'P(A;OICI;' : 'AI(A;ID;') + 'FA;;;' + sid + ')'
-}
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
 cp.execFileSync = (file, args, options) => {
   // Only the folder check stalls: it is the one call that carries the file list, and the
   // recovery is about that call. Any other PowerShell use runs for real.
   if (/powershell\\.exe$/i.test(String(file)) && typeof options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH === 'string') {
-    const lines = String(options.env.AGENT_BOARD_RUNTIME_ACL_PATH).split('|').map(sddl).join('\\n')
+    // The lines it really prints, as if it had printed them and then not exited: made-up
+    // lines would hide what the folder really allows (#799: an admin runner's folder
+    // still holds SYSTEM and Administrators until the check removes them).
+    const lines = original(file, args, options)
     throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
   }
   return original(file, args, options)
@@ -5851,23 +5844,16 @@ test('a Windows server child started on its own opens the page when its PowerShe
   const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
   const preload = join(board.dir, 'stalled-acls-child.cjs')
   const marker = join(board.dir, 'stalled-acls-child-fired')
-  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const path = require('node:path'); const original = cp.execFileSync
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
 const marker = ${JSON.stringify(marker)}
-let sid = null
-const sddl = target => {
-  if (sid === null) {
-    const row = original(path.join(process.env.SystemRoot ?? 'C:\\\\Windows', 'System32', 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
-    sid = /"(S-\\d+(?:-\\d+)+)"\\s*$/.exec(row)?.[1]
-  }
-  let isDir = false
-  try { isDir = fs.statSync(target).isDirectory() } catch {}
-  return 'O:' + sid + 'G:SYD:' + (isDir ? 'P(A;OICI;' : 'AI(A;ID;') + 'FA;;;' + sid + ')'
-}
 cp.execFileSync = (file, args, options) => {
   // Only the folder check stalls: it is the one call that carries the file list, and the
   // recovery is about that call. Any other PowerShell use runs for real.
   if (/powershell\\.exe$/i.test(String(file)) && typeof options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH === 'string') {
-    const lines = String(options.env.AGENT_BOARD_RUNTIME_ACL_PATH).split('|').map(sddl).join('\\n')
+    // The lines it really prints, as if it had printed them and then not exited: made-up
+    // lines would hide what the folder really allows (#799: an admin runner's folder
+    // still holds SYSTEM and Administrators until the check removes them).
+    const lines = original(file, args, options)
     fs.writeFileSync(marker, 'stalled')
     throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
   }
@@ -5886,30 +5872,6 @@ require('node:module').syncBuiltinESMExports()
     const acl = windowsAcl(folder, board.env)
     assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the runtime folder is private')
   } finally { await board.end([url]) }
-})
-
-// A child whose address file could not be made private used to stop without a word, so the
-// command could only say the server did not start (#799). It now names the reason.
-test('a Windows server child whose address file cannot be made private says why instead of exiting silently', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
-  const board = serveIn()
-  const preload = join(board.dir, 'refused-address-owner.cjs')
-  writeFileSync(preload, `const cp = require('node:child_process'); const path = require('node:path'); const original = cp.execFileSync
-const target = ${JSON.stringify(resolve(board.served).toLowerCase())}
-cp.execFileSync = (file, args, options) => {
-  if (/icacls\\.exe$/i.test(String(file)) && Array.isArray(args) && args.includes('/setowner') && path.resolve(String(args[0])).toLowerCase() === target) {
-    throw Object.assign(new Error('synthetic owner refusal'), { code: 'EPERM', status: 5 })
-  }
-  return original(file, args, options)
-}
-require('node:module').syncBuiltinESMExports()
-`)
-  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
-  const started = await startChild(board, undefined)
-  try {
-    assert.equal(started.url, null, 'no page started')
-    assert.equal(started.err.trim(), EN.serveRuntimePrivate)
-    assert.ok(!existsSync(board.served), 'the address file it could not protect is gone')
-  } finally { await board.end([started.url].filter(Boolean)) }
 })
 
 test('a Windows server child reuses the folder its command checked and checks any other folder in full', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 90_000 }, async () => {
@@ -6130,7 +6092,9 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
-test('Windows page start discards a new address file whose owner cannot be set or whose access list is not private', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+// The server child used to stop without a word here, so the command could only say the server
+// did not start; it now names the check that refused (#799).
+test('Windows page start discards a new address file whose owner cannot be set or whose access list is not private, and says why', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
   for (const fault of ['owner', 'access']) {
     const board = serveIn()
     const preload = join(board.dir, `new-file-${fault}.cjs`)
@@ -6149,7 +6113,7 @@ require('node:module').syncBuiltinESMExports()
     board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
     try {
       const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 30_000 })
-      assert.equal(ran.stdout.trim(), EN.serveFailed(EN.serveNotStarted), fault)
+      assert.equal(ran.stdout.trim(), EN.serveFailed(EN.serveRuntimePrivate), fault)
       assert.ok(!existsSync(board.served), 'the empty file is discarded')
       assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [], fault)
       assert.ok(!ran.stdout.includes('http:'))
