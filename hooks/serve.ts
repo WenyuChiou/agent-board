@@ -1344,17 +1344,18 @@ const PAGE_SCRIPT = String.raw`
   // bar at once. A pick in the theme menu goes to the board, which keeps it for the pane and the
   // terminal board too; one that does not land goes back to what it was.
   function barStyleShown(style) {
-    if (style !== 'ink' && style !== 'blue' && style !== 'green') return;
-    document.documentElement.setAttribute('data-bar', style);
+    var root = document.documentElement;
+    if (!root || (style !== 'ink' && style !== 'blue' && style !== 'green')) return;
+    if (root.getAttribute('data-bar') !== style) root.setAttribute('data-bar', style);
     document.querySelectorAll('[data-bar-set]').forEach(function (item) { item.setAttribute('aria-checked', String(item.getAttribute('data-bar-set') === style)); });
   }
-  document.addEventListener('click', function (event) {
-    var node = event.target && event.target.closest ? event.target.closest('[data-bar-set]') : null;
-    if (!node) return;
-    var before = document.documentElement.getAttribute('data-bar') || 'ink';
-    var style = node.getAttribute('data-bar-set');
-    barStyleShown(style);
-    call('/api/style', { style: style }).then(function (data) { if (!data.ok) barStyleShown(before); }, function () { barStyleShown(before); });
+  document.querySelectorAll('[data-bar-set]').forEach(function (node) {
+    node.addEventListener('click', function () {
+      var before = document.documentElement && document.documentElement.getAttribute('data-bar') || 'ink';
+      var style = node.getAttribute('data-bar-set');
+      barStyleShown(style);
+      call('/api/style', { style: style }).then(function (data) { if (!data.ok) barStyleShown(before); }, function () { barStyleShown(before); });
+    });
   });
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
