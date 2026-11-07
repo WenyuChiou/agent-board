@@ -84,7 +84,7 @@ import {
 } from './mirror'
 import type { ListedTask } from './mirror'
 import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
-import { othersNote } from './others'
+import { othersNote, sessionPushNote } from './others'
 import type { ProgressProject } from '../types'
 import { boardRun } from './board-commands'
 import { peekInbox, redact, turnsFor } from './board'
@@ -327,6 +327,7 @@ let pendingQuestionRetry: Promise<PendingTurn[]> | null = null
 let hasRestoredInboxQuestions = false
 const journalNoticesShown = new Set<string>()
 let journalNoticeKey = ''
+const pushedBySession = new Map<string, Set<string>>()
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
 // when moved; otherwise ~/.claude/progress.md. USERPROFILE comes before HOME because that is
@@ -3518,6 +3519,33 @@ const othersNoteFor = async ($: EngineInterface): Promise<string | null> => {
   return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : { ...mirror, agent: mirror.agent || 'claude' }, await $.clock.now(), await wordsOf($))
 }
 
+const sessionPushNoteFor = async ($: EngineInterface): Promise<string | null> => {
+  const mirror = await read($, mine)
+  if (mirror === null || mirror.sessionId === '') return null
+  const seen = pushedBySession.get(mirror.sessionId) ?? new Set<string>()
+  const steps = mirror.tasks.map(one => `- [${one.waiting !== null ? '>' : one.blocked !== null ? '!' : one.status === 'completed' ? 'x' : ' '}] ${[one.subject, one.why ?? '', one.blocked ?? ''].filter(Boolean).join(' — ')}`)
+  const result = sessionPushNote(
+    (await read($, snapshot)).projects,
+    await read($, here),
+    {
+      sessionId: mirror.sessionId,
+      agent: mirror.agent || 'claude',
+      ...(mirror.resume === '' ? {} : { resume: mirror.resume }),
+      ...(mirror.title === '' ? {} : { title: mirror.title }),
+      steps,
+    },
+    seen,
+    await $.clock.now(),
+    await wordsOf($),
+  )
+  if (result.keys.length > 0) {
+    for (const key of result.keys) seen.add(key)
+    pushedBySession.set(mirror.sessionId, seen)
+  }
+
+  return result.note
+}
+
 // Keeps the store to what the board still needs (retention.ts, #373). A pass reads at most
 // its batch size (RETENTION.pruneStartReads at start, pruneReads hourly), in name order after where
 // the last pass stopped. A session start costs the same on a store of any size; the walk point is
@@ -4341,6 +4369,13 @@ export const register: Register = (on, options) => {
         // sit in a fence, marked as data. The row has said `isMeta` since 0.12.0, which the
         // engine's types do not name, so it is built apart from the call.
         const message = { type: 'user' as const, isMeta: true, content: [{ type: 'text' as const, text: note }] }
+        await $.session.append({ message }).catch(() => undefined)
+      }
+    }
+    if (mirror !== null) {
+      const pushNote = await sessionPushNoteFor($)
+      if (pushNote !== null) {
+        const message = { type: 'user' as const, isMeta: true, content: [{ type: 'text' as const, text: pushNote }] }
         await $.session.append({ message }).catch(() => undefined)
       }
     }
