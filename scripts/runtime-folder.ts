@@ -26,6 +26,20 @@ export class RuntimeFolderError extends Error {
   constructor() { super('BOARD_RUNTIME_PRIVATE') }
 }
 
+// The folder check ran out of time: a command printed its answer, or nothing at all, but
+// had not finished when its limit ran out. The person is told the check did not finish,
+// not that the file could not be protected.
+export class RuntimeFolderTimeoutError extends RuntimeFolderError {}
+
+// A command killed by its own limit: the sync runner's error says ETIMEDOUT, the async
+// runner's says the process was killed by a signal with no exit code. A command that failed
+// on its own has an exit code and no signal.
+const isKilled = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  const signal = (error as { signal?: unknown } | null)?.signal
+  return code === 'ETIMEDOUT' || typeof signal === 'string'
+}
+
 type Account = { sid: string; aliases: Record<string, string> }
 let account: Account | undefined
 const system = (): string => join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
@@ -58,7 +72,13 @@ const runAsync = async <T>(check: Check<T>): Promise<T> => {
     let output: string
     try {
       output = await new Promise<string>((resolve, reject) => {
-        execFile(job.file, job.args, job.options, (error, stdout) => error === null ? resolve(stdout) : reject(error))
+        execFile(job.file, job.args, job.options, (error, stdout) => {
+          if (error === null) { resolve(stdout); return }
+          // A command killed by its limit may still have printed its whole answer; the
+          // check decides whether the lines it left behind complete it.
+          if (typeof stdout === 'string') (error as NodeJS.ErrnoException & { stdout?: string }).stdout = stdout
+          reject(error)
+        })
       })
     } catch (error) { step = check.throw(error); continue }
     step = check.next(output)
@@ -85,22 +105,39 @@ const commands = {
   // line is then '-', which no check accepts, and the later read of that file decides, as it did
   // when each file had a call of its own.
   *acls(files: string[]): Check<string[]> {
-    const lines = (yield command(join(system(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
-      '-NoProfile', '-NonInteractive', '-Command',
-      "$ErrorActionPreference = 'Stop'; $PSModuleAutoLoadingPreference = 'None'; "
-        + "$sections = [System.Security.AccessControl.AccessControlSections]'Access,Owner,Group'; "
-        // A Windows path cannot hold a pipe, so it can separate the paths.
-        + "$targets = $env:AGENT_BOARD_RUNTIME_ACL_PATH.Split('|'); "
-        + 'for ($at = 0; $at -lt $targets.Length; $at++) { $target = $targets[$at]; '
-        + 'try { $security = if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::GetAccessControl($target, $sections) } else { [System.IO.File]::GetAccessControl($target, $sections) }; '
-        + '$security.GetSecurityDescriptorSddlForm($sections) } '
-        + "catch { if ($at -eq 0) { throw }; '-' } }",
-    ], {
-      ...powerShellOptions,
-      // Fresh isolated profiles need no command discovery, and a PowerShell parent's module
-      // path must not select an incompatible or user-supplied security implementation.
-      env: { ...process.env, PSModulePath: join(system(), 'WindowsPowerShell', 'v1.0', 'Modules'), AGENT_BOARD_RUNTIME_ACL_PATH: files.map(file => resolve(file)).join('|') },
-    })).trim().split(/\r?\n/).map(line => line.trim())
+    let output: string
+    try {
+      output = yield command(join(system(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference = 'Stop'; $PSModuleAutoLoadingPreference = 'None'; "
+          + "$sections = [System.Security.AccessControl.AccessControlSections]'Access,Owner,Group'; "
+          // A Windows path cannot hold a pipe, so it can separate the paths.
+          + "$targets = $env:AGENT_BOARD_RUNTIME_ACL_PATH.Split('|'); "
+          + 'for ($at = 0; $at -lt $targets.Length; $at++) { $target = $targets[$at]; '
+          + 'try { $security = if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::GetAccessControl($target, $sections) } else { [System.IO.File]::GetAccessControl($target, $sections) }; '
+          + '$security.GetSecurityDescriptorSddlForm($sections) } '
+          + "catch { if ($at -eq 0) { throw }; '-' } }",
+      ], {
+        ...powerShellOptions,
+        // Fresh isolated profiles need no command discovery, and a PowerShell parent's module
+        // path must not select an incompatible or user-supplied security implementation.
+        env: { ...process.env, PSModulePath: join(system(), 'WindowsPowerShell', 'v1.0', 'Modules'), AGENT_BOARD_RUNTIME_ACL_PATH: files.map(file => resolve(file)).join('|') },
+      })
+    } catch (error) {
+      // PowerShell printed every line it was asked for but had not exited when the limit ran
+      // out: the answer is complete without the exit, so take the lines it left behind. A
+      // shorter answer is still a failure, and so is any other error; the original error is
+      // kept, so the caller can still tell the check did not finish. A blank line is never a
+      // complete answer: the command prints exactly one SDDL line, or '-', per file. Nor is an
+      // answer whose last line has no line end: the limit may have cut it after this account's
+      // own entry, and a cut access list can read as private.
+      const printed = (error as { stdout?: unknown } | null)?.stdout
+      if (!isKilled(error) || typeof printed !== 'string' || !printed.endsWith('\n')) throw error
+      const lines = printed.trim().split(/\r?\n/).map(line => line.trim())
+      if (lines.length !== files.length || lines.some(line => line === '')) throw error
+      return lines
+    }
+    const lines = output.trim().split(/\r?\n/).map(line => line.trim())
     if (lines.length !== files.length) throw new RuntimeFolderError()
     return lines
   },
@@ -285,7 +322,10 @@ const checks = {
       })
       remember(root, identity)
       return root
-    } catch { throw new RuntimeFolderError() }
+    } catch (error) {
+      if (isKilled(error)) throw new RuntimeFolderTimeoutError()
+      throw new RuntimeFolderError()
+    }
   },
 
   // Check the existing file's owner and DACL before any token is read. The descriptor must

@@ -27,7 +27,7 @@ import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
-import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
+import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { isTimeout, privateFolderHandoff } from './private-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
@@ -1652,8 +1652,12 @@ const paste = (text: string, reviewToken = '') => {
 // never the caller's whole runtime directory, before a token can be written.
 // `name` is the address file: it is read in the same check as the folder when it is already there.
 let runtimeUnprotected = false
+// Whether the folder check that failed ran out of time: the person is told the check did not
+// finish, not that the file could not be protected (#799).
+let runtimeCheckTimedOut = false
 const readOnlyRunFolder = (folder: string, error: unknown): string => {
   if (!(error instanceof RuntimeFolderError)) throw error
+  if (error instanceof RuntimeFolderTimeoutError) runtimeCheckTimedOut = true
   // A process that cannot protect the folder may reuse a running page, but every later
   // step must refuse to start one or write through this unprotected path.
   runtimeUnprotected = true
@@ -1779,7 +1783,7 @@ const serveChild = (): void => {
   const file = serveFile()
   // A child that could not protect the folder cannot start a page: its address file would
   // be unprotected. The parent reuses a running page itself; a child on its own refuses.
-  if (runtimeUnprotected) throw new RuntimeFolderError()
+  if (runtimeUnprotected) throw runtimeCheckTimedOut ? new RuntimeFolderTimeoutError() : new RuntimeFolderError()
   // A page a test started stops once that test's process is gone, even after a killed run (#959).
   // Only tests set AGENT_BOARD_TEST_PID, to their own process id.
   const testPid = Number(process.env.AGENT_BOARD_TEST_PID)
@@ -1832,7 +1836,12 @@ const serveChild = (): void => {
           const text = JSON.stringify({ pid: process.pid, port, url, path, built })
           if (process.platform === 'win32') writePrivateRuntimeFile(file, text)
           else writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
-        } catch {
+        } catch (error) {
+          // Another `--serve` that wrote first is the page, so that start stops quietly. Any other
+          // failure says why, as a child whose folder check failed does, instead of stopping without
+          // a word (#799): the command shows the same reason, not the generic line.
+          // The file's own icacls calls end in their raw time-out error, not the folder check's.
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') process.stderr.write(`${error instanceof RuntimeFolderTimeoutError || isTimeout(error) ? s.serveRuntimeCheckTimeout : s.serveRuntimePrivate}\n`)
           return false
         }
         // The one line `--serve` waits for. Its pipe closes once it has read it.
@@ -1946,7 +1955,19 @@ interface RunningServer {
   idleMs?: number | undefined
 }
 
-const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningServer | null> => {
+type ServeFailure = { storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckPrivate?: boolean }
+
+// The note a failed start prints: the message folder's failure first, then the child's
+// own folder failure, then the generic line. The child prints its folder failure in the
+// command's language, so the parent matches the same words.
+const serveFailureNote = (failure: ServeFailure): string => {
+  if (failure.storeCode !== undefined) return s.serveStoreFailed(failure.storeCode, messagesDirectory())
+  if (failure.isChildCheckTimeout) return s.serveFailed(s.serveRuntimeCheckTimeout)
+  if (failure.isChildCheckPrivate) return s.serveFailed(s.serveRuntimePrivate)
+  return s.serveFailed(s.serveNotStarted)
+}
+
+const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | null> => {
   const file = serveFile()
   // A folder that could not be protected is read-only: no legacy address is ever moved into
   // it, and no page is ever started from it. Only a page already running is reused.
@@ -1962,7 +1983,7 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
   if (runtimeUnprotected) {
     const kept = (await keptPage(oldServeFile)) ?? (await keptPage(file))
     if (kept !== null) return { url: kept.url, port: kept.port, isKept: true, isNew: false }
-    throw new RuntimeFolderError()
+    throw runtimeCheckTimedOut ? new RuntimeFolderTimeoutError() : new RuntimeFolderError()
   }
   const old = readRunning(oldServeFile)
   if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
@@ -2093,6 +2114,12 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
     }
     const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
     if (failure !== undefined && code !== undefined) failure.storeCode = code
+    // The child names its own folder failure on its stderr; the command carries that
+    // reason instead of the generic line, so the person is told the check did not finish.
+    if (failure !== undefined && code === undefined) {
+      if (stderr.includes(s.serveRuntimeCheckTimeout)) failure.isChildCheckTimeout = true
+      else if (stderr.includes(s.serveRuntimePrivate)) failure.isChildCheckPrivate = true
+    }
     return null
   }
   return null
@@ -2104,7 +2131,7 @@ const ensureServer = async (failure?: { storeCode?: string }): Promise<RunningSe
 const serveBoard = async (): Promise<void> => {
   const requestedIdle = idleMs()
   const requestedStale = staleTimeoutMs()
-  const failure: { storeCode?: string } = {}
+  const failure: ServeFailure = {}
   // `--serve` is what older command files and scripts still run: it opens the page like the plain
   // command and prints no text board before the address (#868). `--quiet-board` is now a no-op.
   const serverPromise = ensureServer(failure)
@@ -2119,18 +2146,18 @@ const serveBoard = async (): Promise<void> => {
   }
   const server = await serverPromise
   if (server === null) {
-    process.stdout.write(`\n${failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted)}\n`)
+    process.stdout.write(`\n${serveFailureNote(failure)}\n`)
     return
   }
   await show(server.url, server.isKept, server.idleMs, await pageIsOpen(server))
 }
 
 const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string }> => {
-  const failure: { storeCode?: string } = {}
+  const failure: ServeFailure = {}
   const server = await ensureServer(failure)
   if (server === null) {
     process.exitCode = 1
-    return { note: failure.storeCode ? s.serveStoreFailed(failure.storeCode, messagesDirectory()) : s.serveFailed(s.serveNotStarted), isOpen: false }
+    return { note: serveFailureNote(failure), isOpen: false }
   }
   const address = server.url
   const isShape = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
@@ -2456,6 +2483,10 @@ try {
   } else if (args.includes('--mcp')) {
     process.exitCode = 1
     process.stderr.write('MCP_START_FAILED\n')
+  } else if (error instanceof RuntimeFolderTimeoutError) {
+    process.exitCode = 1
+    const output = args.includes('--serve-child') ? process.stderr : process.stdout
+    output.write(`${s.serveRuntimeCheckTimeout}\n`)
   } else if (error instanceof RuntimeFolderError) {
     process.exitCode = 1
     const output = args.includes('--serve-child') ? process.stderr : process.stdout

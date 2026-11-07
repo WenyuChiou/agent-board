@@ -737,6 +737,7 @@ export const ZH_TW = {
   invalidStaleMs: '閒置判定時間必須為大於零的毫秒數。',
   serveFailed: (why: string): string => `開不了看板網頁：${why}`,
   serveRuntimePrivate: '無法將看板網頁的位址檔保護為僅此帳號可用；沒有啟動網頁。',
+  serveRuntimeCheckTimeout: 'Windows 檢查看板網頁的位址檔花了太久；電腦可能正忙，請稍後再試一次。',
   serveLanAt: (url: string): string => `同一個網路上的手機，打開 ${url} 或掃這個 QR 碼：`,
   serveLanNone: '找不到這台電腦在區域網路上的位址，手機開不了這個看板。',
   serveLanNotOurs: (address: string): string => `${address} 不是這台電腦在區域網路上的私人位址，看板沒辦法開在那裡。`,

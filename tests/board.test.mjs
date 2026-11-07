@@ -5396,6 +5396,27 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([]) }
 })
 
+test('a Windows page start names a runtime-folder access check that ran out of time instead of a protection failure', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'stalled-acls-empty.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+cp.execFileSync = (file, ...args) => { if (/powershell\\.exe$/i.test(String(file))) throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: '' }); return original(file, ...args) }
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    for (const mode of ['--serve', '--serve-child']) {
+      const ran = spawnSync(process.execPath, [board.script, mode, '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+      assert.equal(ran.status, 1, ran.stderr)
+      assert.equal(mode === '--serve-child' ? ran.stderr.trim() : ran.stdout.trim(), EN.serveRuntimeCheckTimeout)
+      assert.equal(mode === '--serve-child' ? ran.stdout : ran.stderr, '')
+      assert.ok(!(ran.stdout + ran.stderr).includes(board.dir) && !(ran.stdout + ran.stderr).includes('http:'))
+      assert.ok(!existsSync(board.served))
+      assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [])
+    }
+  } finally { await board.end([]) }
+})
+
 test('the board command in a read-only sandbox reuses a running page\'s link', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'acl-denied.cjs')
@@ -5763,6 +5784,50 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
+// What the runtime folder really holds and allows, for a start the stalled-PowerShell mock let
+// through: when such a start fails on a runner, its message shows the folder as it was (#799).
+const runtimeFolderState = (folder, env) => {
+  try { return JSON.stringify({ files: readdirSync(folder), acl: windowsAcl(folder, env) }) } catch (error) { return String(error) }
+}
+
+// The address lines PowerShell printed before its limit are the whole answer, so a start
+// whose PowerShell has not exited still opens the page (#799).
+test('a Windows page start opens the page when its PowerShell printed every address line but has not exited', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  const preload = join(board.dir, 'stalled-acls.cjs')
+  const marker = join(board.dir, 'stalled-acls-fired')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+const marker = ${JSON.stringify(marker)}
+cp.execFileSync = (file, args, options) => {
+  // Only the folder check stalls: it is the one call that carries the file list, and the
+  // recovery is about that call. Any other PowerShell use runs for real.
+  if (/powershell\\.exe$/i.test(String(file)) && typeof options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH === 'string') {
+    // The lines it really prints, as if it had printed them and then not exited: made-up
+    // lines would hide what the folder really allows (#799: an admin runner's folder
+    // still holds SYSTEM and Administrators until the check removes them).
+    const lines = original(file, args, options)
+    fs.writeFileSync(marker, 'stalled')
+    throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
+  }
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    const out = await board.serve(['--quiet-board'])
+    url = board.urlOf(out)
+    // The parent's output names the check that refused, when one did.
+    assert.ok(url, `${out}\n${url === null ? runtimeFolderState(folder, board.env) : ''}`)
+    assert.ok(existsSync(marker), 'the stalled PowerShell mock fired')
+    assert.ok(existsSync(board.served))
+    const acl = windowsAcl(folder, board.env)
+    assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the runtime folder is private')
+  } finally { await board.end([url]) }
+})
+
 // The server child is told which folder the command just checked. It starts the page on that
 // folder when it is still the same plain folder, and checks in full when it is not.
 const startChild = (board, handoff, extra = {}) => new Promise(done => {
@@ -5773,6 +5838,44 @@ const startChild = (board, handoff, extra = {}) => new Promise(done => {
   child.stdout.on('data', chunk => { out += chunk; if (out.includes('\n')) done({ url: out.split('\n')[0].trim(), err }) })
   child.stderr.on('data', chunk => { err += chunk })
   child.once('exit', code => done({ url: null, code, out, err }))
+})
+
+// The child started on its own checks the folder in full: with no handoff, its own
+// PowerShell start is the one that stalls, so this splits the child's own check from
+// the parent-child handoff when the parent-mode recovery test fails.
+test('a Windows server child started on its own opens the page when its PowerShell printed every address line but has not exited', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  const preload = join(board.dir, 'stalled-acls-child.cjs')
+  const marker = join(board.dir, 'stalled-acls-child-fired')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+const marker = ${JSON.stringify(marker)}
+cp.execFileSync = (file, args, options) => {
+  // Only the folder check stalls: it is the one call that carries the file list, and the
+  // recovery is about that call. Any other PowerShell use runs for real.
+  if (/powershell\\.exe$/i.test(String(file)) && typeof options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH === 'string') {
+    // The lines it really prints, as if it had printed them and then not exited: made-up
+    // lines would hide what the folder really allows (#799: an admin runner's folder
+    // still holds SYSTEM and Administrators until the check removes them).
+    const lines = original(file, args, options)
+    fs.writeFileSync(marker, 'stalled')
+    throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
+  }
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    const started = await startChild(board, undefined)
+    url = started.url
+    assert.ok(url, `exit ${started.code}: ${started.err}\n${url === null ? runtimeFolderState(folder, board.env) : ''}`)
+    assert.ok(existsSync(marker), 'the stalled PowerShell mock fired in the child')
+    assert.ok(existsSync(board.served))
+    const acl = windowsAcl(folder, board.env)
+    assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the runtime folder is private')
+  } finally { await board.end([url]) }
 })
 
 test('a Windows server child reuses the folder its command checked and checks any other folder in full', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 90_000 }, async () => {
@@ -5993,8 +6096,10 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
-test('Windows page start discards a new address file whose owner cannot be set or whose access list is not private', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
-  for (const fault of ['owner', 'access']) {
+// The server child used to stop without a word here, so the command could only say the server
+// did not start; it now names the check that refused (#799).
+test('Windows page start discards a new address file whose owner cannot be set or whose access list is not private, and says why', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  for (const fault of ['owner', 'access', 'timeout']) {
     const board = serveIn()
     const preload = join(board.dir, `new-file-${fault}.cjs`)
     writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
@@ -6002,6 +6107,7 @@ const target = ${JSON.stringify(board.served)}.toLowerCase()
 cp.execFileSync = (file, args, options) => {
   const isNewFile = /icacls\\.exe$/i.test(String(file)) && String(args[0]).toLowerCase() === target && args.includes('/setowner')
   if (isNewFile && ${fault === 'owner'}) throw Object.assign(new Error('synthetic owner denial'), { code: 'EACCES' })
+  if (isNewFile && ${fault === 'timeout'}) throw Object.assign(new Error('synthetic owner time-out'), { code: 'ETIMEDOUT', signal: 'SIGTERM' })
   const result = original(file, args, options)
   // As if the filesystem had not inherited the private list.
   if (isNewFile && ${fault === 'access'}) original(file, [args[0], '/grant', '*S-1-1-0:R', '/L'], options)
@@ -6012,7 +6118,7 @@ require('node:module').syncBuiltinESMExports()
     board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
     try {
       const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 30_000 })
-      assert.equal(ran.stdout.trim(), EN.serveFailed(EN.serveNotStarted), fault)
+      assert.equal(ran.stdout.trim(), EN.serveFailed(fault === 'timeout' ? EN.serveRuntimeCheckTimeout : EN.serveRuntimePrivate), fault)
       assert.ok(!existsSync(board.served), 'the empty file is discarded')
       assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [], fault)
       assert.ok(!ran.stdout.includes('http:'))
