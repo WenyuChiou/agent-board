@@ -737,6 +737,7 @@ export const EN: Strings = {
   themeMenu: 'Look',
   barStyleSet: (name: string): string => `The progress bar now uses the ${name} style on the page, the pane and the terminal board.`,
   barStyleUnknown: 'Progress bar styles: ink, blue, green.',
+  barStyleUnreadable: 'The board’s settings file is not valid JSON, so the progress bar style was not changed and the file was not overwritten. Fix or delete progress-settings.json, then pick again.',
   barStyleKey: (name: string): string => `s changes the progress bar style (now: ${name})`,
   pgBarLabel: (count: string, step: string): string => `${count} · ${step}`,
   serveLive: 'Live',

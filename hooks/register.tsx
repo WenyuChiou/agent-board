@@ -1150,9 +1150,6 @@ const questionPass = async ($: EngineInterface, path: string, projects: readonly
   await isDoneWithin($, pass, POLL_MS)
 }
 
-// Re-reads the file only when its mtime or size moved, so the 2s timer is a stat. Only the 2s
-// timer (`canReplace`) takes a held poll's place: the polls the write queue runs return at once,
-// as before, so no write waits behind a second held read.
 // A stat per poll; the file is read only when it changed. A pick made on the page or the terminal
 // board redraws the pane at the next poll.
 let barStyleSeen = ''
@@ -1168,6 +1165,9 @@ const pollBarStyle = async ($: EngineInterface, path: string): Promise<void> => 
   $.ui.invalidate('ui.render')
 }
 
+// Re-reads the file only when its mtime or size moved, so the 2s timer is a stat. Only the 2s
+// timer (`canReplace`) takes a held poll's place: the polls the write queue runs return at once,
+// as before, so no write waits behind a second held read.
 const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
   if (isPolling) {
     if (!canReplace || replacedPoll !== null) return
@@ -4246,8 +4246,12 @@ export const register: Register = (on, options) => {
       const style = barStyleFrom(styleArg[1] ?? '')
       if (style === null) return { text: s.barStyleUnknown }
       const file = settingsPath(await progressPath($))
-      const text = await readText($, file).catch(() => null)
-      try { await $.fs.write(file, withBarStyle(text, style)) } catch { return { text: s.pressFailed } }
+      // A file that exists but cannot be read, or does not read as JSON, is left as it is.
+      let text: string
+      try { text = await readText($, file) } catch { return { text: s.barStyleUnreadable } }
+      const next = withBarStyle(text, style)
+      if (next === null) return { text: s.barStyleUnreadable }
+      try { await $.fs.write(file, next) } catch { return { text: s.pressFailed } }
       await update($, barStyle, () => style)
       $.ui.invalidate('ui.render')
       return { text: s.barStyleSet(barStyleName(style, s)) }

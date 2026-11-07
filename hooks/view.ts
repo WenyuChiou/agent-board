@@ -1519,13 +1519,6 @@ export const statusLine = (view: View, s: Strings = ZH_TW): string | undefined =
   return parts.length === 0 ? undefined : `${s.statusPrefix} · ${parts.join(' · ')}`
 }
 
-export const progressBar = (done: number, total: number, width: number): { filled: string; rest: string } => {
-  const cells = Math.max(4, width)
-  const filled = total === 0 ? 0 : Math.round((done / total) * cells)
-
-  return { filled: '━'.repeat(filled), rest: '─'.repeat(cells - filled) }
-}
-
 // The board's view, built once for the same inputs (#373). After each change of the file the pane,
 // the line under the prompt and the reminders each asked for it, and on a big board each build took
 // a third of a second. Inputs are compared by value, so a copy read again counts as the same; the

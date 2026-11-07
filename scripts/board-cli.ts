@@ -726,11 +726,15 @@ const barStyleNow = (): BarStyle => {
   barStyleKept = { style, at: now }
   return style
 }
-// The pick from the page, the pane or the `s` key: the settings file's other keys are kept.
-const saveBarStyle = (style: BarStyle): void => {
+// The pick from the page or the `s` key: the settings file's other keys are kept. False when the
+// file exists but does not read as a JSON object: it is left as it is. A read or write error throws.
+const saveBarStyle = (style: BarStyle): boolean => {
   const file = settingsPath(path)
-  writeFileSync(file, withBarStyle(read(file), style))
+  const next = withBarStyle(read(file), style)
+  if (next === null) return false
+  writeFileSync(file, next)
   barStyleKept = { style, at: Date.now() }
+  return true
 }
 
 const options = () => ({
@@ -1553,9 +1557,11 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
   // The page sends it; the note says so until its answer comes back.
   if (action.type === 'send') return { state: { ...next, note: s.serveSending(agentLabel(action.route.agent || 'claude', s)), tone: 'quiet' }, isQuit: false, isHtml: false, isWrite: false, send: action }
   if (action.type === 'style') {
+    // The next style after the one in the file now, not after a pick this board kept up to 10 s ago.
+    barStyleKept = null
     const style = nextBarStyle(barStyleNow())
     try {
-      saveBarStyle(style)
+      if (!saveBarStyle(style)) return { state: { ...next, note: s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
     } catch (error) {
       return { state: { ...next, note: failureNote(error), tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
     }
@@ -1859,10 +1865,7 @@ const serveChild = (): void => {
       bulkTidy,
       barStyle: barStyleNow,
       setBarStyle: style => {
-        try {
-          saveBarStyle(style)
-          return true
-        } catch { return false }
+        try { return saveBarStyle(style) } catch { return false }
       },
       sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.

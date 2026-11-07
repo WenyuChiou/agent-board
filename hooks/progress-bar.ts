@@ -39,20 +39,23 @@ export const cellOf = (status: ProgressStepStatus, isCurrent: boolean): Cell => 
 export const cellsOf = (steps: ReadonlyArray<{ status: ProgressStepStatus; isCurrent: boolean }>): Cell[] =>
   steps.map(step => cellOf(step.status, step.isCurrent))
 
-// How the bar is drawn. One step or none: text only. Up to MAX_CELLS: a cell each. Above it:
-// one fill (`share` done, 0..1) with a mark at the current step (`at`, 0..1, null when none)
-// in that step's colour.
+// How the bar is drawn. One live step or none: text only. Up to MAX_CELLS live steps: a cell each
+// (a cancelled step keeps its hollow cell). Above it: one fill (`share` done, 0..1) with a mark at
+// the current step (`at`, 0..1, null when none) in that step's colour. Cancelled steps are not
+// counted, as n/m does not count them. The current step is the one the cells mark current, so the
+// mark points where the cells would; with none, the first step not done.
 export type BarShape =
   | { kind: 'none' }
   | { kind: 'cells'; cells: Cell[] }
   | { kind: 'continuous'; share: number; at: number | null; mark: Cell }
 
 export const barShape = (cells: readonly Cell[]): BarShape => {
-  if (cells.length <= 1) return { kind: 'none' }
-  if (cells.length <= MAX_CELLS) return { kind: 'cells', cells: [...cells] }
   const counted = cells.filter(cell => cell !== 'cancelled')
+  if (counted.length <= 1) return { kind: 'none' }
+  if (counted.length <= MAX_CELLS) return { kind: 'cells', cells: [...cells] }
   const done = counted.filter(cell => cell === 'done').length
-  const open = counted.findIndex(cell => cell !== 'done')
+  const current = counted.indexOf('current')
+  const open = current >= 0 ? current : counted.findIndex(cell => cell !== 'done')
   const mark = open < 0 ? 'done' : counted[open] ?? 'todo'
 
   return {
@@ -63,12 +66,13 @@ export const barShape = (cells: readonly Cell[]): BarShape => {
   }
 }
 
-// The bar in text, for the pane and the terminal board: `━` done, `╸` current, `─` todo, a
-// coloured `━` for a step that waits on the person, is blocked or runs. Each piece names its
+// The bar in text, for the pane and the terminal board: `━` done, `╸` current, `─` todo, `╌` a
+// cancelled step (hollow and dimmer), a coloured `━` for a step that waits on the person, is
+// blocked or runs. Each piece names its
 // cell so the caller colours it. A continuous bar is `room` characters wide.
 export type BarPiece = { text: string; cell: Cell }
 
-const GLYPH: Record<Cell, string> = { done: '━', current: '╸', waiting: '━', blocked: '━', running: '━', todo: '─', cancelled: '─' }
+const GLYPH: Record<Cell, string> = { done: '━', current: '╸', waiting: '━', blocked: '━', running: '━', todo: '─', cancelled: '╌' }
 
 const joined = (cells: readonly Cell[]): BarPiece[] =>
   cells.reduce<BarPiece[]>((pieces, cell) => {
@@ -134,16 +138,18 @@ export const barStyleOf = (text: string | null): BarStyle => {
   }
 }
 
-// The settings file's text with the style set; every other key is kept. A file that is not a
-// JSON object is replaced by one holding only the style.
-export const withBarStyle = (text: string | null, style: BarStyle): string => {
-  let data: Record<string, unknown> = {}
+// The settings file's text with the style set; every other key is kept. A missing or empty file
+// (null or '') starts a new one. A file that does not read as a JSON object gives null: the caller
+// writes nothing, so a file the person edited by hand, or caught half-written, keeps its other keys.
+export const withBarStyle = (text: string | null, style: BarStyle): string | null => {
+  if (text === null || text.trim() === '') return `${JSON.stringify({ style }, null, 2)}\n`
   try {
-    const read: unknown = text === null || text.trim() === '' ? {} : JSON.parse(text)
-    if (read !== null && typeof read === 'object' && !Array.isArray(read)) data = read as Record<string, unknown>
-  } catch {}
-
-  return `${JSON.stringify({ ...data, style }, null, 2)}\n`
+    const read: unknown = JSON.parse(text)
+    if (read === null || typeof read !== 'object' || Array.isArray(read)) return null
+    return `${JSON.stringify({ ...(read as Record<string, unknown>), style }, null, 2)}\n`
+  } catch {
+    return null
+  }
 }
 
 // A style's name in the person's language.

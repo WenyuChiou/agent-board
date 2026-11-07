@@ -2,7 +2,8 @@ import { test, expect } from 'claude-code/testing'
 import type { ProgressStepStatus } from '../types'
 import { barPieces, barRole, barShape, barStyleOf, BAR_STYLES, cellCode, cellsOf, cellsOfCode, nextBarStyle, plainBar, withBarStyle } from '../hooks/progress-bar'
 import type { BarStyle, Cell } from '../hooks/progress-bar'
-import { boardItems, boardKey, boardScreen, emptyBoardState, nearest256 } from '../hooks/board'
+import { boardItems, boardKey, boardScreen, displayColumns, emptyBoardState, nearest256 } from '../hooks/board'
+import { ZH_TW } from '../hooks/i18n'
 import { DARK } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
 import { serveModel } from '../hooks/serve'
@@ -35,7 +36,7 @@ test('#1085: one step draws no bar, 7 steps a cell each, 30 steps one fill with 
     { text: '━', cell: 'blocked' },
     { text: '━', cell: 'running' },
     { text: '─', cell: 'todo' },
-    { text: '─', cell: 'cancelled' },
+    { text: '╌', cell: 'cancelled' },
   ])
   const thirty = cellsOf(steps(`${'x'.repeat(15)}~${' '.repeat(14)}`))
   const shape = barShape(thirty)
@@ -71,7 +72,26 @@ test('#1085: the style is one key of the settings file, and writing it keeps the
   const written = withBarStyle('{"historyDays":3}', 'green')
   expect(JSON.parse(written)).toEqual({ historyDays: 3, style: 'green' })
   expect(barStyleOf(written)).toBe('green')
-  expect(JSON.parse(withBarStyle('[1,2]', 'blue'))).toEqual({ style: 'blue' })
+  expect(JSON.parse(withBarStyle('', 'blue') ?? '')).toEqual({ style: 'blue' })
+  expect(JSON.parse(withBarStyle(null, 'blue') ?? '')).toEqual({ style: 'blue' })
+  // A file that does not read as a JSON object is not overwritten: the caller writes nothing.
+  for (const text of ['[1,2]', 'not json', '{"historyDays":3,', 'null']) expect(withBarStyle(text, 'blue')).toBe(null)
+})
+
+test('#1085: above 12 steps the mark is at the step the cells call current, and cancelled steps do not count', () => {
+  // [x][ ][~] then 11 open: the [~] step is current, as it is at 12 steps and fewer.
+  const shape = barShape(cellsOf(steps(`x ~${' '.repeat(11)}`)))
+  expect(shape.kind).toBe('continuous')
+  if (shape.kind === 'continuous') {
+    expect(shape.at).toBe(2 / 14)
+    expect(shape.mark).toBe('current')
+  }
+  // One live step and a cancelled one: text only, as n/1 says.
+  expect(barShape(cellsOf(steps('~-')))).toEqual({ kind: 'none' })
+  // 13 steps with 2 cancelled are 11 live: a cell each, the cancelled ones hollow.
+  const eleven = cellsOf(steps(`xx--~${' '.repeat(8)}`))
+  expect(barShape(eleven).kind).toBe('cells')
+  expect(plainBar(eleven)).toBe('━━╌╌╸────────')
 })
 
 // The same bar on the terminal board and in the page's model, from one progress file.
@@ -84,7 +104,7 @@ const viewOf = (text: string) => buildView(parseProgress(text), [], null, NOW, 0
 const GROUP = { now: NOW, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } }
 
 test('#1085: the terminal board and the page model carry one cell per step, up to 12, and one fill above', () => {
-  for (const [steps, bar, code] of [[SEVEN, '━━━━╸──', 'xxxx~ -'], [THIRTY, '━━━━━━╸─────', `${'x'.repeat(15)}~${' '.repeat(14)}`], ['- [~] Only step\n', '', '~']] as const) {
+  for (const [steps, bar, code] of [[SEVEN, '━━━━╸─╌', 'xxxx~ -'], [THIRTY, '━━━━━━╸─────', `${'x'.repeat(15)}~${' '.repeat(14)}`], ['- [~] Only step\n', '', '~']] as const) {
     const view = viewOf(file(steps))
     const screen = boardScreen(view, [], emptyBoardState, EN, { width: 100, isColor: false })
     const row = [...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped][0]!
@@ -106,4 +126,17 @@ test('#1085: the terminal board paints done cells in the picked style and the s 
   expect(painted('green')).toContain(sgr(DARK.done))
   const items = boardItems(view, [], false, false)
   expect(boardKey(emptyBoardState, 's', items, EN).action).toEqual({ type: 'style' })
+})
+
+test('#1085: the Chinese boards count the bar cells as two columns and give a long task an 8-cell fill', () => {
+  const view = buildView(parseProgress(file(THIRTY)), [], null, NOW, 0, {}, ZH_TW)
+  for (const width of [60, 100]) {
+    const screen = boardScreen(view, [], emptyBoardState, ZH_TW, { width, isColor: false })
+    const line = screen.split('\n').find(one => one.includes('18/30') || one.includes('15/30'))
+    expect(line).toBeDefined()
+    expect(line).toContain('━━━━╸─── ')
+    expect(line).not.toContain('━━━━━━╸')
+    // Each box-drawing cell counts as two columns, so the line still fits the board.
+    expect(displayColumns(line ?? '', true)).toBeLessThanOrEqual(width)
+  }
 })

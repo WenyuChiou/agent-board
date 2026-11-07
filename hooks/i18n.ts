@@ -776,6 +776,7 @@ export const ZH_TW = {
   themeMenu: '外觀',
   barStyleSet: (name: string): string => `進度條改用「${name}」樣式，頁面、面板和終端看板都會跟著換。`,
   barStyleUnknown: '進度條樣式：ink（墨）、blue（藍）、green（綠）。',
+  barStyleUnreadable: '看板的設定檔不是有效的 JSON，進度條樣式沒有改，也沒有覆寫它。請修好或刪掉 progress-settings.json 再選一次。',
   barStyleKey: (name: string): string => `s 換進度條樣式（現在：${name}）`,
   pgBarLabel: (count: string, step: string): string => `${count} · ${step}`,
   serveLive: '即時',

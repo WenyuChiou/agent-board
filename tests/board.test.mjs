@@ -12204,3 +12204,55 @@ test('after Send the hide button named by each README is visible without More', 
     assert.equal(dom.requests.at(-1).body.type, 'hide')
   }
 })
+
+test('#1085: the page draws a cell per step up to 12, one fill with a mark at the current step above, and the count alone for one step', async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const rowOf = (title, cells, done, total) => ({ ...model.groups[0].rows[0], key: title, title, due: '', cells, done, total, steps: [{ text: 'Synthetic step', status: 'doing', isCurrent: true, line: [{ text: 'Synthetic step' }] }] })
+  model.groups[0].rows = [
+    rowOf('Seven steps', 'xxxx~ -', 4, 6),
+    rowOf('Thirty steps', `x ~${' '.repeat(27)}`, 1, 30),
+    rowOf('One step', '~', 0, 1),
+  ]
+  const dom = await pageDom(html, model)
+  const all = pressWalk(dom.node('board'))
+  const progress = title => {
+    const row = all.find(node => node.tag === 'li' && pressWalk(node).some(one => one.className === 'r-title' && one.textContent === title))
+    assert.ok(row, title)
+    return pressWalk(row).find(node => node.className === 'prog')
+  }
+  const seven = progress('Seven steps')
+  assert.equal(seven.getAttribute('aria-label'), '4/6 · Synthetic step')
+  const bar = pressWalk(seven).find(node => node.className === 'pbar')
+  assert.equal(bar.getAttribute('aria-hidden'), 'true')
+  assert.deepEqual(bar.childNodes.map(node => node.className), ['c-x', 'c-x', 'c-x', 'c-x', 'c-c', 'c-t', 'c-n'])
+  assert.equal(pressWalk(seven).find(node => node.className === 'pcount').textContent, '4/6')
+  const thirty = pressWalk(progress('Thirty steps')).find(node => node.className === 'pbar cont')
+  const [fill, mark] = thirty.childNodes
+  assert.equal(fill.style.width, '3.3%')
+  // The mark sits at the [~] step (the third), not at the open step before it.
+  assert.equal(mark.className, 'c-c')
+  assert.equal(mark.style.left, 'calc(6.7% - 1px)')
+  const one = progress('One step')
+  assert.equal(pressWalk(one).some(node => String(node.className).startsWith('pbar')), false)
+  assert.equal(pressWalk(one).find(node => node.className === 'pcount').textContent, '0/1')
+})
+
+test('#1085: a style picked on the page is written to the settings file with its other keys, served at once, and a bad pick or an unreadable file changes nothing', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const settings = join(board.dir, 'progress-settings.json')
+    writeFileSync(settings, '{"historyDays":3}')
+    assert.equal((await board.call('GET', '/api/board')).json().barStyle, 'ink')
+    const picked = await board.call('POST', '/api/style', { body: { style: 'green' } })
+    assert.equal(picked.status, 200)
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green' })
+    // Served at once: the server keeps its own pick without waiting for its 10-second read.
+    assert.equal((await board.call('GET', '/api/board')).json().barStyle, 'green')
+    for (const body of [{ style: 'pink' }, { style: 3 }, {}]) assert.equal((await board.call('POST', '/api/style', { body })).status, 400)
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green' })
+    writeFileSync(settings, '{"historyDays":3,')
+    assert.equal((await board.call('POST', '/api/style', { body: { style: 'blue' } })).status, 409)
+    assert.equal(readFileSync(settings, 'utf8'), '{"historyDays":3,')
+  } finally { await board.close() }
+})

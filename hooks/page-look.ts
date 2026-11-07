@@ -104,7 +104,21 @@ export const themeHead = String.raw`
   apply();
   try { if (scheme && scheme.addEventListener) scheme.addEventListener('change', apply); } catch (e) {}
   document.addEventListener('DOMContentLoaded', apply);
-  document.addEventListener('keydown', function (event) { if (event && event.key === 'Escape') close(true); });
+  // A menu of radio items: arrow keys move between them, Escape closes it and returns to the button,
+  // and Tab leaves it closed.
+  document.addEventListener('keydown', function (event) {
+    if (!event) return;
+    if (event.key === 'Escape') { close(true); return; }
+    var active = document.activeElement;
+    var menu = active && active.parentNode && active.parentNode.getAttribute && active.parentNode.getAttribute('data-look-menu') !== null ? active.parentNode : null;
+    if (!menu) return;
+    if (event.key === 'Tab') { close(false); return; }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    var items = Array.prototype.slice.call(menu.querySelectorAll('button'));
+    var at = items.indexOf(active);
+    var next = items[(at + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length];
+    if (next && next.focus) { if (event.preventDefault) event.preventDefault(); next.focus(); }
+  });
   document.addEventListener('click', function (event) {
     var node = event.target;
     while (node && node !== document) {

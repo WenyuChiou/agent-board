@@ -931,7 +931,7 @@ div.row-btn .r-chev{visibility:hidden}
 [data-bar="green"] .pbar .c-x,[data-bar="green"] .pbar .c-c,[data-bar="green"] .pbar.cont b,[data-bar="green"] .pbar.cont u.c-c,[data-sw="green"] .sw .c-x,[data-sw="green"] .sw .c-c{background:var(--done)}
 .pcount{font-variant-numeric:tabular-nums;color:var(--ink)}
 .sw{display:inline-flex;align-items:center;gap:2px;width:36px;height:8px;flex:none}
-@media (max-width:560px){.pbar{width:72px}}
+@media (max-width:560px){.pbar{width:auto;min-width:72px}.pbar.cont{width:72px}}
 .r-right.t-alert{color:var(--alert)}
 .r-right{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;max-width:9em;overflow:hidden;text-overflow:ellipsis}
 .row-open{background:var(--current);border-radius:0 0 var(--radius-m) var(--radius-m);padding:var(--s1) var(--s2) var(--s3) calc(var(--s2) + 36px);display:grid;gap:var(--s3);min-width:0;opacity:0;transition:opacity var(--dur-base) var(--ease-out)}
@@ -1871,15 +1871,16 @@ const PAGE_SCRIPT = String.raw`
     node.setAttribute('role', 'img');
     node.setAttribute('aria-label', step ? w('pgBarLabel', done + '/' + total, step) : done + '/' + total);
     var cells = String(code).split('');
-    if (cells.length > 1 && cells.length <= 12) {
+    var live = cells.filter(function (one) { return one !== '-'; }).length;
+    if (live > 1 && live <= 12) {
       var bar = el('span', 'pbar');
       cells.forEach(function (one) { add(bar, el('i', BAR_CELLS[one] || 'c-t')); });
       bar.setAttribute('aria-hidden', 'true');
       add(node, bar);
-    } else if (cells.length > 12) {
+    } else if (live > 12) {
       var counted = cells.filter(function (one) { return one !== '-'; });
-      var open = -1;
-      counted.some(function (one, index) { if (one !== 'x') { open = index; return true; } return false; });
+      var open = counted.indexOf('~');
+      if (open < 0) counted.some(function (one, index) { if (one !== 'x') { open = index; return true; } return false; });
       var finished = counted.filter(function (one) { return one === 'x'; }).length;
       var track = el('span', 'pbar cont');
       var fill = el('b');
