@@ -6194,6 +6194,24 @@ test('Windows Antigravity verified Node commands bypass PowerShell and preserve 
   }
 }))
 
+test('Windows Muse Code hooks run when the host escapes each quote for cmd, as Muse Code 1.4.14 does', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const home = join(f.home, 'muse home')
+  mkdirSync(home)
+  const env = isolatedEnv(home)
+  const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'muse', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const hooks = JSON.parse(readFileSync(join(home, '.config', 'muse', 'settings.json'), 'utf8')).hooks
+  const record = join(home, '.agent-board', 'sessions', createHash('sha256').update('muse:synthetic-muse-session').digest('hex') + '.json')
+  for (const [event, state] of [['UserPromptSubmit', 'working'], ['Stop', 'waiting'], ['SessionEnd', 'ended']]) {
+    const command = hooks[event][0].hooks[0].command
+    assert.ok(!command.includes('"'), command)
+    // Without verbatim arguments Node quotes this one argument as Muse does: each quote inside becomes \".
+    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', command], { env, input: JSON.stringify({ session_id: 'synthetic-muse-session' }), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    assert.equal(result.status, 0, hookFailure(result))
+    assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, state, event)
+  }
+}))
+
 test('Windows Antigravity synthetic direct wrapper preserves stdin argv output and exit code through cmd', { skip: process.platform !== 'win32' }, t => fixture(async f => {
   const home = join(f.home, "synthetic wrapper's home")
   mkdirSync(home)

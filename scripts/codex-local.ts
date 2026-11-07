@@ -1114,13 +1114,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const foreignGroups: Json = {}
   // Codex runs its hooks through PowerShell on Windows (#623).
   const isPowerShellHost = agent === 'codex' && process.platform === 'win32'
+  // Muse Code 1.4.14 on Windows hands the line to cmd as one argument with each quote escaped as \",
+  // which cmd does not read, so every quoted hook failed live. It gets Antigravity's quote-free line.
+  const isQuoteFreeHost = agent === 'muse' && process.platform === 'win32'
   // Only the program is kept from the last install; every other word is written from this run.
   const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
   const earlier = commandsOf(Object.values(manifest.groups)).filter((command): command is string => typeof command === 'string')
-  const hostNode = isPowerShellHost ? windowsHookNode(process.execPath, earlier) : undefined
+  const hostNode = isPowerShellHost || isQuoteFreeHost ? windowsHookNode(process.execPath, earlier) : undefined
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
-    const eventCommand = isPowerShellHost ? windowsHookCommand(hookArgs(event, state), quote, hostNode) : hookArgs(event, state).map(quote).join(' ')
+    const argv = hookArgs(event, state)
+    const eventCommand = isPowerShellHost ? windowsHookCommand(argv, quote, hostNode) : isQuoteFreeHost ? antigravityCommand(argv, true, quote, hostNode) : argv.map(quote).join(' ')
     // The plan mirror's group carries its tool matcher on the group, not on the hook inside it.
     const matcher = planEvents[agent]?.event === event ? planEvents[agent].matcher : undefined
     const group = agent === 'cursor' ? { command: eventCommand, timeout: hostHookTimeout(agent, event) } : { ...(matcher === undefined ? {} : { matcher }), hooks: [{ type: 'command', command: eventCommand, timeout: hostHookTimeout(agent, event) }] }
