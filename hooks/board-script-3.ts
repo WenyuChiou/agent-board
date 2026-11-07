@@ -33,7 +33,7 @@ export const LINES = [
 "  const prose = normalizeReply(answer);",
 "  return prose === null ? null : lastQuestionInProse(prose, isFull);",
 "};",
-"var LINK = /https?:\\/\\/[^\\s<>\"'`“”‘’「」『』]*[^\\s<>\"'`“”‘’「」『』.,;:!?？。！，、)\\]）]/g;",
+"var LINK = /https?:\\/\\/[^\\s<>\"'`“”‘’「」『』，。！？、；：（）]*[^\\s<>\"'`“”‘’「」『』.,;:!?？。！，、；：（）\\]）]/g;",
 "var lastQuestionInProse = (answer, isFull = false) => {",
 "  const prose = answer.replace(/```[\\s\\S]*?```/g, `",
 "",

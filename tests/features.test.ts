@@ -1585,6 +1585,10 @@ test('a link\'s own question mark is not a question, and a question with a link 
   expect(lastQuestion('Done.\n\nCan you open https://example.com/a?q=1&b=2.html?')).toBe('Can you open https://example.com/a?q=1&b=2.html?')
   expect(lastQuestion('I opened http://127.0.0.1:5173/?t=x. Ship it?')).toBe('Ship it?')
   expect(lastQuestion('預覽在 https://example.com/?p=1，可以合併嗎？')).toBe('預覽在 https://example.com/?p=1，可以合併嗎？')
+  // #1121: text after the question on the same line must not let the link swallow it.
+  expect(lastQuestion('預覽在 https://example.com，可以合併嗎？（測試已通過）')).toBe('預覽在 https://example.com，可以合併嗎？')
+  expect(lastQuestion('預覽在 https://example.com/?p=1，可以合併嗎？請回覆。')).toBe('預覽在 https://example.com/?p=1，可以合併嗎？')
+  expect(lastQuestion('請看 https://example.com/path；可以嗎？')).toBe('請看 https://example.com/path；可以嗎？')
 })
 
 test('a reply that is JSON is not cut at its question mark and shown as a question', () => {
