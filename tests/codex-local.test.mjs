@@ -6293,6 +6293,72 @@ test('OpenClaw native metadata callbacks fence stale runs and never request conv
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
+test('OpenClaw session events carry the session folder and progress_card reports to the plugin session', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'openclaw', '--apply').status, 0)
+  const plugin = (await import(pathToFileURL(join(f.root, 'adapters', 'openclaw', 'agent-board-local.mjs')))).default
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, 'adapters', 'openclaw', 'openclaw.plugin.json'))).contracts, { tools: ['progress_card'] })
+  const work = join(f.home, 'work'), other = join(f.home, 'other')
+  mkdirSync(work)
+  mkdirSync(other)
+  const hooks = new Map()
+  let subscription, factory, options
+  plugin.register({
+    on: (name, fn) => hooks.set(name, fn), config: {}, runtime: { agent: { resolveAgentWorkspaceDir: () => work } },
+    registerTool: (value, given) => { factory = value; options = given },
+    agent: { events: { registerAgentEventSubscription: value => { subscription = value } } },
+  })
+  assert.deepEqual(options, { names: ['progress_card'] })
+  const id = 'openclaw-folder-session-1'
+  const record = () => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`openclaw:${id}`).digest('hex') + '.json'), 'utf8'))
+  // Session start has no workspace in its context: the default agent workspace names the folder.
+  await hooks.get('session_start')({ sessionId: id }, { sessionId: id })
+  const digestOf = folder => createHash('sha256').update(process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)).digest('hex')
+  assert.equal(record().folderDigest, digestOf(work))
+  assert.equal(record().project, 'work')
+  // The report command finds that record by its folder.
+  const bound = folderReport(f, work, reportPayload, ['--agent', 'openclaw'])
+  assert.equal(bound.status, 0, bound.stderr)
+  // The tool factory's context names the session's real workspace, which the lifecycle events then carry.
+  assert.equal(factory({}), null)
+  const tool = factory({ sessionId: id, workspaceDir: other })
+  await subscription.handle({ stream: 'lifecycle', sessionId: id, runId: 'folder-run-1', data: { phase: 'start' } })
+  assert.equal(record().folderDigest, digestOf(other))
+  // No hook that receives the prompt or the conversation is registered.
+  for (const name of ['before_prompt_build', 'agent_turn_prepare', 'before_model_resolve', 'before_agent_reply', 'llm_input', 'llm_output', 'before_agent_finalize', 'agent_end', 'before_agent_run', 'before_agent_start']) assert.ok(!hooks.has(name), name)
+  assert.equal(tool.name, 'progress_card')
+  assert.deepEqual(tool.parameters.required, ['steps'])
+  // The plugin reads no reply text: the tool description and the installed skill both tell the agent
+  // to send a closing question as a [?] step before the turn ends.
+  assert.match(tool.description, /- \[\?\] <the question>/)
+  assert.match(tool.description, /before you end the turn/)
+  const skillText = readFileSync(join(f.home, '.openclaw', 'skills', 'agent-board', 'SKILL.md'), 'utf8')
+  assert.match(skillText, /OpenClaw use the progress_card tool/)
+  assert.match(skillText, /`- \[\?\] <the question>` step with state waiting, before ending the turn/)
+  await tool.execute('call-1', { title: 'OpenClaw task', state: 'waiting', steps: ['- [?] Pick one', '- [ ] Continue'] })
+  assert.equal(record().state, 'waiting')
+  assert.equal(record().title, 'OpenClaw task')
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[\?\] Pick one$/m)
+  await assert.rejects(tool.execute('call-2', { steps: 'not a list' }), /INVALID_STEPS/)
+  await assert.rejects(tool.execute('call-3', { steps: ['not a task line'] }), /AGENT_BOARD_REPORT_FAILED/)
+}))
+
+test('a report from a folder binds to an openclaw record that holds the folder and refuses one that does not', () => fixture(f => {
+  f.install('--agent', 'openclaw', '--apply')
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  const normalized = resolve(cwd)
+  const folderDigest = createHash('sha256').update(process.platform === 'win32' ? normalized.toLowerCase() : normalized).digest('hex')
+  const id = 'synthetic-openclaw-session'
+  const saveRecord = extra => f.save(join(f.root, 'sessions', createHash('sha256').update(`openclaw:${id}`).digest('hex') + '.json'), JSON.stringify({ session: id, agent: 'openclaw', state: 'waiting', updated: new Date().toISOString(), ...extra }))
+  saveRecord({})
+  const refused = folderReport(f, cwd, reportPayload, ['--agent', 'openclaw'])
+  assert.notEqual(refused.status, 0)
+  assert.equal(refused.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
+  saveRecord({ folder: 'demo', folderDigest })
+  const bound = folderReport(f, cwd, reportPayload, ['--agent', 'openclaw'])
+  assert.equal(bound.status, 0, bound.stderr)
+}))
+
 test('DeepSeek setup appends an owned native patch and preserves other YAML on removal', () => fixture(f => {
   f.env.DSH_HOME = join(f.home, '.dsh')
   const file = join(f.env.DSH_HOME, 'cordis.patch.yml')
@@ -10395,20 +10461,20 @@ test('an OpenCode todo.updated event becomes the session steps; a child session,
   assert.match(text, /^- \[-\] Dropped idea$/m)
 }))
 
-test('an OpenClaw progress_card or update_plan call becomes the session steps; an error, no plan or another tool writes nothing', () => fixture(async f => {
+test('an OpenClaw update_plan call becomes the session steps; an error, no plan or another tool writes nothing', () => fixture(async f => {
   const id = 'openclaw-plan-session-1'
   const plan = [{ step: 'Read the spec', status: 'completed' }, { step: 'Write the code', status: 'in_progress' }, { step: 'Ship it', status: 'pending' }]
   const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }, saved) => {
     const handlers = new Map()
     plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
     const fire = (event, ctx = { sessionId: id }) => handlers.get('after_tool_call')?.(event, ctx)
-    fire({ toolName: 'progress_card', params: { plan }, error: 'tool failed' })
-    fire({ toolName: 'progress_card', params: { markdown: 'only text' } })
-    fire({ toolName: 'progress_card', params: { plan: [] } })
+    fire({ toolName: 'update_plan', params: { plan }, error: 'tool failed' })
+    fire({ toolName: 'update_plan', params: { markdown: 'only text' } })
+    fire({ toolName: 'update_plan', params: { plan: [] } })
     fire({ toolName: 'read_file', params: { plan } })
     fire({ toolName: 'update_plan', params: { plan } }, {})
     assert.equal(saved.length, 0)
-    fire({ toolName: 'progress_card', params: { plan } })
+    fire({ toolName: 'update_plan', params: { plan } })
   })
   assert.equal(got.saved.length, 1)
   assert.ok(got.saved[0].args.includes('--plan-event'))
@@ -10446,7 +10512,7 @@ test('a plan of 250 items reaches the board as its first 40 steps, from OpenCode
     const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }) => {
       const handlers = new Map()
       plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
-      handlers.get('after_tool_call')?.({ toolName: 'progress_card', params: { plan: many.map(step => ({ step, status: 'pending' })) } }, { sessionId: 'openclaw-plan-session-many' })
+      handlers.get('after_tool_call')?.({ toolName: 'update_plan', params: { plan: many.map(step => ({ step, status: 'pending' })) } }, { sessionId: 'openclaw-plan-session-many' })
     })
     assert.equal(got.saved.length, 1)
     assert.equal(JSON.parse(got.saved[0].input).tool_input.plan.length, 200)
@@ -10454,17 +10520,6 @@ test('a plan of 250 items reaches the board as its first 40 steps, from OpenCode
     fortySteps(f.progress)
   })
 })
-
-test('the older OpenClaw update_plan name reaches the board too', () => fixture(async f => {
-  const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }) => {
-    const handlers = new Map()
-    plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
-    handlers.get('after_tool_call')?.({ toolName: 'update_plan', params: { plan: [{ step: 'Old name step', status: 'in_progress' }] } }, { sessionId: 'openclaw-plan-session-2' })
-  })
-  assert.equal(got.saved.length, 1)
-  assert.equal(got.deliver(got.saved[0]).status, 0)
-  assert.match(readFileSync(f.progress, 'utf8'), /^- \[~\] Old name step$/m)
-}))
 
 // #922: a new block joins its project's section, and a plan event with no block files like a status event.
 const sharedReports = (f, eol) => {
@@ -10645,3 +10700,56 @@ for (const agent of ['gemini', 'opencode']) {
     assert.equal(readFileSync(edited.old, 'utf8'), `${edited.text}\nMy own line\n`)
   }))
 }
+
+const cursorSessionRecord = (f, id) => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`cursor:${id}`).digest('hex') + '.json'), 'utf8'))
+const cursorHook = (f, name, id, cwd, extra = {}) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-event', '--agent', 'cursor'], {
+  cwd: f.home, env: { ...f.env, CODEX_THREAD_ID: undefined }, input: JSON.stringify({ conversation_id: id, generation_id: `gen-${id}`, hook_event_name: name, workspace_roots: [cwd], ...extra }), encoding: 'utf8', windowsHide: true, timeout: 15000,
+})
+const cursorReport = (f, cwd, payload, extraEnv = {}) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-report', '--agent', 'cursor'], {
+  cwd, env: { ...f.env, CODEX_THREAD_ID: undefined, AGENT_BOARD_AGENT: undefined, AGENT_BOARD_SESSION_ID: undefined, ...extraEnv }, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 15000,
+})
+const cursorSteps = { title: 'Synthetic Cursor task', project: 'demo', state: 'waiting', steps: ['- [x] Read the files', '- [~] Write the change', '- [?] Blue or green?'] }
+
+test('a Cursor report with no injected environment lands under the one active Cursor session of this folder', () => fixture(f => {
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  for (const name of ['sessionStart', 'beforeSubmitPrompt']) assert.equal(cursorHook(f, name, 'cursor-session-one', cwd).status, 0)
+  assert.match(cursorSessionRecord(f, 'cursor-session-one').folderDigest, /^[a-f0-9]{64}$/)
+  const report = cursorReport(f, cwd, cursorSteps)
+  assert.equal(report.status, 0, report.stderr)
+  assert.equal(JSON.parse(report.stdout).session, 'cursor-session-one')
+  const text = readFileSync(f.progress, 'utf8')
+  for (const step of cursorSteps.steps) assert.ok(text.includes(step), text)
+}))
+
+test('a Cursor report with no injected environment is not connected when two Cursor sessions are active in the folder', () => fixture(f => {
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  for (const id of ['cursor-session-one', 'cursor-session-two']) for (const name of ['sessionStart', 'beforeSubmitPrompt']) assert.equal(cursorHook(f, name, id, cwd).status, 0)
+  const report = cursorReport(f, cwd, cursorSteps)
+  assert.notEqual(report.status, 0)
+  assert.equal(report.stdout, '')
+  assert.equal(report.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
+}))
+
+test('a Cursor report with the injected environment still binds to that session', () => fixture(f => {
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  for (const id of ['cursor-session-one', 'cursor-session-two']) for (const name of ['sessionStart', 'beforeSubmitPrompt']) assert.equal(cursorHook(f, name, id, cwd).status, 0)
+  const report = cursorReport(f, cwd, cursorSteps, { AGENT_BOARD_AGENT: 'cursor', AGENT_BOARD_SESSION_ID: 'cursor-session-two' })
+  assert.equal(report.status, 0, report.stderr)
+  assert.equal(JSON.parse(report.stdout).session, 'cursor-session-two')
+}))
+
+test('the local agent instructions tell Cursor to report from the project folder without waiting for injected variables', async () => {
+  const { STRINGS } = await sourceModules()
+  for (const [lang, s] of Object.entries(STRINGS)) {
+    const skill = s.localAgentSkill('board')
+    assert.doesNotMatch(skill, /AGENT_BOARD_SESSION_ID|AGENT_BOARD_AGENT/, lang)
+    assert.match(skill, /Cursor|cursor/, lang)
+    assert.ok(skill.includes('board --codex-report --agent cursor'), lang)
+  }
+})

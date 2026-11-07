@@ -233,12 +233,15 @@ changes; no receiving connection or model call is added by setup.
 | Hermes Agent | the `hooks:` block of `config.yaml` in the Hermes folder, `~/.hermes` (`%LOCALAPPDATA%\hermes` on Windows) (only the board's four entries; other hooks and keys stay) and `skills/agent-board/` | `--hermes-dir`, then `HERMES_HOME` |
 
 OpenClaw receives `session_start`, `session_end` and sanitized lifecycle start/end/error
-events. Only the native session/run ids and state are reported; stale runs cannot replace
-the current one. It explicitly denies conversation access. Hosts lacking the subscription
+events. Only the native session/run ids, state and the session's workspace folder are reported;
+stale runs cannot replace the current one. It explicitly denies conversation access. Hosts lacking the subscription
 API fail visibly rather than falling back to transcript access. Reload the plugin in each
-host; installation cannot enumerate every previously open session. When OpenClaw's
-`progress_card` (or the older `update_plan`) call succeeds with a plan, the plugin copies each
-step's text and status into the board's steps; OpenCode's plugin does the same with its todo list, and Grok Build's `PostToolUse` hook (matcher `^todo_write$`, timeout 5 s, prints nothing) copies the full list from the tool's result.
+host; installation cannot enumerate every previously open session. The plugin
+registers a `progress_card` tool (`title`, `state`, `steps`) that reports to the board's report
+writer for the plugin's own session, so it needs no folder lookup. When OpenClaw's own
+`update_plan` call succeeds with a plan, the plugin copies each step's text and status into the
+board's steps; the plugin reads no reply text, so the installed skill and the tool's description tell the agent to
+send a closing question as a `- [?] <the question>` step before the turn ends; OpenCode's plugin does the same with its todo list, and Grok Build's `PostToolUse` hook (matcher `^todo_write$`, timeout 5 s, prints nothing) copies the full list from the tool's result.
 
 DeepSeek uses `agent/created`, `agent/status` (running/idle) and `agent/disposed`, retaining
 its own agent identity. Its owned entry is appended to a plain root YAML patch sequence;

@@ -292,7 +292,7 @@ More answers are in the guide's [FAQ](docs/GUIDE.md#faq) and [Troubleshooting](d
 <details>
 <summary><b>Colours and marks</b></summary>
 
-The pane follows Claude Code's theme (`/config`, then **Theme**); the page follows your computer's light or dark mode until you pick Light or Dark. On the board's page, the switch is next to **Close the board**: at the bottom of the expanded sidebar, or below the tasks on a narrow screen or when the sidebar is collapsed. Every mark has its own shape, so it reads without colour; the page draws a step still to do as a small dot rather than a ring, so it does not look like a button:
+The pane follows Claude Code's theme (`/config`, then **Theme**); the page follows your computer's light or dark mode until you pick Light or Dark. On the board's page, the look button is next to **Close the board**: it opens a menu of Light, Dark and System, then the progress bar's three styles, Ink (the default), Blue and Green. The progress bar shows one cell per step beside the count, such as `━━━━╸── 5/7`; the style you pick shows on the page, the pane and the terminal board alike (`/progress style blue` in the pane, `s` on the terminal board). The button sits at the bottom of the expanded sidebar, or below the tasks on a narrow screen or when the sidebar is collapsed. Every mark has its own shape, so it reads without colour; the page draws a step still to do as a small dot rather than a ring, so it does not look like a button:
 
 | Mark | Means | | Mark | Means |
 |:-:|---|---|:-:|---|

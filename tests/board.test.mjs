@@ -919,6 +919,115 @@ fs.renameSync = (from, to, ...rest) => {
   assert.notEqual(ran.files['progress-questions.json'], seed.files['progress-questions.json'], 'the tick rewrote the ledger')
 })
 
+test('a refused rename retry rechecks the destination and preserves another writer\'s progress or question update', () => {
+  const seed = chatRun(['--keys', ''], { file: () => HAND_FILE, inspect: questionFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const peerFile = '# Progress\n\n## demo\n### Concurrent task\n- [?] Keep peer question, OK?\n'
+  const peerAnswered = chatRun(['--keys', 'x'], { file: () => peerFile, inspect: questionFiles })
+  assert.equal(peerAnswered.status, 0, peerAnswered.stderr)
+  const peerRecord = JSON.parse(peerAnswered.files['progress-questions.json']).records[0]
+  assert.equal(peerRecord.isWaiting, false)
+  const concurrentLedger = JSON.stringify({
+    ...JSON.parse(seed.files['progress-questions.json']),
+    records: [...JSON.parse(seed.files['progress-questions.json']).records, peerRecord],
+  })
+  const inspect = dir => ({
+    ...questionFiles(dir),
+    progress: readFileSync(join(dir, 'progress.md'), 'utf8'),
+    temps: readdirSync(dir).filter(name => name.endsWith('.board-tmp')),
+  })
+
+  // 1. A refused progress rename preserves another writer's task and the requested tick.
+  const progressRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+let refused = false
+fs.renameSync = (from, to, ...rest) => {
+  if (!refused && String(to) === progress) {
+    refused = true
+    fs.writeFileSync(progress, fs.readFileSync(progress, 'utf8') + '\\n### Concurrent task\\n- [~] Added while progress rename was refused\\n')
+    throw Object.assign(new Error('synthetic held progress'), { code: 'EPERM' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(progressRan.status, 0, progressRan.stderr)
+  assert.ok(progressRan.progress.includes('- [x] Ship it, OK?'), progressRan.progress)
+  assert.ok(progressRan.progress.includes('### Concurrent task\n- [~] Added while progress rename was refused'), progressRan.progress)
+  assert.deepEqual(progressRan.temps, [])
+
+  // 2. A refused question-ledger rename preserves a concurrent question update and the requested answer,
+  // without running the missing-ledger fallback or leaving stale temp files.
+  const ledgerRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+const originalLink = fs.linkSync
+const originalSpawn = cp.spawnSync
+const probe = { links: 0, moves: 0, sources: [] }
+let refused = false
+fs.linkSync = (from, to) => {
+  if (String(to) === ledger && String(from).endsWith('.board-tmp')) probe.links += 1
+  return originalLink(from, to)
+}
+cp.spawnSync = (tool, argv, options) => {
+  if (Array.isArray(argv) && argv.some(arg => String(arg).includes('.board-tmp'))) probe.moves += 1
+  return originalSpawn(tool, argv, options)
+}
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === ledger && fs.readFileSync(progress, 'utf8').includes('- [x] Ship it, OK?')) {
+    probe.sources.push(path.basename(String(from)))
+    if (!refused) {
+      refused = true
+      fs.writeFileSync(ledger, ${JSON.stringify(concurrentLedger)})
+      throw Object.assign(new Error('synthetic held ledger'), { code: 'EPERM' })
+    }
+  }
+  return originalRename(from, to, ...rest)
+}
+process.on('exit', () => fs.writeFileSync(ledger + '.probe', JSON.stringify(probe)))`),
+  })
+  assert.equal(ledgerRan.status, 0, ledgerRan.stderr)
+  const finalLedger = JSON.parse(ledgerRan.files['progress-questions.json'])
+  const tickedRecord = finalLedger.records.find(one => one.words.includes('Ship it'))
+  const concurrentRecord = finalLedger.records.find(one => one.words.includes('Keep peer question'))
+  assert.ok(tickedRecord, ledgerRan.files['progress-questions.json'])
+  assert.equal(tickedRecord.isWaiting, false)
+  assert.ok(concurrentRecord, ledgerRan.files['progress-questions.json'])
+  const probe = JSON.parse(ledgerRan.files['progress-questions.json.probe'])
+  assert.equal(probe.links, 0)
+  assert.equal(probe.moves, 0)
+  assert.equal(probe.sources.length, 2)
+  assert.notEqual(probe.sources[0], probe.sources[1], 'the stale temp was discarded and a fresh temp was written from current contents')
+  assert.deepEqual(ledgerRan.temps, [])
+
+  // 3. A changed destination after a refused rename does not count a replacement or run onReplaced:
+  // if the restarted rewrite then fails persistently, the journal line is still rolled back.
+  const rollbackRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+let refused = false
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === progress) {
+    if (!refused) {
+      refused = true
+      fs.writeFileSync(progress, fs.readFileSync(progress, 'utf8') + '\\n### Concurrent task\\n- [~] Still preserved\\n')
+      throw Object.assign(new Error('synthetic held progress'), { code: 'EPERM' })
+    }
+    throw Object.assign(new Error('persistent progress refusal'), { code: 'EACCES' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(rollbackRan.status, 1)
+  assert.match(rollbackRan.stdout + rollbackRan.stderr, /nothing was changed/)
+  assert.ok(rollbackRan.progress.includes('- [?] Ship it, OK?'), rollbackRan.progress)
+  assert.ok(rollbackRan.progress.includes('### Concurrent task\n- [~] Still preserved'), rollbackRan.progress)
+  assert.deepEqual(rollbackRan.temps, [])
+})
+
 test('the terminal board preserves unknown JSON ledgers and never overwrites a quarantine collision', () => {
   const unknown = '{"version":99,"future":"keep these bytes"}\n'
   const kept = chatRun(['--keys', 'down h'], { beside: { 'progress-questions.json': unknown }, inspect: questionFiles })
@@ -2594,7 +2703,7 @@ test('served questions keep hidden identities across reordered reports and a fre
 test('the terminal board and the page retire a resolution once the agent ticks its step', { timeout: 30_000 }, async () => {
   for (const surface of ['terminal', 'page']) {
     const dir = surface === 'terminal' ? mkdtempSync(join(tmpdir(), 'board-resolve-')) : null
-    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true }) }
+    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
     try {
       const script = join(board.dir, 'agent-board.mjs')
       if (surface === 'terminal') writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: board.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
@@ -3837,7 +3946,8 @@ const pressRuntime = async () => {
         syncBuiltinESMExports()
         process.exitCode = 0
         assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep))
-        rmSync(root, { recursive: true, force: true })
+        // A held file on Windows refuses the delete; retry it the way the page fixture does (#991).
+        rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
       },
     }
   } catch (error) {
@@ -3849,7 +3959,7 @@ const pressRuntime = async () => {
     fs.unlinkSync = originalUnlink
     childProcess.spawnSync = originalSpawn
     syncBuiltinESMExports()
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     throw error
   }
 }
@@ -9320,18 +9430,30 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
     removeAttribute: name => { delete attributes[name] },
     classList: { add: name => classes.add(name), remove: name => classes.delete(name) },
   }
-  // One icon button switches the theme on the live page.
-  const buttons = [...html.matchAll(/<button\b([^>]*data-theme-toggle[^>]*)>/g)].map(found => {
-    assert.match(found[1], /data-local/)
-    const attrs = { ...Object.fromEntries([...found[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]])), 'data-theme-toggle': '' }
-    return { getAttribute: name => attrs[name] ?? null, setAttribute: (name, value) => { attrs[name] = value } }
-  })
+  const node = (tag, raw, flag) => {
+    assert.match(raw, /data-local/)
+    const attrs = { ...Object.fromEntries([...raw.matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]])), [flag]: attrs0(raw, flag) }
+    return { tag, focused: 0, getAttribute: name => attrs[name] ?? null, setAttribute: (name, value) => { attrs[name] = value }, focus() { this.focused += 1 } }
+  }
+  const attrs0 = (raw, flag) => (new RegExp(`${flag}="([^"]*)"`).exec(raw)?.[1] ?? '')
+  // One icon button opens the look menu (#1085): three themes, then the three progress-bar styles.
+  const buttons = [...html.matchAll(/<button\b([^>]*data-theme-toggle[^>]*)>/g)].map(found => node('button', found[1], 'data-theme-toggle'))
   assert.equal(buttons.length, 1)
+  const themes = [...html.matchAll(/<button\b([^>]*data-theme-set[^>]*)>/g)].map(found => node('button', found[1], 'data-theme-set'))
+  assert.deepEqual(themes.map(item => item.getAttribute('data-theme-set')), ['light', 'dark', 'system'])
+  const styles = [...html.matchAll(/<button\b([^>]*data-bar-set[^>]*)>/g)].map(found => node('button', found[1], 'data-bar-set'))
+  assert.deepEqual(styles.map(item => item.getAttribute('data-bar-set')), ['ink', 'blue', 'green'])
+  const menu = { hidden: true, getAttribute: name => (name === 'data-look-menu' ? '' : null), querySelector: selector => (selector.includes('aria-checked') ? themes.find(item => item.getAttribute('aria-checked') === 'true') ?? null : themes[0]) }
+  const look = { querySelector: selector => (selector === '[data-look-menu]' ? menu : null) }
+  buttons[0].parentNode = look
+  for (const item of [...themes, ...styles]) item.parentNode = menu
+  menu.parentNode = look
+  const select = selector => selector === '[data-theme-toggle]' ? buttons : selector === '[data-theme-set]' ? themes : selector === '[data-look-menu]' ? [menu] : []
   const events = {}
   let finish
   runInNewContext(themeScript(html), {
     document: {
-      documentElement: root, querySelectorAll: () => buttons, addEventListener: (name, run) => { events[name] = run },
+      documentElement: root, querySelectorAll: select, addEventListener: (name, run) => { events[name] = run },
       get cookie() { return jar.value },
       set cookie(line) {
         const pair = line.split(';')[0]
@@ -9349,30 +9471,45 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
   }, { timeout: 1000 })
   events.DOMContentLoaded()
   return {
-    attributes, classes, button: buttons[0],
-    toggle: () => events.click({ target: { parentNode: buttons[0] } }),
+    attributes, classes, menu, themes, styles, button: buttons[0],
+    open: () => events.click({ target: { parentNode: buttons[0] } }),
+    pick: theme => events.click({ target: themes.find(item => item.getAttribute('data-theme-set') === theme) }),
+    outside: () => events.click({ target: { parentNode: null } }),
+    escape: () => events.keydown({ key: 'Escape' }),
     finish: () => finish(),
   }
 }
 
-test('the serve page offers a light and a dark theme, follows the system until one is picked, and remembers the choice', () => {
+test('the serve page offers light, dark and system themes in one menu, follows the system until one is picked, and remembers the choice', () => {
   const html = redesignPage()
   const storage = new Map()
   const jar = { value: '' }
   const dom = themeDom(html, storage, false, jar)
-  // One icon button; a first visit follows the system, and the button names the theme it switches to.
+  // One icon button; a first visit follows the system, and its icon is the theme on screen.
   assert.equal(dom.attributes['data-theme'], undefined)
   assert.equal(dom.button.getAttribute('data-now'), 'light')
-  assert.equal(dom.button.getAttribute('aria-label'), EN.themeToDark)
-  assert.equal(dom.button.getAttribute('title'), EN.themeToDark)
-  const onDark = themeDom(html, new Map(), false, { value: '' }, 'dark')
-  assert.equal(onDark.button.getAttribute('data-now'), 'dark')
-  assert.equal(onDark.button.getAttribute('aria-label'), EN.themeToLight)
-  dom.toggle()
+  assert.equal(dom.button.getAttribute('aria-label'), EN.themeMenu)
+  assert.equal(dom.button.getAttribute('aria-haspopup'), 'menu')
+  assert.deepEqual(dom.themes.map(item => item.getAttribute('aria-checked')), ['false', 'false', 'true'])
+  assert.equal(themeDom(html, new Map(), false, { value: '' }, 'dark').button.getAttribute('data-now'), 'dark')
+  // The button opens the menu and puts focus on the current pick; a press outside or Escape closes it.
+  dom.open()
+  assert.equal(dom.menu.hidden, false)
+  assert.equal(dom.button.getAttribute('aria-expanded'), 'true')
+  assert.equal(dom.themes[2].focused, 1)
+  dom.outside()
+  assert.equal(dom.menu.hidden, true)
+  dom.open()
+  dom.escape()
+  assert.equal(dom.menu.hidden, true)
+  assert.equal(dom.button.focused, 1)
+  dom.open()
+  dom.pick('dark')
+  assert.equal(dom.menu.hidden, true)
   assert.equal(storage.get('agent-board.theme'), 'dark')
   assert.equal(dom.attributes['data-theme'], 'dark')
   assert.equal(dom.button.getAttribute('data-now'), 'dark')
-  assert.equal(dom.button.getAttribute('aria-label'), EN.themeToLight)
+  assert.deepEqual(dom.themes.map(item => item.getAttribute('aria-checked')), ['false', 'true', 'false'])
   assert.ok(dom.classes.has('theming'))
   dom.finish()
   assert.ok(!dom.classes.has('theming'))
@@ -9380,14 +9517,14 @@ test('the serve page offers a light and a dark theme, follows the system until o
   assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], 'dark')
   const reload = themeDom(html, storage, false, jar)
   assert.equal(reload.attributes['data-theme'], 'dark')
-  reload.toggle()
+  reload.pick('light')
   assert.equal(storage.get('agent-board.theme'), 'light')
   assert.equal(reload.attributes['data-theme'], 'light')
-  assert.equal(reload.button.getAttribute('aria-label'), EN.themeToDark)
-  // A dark system flips to light on the first press.
-  const first = themeDom(html, new Map(), false, { value: '' }, 'dark')
-  first.toggle()
-  assert.equal(first.attributes['data-theme'], 'light')
+  // System forgets the pick: the page follows the system again, on this port and the next.
+  reload.pick('system')
+  assert.equal(storage.has('agent-board.theme'), false)
+  assert.equal(reload.attributes['data-theme'], undefined)
+  assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], undefined)
   assert.match(html, /<script nonce="synthetic">[\s\S]*agent-board.theme/)
   assert.match(html, /prefers-reduced-motion:reduce/)
 })
@@ -9399,7 +9536,7 @@ test('the theme is applied before the page paints and survives blocked browser s
     assert.ok(!themeScript(html).includes('(function ()'))
     const dom = themeDom(html, new Map(), true)
     assert.equal(dom.attributes['data-theme'], undefined)
-    dom.toggle()
+    dom.pick('dark')
     assert.equal(dom.attributes['data-theme'], 'dark')
     assert.equal(dom.button.getAttribute('data-now'), 'dark')
     assert.equal(themeDom(html, new Map([['agent-board.theme', 'unknown']])).attributes['data-theme'], undefined)
@@ -11133,7 +11270,7 @@ test('the sidebar and the theme button keep working while the board is unreachab
   assert.equal(dom.node('shell').getAttribute('data-view'), 'needs')
   assert.equal(dom.requests.length, 0)
   const theme = themeDom(html)
-  theme.toggle()
+  theme.pick('dark')
   assert.equal(theme.attributes['data-theme'], 'dark')
 })
 
@@ -11145,15 +11282,17 @@ test('the page uses ink for actions and amber only for what needs you', async ()
   assert.ok(html.includes('--act:var(--ink)') && html.includes('--on-act:var(--surface)') && html.includes('--btn-line:'))
   const primary = rules.find(([selector]) => selector === 'button.primary')[1]
   assert.ok(primary.includes('var(--act)') && primary.includes('var(--on-act)'), primary)
-  // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words and the Needs you view.
-  assert.deepEqual(using('waiting'), ['.badge', '.flag', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
-  assert.deepEqual(using('accent'), [], 'the blue accent is not on the live page')
+  // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words, the Needs you view, and a progress-bar cell for a step that waits on the person (#1085).
+  assert.deepEqual(using('waiting'), ['.badge', '.flag', '.pbar .c-w', '.pbar.cont u.c-w', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
+  // The blue accent is on the live page only when the person picks the Blue progress-bar style (#1085), and on its swatch in the look menu.
+  assert.deepEqual(using('accent'), ['[data-bar="blue"] .pbar .c-x,[data-bar="blue"] .pbar .c-c,[data-bar="blue"] .pbar.cont b,[data-bar="blue"] .pbar.cont u.c-c,[data-sw="blue"] .sw .c-x,[data-sw="blue"] .sw .c-c'], 'the blue accent is only the Blue bar style')
   // The question card's send arrow is an action, so it is ink on the page colour, like a primary button (#1107).
   const arrow = rules.find(([selector]) => selector === '.answers button.answer-send')[1]
   assert.ok(arrow.includes('var(--act)') && arrow.includes('var(--on-act)'), arrow)
   // Green is for what is alive, red for what is wrong, and a finished task is muted.
   assert.ok(html.includes('--alive:var(--done)'))
-  assert.deepEqual(using('alive'), ['.chip.working::after', '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', '.s-agent.working .ag::after', '.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after', '.s-running', '.v-working>svg.i'].sort())
+  // A progress-bar cell for a step that runs (CI, handed over) is alive too (#1085).
+  assert.deepEqual(using('alive'), ['.chip.working::after', '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', '.pbar .c-r', '.pbar.cont u.c-r', '.s-agent.working .ag::after', '.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after', '.s-running', '.v-working>svg.i'].sort())
   for (const selector of ['#offline', '.t-alert', '.badge.bad', '.s-blocked']) assert.ok(using('alert').includes(selector), selector)
   assert.ok(rules.some(([selector, body]) => selector.includes('.s-done') && body.includes('var(--muted)')))
 })
@@ -12254,4 +12393,56 @@ test('after Send the hide button named by each README is visible without More', 
     await dom.flush()
     assert.equal(dom.requests.at(-1).body.type, 'hide')
   }
+})
+
+test('#1085: the page draws a cell per step up to 12, one fill with a mark at the current step above, and the count alone for one step', async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const rowOf = (title, cells, done, total) => ({ ...model.groups[0].rows[0], key: title, title, due: '', cells, done, total, steps: [{ text: 'Synthetic step', status: 'doing', isCurrent: true, line: [{ text: 'Synthetic step' }] }] })
+  model.groups[0].rows = [
+    rowOf('Seven steps', 'xxxx~ -', 4, 6),
+    rowOf('Thirty steps', `x ~${' '.repeat(27)}`, 1, 30),
+    rowOf('One step', '~', 0, 1),
+  ]
+  const dom = await pageDom(html, model)
+  const all = pressWalk(dom.node('board'))
+  const progress = title => {
+    const row = all.find(node => node.tag === 'li' && pressWalk(node).some(one => one.className === 'r-title' && one.textContent === title))
+    assert.ok(row, title)
+    return pressWalk(row).find(node => node.className === 'prog')
+  }
+  const seven = progress('Seven steps')
+  assert.equal(seven.getAttribute('aria-label'), '4/6 · Synthetic step')
+  const bar = pressWalk(seven).find(node => node.className === 'pbar')
+  assert.equal(bar.getAttribute('aria-hidden'), 'true')
+  assert.deepEqual(bar.childNodes.map(node => node.className), ['c-x', 'c-x', 'c-x', 'c-x', 'c-c', 'c-t', 'c-n'])
+  assert.equal(pressWalk(seven).find(node => node.className === 'pcount').textContent, '4/6')
+  const thirty = pressWalk(progress('Thirty steps')).find(node => node.className === 'pbar cont')
+  const [fill, mark] = thirty.childNodes
+  assert.equal(fill.style.width, '3.3%')
+  // The mark sits at the [~] step (the third), not at the open step before it.
+  assert.equal(mark.className, 'c-c')
+  assert.equal(mark.style.left, 'calc(6.7% - 1px)')
+  const one = progress('One step')
+  assert.equal(pressWalk(one).some(node => String(node.className).startsWith('pbar')), false)
+  assert.equal(pressWalk(one).find(node => node.className === 'pcount').textContent, '0/1')
+})
+
+test('#1085: a style picked on the page is written to the settings file with its other keys, served at once, and a bad pick or an unreadable file changes nothing', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const settings = join(board.dir, 'progress-settings.json')
+    writeFileSync(settings, '{"historyDays":3}')
+    assert.equal((await board.call('GET', '/api/board')).json().barStyle, 'ink')
+    const picked = await board.call('POST', '/api/style', { body: { style: 'green' } })
+    assert.equal(picked.status, 200)
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green' })
+    // Served at once: the server keeps its own pick without waiting for its 10-second read.
+    assert.equal((await board.call('GET', '/api/board')).json().barStyle, 'green')
+    for (const body of [{ style: 'pink' }, { style: 3 }, {}]) assert.equal((await board.call('POST', '/api/style', { body })).status, 400)
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green' })
+    writeFileSync(settings, '{"historyDays":3,')
+    assert.equal((await board.call('POST', '/api/style', { body: { style: 'blue' } })).status, 409)
+    assert.equal(readFileSync(settings, 'utf8'), '{"historyDays":3,')
+  } finally { await board.close() }
 })

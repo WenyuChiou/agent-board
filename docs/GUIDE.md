@@ -51,7 +51,7 @@ agent-board --help all
 | `agent-board stop` | Stop the board page server for this progress file |
 | `--serve` | The old spelling of plain `agent-board`: still accepted, and prints only the page address, with no text board |
 | `--lan` | Open the page and show the phone address too; no `--serve` needed |
-| `--watch` | Terminal board; arrows or `j`/`k` and Enter to select, `x` tick, `d` confirm done, `a` archive, `t` archive the done list now, `y`/`n` or `1`–`9` answer, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` page, `q` quit. Into a pipe it prints the board once as plain text |
+| `--watch` | Terminal board; arrows or `j`/`k` and Enter to select, `x` tick, `d` confirm done, `a` archive, `t` archive the done list now, `s` next progress bar style, `y`/`n` or `1`–`9` answer, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` page, `q` quit. Into a pipe it prints the board once as plain text |
 | `--json` | Versioned, redacted, read-only board data for an agent; see [Board JSON](BOARD-JSON.md) |
 | `--status` | One line for tmux or a shell prompt, e.g. `2 need you · 3 working`. Reads only `progress.md` once; no sidecar/inbox reads, writes, browser or service. Counts follow the page's Needs you and Working now rules for that snapshot; questions retained only in sidecars are not included. Always plain text, even with `FORCE_COLOR`. |
 
@@ -126,6 +126,7 @@ Open a new Claude Code session; `/progress` opens the pane. It mirrors Task tool
 | `/progress tidy`, `/progress sync` | Archive eligible work; reread Tasks/PR |
 | `/progress report`, `/progress today` | Copy a weekly/daily report |
 | `/progress lang en`, `zh-TW`, `zh-CN`, `auto` | Pane language |
+| `/progress style ink`, `blue`, `green` | Progress bar style, the same on the page, the pane and the terminal board |
 | `/progress notify on`, `off` | Desktop notifications |
 
 The optional connector requires Node.js 18+ and reloads of older plugin sessions before migration. Its native worker shares the installer lock across data roots, keeps removal disabled durably, and preserves foreign edits. Background probes start after the pane and polling; missing Node or damaged setup records fail closed. `connect status` describes configuration, not native execution.
