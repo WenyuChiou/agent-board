@@ -121,10 +121,21 @@ const EARLIER_LIFECYCLE_STEPS = [
   '原生 session 活动状态；任务步骤由当前 agent 明确报告',
 ]
 export const LIFECYCLE_STEPS: ReadonlySet<string> = new Set([
-  ...LANGS.flatMap(lang => [STRINGS[lang].codexLifecycle, STRINGS[lang].localAgentLifecycle]),
+  ...LANGS.flatMap(lang => [
+    STRINGS[lang].codexLifecycle,
+    STRINGS[lang].codexLifecycleWorking,
+    STRINGS[lang].localAgentLifecycle,
+    STRINGS[lang].localAgentLifecycleWorking,
+  ]),
   ...EARLIER_LIFECYCLE_STEPS,
 ])
-export const isLifecycleStep = (text: string): boolean => LIFECYCLE_STEPS.has(text.trim())
+export const isLifecycleStep = (text: string): boolean => LIFECYCLE_STEPS.has(text.replace(/^- \[[ x~?!]\] /, '').trim())
+
+export const codexLifecycleStep = (state: string, s: Strings): string =>
+  state === 'working' ? `- [ ] ${s.codexLifecycleWorking}` : `- [ ] ${s.codexLifecycle}`
+
+export const localAgentLifecycleStep = (state: string, s: Strings): string =>
+  state === 'working' ? `- [ ] ${s.localAgentLifecycleWorking}` : `- [ ] ${s.localAgentLifecycle}`
 
 // The hook keeps one line so the ledger sees the same words when a prompt answers it.
 export const questionSteps = (held: readonly string[], previousAsked: number | undefined, state: unknown, value: unknown, isBoardPrompt = false, previousRevision?: string): { steps: string[]; asked: number | undefined; askedRevision: string | undefined } => {
@@ -165,7 +176,12 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' && !isClosingQuestion ? 'done' : 'waiting'
   // Keep the hook's own steps in place: the ledger needs to see their original words closed.
   // A session ending does not answer its last question, but it does end an approval.
-  const held = previous?.steps ?? [`- [ ] ${s.codexLifecycle}`]
+  const placeholder = codexLifecycleStep(state, s)
+  const held = previous === null
+    ? [placeholder]
+    : previous.steps.map((step, index) =>
+        index === 0 && isLifecycleStep(step) ? placeholder : step
+      )
   const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
   const approvalSteps = held.map((step, index) => event !== 'SessionStart' && index === earlier ? step.replace(/^- \[\?\] /, '- [x] ') : step)
   const { steps, asked, askedRevision } = questionSteps(approvalSteps, previous?.asked, working ? 'working' : event === 'Stop' ? state : 'ended', event === 'Stop' ? input.question : undefined, working && input.prompt_submitted === false, previous?.askedRevision)
