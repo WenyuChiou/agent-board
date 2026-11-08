@@ -1,5 +1,6 @@
 import type { ProgressStepStatus } from '../types'
 import type { Strings } from './i18n'
+import { withBoardSettings } from './board-settings'
 
 // Progress as a bar of one cell per step (#1085), the same rule on the page, the pane, the
 // terminal board and the line under the prompt. Nothing here reads a file or the clock: the
@@ -141,16 +142,7 @@ export const barStyleOf = (text: string | null): BarStyle => {
 // The settings file's text with the style set; every other key is kept. A missing or empty file
 // (null or '') starts a new one. A file that does not read as a JSON object gives null: the caller
 // writes nothing, so a file the person edited by hand, or caught half-written, keeps its other keys.
-export const withBarStyle = (text: string | null, style: BarStyle): string | null => {
-  if (text === null || text.trim() === '') return `${JSON.stringify({ style }, null, 2)}\n`
-  try {
-    const read: unknown = JSON.parse(text)
-    if (read === null || typeof read !== 'object' || Array.isArray(read)) return null
-    return `${JSON.stringify({ ...(read as Record<string, unknown>), style }, null, 2)}\n`
-  } catch {
-    return null
-  }
-}
+export const withBarStyle = (text: string | null, style: BarStyle): string | null => withBoardSettings(text, { style })
 
 // A style's name in the person's language.
 export const barStyleName = (style: BarStyle, s: Strings): string => (style === 'blue' ? s.barStyleBlue : style === 'green' ? s.barStyleGreen : s.barStyleInk)

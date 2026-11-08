@@ -228,7 +228,7 @@ const awaitRecoveryExit = async data => {
   }
 }
 
-export const browserFixture = async (name, run) => {
+export const browserFixture = async (name, run, { hasTouch = false } = {}) => {
   const root = mkdtempSync(join(tmpdir(), fixturePrefix))
   const evidence = join(artifacts, `${name}-${process.pid}-${Date.now()}`)
   mkdirSync(evidence, { recursive: true })
@@ -266,11 +266,11 @@ export const browserFixture = async (name, run) => {
     assert.equal(doctor.capabilities.liveReply, false)
 
     browser = await chromium.launch({ headless: true, env })
-    context = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
+    context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, hasTouch })
     await context.tracing.start({ screenshots: true, snapshots: true, sources: true })
     page = await context.newPage()
-    const startServer = async ({ messages = false } = {}) => {
-      const args = ['--serve', '--no-open', '--quiet-board', '--lang', 'en', ...(messages ? ['--messages-dir', join(root, 'messages')] : [])]
+    const startServer = async ({ messages = false, language = 'en' } = {}) => {
+      const args = ['--serve', '--no-open', '--quiet-board', ...(language === null ? [] : ['--lang', language]), ...(messages ? ['--messages-dir', join(root, 'messages')] : [])]
       const result = await commandEvidence(evidence, 'serve', installedScript, args, env, boardRoot)
       const url = result.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
       assert.ok(url, result.stdout)

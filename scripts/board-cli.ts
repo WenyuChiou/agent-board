@@ -17,6 +17,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
+import { boardLanguage, settingsLangOf, withBoardSettings } from '../hooks/board-settings'
+import type { SettingsLang } from '../hooks/board-settings'
 import { barStyleName, barStyleOf, nextBarStyle, withBarStyle } from '../hooks/progress-bar'
 import type { BarStyle } from '../hooks/progress-bar'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
@@ -92,7 +94,11 @@ const systemLang = (env: unknown) => {
 }
 
 const path = progressFile()
-const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? systemLang(process.env.LANG) ?? 'en']
+const savedLanguage = (): SettingsLang | null => {
+  try { return settingsLangOf(readFileSync(settingsPath(path), 'utf8')) } catch { return null }
+}
+const wordsNow = () => STRINGS[boardLanguage(flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang')), savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))]
+let s = wordsNow()
 
 // Files changed since the board last read progress.md in full. A read refused because another
 // program holds the file open can say that nothing was changed only while this is 0. It is
@@ -734,6 +740,15 @@ const saveBarStyle = (style: BarStyle): boolean => {
   if (next === null) return false
   writeFileSync(file, next)
   barStyleKept = { style, at: Date.now() }
+  return true
+}
+
+const saveLanguage = (lang: SettingsLang): boolean => {
+  const file = settingsPath(path)
+  const next = withBoardSettings(read(file), { lang })
+  if (next === null) return false
+  writeFileSync(file, next)
+  s = wordsNow()
   return true
 }
 
@@ -1881,7 +1896,7 @@ const serveChild = (): void => {
         const projects = !isFresh && progressProjectCache !== null ? progressProjectCache.projects : parseProgress(read(path))
         return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
       },
-      s,
+      get s() { return s },
       port: Number(flag('--port') ?? 0) || 0,
       ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
@@ -1893,9 +1908,9 @@ const serveChild = (): void => {
       clean: cleanUp,
       bulkTidy,
       barStyle: barStyleNow,
-      setBarStyle: style => {
-        try { return saveBarStyle(style) } catch { return false }
-      },
+      setBarStyle: saveBarStyle,
+      language: () => savedLanguage() ?? 'auto',
+      setLanguage: saveLanguage,
       sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.
       sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,

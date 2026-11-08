@@ -26,6 +26,8 @@ import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
 import { isBarStyle } from '../hooks/progress-bar'
 import type { BarStyle } from '../hooks/progress-bar'
+import { isSettingsLang } from '../hooks/board-settings'
+import type { SettingsLang } from '../hooks/board-settings'
 
 export type ServeOptions = {
   allowResume?: boolean
@@ -48,9 +50,11 @@ export type ServeOptions = {
   // move is on, #464), the line to show.
   clean: () => string
   // The progress bar's style (#1085): read from the board's settings file, and written there by
-  // the page's theme menu so the pane and the terminal board show the same pick.
+  // Settings so the pane and the terminal board show the same pick.
   barStyle?: () => BarStyle
   setBarStyle?: (style: BarStyle) => boolean
+  language?: () => SettingsLang
+  setLanguage?: (lang: SettingsLang) => boolean
   sweep: () => void
   sweepMs: number
   paste: (text: string, reviewToken?: string) => { isAdded: boolean; note: string; review?: { token: string; current: string; incoming: string } }
@@ -423,7 +427,7 @@ export const startServer = (o: ServeOptions): void => {
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
-      res.end(servePage(o.s, nonce, isLan, o.idleMs))
+      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.()))
       return
     }
     if (req.method === 'GET') {
@@ -437,7 +441,7 @@ export const startServer = (o: ServeOptions): void => {
           const view = o.view()
           const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', now }
+          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.
           const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
@@ -531,7 +535,12 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/style') {
         const style = body.style
         if (!isBarStyle(style) || o.setBarStyle === undefined) return json(res, 400, { note: o.s.pressFailed })
-        return o.setBarStyle(style) ? json(res, 200, { style }) : json(res, 409, { note: o.s.pressFailed })
+        return o.setBarStyle(style) ? json(res, 200, { style }) : json(res, 409, { note: o.s.barStyleUnreadable })
+      }
+      if (url.pathname === '/api/language') {
+        const lang = body.lang
+        if (!isSettingsLang(lang) || o.setLanguage === undefined) return json(res, 400, { note: o.s.pressFailed })
+        return o.setLanguage(lang) ? json(res, 200, { lang, note: o.s.settingsLanguageChanged }) : json(res, 409, { note: o.s.barStyleUnreadable })
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()
