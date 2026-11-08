@@ -268,6 +268,11 @@ export const markApproval = (mirror: ProgressMirror, step: string): ProgressMirr
   return { ...mirror, questionSequence: renewed.questionRevision, tasks: [...mirror.tasks.filter(one => one.id !== APPROVAL), renewed] }
 }
 
+// An approval that waited behind another question goes up once nothing else waits (#1106); a step
+// already there stays as it is, so its question token does not change on every save.
+export const raiseApproval = (mirror: ProgressMirror, step: string): ProgressMirror =>
+  mirror.tasks.some(one => one.id === APPROVAL) ? mirror : markApproval(mirror, step)
+
 // The dialog is over (answered, declined, or the turn ended): the step goes, it was never the model's.
 export const clearApproval = (mirror: ProgressMirror): ProgressMirror =>
   mirror.tasks.some(one => one.id === APPROVAL) ? { ...mirror, tasks: mirror.tasks.filter(one => one.id !== APPROVAL) } : mirror
