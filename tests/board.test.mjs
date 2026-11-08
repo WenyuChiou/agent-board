@@ -5313,6 +5313,8 @@ const serveIn = () => {
       await new Promise(done => {
         const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
         req.on('error', done)
+        // A page that accepted the connection but never answers must not hold every test's cleanup.
+        req.setTimeout(5000, () => req.destroy(new Error('the close request timed out')))
         req.end('{}')
       })
     }
@@ -5329,30 +5331,52 @@ const serveIn = () => {
   return { dir, path, script, env, serve, urlOf, served, end }
 }
 
-// Cursor's shell has two extra inheritable pipes as well as stdout and stderr.
-const cursorShell = async (board, args, env = {}, stop = async () => {}) => {
+// A test that may run out of time writes what it saw so far to stderr just before the test runner
+// would cut it off, so a CI log of a timeout still says which phase took the time (#1158).
+const phaseLog = (budgetMs, more = () => []) => {
+  const began = Date.now()
+  const lines = []
+  const line = (text, at) => `${String(at - began).padStart(6)} ms  ${text}`
+  const mark = text => { lines.push(line(text, Date.now())) }
+  // `more` gives lines other processes wrote, each starting with its Date.now(), read when the log is printed.
+  const text = () => `phase log:\n${[...lines, ...more().map(entry => line(entry.slice(entry.indexOf(' ') + 1), Number(entry.slice(0, entry.indexOf(' ')))))].sort().join('\n')}`
+  const watchdog = setTimeout(() => process.stderr.write(`\n[${budgetMs} ms passed and the test is still running] ${text()}\n`), budgetMs)
+  watchdog.unref()
+  return { mark, text, end: () => clearTimeout(watchdog) }
+}
+
+// Cursor's shell has two extra inheritable pipes as well as stdout and stderr. `mark` takes one line
+// per event, so a failure says which pipe stayed open and when the others closed.
+const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = () => {}) => {
   const found = spawnSync('where.exe', ['bash.exe'], { encoding: 'utf8', windowsHide: true })
   const bash = found.stdout.split(/\r?\n/).find(file => /[\\/]Git[\\/].*[\\/]bash\.exe$/i.test(file))
   assert.ok(bash, 'Git Bash is needed to reproduce Cursor on Windows')
   const child = spawn(bash, ['-c', 'exec "$@"', 'cursor', process.execPath, board.script, ...args], {
     env: { ...board.env, ...env }, stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'ignore'], windowsHide: true,
   })
+  mark(`bash ${child.pid} started ${args.join(' ')} through ${bash}`)
   let stdout = ''
   let stderr = ''
   child.stdout.on('data', chunk => { stdout += chunk })
   child.stderr.on('data', chunk => { stderr += chunk })
-  const end = stream => new Promise((done, fail) => { stream.once('end', done); stream.once('error', fail) })
-  const exited = new Promise((done, fail) => { child.once('exit', (code, signal) => done({ code, signal })); child.once('error', fail) })
+  const open = new Set(['stdout', 'stderr', 'fd3', 'fd4', 'bash exit'])
+  const end = (stream, name) => new Promise((done, fail) => { stream.once('end', () => { open.delete(name); mark(`${name} EOF`); done() }); stream.once('error', fail) })
+  const exited = new Promise((done, fail) => {
+    child.once('exit', (code, signal) => { open.delete('bash exit'); mark(`bash exit code=${code} signal=${signal}`); done({ code, signal }) })
+    child.once('error', fail)
+  })
   let timer
   try {
     const [result] = await Promise.race([
-      Promise.all([exited, end(child.stdout), end(child.stderr), end(child.stdio[3]), end(child.stdio[4])]),
-      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error('Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds')), 5000) }),
+      Promise.all([exited, end(child.stdout, 'stdout'), end(child.stderr, 'stderr'), end(child.stdio[3], 'fd3'), end(child.stdio[4], 'fd4')]),
+      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
     ])
     assert.equal(result.code, 0, stderr)
     return { stdout, stderr }
   } catch (error) {
+    mark(`cursor shell failed: ${error.message.split('\n')[0]}`)
     await stop()
+    mark('stop done')
     throw error
   } finally {
     clearTimeout(timer)
@@ -5372,11 +5396,145 @@ const closeFixturePage = async board => {
   await new Promise(done => {
     const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
     req.on('error', done)
+    // A page that accepted the connection but never answers must not hold the test's cleanup.
+    req.setTimeout(5000, () => req.destroy(new Error('the close request timed out')))
     req.end('{}')
   })
 }
 
 const processAlive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
+
+// A stand-in browser: a small Windows program built here, so no real browser opens on the tester's
+// screen. `body` is its Main. Synthetic data only.
+const compileStandIn = (board, exe, body) => {
+  mkdirSync(resolve(exe, '..'), { recursive: true })
+  const source = join(board.dir, `${basename(exe, '.exe')}.cs`)
+  writeFileSync(source, `using System; using System.IO; using System.Diagnostics; using System.Threading;\npublic static class Browser { public static void Main() { ${body} } }`)
+  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
+    env: { ...board.env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: exe }, windowsHide: true, stdio: 'pipe', timeout: 15_000,
+  })
+}
+// Writes its PID for the test and stays up, as a browser window does.
+const SLEEPING_BROWSER = 'File.WriteAllText(Environment.GetEnvironmentVariable("BOARD_TEST_BROWSER_PID"), Process.GetCurrentProcess().Id.ToString()); Thread.Sleep(20000);'
+// Notes that it was started, then exits with an error at once, as a browser with no display does.
+const FAILING_BROWSER = 'File.AppendAllText(Environment.GetEnvironmentVariable("BOARD_TEST_FAILED_BROWSERS"), Process.GetCurrentProcess().Id.ToString() + "\\n"); Environment.Exit(1);'
+
+// Loaded into the `--html` process: notes every PowerShell it starts, with its exit code, time and
+// stderr (read here instead of dropped), so a run that lost Cursor's pipes says what its launcher did.
+const launchLogPreload = log => `const cp = require('node:child_process')
+const fs = require('node:fs')
+const note = line => { try { fs.appendFileSync(${JSON.stringify(log)}, Date.now() + ' ' + line + '\\n') } catch {} }
+const isPowerShell = file => /(?:^|[\\\\/])powershell(?:\\.exe)?$/i.test(String(file))
+const spawn = cp.spawn
+cp.spawn = function (file, args, options) {
+  if (!isPowerShell(file)) return spawn.apply(this, arguments)
+  const stdio = options?.stdio === 'ignore' ? ['ignore', 'ignore', 'pipe'] : options?.stdio
+  const child = spawn.call(this, file, args, { ...options, stdio })
+  const began = Date.now()
+  let err = ''
+  child.stderr?.on('data', chunk => { err += chunk })
+  note('powershell ' + child.pid + ' started, stdio ' + JSON.stringify(options?.stdio))
+  child.once('exit', (code, signal) => note('powershell ' + child.pid + ' exit code=' + code + ' signal=' + signal + ' after ' + (Date.now() - began) + ' ms, stderr ' + JSON.stringify(err.trim().slice(0, 600))))
+  return child
+}
+const execFileSync = cp.execFileSync
+cp.execFileSync = function (file) {
+  if (!isPowerShell(file)) return execFileSync.apply(this, arguments)
+  const began = Date.now()
+  try { return execFileSync.apply(this, arguments) } finally { note('powershell execFileSync took ' + (Date.now() - began) + ' ms') }
+}
+process.on('exit', code => note('--html process ' + process.pid + ' exit ' + code))
+require('node:module').syncBuiltinESMExports()
+`
+
+// The paths a browser-startup test uses: a Program Files of its own with Edge and Chrome slots, the
+// files the stand-ins and the `--html` process write, and the launcher log.
+const browserFixture = board => {
+  const programs = join(board.dir, 'Programs & Friends')
+  return {
+    programs,
+    edge: join(programs, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    chrome: join(programs, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    marker: join(board.dir, 'browser.pid'),
+    failed: join(board.dir, 'failed-browsers.txt'),
+    launcher: join(board.dir, 'launcher.pid'),
+    launchLog: join(board.dir, 'launch.log'),
+    preload: join(board.dir, 'launch-log.cjs'),
+  }
+}
+
+// Runs `--html` the way Cursor does against the fixture's browsers, with the launcher log loaded into
+// the `--html` process; `pid` is the stand-in that stays running, or undefined. Every step is marked.
+const htmlThroughCursor = async (board, fixture, log) => {
+  writeFileSync(fixture.preload, launchLogPreload(fixture.launchLog))
+  writeFileSync(board.script, `import { writeFileSync as recordLauncherPid } from 'node:fs'\nif (process.argv.includes('--html')) recordLauncherPid(${JSON.stringify(fixture.launcher)}, String(process.pid))\n${readFileSync(board.script, 'utf8')}`)
+  const served = await board.serve()
+  assert.ok(board.urlOf(served), served)
+  log.mark(`page served on port ${new URL(board.urlOf(served)).port}`)
+  const env = {
+    AGENT_BOARD_TEST_PID: '', ProgramFiles: fixture.programs, 'ProgramFiles(x86)': fixture.programs, BOARD_TEST_BROWSER_PID: fixture.marker,
+    BOARD_TEST_FAILED_BROWSERS: fixture.failed, NODE_OPTIONS: `--require ${JSON.stringify(fixture.preload)}`,
+  }
+  let pid
+  const stop = async () => {
+    if (existsSync(fixture.marker)) {
+      pid = Number(readFileSync(fixture.marker, 'utf8'))
+      if (processAlive(pid)) process.kill(pid)
+      for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    }
+    log.mark(`stand-in after the failed run: ${pid === undefined ? 'never started' : `${pid}, ${processAlive(pid) ? 'still alive' : 'stopped'}`}`)
+    await closeFixturePage(board)
+    await delay(200)
+  }
+  const result = await cursorShell(board, ['--html'], env, stop, log.mark)
+  for (let tries = 0; !existsSync(fixture.marker) && tries < 20; tries++) await delay(100)
+  if (existsSync(fixture.marker)) pid = Number(readFileSync(fixture.marker, 'utf8'))
+  log.mark(`stand-in ${pid === undefined ? 'never started' : `${pid} started, ${processAlive(pid) ? 'alive' : 'gone'}`}`)
+  return { ...result, pid: () => pid }
+}
+
+// What the `--html` process's launcher log holds so far, for the phase log.
+const launcherLines = fixture => existsSync(fixture.launchLog) ? readFileSync(fixture.launchLog, 'utf8').trim().split('\n').filter(Boolean).map(entry => entry.replace(' ', ' launcher: ')) : []
+
+// Stops the stand-in and the `--html` process the fixture may have left, then removes the fixture.
+const endBrowserFixture = async (board, fixture, log, pid) => {
+  if (pid === undefined && existsSync(fixture.marker)) pid = Number(readFileSync(fixture.marker, 'utf8'))
+  if (pid && processAlive(pid)) process.kill(pid)
+  if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+  if (pid) assert.ok(!processAlive(pid), 'the stand-in browser must stop before cleanup')
+  if (existsSync(fixture.launcher)) {
+    const launcherPid = Number(readFileSync(fixture.launcher, 'utf8'))
+    if (processAlive(launcherPid)) process.kill(launcherPid)
+    for (let tries = 0; processAlive(launcherPid) && tries < 50; tries++) await delay(100)
+    log.mark(`--html process ${launcherPid} ${processAlive(launcherPid) ? 'still alive' : 'gone'}`)
+    assert.ok(!processAlive(launcherPid), 'the board launcher must stop before cleanup')
+  }
+  await board.end([])
+  log.mark('fixture removed')
+}
+
+// Runs a browser-startup test body with the phase log; a failure, in the body or in the cleanup,
+// carries the whole log, and the cleanup never hides the body's error.
+const browserStartupTest = async body => {
+  const board = serveIn()
+  const fixture = browserFixture(board)
+  const log = phaseLog(23_000, () => launcherLines(fixture))
+  let pid
+  let failure
+  try {
+    pid = await body(board, fixture, log)
+  } catch (error) {
+    failure = error
+  } finally {
+    log.end()
+    try { await endBrowserFixture(board, fixture, log, pid) } catch (error) { log.mark(`cleanup failed: ${error.message.split('\n')[0]}`); failure ??= error }
+  }
+  if (failure !== undefined) {
+    failure.message = `${failure.message}\n${log.text()}`
+    throw failure
+  }
+}
 
 test('Windows server startup releases Cursor pipes while its page stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
   const board = serveIn()
@@ -5412,55 +5570,35 @@ test('a Windows page starts from a folder whose name holds a curly apostrophe, b
   }
 })
 
-test('Windows browser startup releases Cursor pipes while the browser stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
-  const board = serveIn()
-  const programs = join(board.dir, 'Programs & Friends')
-  const unavailable = join(programs, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
-  const browser = join(programs, 'Google', 'Chrome', 'Application', 'chrome.exe')
-  const marker = join(board.dir, 'browser.pid')
-  const launcher = join(board.dir, 'launcher.pid')
-  let pid
-  try {
-    mkdirSync(resolve(browser, '..'), { recursive: true })
-    mkdirSync(resolve(unavailable, '..'), { recursive: true })
-    writeFileSync(unavailable, 'synthetic invalid executable')
-    const source = join(board.dir, 'browser.cs')
-    writeFileSync(source, `using System; using System.IO; using System.Diagnostics; using System.Threading;
-public static class Browser { public static void Main() { File.WriteAllText(Environment.GetEnvironmentVariable("BOARD_TEST_BROWSER_PID"), Process.GetCurrentProcess().Id.ToString()); Thread.Sleep(20000); } }`)
-    const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-    execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
-      env: { ...board.env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: browser }, windowsHide: true, stdio: 'pipe',
-    })
-    writeFileSync(board.script, `import { writeFileSync as recordLauncherPid } from 'node:fs'\nif (process.argv.includes('--html')) recordLauncherPid(${JSON.stringify(launcher)}, String(process.pid))\n${readFileSync(board.script, 'utf8')}`)
-    assert.ok(board.urlOf(await board.serve()))
-    const result = await cursorShell(board, ['--html'], { AGENT_BOARD_TEST_PID: '', ProgramFiles: programs, 'ProgramFiles(x86)': programs, BOARD_TEST_BROWSER_PID: marker }, async () => {
-      if (existsSync(marker)) {
-        pid = Number(readFileSync(marker, 'utf8'))
-        if (processAlive(pid)) process.kill(pid)
-        for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
-      }
-      await closeFixturePage(board)
-      await delay(200)
-    })
-    assert.ok(board.urlOf(result.stdout), result.stdout)
-    for (let tries = 0; !existsSync(marker) && tries < 20; tries++) await delay(100)
-    assert.ok(existsSync(marker), `the stand-in browser must start: ${result.stdout} ${result.stderr}`)
-    pid = Number(readFileSync(marker, 'utf8'))
-    assert.ok(processAlive(pid), 'the browser must outlive the caller pipes')
-  } finally {
-    if (pid === undefined && existsSync(marker)) pid = Number(readFileSync(marker, 'utf8'))
-    if (pid && processAlive(pid)) process.kill(pid)
-    if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
-    if (pid) assert.ok(!processAlive(pid), 'the stand-in browser must stop before cleanup')
-    if (existsSync(launcher)) {
-      const launcherPid = Number(readFileSync(launcher, 'utf8'))
-      if (processAlive(launcherPid)) process.kill(launcherPid)
-      for (let tries = 0; processAlive(launcherPid) && tries < 50; tries++) await delay(100)
-      assert.ok(!processAlive(launcherPid), 'the board launcher must stop before cleanup')
-    }
-    await board.end([])
-  }
-})
+test('Windows browser startup releases Cursor pipes while the browser stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+  // The Edge slot holds a file that is not a program, so the launcher has to move on to Chrome.
+  mkdirSync(resolve(fixture.edge, '..'), { recursive: true })
+  writeFileSync(fixture.edge, 'synthetic invalid executable')
+  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browser compiled')
+  const result = await htmlThroughCursor(board, fixture, log)
+  assert.ok(board.urlOf(result.stdout), result.stdout)
+  assert.match(result.stdout, /Opened Agent Board/, result.stdout)
+  assert.ok(result.pid() !== undefined, `the stand-in browser must start: ${result.stdout} ${result.stderr}`)
+  assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
+  return result.pid()
+}))
+
+test('a Windows browser that exits with an error at once gives way to the next browser, and Cursor pipes are still released', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+  // Start-Process returns once the program exists, so a browser that exits with an error right
+  // away (no display, no sandbox) would otherwise count as opened and the person would see nothing.
+  compileStandIn(board, fixture.edge, FAILING_BROWSER)
+  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browsers compiled')
+  const result = await htmlThroughCursor(board, fixture, log)
+  assert.ok(board.urlOf(result.stdout), result.stdout)
+  assert.match(result.stdout, /Opened Agent Board/, result.stdout)
+  assert.ok(existsSync(fixture.failed), 'the failing Edge stand-in must have been tried first')
+  assert.equal(readFileSync(fixture.failed, 'utf8').trim().split('\n').length, 1, 'the failing Edge stand-in is tried once')
+  assert.ok(result.pid() !== undefined, `the Chrome stand-in must start after Edge failed: ${result.stdout} ${result.stderr}`)
+  assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
+  return result.pid()
+}))
 
 test('Windows page startup times out without leaving its child or ready files', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
   const board = serveIn()

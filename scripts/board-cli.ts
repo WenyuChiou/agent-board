@@ -921,16 +921,20 @@ const watchLaunch = (child: ChildProcess, onResult: (isOpen: boolean) => void): 
 // long as it runs (#1158). PowerShell is hidden; a browser started from it keeps its normal visible
 // window. Several programs are tried in the one PowerShell run, in order, and the PID printed is
 // the first that started: each PowerShell start costs about a second, and the caller's turn waits
-// for every one of them.
+// for every one of them. Start-Process returns as soon as the program exists, so with `graceMs` a
+// program that exits with an error within that time (no display, no sandbox) counts as not started
+// and the next one is tried, the way watchLaunch does it elsewhere. Start-Process reads -FilePath and
+// -WorkingDirectory as wildcards, so both are escaped.
 // PowerShell ends a single-quoted string at the curly quotes too, so each is doubled like '.
 const psLiteral = (value: string): string => `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'`
 const windowsArgument = (value: string): string => `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
-type WindowsStartOptions = { isHidden?: boolean; env?: NodeJS.ProcessEnv; isPiped?: boolean }
+type WindowsStartOptions = { isHidden?: boolean; env?: NodeJS.ProcessEnv; isPiped?: boolean; graceMs?: number }
 const windowsStart = (bins: string | string[], argv: string[], options: WindowsStartOptions = {}): ChildProcess => {
   const programs = (Array.isArray(bins) ? bins : [bins]).map(psLiteral).join(', ')
   const argumentsPart = argv.length === 0 ? '' : ` -ArgumentList ${psLiteral(argv.map(windowsArgument).join(' '))}`
   const hiddenPart = options.isHidden ? ' -WindowStyle Hidden' : ''
-  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); foreach ($program in @(${programs})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program${argumentsPart} -WorkingDirectory ([Management.Automation.WildcardPattern]::Escape(${psLiteral(dirname(path))})) -PassThru${hiddenPart} } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) { [Console]::Out.WriteLine($started.Id); exit 0 } }; exit 1`
+  const gracePart = options.graceMs === undefined ? '' : ` if ($started.WaitForExit(${Math.round(options.graceMs)}) -and $started.ExitCode -ne 0) { [Console]::Error.WriteLine($program + ' exited with ' + $started.ExitCode); continue };`
+  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); foreach ($program in @(${programs})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath ([Management.Automation.WildcardPattern]::Escape($program))${argumentsPart} -WorkingDirectory ([Management.Automation.WildcardPattern]::Escape(${psLiteral(dirname(path))})) -PassThru${hiddenPart} } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) {${gracePart} [Console]::Out.WriteLine($started.Id) }; exit 0 }; exit 1`
   return spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
     cwd: dirname(path), stdio: options.isPiped ? ['ignore', 'pipe', 'pipe'] : 'ignore', windowsHide: true, env: options.env,
   })
@@ -1010,7 +1014,7 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
     const programs = [...new Set(candidates)].filter(isInstalled)
     if (programs.length === 0) return fallback()
     try {
-      watchWindowsLaunch(windowsStart(programs, [`--app=${target}`]), isOpen => isOpen ? done(true) : fallback())
+      watchWindowsLaunch(windowsStart(programs, [`--app=${target}`], { graceMs: LAUNCH_GRACE_MS }), isOpen => isOpen ? done(true) : fallback())
     } catch {
       fallback()
     }
