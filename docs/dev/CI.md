@@ -56,7 +56,9 @@ three spawn-heavy files ran side by side on the 4-vCPU runner, every test ran ab
 the tests with the tightest time limits failed, a different one each run (#910). Each part runs every
 sixth (or second) file in one Node run. `tests/codex-local.test.mjs` and `tests/board.test.mjs` take
 far longer than the rest (about 8 and 5 minutes there), so every part runs them, each part taking an
-equal share of their tests. A serial run times one file at a time and records the times, and a step
+equal share of their tests. On Ubuntu the board set runs in two parts: files run side by side there, but
+Node runs one file's tests one after another, so a single part ran about as long as `codex-local` alone
+(449.9 s of that file in a 498.5 s run, over the 480 s part budget; #1130). A serial run times one file at a time and records the times, and a step
 after the tests checks them against the budgets in `scripts/ci-impact.mjs` (#902 step 4): a file over
 its budget, or a part over 480 s, fails the job and names the slow files. The file budgets come from
 step 1 of #902 (each file's share of the Windows board logs, x 1.5); the part budget is re-derived
