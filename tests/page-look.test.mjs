@@ -106,8 +106,8 @@ const fontFamily = /^var\(--font-(?:sans|mono)\)$/
 const fontShorthand = /^(?:(?:normal|italic|oblique|small-caps|bold|bolder|lighter|\d{3})\s+)*var\(--text-(?:xs|sm|md|lg)\)(?:\s*\/\s*(?:normal|[\d.]+|var\(--[\w-]+\)))?\s+var\(--font-(?:sans|mono)\)$/
 const isMobile = rule => rule.ancestors.some(ancestor => /@media\s*\([^)]*max-width\s*:\s*(?:600|640|760)px\s*\)/.test(ancestor))
 // The sheet that holds Needs you is the one raised surface. A field, an outlined button (filled with the surface so it reads on the
-// ground and on the sheet alike) and a card of the Needs you view, which is its own sheet, may use it too.
-const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input)(?=$|[:[\s])/.test(selector) || /(?:^|\s)\.sheet$/.test(selector) ||
+// ground and on the sheet alike) and a card of the Needs you view, which is its own sheet, may use it too. A select is a field.
+const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input|select)(?=$|[:[\s])/.test(selector) || /(?:^|\s)\.sheet$/.test(selector) ||
   /(?:^|\s)(?:\.btn|\.shelf-head|button[\w.:-]*|#close)(?=$|[:\s])/.test(selector) || /\.cards>li$/.test(selector)
 
 test('the page uses only colour, size, radius, spacing and motion tokens from page-look', () => {

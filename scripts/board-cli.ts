@@ -17,6 +17,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
+import { boardLanguage, settingsLangOf, withBoardSettings } from '../hooks/board-settings'
+import type { SettingsLang } from '../hooks/board-settings'
 import { barStyleName, barStyleOf, nextBarStyle, withBarStyle } from '../hooks/progress-bar'
 import type { BarStyle } from '../hooks/progress-bar'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
@@ -92,7 +94,11 @@ const systemLang = (env: unknown) => {
 }
 
 const path = progressFile()
-const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? systemLang(process.env.LANG) ?? 'en']
+const savedLanguage = (): SettingsLang | null => {
+  try { return settingsLangOf(readFileSync(settingsPath(path), 'utf8')) } catch { return null }
+}
+const wordsNow = () => STRINGS[boardLanguage(flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang')), savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))]
+let s = wordsNow()
 
 // Files changed since the board last read progress.md in full. A read refused because another
 // program holds the file open can say that nothing was changed only while this is 0. It is
@@ -714,18 +720,19 @@ let routes: Record<string, AnswerRoute> = {}
 
 // The progress bar's style, from the board's settings file (#1085); one the page or the pane
 // picked shows at the next draw. A file that cannot be read means the default.
-// Read at most every 10 s, so the page's idle poll does not read the file each time; a pick made
-// here is kept at once.
-const BAR_STYLE_MS = 10_000
-let barStyleKept: { style: BarStyle; at: number } | null = null
-const barStyleNow = (): BarStyle => {
+// The file also holds the language picked in Settings (#1163). One read serves both, at most every
+// 10 s, so the page's idle poll does not read the file each time; a pick made here is kept at once.
+const SETTINGS_MS = 10_000
+let settingsKept: { text: string | null; at: number } | null = null
+const settingsNow = (): string | null => {
   const now = Date.now()
-  if (barStyleKept !== null && now - barStyleKept.at < BAR_STYLE_MS) return barStyleKept.style
-  let style: BarStyle
-  try { style = barStyleOf(read(settingsPath(path))) } catch { style = barStyleOf(null) }
-  barStyleKept = { style, at: now }
-  return style
+  if (settingsKept !== null && now - settingsKept.at < SETTINGS_MS) return settingsKept.text
+  let text: string | null
+  try { text = read(settingsPath(path)) } catch { text = null }
+  settingsKept = { text, at: now }
+  return text
 }
+const barStyleNow = (): BarStyle => barStyleOf(settingsNow())
 // The pick from the page or the `s` key: the settings file's other keys are kept. False when the
 // file exists but does not read as a JSON object: it is left as it is. A read or write error throws.
 const saveBarStyle = (style: BarStyle): boolean => {
@@ -733,7 +740,18 @@ const saveBarStyle = (style: BarStyle): boolean => {
   const next = withBarStyle(read(file), style)
   if (next === null) return false
   writeFileSync(file, next)
-  barStyleKept = { style, at: Date.now() }
+  settingsKept = { text: next, at: Date.now() }
+  return true
+}
+
+const saveLanguage = (lang: SettingsLang): boolean => {
+  const file = settingsPath(path)
+  const next = withBoardSettings(read(file), { lang })
+  if (next === null) return false
+  // A failed write names the file on the page, as a failed read does.
+  try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
+  settingsKept = { text: next, at: Date.now() }
+  s = wordsNow()
   return true
 }
 
@@ -1583,7 +1601,7 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
   if (action.type === 'send') return { state: { ...next, note: s.serveSending(agentLabel(action.route.agent || 'claude', s)), tone: 'quiet' }, isQuit: false, isHtml: false, isWrite: false, send: action }
   if (action.type === 'style') {
     // The next style after the one in the file now, not after a pick this board kept up to 10 s ago.
-    barStyleKept = null
+    settingsKept = null
     const style = nextBarStyle(barStyleNow())
     try {
       if (!saveBarStyle(style)) return { state: { ...next, note: s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
@@ -1881,7 +1899,7 @@ const serveChild = (): void => {
         const projects = !isFresh && progressProjectCache !== null ? progressProjectCache.projects : parseProgress(read(path))
         return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
       },
-      s,
+      get s() { return s },
       port: Number(flag('--port') ?? 0) || 0,
       ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
@@ -1893,9 +1911,10 @@ const serveChild = (): void => {
       clean: cleanUp,
       bulkTidy,
       barStyle: barStyleNow,
-      setBarStyle: style => {
-        try { return saveBarStyle(style) } catch { return false }
-      },
+      setBarStyle: saveBarStyle,
+      // With no pick saved, the panel shows the setup language the board uses, not Automatic.
+      language: () => settingsLangOf(settingsNow()) ?? langOf(BAKED.lang) ?? 'auto',
+      setLanguage: saveLanguage,
       sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.
       sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,

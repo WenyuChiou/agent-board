@@ -29,9 +29,9 @@ const FILE = '## Synthetic project\n' +
   block('bbbb0000', 'working', '- [~] Background child', 5, 'codex', 'origin=run parent=cccc3333') +
   '### Hand-kept plan\n- [ ] Review\n'
 
-// The guard runs before the installed bundle: reading anything beyond progress.md, its two
-// sidecars (answered, questions) and the inbox folder, writing, polling or launching anything
-// fails the command (#832). The inbox is read so --status counts a waiting turn like the
+// The guard runs before the installed bundle: reading anything beyond progress.md, its three
+// sidecars (answered, questions, and settings for the language picked on the page, #1163) and
+// the inbox folder, writing, polling or launching anything fails the command (#832). The inbox is read so --status counts a waiting turn like the
 // page and the terminal (#1000).
 const guard = `import { createRequire as statusCreateRequire } from 'node:module'
 {
@@ -46,7 +46,8 @@ const readdir = fs.readdirSync
 const progressFile = resolve(process.env.STATUS_PROGRESS)
 const answeredFile = resolve(process.env.STATUS_PROGRESS.replace(/\\.md$/i, '') + '-answered.json')
 const questionsFile = resolve(process.env.STATUS_PROGRESS.replace(/\\.md$/i, '') + '-questions.json')
-const reads = { progress: 0, answered: 0, questions: 0, inboxDir: 0, inbox: {} }
+const settingsFile = resolve(process.env.STATUS_PROGRESS.replace(/\\.md$/i, '') + '-settings.json')
+const reads = { progress: 0, answered: 0, questions: 0, settings: 0, inboxDir: 0, inbox: {} }
 const inboxDir = resolve(dirname(progressFile), 'progress-inbox')
 const violations = []
 fs.readFileSync = (file, ...args) => {
@@ -64,6 +65,10 @@ fs.readFileSync = (file, ...args) => {
   if (target === questionsFile) {
     reads.questions++
     if (process.env.STATUS_DENIED_SIDECAR === 'questions') throw Object.assign(new Error('denied'), { code: 'EACCES' })
+    return read(file, ...args)
+  }
+  if (target === settingsFile) {
+    reads.settings++
     return read(file, ...args)
   }
   if (target.startsWith(inboxDir + sep)) {
@@ -93,19 +98,21 @@ process.on('exit', () => {
   assert.equal(reads.progress, 1, 'progress.md is read exactly once')
   assert.ok(reads.answered <= 1, 'answered file is read at most once')
   assert.ok(reads.questions <= 1, 'questions ledger is read at most once')
+  assert.ok(reads.settings <= 1, 'settings file is read at most once')
   assert.ok(reads.inboxDir <= 1, 'inbox directory is listed at most once')
   for (const [file, count] of Object.entries(reads.inbox)) assert.ok(count <= 1, 'inbox file is read at most once: ' + file)
 })
 }
 `
 
-const run = (args = [], { file = FILE, answered = null, questions = null, lang = 'en', denied = false, launcher = false, inbox = null, deniedSidecar = null } = {}) => {
+const run = (args = [], { file = FILE, answered = null, questions = null, lang = 'en', denied = false, launcher = false, inbox = null, deniedSidecar = null, settings = null } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'board-status-'))
   try {
     const path = join(root, 'progress.md')
     if (file !== null) writeFileSync(path, file)
     if (answered !== null) writeFileSync(join(root, 'progress-answered.json'), typeof answered === 'string' ? answered : JSON.stringify(answered))
     if (questions !== null) writeFileSync(join(root, 'progress-questions.json'), typeof questions === 'string' ? questions : JSON.stringify(questions))
+    if (settings !== null) writeFileSync(join(root, 'progress-settings.json'), JSON.stringify(settings))
     if (inbox !== null) {
       mkdirSync(join(root, 'progress-inbox'))
       for (const turn of inbox) writeFileSync(join(root, 'progress-inbox', turn.name), turn.body)
@@ -137,6 +144,15 @@ test('the status line counts what needs you and what is working in one line and 
 test('the status line uses all three languages and an explicit language overrides the installed one', () => {
   for (const [lang, expected] of [['en', '2 need you · 3 working'], ['zh-TW', '2 項等你 · 3 項進行中'], ['zh-CN', '2 项等你 · 3 项进行中']]) {
     const result = run(['--lang', lang], { lang: 'zh-TW' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, `${expected}\n`)
+    assert.equal(result.stderr, '')
+  }
+})
+
+test('the status line follows the language picked in Settings, and an explicit language still wins (#1163)', () => {
+  for (const [args, expected] of [[[], '2 項等你 · 3 項進行中'], [['--lang', 'en'], '2 need you · 3 working']]) {
+    const result = run(args, { lang: 'en', settings: { lang: 'zh-TW' } })
     assert.equal(result.status, 0, result.stderr)
     assert.equal(result.stdout, `${expected}\n`)
     assert.equal(result.stderr, '')
