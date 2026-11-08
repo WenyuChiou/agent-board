@@ -1,8 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 import { confirmTask, takeTask } from '../hooks/blocks'
-import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, pinned, routesOf, terminalLook } from '../hooks/board'
+import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, peekInbox, pinned, routesOf, terminalLook } from '../hooks/board'
 import type { AnswerRoute } from '../hooks/board'
-import { codexEvent, codexLifecycleStep, isLifecycleStep, LIFECYCLE_STEPS, localAgentLifecycleStep } from '../hooks/codex'
+import { codexEvent, codexLifecycleStep, isLifecycleStep, LIFECYCLE_STEPS, localAgentLifecycleStep, putCodexBlock } from '../hooks/codex'
+import { answerAgentPrompt } from '../hooks/inbox'
 import { DARK, LIGHT } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
 import { serveModel } from '../hooks/serve'
@@ -557,5 +558,130 @@ test('a working Codex or local agent placeholder step matches its state in all l
     const answered = codexEvent(askStop, { session_id: 's-1142', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-2' }, at(1), s)
     expect(answered.state).toBe('working')
     expect(answered.steps).toEqual([`- [ ] ${s.codexLifecycleWorking}`, '- [x] Should we proceed?'])
+  }
+})
+
+test('a reply typed in the agent chat moves its question out of Needs you to You replied (#401)', () => {
+  const OWNER = '0'.repeat(64)
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+
+    // 1. Codex: Prompt submitted in agent chat
+    const start = codexEvent(null, { session_id: 's-401', hook_event_name: 'SessionStart' }, at(10), s)
+    const prompt1 = codexEvent(start, { session_id: 's-401', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }, at(9), s)
+    const askStop = codexEvent(prompt1, { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-1', question: 'Deploy to production?' }, at(5), s)
+    expect(askStop.state).toBe('waiting')
+
+    const fileWaiting = `# Progress\n\n## backend\n${putCodexBlock('', askStop, OWNER)}\n`
+    const viewWaiting = buildView(parseProgress(fileWaiting), [], null, NOW, 0, {}, s)
+    expect(viewWaiting.overview.waiting).toBe(1)
+    expect(viewWaiting.waiting.length).toBe(1)
+    expect(viewWaiting.waiting[0]?.text).toBe('Deploy to production?')
+
+    // Older prompt or prompt with no time changes nothing
+    const olderPrompt = codexEvent(askStop, { session_id: 's-401', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-old' }, at(6), s)
+    expect(olderPrompt.replied).toBeUndefined()
+    const undatedPrompt = codexEvent(askStop, { session_id: 's-401', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-undated' }, 'invalid-time', s)
+    expect(undatedPrompt.replied).toBeUndefined()
+
+    // Newer prompt submitted in Codex session chat: question leaves Needs you, row says answeredWaiting
+    const answered = codexEvent(askStop, { session_id: 's-401', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-2' }, at(2), s)
+    expect(answered.replied).toBe(at(2))
+
+    const fileReplied = `# Progress\n\n## backend\n${putCodexBlock('', answered, OWNER)}\n`
+    const viewReplied = buildView(parseProgress(fileReplied), [], null, NOW, 0, {}, s)
+    expect(viewReplied.overview.waiting).toBe(0)
+    expect(viewReplied.waiting).toEqual([])
+    expect(viewReplied.groups[0]?.rows[0]?.status).toBe(s.answeredWaiting)
+
+    // Agent's next report without question settles it
+    const nextStop = codexEvent(answered, { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-2' }, at(1), s)
+    expect(nextStop.replied).toBeUndefined()
+    const fileSettled = `# Progress\n\n## backend\n${putCodexBlock('', nextStop, OWNER)}\n`
+    const viewSettled = buildView(parseProgress(fileSettled), [], null, NOW, 0, {}, s)
+    expect(viewSettled.overview.waiting).toBe(0)
+    expect(viewSettled.waiting).toEqual([])
+
+    // Agent's next report with a new question asks again
+    const askAgain = codexEvent(answered, { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-2', question: 'Should we run migrations?' }, at(1), s)
+    const fileAskAgain = `# Progress\n\n## backend\n${putCodexBlock('', askAgain, OWNER)}\n`
+    const viewAskAgain = buildView(parseProgress(fileAskAgain), [], null, NOW, 0, {}, s)
+    expect(viewAskAgain.overview.waiting).toBe(1)
+    expect(viewAskAgain.waiting.length).toBe(1)
+    expect(viewAskAgain.waiting[0]?.text).toBe('Should we run migrations?')
+
+    // 2. Inbox: An inbox agent prompt event answers the waiting question
+    const geminiMirror = {
+      sessionId: 's-inbox',
+      agent: 'gemini',
+      resume: 's-inbox',
+      project: 'frontend',
+      title: 'Build frontend',
+      firstPrompt: 'build',
+      state: 'waiting' as const,
+      source: 'tasks' as const,
+      updated: NOW - 100_000,
+      turnOrder: (NOW - 100_000) * 2,
+      tasks: [
+        { id: '1', subject: 'Ready to build, OK?', status: 'pending' as const, waiting: 'you' as const, why: '' },
+      ],
+    }
+    const fileGeminiWaiting = `# Progress\n\n## frontend\n<!-- auto session=s-inbox agent=gemini state=waiting updated=${new Date(NOW - 100_000).toISOString()} -->\n### Build frontend\n- [?] Ready to build, OK?\n<!-- /auto session=s-inbox -->\n`
+    const viewGeminiWaiting = buildView(parseProgress(fileGeminiWaiting), [], null, NOW, 0, {}, s)
+    expect(viewGeminiWaiting.overview.waiting).toBe(1)
+    expect(viewGeminiWaiting.waiting.length).toBe(1)
+
+    // Older prompt or prompt with no time returns null
+    const olderPromptTurn = { agent: 'gemini', event: 'prompt' as const, session: 's-inbox', id: 's-inbox', cwd: '/workspace/frontend', project: 'frontend', prompt: '', answer: '', transcript: '', at: NOW - 120_000 }
+    expect(answerAgentPrompt(geminiMirror, olderPromptTurn, NOW)).toBeNull()
+
+    // Newer prompt answers agent: sets replied, leaves Needs you, row says answeredWaiting
+    const promptTurn = { agent: 'gemini', event: 'prompt' as const, session: 's-inbox', id: 's-inbox', cwd: '/workspace/frontend', project: 'frontend', prompt: '', answer: '', transcript: '', at: NOW - 50_000 }
+    const answeredMirror = answerAgentPrompt(geminiMirror, promptTurn, NOW)!
+    expect(answeredMirror).not.toBeNull()
+    expect(answeredMirror.updated).toBe(NOW - 50_000)
+    expect(answeredMirror.replied).toBe(answeredMirror.updated)
+
+    const fileGeminiReplied = `# Progress\n\n## frontend\n<!-- auto session=s-inbox agent=gemini state=working updated=${new Date(answeredMirror.updated).toISOString()} replied=${new Date(answeredMirror.replied).toISOString()} -->\n### Build frontend\n- [?] Ready to build, OK?\n<!-- /auto session=s-inbox -->\n`
+    const viewGeminiReplied = buildView(parseProgress(fileGeminiReplied), [], null, NOW, 0, {}, s)
+    expect(viewGeminiReplied.overview.waiting).toBe(0)
+    expect(viewGeminiReplied.waiting).toEqual([])
+    expect(viewGeminiReplied.groups[0]?.rows[0]?.status).toBe(s.answeredWaiting)
+
+    // 3. Claude Mirror: Typing in chat sets replied and leaves Needs you
+    const claudeMirror = {
+      sessionId: 'claude-sess-1',
+      project: 'core',
+      title: 'Fix issue',
+      firstPrompt: '',
+      state: 'waiting' as const,
+      source: 'tasks' as const,
+      updated: NOW - 100_000,
+      tasks: [
+        { id: '1', subject: 'Verify fix?', status: 'pending' as const, waiting: 'you' as const, why: 'Needs your approval' },
+      ],
+    }
+    const viewClaudeWaiting = buildView([], [], claudeMirror, NOW, 0, {}, s)
+    expect(viewClaudeWaiting.overview.waiting).toBe(1)
+    expect(viewClaudeWaiting.waiting.length).toBe(1)
+
+    // Later prompt submitted in Claude chat
+    const claudeReplied = { ...claudeMirror, replied: NOW - 50_000 }
+    const viewClaudeReplied = buildView([], [], claudeReplied, NOW, 0, {}, s)
+    expect(viewClaudeReplied.overview.waiting).toBe(0)
+    expect(viewClaudeReplied.waiting).toEqual([])
+    expect(viewClaudeReplied.current?.status).toBe(s.answeredWaiting)
+
+    // Next Claude report with new question asks again
+    const claudeAskAgain = {
+      ...claudeReplied,
+      updated: NOW - 10_000,
+      tasks: [
+        { id: '2', subject: 'Merge PR?', status: 'pending' as const, waiting: 'you' as const, why: 'Needs your confirmation' },
+      ],
+    }
+    const viewClaudeAskAgain = buildView([], [], claudeAskAgain, NOW, 0, {}, s)
+    expect(viewClaudeAskAgain.overview.waiting).toBe(1)
+    expect(viewClaudeAskAgain.waiting.length).toBe(1)
   }
 })

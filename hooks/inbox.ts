@@ -192,8 +192,11 @@ export const answerAgentPrompt = (mirror: (ProgressMirror & { confirmedAt?: numb
   // A known session without a source clock is still unknown causality. Its
   // heartbeat/arrival time cannot prove that this prompt answered its question.
   if (barrier < 0 || order <= barrier) return null
+  const at = prompt.at ?? now
+  const updated = Math.min(at, now)
   return {
-    ...mirror, state: 'working', updated: now, promptOrder: order, autoAsk: null,
+    ...mirror, state: 'working', updated, promptOrder: order, autoAsk: null,
+    replied: updated,
     promptQuestion: mirror.tasks.some(one => one.waiting === 'you') ? { order, state: mirror.state, autoAsk: mirror.autoAsk, tasks: mirror.tasks.filter(one => one.waiting === 'you') } : null,
     tasks: mirror.tasks.map(one => one.waiting === 'you' ? answeredStep(one) : one),
   }

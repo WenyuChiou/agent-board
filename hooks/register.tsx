@@ -4015,7 +4015,16 @@ const setNotify = ($: EngineInterface, requested?: boolean): Promise<boolean> =>
 
 const settle = async ($: EngineInterface, isWriteBlocking = true): Promise<void> => {
   const at = await $.clock.now()
-  await saveMine($, mirror => ({ ...mirror, state: stateOf(mirror, isTurnRunning), isTurnRunning, updated: at }))
+  await saveMine($, mirror => {
+    const isReplied = mirror.replied !== undefined && Number.isFinite(mirror.replied) && mirror.replied >= (mirror.updated ?? 0)
+    return {
+      ...mirror,
+      state: stateOf(mirror, isTurnRunning),
+      isTurnRunning,
+      updated: at,
+      ...(isReplied ? { replied: at } : {}),
+    }
+  })
   const writing = queueWrite($)
   if (isWriteBlocking) await writing
 }
@@ -4363,6 +4372,15 @@ export const register: Register = (on, options) => {
     else if (e.turnId !== undefined && isAnswer) await answerHere($)
     else if (e.turnId !== undefined && e.origin.kind === 'task-notification')
       await saveBackground($, one => finishBackgroundJob(one, e.text, true, isTurnRunning))
+    else if (isAnswer) {
+      const at = await $.clock.now()
+      const mirror = await read($, mine)
+      const hasQuestion = mirror !== null && (isAskingYou(mirror) || mirror.autoAsk !== null || mirror.tasks.some(t => waitsOnYou(mirror, t)))
+      if (mirror !== null && hasQuestion && at > (mirror.updated ?? 0)) {
+        await saveMine($, one => ({ ...one, replied: at }), false)
+        await settle($, false)
+      }
+    }
 
     return entered
   })
@@ -4452,7 +4470,7 @@ export const register: Register = (on, options) => {
     const question = e.isAborted ? null : lastQuestion(isDelivery ? e.answer.replace(/^\s*ACK \S+[ \t]*/, '') : e.answer)
     if (mirror !== null && mirror.tasks.length > 0) {
       const branch = await branchName($)
-      await saveMine($, one => ({ ...one, branch }))
+      await saveMine($, one => ({ ...one, branch, replied: undefined }))
       // A turn that ended on a question waits on the person even if Claude did not mark it.
       if (question !== null && mirror.source === 'tasks') await saveMine($, one => markAsked(one, question, hasRunningTurnBackgroundJob))
       await settle($)
@@ -4466,7 +4484,10 @@ export const register: Register = (on, options) => {
         })
       }
     }
-    if (mirror !== null && mirror.tasks.length === 0 && mirror.source === 'turns') await settle($)
+    if (mirror !== null && mirror.tasks.length === 0 && mirror.source === 'turns') {
+      await saveMine($, one => ({ ...one, replied: undefined }))
+      await settle($)
+    }
     // No Task list: a turn that changed something, or any turn once the session is tracked,
     // is summed up into steps.
     if (mirror !== null && !e.isAborted && !isDelivery && (mirror.tasks.length === 0 || mirror.source === 'turns')) {

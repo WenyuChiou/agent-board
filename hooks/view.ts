@@ -416,13 +416,17 @@ export const foldSteps = (steps: readonly ViewStep[], room = 6, s: Strings = ZH_
 const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
   if (mirror.tasks.length === 0) return null
   const doing = doingTask(mirror)
-  const waitingYou = mirror.tasks.find(task => waitsOnYou(mirror, task))
+  const isReplied = mirror.replied !== undefined && Number.isFinite(mirror.replied) && (mirror.updated === null || mirror.replied >= (mirror.updated ?? 0))
+  const waitingYou = isReplied ? undefined : mirror.tasks.find(task => waitsOnYou(mirror, task))
   const blocked = mirror.tasks.find(task => task.status !== 'completed' && task.blocked !== null)
   const done = mirror.tasks.filter(task => task.status === 'completed' && !task.handoffTo).length
   let status = s.waitingReply
   let tone: Tone = 'warn'
   if (mirror.state === 'done') {
     status = s.allDone
+    tone = 'quiet'
+  } else if (isReplied) {
+    status = s.answeredWaiting
     tone = 'quiet'
   } else if (waitingYou !== undefined) {
     status = s.waitsOnYou(waitingYou.subject)
@@ -434,7 +438,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     tone = 'accent'
   }
   const steps = mirror.tasks.map((task, index) => {
-    const hasAnswer = isAnswered(mirror, task)
+    const hasAnswer = isAnswered(mirror, task) || isReplied
     let stepStatus: ProgressStepStatus = task.handoffTo ? 'cancelled' : task.status === 'completed' ? 'done' : 'todo'
     if (task.status !== 'completed') {
       if (task.blocked !== null) stepStatus = 'blocked'
@@ -938,6 +942,7 @@ export const buildView = (
     return key
   }
   // How many tasks share each project and title, counted once rather than for every row (#371).
+  const repliedQuestions = new Set<string>()
   const twins = new Map<string, number>()
   for (const project of projects) {
     for (const task of project.tasks) {
@@ -980,6 +985,7 @@ export const buildView = (
       const stale = isStale(task.auto, now, updated, staleMs)
       const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
+      const isRepliedTask = task.auto?.replied !== undefined && Number.isFinite(task.auto.replied) && (task.auto.updated === null || task.auto.replied >= task.auto.updated)
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
       const taskQuestions: WaitingItem[] = []
@@ -1043,7 +1049,9 @@ export const buildView = (
           return held
         }
         let value: boolean
-        if (isFrozen) {
+        if (isRepliedTask) {
+          value = false
+        } else if (isFrozen) {
           const saved = savedAt(index)
           value = saved === undefined ? true : saved.isUnresolved === true && saved.source !== undefined && !marked.has(saved.id)
         } else if (marked.has(keys[index] ?? '')) {
@@ -1123,7 +1131,13 @@ export const buildView = (
         if (counts !== undefined) counts.indexLookups += 1
         return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
       }))
-      if (!isInactive) waiting.push(...taskQuestions)
+      if (!isInactive && !isRepliedTask) waiting.push(...taskQuestions)
+      if (isRepliedTask) {
+        for (const item of taskQuestions) {
+          if (item.questionId) repliedQuestions.add(item.questionId)
+          if (item.hideKey) repliedQuestions.add(item.hideKey)
+        }
+      }
 
       let completion: DoneItem & { at: number } | null = null
       if (isComplete) {
@@ -1161,18 +1175,18 @@ export const buildView = (
       // A hook's placeholder step says the session waits; while it works the row shows no step (#612).
       const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
       const { done, total } = countSteps(shown)
-      const isAnsweredWaiting = !isBlocked && auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index))
+      const isAnsweredWaiting = !isBlocked && (auto === 'waiting' || isRepliedTask) && (task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index)) || isRepliedTask)
       const phrase =
         auto === 'working' && isBlocked
           ? stepPhrase(task, s, isPrompt)
-          : auto === 'working'
-          ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
-          : auto === 'ended'
-            ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
-            : !isBlocked && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
-              ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
-              : isAnsweredWaiting
-                ? { status: s.answeredWaiting, tone: 'quiet' as const }
+          : isAnsweredWaiting
+            ? { status: s.answeredWaiting, tone: 'quiet' as const }
+            : auto === 'working'
+            ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
+            : auto === 'ended'
+              ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
+              : !isBlocked && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
+                ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
                 : stepPhrase(task, s, isPrompt)
       const open = task.steps[currentStepIndex(task)]
       const group = folded.runs.get(task)
@@ -1305,7 +1319,15 @@ export const buildView = (
     else group.rows.push(row)
   }
 
-  const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined).flatMap(turn => {
+  for (const turn of pending) {
+    if (turn.isQuestion && turn.id !== undefined && turn.replied !== undefined && turn.replied > turn.at) {
+      const scope = questionScope(turn.project, turn.agent, turn.id ?? '')
+      const id = observed?.keys[pendingQuestionSlot(scope, turn.text)] ?? observed?.ledger.records.find(record => record.scope === scope && record.isUnresolved && record.producerSources?.includes(JSON.stringify(turn)))?.id
+      if (id !== undefined) repliedQuestions.add(id)
+    }
+  }
+
+  const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined && !(turn.replied !== undefined && turn.replied > turn.at)).flatMap(turn => {
     const updated = inactiveScopes.get(questionScope(turn.project, turn.agent, turn.id ?? ''))
     if (updated !== undefined && turn.at <= updated) return []
     const scope = questionScope(turn.project, turn.agent, turn.id ?? '')
@@ -1314,7 +1336,13 @@ export const buildView = (
     const parts = splitNote(turn.text)
     return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
-  const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).map(item => ({ ...item, questionId: item.hideKey }))
+  const isRepliedMine = mine !== null && mine.replied !== undefined && Number.isFinite(mine.replied) && (mine.updated === null || mine.replied >= (mine.updated ?? 0))
+  if (isRepliedMine && mine !== null) {
+    for (const item of ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null)))) {
+      if (item.hideKey) repliedQuestions.add(item.hideKey)
+    }
+  }
+  const own = mine === null || mine.isRun === true || isRepliedMine ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).map(item => ({ ...item, questionId: item.hideKey }))
   // Each record by its id, once: a board holds hundreds of questions and thousands of records.
   const recordOf = new Map<string, QuestionRecord>()
   const rankOf = new Map<string, number>()
@@ -1356,7 +1384,7 @@ export const buildView = (
   const runSessions = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto?.isRun === true ? [sessionIdentity(task.auto)] : [])).filter(identity => identity !== null))
   const starterOf = startersOf(projects)
   for (const record of observed?.ledger.records ?? []) {
-    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id) || foldedScopes.has(record.scope)) continue
+    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id) || foldedScopes.has(record.scope) || repliedQuestions.has(record.id)) continue
     const source = record.source
     const saved = source.kind === 'block' ? sourceSnapshot(source.data) : null
     let agent = source.agent
@@ -1462,8 +1490,8 @@ export const buildView = (
   if (current !== null && !asks.some(item => item.where === 'here') && all.some(item => item.where === 'here' && item.ageStage !== 'pending')) {
     current.status = reminder.some(item => item.where === 'here') ? s.sectionQuestionReminders : s.sectionOlderQuestions
     current.tone = 'quiet'
-  } else if (current !== null && own.some(isResolved) && !all.some(item => item.where === 'here')) {
-    current.status = s.answeredNote
+  } else if (current !== null && (own.some(isResolved) || isRepliedMine) && !all.some(item => item.where === 'here')) {
+    current.status = isRepliedMine ? s.answeredWaiting : s.answeredNote
     current.tone = 'quiet'
   }
   return {

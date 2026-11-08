@@ -32,6 +32,8 @@ export type CodexReport = Origin & {
   approvalRevision?: string
   askedRevision?: string
   updated: string
+  // ISO timestamp when a prompt replied to a waiting question in chat (#401).
+  replied?: string
   events?: string[]
   retiredTurns?: string[]
   agent?: LocalAgent
@@ -180,6 +182,13 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest' && !isClosingQuestion) return previous
   if (previous?.turn && turn && previous.turn !== turn && event !== 'UserPromptSubmit') throw new Error('STALE_TURN')
   const working = event === 'UserPromptSubmit'
+  const isHumanPrompt = working && input.prompt_submitted !== false
+  if (isHumanPrompt && previous?.asked !== undefined) {
+    const promptAt = Date.parse(now)
+    const questionAt = Date.parse(previous.updated)
+    // A prompt with no time of its own, or one older than the question, changes nothing (#401).
+    if (!Number.isFinite(promptAt) || promptAt < questionAt) return previous
+  }
   // A reply that ends on a question waits for the person, even after the model reported its own steps done.
   const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' && !isClosingQuestion ? 'done' : 'waiting'
   // Keep the hook's own steps in place: the ledger needs to see their original words closed.
@@ -212,6 +221,7 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
     ...(approvalRevision === undefined ? {} : { approvalRevision }),
     ...(askedRevision === undefined ? {} : { askedRevision }),
     updated: now,
+    ...(isHumanPrompt && previous?.asked !== undefined ? { replied: now } : {}),
     // A replayed event keeps the list as it was, so the replay changes no bytes.
     events: previous?.events?.includes(key) ? previous.events : [...(previous?.events ?? []), key].slice(-256),
     retiredTurns: [...(previous?.retiredTurns ?? []), ...(working && previous?.turn && previous.turn !== turn ? [previous.turn] : [])].slice(-128),
@@ -359,7 +369,8 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const resume = RESUME.test(report.session) ? ` resume=${report.session}` : ''
   // Only a run is marked: a person's session is the default, so its block stays as it was.
   const run = report.origin === 'run' ? ` origin=run${report.parent !== undefined && RESUME.test(report.parent) ? ` parent=${report.parent}` : ''}` : ''
-  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${resume}${run} -->`
+  const replied = report.replied ? ` replied=${report.replied}` : ''
+  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${replied}${resume}${run} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const block = [marker, `### ${report.title}`, ...stepLines(report, owner, true), `<!-- /auto session=${id} -->`].join(eol)
   // Use the board's scanner: Markdown examples are not task ownership, and a
