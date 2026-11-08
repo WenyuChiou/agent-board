@@ -185,8 +185,8 @@ Hooks 说明对话在做事还是在等；任务步骤和什么时候算完成�
 | Cursor | IDE (Composer) | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| DeepSeek Harness | TUI | 1 | &#91;P1&#93; | Implemented（已实现） | 未测试 | [hooks/receivers/deepseek.ts](hooks/receivers/deepseek.ts) |
+| DeepSeek Harness | Web | 1 | &#91;P1&#93; | Verified（已验证） | [docs/validation/2026-11-08-deepseek-harness-live.md](docs/validation/2026-11-08-deepseek-harness-live.md) | [hooks/receivers/deepseek.ts](hooks/receivers/deepseek.ts) |
 | dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |

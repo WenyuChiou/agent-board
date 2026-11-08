@@ -438,7 +438,7 @@ const filesByFolder = (mode: string, agent: string): boolean => mode === '--code
 // runs as --report does and prints nothing, because Codex and Gemini read a hook's stdout as a decision.
 export const runCodexLocal = async (args: string[], boardPath: string, s: Strings, planInput?: Json): Promise<boolean> => {
   args = args.map(arg => arg === '--report' ? '--codex-report' : arg)
-  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event'].find(one => args.includes(one))
+  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event', '--mailbox'].find(one => args.includes(one))
   if (!mode) return false
   const flag = (name: string): string | undefined => {
     const index = args.indexOf(name)
@@ -496,6 +496,33 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const connectorProgress = activeConnection === undefined ? undefined : activeConnection.connectedProgress ?? join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'progress.md')
   const storedProgress = loaded.progress ?? otherManifests.find(one => typeof one.progress === 'string')?.progress ?? connectorProgress
   const progress = localProgressPath(flag('--progress-file'), mode === '--codex-setup' ? join(root, 'progress.md') : boardPath, storedProgress)
+  // DeepSeek's plugin runs in the dsh process and hands a board message to its idle session itself (#725):
+  // it takes the session's next message here (which also keeps the session's mailbox open, so its card
+  // has a Send box), gives it to the session, then marks it delivered here. `watch` is the folder whose
+  // messages.json changes when the board queues a message.
+  if (mode === '--mailbox') {
+    const action = flag('--mailbox'), session = flag('--session')
+    if (agent !== 'deepseek' || session === undefined || !['take', 'accept', 'end'].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
+    const directory = defaultMessagesDirectory(progress, home, process.env, process.platform)
+    const mailbox = hookMailbox(directory, 5000)
+    const answer = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value)}\n`) }
+    if (action === 'take') {
+      const message = await mailbox.turn(agent, session, 'dsh', Date.now())
+      // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
+      const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
+      const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
+      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary } })
+    } else if (action === 'accept') {
+      const id = flag('--id'), nonce = flag('--nonce')
+      if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
+      await mailbox.accept(agent, session, id, nonce, Date.now())
+      answer({ ok: true })
+    } else {
+      await mailbox.end(agent, session, Date.now())
+      answer({ ok: true })
+    }
+    return true
+  }
   // Hermes Agent reads its hooks from config.yaml and its trust answers from shell-hooks-allowlist.json, both in its home (#1115).
   const hermesDir = resolve(flag('--hermes-dir') ?? hermesHome(home, sep, process.env, process.platform))
   const configs: Partial<Record<LocalAgent, string>> = {

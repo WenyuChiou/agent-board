@@ -16,6 +16,7 @@ export const ZH_CN: Strings = {
   messagesTimeout: "等候回复超时，请先检查原对话",
   messagesAccepted: "等候回复",
   messagesHandedNextTurn: '已在回合开始时交给此会话，尚未确认回复。',
+  messagesHandedNow: '已交给此会话，尚未确认回复。',
   messagesAcceptedDisconnected: "连接中断。结果未确认；等候回复。",
   messagesAcknowledged: "已回复",
   messagesRejected: '已拒绝／未发送',
