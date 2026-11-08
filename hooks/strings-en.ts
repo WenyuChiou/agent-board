@@ -15,6 +15,7 @@ export const EN: Strings = {
   messagesUncertain: "No reply confirmed. Check the original conversation.",
   messagesTimeout: "Reply timed out. Check the original conversation before retrying.",
   messagesAccepted: "Waiting for a reply",
+  messagesAcceptedUnconfirmed: "Delivered. Reply not confirmed.",
   messagesHandedNextTurn: 'Handed to the session at its turn start. No reply is confirmed.',
   messagesHandedNow: 'Handed to the session. No reply is confirmed.',
   messagesAcceptedDisconnected: "Connection interrupted. Result unconfirmed; waiting for a reply.",

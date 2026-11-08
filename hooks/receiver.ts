@@ -74,12 +74,11 @@ export const parseAddress = (text: string, key: string): BoardAddress | null => 
   } catch { return null }
 }
 
-// The line the hub takes as this delivery's ACK: the reply's own first line, nothing past it. A
-// first line over the room keeps the ACK alone.
+// Keep this rule in step with scripts/message-client.mjs: only the matching line reaches the hub.
 export const ackLine = (answer: string, nonce: string): string | null => {
-  const line = (answer.split(/\r\n|\r|\n/, 1)[0] ?? '').trim()
   const ack = `ACK ${nonce}`
-  if (line !== ack && !line.startsWith(`${ack} `)) return null
+  const line = answer.split(/\r?\n/).find(one => one === ack || one.startsWith(`${ack} `))
+  if (line === undefined) return null
   return line.length > ACK_ROOM ? ack : line
 }
 
