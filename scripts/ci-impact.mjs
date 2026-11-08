@@ -143,6 +143,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/page-regressions.test.mjs': 90_000,
   'tests/codex-fallback.test.mjs': 80_000,
   'tests/prompt-hooks.test.mjs': 65_000,
+  // Grew past the floor with #1162's terminal setup tests: 45.3 s and 52.3 s in the two Windows
+  // runs of main a89f4199 (run 42472161465, Node 22 and 24), x 1.5 and rounded up (#1159).
+  'tests/setup-guidance.test.mjs': 80_000,
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
