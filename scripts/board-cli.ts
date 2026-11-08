@@ -917,13 +917,14 @@ const watchLaunch = (child: ChildProcess, onResult: (isOpen: boolean) => void): 
 
 // Start-Process creates the long-lived program without forwarding a shell's extra handles.
 // PowerShell is hidden; a browser started from it keeps its normal visible window.
-const psLiteral = (value: string): string => `'${value.replace(/'/g, "''")}'`
+// PowerShell ends a single-quoted string at the curly quotes too, so each is doubled like '.
+const psLiteral = (value: string): string => `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'`
 const windowsArgument = (value: string): string => `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
 type WindowsStartOptions = { isHidden?: boolean; env?: NodeJS.ProcessEnv; isPiped?: boolean }
 const windowsStart = (bin: string, argv: string[], options: WindowsStartOptions = {}): ChildProcess => {
   const argumentsPart = argv.length === 0 ? '' : ` -ArgumentList ${psLiteral(argv.map(windowsArgument).join(' '))}`
   const hiddenPart = options.isHidden ? ' -WindowStyle Hidden' : ''
-  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); $started = Microsoft.PowerShell.Management\\Start-Process -FilePath ${psLiteral(bin)}${argumentsPart} -WorkingDirectory ${psLiteral(dirname(path))} -PassThru${hiddenPart}; if ($started) { [Console]::Out.WriteLine($started.Id) }`
+  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); $started = Microsoft.PowerShell.Management\\Start-Process -FilePath ${psLiteral(bin)}${argumentsPart} -WorkingDirectory ([Management.Automation.WildcardPattern]::Escape(${psLiteral(dirname(path))})) -PassThru${hiddenPart}; if ($started) { [Console]::Out.WriteLine($started.Id) }`
   return spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
     cwd: dirname(path), stdio: options.isPiped ? ['ignore', 'pipe', 'pipe'] : 'ignore', windowsHide: true, env: options.env,
   })
@@ -2185,13 +2186,14 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
           if (isLauncherDone && (pid === undefined || !isRunning(pid))) break
           await new Promise(done => setTimeout(done, 50))
         }
-        if (url === null && pid !== undefined && isRunning(pid)) {
-          try { process.kill(pid) } catch {}
-        }
         let stderr = launcherError
         try { stderr = (stderr + '\n' + readFileSync(err, 'utf8')).slice(-16_384) } catch {}
         return { url, stderr, readyBy }
       } finally {
+        // In finally, so a server whose ready file could not be read is stopped too.
+        if (url === null && pid !== undefined && isRunning(pid)) {
+          try { process.kill(pid) } catch {}
+        }
         if (url === null && child !== undefined && !isLauncherDone) child.kill()
         child?.stdout?.destroy()
         child?.stderr?.destroy()

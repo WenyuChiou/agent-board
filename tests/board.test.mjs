@@ -5370,6 +5370,30 @@ test('Windows server startup releases Cursor pipes while its page stays running'
   } finally { await board.end([]) }
 })
 
+test('a Windows page starts from a folder whose name holds a curly apostrophe, brackets and PowerShell text, and runs none of it', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  // ’ ends a PowerShell single-quoted string as ' does, and Start-Process reads -WorkingDirectory as a wildcard.
+  const folder = join(board.dir, '[x] x’;New-Item -ItemType File -Name injected -Force;#')
+  const path = join(folder, 'progress.md')
+  const script = join(folder, 'agent-board.mjs')
+  const mine = servedAt(join(board.dir, 'run'), path)
+  try {
+    mkdirSync(folder)
+    writeFileSync(path, FILE)
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const out = await new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open'], { env: board.env, cwd: board.dir, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stdout}\n${stderr}`)) : done(stdout))))
+    assert.ok(board.urlOf(out), out)
+    for (const where of [board.dir, folder]) assert.equal(existsSync(join(where, 'injected')), false, 'a folder name never runs as PowerShell code')
+  } finally {
+    const record = existsSync(mine) ? JSON.parse(readFileSync(mine, 'utf8')) : null
+    if (record !== null) {
+      spawnSync(process.execPath, [script, '--stop'], { env: board.env, cwd: board.dir, windowsHide: true })
+      for (let tries = 0; processAlive(record.pid) && tries < 50; tries++) await delay(100)
+    }
+    await board.end([])
+  }
+})
+
 test('Windows browser startup releases Cursor pipes while the browser stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
   const board = serveIn()
   const programs = join(board.dir, 'Programs & Friends')
