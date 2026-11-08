@@ -215,7 +215,10 @@ const reportSteps = (state: unknown, given: unknown, maximum: number): string[] 
     return `- [${marked[1]!.toLowerCase()}] ${marked[2]}`
   })
   if (state === 'done' && steps.some(step => !/^- \[[x\-]\]/.test(step))) throw new Error('UNFINISHED_STEPS')
-  return steps.slice(0, maximum)
+  if (steps.length <= maximum) return steps
+  // Over the limit, a question for the user is never the step left out.
+  let room = maximum - Math.min(maximum, steps.filter(step => step.startsWith('- [?]')).length)
+  return steps.filter(step => step.startsWith('- [?]') || room-- > 0).slice(0, maximum)
 }
 
 export const validateCodexReport = (report: CodexReport, session: string): CodexReport => {

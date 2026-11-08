@@ -4594,6 +4594,19 @@ test('a report with more than forty steps keeps the first forty and reports the 
   assert.doesNotMatch(text, /^- \[ \] Step (41|42|43)$/m)
 }))
 
+test('a report with more than forty steps keeps a question for the user that comes after the fortieth', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const steps = Array.from({ length: 45 }, (_, index) => `- [ ] Step ${index + 1}`)
+  steps[42] = '- [?] Deploy it, OK?'
+  const result = f.command(['--report'], { title: 'Long list', state: 'working', steps })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).dropped, 5)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^- \[\?\] Deploy it, OK\?$/m)
+  assert.match(text, /^- \[ \] Step 39$/m)
+  assert.doesNotMatch(text, /^- \[ \] Step (40|41|42|44|45)$/m)
+}))
+
 test('an unreadable report step names its first sixty characters and the accepted form', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   const step = `Synthetic invalid step ${'z'.repeat(70)}`
