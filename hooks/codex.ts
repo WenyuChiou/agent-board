@@ -46,23 +46,31 @@ export const codexEvents = ['SessionStart', 'UserPromptSubmit', 'PermissionReque
 // The plan a tool call carries, as a report input (#922). Codex's update_plan sends
 // `plan: [{step, status}]` and Gemini's write_todos `todos: [{description, status}]`; nothing else of
 // the call is read. Grok Build's todo_write may carry only the changed items, so its list is read from
-// the result, which holds the whole list after the merge (camelCase payload). Null when it is another
-// tool, no session id, or no usable step.
+// the result, which holds the whole list after the merge (camelCase payload). Hermes' todo tool puts
+// that list in extra.result as JSON. Null when it is another tool, no session id, or no usable step.
 const PLAN_MARKS: Record<string, string> = { completed: 'x', in_progress: '~', pending: ' ', cancelled: '-', blocked: '!' }
 const asRecord = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
 export const planReport = (raw: Record<string, unknown>): { session: string; input: { state: 'working'; steps: string[]; planTitle: string } } | null => {
   const isGrok = raw.toolName === 'todo_write'
   const isCodex = raw.tool_name === 'update_plan'
+  const isHermes = raw.tool_name === 'todo' && raw.hook_event_name === 'post_tool_call'
+  const hermesList = (): unknown => {
+    const input = asRecord(raw.tool_input)
+    const result = asRecord(raw.extra).result
+    if (result === undefined) return input.merge === true ? undefined : input.todos
+    if (typeof result !== 'string') return undefined
+    try { return asRecord(JSON.parse(result)).todos } catch { return undefined }
+  }
   // A truncated result is half a list, and a DuplicateId or InvalidArgument result has none.
   const list = isGrok ? (raw.toolResultTruncated === true ? undefined : asRecord(asRecord(raw.toolResult).TodosUpdated).todos)
-    : isCodex ? asRecord(raw.tool_input).plan : raw.tool_name === 'write_todos' ? asRecord(raw.tool_input).todos : undefined
+    : isCodex ? asRecord(raw.tool_input).plan : raw.tool_name === 'write_todos' ? asRecord(raw.tool_input).todos : isHermes ? hermesList() : undefined
   const session = isGrok ? raw.sessionId : raw.session_id
   if (typeof session !== 'string' || !Array.isArray(list)) return null
   const items: { mark: string; text: string }[] = []
   for (const item of list) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) continue
     const one = item as Record<string, unknown>
-    const words = one[isGrok ? 'content' : isCodex ? 'step' : 'description']
+    const words = one[isGrok || isHermes ? 'content' : isCodex ? 'step' : 'description']
     if (typeof words !== 'string') continue
     let text = words.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()
     // The report check refuses a step line over 500 characters, its `- [m] ` marker included: a longer
