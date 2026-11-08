@@ -81,8 +81,8 @@ syntheticSync()
     assert.equal(result.status, 0, result.stderr || String(result.error))
     return JSON.parse(result.stdout)
   }
-  const start = async () => {
-    const child = spawn(process.execPath, [script, '--serve-child'], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+  const start = async (...args) => {
+    const child = spawn(process.execPath, [script, '--serve-child', ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     let stderr = ''
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', chunk => { stderr += chunk })
@@ -119,6 +119,24 @@ const files = directory => Object.fromEntries(readdirSync(directory, { withFileT
 
 const block = (agent, session = 'a1b2c3d4') => `<!-- auto session=${session} agent=${agent} state=working updated=2020-01-01T00:00:00Z -->\n### Synthetic work\n- [~] Work\n<!-- /auto session=${session} -->\n`
 
+const nativeCodex = f => {
+  const bin = join(f.root, 'synthetic bin')
+  if (process.platform !== 'win32') return join(bin, 'codex')
+  const executable = join(bin, 'codex.exe')
+  const standIn = join(bin, 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
+  writeFileSync(executable, 'synthetic executable')
+  const prelude = `import syntheticChild from 'node:child_process'
+import { syncBuiltinESMExports as syncSyntheticChild } from 'node:module'
+const spawnSyntheticChild = syntheticChild.spawn
+syntheticChild.spawn = (file, args, options) => file === ${JSON.stringify(executable)}
+  ? spawnSyntheticChild(process.execPath, [${JSON.stringify(standIn)}, ...args], options)
+  : spawnSyntheticChild(file, args, options)
+syncSyntheticChild()
+`
+  writeFileSync(f.script, prelude + readFileSync(f.script, 'utf8'))
+  return executable
+}
+
 test('Settings agent states follow their order in all three languages', () => {
   for (const words of [EN, ZH_TW, ZH_CN]) {
     assert.deepEqual(settingsAgentState(true, true, true, true, words), { state: words.settingsAgentOnBoard, button: 'remove' })
@@ -129,9 +147,95 @@ test('Settings agent states follow their order in all three languages', () => {
   }
 })
 
+test('Settings setup confirmations describe files and hook approval', () => {
+  assert.equal(EN.settingsAgentSetupConfirm('Codex', 1, true), 'Set up Codex? Setup will change 1 file. It also approves the board’s hooks.')
+  assert.equal(EN.settingsAgentSetupConfirm('Codex', 2, true), 'Set up Codex? Setup will change 2 files. It also approves the board’s hooks.')
+  assert.equal(EN.settingsAgentSetupConfirm('Cursor', 1, false), 'Set up Cursor? Setup will change 1 file.')
+  assert.equal(EN.settingsAgentSetupConfirm('Cursor', 2, false), 'Set up Cursor? Setup will change 2 files.')
+  assert.equal(EN.settingsAgentSetupConfirm('Codex', 0, true), 'Approve the board’s hooks for Codex? No files change.')
+  assert.equal(EN.settingsAgentSetupConfirm('Cursor', 0, false), 'Set up Cursor? No files need to change.')
+  assert.equal(ZH_TW.settingsAgentSetupConfirm('Codex', 0, true), '要核准 Codex 使用看板的 hooks 嗎？不用改動任何檔案。')
+  assert.equal(ZH_CN.settingsAgentSetupConfirm('Codex', 0, true), '要批准 Codex 使用看板的 hooks 吗？不用改动任何文件。')
+})
+
+test('Settings keeps every agent and caches detection when the Codex hooks check fails', { timeout: 30_000 }, async () => {
+  for (const isExplicit of [false, true]) {
+    const f = fixture()
+    const programs = setupPrograms(f.root, f.env, ['codex'])
+    const executable = nativeCodex(f)
+    const standIn = process.platform === 'win32' ? join(f.root, 'synthetic bin', 'node_modules', '@openai', 'codex', 'bin', 'codex.js') : executable
+    const source = readFileSync(standIn, 'utf8')
+    const hookCheck = "if (message.method === 'hooks/list') {"
+    assert.ok(source.includes(hookCheck))
+    writeFileSync(standIn, source.replace(hookCheck, `if (message.method === 'hooks/list') {
+    process.stdout.write(JSON.stringify({ id: message.id, error: { code: -1, message: 'synthetic hooks failure' } }) + '\\n')
+    return
+  }
+  ${hookCheck}`), { mode: 0o755 })
+    f.local('--codex-setup', '--agent', 'codex', '--apply')
+    programs.clear()
+    const board = await f.start(...(isExplicit ? ['--codex-bin', executable] : []))
+    try {
+      for (let i = 0; i < 2; i++) {
+        const result = await board.call('GET', '/api/agents')
+        assert.equal(result.status, 200, result.text)
+        assert.deepEqual(result.json().rows.map(row => row.agent), setupAgents)
+      }
+      assert.equal(programs.calls().filter(call => call.method === 'hooks/list').length, 1, 'a failing check is cached')
+    } finally { await board.close() }
+  }
+})
+
+test('Settings keeps every agent when the Codex doctor itself throws', { timeout: 25_000 }, async () => {
+  const f = fixture()
+  f.local('--codex-setup', '--agent', 'codex', '--apply')
+  const manifest = join(f.data, 'install-codex.json')
+  const record = JSON.parse(readFileSync(manifest, 'utf8'))
+  record.groups = []
+  writeFileSync(manifest, JSON.stringify(record))
+  const board = await f.start()
+  try {
+    const result = await board.call('GET', '/api/agents')
+    assert.equal(result.status, 200, result.text)
+    assert.deepEqual(result.json().rows.map(row => row.agent), setupAgents)
+    assert.equal(result.json().rows.find(row => row.agent === 'codex').state, EN.settingsAgentStart)
+  } finally { await board.close() }
+})
+
+test('Settings directs connector-managed agent removal back to Claude Code', { timeout: 25_000 }, async () => {
+  for (const hasOtherInstall of [false, true]) {
+    const f = fixture()
+    if (hasOtherInstall) f.setup('--agent', 'gemini', '--apply')
+    writeFileSync(join(f.data, 'legacy-connect.json'), JSON.stringify({
+      version: 1, revision: 1, disabled: false, owned: {}, notified: [], connectedProgress: f.progress,
+      setup: { agents: [
+        { agent: 'cursor', label: 'Cursor', hook: 'configured', board: 'ready' },
+        ...(hasOtherInstall ? [{ agent: 'gemini', label: 'Gemini', hook: 'configured', board: 'ready' }] : []),
+      ], problems: [], node: null },
+    }))
+    const board = await f.start()
+    try {
+      const rows = await board.call('GET', '/api/agents')
+      assert.equal(rows.status, 200, rows.text)
+      const cursor = rows.json().rows.find(row => row.agent === 'cursor')
+      assert.equal(cursor.state, EN.settingsAgentStart)
+      assert.equal(cursor.note, EN.settingsAgentConnector('Cursor'))
+      if (hasOtherInstall) assert.equal(rows.json().rows.find(row => row.agent === 'gemini').note, undefined)
+      const before = files(f.home)
+      for (const request of [() => board.call('GET', '/api/agents?agent=cursor&action=remove'), () => board.call('POST', '/api/agents/remove', { agent: 'cursor' })]) {
+        const result = await request()
+        assert.equal(result.status, 409, result.text)
+        assert.equal(result.json().note, EN.settingsAgentConnector('Cursor'))
+        assert.deepEqual(files(f.home), before)
+      }
+    } finally { await board.close() }
+  }
+})
+
 test('Settings detects real synthetic installs once, trusts Codex and Hermes, refuses concurrent presses and guards the phone routes', { timeout: 30_000 }, async () => {
   const f = fixture(true)
   const programs = setupPrograms(f.root, f.env, ['codex'])
+  const executable = nativeCodex(f)
   const codex = join(f.root, 'synthetic bin', ...(process.platform === 'win32' ? ['node_modules', '@openai', 'codex', 'bin', 'codex.js'] : ['codex']))
   const script = readFileSync(codex, 'utf8')
   const output = "process.stdout.write(JSON.stringify({ id: message.id, result }) + '\\n')"
@@ -143,7 +247,7 @@ test('Settings detects real synthetic installs once, trusts Codex and Hermes, re
   writeFileSync(f.progress, '# Progress\n\n## Synthetic project\n' + block('opencode'))
   f.env.AGENT_BOARD_TEST_DELAY = '100'
   programs.clear()
-  const board = await f.start()
+  const board = await f.start('--codex-bin', executable)
   try {
     const getRows = async () => {
       const result = await board.call('GET', '/api/agents')
@@ -159,6 +263,9 @@ test('Settings detects real synthetic installs once, trusts Codex and Hermes, re
     assert.equal(row(first, 'gemini').state, EN.settingsAgentStart)
     assert.equal(row(first, 'codex').state, EN.settingsAgentApproval)
     assert.equal(row(first, 'claude').state, EN.settingsAgentStart)
+    const codexPreview = await board.call('GET', '/api/agents?agent=codex&action=setup')
+    assert.equal(codexPreview.status, 200, codexPreview.text)
+    assert.equal(codexPreview.json().note, EN.settingsAgentSetupConfirm('Codex', codexPreview.json().count, true))
     const checks = () => programs.calls().filter(call => call.method === 'hooks/list').length
     const before = checks()
     assert.equal(before, 1)
@@ -181,6 +288,9 @@ test('Settings detects real synthetic installs once, trusts Codex and Hermes, re
     const hermes = await board.call('POST', '/api/agents/setup', { agent: 'hermes' })
     assert.equal(hermes.status, 200, hermes.text)
     assert.ok(JSON.parse(readFileSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json'), 'utf8')).approvals.length > 0)
+    const hermesPreview = await board.call('GET', '/api/agents?agent=hermes&action=setup')
+    assert.equal(hermesPreview.status, 200, hermesPreview.text)
+    assert.equal(hermesPreview.json().note, EN.settingsAgentSetupConfirm('Hermes Agent', hermesPreview.json().count, true))
     writeFileSync(join(f.home, '.cursor', 'hooks.json'), '{"hooks":false}')
     const failed = await board.call('POST', '/api/agents/setup', { agent: 'cursor' })
     assert.equal(failed.status, 409)
@@ -230,9 +340,14 @@ test('Settings setup and removal match terminal setup byte for byte and refuse t
     assert.equal(preview.status, 200, preview.text)
     assert.ok(preview.json().count > 0)
     assert.match(preview.json().note, new RegExp('change ' + preview.json().count + ' files'))
+    assert.equal(preview.json().note, EN.settingsAgentSetupConfirm('Cursor', preview.json().count, false))
     assert.deepEqual(files(f.home), beforePreview, 'the preview writes nothing')
     const added = await board.call('POST', '/api/agents/setup', { agent: 'cursor' })
     assert.equal(added.status, 200, added.text)
+    const alreadySetUp = await board.call('GET', '/api/agents?agent=cursor&action=setup')
+    assert.equal(alreadySetUp.status, 200, alreadySetUp.text)
+    assert.equal(alreadySetUp.json().count, 0)
+    assert.equal(alreadySetUp.json().note, EN.settingsAgentSetupConfirm('Cursor', 0, false))
     afterSetup = files(f.home)
     const removed = await board.call('POST', '/api/agents/remove', { agent: 'cursor' })
     assert.equal(removed.status, 200, removed.text)
@@ -319,7 +434,7 @@ test('Settings previews before confirming, restores keyboard focus, displays the
   let isFailing = false
   const dom = settingsDom(false, (path, body) => {
     if (path === '/api/agents') return { ok: true, rows: [{ agent: 'cursor', name: 'Cursor', state: isSetUp ? EN.settingsAgentStart : EN.settingsAgentNotSetUp, button: isSetUp ? 'remove' : 'setup' }] }
-    if (path.startsWith('/api/agents?')) return { ok: true, count: 7, note: isSetUp ? EN.settingsAgentRemoveConfirm('Cursor') : EN.settingsAgentSetupConfirm('Cursor', 7) }
+    if (path.startsWith('/api/agents?')) return { ok: true, count: 7, note: isSetUp ? EN.settingsAgentRemoveConfirm('Cursor') : EN.settingsAgentSetupConfirm('Cursor', 7, false) }
     assert.deepEqual(JSON.parse(JSON.stringify(body)), { agent: 'cursor' })
     if (isFailing) return { ok: false, note: 'Synthetic setup refusal' }
     isSetUp = !isSetUp

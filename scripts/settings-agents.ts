@@ -30,7 +30,7 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
   const home = resolve(flag('--home') ?? homedir())
   const data = resolve(flag('--data-dir') ?? baked?.codexRoot ?? join(home, '.agent-board'))
   const context = ['--home', home, '--data-dir', data, '--progress-file', o.progress, '--json']
-  for (const name of ['--codex-dir', '--codex-bin', '--grok-dir', '--hermes-dir', '--opencode-dir', '--openclaw-dir', '--deepseek-dir']) {
+  for (const name of ['--codex-dir', '--grok-dir', '--hermes-dir', '--opencode-dir', '--openclaw-dir', '--deepseek-dir']) {
     const value = flag(name)
     if (value !== undefined) context.push(name, value)
   }
@@ -38,8 +38,8 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
   const isKnown = (agent: unknown): agent is string => typeof agent === 'string' && (agent === 'claude' || setupAgents.some(one => one === agent))
   const execute = async (agent: string, mode: string, isApplying = false): Promise<AgentPlan> => {
     let result: unknown
-    const binary = agent === 'codex' && (mode === '--codex-trust' || mode === '--codex-doctor') && flag('--codex-bin') === undefined
-      ? discoverCodexBinary() ?? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
+    const binary = agent === 'codex' && mode === '--codex-trust'
+      ? flag('--codex-bin') ?? discoverCodexBinary() ?? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
     const extra = binary === undefined ? [] : ['--codex-bin', binary]
     await runCodexLocal([...context, mode, '--agent', agent, ...extra, ...(isApplying ? ['--apply'] : [])], o.progress, o.words(), undefined, {
       output: value => { result = value },
@@ -67,7 +67,7 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
     }))
     if (isLast || removesNeeded) throw Object.assign(new Error('BOARD_RUNNING'), { note: refusal(agent) })
   }
-  let cached: { at: number; installed: Set<string>; found: Set<string>; hasClaude: boolean; isUntrusted: boolean } | null = null
+  let cached: { at: number; installed: Set<string>; connected: Set<string>; found: Set<string>; hasClaude: boolean; isUntrusted: boolean } | null = null
   let reading: Promise<void> | null = null
   let isBusy = false
   let generation = 0
@@ -83,7 +83,8 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
         installed.add(agent)
       }
       const connector = new ConnectTransaction(home, undefined).state
-      if (!connector.disabled) for (const agent of connector.setup?.agents ?? []) if (agent.hook === 'configured') installed.add(agent.agent)
+      const connected = new Set<string>()
+      if (!connector.disabled) for (const agent of connector.setup?.agents ?? []) if (agent.hook === 'configured') connected.add(agent.agent)
       const found = new Set<string>(discoverSetupAgents(home, data, {
         codex: flag('--codex-dir') || process.env.CODEX_HOME,
         grok: flag('--grok-dir') || process.env.GROK_HOME,
@@ -95,8 +96,11 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
       const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
       const hasClaude = hasBoardPlugin(claudeDirectory) && !connector.disabled
       let isUntrusted = false
-      if (installed.has('codex')) isUntrusted = (await execute('codex', '--codex-doctor')).hooksTrusted === false
-      if (observed === generation) cached = { at: Date.now(), installed, found, hasClaude, isUntrusted }
+      if (installed.has('codex') || connected.has('codex')) {
+        // An unavailable Codex check must not hide the other agents.
+        try { isUntrusted = (await execute('codex', '--codex-doctor')).hooksTrusted === false } catch { isUntrusted = false }
+      }
+      if (observed === generation) cached = { at: Date.now(), installed, connected, found, hasClaude, isUntrusted }
     })().finally(() => { reading = null })
     return reading
   }
@@ -106,10 +110,14 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
     const lines = o.readProgress().split('\n')
     const onBoard = new Set(scanBlocks(lines).map(span => span.agent))
     const agents: string[] = [...setupAgents, ...(snapshot.hasClaude ? ['claude'] : [])]
+    const setUp = new Set([...snapshot.installed, ...snapshot.connected])
     return agents.map(agent => {
-      const isSetUp = agent === 'claude' || snapshot.installed.has(agent)
+      const isSetUp = agent === 'claude' || setUp.has(agent)
       const state = settingsAgentState(isSetUp, onBoard.has(agent), agent === 'codex' && snapshot.isUntrusted, snapshot.found.has(agent), o.words())
-      return { agent, name: o.words().agentNames[agent] ?? agent, ...state, ...(isSetUp && (agent === 'claude' || snapshot.installed.size === 1) ? { note: refusal(agent) } : {}) }
+      const name = o.words().agentNames[agent] ?? agent
+      const note = snapshot.connected.has(agent) && !snapshot.installed.has(agent) ? o.words().settingsAgentConnector(name)
+        : isSetUp && (agent === 'claude' || setUp.size === 1) ? refusal(agent) : undefined
+      return { agent, name, ...state, ...(note === undefined ? {} : { note }) }
     })
   }
   const failed = (error: unknown, agent: string): AgentResult => ({ status: 409, note: (error as { note?: string })?.note ?? setupFailure(error, agent, o.words()).message })
@@ -121,7 +129,7 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
       const plan = await checkedPlan(agent, action)
       const count = new Set([...plan.changes.map(change => change.file), ...(action === 'setup' ? setupRecordChanges(plan, [agent]) : [])]).size
       const name = o.words().agentNames[agent] ?? agent
-      return { status: 200, count, note: action === 'setup' ? o.words().settingsAgentSetupConfirm(name, count) : o.words().settingsAgentRemoveConfirm(name) }
+      return { status: 200, count, note: action === 'setup' ? o.words().settingsAgentSetupConfirm(name, count, agent === 'codex' || agent === 'hermes') : o.words().settingsAgentRemoveConfirm(name) }
     } catch (error) { return failed(error, agent) }
   }
   const change = async (agent: unknown, action: 'setup' | 'remove'): Promise<AgentResult> => {
@@ -139,8 +147,11 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
     finally { generation++; cached = null; isBusy = false }
   }
   const checkedPlan = async (agent: string, action: 'setup' | 'remove'): Promise<AgentPlan> => {
+    const connector = new ConnectTransaction(home, undefined).state
+    const note = o.words().settingsAgentConnector(o.words().agentNames[agent] ?? agent)
+    if (!connector.disabled && connector.setup?.agents.some(one => one.agent === agent && one.hook === 'configured') && !existsSync(record(agent))) throw Object.assign(new Error('BOARD_RUNNING'), { note })
     const plan = await execute(agent, action === 'setup' ? '--codex-setup' : '--codex-remove')
-    if (plan.managedBy === 'connector') throw Object.assign(new Error('BOARD_RUNNING'), { note: refusal(agent) })
+    if (plan.managedBy === 'connector') throw Object.assign(new Error('BOARD_RUNNING'), { note })
     if (plan.conflicts.length) throw new Error('INSTALL_CONFLICT')
     if (action === 'remove') protectRemoval(agent, plan)
     return plan
