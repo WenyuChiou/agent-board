@@ -747,7 +747,8 @@ const saveLanguage = (lang: SettingsLang): boolean => {
   const file = settingsPath(path)
   const next = withBoardSettings(read(file), { lang })
   if (next === null) return false
-  writeFileSync(file, next)
+  // A failed write names the file on the page, as a failed read does.
+  try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
   s = wordsNow()
   return true
 }
@@ -1909,7 +1910,8 @@ const serveChild = (): void => {
       bulkTidy,
       barStyle: barStyleNow,
       setBarStyle: saveBarStyle,
-      language: () => savedLanguage() ?? 'auto',
+      // With no pick saved, the panel shows the setup language the board uses, not Automatic.
+      language: () => savedLanguage() ?? langOf(BAKED.lang) ?? 'auto',
       setLanguage: saveLanguage,
       sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.

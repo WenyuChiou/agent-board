@@ -12540,6 +12540,16 @@ test('Settings language saves alongside other keys, reloads the running page, lo
   } finally { await board.close() }
 })
 
+test('Settings shows the setup language the board uses when no language is saved, not Automatic', { timeout: 30_000 }, async () => {
+  // The helper's board script holds English from setup; the system says Traditional Chinese.
+  const board = await page('', { LANG: 'zh-TW' })
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    assert.ok(html.includes('<option value="en" selected>'), 'the setup language is the one shown')
+    assert.ok(!html.includes('<option value="auto" selected>'))
+  } finally { await board.close() }
+})
+
 test('Settings language reloads after a successful change, restores its notice, and reports a failed write without reloading', async () => {
   const html = await sourcePage()
   const sessionStore = new Map()
