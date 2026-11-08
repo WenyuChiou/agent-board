@@ -44,7 +44,8 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
 const argv = process.argv.slice(2)
 const failure = process.env.AGENT_BOARD_TEST_CLAUDE_FAIL
 if (failure === 'all' || failure === argv[1]) process.exit(17)
-if (argv[1] === 'install') {
+// 'silent' stands for an install that exits 0 but leaves no plugin behind.
+if (argv[1] === 'install' && failure !== 'silent') {
   const directory = path.join(process.env.CLAUDE_CONFIG_DIR, 'plugins')
   fs.mkdirSync(directory, { recursive: true })
   fs.writeFileSync(path.join(directory, 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'agent-board@agent-board': [{ scope: 'user' }] } }))

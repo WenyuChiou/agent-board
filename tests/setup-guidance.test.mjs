@@ -147,6 +147,7 @@ test('the Antigravity apply summary accounts for every file counted by its previ
 const terminal = (run, programs) => fixture((setup, f) => {
   f.env.USERPROFILE = f.env.HOME
   f.env.AGENT_BOARD_SETUP_TTY = '1'
+  f.env.AGENT_BOARD_TEST_PID = String(process.pid)
   const commands = setupPrograms(f.root, f.env, programs)
   return run({ ...f, commands })
 })
@@ -193,16 +194,51 @@ test('terminal Enter means yes and the question is translated in all three langu
   })
 })
 
-test('terminal setup --apply skips its question and groups restart and session instructions', () => terminal(f => {
-  const result = f.invoke(['--agent', 'codex,hermes,opencode,openclaw', '--lang', 'en', '--apply'], 'n\n')
+test('terminal setup --apply writes files only and leaves hook approval and the plugin to a typed yes', () => terminal(f => {
+  const result = f.invoke(['--agent', 'codex,hermes,opencode,openclaw', '--lang', 'en', '--apply'], 'y\n')
   succeeded(result)
-  assert.doesNotMatch(result.stdout, /Set these up\?/)
-  assertTrusted(f)
-  assert.deepEqual(claudeCalls(f), pluginCommands)
+  assert.doesNotMatch(result.stdout, /Set these up\?|This will:/)
+  assert.equal(existsSync(join(f.root, 'data', 'install-codex.json')), true)
+  assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), false)
+  assert.equal(f.commands.calls().some(call => call.method === 'config/batchWrite'), false)
+  assert.deepEqual(claudeCalls(f), [])
   const next = result.stdout.split('Next steps:')[1]
+  assert.match(next, /--codex-trust --codex-bin/)
+  assert.match(next, /--hermes-trust/)
+  assert.match(next, /claude plugin install agent-board@agent-board/)
   for (const host of ['opencode', 'openclaw']) assert.ok(next.includes(bootstrap[0][host]))
-  assert.equal(next.split('Open a new session').length - 1, 1)
-  assert.match(next, /Codex, Hermes Agent, OpenCode, OpenClaw, Claude Code/)
+}))
+
+test('terminal setup skips "marketplace add" when Claude Code already knows the marketplace', () => terminal(f => {
+  mkdirSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins'), { recursive: true })
+  writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'known_marketplaces.json'), JSON.stringify({ 'agent-board': { source: { source: 'github', repo: 'WenyuChiou/agent-board' } } }))
+  const result = f.invoke(['--agent', 'cursor', '--lang', 'en'], 'y\n')
+  succeeded(result)
+  assert.deepEqual(claudeCalls(f), [pluginCommands[1]])
+  assert.doesNotMatch(result.stdout, /Claude Code marketplace:/)
+  assert.match(result.stdout, /Claude Code plugin: done\./)
+}))
+
+test('a Claude plugin install that exits 0 without installing the plugin is reported as failed', () => terminal(f => {
+  f.env.AGENT_BOARD_TEST_CLAUDE_FAIL = 'silent'
+  const result = f.invoke(['--agent', 'cursor', '--lang', 'en'], 'y\n')
+  succeeded(result)
+  assert.match(result.stdout, /Claude Code plugin: failed\. Run: claude plugin install agent-board@agent-board/)
+  assert.doesNotMatch(result.stdout.split('Next steps:')[1] ?? '', /Claude Code/)
+}))
+
+test('an agent whose files fail reports its hook approval as not done, with the command to run', () => terminal(f => {
+  // The preload makes only the Codex file write fail; the preview and Hermes Agent are untouched.
+  const preload = join(f.root, 'fail-codex-apply.cjs')
+  writeFileSync(preload, "const a = process.argv; if ((a[1] || '').endsWith('setup-codex.mjs') && a.includes('--apply') && a[a.indexOf('--agent') + 1] === 'codex') { process.stderr.write(JSON.stringify({ error: { code: 'SYNTHETIC', message: 'synthetic write failure' } }) + '\\n'); process.exit(2) }\n")
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'], 'y\n')
+  assert.ifError(result.error)
+  assert.equal(result.status, 1, result.stdout)
+  assert.match(result.stdout, /Codex files: failed\./)
+  assert.match(result.stdout, /Approve the board's hooks in Codex: failed\. Run: .*--codex-trust/)
+  assert.match(result.stdout, /Approve the board's hooks in Hermes Agent: done\./)
+  assert.equal(f.commands.calls().some(call => call.method === 'config/batchWrite'), false)
 }))
 
 test('a failed Claude plugin part keeps files and both trust applies and does not skip the other plugin command', () => {
@@ -283,14 +319,14 @@ test('JSON setup ignores the terminal test seam and applies files without trust 
   }
 }))
 
-test('an unchanged terminal setup omits approvals and installation that already succeeded', () => terminal(f => {
-  const args = ['--agent', 'codex,hermes', '--lang', 'en', '--apply']
-  succeeded(f.invoke(args))
+test('an unchanged terminal setup asks nothing and repeats no approval or installation that already succeeded', () => terminal(f => {
+  const args = ['--agent', 'codex,hermes', '--lang', 'en']
+  succeeded(f.invoke(args, 'y\n'))
   assertTrusted(f)
   f.commands.clear()
-  const result = f.invoke(args)
+  const result = f.invoke(args, 'y\n')
   succeeded(result)
-  assert.doesNotMatch(result.stdout, /Approve the board's hooks|Install the Claude Code plugin|failed/)
+  assert.doesNotMatch(result.stdout, /Set these up\?|Approve the board's hooks|Install the Claude Code plugin|failed/)
   assert.equal(f.commands.calls().some(call => call.method === 'config/batchWrite'), false)
   assert.deepEqual(claudeCalls(f), [])
 }))

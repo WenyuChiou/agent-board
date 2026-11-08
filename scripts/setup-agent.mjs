@@ -1,8 +1,9 @@
 // Preview every selected target before applying any of them. Each target keeps its own
 // ownership record while sharing one script, skill and local progress file.
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, readSync, statSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { isatty } from 'node:tty'
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -11,8 +12,12 @@ const args = process.argv.slice(2)
 // The npm launcher supplies its package name for the setup command in guidance.
 const command = process.env.AGENT_BOARD_SETUP_COMMAND || ''
 const isJson = args.includes('--json')
-// Tests use this seam to exercise terminal consent with piped input, without a pseudo-terminal.
-const isTerminal = !isJson && ((process.stdin.isTTY && process.stdout.isTTY) || process.env.AGENT_BOARD_SETUP_TTY === '1')
+// isatty, not process.stdin: opening process.stdin on a POSIX terminal leaves fd 0 non-blocking.
+// Only a test (AGENT_BOARD_TEST_PID) may use the seam that exercises consent with piped input.
+const isTerminal = !isJson && ((isatty(0) && isatty(1)) || (process.env.AGENT_BOARD_SETUP_TTY === '1' && !!process.env.AGENT_BOARD_TEST_PID))
+// --apply keeps its old meaning in a terminal too: files only. Approving hooks and installing the
+// plugin need a yes typed at the question, so an agent's shell tool cannot approve for the person.
+const isAsking = isTerminal && !args.includes('--apply')
 const langOf = value => {
   if (typeof value !== 'string') return null
   const text = value.trim().toLowerCase()
@@ -262,13 +267,36 @@ const hermesHome = home => {
   return local && own !== undefined && clean(own) === clean(home) ? join(local, 'hermes') : join(home, 'AppData', 'Local', 'hermes')
 }
 
+// On a POSIX terminal the answer is read from /dev/tty: a parent that opened process.stdin (the npm
+// launcher does) hands down a non-blocking fd 0, whose read fails at once with EAGAIN.
 const askYes = () => {
   process.stdout.write(words('question'))
+  let fd = 0
+  let isOwn = false
+  if (process.platform !== 'win32' && isatty(0)) {
+    try { fd = openSync('/dev/tty', 'r'); isOwn = true } catch {}
+  }
+  const chunks = []
+  let size = 0
   try {
-    const bytes = Buffer.alloc(64)
-    const size = readSync(0, bytes, 0, bytes.length, null)
-    return size > 0 && /^\s*(y|yes|是|好|對|对)?\s*$/i.test(bytes.toString('utf8', 0, size).split(/\r?\n/)[0])
-  } catch { return false }
+    const bytes = Buffer.alloc(256)
+    while (size < 4096) {
+      let count
+      try { count = readSync(fd, bytes, 0, bytes.length, null) } catch (error) {
+        if (error?.code !== 'EAGAIN') return false
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+        continue
+      }
+      if (count === 0) break
+      const chunk = Buffer.from(bytes.subarray(0, count))
+      chunks.push(chunk)
+      size += count
+      if (chunk.includes(10)) break
+    }
+  } finally {
+    if (isOwn) try { closeSync(fd) } catch {}
+  }
+  return size > 0 && /^\s*(y|yes|是|好|對|对)?\s*$/i.test(Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0])
 }
 
 const hasPlugin = directory => {
@@ -282,14 +310,12 @@ const hasPlugin = directory => {
 }
 
 // npm supplies .cmd shims on Windows; quote each argument for cmd rather than enabling a shell for every program.
+// A plugin install fetches from GitHub, so a stuck one ends after three minutes and counts as failed.
 const runProgram = (program, argv) => {
-  const options = { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }
-  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(program)) {
+  const options = { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000 }
+  if (process.platform === 'win32' && /\.cmd$/i.test(program)) {
     const quoted = [program, ...argv].map(word => `"${word.replaceAll('"', '""')}"`).join(' ')
     return spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${quoted}"`], { ...options, windowsVerbatimArguments: true })
-  }
-  if (process.platform === 'win32' && /\.ps1$/i.test(program)) {
-    return spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', program, ...argv], options)
   }
   return spawnSync(program, argv, options)
 }
@@ -337,15 +363,15 @@ const main = () => {
     || (homeAt < 0 && (findOnPath(commands[agent]) || apps[agent]?.some(app => existsSync(app)))),
   ) : selector.split(',')
   const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
-  const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude']) : undefined
+  const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude'], ['.exe', '.cmd']) : undefined
   const hasClaude = existsSync(claudeDirectory) || (homeAt < 0 && !!claude)
-  const isPluginNeeded = isTerminal && !!claude && !hasPlugin(claudeDirectory)
+  const isPluginNeeded = isAsking && !!claude && !hasPlugin(claudeDirectory)
   const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
   const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
     ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
   const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
   const setupCommand = extra => [command || nodeCommand(fileURLToPath(import.meta.url)), ...common.map(quote), ...extra.map(quote)].join(' ')
-  if (selector === 'auto' && !selected.length && !(isTerminal && claude)) {
+  if (selector === 'auto' && !selected.length && !isPluginNeeded) {
     const next = setupCommand(['--agent', 'codex'])
     const noAgent = noAgentText(homeAt < 0 ? 'anywhere' : 'home', { home, next })
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n1. ${words('plugin')}` : noAgent}\n`)
@@ -353,7 +379,7 @@ const main = () => {
   }
   if ((!selected.length && selector !== 'auto') || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
   const apply = args.includes('--apply')
-  const isShowingApplied = apply && !isTerminal
+  const isShowingApplied = apply
   const script = fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
   const run = (agent, isApplying) => {
     const result = spawnSync(process.execPath, [script, ...common, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
@@ -426,12 +452,14 @@ const main = () => {
   const sharedChanges = [...new Map(results.flatMap(plan => plan.conflicts.length ? [] : changesFor(plan, true)).map(change => [change.file, change])).values()]
   const sharedFiles = [...new Set(filesByAgent.flat().filter(file => shared.has(file)))]
   const lines = []
+  let sharedLine = ''
   if (sharedFiles.length) {
     const status = describe(sharedChanges)
-    lines.push(`${words('shared')}:${status ? ` ${status}` : ''}`)
+    sharedLine = `${words('shared')}:${status ? ` ${status}` : ''}`
+    lines.push(sharedLine)
     if (!isShowingApplied) lines.push(...sharedFiles.map(file => fileLine(file, sharedChanges)))
   }
-  lines.push(...selected.map((agent, i) => {
+  const agentLines = selected.map((agent, i) => {
     const plan = results[i]
     const ownChanges = changesFor(plan, false)
     const changed = new Set(ownChanges.map(change => change.file))
@@ -446,7 +474,8 @@ const main = () => {
     // An old /board file the person edited stays; say so in the preview and after applying.
     const kept = plan.conflicts.length ? [] : (plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`)
     return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
-  }))
+  })
+  lines.push(...agentLines)
   if (hasClaude) lines.push(`Claude Code: ${words('claude')}`)
   const steps = []
   const boardRun = (plan, agent, extra) => {
@@ -463,18 +492,26 @@ const main = () => {
   }
   const boardPlan = available.length ? results[selected.indexOf(available[0])] : null
   const boardCommand = boardPlan ? command ? command.replace(/\s+setup\s*$/, '') : nodeCommand(boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs')) : ''
-  if (isTerminal) {
+  if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
     const approvals = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
       const plan = plans[selected.indexOf(agent)]
       return plan.managedBy !== 'connector' && (plan.changes.length || !isTrusted(plan, agent, agent === 'codex' ? codex : undefined))
     })
-    const will = lines.filter(line => !line.startsWith('  ') && !line.startsWith('Claude Code:')).map(line => line.split('\n')[0])
-    will.push(...approvals.map(agent => words('trustPart', { host: names[agent] })))
-    if (isPluginNeeded) will.push(words('installPlugin'))
-    process.stdout.write(`${lines.join('\n')}\n\n${words('thisWill')}\n${will.map(line => `- ${line}`).join('\n')}\n`)
-    const hasConsent = apply || askYes()
-    if (!apply) process.stdout.write('\n')
+    // Only what a yes would do: no skipped agent and no agent whose own files are already current.
+    const will = [
+      ...(sharedChanges.length ? [sharedLine] : []),
+      ...agentLines.filter((line, i) => !plans[i].conflicts.length && changesFor(plans[i], false).length).map(line => line.split('\n')[0]),
+      ...approvals.map(agent => words('trustPart', { host: names[agent] })),
+      ...(isPluginNeeded ? [words('installPlugin')] : []),
+    ]
+    // With nothing to do there is nothing to ask; the plain preview below says so.
+    let hasConsent = false
+    if (will.length) {
+      process.stdout.write(`${lines.join('\n')}\n\n${words('thisWill')}\n${will.map(line => `- ${line}`).join('\n')}\n`)
+      hasConsent = askYes()
+      process.stdout.write('\n')
+    }
     if (hasConsent) {
       const completed = []
       const report = (part, isDone, next) => process.stdout.write(`${words(isDone ? 'partDone' : 'partFailed', { part, command: next })}\n`)
@@ -493,20 +530,30 @@ const main = () => {
         if (!isDone) process.exitCode = 1
         report(words('filesPart', { host: names[agent] }), isDone, setupCommand(['--agent', agent, '--apply']))
       }
-      for (const agent of approvals.filter(agent => completed.includes(agent))) {
+      for (const agent of approvals) {
         const extra = [`--${agent}-trust`, ...(agent === 'codex' && codex ? ['--codex-bin', codex] : []), '--apply', '--json']
-        const result = boardRun(plans[selected.indexOf(agent)], agent, extra)
         const next = [boardCommand, ...common.map(quote), ...extra.filter(word => word !== '--json').map(quote), ...(agent === 'codex' && !codex ? ['--codex-bin <path-to-codex>'] : [])].join(' ')
+        // Hooks whose files were not written cannot be approved; say so instead of leaving the part out.
+        if (!completed.includes(agent)) {
+          report(words('trustPart', { host: names[agent] }), false, next)
+          continue
+        }
+        const result = boardRun(plans[selected.indexOf(agent)], agent, extra)
         report(words('trustPart', { host: names[agent] }), !result.error && result.status === 0, next)
       }
       let isPluginReady = !!claude && hasPlugin(claudeDirectory)
       if (isPluginNeeded) {
+        let known = null
+        try { known = JSON.parse(readFileSync(join(claudeDirectory, 'plugins', 'known_marketplaces.json'), 'utf8').replace(/^﻿/, '')) } catch {}
+        // A marketplace Claude Code already knows would make "marketplace add" fail; only the install is left.
+        const isKnown = known !== null && typeof known === 'object' && Object.hasOwn(known, 'agent-board')
         for (const [part, argv] of [
-          ['marketplacePart', ['plugin', 'marketplace', 'add', 'WenyuChiou/agent-board']],
+          ...(isKnown ? [] : [['marketplacePart', ['plugin', 'marketplace', 'add', 'WenyuChiou/agent-board']]]),
           ['pluginPart', ['plugin', 'install', 'agent-board@agent-board']],
         ]) {
           const result = runProgram(claude, argv)
-          const isDone = !result.error && result.status === 0
+          // An install counts once Claude Code lists the plugin, not on its exit status alone.
+          const isDone = !result.error && result.status === 0 && (part !== 'pluginPart' || hasPlugin(claudeDirectory))
           report(words(part), isDone, ['claude', ...argv].join(' '))
           if (part === 'pluginPart') isPluginReady = isDone
         }
@@ -530,7 +577,8 @@ const main = () => {
       if (next.length) process.stdout.write(`\n${words('next')}\n${next.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n`)
       return
     }
-    lines.length = 0
+    // A no: the preview is already on screen, so only the next steps follow.
+    if (will.length) lines.length = 0
   }
   if (!apply && available.some(agent => plans[selected.indexOf(agent)].changes.length)) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
   const sessionAgents = []

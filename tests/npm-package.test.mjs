@@ -256,7 +256,7 @@ const terminalLauncher = f => {
   const preload = join(f.box, 'terminal.cjs')
   // Only the launcher sees a fake TTY here; setup uses its own explicit test seam.
   save(preload, `if (/[\\\\/]bin[\\\\/]agent-board\\.mjs$/.test(process.argv[1] || '')) { process.stdin.isTTY = true; process.stdout.isTTY = true }\n`)
-  return { NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, AGENT_BOARD_SETUP_TTY: '1', CI: '1' }
+  return { NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, AGENT_BOARD_SETUP_TTY: '1', AGENT_BOARD_TEST_PID: String(process.pid), CI: '1' }
 }
 
 test('the bare terminal launcher accepts Enter once for files, trust and the Claude plugin', () => fixture(f => {
