@@ -1817,6 +1817,25 @@ const isOwnAddressFile = (file: string): boolean => {
   const own = lstatSync(file)
   return !own.isSymbolicLink() && (process.getuid === undefined || own.uid === process.getuid())
 }
+
+const settingsPortOf = (text: string | null): number | null => {
+  try {
+    const data: unknown = JSON.parse(text ?? '')
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) return null
+    const port = (data as Record<string, unknown>).port
+    return typeof port === 'number' && Number.isSafeInteger(port) && port > 0 && port <= 65535 ? port : null
+  } catch { return null }
+}
+
+const savePort = (port: number): boolean => {
+  const file = settingsPath(path)
+  const next = withBoardSettings(read(file), { port })
+  if (next === null) return false
+  try { writeFileSync(file, next) } catch { return false }
+  settingsKept = { text: next, at: Date.now() }
+  return true
+}
+
 const readRunning = (file = serveFile()): Running | null => {
   try {
     // Only a file of this account's own, never a link to one somewhere else.
@@ -1874,6 +1893,8 @@ const serveChild = (): void => {
   // A child that could not protect the folder cannot start a page: its address file would
   // be unprotected. The parent reuses a running page itself; a child on its own refuses.
   if (runtimeUnprotected) throw runtimeFolderFailure()
+  const explicitPort = flag('--port') !== undefined ? Number(flag('--port')) || 0 : undefined
+  const preferredPort = explicitPort === undefined ? (settingsPortOf(settingsNow()) ?? undefined) : undefined
   // A page a test started stops once that test's process is gone, even after a killed run (#959).
   // Only tests set AGENT_BOARD_TEST_PID, to their own process id.
   const testPid = Number(process.env.AGENT_BOARD_TEST_PID)
@@ -1900,7 +1921,8 @@ const serveChild = (): void => {
         return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
       },
       get s() { return s },
-      port: Number(flag('--port') ?? 0) || 0,
+      port: explicitPort ?? 0,
+      preferredPort,
       ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
@@ -1931,6 +1953,7 @@ const serveChild = (): void => {
           const text = JSON.stringify({ pid: process.pid, port, url, path, built })
           if (process.platform === 'win32') writePrivateRuntimeFile(file, text)
           else writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
+          savePort(port)
         } catch (error) {
           // Another `--serve` that wrote first is the page, so that start stops quietly. Any other
           // failure says why, as a child whose folder check failed does, instead of stopping without
