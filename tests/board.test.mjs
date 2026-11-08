@@ -3,7 +3,7 @@
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -5406,14 +5406,34 @@ const processAlive = pid => { try { process.kill(pid, 0); return true } catch { 
 
 // A stand-in browser: a small Windows program built here, so no real browser opens on the tester's
 // screen. `body` is its Main. Synthetic data only.
+// Each body is built once per test run and copied into place. The .NET Framework compiler that
+// ships with Windows builds one in about a second; Add-Type starts PowerShell and the compiler in
+// one process and took more than 15 s on a cold CI runner (#1166), so it is only the fallback.
+const standInBuilds = new Map()
+const buildStandIn = (body, env) => {
+  const built = standInBuilds.get(body)
+  if (built !== undefined) return built
+  const dir = mkdtempSync(join(tmpdir(), 'board-standin-'))
+  process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
+  const source = join(dir, 'browser.cs')
+  const exe = join(dir, 'browser.exe')
+  writeFileSync(source, `using System; using System.IO; using System.Diagnostics; using System.Threading;\npublic static class Browser { public static void Main() { ${body} } }`)
+  const windows = process.env.SystemRoot ?? 'C:\\Windows'
+  const csc = join(windows, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
+  if (existsSync(csc)) {
+    execFileSync(csc, ['/nologo', '/target:winexe', `/out:${exe}`, source], { windowsHide: true, stdio: 'pipe', timeout: 15_000 })
+  } else {
+    const powershell = join(windows, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
+      env: { ...env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: exe }, windowsHide: true, stdio: 'pipe', timeout: 15_000,
+    })
+  }
+  standInBuilds.set(body, exe)
+  return exe
+}
 const compileStandIn = (board, exe, body) => {
   mkdirSync(resolve(exe, '..'), { recursive: true })
-  const source = join(board.dir, `${basename(exe, '.exe')}.cs`)
-  writeFileSync(source, `using System; using System.IO; using System.Diagnostics; using System.Threading;\npublic static class Browser { public static void Main() { ${body} } }`)
-  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-  execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
-    env: { ...board.env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: exe }, windowsHide: true, stdio: 'pipe', timeout: 15_000,
-  })
+  copyFileSync(buildStandIn(body, board.env), exe)
 }
 // Writes its PID for the test and stays up, as a browser window does.
 const SLEEPING_BROWSER = 'File.WriteAllText(Environment.GetEnvironmentVariable("BOARD_TEST_BROWSER_PID"), Process.GetCurrentProcess().Id.ToString()); Thread.Sleep(20000);'
