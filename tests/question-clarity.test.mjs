@@ -82,7 +82,7 @@ test('Chinese and English questions offer clean choices or a yes and no', () => 
     ['用 A、B 还是 C？', 'choose', ['A', 'B', 'C']],
     ['先用旗標給部分人，還是直接全部開？', 'choose', ['先用旗標給部分人', '直接全部開']],
     ['"Top shelf or bottom shelf?"', 'choose', ['Top shelf', 'bottom shelf']],
-    ['「先開旗標」還是「全部開？」', 'choose', ['先開旗標', '全部開']],
+    ['「先開旗標」還是「全部開？」', 'choose', ['「先開旗標」', '「全部開']],
     // A 或 in a statement never pairs with a later sentence's question mark.
     ['我覺得 A 或 B 都行。要繼續嗎？', 'confirm', []],
     ['A 或 B 都可以，要繼續嗎？', 'confirm', []],

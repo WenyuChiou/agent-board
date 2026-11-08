@@ -102,7 +102,6 @@ const stripQuestionFrame = (lead: string): string => {
 // The lead-in goes whole: 是否要用 and 要不要 never leave 否要用 or 不要 on the first button.
 const firstOption = (text: string): string =>
   stripQuestionFrame(text)
-    .replace(/^[「『“]+|[」』”]+$/g, '')
     .replace(/^(?:請問|请问)?\s*(?:你|您)?\s*(?:是否要用|是否要|要不要用|想要用|想用|要用|選擇|选择|是否|要不要|想要|要|用|選|选|是)\s*/, '')
     .trim()
 
@@ -112,7 +111,7 @@ const SHARED_TAIL = /^(\S+)\s+(?:for|in|on|with|to|at|as|from|into|via)\s+\S.*$/
 const pairedLast = (first: string, last: string): string => /^[^\s㐀-鿿]+$/.test(first) ? last.replace(SHARED_TAIL, '$1') : last
 
 const lastOption = (text: string): string => {
-  const option = text.trim().replace(/^[「『“]+|[」』”]+$/g, '').trim()
+  const option = text.trim()
   // These common nouns end in the same characters as question particles.
   const isNoun = /(?:毛呢|(?:酒|網|网|氧|清|書|书|水|茶|餐|咖啡)吧)$/.test(option)
   const withoutParticle = isNoun ? option : option.replace(/[呢嗎吗吧]$/, '').trim()
