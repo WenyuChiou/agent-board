@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, limitReport, planReport, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
+import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { hermesHome } from '../hooks/hermes-home'
 import { agentHooks, BOARD_FOR, isReleased, readConfig, withHermesHooks, withoutHermesHooks } from '../hooks/connect-pure'
@@ -769,7 +769,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
       // A reply that ends on a question waits for the person, even after the agent reported its own steps done.
       const state = isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' && !(typeof payload.question === 'string' && payload.question.trim() !== '') ? 'done' : status
-      const question = questionSteps(previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`], previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
+      const placeholder = localAgentLifecycleStep(state, s)
+      const held = !Array.isArray(previous?.steps)
+        ? [placeholder]
+        : previous.steps.map((step, index) =>
+            index === 0 && isLifecycleStep(step) ? placeholder : step
+          )
+      const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
       const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s)
         : mode === '--agent-status' ? validateCodexReport({
           // These are already validated stored steps, including up to two owned lines beyond
