@@ -28,7 +28,7 @@ import { address, isMailboxTarget, isOpen } from './messaging'
 // that Claude Code session; none: copied, then pasted into the agent's chat.
 export type SendMode = 'send' | 'connected' | 'mailbox' | 'open' | 'claude' | 'none'
 type Delivery = { id: string; turn: string; agent: string }
-type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text'> & { when: string; isMailbox: boolean }
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted'> & { when: string; isMailbox: boolean }
 type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly Omit<Message, 'nonce' | 'hash'>[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
@@ -49,11 +49,11 @@ const rowReceipt = (agent: string, session: string | undefined, messages: readon
   const one = to === undefined
     ? answers === undefined ? undefined : messages.filter(message => message.answers === answers).at(-1)
     : messages.filter(message => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1)
-  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
+  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...(one.hasAccepted === true ? { hasAccepted: true } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 // The person's answer to this question reached its session: the session took it, or replied.
 const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
-  messages.some(message => message.answers === questionId && (message.status === 'acknowledged' || message.status === 'accepted' && message.error === ''))
+  messages.some(message => message.answers === questionId && (message.status === 'acknowledged' || message.status === 'accepted' && message.error === '' || message.status === 'uncertain' && message.hasAccepted === true))
 const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerCase() === 'claude'
 // What pressing Send does right now, for a Claude session that is receiving (#316).
 const claudeHint = (agent: string, isWorking: boolean, s: Strings): string => !isClaudeAgent(agent) ? '' : isWorking ? s.claudeSendWorking : s.claudeSendNow
@@ -764,7 +764,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendNow', 'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveQueueNextTurn', 'serveNextTurnHint', 'serveQueueNextOpen', 'serveNextOpenHint', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'serveQueueNextTurn', 'serveNextTurnHint', 'serveQueueNextOpen', 'serveNextOpenHint', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1523,9 +1523,11 @@ const PAGE_SCRIPT = String.raw`
     var reply = receipt.reply || '';
     var ack = 'ACK ' + receipt.id;
     if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
-    var isFailed = receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error);
-    var labelKey = receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error)
+    var isFailed = receiptFailed(receipt);
+    var isAcceptedUnconfirmed = receipt.status === 'uncertain' && receipt.hasAccepted === true;
+    var labelKey = isFailed && receipt.status === 'uncertain'
       ? 'messagesTimeout'
+      : isAcceptedUnconfirmed ? 'messagesAcceptedUnconfirmed'
       : receipt.status === 'accepted' && !receipt.isMailbox && receipt.error === 'DISCONNECTED'
         ? 'messagesAcceptedDisconnected'
         : labels[receipt.status];
@@ -1656,12 +1658,15 @@ const PAGE_SCRIPT = String.raw`
   // The agent filter (icon row or sidebar) and the project filter (sidebar) both apply; either may be empty.
   function matchesAgent(id) { return !pg.filter || pg.filter === id; }
   function matches(id, project) { return matchesAgent(id) && (!pg.project || pg.project === project); }
+  function receiptFailed(receipt) {
+    return !!receipt && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error || ''));
+  }
   // A sent answer is on its way: its card stays on the sheet with its line, but it no longer waits for the person.
   // A message that timed out or was refused waits for the person again.
   function isSent(ref) {
     var one = source(ref);
     var receipt = one.receipt;
-    var isFailed = !!receipt && (receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error || ''));
+    var isFailed = receiptFailed(receipt);
     return one.isSending === true && !isFailed;
   }
   function byTime(a, b) { return (b.at || 0) - (a.at || 0); }
