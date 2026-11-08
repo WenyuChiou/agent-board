@@ -6747,6 +6747,20 @@ test('deepseekLocalPlugin ignores subagents and gives a waiting board message to
     assert.deepEqual(lonely.received, [])
     failedHooks.get('agent/disposed')({ agent: lonely })
     await until(settled, 'the end call closed')
+    // A take asked for while another is under way runs right after it, with no further event from dsh.
+    const quick = fake('deepseek-quick-session')
+    const takes = () => children.filter(child => child.spawnargs.includes('take') && child.spawnargs.includes('deepseek-quick-session')).length
+    hooks.get('agent/created')({ agent: quick })
+    hooks.get('agent/status')({ agent: quick, status: 'idle' })
+    await until(() => takes() === 2 && settled(), 'the second take ran right after the first')
+    // A followup that fails is logged and never marked delivered: its claim runs out and the board hands it out again.
+    quick.followup = () => Promise.reject(new Error('SYNTHETIC'))
+    queue(store(), 'deepseek-quick-session', 'quick-message', 'Synthetic refused answer')
+    hooks.get('agent/status')({ agent: quick, status: 'idle' })
+    await until(() => failures() === 2 && settled(), 'the failed followup was logged')
+    assert.notEqual(status('quick-message'), 'accepted')
+    hooks.get('agent/disposed')({ agent: quick })
+    await until(settled, 'the quick session ended')
   } finally {
     // A failed check leaves no board call running: each one is stopped and waited for, on Windows too.
     for (const child of children) if (!child.isClosed) child.kill()

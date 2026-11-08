@@ -46,11 +46,13 @@ const sessionOf = agent => {
   return typeof id === 'string' && id !== '' ? id : undefined
 }
 const mailboxReceiver = () => {
-  const roots = new Map(), busy = new Set(), failing = new Set()
+  const roots = new Map(), busy = new Set(), failing = new Set(), again = new Set()
   let watcher = null, folder = null, pending = null, timer = null, ticks = 0
   const deliver = async agent => {
     const session = sessionOf(agent)
-    if (session === undefined || busy.has(session) || roots.get(session) !== agent || agent.status !== 'idle') return
+    if (session === undefined || roots.get(session) !== agent || agent.status !== 'idle') return
+    // A message the board writes while a take is under way is taken right after it, not at the next tick.
+    if (busy.has(session)) { again.add(session); return }
     busy.add(session)
     try {
       const taken = await mailboxCall('take', session)
@@ -68,12 +70,15 @@ const mailboxReceiver = () => {
       // A session that closed meanwhile does not get it: the claim runs out and the board hands it out again.
       if (roots.get(session) !== agent) return
       // Given first, then marked delivered: if the mark fails, the claim runs out and the session may get the
-      // same answer again, which beats losing it.
-      agent.followup(boardMessage(message.text, message.summary))
+      // same answer again, which beats losing it. Awaited, so a followup that fails is never marked delivered.
+      await agent.followup(boardMessage(message.text, message.summary))
       const accepted = await mailboxCall('accept', session, ['--id', message.id, '--nonce', message.nonce])
       if (accepted?.ok !== true) throw new Error('MAILBOX_FAILED')
     } catch { hookError('MAILBOX_FAILED') }
-    finally { busy.delete(session) }
+    finally {
+      busy.delete(session)
+      if (again.delete(session)) deliver(agent)
+    }
   }
   // The board rewrites messages.json whenever it queues a message: a session with one waiting takes it.
   const check = () => {
@@ -117,6 +122,7 @@ const mailboxReceiver = () => {
       if (session === undefined || roots.get(session) !== agent) return
       roots.delete(session)
       failing.delete(session)
+      again.delete(session)
       mailboxCall('end', session)
       if (roots.size > 0) return
       clearInterval(timer)
