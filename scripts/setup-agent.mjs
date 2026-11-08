@@ -1,8 +1,9 @@
 // Preview every selected target before applying any of them. Each target keeps its own
 // ownership record while sharing one script, skill and local progress file.
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { isatty } from 'node:tty'
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -11,6 +12,12 @@ const args = process.argv.slice(2)
 // The npm launcher supplies its package name for the setup command in guidance.
 const command = process.env.AGENT_BOARD_SETUP_COMMAND || ''
 const isJson = args.includes('--json')
+// isatty, not process.stdin: opening process.stdin on a POSIX terminal leaves fd 0 non-blocking.
+// Only a test (AGENT_BOARD_TEST_PID) may use the seam that exercises consent with piped input.
+const isTerminal = !isJson && ((isatty(0) && isatty(1)) || (process.env.AGENT_BOARD_SETUP_TTY === '1' && !!process.env.AGENT_BOARD_TEST_PID))
+// --apply keeps its old meaning in a terminal too: files only. Approving hooks and installing the
+// plugin need a yes typed at the question, so an agent's shell tool cannot approve for the person.
+const isAsking = isTerminal && !args.includes('--apply')
 const langOf = value => {
   if (typeof value !== 'string') return null
   const text = value.trim().toLowerCase()
@@ -57,11 +64,25 @@ const summaries = [
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin.",
     "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin.",
     "deepseek": "DeepSeek: close and reopen DeepSeek Harness (dsh) so it loads the agent-board plugin setup wrote.",
+    "cursorWindows": "Cursor: on Windows, start cursor-agent from PowerShell or Command Prompt. Started from Git Bash, Cursor runs none of the board's hooks, so the board gets nothing from it.",
     "start": "Then start a new session in each of: {agents}.",
     "startOne": "Then start a new session in {agents}.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
-    "board": "Open the board: {command}"
+    "board": "Open the board: {command}",
+    "thisWill": "This will:",
+    "question": "Set these up? [Y/n] ",
+    "filesPart": "{host} files",
+    "trustPart": "Approve the board's hooks in {host}",
+    "installPlugin": "Install the Claude Code plugin",
+    "marketplacePart": "Claude Code marketplace",
+    "pluginPart": "Claude Code plugin",
+    "partDone": "{part}: done.",
+    "partFailed": "{part}: failed. Run: {command}",
+    "thenBoard": "Then type /agent-board in any of them.",
+    "open": "Open a new session in each of: {agents}.",
+    "openOne": "Open a new session in {agents}.",
+    "thenBoardOne": "Then type /agent-board there."
   },
   {
     "previewCreate": "將建立 {count} 個設定檔案",
@@ -86,11 +107,25 @@ const summaries = [
     "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛。",
     "openclaw": "OpenClaw：重新啟動 OpenClaw，載入 setup 產生的 agent-board 外掛。",
     "deepseek": "DeepSeek：關掉 DeepSeek Harness（dsh）再重新打開，讓它載入 setup 產生的 agent-board 外掛。",
+    "cursorWindows": "Cursor：在 Windows 上，請從 PowerShell 或命令提示字元啟動 cursor-agent。從 Git Bash 啟動時，Cursor 不會執行看板的 hooks，看板就收不到它的任何進度。",
     "start": "最後在 {agents} 各開一個新的工作階段。",
     "startOne": "最後在 {agents} 開一個新的工作階段。",
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
     "plugin": "Claude Code：執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。",
-    "board": "開啟看板：{command}"
+    "board": "開啟看板：{command}",
+    "thisWill": "會做這幾件事：",
+    "question": "要設定這些嗎？[Y/n] ",
+    "filesPart": "{host} 設定檔案",
+    "trustPart": "在 {host} 核准看板的 hooks",
+    "installPlugin": "安裝 Claude Code 外掛",
+    "marketplacePart": "Claude Code 外掛市集",
+    "pluginPart": "Claude Code 外掛",
+    "partDone": "{part}：已完成。",
+    "partFailed": "{part}：失敗。請執行：{command}",
+    "thenBoard": "接著在其中任一個輸入 /agent-board。",
+    "open": "在 {agents} 各開一個新的工作階段。",
+    "openOne": "在 {agents} 開一個新的工作階段。",
+    "thenBoardOne": "接著在那裡輸入 /agent-board。"
   },
   {
     "previewCreate": "将创建 {count} 个设置文件",
@@ -115,11 +150,25 @@ const summaries = [
     "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件。",
     "openclaw": "OpenClaw：重新启动 OpenClaw，加载 setup 生成的 agent-board 插件。",
     "deepseek": "DeepSeek：关掉 DeepSeek Harness（dsh）再重新打开，让它加载 setup 生成的 agent-board 插件。",
+    "cursorWindows": "Cursor：在 Windows 上，请从 PowerShell 或命令提示符启动 cursor-agent。从 Git Bash 启动时，Cursor 不会运行看板的 hooks，看板就收不到它的任何进度。",
     "start": "最后在 {agents} 各开一个新的会话。",
     "startOne": "最后在 {agents} 开一个新的会话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",
-    "board": "打开看板：{command}"
+    "board": "打开看板：{command}",
+    "thisWill": "会做这几件事：",
+    "question": "要设置这些吗？[Y/n] ",
+    "filesPart": "{host} 设置文件",
+    "trustPart": "在 {host} 批准看板的 hooks",
+    "installPlugin": "安装 Claude Code 插件",
+    "marketplacePart": "Claude Code 插件市场",
+    "pluginPart": "Claude Code 插件",
+    "partDone": "{part}：已完成。",
+    "partFailed": "{part}：失败。请运行：{command}",
+    "thenBoard": "接着在其中任一个输入 /agent-board。",
+    "open": "在 {agents} 各开一个新的会话。",
+    "openOne": "在 {agents} 开一个新的会话。",
+    "thenBoardOne": "接着在那里输入 /agent-board。"
   }
 ]
 const summary = summaries[['en', 'zh-TW', 'zh-CN'].indexOf(language)]
@@ -221,6 +270,60 @@ const hermesHome = home => {
   return local && own !== undefined && clean(own) === clean(home) ? join(local, 'hermes') : join(home, 'AppData', 'Local', 'hermes')
 }
 
+// On a POSIX terminal the answer is read from /dev/tty. fd 0 can be non-blocking (code in this process
+// opened process.stdin, or a parent shared a non-blocking pipe); a read before the answer is typed then
+// fails with EAGAIN, so setup waits and reads again.
+const askYes = () => {
+  process.stdout.write(words('question'))
+  let fd = 0
+  let isOwn = false
+  if (process.platform !== 'win32' && isatty(0)) {
+    try { fd = openSync('/dev/tty', 'r'); isOwn = true } catch {}
+  }
+  const chunks = []
+  let size = 0
+  try {
+    const bytes = Buffer.alloc(256)
+    while (size < 4096) {
+      let count
+      try { count = readSync(fd, bytes, 0, bytes.length, null) } catch (error) {
+        if (error?.code !== 'EAGAIN') return false
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+        continue
+      }
+      if (count === 0) break
+      const chunk = Buffer.from(bytes.subarray(0, count))
+      chunks.push(chunk)
+      size += count
+      if (chunk.includes(10)) break
+    }
+  } finally {
+    if (isOwn) try { closeSync(fd) } catch {}
+  }
+  return size > 0 && /^\s*(y|yes|是|好|對|对)?\s*$/i.test(Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0])
+}
+
+const hasPlugin = directory => {
+  const plugin = 'agent-board@agent-board'
+  const read = file => {
+    try { return JSON.parse(readFileSync(join(directory, file), 'utf8').replace(/^\uFEFF/, '')) } catch { return null }
+  }
+  const installed = read('plugins/installed_plugins.json')?.plugins?.[plugin]
+  return (Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === 'object')
+    || read('settings.json')?.enabledPlugins?.[plugin] === true
+}
+
+// npm supplies .cmd shims on Windows; quote each argument for cmd rather than enabling a shell for every program.
+// A plugin install fetches from GitHub, so a stuck one ends after three minutes and counts as failed.
+const runProgram = (program, argv) => {
+  const options = { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000 }
+  if (process.platform === 'win32' && /\.cmd$/i.test(program)) {
+    const quoted = [program, ...argv].map(word => `"${word.replaceAll('"', '""')}"`).join(' ')
+    return spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${quoted}"`], { ...options, windowsVerbatimArguments: true })
+  }
+  return spawnSync(program, argv, options)
+}
+
 const main = () => {
   const at = args.indexOf('--agent')
   const selector = at < 0 ? 'auto' : args[at + 1]
@@ -263,20 +366,24 @@ const main = () => {
     || (ownPrograms[agent] !== undefined && existsSync(ownPrograms[agent]))
     || (homeAt < 0 && (findOnPath(commands[agent]) || apps[agent]?.some(app => existsSync(app)))),
   ) : selector.split(',')
-  const hasClaude = existsSync(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')) || (homeAt < 0 && !!findOnPath(['claude']))
+  const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
+  const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude'], ['.exe', '.cmd']) : undefined
+  const hasClaude = existsSync(claudeDirectory) || (homeAt < 0 && !!claude)
+  const isPluginNeeded = isAsking && !!claude && !hasPlugin(claudeDirectory)
   const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
   const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
     ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
   const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
   const setupCommand = extra => [command || nodeCommand(fileURLToPath(import.meta.url)), ...common.map(quote), ...extra.map(quote)].join(' ')
-  if (selector === 'auto' && !selected.length) {
+  if (selector === 'auto' && !selected.length && !isPluginNeeded) {
     const next = setupCommand(['--agent', 'codex'])
     const noAgent = noAgentText(homeAt < 0 ? 'anywhere' : 'home', { home, next })
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n1. ${words('plugin')}` : noAgent}\n`)
     return
   }
-  if (!selected.length || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
+  if ((!selected.length && selector !== 'auto') || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
   const apply = args.includes('--apply')
+  const isShowingApplied = apply
   const script = fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
   const run = (agent, isApplying) => {
     const result = spawnSync(process.execPath, [script, ...common, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
@@ -301,9 +408,9 @@ const main = () => {
   }
   const plans = selected.map(agent => run(agent, false))
   const available = selected.filter((agent, i) => !plans[i].conflicts.length)
-  if (!available.length) process.exitCode = 1
+  if (selected.length && !available.length) process.exitCode = 1
   const results = plans.map((plan, i) => {
-    if (!apply || plan.conflicts.length) return plan
+    if (!isShowingApplied || plan.conflicts.length) return plan
     // An unchanged install still rewrites its manifest; keep a second run read-only.
     return plan.changes.length ? run(selected[i], true) : { ...plan, applied: true }
   })
@@ -325,7 +432,7 @@ const main = () => {
   })
   const filesByAgent = plans.map(plan => plan.conflicts.length ? [] : [
     ...plan.changes.map(change => change.file),
-    ...(!apply ? records(plan) : []),
+    ...(!isShowingApplied ? records(plan) : []),
   ])
   const owners = new Map()
   for (const [i, files] of filesByAgent.entries()) for (const file of files) {
@@ -335,7 +442,7 @@ const main = () => {
   const shared = new Set([...owners].filter(([, agents]) => agents.size > 1).map(([file]) => file))
   const changesFor = (plan, isShared) => plan.changes.filter(change => shared.has(change.file) === isShared)
   const describe = changes => {
-    if (apply) return changes.length ? words('applied', { count: changes.length }) : ''
+    if (isShowingApplied) return changes.length ? words('applied', { count: changes.length }) : ''
     return [['create', 'previewCreate'], ['update', 'preview'], ['remove', 'previewRemove']]
       .flatMap(([action, key]) => {
         const count = changes.filter(change => change.action === action).length
@@ -349,40 +456,136 @@ const main = () => {
   const sharedChanges = [...new Map(results.flatMap(plan => plan.conflicts.length ? [] : changesFor(plan, true)).map(change => [change.file, change])).values()]
   const sharedFiles = [...new Set(filesByAgent.flat().filter(file => shared.has(file)))]
   const lines = []
+  let sharedLine = ''
   if (sharedFiles.length) {
     const status = describe(sharedChanges)
-    lines.push(`${words('shared')}:${status ? ` ${status}` : ''}`)
-    if (!apply) lines.push(...sharedFiles.map(file => fileLine(file, sharedChanges)))
+    sharedLine = `${words('shared')}:${status ? ` ${status}` : ''}`
+    lines.push(sharedLine)
+    if (!isShowingApplied) lines.push(...sharedFiles.map(file => fileLine(file, sharedChanges)))
   }
-  lines.push(...selected.map((agent, i) => {
+  const agentLines = selected.map((agent, i) => {
     const plan = results[i]
     const ownChanges = changesFor(plan, false)
     const changed = new Set(ownChanges.map(change => change.file))
-    const alreadyCurrent = apply && !plan.conflicts.length && plan.managedBy !== 'connector'
+    const alreadyCurrent = isShowingApplied && !plan.conflicts.length && plan.managedBy !== 'connector'
       ? changesFor(plans[i], false).filter(change => !changed.has(change.file)).length : 0
     const current = alreadyCurrent > 0 ? `; ${words('current', { count: alreadyCurrent })}` : ''
     const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.join(', '), command: setupCommand(['--agent', agent, '--apply']) })
       : describe(ownChanges) || words('ready')
     const capability = plan.managedBy !== 'connector' && !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
     // An install plan removes a file only to retire the old /board command (#868), so the preview says so.
-    const files = !apply && !plan.conflicts.length ? filesByAgent[i].filter(file => !shared.has(file)).map(file => fileLine(file, ownChanges)) : []
+    const files = !isShowingApplied && !plan.conflicts.length ? filesByAgent[i].filter(file => !shared.has(file)).map(file => fileLine(file, ownChanges)) : []
     // An old /board file the person edited stays; say so in the preview and after applying.
     const kept = plan.conflicts.length ? [] : (plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`)
     return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
-  }))
+  })
+  lines.push(...agentLines)
   if (hasClaude) lines.push(`Claude Code: ${words('claude')}`)
   const steps = []
-  const isTrusted = (plan, codex) => {
+  const boardRun = (plan, agent, extra) => {
     const own = []
     for (let i = 0; i < common.length; i++) {
       if (common[i] === '--agent') i++
       else own.push(common[i])
     }
-    const doctor = spawnSync(process.execPath, [plan.script ?? join(plan.data, 'agent-board.mjs'), '--codex-doctor', '--json', ...own, '--agent', 'codex', '--codex-bin', codex], { encoding: 'utf8', windowsHide: true })
+    return spawnSync(process.execPath, [plan.script ?? join(plan.data, 'agent-board.mjs'), ...own, '--agent', agent, ...extra], { encoding: 'utf8', windowsHide: true })
+  }
+  const isTrusted = (plan, agent, codex) => {
+    const doctor = boardRun(plan, agent, ['--codex-doctor', '--json', ...(codex ? ['--codex-bin', codex] : [])])
     try { return doctor.status === 0 && JSON.parse(doctor.stdout).hooksTrusted === true } catch { return false }
   }
   const boardPlan = available.length ? results[selected.indexOf(available[0])] : null
   const boardCommand = boardPlan ? command ? command.replace(/\s+setup\s*$/, '') : nodeCommand(boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs')) : ''
+  if (isAsking) {
+    const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
+    const approvals = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
+      const plan = plans[selected.indexOf(agent)]
+      return plan.managedBy !== 'connector' && (plan.changes.length || !isTrusted(plan, agent, agent === 'codex' ? codex : undefined))
+    })
+    // Only what a yes would do: no skipped agent and no agent whose own files are already current.
+    const will = [
+      ...(sharedChanges.length ? [sharedLine] : []),
+      ...agentLines.filter((line, i) => !plans[i].conflicts.length && changesFor(plans[i], false).length).map(line => line.split('\n')[0]),
+      ...approvals.map(agent => words('trustPart', { host: names[agent] })),
+      ...(isPluginNeeded ? [words('installPlugin')] : []),
+    ]
+    // With nothing to do there is nothing to ask; the plain preview below says so.
+    let hasConsent = false
+    if (will.length) {
+      process.stdout.write(`${lines.join('\n')}\n\n${words('thisWill')}\n${will.map(line => `- ${line}`).join('\n')}\n`)
+      hasConsent = askYes()
+      process.stdout.write('\n')
+    }
+    if (hasConsent) {
+      const completed = []
+      const report = (part, isDone, next) => process.stdout.write(`${words(isDone ? 'partDone' : 'partFailed', { part, command: next })}\n`)
+      for (const [i, agent] of selected.entries()) {
+        const plan = plans[i]
+        // A skipped agent's preview line already names its files and the command to apply it.
+        if (plan.conflicts.length) continue
+        let isDone = true
+        try {
+          if (plan.changes.length) {
+            const applied = run(agent, true)
+            isDone = applied.applied === true && !applied.conflicts.length
+          }
+          if (isDone) completed.push(agent)
+        } catch { isDone = false }
+        if (!isDone) process.exitCode = 1
+        report(words('filesPart', { host: names[agent] }), isDone, setupCommand(['--agent', agent, '--apply']))
+      }
+      for (const agent of approvals) {
+        const extra = [`--${agent}-trust`, ...(agent === 'codex' && codex ? ['--codex-bin', codex] : []), '--apply', '--json']
+        const next = [boardCommand, ...common.map(quote), ...extra.filter(word => word !== '--json').map(quote), ...(agent === 'codex' && !codex ? ['--codex-bin <path-to-codex>'] : [])].join(' ')
+        // Hooks whose files were not written cannot be approved; say so instead of leaving the part out.
+        if (!completed.includes(agent)) {
+          report(words('trustPart', { host: names[agent] }), false, next)
+          continue
+        }
+        const result = boardRun(plans[selected.indexOf(agent)], agent, extra)
+        report(words('trustPart', { host: names[agent] }), !result.error && result.status === 0, next)
+      }
+      let isPluginReady = !!claude && hasPlugin(claudeDirectory)
+      if (isPluginNeeded) {
+        let known = null
+        try { known = JSON.parse(readFileSync(join(claudeDirectory, 'plugins', 'known_marketplaces.json'), 'utf8').replace(/^\uFEFF/, '')) } catch {}
+        // A marketplace Claude Code already knows would make "marketplace add" fail; only the install is left.
+        const isKnown = known !== null && typeof known === 'object' && Object.hasOwn(known, 'agent-board')
+        for (const [part, argv] of [
+          ...(isKnown ? [] : [['marketplacePart', ['plugin', 'marketplace', 'add', 'WenyuChiou/agent-board']]]),
+          ['pluginPart', ['plugin', 'install', 'agent-board@agent-board']],
+        ]) {
+          const result = runProgram(claude, argv)
+          // An install counts once Claude Code lists the plugin, not on its exit status alone.
+          const isDone = !result.error && result.status === 0 && (part !== 'pluginPart' || hasPlugin(claudeDirectory))
+          report(words(part), isDone, ['claude', ...argv].join(' '))
+          if (part === 'pluginPart') isPluginReady = isDone
+        }
+      }
+      const next = []
+      const sessions = []
+      for (const agent of completed) {
+        const plan = plans[selected.indexOf(agent)]
+        if (plan.managedBy === 'connector') continue
+        if (plan.capabilities.lifecycle === 'adapter-pending') next.push(words('skill', { host: names[agent] }))
+        else {
+          if (['opencode', 'openclaw', 'deepseek'].includes(agent)) next.push(words(agent))
+          // Started from Git Bash, cursor-agent hands its PowerShell hook commands to bash and none runs (#1159).
+          if (agent === 'cursor' && process.platform === 'win32') next.push(words('cursorWindows'))
+          sessions.push(names[agent])
+        }
+      }
+      if (isPluginReady) sessions.push('Claude Code')
+      if (sessions.length) {
+        next.push(words(sessions.length === 1 ? 'openOne' : 'open', { agents: sessions.join(message(', ', '、', '、')) }))
+        next.push(words(sessions.length === 1 ? 'thenBoardOne' : 'thenBoard'))
+      }
+      if (next.length) process.stdout.write(`\n${words('next')}\n${next.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n`)
+      return
+    }
+    // A no: the preview is already on screen, so only the next steps follow.
+    if (will.length) lines.length = 0
+  }
   if (!apply && available.some(agent => plans[selected.indexOf(agent)].changes.length)) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
   const sessionAgents = []
   for (const agent of available) {
@@ -392,7 +595,7 @@ const main = () => {
     const codex = agent === 'codex' ? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
     // A repeat run of an unchanged install asks Codex itself whether the board's hooks are trusted,
     // and leaves out the trust step only on its yes; no answer or any other answer keeps it (#808).
-    if (codex && !plan.changes.length && isTrusted(plan, codex)) continue
+    if (codex && !plan.changes.length && isTrusted(plan, agent, codex)) continue
     if (agent === 'codex' && !codex) {
       steps.push(words('codexMissing'))
       continue
@@ -404,6 +607,7 @@ const main = () => {
     if (['codex', 'hermes', 'opencode', 'openclaw', 'deepseek'].includes(agent)) {
       steps.push(words(agent, { command: boardCommand, codex: codex ? quote(codex) : '' }))
     }
+    if (agent === 'cursor' && process.platform === 'win32') steps.push(words('cursorWindows'))
     sessionAgents.push(names[agent])
   }
   if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
