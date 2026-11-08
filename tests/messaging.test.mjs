@@ -385,6 +385,36 @@ test('a Cursor mailbox card says the message waits for the chat to open, not for
   assert.ok(!page.text().includes(EN.serveNextTurnHint))
 })
 
+test('a DeepSeek mailbox card is a plain Send with no Copy, and an answer handed over says so without naming a next turn (#725)', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now(), seed = enrollMailbox({ messages: [] }, 'deepseek', 'mailbox-session', 'dsh', now, 43_200_000), mailbox = seed.mailboxes[0]
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=deepseek resume=mailbox-session state=waiting updated=${new Date(now).toISOString()} -->\n### Mailbox page\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  const model = messages => serveModel(view, [], EN, new Set(), false, { connections: [], mailboxes: [mailbox], messages }, false, group)
+  assert.equal(model([]).asks[0].send, 'mailbox')
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model([]), async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  const labels = page.cards().flatMap(card => page.buttons(card)).map(one => one.textContent)
+  assert.ok(labels.includes(EN.serveSend('DeepSeek')), labels.join(' | '))
+  assert.ok(!labels.includes(EN.serveQueueNextTurn('DeepSeek')))
+  assert.ok(!labels.includes(EN.pgCopyAnswer))
+  page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
+  assert.ok(!page.text().includes(EN.serveNextTurnHint))
+  page.inputs(page.cards()[0])[0].value = 'Blue'
+  page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.serveSend('DeepSeek')).click()
+  await page.flush()
+  assert.equal(page.requests[0].body.type, 'message')
+  assert.equal(page.requests[0].body.text, 'Blue')
+  // Handed over the moment the session was idle, not at a turn it starts later.
+  const queued = queueMessage(seed, { id: 'deepseek-accepted', target: mailbox.id, turn: 'session', text: 'Blue' }, 'board', mailbox, now).state
+  const taken = takeMailboxMessage(queued, 'deepseek', 'mailbox-session', 'dsh', now + 1, 43_200_000, 'abcdef')
+  const accepted = acceptMailboxMessage(taken.state, 'deepseek', 'mailbox-session', 'deepseek-accepted', 'abcdef', now + 2)
+  await page.redraw(model(accepted.messages))
+  assert.ok(!page.text().includes(EN.messagesHandedNextTurn))
+  assert.ok(page.text().includes(EN.messagesHandedNow), page.text())
+})
+
 test('the same text queued again after the first was handed over is a new message', async () => {
   const { servePage } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
@@ -2932,6 +2962,31 @@ test('an existing card sends only to its exact live receiver and preserves mark 
   assert.equal(hidden.asks.length, 0); assert.equal(hidden.hidden.length, 1)
   assert.equal((await board.call('/api/act', { key: hidden.hidden[0].key, type: 'unhide' })).status, 200)
   assert.equal((await board.call('/api/board')).body.model.asks.length, 1)
+}))
+
+test('after an answer reaches its session, that question leaves Needs you when the agent rewrites its report, and the next question starts with no receipt (#725)', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const block = steps => `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Answer fixture\n${steps}\n<!-- /auto session=abcdef01 -->\n`
+  writeFileSync(join(dir, 'progress.md'), block('- [?] Blue or green?'))
+  const connected = (await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: 'Synthetic Codex CLI' })).body
+  const ask = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  assert.ok(ask.questionId)
+  assert.equal((await board.call('/api/act', { key: ask.key, type: 'message', id: 'AB-TEST-003', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn })).status, 200)
+  const credentials = { connection: connected.id, secret: connected.secret }
+  const claimed = (await board.call('/api/messages/poll', { ...credentials, turn: 'turn1' })).body.messages[0]
+  await board.call('/api/messages/receipt', { ...credentials, id: 'AB-TEST-003', nonce: claimed.nonce, status: 'acknowledged', reply: 'ACK ' + claimed.nonce })
+  // The agent words the step its own way once it has the answer, and asks the next question.
+  writeFileSync(join(dir, 'progress.md'), block('- [x] Blue or green? Blue\n- [?] Apple or banana?'))
+  const model = (await board.call('/api/board')).body.model
+  assert.deepEqual(model.asks.map(one => one.text), ['Apple or banana?'])
+  assert.equal(model.asks[0].receipt, undefined)
+  // A question gone from a report whose answer its session turned down stays where the person sees it.
+  const apple = model.asks[0]
+  assert.equal((await board.call('/api/act', { key: apple.key, type: 'message', id: 'AB-TEST-004', text: 'Apple', session: apple.session, asked: apple.text, fp: apple.fp, connection: apple.delivery.id, turn: apple.delivery.turn })).status, 200)
+  const second = (await board.call('/api/messages/poll', { ...credentials, turn: 'turn1' })).body.messages[0]
+  await board.call('/api/messages/receipt', { ...credentials, id: 'AB-TEST-004', nonce: second.nonce, status: 'rejected' })
+  writeFileSync(join(dir, 'progress.md'), block('- [?] Pear or plum?'))
+  assert.deepEqual((await board.call('/api/board')).body.model.asks.map(one => one.text).sort(), ['Apple or banana?', 'Pear or plum?'])
 }))
 
 test('a card cannot infer a receiving connection from a matching title, prefix or another agent', async () => fixture(async (board, dir) => {

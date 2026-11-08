@@ -1,8 +1,9 @@
 import { STRINGS } from './strings'
 import { HOOK_VERSION, HOOK_WORKER_GRACE, hookGuardSource, hookTimeout } from './hook-safety'
+import { deepseekReceiverSource } from './receivers/deepseek'
 
-// Native metadata observers only. No conversation grant, transcript read, model call
-// or receiving connection is installed by these generated plugins.
+// Native metadata observers. No conversation grant, transcript read or model call is installed by these
+// generated plugins; DeepSeek's alone also receives a board message for its session (hooks/receivers/deepseek.ts).
 const runner = (node: string, script: string, progress: string, agent: string, home: string): string => `import { spawnSync } from 'node:child_process'
 ${hookGuardSource(home, agent)}
 const report = (mode, payload, deadline, session, cwd) => {
@@ -104,8 +105,10 @@ export default {
 // the board page or write progress.md from there. This plugin runs in the dsh process, outside that
 // sandbox, and gives the agent one tool, agent_board, for both. The tool is bound to the session the
 // host gives it (its id and folder); no hook that receives the prompt, messages or model is registered.
+// A board answer for a root session reaches that session directly, with no Copy (#725).
 export const deepseekLocalPlugin = (node: string, script: string, progress: string, home: string, board: string, description = STRINGS.en.deepseekBoardTool, stepFormat = STRINGS.en.localAgentStepFormat): string => `${runner(node, script, progress, 'deepseek', home)}
 import { spawn } from 'node:child_process'
+${deepseekReceiverSource(node, board, progress, home)}
 export const name = 'agent-board-local'
 const folderOf = agent => {
   const cwd = agent?.session?.header?.cwd
@@ -139,12 +142,20 @@ const openBoard = () => new Promise((resolve, reject) => {
 })
 export const apply = ctx => {
   const save = (agent, state) => withHook((_current, deadline) => report('--agent-status', { session_id: agent.session.header.id, state, ...folderOf(agent) }, deadline))
-  ctx.on('agent/created', ({ agent }) => { save(agent, agent.status === 'running' ? 'working' : 'waiting') })
+  const receiver = mailboxReceiver()
+  ctx.on('agent/created', ({ agent }) => {
+    save(agent, agent.status === 'running' ? 'working' : 'waiting')
+    receiver.add(agent)
+  })
   ctx.on('agent/status', ({ agent, status }) => {
     if (!['running', 'idle'].includes(status)) return
     save(agent, status === 'running' ? 'working' : 'waiting')
+    if (status === 'idle') receiver.idle(agent)
   })
-  ctx.on('agent/disposed', ({ agent }) => { save(agent, 'ended') })
+  ctx.on('agent/disposed', ({ agent }) => {
+    save(agent, 'ended')
+    receiver.remove(agent)
+  })
   // Tools are optional: a host without the service still gets the lifecycle events above.
   if (typeof ctx.inject !== 'function') return
   // The shape that defineTool of @deepseek-ai/dsh-tools returns, built by hand: a plugin loaded by file

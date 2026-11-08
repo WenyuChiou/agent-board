@@ -577,6 +577,17 @@ test('a question in a block updated 30 minutes ago is shown as 30 minutes old, n
   } finally { await f.close() }
 })
 
+test('a hand-kept task with no due date shows no time rather than "Unknown time" (#1145)', async () => {
+  const f = await fixture('## demo\n### Renew the synthetic passport\n- [x] Photos\n- [ ] Fill the form\n')
+  try {
+    const model = await f.api()
+    const dom = await pageDom(f.runtime.servePage(EN, 'synthetic'), model)
+    const text = dom.node('board').readText
+    assert.ok(text.includes('Renew the synthetic passport'), text)
+    assert.ok(!text.includes(EN.pgUnknownAge), text)
+  } finally { await f.close() }
+})
+
 test('a hand-kept task with a due date shows it on its row in place of the unknown age', async () => {
   const f = await fixture('## demo\n### Pay the synthetic invoice\n> 截止 11-06\n- [ ] Open the invoice\n')
   try {
