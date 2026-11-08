@@ -7092,7 +7092,7 @@ export const LINES = [
 "  const session = item.type === \"ask\" ? item.ask.target?.session ?? item.ask.session : item.type === \"row\" ? item.row.archive?.session ?? item.row.target?.session ?? \"\" : \"\";",
 "  const parts = item.type === \"ask\" ? [session, item.ask.target?.resume ?? \"\", item.ask.project, item.ask.task, item.ask.text, item.ask.note] : item.type === \"row\" ? [session, item.row.target?.resume ?? \"\", item.row.project, item.row.title, item.row.next?.step ?? \"\", item.row.question ?? \"\", item.row.resume ?? \"\"] : [item.turn.agent, item.turn.project, item.turn.text];",
 "  if (item.type === \"row\")",
-"    parts.push(item.row.confirm?.expected ?? \"\", JSON.stringify(item.row.steps));",
+"    parts.push(item.row.confirm?.expected ?? \"\", JSON.stringify(item.row.steps.map(({ line, ...step }) => step)));",
 "  if (item.type !== \"turn\" && session === \"\")",
 "    parts.push(String(twinsOf(item, items)));",
 "  return sha256(parts.join(\"\\x00\")).slice(0, 12);",

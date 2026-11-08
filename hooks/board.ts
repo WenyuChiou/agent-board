@@ -708,7 +708,9 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[]): strin
       : item.type === 'row'
         ? [session, item.row.target?.resume ?? '', item.row.project, item.row.title, item.row.next?.step ?? '', item.row.question ?? '', item.row.resume ?? '']
         : [item.turn.agent, item.turn.project, item.turn.text]
-  if (item.type === 'row') parts.push(item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps))
+  // A step's line number moves whenever a block above it grows or shrinks, so it stays out: a press
+  // from the drawn card still acts (#1170). A tick by line is checked against the current line.
+  if (item.type === 'row') parts.push(item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => step)))
   if (item.type !== 'turn' && session === '') parts.push(String(twinsOf(item, items)))
 
   return sha256(parts.join('\u0000')).slice(0, 12)

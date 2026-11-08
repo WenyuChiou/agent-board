@@ -270,7 +270,8 @@ const hookLoad = async ({ out, isStdinStop }) => {
           const rows = [...model.groups.flatMap(group => group.rows), ...model.stopped, ...model.idle]
           for (const one of [...expected]) {
             const shortId = shortIdOf(one.id)
-            const row = shortId === undefined ? undefined : rows.find(item => item.session === shortId)
+            // A session with a mailbox shows its own id on the row instead of the block's short id (#828).
+            const row = rows.find(item => item.session === one.id || (shortId !== undefined && item.session === shortId))
             if (row !== undefined && / is working$/.test(row.status) === one.isWorking) one.done({ host: one.host, ms: Math.max(0, Math.round(at - one.returnedAt)) })
           }
         }
