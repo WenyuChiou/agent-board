@@ -499,7 +499,8 @@ test('the budgeted slow files go to different parts, and the parts together run 
   const slow = Object.keys(BOARD_FILE_BUDGETS_MS).filter(path => !selfPartedTests.includes(path))
   for (const total of [4, 6]) {
     const shares = Array.from({ length: total }, (_, i) => partFiles(files, (i + 1) + '/' + total))
-    for (const share of shares) assert.ok(share.filter(path => slow.includes(path)).length <= 1, total + ' parts: ' + share.join(' '))
+    // Spread evenly: one per part while there are no more slow files than parts (Windows' 6), else at most one more.
+    for (const share of shares) assert.ok(share.filter(path => slow.includes(path)).length <= Math.ceil(slow.length / total), total + ' parts: ' + share.join(' '))
     const others = shares.flat().filter(path => !selfPartedTests.includes(path))
     assert.deepEqual([...others].sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
     for (const share of shares) for (const path of selfPartedTests) assert.ok(share.includes(path))

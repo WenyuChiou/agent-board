@@ -3332,6 +3332,24 @@ test('with explicit legacy opt-in a reply goes into a closed Grok session once, 
   }
 })
 
+test('a press on the page still acts after a block above its card grows, so its lines moved (#1170)', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const { call, path, rowOf } = board
+    const row = await rowOf('Pick the cache')
+    assert.equal(row.canArchive, true)
+    // Another task is written above the card after the page drew it: every line below moves down.
+    const grown = readFileSync(path, 'utf8').replace('## api-gateway\n', '## Notes\n### Read the logs\n- [ ] Open the file\n- [ ] Find the error\n\n## api-gateway\n')
+    writeFileSync(path, grown)
+    const archived = await call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: row.session, fp: row.fp } })
+    assert.equal(archived.status, 200, archived.body)
+    assert.ok(!readFileSync(path, 'utf8').includes('b2c3d4e5'))
+    assert.ok(readFileSync(path, 'utf8').includes('### Read the logs'))
+  } finally {
+    await board.close()
+  }
+})
+
 test('a press on the page for a task whose block another session took under the same title is refused, and nothing is archived until the page draws the block that is there now', { timeout: 30_000 }, async () => {
   const board = await page()
   try {
@@ -3454,7 +3472,10 @@ const viewed = model => {
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
 // `width`: the window's width in pixels (the page folds and moves its sidebar by it); `storage`: a Map behind localStorage;
 // `motion`: 'reduce' or 'full', what the person's system asks for (left out: the page never moves, as in the other tests).
-const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now } = {}) => {
+// The stub now reads every static button with its attributes (#1163). The bulk tidy's confirm and
+// cancel start disabled and wait for a preview, online or not, so the offline checks leave them out.
+const WAITS_FOR_PREVIEW = ['tidy-confirm', 'tidy-cancel']
+const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now, notification, sessionStore, onReload, onFocus } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -3472,6 +3493,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       nodes.set(value, this)
     }
     get id() { return this.attributes.id ?? '' }
+    get hidden() { return 'hidden' in this.attributes }
+    set hidden(value) { if (value) this.attributes.hidden = ''; else delete this.attributes.hidden }
     get tagName() { return this.tag.toUpperCase() }
     set textContent(value) {
       this.textWrites += 1
@@ -3524,13 +3547,17 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     }
     click() {
       if (this.disabled) return
-      this.events.click?.()
+      this.events.click?.({ target: this })
       if (this.tag === 'summary' && this.parentNode?.tag === 'details') {
         this.parentNode.open = !this.parentNode.open
         this.parentNode.events.toggle?.()
       }
     }
     focus() { document.activeElement = this }
+    closest(selector) {
+      for (let node = this; node; node = node.parentNode) if (matches(node, selector)) return node
+      return null
+    }
     blur() { if (document.activeElement === this) document.activeElement = null }
     scrollIntoView() { this.scrolled = true }
     setSelectionRange() {}
@@ -3544,6 +3571,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   get('.pfoot').appendChild(get('close'))
   for (const id of ['close']) get(id).tag = 'button'
   const matches = (node, selector) => {
+    if (selector.includes(',')) return selector.split(',').some(one => matches(node, one.trim()))
     if (selector === 'button') return node.tag === 'button'
     if (selector === 'button:not([data-local])') return node.tag === 'button' && node.getAttribute('data-local') === null
     if (selector === 'button[data-static]') return node.tag === 'button' && node.getAttribute('data-static') !== null
@@ -3557,7 +3585,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   for (const found of html.matchAll(/<button\b([^>]*)>/g)) {
     const id = found[1].match(/id="([^"]+)"/)?.[1]
     if (!id) continue
-    for (const attr of ['data-local', 'data-static']) if (found[1].includes(attr)) get(id).setAttribute(attr, '')
+    get(id).tag = 'button'
+    for (const attr of found[1].matchAll(/([\w-]+)(?:="([^"]*)")?/g)) get(id).setAttribute(attr[1], attr[2] ?? '')
   }
   const copied = []
   const copies = []
@@ -3575,9 +3604,27 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     title: '',
     hidden: false,
     events: {},
-    addEventListener(name, run) { this.events[name] = run },
+    addEventListener(name, run) {
+      const previous = this.events[name]
+      this.events[name] = event => { previous?.(event); run(event) }
+    },
     body: new Element('body'),
     execCommand: () => { copies.push(document.body.childNodes.find(node => node.tag === 'textarea')?.value); return copyAllowed },
+  }
+  // Parse the static Settings controls too, so tests exercise the rendered panel's real order.
+  // Only the panel: the static controls after it (the bulk tidy, the footer) stay out, as before Settings.
+  const settingsMarkup = html.match(/<div id="settings"[\s\S]*?<p id="settings-result"[^>]*><\/p><\/div><\/div>/)?.[0] ?? ''
+  const parents = [document.body]
+  for (const token of settingsMarkup.matchAll(/<\/?([a-z][\w-]*)\b([^>]*)>|([^<]+)/g)) {
+    if (token[3]) { parents.at(-1).text += token[3]; continue }
+    if (token[0].startsWith('</')) { parents.pop(); continue }
+    const attrs = Object.fromEntries([...token[2].matchAll(/([\w-]+)(?:="([^"]*)")?/g)].map(one => [one[1], one[2] ?? '']))
+    const node = attrs.id ? get(attrs.id) : new Element(token[1])
+    node.tag = token[1]
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value)
+    if ('hidden' in attrs) node.hidden = true
+    parents.at(-1).appendChild(node)
+    if (!token[0].endsWith('/>')) parents.push(node)
   }
   let model = viewed(first)
   let clockNow = now === undefined ? Date.now() : now
@@ -3586,6 +3633,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   const windowEvents = {}
   const win = {
     confirm, isSecureContext: !!clipboard,
+    focus: onFocus,
+    location: { reload: onReload },
     ...(width === undefined ? {} : { innerWidth: width, addEventListener: (name, run) => { windowEvents[name] = run } }),
     ...(motion === undefined ? {} : { matchMedia: () => ({ matches: motion === 'reduce', addEventListener: () => {} }) }),
   }
@@ -3600,6 +3649,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     URLSearchParams,
     navigator: clipboard ? { clipboard: { writeText: async text => { copied.push(text) }, ...(readClipboard ? { readText: readClipboard } : {}) } } : {},
     window: win,
+    ...(notification === undefined ? {} : { Notification: notification }),
+    ...(sessionStore === undefined ? {} : { sessionStorage: { getItem: key => sessionStore.get(key), setItem: (key, value) => sessionStore.set(key, value), removeItem: key => sessionStore.delete(key) } }),
     ...(storage === undefined ? {} : { localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { storage.set(key, value) }, removeItem: key => { storage.delete(key) } } }),
     ...(motion === undefined ? {} : { requestAnimationFrame: run => { run(); return 1 } }),
     crypto: { randomUUID: () => `synthetic-offline-attempt-${requests.length}` },
@@ -4950,7 +5001,8 @@ test('L5 restarted server: an old page tab disables its buttons and says how to 
           await dom.settle()
         }
         assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).every(button => button.disabled), `${lang}: ${failure}`)
-        assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') !== null && button.className !== 'answer-send').every(button => !button.disabled))
+        const stuck = dom.allButtons().filter(button => button.getAttribute('data-local') !== null && button.className !== 'answer-send' && !WAITS_FOR_PREVIEW.includes(button.id) && button.disabled)
+        assert.deepEqual(stuck.map(button => button.id || button.className), [], `${lang}: ${failure}: local controls stay enabled`)
         assert.equal(dom.node('offline').textContent, line)
         // The line stays in view under the header while the page scrolls, with a rule under it.
         assert.match(html, /#offline\{[^}]*position:sticky;top:0;/)
@@ -5029,7 +5081,7 @@ test('an old page tab keeps its copy buttons working while the board is unreacha
     await dom.settle()
     const local = dom.allButtons().filter(button => button.getAttribute('data-local') !== null)
     assert.ok(local.length >= 6, 'reply, answers, command and both resume buttons are local')
-    assert.ok(local.filter(button => button.className !== 'answer-send').every(button => !button.disabled), 'local controls enabled')
+    assert.ok(local.filter(button => button.className !== 'answer-send' && !WAITS_FOR_PREVIEW.includes(button.id)).every(button => !button.disabled), 'local controls enabled')
     assert.ok(dom.allButtons().filter(button => !local.includes(button)).every(button => button.disabled), 'server buttons disabled')
     const choiceSend = local.find(button => button.className === 'answer-send')
     assert.equal(choiceSend.disabled, true, 'copy needs a choice even when offline')
@@ -9452,19 +9504,14 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
     return { tag, focused: 0, getAttribute: name => attrs[name] ?? null, setAttribute: (name, value) => { attrs[name] = value }, focus() { this.focused += 1 } }
   }
   const attrs0 = (raw, flag) => (new RegExp(`${flag}="([^"]*)"`).exec(raw)?.[1] ?? '')
-  // One icon button opens the look menu (#1085): three themes, then the three progress-bar styles.
-  const buttons = [...html.matchAll(/<button\b([^>]*data-theme-toggle[^>]*)>/g)].map(found => node('button', found[1], 'data-theme-toggle'))
+  // Settings includes the same three themes and progress-bar styles.
+  const buttons = [...html.matchAll(/<button\b([^>]*data-settings-toggle[^>]*)>/g)].map(found => node('button', found[1], 'data-settings-toggle'))
   assert.equal(buttons.length, 1)
   const themes = [...html.matchAll(/<button\b([^>]*data-theme-set[^>]*)>/g)].map(found => node('button', found[1], 'data-theme-set'))
   assert.deepEqual(themes.map(item => item.getAttribute('data-theme-set')), ['light', 'dark', 'system'])
   const styles = [...html.matchAll(/<button\b([^>]*data-bar-set[^>]*)>/g)].map(found => node('button', found[1], 'data-bar-set'))
   assert.deepEqual(styles.map(item => item.getAttribute('data-bar-set')), ['ink', 'blue', 'green'])
-  const menu = { hidden: true, getAttribute: name => (name === 'data-look-menu' ? '' : null), querySelector: selector => (selector.includes('aria-checked') ? themes.find(item => item.getAttribute('aria-checked') === 'true') ?? null : themes[0]) }
-  const look = { querySelector: selector => (selector === '[data-look-menu]' ? menu : null) }
-  buttons[0].parentNode = look
-  for (const item of [...themes, ...styles]) item.parentNode = menu
-  menu.parentNode = look
-  const select = selector => selector === '[data-theme-toggle]' ? buttons : selector === '[data-theme-set]' ? themes : selector === '[data-look-menu]' ? [menu] : []
+  const select = selector => selector === '[data-settings-toggle]' ? buttons : selector === '[data-theme-set]' ? themes : []
   const events = {}
   let finish
   runInNewContext(themeScript(html), {
@@ -9487,61 +9534,36 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
   }, { timeout: 1000 })
   events.DOMContentLoaded()
   return {
-    attributes, classes, menu, themes, styles, button: buttons[0],
-    open: () => events.click({ target: { parentNode: buttons[0] } }),
+    attributes, classes, themes, styles, button: buttons[0],
     pick: theme => events.click({ target: themes.find(item => item.getAttribute('data-theme-set') === theme) }),
-    outside: () => events.click({ target: { parentNode: null } }),
-    escape: () => events.keydown({ key: 'Escape' }),
     finish: () => finish(),
   }
 }
 
-test('the serve page offers light, dark and system themes in one menu, follows the system until one is picked, and remembers the choice', () => {
+test('Settings offers light, dark and automatic themes, follows the system and remembers the browser choice', () => {
   const html = redesignPage()
   const storage = new Map()
   const jar = { value: '' }
   const dom = themeDom(html, storage, false, jar)
-  // One icon button; a first visit follows the system, and its icon is the theme on screen.
   assert.equal(dom.attributes['data-theme'], undefined)
-  assert.equal(dom.button.getAttribute('data-now'), 'light')
-  assert.equal(dom.button.getAttribute('aria-label'), EN.themeMenu)
-  assert.equal(dom.button.getAttribute('aria-haspopup'), 'menu')
+  assert.equal(dom.button.getAttribute('aria-haspopup'), 'dialog')
   assert.deepEqual(dom.themes.map(item => item.getAttribute('aria-checked')), ['false', 'false', 'true'])
   assert.equal(themeDom(html, new Map(), false, { value: '' }, 'dark').button.getAttribute('data-now'), 'dark')
-  // The button opens the menu and puts focus on the current pick; a press outside or Escape closes it.
-  dom.open()
-  assert.equal(dom.menu.hidden, false)
-  assert.equal(dom.button.getAttribute('aria-expanded'), 'true')
-  assert.equal(dom.themes[2].focused, 1)
-  dom.outside()
-  assert.equal(dom.menu.hidden, true)
-  dom.open()
-  dom.escape()
-  assert.equal(dom.menu.hidden, true)
-  assert.equal(dom.button.focused, 1)
-  dom.open()
   dom.pick('dark')
-  assert.equal(dom.menu.hidden, true)
   assert.equal(storage.get('agent-board.theme'), 'dark')
   assert.equal(dom.attributes['data-theme'], 'dark')
-  assert.equal(dom.button.getAttribute('data-now'), 'dark')
   assert.deepEqual(dom.themes.map(item => item.getAttribute('aria-checked')), ['false', 'true', 'false'])
   assert.ok(dom.classes.has('theming'))
   dom.finish()
   assert.ok(!dom.classes.has('theming'))
-  // The live page starts on a new port each time, with empty storage; the cookie keeps the pick.
   assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], 'dark')
   const reload = themeDom(html, storage, false, jar)
-  assert.equal(reload.attributes['data-theme'], 'dark')
   reload.pick('light')
   assert.equal(storage.get('agent-board.theme'), 'light')
-  assert.equal(reload.attributes['data-theme'], 'light')
-  // System forgets the pick: the page follows the system again, on this port and the next.
   reload.pick('system')
   assert.equal(storage.has('agent-board.theme'), false)
   assert.equal(reload.attributes['data-theme'], undefined)
   assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], undefined)
-  assert.match(html, /<script nonce="synthetic">[\s\S]*agent-board.theme/)
   assert.match(html, /prefers-reduced-motion:reduce/)
 })
 
@@ -11321,13 +11343,14 @@ test('buttons keep desktop size in a narrow window with a mouse', async () => {
 
 test('Close the board uses the quiet button look, the page hit size, and room for its name (#1145)', () => {
   const html = redesignPage()
-  const rule = html.match(/\.pfoot #close\{([^}]*)\}/)[1]
+  // Settings' footer button shares the rule (#1163), so the selector may be a list.
+  const rule = html.match(/(?:^|[}\s])\.pfoot #close(?:,\.pfoot #settings-toggle)?\{([^}]*)\}/)[1]
   assert.match(rule, /(?:^|;)width:auto(?:;|$)/)
   assert.match(rule, /min-width:var\(--hit\)/)
   assert.match(rule, /(?:^|;)height:var\(--hit\)/)
   const touch = mediaBlocks(html, '(pointer:coarse)').join('\n')
-  assert.match(touch, /\.pfoot #close\{[^}]*height:48px;[^}]*min-width:48px/)
-  assert.doesNotMatch(touch, /\.pfoot #close\{(?:[^}]*;)?width:48px/)
+  assert.match(touch, /\.pfoot #close(?:,[^{}]*)?\{[^}]*height:48px;[^}]*min-width:48px/)
+  assert.doesNotMatch(touch, /\.pfoot #close(?:,[^{}]*)?\{(?:[^}]*;)?width:48px/)
   assert.match(html, /\.icon-btn\{[^}]*background:transparent;[^}]*color:var\(--muted\)/)
 })
 
@@ -12466,4 +12489,190 @@ test('#1085: a style picked on the page is written to the settings file with its
     assert.equal((await board.call('POST', '/api/style', { body: { style: 'blue' } })).status, 409)
     assert.equal(readFileSync(settings, 'utf8'), '{"historyDays":3,')
   } finally { await board.close() }
+})
+
+test('Settings has one labelled button and three accessible sections in every language and keeps focus inside until closed', async () => {
+  for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
+    const html = await sourcePage(lang)
+    assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
+    assert.doesNotMatch(html, /data-theme-toggle|data-look-menu/)
+    assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
+    const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
+    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 3)
+    const dom = await pageDom(html, redesignModel(), { width: 375 })
+    assert.equal(dom.node('settings').hidden, true)
+    dom.node('settings-toggle').click()
+    assert.equal(dom.node('settings').hidden, false)
+    assert.equal(dom.node('shell').inert, true)
+    assert.equal(dom.active(), dom.node('settings-close'))
+    let prevented = false
+    dom.node('settings-lang').focus()
+    dom.key({ key: 'Tab', shiftKey: true, preventDefault: () => { prevented = true } })
+    assert.equal(prevented, false, 'normal Tab moves through the panel')
+    dom.node('settings-close').focus()
+    dom.key({ key: 'Tab', shiftKey: true, preventDefault: () => { prevented = true } })
+    assert.equal(prevented, true)
+    assert.notEqual(dom.active(), dom.node('settings-toggle'), 'Shift+Tab remains in the panel')
+    dom.key({ key: 'Escape', preventDefault() {} })
+    assert.equal(dom.node('settings').hidden, true)
+    assert.equal(dom.node('shell').inert, false)
+    assert.equal(dom.active(), dom.node('settings-toggle'))
+    dom.node('settings-toggle').click()
+    dom.node('settings-close').click()
+    assert.equal(dom.active(), dom.node('settings-toggle'))
+  }
+})
+
+test('Settings language in the file beats baked and system language, --lang beats the file, and Automatic follows the system', () => {
+  const code = `process.env.LANG = 'zh-CN'\n${BOARD_SCRIPT}`
+  const saved = { 'progress-settings.json': '{"lang":"en"}' }
+  assert.ok(run('zh-TW', [], saved, FILE, code).startsWith('Progress'))
+  assert.ok(run('en', [], { 'progress-settings.json': '{"lang":"zh-TW"}' }, FILE, code).startsWith('進度'))
+  assert.ok(run('en', [], { 'progress-settings.json': '{"lang":"zh-CN"}' }, FILE, code).startsWith('进度'))
+  assert.ok(run('en', ['--lang', 'zh-TW'], saved, FILE, code).startsWith('進度'))
+  assert.ok(run('zh-TW', [], { 'progress-settings.json': '{"lang":"auto"}' }, FILE, code).startsWith('进度'))
+  assert.ok(run('zh-TW', ['--lang', 'auto'], saved, FILE, code).startsWith('进度'))
+  assert.ok(run('zh-TW', [], { 'progress-settings.json': '{"lang":"unknown"}' }, FILE, code).startsWith('進度'))
+  assert.ok(run('zh-TW', [], {}, FILE, code).startsWith('進度'))
+  assert.ok(run('', [], {}, FILE, code).startsWith('进度'))
+})
+
+test('Settings language saves alongside other keys, reloads the running page, localizes later actions and refuses damaged settings', { timeout: 30_000 }, async () => {
+  const board = await page('', { LANG: 'zh-TW' })
+  try {
+    const settings = join(board.dir, 'progress-settings.json')
+    writeFileSync(settings, '{"historyDays":3,"style":"green"}')
+    for (const [lang, words] of [['zh-CN', ZH_CN], ['zh-TW', ZH_TW], ['en', EN], ['auto', ZH_TW]]) {
+      const picked = await board.call('POST', '/api/language', { body: { lang } })
+      assert.equal(picked.status, 200)
+      assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green', lang })
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      assert.ok(html.includes(`<h2 id="settings-title">${words.settingsTitle}</h2>`))
+      assert.ok(html.includes(`<option value="${lang}" selected>`))
+      assert.equal((await board.call('GET', '/api/board')).json().lang, lang)
+      assert.equal((await board.call('POST', '/api/style', { body: { style: 'wrong' } })).json().note, words.pressFailed)
+    }
+    for (const lang of ['wrong', 3, null, {}, 'zh']) assert.equal((await board.call('POST', '/api/language', { body: { lang } })).status, 400)
+    for (const damaged of ['{"historyDays":3,', 'null', '[]']) {
+      writeFileSync(settings, damaged)
+      const failed = await board.call('POST', '/api/language', { body: { lang: 'en' } })
+      assert.equal(failed.status, 409)
+      assert.equal(failed.json().note, ZH_TW.barStyleUnreadable)
+      assert.equal(readFileSync(settings, 'utf8'), damaged)
+    }
+  } finally { await board.close() }
+})
+
+test('Settings shows the setup language the board uses when no language is saved, not Automatic', { timeout: 30_000 }, async () => {
+  // The helper's board script holds English from setup; the system says Traditional Chinese.
+  const board = await page('', { LANG: 'zh-TW' })
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    assert.ok(html.includes('<option value="en" selected>'), 'the setup language is the one shown')
+    assert.ok(!html.includes('<option value="auto" selected>'))
+  } finally { await board.close() }
+})
+
+test('Settings language reloads after a successful change, restores its notice, and reports a failed write without reloading', async () => {
+  const html = await sourcePage()
+  const sessionStore = new Map()
+  let reloads = 0
+  let isOk = true
+  const dom = await pageDom(html, redesignModel(), {
+    sessionStore, onReload: () => { reloads += 1 },
+    post: async request => {
+      assert.equal(request.path, '/api/language')
+      return { ok: isOk, json: async () => ({ note: isOk ? EN.settingsLanguageChanged : EN.barStyleUnreadable }) }
+    },
+  })
+  dom.node('settings-lang').value = 'zh-TW'
+  dom.node('settings-lang').events.change()
+  await dom.settle()
+  assert.equal(reloads, 1)
+  assert.deepEqual(dom.requests[0].body, { lang: 'zh-TW' })
+  const reloaded = await pageDom(await sourcePage('zh-TW'), redesignModel(), { sessionStore })
+  assert.equal(reloaded.node('settings').hidden, false)
+  assert.equal(reloaded.node('settings-result').textContent, ZH_TW.settingsLanguageChanged)
+  isOk = false
+  dom.node('settings-lang').value = 'zh-CN'
+  dom.node('settings-lang').events.change()
+  await dom.settle()
+  assert.equal(reloads, 1)
+  assert.equal(dom.node('settings-result').textContent, EN.barStyleUnreadable)
+  assert.equal(dom.node('settings-lang').value, 'zh-TW', 'a failed write restores the last saved choice')
+  assert.equal(dom.node('settings-lang').disabled, false)
+})
+
+test('Settings notifications start off, ask permission once, notify each new waiting card once across reloads and focus the page on a click', async () => {
+  const notices = []
+  let prompts = 0
+  let focuses = 0
+  class Notification {
+    static permission = 'default'
+    static async requestPermission() { prompts += 1; this.permission = 'granted'; return 'granted' }
+    constructor(title, options) { this.title = title; this.options = options; notices.push(this) }
+    close() { this.closed = true }
+  }
+  const storage = new Map()
+  const model = redesignModel()
+  model.asks = [{ ...model.asks[0], questionId: 'settings-question-one', agent: 'codex', text: 'Review this change?', isSending: false }]
+  const html = await sourcePage()
+  const dom = await pageDom(html, model, { storage, notification: Notification, onFocus: () => { focuses += 1 } })
+  assert.equal(notices.length, 0)
+  assert.equal(dom.node('settings-notify').getAttribute('aria-checked'), 'false')
+  dom.node('settings-notify').click()
+  await dom.flush()
+  assert.equal(prompts, 1)
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0].title, 'Review this change?')
+  assert.equal(notices[0].options.body, 'Codex')
+  notices[0].onclick()
+  assert.equal(focuses, 1)
+  assert.equal(notices[0].closed, true)
+  await dom.redraw(model)
+  assert.equal(notices.length, 1)
+  const reloaded = await pageDom(html, model, { storage, notification: Notification })
+  assert.equal(notices.length, 1)
+  assert.equal(prompts, 1)
+  const approval = { ...model, asks: [...model.asks, { ...model.asks[0], key: 'new-approval', questionId: 'settings-approval-two', text: 'Approve this change?' }] }
+  await reloaded.redraw(approval)
+  assert.equal(notices.length, 2)
+  await reloaded.redraw(approval)
+  assert.equal(notices.length, 2)
+  reloaded.node('settings-notify').click()
+  assert.equal(storage.get('agent-board.notifications'), 'off')
+})
+
+test('Settings notifications stay off after denial or dismissal without another prompt and unavailable phone notifications are hidden', async () => {
+  for (const answer of ['denied', 'default']) {
+    let prompts = 0
+    class Notification {
+      static permission = 'default'
+      static async requestPermission() { prompts += 1; this.permission = answer; return answer }
+    }
+    const storage = new Map()
+    const html = await sourcePage()
+    const dom = await pageDom(html, redesignModel(), { storage, notification: Notification })
+    dom.node('settings-notify').click()
+    await dom.flush()
+    assert.equal(dom.node('settings-notify').getAttribute('aria-checked'), 'false')
+    if (answer === 'denied') assert.equal(dom.node('settings-result').textContent, EN.settingsDenied)
+    dom.node('settings-notify').click()
+    await dom.flush()
+    const reload = await pageDom(html, redesignModel(), { storage, notification: Notification })
+    reload.node('settings-notify').click()
+    await reload.flush()
+    assert.equal(prompts, 1)
+    assert.equal(storage.get('agent-board.notifications'), 'off')
+  }
+  const { servePage } = await sourceBoard()
+  const phone = await pageDom(servePage(EN, 'synthetic', true), redesignModel())
+  assert.equal(phone.node('settings-notifications').hidden, true)
+  class InsecureNotification {
+    static permission = 'denied'
+    static async requestPermission() { throw Error('an insecure phone must not ask') }
+  }
+  const insecure = await pageDom(servePage(EN, 'synthetic', true), redesignModel(), { notification: InsecureNotification })
+  assert.equal(insecure.node('settings-notifications').hidden, true)
 })

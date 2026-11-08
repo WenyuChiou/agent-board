@@ -4897,9 +4897,10 @@ test("the redesigned pages speak the page's language in every new word", () => {
   const keys = ['pgNeeds', 'pgWorking', 'pgOthers', 'pgStopped', 'pgDone', 'pgAgents', 'pgOlder', 'pgOlderOne', 'pgSideFold', 'pgSideOpen', 'showAllQuestions'] as const
   for (const s of Object.values(STRINGS)) {
     const live = servePage(s, 'synthetic')
-    // One icon button opens the look menu (#1085): the three themes and the three progress-bar styles, in the page's language.
-    for (const label of [s.themeMenu, s.themeLight, s.themeDark, s.themeSystem, s.barStyleHead, s.barStyleInk, s.barStyleBlue, s.barStyleGreen]) expect(live).toContain(label)
-    expect(live).toContain('data-theme-toggle')
+    // Settings holds the look (#1163), in the page's language.
+    for (const label of [s.settingsTitle, s.themeMenu, s.themeLight, s.themeDark, s.settingsAutomatic, s.barStyleHead, s.barStyleInk, s.barStyleBlue, s.barStyleGreen]) expect(live).toContain(label)
+    expect(live).toContain('data-settings-toggle')
+    expect(live).not.toContain('data-theme-toggle')
     expect(live).not.toContain('data-theme-pick')
     for (const label of [s.pgViews, s.pgOverview, s.pgNeeds, s.pgWorking, s.pgOthers, s.pgDone, s.pgProjects, s.pgAgents, s.pgSideFold]) expect(live).toContain(label)
     expect(live).toContain(s.serveLive)

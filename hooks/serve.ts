@@ -4,7 +4,9 @@ import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, Quiet, RepoOf } from './grouping'
-import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead, themeToggle } from './page-look'
+import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead } from './page-look'
+import { settingsCss, settingsPanel, settingsScript, settingsToggle } from './page-settings'
+import type { SettingsLang } from './board-settings'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { agentLabel } from './strings'
@@ -774,6 +776,7 @@ const PAGE_WORDS = [
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
+  'settingsLanguageChanged', 'settingsNotifications', 'settingsOn', 'settingsOff', 'settingsDenied', 'settingsUnavailable', 'settingsChanged', 'settingsLanguage',
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
@@ -1000,13 +1003,13 @@ ${CLIP_CSS}
 .s-agent.working .ag::after{border-color:var(--ground);border-radius:var(--radius-round);background:var(--alive)}
 .s-agent[aria-pressed="true"].working .ag::after,.s-agent[aria-pressed="true"][data-presence="offline"] .ag::after,.s-agent[aria-pressed="true"][data-presence="notseen"] .ag::after{border-color:var(--current)}
 .shell[data-empty="1"] :is(.s-views,.s-projects){display:none}
-/* the settings at the foot of the sidebar: the language spot (reserved, in a row with the theme button), the project link, then Close the board */
+/* Settings occupies the reserved sidebar row and follows the work when the sidebar folds. */
 .s-foot{margin-top:auto;padding-top:var(--s3);border-top:1px solid var(--line)}
 .side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
 .side .pfoot .set-row{order:-1;flex-basis:100%;margin-left:calc(var(--s2) * -1)}
 .side .pfoot .grow{display:none}
 /* Close the board shows its name beside the icon (#1145): an X alone did not say it stops the board */
-.pfoot #close{display:inline-flex;gap:var(--s1);width:auto;height:var(--hit);min-width:var(--hit);min-height:var(--hit);padding:0 var(--s2);font:inherit;font-size:var(--text-xs)}
+.pfoot #close,.pfoot #settings-toggle{display:inline-flex;gap:var(--s1);width:auto;height:var(--hit);min-width:var(--hit);min-height:var(--hit);padding:0 var(--s2);font:inherit;font-size:var(--text-xs)}
 .side .pfoot .btn{min-height:24px;padding-inline:var(--s2);font-size:var(--text-xs);color:var(--muted)}
 .side .pfoot #close:hover,.side .pfoot .btn:hover{color:var(--ink)}
 .side .pfoot p{order:3;flex-basis:100%}
@@ -1083,7 +1086,7 @@ ${CLIP_CSS}
   .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet{flex:0 0 auto;min-height:44px}
   .answers button.answer-send{flex:0 0 48px;width:48px;min-width:48px;justify-content:center}
-  .pfoot #close{height:48px;min-width:48px;min-height:48px}
+  .pfoot #close,.pfoot #settings-toggle{height:48px;min-width:48px;min-height:48px}
   .s-toggle{width:44px;height:44px}
   #away-line .away-x{width:44px;height:44px}
   textarea{min-height:96px}
@@ -1104,7 +1107,7 @@ const sideView = (id: keyof typeof VIEW_ICONS, label: string, hasCount: boolean)
   `<button type="button" class="s-item v-${id}" id="view-${id}" data-view="${id}" data-local data-nav title="${esc(label)}" aria-pressed="${id === 'all'}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${VIEW_ICONS[id]}</svg><span class="s-txt">${esc(label)}</span>${hasCount ? `<span class="s-n${id === 'needs' ? ' hot' : ''}" id="count-${id}"></span>` : ''}</button>`
 
 // `isLan`: the page a phone opens on the local network, which closes sooner.
-export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0): string => `<!doctype html>
+export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, language: SettingsLang = 'auto'): string => `<!doctype html>
 <html lang="${htmlLang(s)}">
 <head>
 <meta charset="utf-8">
@@ -1118,6 +1121,7 @@ ${pageTokens('56px')}
 ${pageBaseCss}
 ${agentMarkCss()}
 ${PAGE_CSS}
+${settingsCss}
 </style>
 </head>
 <body>
@@ -1135,11 +1139,12 @@ ${PAGE_CSS}
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg><span>${esc(s.serveClose)}</span></button></footer>
+<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${settingsToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg><span>${esc(s.serveClose)}</span></button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
 </div>
+${settingsPanel(s, language, isLan)}
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
@@ -1331,8 +1336,9 @@ const PAGE_SCRIPT = String.raw`
       });
     }).catch(function (error) { unreachable(); throw error; });
   }
+  ${settingsScript}
   // The progress bar's style (#1085): the root's data-bar picks the colours, so a pick shows on every
-  // bar at once. A pick in the theme menu goes to the board, which keeps it for the pane and the
+  // bar at once. A pick in Settings goes to the board, which keeps it for the pane and the
   // terminal board too; one that does not land goes back to what it was.
   function barStyleShown(style) {
     var root = document.documentElement;
@@ -1345,7 +1351,11 @@ const PAGE_SCRIPT = String.raw`
       var before = document.documentElement && document.documentElement.getAttribute('data-bar') || 'ink';
       var style = node.getAttribute('data-bar-set');
       barStyleShown(style);
-      call('/api/style', { style: style }).then(function (data) { if (!data.ok) barStyleShown(before); }, function () { barStyleShown(before); });
+      node.disabled = true;
+      call('/api/style', { style: style }).then(function (data) {
+        if (!data.ok) { barStyleShown(before); settingsSay(data.note || w('pressFailed'), true); }
+        else settingsSay(w('settingsChanged', w('barStyleHead'), w(style === 'blue' ? 'barStyleBlue' : style === 'green' ? 'barStyleGreen' : 'barStyleInk')));
+      }, function () { barStyleShown(before); settingsSay(w('pressFailed'), true); }).finally(function () { node.disabled = false; });
     });
   });
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
@@ -2908,6 +2918,8 @@ const PAGE_SCRIPT = String.raw`
       }
       reachable();
       if (data.barStyle) barStyleShown(data.barStyle);
+      if (data.lang && !settingsLanguage.disabled) { languageKept = data.lang; settingsLanguage.value = data.lang; }
+      notifyWaiting(data.model);
       connections = data.messaging && data.messaging.connections || [];
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; })], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
       if (text !== last) {

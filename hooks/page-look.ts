@@ -52,10 +52,7 @@ export const pageTokens = (headHeight = '54px'): string => {
 @media (max-width:640px){:root{--text-lg:max(18px,1.125rem)}}`
 }
 
-// This runs before styles and delegates presses because the menu is parsed later. The theme button
-// opens a small menu (#1085): Light / Dark / System, then the progress bar's three styles. The
-// theme pick is this browser's; a style pick goes to the board (the page's own script sends it),
-// so the pane and the terminal board show the same one.
+// The browser's theme is applied before paint; Settings delegates its presses after parsing.
 export const themeHead = String.raw`
 (() => {
   var root = document.documentElement;
@@ -79,17 +76,8 @@ export const themeHead = String.raw`
     if (choice) root.setAttribute('data-theme', choice);
     else root.removeAttribute('data-theme');
     var shown = choice || (scheme && scheme.matches ? 'dark' : 'light');
-    // The button's icon follows the theme on screen; each theme item says whether it is the pick.
-    each('[data-theme-toggle]', function (button) { button.setAttribute('data-now', shown); });
+    each('[data-settings-toggle]', function (button) { button.setAttribute('data-now', shown); });
     each('[data-theme-set]', function (item) { item.setAttribute('aria-checked', String(item.getAttribute('data-theme-set') === (choice || 'system'))); });
-  }
-  function menuOf(button) { return button && button.parentNode && button.parentNode.querySelector ? button.parentNode.querySelector('[data-look-menu]') : null; }
-  function close(focus) {
-    each('[data-look-menu]', function (menu) { menu.hidden = true; });
-    each('[data-theme-toggle]', function (button) {
-      if (focus && button.getAttribute('aria-expanded') === 'true' && button.focus) button.focus();
-      button.setAttribute('aria-expanded', 'false');
-    });
   }
   function pick(next) {
     choice = next === 'system' ? '' : next;
@@ -104,67 +92,29 @@ export const themeHead = String.raw`
   apply();
   try { if (scheme && scheme.addEventListener) scheme.addEventListener('change', apply); } catch (e) {}
   document.addEventListener('DOMContentLoaded', apply);
-  // A menu of radio items: arrow keys move between them, Escape closes it and returns to the button,
-  // and Tab leaves it closed.
-  document.addEventListener('keydown', function (event) {
-    if (!event) return;
-    if (event.key === 'Escape') { close(true); return; }
-    var active = document.activeElement;
-    var menu = active && active.parentNode && active.parentNode.getAttribute && active.parentNode.getAttribute('data-look-menu') !== null ? active.parentNode : null;
-    if (!menu) return;
-    if (event.key === 'Tab') { close(false); return; }
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    var items = Array.prototype.slice.call(menu.querySelectorAll('button'));
-    var at = items.indexOf(active);
-    var next = items[(at + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length];
-    if (next && next.focus) { if (event.preventDefault) event.preventDefault(); next.focus(); }
-  });
   document.addEventListener('click', function (event) {
     var node = event.target;
     while (node && node !== document) {
-      if (node.getAttribute && node.getAttribute('data-theme-toggle') !== null) {
-        var menu = menuOf(node);
-        var isOpen = node.getAttribute('aria-expanded') === 'true';
-        close(false);
-        if (menu && !isOpen) {
-          menu.hidden = false;
-          node.setAttribute('aria-expanded', 'true');
-          var first = menu.querySelector('[aria-checked="true"]') || menu.querySelector('button');
-          if (first && first.focus) first.focus();
-        }
-        return;
-      }
       if (node.getAttribute && node.getAttribute('data-theme-set') !== null) {
         pick(node.getAttribute('data-theme-set'));
-        close(true);
         return;
       }
-      if (node.getAttribute && node.getAttribute('data-bar-set') !== null) { close(true); return; }
-      if (node.getAttribute && node.getAttribute('data-look-menu') !== null) return;
       node = node.parentNode;
     }
-    close(false);
   });
 })();
 `
 
 const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 
-const THEME_ICONS = {
-  moon: '<path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1z"/>',
-  sun: '<circle cx="8" cy="8" r="3"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/>',
-} as const
-
-// One icon button for the look: its icon follows the theme on screen, and it opens a menu of the
-// three themes and the progress bar's three styles (#1085). Each style item shows a small bar in its colours.
+// Settings keeps the existing theme and shared progress-bar choices together.
 const SWATCH = '<span class="sw" aria-hidden="true"><i class="c-x"></i><i class="c-x"></i><i class="c-c"></i><i class="c-t"></i></span>'
-export const themeToggle = (s: Strings): string =>
-  `<span class="look"><button type="button" class="icon-btn" data-local data-theme-toggle data-now="light" aria-haspopup="menu" aria-expanded="false" aria-label="${esc(s.themeMenu)}" title="${esc(s.themeMenu)}"><svg class="i i-moon" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS.moon}</svg><svg class="i i-sun" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS.sun}</svg></button>` +
-  `<span class="look-menu" role="menu" data-look-menu aria-label="${esc(s.themeMenu)}" hidden>` +
-  (['light', 'dark', 'system'] as const).map(theme => `<button type="button" role="menuitemradio" aria-checked="false" data-local data-theme-set="${theme}">${esc(theme === 'light' ? s.themeLight : theme === 'dark' ? s.themeDark : s.themeSystem)}</button>`).join('') +
-  `<span class="look-head" role="presentation">${esc(s.barStyleHead)}</span>` +
-  (['ink', 'blue', 'green'] as const).map(style => `<button type="button" role="menuitemradio" aria-checked="${style === 'ink'}" data-local data-bar-set="${style}" data-sw="${style}">${SWATCH}${esc(style === 'blue' ? s.barStyleBlue : style === 'green' ? s.barStyleGreen : s.barStyleInk)}</button>`).join('') +
-  `</span></span>`
+export const themeControls = (s: Strings): string =>
+  `<div class="settings-choices" role="radiogroup" aria-label="${esc(s.themeMenu)}">` +
+  (['light', 'dark', 'system'] as const).map(theme => `<button type="button" role="radio" aria-checked="false" data-local data-theme-set="${theme}" data-changed="${esc(s.settingsChanged(s.themeMenu, theme === 'light' ? s.themeLight : theme === 'dark' ? s.themeDark : s.settingsAutomatic))}">${esc(theme === 'light' ? s.themeLight : theme === 'dark' ? s.themeDark : s.settingsAutomatic)}</button>`).join('') +
+  `</div><p class="settings-label">${esc(s.barStyleHead)}</p><div class="settings-choices" role="radiogroup" aria-label="${esc(s.barStyleHead)}">` +
+  (['ink', 'blue', 'green'] as const).map(style => `<button type="button" role="radio" aria-checked="${style === 'ink'}" data-local data-bar-set="${style}" data-sw="${style}">${SWATCH}${esc(style === 'blue' ? s.barStyleBlue : style === 'green' ? s.barStyleGreen : s.barStyleInk)}</button>`).join('') +
+  `</div>`
 
 // Bubble a, the board's mark: a lowercase a whose foot turns out into a speech-bubble tail, an agent
 // talking to you. One path on a 64 grid, in the brand colour.
@@ -278,15 +228,6 @@ svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .icon-btn{display:inline-grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
 .icon-btn:hover{background:var(--hover);color:var(--ink)}
 .icon-btn:active{background:var(--press)}
-[data-theme-toggle] .i-sun,[data-theme-toggle][data-now="dark"] .i-moon{display:none}
-[data-theme-toggle][data-now="dark"] .i-sun{display:block}
-.look{position:relative;display:inline-flex}
-.look-menu{position:absolute;bottom:calc(100% + var(--s1));left:0;z-index:20;min-width:176px;display:grid;padding:var(--s1);background:var(--inset);border:1px solid var(--line-strong);border-radius:var(--radius-m)}
-.look-menu button{display:flex;align-items:center;gap:var(--s2);min-height:var(--hit);padding:0 var(--s2);border:0;border-radius:var(--radius-s);background:transparent;text-align:left;cursor:pointer;font-size:var(--text-sm);white-space:nowrap}
-.look-menu button[aria-checked="true"]{font-weight:600}
-.look-menu button[aria-checked="true"]::after{content:'';margin-left:auto;width:8px;height:4px;border-left:2px solid currentColor;border-bottom:2px solid currentColor;transform:translateY(-2px) rotate(-45deg)}
-.look-head{padding:var(--s2) var(--s2) var(--s1);margin-top:var(--s1);border-top:1px solid var(--line);font-size:var(--text-xs);color:var(--muted)}
-@media (pointer:coarse){.look-menu button{min-height:44px}}
 @media (pointer:coarse){.icon-btn{width:44px;height:44px}}
 .quiet,.meta{color:var(--muted)}
 button:hover,.btn:hover,summary:hover{background-color:var(--hover)}
