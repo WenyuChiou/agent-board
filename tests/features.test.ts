@@ -4602,6 +4602,20 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
 })
 
+test('hiding a question on a state=waiting session reflects answeredWaiting rather than plain working (#1143)', () => {
+  const key = 'a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'
+  for (const s of Object.values(STRINGS)) {
+    expect(s.answeredWaiting).toBeTruthy()
+    const hiddenView = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, s, [key])
+    const row = hiddenView.groups.find(group => group.project === 'api-gateway')?.rows.find(r => r.title === 'Rate-limit the public endpoints')
+    expect(row?.status).toBe(s.answeredWaiting)
+    expect(row?.tone).toBe('quiet')
+    const model = serveModel(hiddenView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(model.view.working.some(ref => ref.key === `row:${row?.key}`)).toBe(true)
+    expect(pageWords(s).answeredWaiting).toBe(s.answeredWaiting)
+  }
+})
+
 test('a quick answer pressed while the page showed one question is refused once the same step asks another', () => {
   const asked = boardItems(serveView(), [])
   const shown = asked.find(item => item.type === 'ask' && item.ask.agent === 'codex')?.key ?? ''

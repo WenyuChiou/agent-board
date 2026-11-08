@@ -768,7 +768,7 @@ const PAGE_WORDS = [
   'claudeSendNow', 'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
   'serveQueueNextTurn', 'serveNextTurnHint', 'serveQueueNextOpen', 'serveNextOpenHint', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
-  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
+  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting',
   'archiveNow', 'cleanUp', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
@@ -1992,7 +1992,8 @@ const PAGE_SCRIPT = String.raw`
     var lastFinished = lastDone.length ? clean(lastDone[lastDone.length - 1].text) : '';
     // A plan-tool block with no title takes its current step as the title; the step is then said once.
     if (sameName(step, clean(fullTitle(ref)))) step = '';
-    var detail = section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
+    var isAnsweredWaiting = row.status === w('answeredWaiting');
+    var detail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
     var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
     var project = showProject ? clean(ref.repo || row.project) : '';

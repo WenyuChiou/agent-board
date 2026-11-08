@@ -1161,6 +1161,7 @@ export const buildView = (
       // A hook's placeholder step says the session waits; while it works the row shows no step (#612).
       const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
       const { done, total } = countSteps(shown)
+      const isAnsweredWaiting = !isBlocked && auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index))
       const phrase =
         auto === 'working' && isBlocked
           ? stepPhrase(task, s, isPrompt)
@@ -1170,7 +1171,9 @@ export const buildView = (
             ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
             : !isBlocked && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
               ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
-              : stepPhrase(task, s, isPrompt)
+              : isAnsweredWaiting
+                ? { status: s.answeredWaiting, tone: 'quiet' as const }
+                : stepPhrase(task, s, isPrompt)
       const open = task.steps[currentStepIndex(task)]
       const group = folded.runs.get(task)
       const row: TaskRow = {
