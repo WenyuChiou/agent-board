@@ -120,6 +120,7 @@ export const EN: Strings = {
     "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin.",
     "deepseek": "DeepSeek: close and reopen DeepSeek Harness (dsh) so it loads the agent-board plugin setup wrote.",
     "start": "Then start a new session in each of: {agents}.",
+    "startOne": "Then start a new session in {agents}.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
     "board": "Open the board: {command}"

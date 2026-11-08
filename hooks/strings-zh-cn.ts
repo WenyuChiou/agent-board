@@ -120,6 +120,7 @@ export const ZH_CN: Strings = {
     "openclaw": "OpenClaw：重新启动 OpenClaw，加载 setup 生成的 agent-board 插件。",
     "deepseek": "DeepSeek：关掉 DeepSeek Harness（dsh）再重新打开，让它加载 setup 生成的 agent-board 插件。",
     "start": "最后在 {agents} 各开一个新的会话。",
+    "startOne": "最后在 {agents} 开一个新的会话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",
     "board": "打开看板：{command}"

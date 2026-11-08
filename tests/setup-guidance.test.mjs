@@ -104,6 +104,14 @@ test('npm setup groups shared files, accurate counts, commands and sessions in e
   })
 })
 
+test('setup with one agent asks for one new session, without "each of"', () => {
+  for (const [index, lang] of locales.entries()) fixture(setup => {
+    const said = setup('--agent', 'hermes', '--lang', lang)
+    assert.ok(said.includes(bootstrap[index].startOne.replace('{agents}', 'Hermes Agent')), said)
+    assert.ok(!said.includes(bootstrap[index].start.replace('{agents}', 'Hermes Agent')), said)
+  })
+})
+
 test('setup separates newly created and updated files in its preview', () => {
   for (const [index, lang] of locales.entries()) fixture((setup, { env }) => {
     writeFileSync(join(env.CODEX_HOME, 'hooks.json'), '{"hooks":{},"synthetic":true}\n')

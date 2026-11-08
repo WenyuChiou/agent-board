@@ -58,6 +58,7 @@ const summaries = [
     "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin.",
     "deepseek": "DeepSeek: close and reopen DeepSeek Harness (dsh) so it loads the agent-board plugin setup wrote.",
     "start": "Then start a new session in each of: {agents}.",
+    "startOne": "Then start a new session in {agents}.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
     "board": "Open the board: {command}"
@@ -86,6 +87,7 @@ const summaries = [
     "openclaw": "OpenClaw：重新啟動 OpenClaw，載入 setup 產生的 agent-board 外掛。",
     "deepseek": "DeepSeek：關掉 DeepSeek Harness（dsh）再重新打開，讓它載入 setup 產生的 agent-board 外掛。",
     "start": "最後在 {agents} 各開一個新的工作階段。",
+    "startOne": "最後在 {agents} 開一個新的工作階段。",
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
     "plugin": "Claude Code：執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。",
     "board": "開啟看板：{command}"
@@ -114,6 +116,7 @@ const summaries = [
     "openclaw": "OpenClaw：重新启动 OpenClaw，加载 setup 生成的 agent-board 插件。",
     "deepseek": "DeepSeek：关掉 DeepSeek Harness（dsh）再重新打开，让它加载 setup 生成的 agent-board 插件。",
     "start": "最后在 {agents} 各开一个新的会话。",
+    "startOne": "最后在 {agents} 开一个新的会话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",
     "board": "打开看板：{command}"
@@ -403,7 +406,7 @@ const main = () => {
     }
     sessionAgents.push(names[agent])
   }
-  if (sessionAgents.length) steps.push(words('start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
+  if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
   for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
   if (hasClaude) steps.push(words('plugin'))
   if (available.length) {
