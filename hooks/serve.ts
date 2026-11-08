@@ -766,7 +766,7 @@ const PAGE_WORDS = [
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -1616,7 +1616,8 @@ const PAGE_SCRIPT = String.raw`
   // A row with a due date and no age (a hand-kept task) shows the date where the age would be; an
   // agent's row keeps its age, so how fresh its status is stays on the row.
   function dueOf(ref) { var one = source(ref); return one.when ? '' : clean(one.due || ''); }
-  function ageOf(ref) { return clean(source(ref).when || w('pgUnknownAge')); }
+  // A hand-kept task has no time of its own, so it shows none rather than "Unknown time" (#1145).
+  function ageOf(ref) { return clean(source(ref).when || (agentOf(ref) === 'own' ? '' : w('pgUnknownAge'))); }
   // 'own' for the person's hand-kept tasks, '?' for a finished task whose agent the model did not say.
   function agentOf(ref) { return source(ref).isOwn || ref.isOwn ? 'own' : ref.agent || '?'; }
   function markOf(ref) {
@@ -2339,10 +2340,13 @@ const PAGE_SCRIPT = String.raw`
     });
     setText(pg.nodes.needsCount, count.cards);
     if (pg.nodes.needsCount) pg.nodes.needsFlag.setAttribute('data-needs-count', String(count.cards));
-    setText(pg.nodes.needsText, pg.filter ? w('pgNoQuestions', nameOf(pg.filter)) : w('pgNothing'));
-    setText(pg.nodes.needsSub, pg.filter ? '' : w('pgNothingHint'));
-    reveal(pg.nodes.needsEmpty, count.shown === 0);
     var isFiltered = !!(pg.filter || pg.project);
+    // A filter that hides every question must not read as "nothing needs you" while some wait elsewhere (#1144).
+    var scope = pg.filter ? nameOf(pg.filter) : pg.project;
+    var elsewhere = isFiltered ? Math.max(0, (pg.waitingNow || 0) - count.cards) : 0;
+    setText(pg.nodes.needsText, !isFiltered ? w('pgNothing') : elsewhere > 0 ? w('pgNoQuestionsElsewhere', scope, elsewhere) : w('pgNoQuestions', scope));
+    setText(pg.nodes.needsSub, isFiltered ? '' : w('pgNothingHint'));
+    reveal(pg.nodes.needsEmpty, count.shown === 0);
     pg.nodes.needsClear = clearFilters(pg.nodes.needsEmpty, pg.nodes.needsClear, isFiltered);
     // The Other work view says so when it has nothing, here or on the Stopped shelf; Overview leaves the empty section out.
     setText(pg.nodes.othersText, isFiltered ? w('pgNoOthersFor', pg.filter ? nameOf(pg.filter) : pg.project) : w('pgNoOthers'));
