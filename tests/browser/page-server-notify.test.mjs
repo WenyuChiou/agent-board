@@ -10,13 +10,13 @@ import { test } from 'node:test'
 import { chromium } from './fixture.mjs'
 
 const loader = registerHooks({ resolve(specifier, context, next) {
-  if (/^\.\.?\//.test(specifier) && !/\.[a-z]+$/i.test(specifier) && context.parentURL?.startsWith(new URL('../', import.meta.url).href)) return next(`${specifier}.ts`, context)
+  if (/^\.\.?\//.test(specifier) && !/\.[a-z]+$/i.test(specifier) && context.parentURL?.startsWith(new URL('../../', import.meta.url).href)) return next(`${specifier}.ts`, context)
   return next(specifier, context)
 } })
-const { parseProgress } = await import('../hooks/parse.ts')
-const { buildView } = await import('../hooks/view.ts')
-const { STRINGS } = await import('../hooks/strings.ts')
-const { startServer } = await import('../scripts/board-serve.ts')
+const { parseProgress } = await import('../../hooks/parse.ts')
+const { buildView } = await import('../../hooks/view.ts')
+const { STRINGS } = await import('../../hooks/strings.ts')
+const { startServer } = await import('../../scripts/board-serve.ts')
 loader.deregister()
 
 const firstText = 'Publish the synthetic plan, OK?'

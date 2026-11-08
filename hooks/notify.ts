@@ -72,12 +72,17 @@ const powershellString = (value: string): string => `'${value.replaceAll(`'`, `'
 
 // A Windows toast through the built-in WinRT API, no module. The notifier id is
 // the product name; a toast from an unregistered id still shows.
+// GetElementsByTagName returns a live list: indexing it with [n] enumerates it,
+// and appending a child modifies the document, so the second index fails with
+// "Collection was modified". Hold both nodes through .Item() first, then append.
 const windowsToastScript = (title: string, body: string): string => [
   '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
   '$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)',
   '$textNodes = $template.GetElementsByTagName(\'text\')',
-  `$textNodes[0].AppendChild($template.CreateTextNode(${powershellString(title)})) | Out-Null`,
-  `$textNodes[1].AppendChild($template.CreateTextNode(${powershellString(body)})) | Out-Null`,
+  '$titleNode = $textNodes.Item(0)',
+  '$bodyNode = $textNodes.Item(1)',
+  `$titleNode.AppendChild($template.CreateTextNode(${powershellString(title)})) | Out-Null`,
+  `$bodyNode.AppendChild($template.CreateTextNode(${powershellString(body)})) | Out-Null`,
   '$toast = [Windows.UI.Notifications.ToastNotification]::new($template)',
   '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(\'Agent Board\').Show($toast)',
 ].join('\n')

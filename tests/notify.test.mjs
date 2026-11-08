@@ -28,6 +28,11 @@ test('the server notification command is per platform and needs no new dependenc
   assert.match(windows.args[2], /ToastNotificationManager/)
   assert.match(windows.args[2], /進度 · Synthetic/)
   assert.match(windows.args[2], /codex 在問：Ship it, OK\?/)
+  // A live node list breaks when indexed after the document changes, so the
+  // nodes are held through .Item() first (desktop run 2026-11-08).
+  assert.match(windows.args[2], /\.Item\(0\)/)
+  assert.match(windows.args[2], /\.Item\(1\)/)
+  assert.doesNotMatch(windows.args[2], /\$textNodes\[\d\]/)
   const mac = serverNotifyCommand('darwin', '進度 · Synthetic', 'codex 在問：Ship it, OK?')
   assert.deepEqual(mac, { command: 'osascript', args: ['-e', 'display notification "codex 在問：Ship it, OK?" with title "進度 · Synthetic"'] })
   assert.deepEqual(serverNotifyCommand('linux', '進度 · Synthetic', 'codex 在問：Ship it, OK?'), { command: 'notify-send', args: ['進度 · Synthetic', 'codex 在問：Ship it, OK?'] })
