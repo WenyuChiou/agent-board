@@ -4015,7 +4015,16 @@ const setNotify = ($: EngineInterface, requested?: boolean): Promise<boolean> =>
 
 const settle = async ($: EngineInterface, isWriteBlocking = true): Promise<void> => {
   const at = await $.clock.now()
-  await saveMine($, mirror => ({ ...mirror, state: stateOf(mirror, isTurnRunning), isTurnRunning, updated: at }))
+  await saveMine($, mirror => {
+    const isReplied = mirror.replied !== undefined && Number.isFinite(mirror.replied) && mirror.replied >= (mirror.updated ?? 0)
+    return {
+      ...mirror,
+      state: stateOf(mirror, isTurnRunning),
+      isTurnRunning,
+      updated: at,
+      ...(isReplied ? { replied: at } : {}),
+    }
+  })
   const writing = queueWrite($)
   if (isWriteBlocking) await writing
 }

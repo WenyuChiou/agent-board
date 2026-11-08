@@ -639,9 +639,10 @@ test('a reply typed in the agent chat moves its question out of Needs you to You
     const promptTurn = { agent: 'gemini', event: 'prompt' as const, session: 's-inbox', id: 's-inbox', cwd: '/workspace/frontend', project: 'frontend', prompt: '', answer: '', transcript: '', at: NOW - 50_000 }
     const answeredMirror = answerAgentPrompt(geminiMirror, promptTurn, NOW)!
     expect(answeredMirror).not.toBeNull()
-    expect(answeredMirror.replied).toBe(NOW - 50_000)
+    expect(answeredMirror.updated).toBe(NOW - 50_000)
+    expect(answeredMirror.replied).toBe(answeredMirror.updated)
 
-    const fileGeminiReplied = `# Progress\n\n## frontend\n<!-- auto session=s-inbox agent=gemini state=working updated=${new Date(NOW - 50_000).toISOString()} replied=${new Date(NOW - 50_000).toISOString()} -->\n### Build frontend\n- [?] Ready to build, OK?\n<!-- /auto session=s-inbox -->\n`
+    const fileGeminiReplied = `# Progress\n\n## frontend\n<!-- auto session=s-inbox agent=gemini state=working updated=${new Date(answeredMirror.updated).toISOString()} replied=${new Date(answeredMirror.replied).toISOString()} -->\n### Build frontend\n- [?] Ready to build, OK?\n<!-- /auto session=s-inbox -->\n`
     const viewGeminiReplied = buildView(parseProgress(fileGeminiReplied), [], null, NOW, 0, {}, s)
     expect(viewGeminiReplied.overview.waiting).toBe(0)
     expect(viewGeminiReplied.waiting).toEqual([])

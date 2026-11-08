@@ -182,11 +182,12 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest' && !isClosingQuestion) return previous
   if (previous?.turn && turn && previous.turn !== turn && event !== 'UserPromptSubmit') throw new Error('STALE_TURN')
   const working = event === 'UserPromptSubmit'
-  if (working && previous?.asked !== undefined) {
+  const isHumanPrompt = working && input.prompt_submitted !== false
+  if (isHumanPrompt && previous?.asked !== undefined) {
     const promptAt = Date.parse(now)
     const questionAt = Date.parse(previous.updated)
     // A prompt with no time of its own, or one older than the question, changes nothing (#401).
-    if (!Number.isFinite(promptAt) || promptAt <= questionAt) return previous
+    if (!Number.isFinite(promptAt) || promptAt < questionAt) return previous
   }
   // A reply that ends on a question waits for the person, even after the model reported its own steps done.
   const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' && !isClosingQuestion ? 'done' : 'waiting'
@@ -220,7 +221,7 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
     ...(approvalRevision === undefined ? {} : { approvalRevision }),
     ...(askedRevision === undefined ? {} : { askedRevision }),
     updated: now,
-    ...(working && previous?.asked !== undefined ? { replied: now } : {}),
+    ...(isHumanPrompt && previous?.asked !== undefined ? { replied: now } : {}),
     // A replayed event keeps the list as it was, so the replay changes no bytes.
     events: previous?.events?.includes(key) ? previous.events : [...(previous?.events ?? []), key].slice(-256),
     retiredTurns: [...(previous?.retiredTurns ?? []), ...(working && previous?.turn && previous.turn !== turn ? [previous.turn] : [])].slice(-128),
