@@ -76,12 +76,14 @@ Every isolated run (How to run it safely) uses one test home that is kept betwee
 - **One folder, kept.** It sits outside every repository and outside the real home's config folders. Every variable in the isolation list points into it. The scratch project folder sits inside it too, because a trust is kept for that folder's path. Do not empty it or start a new one between runs.
 - **The person's steps there are done once.** The person signs in to each agent in that home. The trust prompt for the scratch project folder and the board's hooks approvals are either done by the person or pressed by the checker after the person's yes (How to run it safely). Later runs reuse what is there. A step comes back only when its screen comes back, for example after an expired sign-in, or a hook approval after the release changed that hook.
 - **Each run starts by installing the release in it.** Run setup with `--apply` against the test home, never the real one. Then read each host's hooks version there, as the first rule above asks.
-- **Nothing comes in from the real home:** no credentials, config, history or `progress.md`.
+- **Nothing comes in from the real home:** no credentials, config, history or `progress.md` — except Codex CLI's user skills on Windows (next bullet).
+- **Codex CLI on Windows reads user skills from the real profile.** It resolves its home from the Windows profile, not from the environment, so the kept home does not move its user skills: Codex CLI 0.163 loaded the `agent-board` skill from the real profile's `.agents\skills` folder even with `HOME`, `USERPROFILE` and `CODEX_HOME` pointed at the kept home (found 2026-11-07, synthetic prompt for #884; only the read-only sandbox refusing the command kept real board data from reaching the model). A Codex row that uses the skill therefore runs on the person's own install, like an app row, after it has the release — never with a writable sandbox in the kept home.
+- **Other agents' skills homes were not checked for the same leak, except Claude Code.** Claude Code's user skills follow `CLAUDE_CONFIG_DIR` (and `%USERPROFILE%`), both already in the isolation list, so they come from the kept home. If a run finds another agent that reads its skills from the real profile the same way, say so here and route its skill rows the same way.
 - **Each check starts a new chat.** Earlier test chats build up in the kept home; none is reopened.
 - **It holds the person's sign-ins, so it stays on that computer.** It never goes into a repository, an issue, a pull request, a log or a screenshot, and the record does not name its path ([RULES.md, R8](../dev/RULES.md#r8-what-stays-off-github)).
 - **Replace it only on the person's word.** When the checker finds it broken, it says why and asks first. Move the old folder aside; do not delete it. A new home brings back the one-time steps.
 
-The app rows run on the person's own install, which they keep on the release. Every other row runs in the kept test home.
+The app rows run on the person's own install, which they keep on the release. Codex rows that use the skill run there too, after it has the release (never with a writable sandbox in the kept home). Every other row runs in the kept test home.
 
 ## What the person does, all at once
 
