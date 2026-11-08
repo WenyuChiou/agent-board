@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, readSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,7 +34,7 @@ const usage = [
   `agent-board ${v}: a local board for coding agents.
 
 Set up, once per computer:
-  agent-board setup            preview what setup would change; writes nothing
+  agent-board setup            preview setup; in a terminal, confirm once to apply
   agent-board setup --apply    make those changes
   setup options: --agent <name>[,<name>] or all, --home <folder>, --data-dir <folder>
 
@@ -52,7 +52,7 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：給程式 agent 用的本機看板。
 
 設定（每台電腦一次）：
-  agent-board setup            先看設定會改什麼，不寫入任何東西
+  agent-board setup            預覽設定；在終端機確認一次即可套用
   agent-board setup --apply    套用這些變更
   setup 選項：--agent <名稱>[,<名稱>] 或 all、--home <資料夾>、--data-dir <資料夾>
 
@@ -70,7 +70,7 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：给编程 agent 用的本机看板。
 
 设置（每台电脑一次）：
-  agent-board setup            先看设置会改什么，不写入任何东西
+  agent-board setup            预览设置；在终端确认一次即可应用
   agent-board setup --apply    应用这些更改
   setup 选项：--agent <名称>[,<名称>] 或 all、--home <文件夹>、--data-dir <文件夹>
 
@@ -90,7 +90,7 @@ const usageAll = [
   `agent-board ${v}: a local board for coding agents.
 
 Set up, once per computer:
-  agent-board setup            preview what setup would change; writes nothing
+  agent-board setup            preview setup; in a terminal, confirm once to apply
   agent-board setup --apply    make those changes
   setup options: --agent <name>[,<name>] or all, --home <folder>, --data-dir <folder>
 
@@ -117,7 +117,7 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：給程式 agent 用的本機看板。
 
 設定（每台電腦一次）：
-  agent-board setup            先看設定會改什麼，不寫入任何東西
+  agent-board setup            預覽設定；在終端機確認一次即可套用
   agent-board setup --apply    套用這些變更
   setup 選項：--agent <名稱>[,<名稱>] 或 all、--home <資料夾>、--data-dir <資料夾>
 
@@ -144,7 +144,7 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：给编程 agent 用的本机看板。
 
 设置（每台电脑一次）：
-  agent-board setup            先看设置会改什么，不写入任何东西
+  agent-board setup            预览设置；在终端确认一次即可应用
   agent-board setup --apply    应用这些更改
   setup 选项：--agent <名称>[,<名称>] 或 all、--home <文件夹>、--data-dir <文件夹>
 
@@ -237,31 +237,16 @@ const candidates = [
   ]),
 ]
 let installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
-// One yes in place of "setup, then setup --apply": only the plain command, in a terminal someone is typing at.
-const askYes = question => {
-  process.stdout.write(question)
-  let answer = ''
-  try {
-    const bytes = Buffer.alloc(64)
-    answer = bytes.toString('utf8', 0, readSync(0, bytes, 0, bytes.length, null))
-  } catch {}
-  return /^\s*(y|yes|是|好|對|对)\s*$/i.test(answer.split(/\r?\n/)[0])
-}
-// Setup edits other agents' files, so the person sees its preview first and then answers one question.
+// Setup owns the preview and the single consent question for both entry points.
 if (!installed && args.length === 0 && process.stdin.isTTY && process.stdout.isTTY) {
   const setup = [join(pkg, 'scripts/setup-agent.mjs')]
   const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name} setup` }
-  const preview = spawnSync(process.execPath, setup, { stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8', env: setupEnv, windowsHide: true })
-  process.stdout.write(preview.stdout ?? '')
-  // A preview that fails says why itself; the "not set up" text below would only send the person back to it.
-  process.stderr.write(preview.stderr ?? (preview.error ? `${preview.error.message}\n` : ''))
-  if (preview.status !== 0) process.exit(preview.status ?? 1)
-  // The preview offers its --apply step only when something would change; with nothing to do, nothing is asked.
-  if (preview.status === 0 && (preview.stdout ?? '').includes('--apply') && askYes(message('Apply these changes? [y/N] ', '套用這些變更嗎？[y/N] ', '应用这些变更吗？[y/N] '))) {
-    const applied = spawnSync(process.execPath, [...setup, '--apply'], { stdio: ['inherit', 'inherit', 'inherit'], env: setupEnv, windowsHide: true })
-    if (applied.status !== 0) process.exit(applied.status ?? 1)
-    installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
-  }
+  const result = spawnSync(process.execPath, setup, { stdio: ['inherit', 'inherit', 'pipe'], encoding: 'utf8', env: setupEnv, windowsHide: true })
+  process.stderr.write(result.stderr ?? (result.error ? `${result.error.message}\n` : ''))
+  if (result.status !== 0) process.exit(result.status ?? 1)
+  installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
+  // A plugin-only setup opens its board in the next Claude session; a declined preview also ends here.
+  if (!installed) process.exit(0)
 }
 if (!installed) {
   const list = candidates.map(path => `  ${shown(path)}`).join('\n')

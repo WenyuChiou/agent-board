@@ -184,7 +184,7 @@ files: the board script lands at `~/.agent-board/agent-board.mjs`, and no hook p
 npm's cache, so clearing that cache breaks nothing. `npm install -g @wenyuchiou/agent-board` gives a
 lasting `agent-board` command in place of `npx`.
 
-On a first plain `agent-board` run with nothing set up, it prints the setup preview, asks `Apply these changes? [y/N]`, and on yes applies it and opens the board. OpenCode and Gemini CLI use `/agent-board`; setup removes an unchanged old `/board` file and keeps one you edited.
+In a terminal, setup prints its preview and asks once: `Set these up? [Y/n]` (Enter means yes). A yes writes the files, approves the board's hooks in Codex and Hermes Agent for the agents it set up, and, when `claude` is on the PATH and the plugin is not installed, runs `claude plugin marketplace add WenyuChiou/agent-board` (left out when Claude Code already knows that marketplace) and `claude plugin install agent-board@agent-board`. Each part prints done, or failed with the command to run by hand, and a failed part does not stop the others. A no writes nothing. Without a terminal (piped input, `--json`, an agent's shell tool that is not a terminal) setup only previews. `setup --apply` writes the files only, in a terminal too, and lists the approval and plugin commands: only a yes typed at the question approves hooks or installs the plugin. On a first plain `agent-board` run with nothing set up, the launcher hands over to the same question and opens the board after a yes. OpenCode and Gemini CLI use `/agent-board`; setup removes an unchanged old `/board` file and keeps one you edited.
 
 A plain `agent-board` call opens the interactive local page on a desktop, from an agent or
 in a non-interactive call. An interactive terminal over SSH or without a display opens the
@@ -214,7 +214,7 @@ dependencies and no install scripts. Pre-releases are on the `next` tag
 | Antigravity | Four named native hooks plus shared skill | Native CLI/App/IDE events; no session-end event or turn fence |
 | Grok Build | SessionStart, UserPromptSubmit, Stop, SessionEnd, and a plan mirror on `todo_write` | Prompt/idle/end status; native execution unverified |
 | Muse Code | Stop, SessionEnd | Coarse status and native execution unverified |
-| Hermes Agent | `on_session_start`, `pre_llm_call`, `post_llm_call` (carries the reply) and `on_session_end` shell hooks in `config.yaml`, plus the skill | Hermes asks once to trust each hook (or `--hermes-trust` adds only the board's commands to its allowlist); native execution unverified |
+| Hermes Agent | `on_session_start`, `pre_llm_call`, `post_llm_call` (carries the reply) and `on_session_end` shell hooks in `config.yaml`, a plan mirror on its `todo` tool, plus the skill | Hermes asks once to trust each hook (or `--hermes-trust` adds only the board's commands to its allowlist); native execution unverified |
 | OpenClaw | Independent metadata plugin and native skill | Native host execution unverified; requires sanitized lifecycle subscription API |
 | DeepSeek Harness | Native Cordis lifecycle plugin, `agent_board` tool and skill | Checked live on Windows in dsh web 0.2.2-rc.1 (report, open, page stays up after dsh closes); CLI and Desktop unchecked |
 
@@ -255,7 +255,9 @@ Hermes Agent runs its shell hooks from the `hooks:` mapping of `config.yaml`. Se
 entry each under `on_session_start`, `pre_llm_call` (a turn begins, so the block says working and an
 answered question closes; it prints nothing, because Hermes reads that hook's output as context for the
 model), `post_llm_call` (its `extra.assistant_response` is the reply, so a closing question becomes a card)
-and `on_session_end` (which Hermes fires after every turn, so it only marks the session idle). Entries are found again by the installed worker's name; other keys and
+and `on_session_end` (which Hermes fires after every turn, so it only marks the session idle), and one
+`post_tool_call` entry with `matcher: todo`, which copies the whole list from the `todo` tool's result into
+the block's steps. Entries are found again by the installed worker's name; other keys and
 hooks are kept as they are. A `hooks:` written in flow style, or a root that is not a mapping, is a
 conflict and the file is left untouched. Each command is double-quoted for Hermes's `shlex` split
 (no shell), with forward slashes on Windows. Setup never sets `hooks_auto_accept` or passes

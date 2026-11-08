@@ -1,7 +1,7 @@
 import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from './board-commands'
 import { HOOK_VERSION, hookGuardSource, hostHookTimeout } from './hook-safety'
 import { INBOX_DROPPED_COPY, INBOX_DROPPED_FILE, INBOX_DROPPED_FOLD_BYTES, INBOX_DROPPED_KEEP_DAYS, INBOX_DROPPED_STALE_MINUTES, INBOX_MAX_BYTES, INBOX_MAX_FILES } from './hook-reporters'
-import { antigravityCommand, antigravityHooks, directHookArgs, encodedCommandText, hookCommandArgs } from './local-agents'
+import { antigravityCommand, antigravityHooks, directHookArgs, encodedCommandText, hookCommandArgs, planEvents } from './local-agents'
 import { legacyOpenClawPlugin, legacyOpenCodePlugin } from './legacy-hook-plugins'
 import { LANGS, ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -101,6 +101,7 @@ export const reportCommand = (script: string, agent: string, event: 'prompt' | '
 // A hook command this plugin wrote: it runs the reporter script by its path, so a person's
 // own `my-progress-report.sh` is not taken for ours.
 const OURS = /(?:^|[\\/'"\s])progress-report\.(?:sh|ps1)(?:\\?['"])?(?:\s|$)/
+const HERMES_OURS = new RegExp(`${OURS.source}|[\\\\/]progress-hook\\.mjs[\\s\\S]*--hook-version[\\s\\S]*--hook-event[\\s\\S]*post_tool_call[\\s\\S]*--plan-event[\\s\\S]*--agent[\\s\\S]*hermes[\\s\\S]*--progress-file`)
 
 // Whether a config already runs our reporter, whatever else taking our hooks out would tidy.
 export const hasOurHook = (text: string): boolean => OURS.test(text)
@@ -300,7 +301,7 @@ const jsonEdit =
 // is left alone. The empty map `hooks: {}` is the one flow-style value it can follow: Hermes
 // writes that into a new config.yaml, and it holds nothing to keep.
 // A comment runs to the line end, a Windows `\r` included.
-const HERMES_KEY = /^\s+(?:pre_llm_call|post_llm_call|on_session_start|on_session_end|on_session_finalize)\s*:\s*(?:#[^\n]*)?$/
+const HERMES_KEY = /^\s+(?:pre_llm_call|post_llm_call|post_tool_call|on_session_start|on_session_end|on_session_finalize)\s*:\s*(?:#[^\n]*)?$/
 const TOP_HOOKS = /^hooks\s*:\s*(?:#[^\n]*)?$/
 const EMPTY_HOOKS = /^hooks\s*:\s*\{\s*\}\s*(?:#[^\n]*)?$/
 
@@ -332,11 +333,13 @@ const hermesItems = (lines: readonly string[], owns: RegExp = OURS): Array<[numb
     const indent = indentOf(line)
     let end = at + 1
     while (end < lines.length && isContent(lines[end] ?? '') && indentOf(lines[end] ?? '') > indent) end += 1
-    if (lines.slice(at, end).some(one => isContent(one) && owns.test(one))) items.push([at, end])
+    if (owns.test(lines.slice(at, end).filter(isContent).join('\n'))) items.push([at, end])
   })
 
   return items
 }
+
+export const hasOurHermesHook = (text: string): boolean => hermesItems(text.split('\n'), HERMES_OURS).length > 0
 
 const stripHermesHooks = (text: string, isKeepingTop: boolean, owns: RegExp = OURS): string => {
   const lines = text.split('\n')
@@ -352,7 +355,7 @@ const stripHermesHooks = (text: string, isKeepingTop: boolean, owns: RegExp = OU
 
 export const withoutHermesHooks = (text: string, owns: RegExp = OURS): string => stripHermesHooks(text, false, owns)
 
-export const withHermesHooks = (text: string, events: Array<[string, string]>, owns: RegExp = OURS): string | null => {
+export const withHermesHooks = (text: string, events: Array<[string, string, string?]>, owns: RegExp = OURS): string | null => {
   // Ours all there already, in whatever style Hermes last wrote them: nothing to change, so
   // a session start neither rewrites the file nor says it connected Hermes again.
   const lines0 = text.split('\n')
@@ -364,9 +367,14 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>, o
   const isItemOf = (item: string, command: string): boolean =>
     [command, JSON.stringify(command), `'${command.replace(/'/g, "''")}'`].some(form => flat(item).includes(flat(form)))
   const hasTimeout = (item: string): boolean => [...item.matchAll(/(?:^|[,{\n])\s*timeout\s*:\s*(\d+)/g)].some(match => Number(match[1]) >= hostHookTimeout('hermes'))
-  if (items.length === events.length && events.every(([, command]) => items.some(item => isItemOf(item, command) && hasTimeout(item)))) return text
+  const hasMatcher = (item: string, expected: string | undefined): boolean => {
+    if (expected === undefined) return true
+    const match = /(?:^|[,{\n])\s*matcher\s*:\s*(?:"([^"]*)"|'([^']*)'|([^,\s}#]+))/.exec(item)
+    return (match?.[1] ?? match?.[2] ?? match?.[3]) === expected
+  }
+  if (items.length === events.length && events.every(([, command, matcher]) => items.some(item => isItemOf(item, command) && hasTimeout(item) && hasMatcher(item, matcher)))) return text
   const base = stripHermesHooks(text, true, owns)
-  const item = (command: string): string => `- {command: ${JSON.stringify(command)}, timeout: ${hostHookTimeout('hermes')}}`
+  const item = (command: string, matcher?: string): string => `- {command: ${JSON.stringify(command)}, timeout: ${hostHookTimeout('hermes')}${matcher === undefined ? '' : `, matcher: ${matcher === 'todo' ? matcher : JSON.stringify(matcher)}`}}`
   // Lines of ours end the way the file's own lines do.
   const eol = text.includes('\r\n') ? '\r' : ''
   // An empty `hooks: {}` becomes a bare `hooks:` that ours go under.
@@ -376,7 +384,7 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>, o
     .map(line => (EMPTY_HOOKS.test(line) ? `${line.replace(/\{\s*\}\s*/, '').replace(/\s+(#|\r|$)/, ' $1').trimEnd()}${line.endsWith('\r') ? '\r' : ''}` : line))
   const at = lines.findIndex(line => /^hooks\s*:/.test(line))
   if (at === -1) {
-    const added = ['hooks:', ...events.flatMap(([event, command]) => [`  ${event}:`, `    ${item(command)}`])].join(`${eol}\n`)
+    const added = ['hooks:', ...events.flatMap(([event, command, matcher]) => [`  ${event}:`, `    ${item(command, matcher)}`])].join(`${eol}\n`)
     return base.trim() === '' ? `${added}${eol}\n` : `${base.replace(/(?:\r?\n)+$/, '')}${eol}\n${eol}\n${added}${eol}\n`
   }
   if (!TOP_HOOKS.test(lines[at] ?? '')) return null
@@ -386,10 +394,10 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>, o
   while (insert - 1 > at && !isContent(lines[insert - 1] ?? '')) insert -= 1
   const firstChild = lines.slice(at + 1, end).find(isContent)
   const indent = firstChild === undefined ? 2 : indentOf(firstChild)
-  for (const [event, command] of events) {
+  for (const [event, command, matcher] of events) {
     const key = lines.findIndex((line, index) => index > at && index < end && indentOf(line) === indent && new RegExp(`^\\s*${event}\\s*:`).test(line))
     if (key === -1) {
-      lines.splice(insert, 0, `${' '.repeat(indent)}${event}:${eol}`, `${' '.repeat(indent + 2)}${item(command)}${eol}`)
+      lines.splice(insert, 0, `${' '.repeat(indent)}${event}:${eol}`, `${' '.repeat(indent + 2)}${item(command, matcher)}${eol}`)
       insert += 2
       end += 2
       continue
@@ -398,7 +406,7 @@ export const withHermesHooks = (text: string, events: Array<[string, string]>, o
     if (after !== '' && !after.startsWith('#')) return null
     const next = lines.slice(key + 1, end).find(isContent)
     const nested = next !== undefined && (indentOf(next) > indent || (indentOf(next) === indent && next.trimStart().startsWith('- ')))
-    lines.splice(key + 1, 0, `${' '.repeat(nested && next !== undefined ? indentOf(next) : indent + 2)}${item(command)}${eol}`)
+    lines.splice(key + 1, 0, `${' '.repeat(nested && next !== undefined ? indentOf(next) : indent + 2)}${item(command, matcher)}${eol}`)
     if (key < insert) insert += 1
     end += 1
   }
@@ -486,14 +494,20 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       label: 'Hermes Agent',
       dir: ctx.hermesHome,
       file: [ctx.hermesHome, 'config.yaml'].join(ctx.sep),
-      edit: (text, remove) =>
-        remove
-          ? withoutHermesHooks(text)
-          : withHermesHooks(text, [
-              ['post_llm_call', turn('hermes')],
-              ['on_session_finalize', end('hermes')],
-              ['pre_llm_call', prompt('hermes')],
-            ]),
+      edit: (text, remove) => {
+        if (remove) return withoutHermesHooks(text, HERMES_OURS)
+        const folder = ctx.script.replace(/[\\/][^\\/]*$/, '')
+        const progress = ctx.progress ?? [folder, 'progress.md'].join(ctx.sep)
+        const plan = planEvents.hermes!
+        const command = hookCommandArgs(ctx.node ?? 'node', ctx.home, 'hermes', [folder, HOOK_WORKER].join(ctx.sep), progress, plan.event)
+          .map(word => JSON.stringify(ctx.isWindows ? word.replace(/\\/g, '/') : word)).join(' ')
+        return withHermesHooks(text, [
+          ['post_llm_call', turn('hermes')],
+          ['on_session_finalize', end('hermes')],
+          ['pre_llm_call', prompt('hermes')],
+          ...(ctx.board === undefined ? [] : [[plan.event, command, plan.matcher] as [string, string, string]]),
+        ], HERMES_OURS)
+      },
     },
     {
       // OpenClaw takes plugins, not commands. A standalone file goes in plugins.load.paths and

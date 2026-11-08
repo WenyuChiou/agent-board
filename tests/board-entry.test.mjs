@@ -268,12 +268,22 @@ const firstRun = async (answer, check, extraEnv = {}) => {
     const env = {
       ...Object.fromEntries(['SystemRoot', 'SystemDrive', 'windir', 'ComSpec'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
       PATH: dirname(process.execPath),
-      CI: '', LANG: 'en_US.UTF-8', HOME: home, USERPROFILE: home, TEMP: root, TMP: root, TMPDIR: root, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid), ...extraEnv,
+      CI: '', LANG: 'en_US.UTF-8', HOME: home, USERPROFILE: home, TEMP: root, TMP: root, TMPDIR: root, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid),
+      // The shim fakes a terminal for the launcher only; setup asks through its own test seam.
+      AGENT_BOARD_SETUP_TTY: '1', ...extraEnv,
     }
     const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
     const result = await new Promise(done => {
       const child = execFile(process.execPath, ['--require', shim, launcher], { env, encoding: 'utf8', timeout: 25_000, windowsHide: true }, (error, stdout, stderr) => done({ status: error ? (error.code ?? 1) : 0, stdout, stderr }))
-      child.stdin.end(answer)
+      // { after, text } types the answer only once the question is on screen, as a person does.
+      if (typeof answer === 'string') child.stdin.end(answer)
+      else {
+        let seen = ''
+        child.stdout.on('data', chunk => {
+          seen += chunk
+          if (seen.includes(answer.after) && !child.stdin.writableEnded) child.stdin.end(answer.text)
+        })
+      }
     })
     check(result, home)
   } finally {
@@ -284,19 +294,23 @@ const firstRun = async (answer, check, extraEnv = {}) => {
 
 test('the first plain agent-board in a terminal with nothing set up asks one question, and no changes nothing (#868)', { timeout: 40_000 }, async () => {
   await firstRun('n\n', ({ status, stdout, stderr }, home) => {
-    const asked = stdout.indexOf('Apply these changes? [y/N]')
+    const asked = stdout.indexOf('Set these up? [Y/n]')
     assert.ok(asked > 0, stdout)
-    assert.ok(stdout.includes('would create') && stdout.indexOf('--apply') < asked, 'the preview is printed before the question')
-    assert.equal(status, 1)
-    assert.match(stderr, /not set up for this account yet/)
+    assert.equal(stdout.split('Set these up?').length - 1, 1, 'one question')
+    assert.ok(stdout.includes('would create') && stdout.indexOf('would create') < asked, 'the preview is printed before the question')
+    assert.ok(stdout.indexOf('--apply') > asked, 'a no keeps the manual apply step')
+    // Setup's no already says what to do next, so the launcher adds no "not set up" error.
+    assert.equal(status, 0, stderr)
+    assert.doesNotMatch(stderr, /not set up for this account yet/)
     assert.equal(existsSync(join(home, '.agent-board')), false, 'nothing was written')
   })
 })
 
 test('the first plain agent-board in a terminal with nothing set up applies setup on one yes (#868)', { timeout: 60_000 }, async () => {
   await firstRun('y\n', ({ status, stdout, stderr }, home) => {
-    const asked = stdout.indexOf('Apply these changes? [y/N]')
-    assert.ok(asked > 0 && stdout.indexOf('--apply') < asked, 'the preview is printed before the question')
+    const asked = stdout.indexOf('Set these up? [Y/n]')
+    assert.ok(asked > 0 && stdout.includes('would create') && stdout.indexOf('would create') < asked, 'the preview is printed before the question')
+    assert.equal(stdout.split('Set these up?').length - 1, 1, 'one question')
     assert.ok(existsSync(join(home, '.agent-board', 'agent-board.mjs')), stdout)
     assert.doesNotMatch(stderr, /not set up for this account yet/)
     assert.equal(status, 0, stderr)
@@ -307,8 +321,25 @@ test('the first plain agent-board in a terminal with nothing set up applies setu
   }, { CI: '1' })
 })
 
+// A child started through Node gets a blocking fd 0, so the preload opens process.stdin in setup itself:
+// that makes fd 0 non-blocking, and a read before the answer is typed fails with EAGAIN. Setup must wait.
+test('the first plain agent-board waits for a yes typed after the question, though stdin is non-blocking (#1162)', { skip: process.platform === 'win32', timeout: 60_000 }, async () => {
+  const shimDir = mkdtempSync(join(tmpdir(), 'board-first-nonblock-'))
+  try {
+    const openStdin = join(shimDir, 'open-stdin.cjs')
+    writeFileSync(openStdin, "if ((process.argv[1] || '').endsWith('setup-agent.mjs')) process.stdin\n")
+    await firstRun({ after: 'Set these up?', text: 'y\n' }, ({ status, stdout, stderr }, home) => {
+      assert.equal(status, 0, stderr)
+      assert.ok(existsSync(join(home, '.agent-board', 'agent-board.mjs')), stdout)
+      assert.doesNotMatch(stdout, /Apply these changes: /)
+    }, { CI: '1', NODE_OPTIONS: `--require "${openStdin}"` })
+  } finally {
+    removeTree(shimDir)
+  }
+})
+
 test('a first-run setup preview that fails shows its own error and exit status, and asks nothing (#868)', { timeout: 40_000 }, async () => {
-  // The preload makes only setup's preview fail; the launcher and an --apply run are untouched.
+  // The preload makes setup itself fail before it previews or asks; the launcher is untouched.
   const shimDir = mkdtempSync(join(tmpdir(), 'board-first-fail-'))
   try {
     const failShim = join(shimDir, 'fail-preview.cjs')
@@ -316,7 +347,7 @@ test('a first-run setup preview that fails shows its own error and exit status, 
     await firstRun('y\n', ({ status, stdout, stderr }, home) => {
       assert.equal(status, 3, stderr)
       assert.match(stderr, /setup preview failed for the test/)
-      assert.doesNotMatch(stdout, /Apply these changes/)
+      assert.doesNotMatch(stdout, /Set these up\?/)
       assert.doesNotMatch(stderr, /not set up for this account yet/)
       assert.equal(existsSync(join(home, '.agent-board')), false, 'nothing was written')
     }, { NODE_OPTIONS: `--require "${failShim.replace(/\\/g, '/')}"` })
