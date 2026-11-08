@@ -19,6 +19,7 @@ import type { Strings } from '../hooks/i18n'
 import { agentLabel } from '../hooks/strings'
 import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
 import { serverNotifyCheck, serverNotifyCommand } from '../hooks/notify'
+import { keepRecent } from '../hooks/remind'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
@@ -306,10 +307,18 @@ export const startServer = (o: ServeOptions): void => {
     return latest === 0 ? null : now - latest
   }
   // The questions the server itself already told the person about (#1014),
-  // keyed by notifyKey. The page merges these from the poll, and the server
-  // marks a question told when a page that opted in has seen it, so one
-  // question notifies once across both surfaces.
+  // keyed by notifyKey. The server marks a question told when a page that
+  // opted in has seen it, so one question notifies once across both surfaces.
+  // Only the questions the server actually fired a notification for are
+  // returned to the page (see serverNotified): a question merely delegated
+  // to a present page stays notifiable by that page.
   let serverTold: Record<string, number> = {}
+  // The questions the server actually fired a notification for, keyed by
+  // notifyKey. Only these are returned to the page, so the page merges a
+  // question the server told while the browser was closed, and still
+  // notifies for a question the server only marked told because a page
+  // that opted in was present.
+  let serverNotified: Record<string, number> = {}
   // Whether a page that opted in has ever polled. The server only notifies
   // after that: until then the person has not asked for notifications, and
   // the questions already waiting are seeded as told, not replayed. The flag
@@ -336,25 +345,31 @@ export const startServer = (o: ServeOptions): void => {
     return false
   }
   // Tell the person about the model's new waiting questions, unless a page
-  // that opted in is open. Returns the notifyKeys the server has told among
-  // the model's asks, for the page to merge into its own told set.
+  // that opted in is open. Returns the notifyKeys the server actually
+  // notified among the model's asks, for the page to merge into its own
+  // told set. A question the server only marked told because a page was
+  // present is not returned: the page has not been told about it yet, and
+  // still has to notify for it itself.
   const checkServerNotify = (model: ReturnType<typeof serveModel>, now: number): string[] => {
     const { due, told } = serverNotifyCheck(model.asks, serverTold, now, notifyPagePresent(now), hasSeenOptIn)
     serverTold = told
     for (const ask of due) {
+      const key = ask.notifyKey ?? ask.key
       const title = o.s.notifyTitle(ask.project)
       const body = o.s.noticeAsked(ask.agent || ask.project, ask.text)
       if (o.notify !== undefined) {
-        try { o.notify(title, body) } catch {}
+        try { o.notify(title, body); serverNotified[key] = now } catch {}
         continue
       }
       const command = serverNotifyCommand(process.platform, title, body)
       if (command === null) continue
       try {
         spawn(command.command, command.args, { windowsHide: true, stdio: 'ignore' }).on('error', () => {}).unref()
+        serverNotified[key] = now
       } catch {}
     }
-    return model.asks.filter(ask => !ask.isOwn).map(ask => ask.notifyKey ?? ask.key).filter(key => serverTold[key] !== undefined)
+    serverNotified = keepRecent(serverNotified, now)
+    return model.asks.filter(ask => !ask.isOwn).map(ask => ask.notifyKey ?? ask.key).filter(key => serverNotified[key] !== undefined)
   }
   let isStopping = false
   // The page on the local network: its own server, address and token, so the computer's token
