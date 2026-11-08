@@ -209,6 +209,7 @@ export const EN: Strings = {
   waitingReply: 'waiting on your reply',
   backgroundRunning: 'background job running',
   answeredNote: 'answered, waiting on Claude',
+  answeredWaiting: 'answered in the chat, waiting for it to carry on',
   allDone: 'all done',
   claudeWorking: 'Claude is working',
   agentWorking: (agent: string): string => `${agent} is working`,

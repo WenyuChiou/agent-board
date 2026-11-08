@@ -209,6 +209,7 @@ export const ZH_CN: Strings = {
   waitingReply: '等你回复',
   backgroundRunning: '后台任务运行中',
   answeredNote: '你已回复，等 Claude 处理',
+  answeredWaiting: '已在对话回答，等它继续',
   allDone: '全部完成',
   claudeWorking: 'Claude 正在做',
   agentWorking: (agent: string): string => `${agent} 正在做`,

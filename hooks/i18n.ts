@@ -248,6 +248,7 @@ export const ZH_TW = {
   backgroundRunning: '背景工作執行中',
   // A step of this session the person answered in chat, until Claude asks again.
   answeredNote: '你已回覆，等 Claude 處理',
+  answeredWaiting: '已在對話回答，等它繼續',
   allDone: '全部完成',
   claudeWorking: 'Claude 正在做',
   agentWorking: (agent: string): string => `${agent} 正在做`,
