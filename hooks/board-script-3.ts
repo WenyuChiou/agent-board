@@ -11134,7 +11134,7 @@ export const LINES = [
 "  const startPage = async () => {",
 "    const readyBy = performance.now() + 1e4;",
 "    if (process.platform === \"win32\") {",
-"      const prefix = join17(dirname8(file), `.agent-board-ready-${randomUUID2()}`);",
+"      const prefix = join18(dirname8(file), `.agent-board-ready-${randomUUID2()}`);",
 "      const ready = `${prefix}.tmp`;",
 "      const err = `${prefix}.err`;",
 "      let child;",
