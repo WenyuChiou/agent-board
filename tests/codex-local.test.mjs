@@ -1361,7 +1361,7 @@ test('setup on a zh-TW system with no LANG previews in zh-TW and bakes zh-TW', (
   const system = { ...f, env: { ...f.env, ...systemLanguageEnv() } }
   const preview = setupAgent(system, '--agent', 'codex')
   assert.equal(preview.status, 0, preview.stderr)
-  assert.match(preview.stdout, /將更新/)
+  assert.match(preview.stdout, /將建立/)
   assert.ok(!preview.stdout.includes('would update'))
   const applied = setupAgent(system, '--agent', 'codex', '--apply')
   assert.equal(applied.status, 0, applied.stderr)
@@ -1391,7 +1391,7 @@ test('a hook on a zh-TW install writes its step in zh-TW', () => fixture(f => {
 }))
 
 test('--lang and LANG still win over a zh-TW system', () => fixture(f => {
-  for (const [args, LANG, expected] of [[['--lang', 'en'], '', /would update/], [[], 'en_US.UTF-8', /would update/], [['--lang', 'zh-CN'], '', /将更新/]]) {
+  for (const [args, LANG, expected] of [[['--lang', 'en'], '', /would create/], [[], 'en_US.UTF-8', /would create/], [['--lang', 'zh-CN'], '', /将创建/]]) {
     const result = setupAgent({ ...f, env: { ...f.env, ...systemLanguageEnv(), LANG } }, '--agent', 'codex', ...args)
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, expected, JSON.stringify({ args, LANG }))
@@ -1476,7 +1476,7 @@ test('setup preview names the record of another installed agent that apply would
   assert.deepEqual(changedSince(skipped), listedIn(mixed.stdout))
 }))
 
-test('setup preview groups files per agent and shortens only paths inside the selected home', () => fixture(f => {
+test('setup preview groups shared and agent files and shortens only paths inside the selected home', () => fixture(f => {
   const home = join(f.home, 'home')
   const data = join(f.home, 'home-other')
   mkdirSync(home)
@@ -1493,13 +1493,17 @@ test('setup preview groups files per agent and shortens only paths inside the se
   assert.equal(preview.status, 0, preview.stderr)
   const lines = preview.stdout.split(/\r?\n/)
   const plans = JSON.parse(json.stdout).plans
-  let offset = 0
+  const shared = new Set(plans[0].changes.map(change => change.file).filter(file => plans[1].changes.some(change => change.file === file)))
+  const shown = file => file.startsWith(`${home}/`) || file.startsWith(`${home}\\`) ? `~${file.slice(home.length)}` : file
+  assert.ok(lines[0].startsWith('Shared:'))
+  assert.deepEqual(lines.slice(1, shared.size + 1), [...shared].map(file => `  ${shown(file)}`))
+  let offset = shared.size + 1
   for (const [index, name] of ['Codex', 'Hermes Agent'].entries()) {
     const plan = plans[index]
     assert.ok(lines[offset].startsWith(`${name}:`))
-    const expected = plan.changes.map(change => `  ${change.file.startsWith(`${home}/`) || change.file.startsWith(`${home}\\`) ? `~${change.file.slice(home.length)}` : change.file}`)
-    assert.deepEqual(lines.slice(offset + 1, offset + 1 + plan.changes.length), expected)
-    offset += 1 + plan.changes.length
+    const expected = plan.changes.filter(change => !shared.has(change.file)).map(change => `  ${shown(change.file)}`)
+    assert.deepEqual(lines.slice(offset + 1, offset + 1 + expected.length), expected)
+    offset += 1 + expected.length
   }
   assert.ok(preview.stdout.includes(`  ${join(data, 'agent-board.mjs')}\n`))
   assert.deepEqual(homeSnapshot(f.home), before)
@@ -1548,9 +1552,10 @@ test('setup prints a plain summary with each agent and the next steps, and --jso
   }
   assert.equal(new Set(summaries).size, 3)
 
-  assert.match(summaries[0], /Hermes Agent: (?:would update|updated) \d+ setup files/)
+  assert.match(summaries[0], /Hermes Agent: would create \d+ setup files/)
   assert.doesNotMatch(summaries[0], /automatic reporting is unavailable/i)
-  assert.match(summaries[0], /^\d+\. Hermes Agent: start a new session\. Hermes asks once whether to trust the board's hooks; answer y\..*--hermes-trust.*--apply/m)
+  assert.match(summaries[0], /^\d+\. Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y\..*--hermes-trust.*--apply/m)
+  assert.match(summaries[0], /^\d+\. Then start a new session in each of: Codex, Hermes Agent./m)
   const childPlans = ['codex', 'hermes'].map(agent => JSON.parse(f.install('--lang', 'zh-CN', '--agent', agent).stdout))
   const json = setupAgent(f, '--lang', 'zh-CN', '--agent', 'codex,hermes', '--json')
   assert.equal(json.status, 0, json.stderr)

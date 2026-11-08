@@ -35,9 +35,12 @@ const message = (en, tw, cn) => [en, tw, cn][['en', 'zh-TW', 'zh-CN'].indexOf(la
 // Keep this copy identical to setupSummary in all three tables.
 const summaries = [
   {
+    "previewCreate": "would create {count} setup files",
     "preview": "would update {count} setup files",
+    "previewRemove": "would remove {count} setup files",
     "applied": "updated {count} setup files",
     "current": "{count} already current",
+    "shared": "Shared",
     "retire": "{file} (the old /board command; setup removes it)",
     "keptEdited": "{file} (your edited old /board command; setup leaves it; the command is now /agent-board)",
     "ready": "already set up",
@@ -48,25 +51,24 @@ const summaries = [
     "connector": "managed by the Claude Code plugin connector; keeps its board at {progress}",
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
-    "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works). Then start a new session.",
+    "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works).",
     "codexMissing": "Codex: setup could not find Codex; run where.exe codex in PowerShell or command -v codex in bash, then pass its full path to --codex-bin.",
-    "antigravity": "Antigravity: start a new conversation; setup has already configured its reporting hooks.",
-    "cursor": "Cursor: start a new chat in Cursor or cursor-agent; setup has already configured its reporting hooks.",
-    "grok": "Grok Build: start a new session; setup has already configured its reporting hooks.",
-    "hermes": "Hermes Agent: start a new session. Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command} --hermes-trust, then run it again with --apply.",
-    "muse": "Muse Code: start a new session; setup has already configured its reporting hooks.",
-    "gemini": "Gemini CLI: start a new session; setup has already configured its reporting hooks.",
-    "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin, then start a new session.",
-    "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin, then start a new chat.",
-    "deepseek": "DeepSeek: close and reopen DeepSeek Harness (dsh) so it loads the agent-board plugin setup wrote, then start a new conversation.",
+    "hermes": "Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command} --hermes-trust, then run it again with --apply.",
+    "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin.",
+    "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin.",
+    "deepseek": "DeepSeek: close and reopen DeepSeek Harness (dsh) so it loads the agent-board plugin setup wrote.",
+    "start": "Then start a new session in each of: {agents}.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
     "board": "Open the board: {command}"
   },
   {
+    "previewCreate": "將建立 {count} 個設定檔案",
     "preview": "將更新 {count} 個設定檔案",
+    "previewRemove": "將移除 {count} 個設定檔案",
     "applied": "已更新 {count} 個設定檔案",
     "current": "{count} 個已是最新",
+    "shared": "共用",
     "retire": "{file}（舊的 /board 命令；setup 會移除）",
     "keptEdited": "{file}（你改過的舊 /board 命令；setup 不動它；命令已改成 /agent-board）",
     "ready": "已設定完成",
@@ -77,25 +79,24 @@ const summaries = [
     "connector": "由 Claude Code 外掛的連接器管理；保留看板 {progress}",
     "next": "接下來：",
     "apply": "套用這些變更：{command}",
-    "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。然後開始新的工作階段。",
+    "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
     "codexMissing": "Codex：setup 找不到 Codex；請在 PowerShell 執行 where.exe codex 或在 bash 執行 command -v codex，再用 --codex-bin 傳入完整路徑。",
-    "antigravity": "Antigravity：開始新的對話；setup 已設定回報 hooks。",
-    "cursor": "Cursor：在 Cursor 或 cursor-agent 開始新的對話；setup 已設定回報 hooks。",
-    "grok": "Grok Build：開始新的工作階段；setup 已設定回報 hooks。",
-    "hermes": "Hermes Agent：開始新的工作階段。Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} --hermes-trust 預覽，再加上 --apply 重新執行同一命令。",
-    "muse": "Muse Code：開始新的工作階段；setup 已設定回報 hooks。",
-    "gemini": "Gemini CLI：開始新的工作階段；setup 已設定回報 hooks。",
-    "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛，再開始新的工作階段。",
-    "openclaw": "OpenClaw：重新啟動 OpenClaw，載入 setup 產生的 agent-board 外掛，再開始新的對話。",
-    "deepseek": "DeepSeek：關掉 DeepSeek Harness（dsh）再重新打開，讓它載入 setup 產生的 agent-board 外掛，然後開一個新的對話。",
+    "hermes": "Hermes Agent：Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} --hermes-trust 預覽，再加上 --apply 重新執行同一命令。",
+    "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛。",
+    "openclaw": "OpenClaw：重新啟動 OpenClaw，載入 setup 產生的 agent-board 外掛。",
+    "deepseek": "DeepSeek：關掉 DeepSeek Harness（dsh）再重新打開，讓它載入 setup 產生的 agent-board 外掛。",
+    "start": "最後在 {agents} 各開一個新的工作階段。",
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
     "plugin": "Claude Code：執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。",
     "board": "開啟看板：{command}"
   },
   {
+    "previewCreate": "将创建 {count} 个设置文件",
     "preview": "将更新 {count} 个设置文件",
+    "previewRemove": "将移除 {count} 个设置文件",
     "applied": "已更新 {count} 个设置文件",
     "current": "{count} 个已是最新",
+    "shared": "共用",
     "retire": "{file}（旧的 /board 命令；setup 会移除）",
     "keptEdited": "{file}（你改过的旧 /board 命令；setup 不动它；命令已改成 /agent-board）",
     "ready": "已设置完成",
@@ -106,17 +107,13 @@ const summaries = [
     "connector": "由 Claude Code 插件的连接器管理；保留看板 {progress}",
     "next": "接下来：",
     "apply": "应用这些更改：{command}",
-    "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。然后开始新的会话。",
+    "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
     "codexMissing": "Codex：setup 找不到 Codex；请在 PowerShell 运行 where.exe codex 或在 bash 运行 command -v codex，再用 --codex-bin 传入完整路径。",
-    "antigravity": "Antigravity：开始新的对话；setup 已配置报告 hooks。",
-    "cursor": "Cursor：在 Cursor 或 cursor-agent 开始新的对话；setup 已配置报告 hooks。",
-    "grok": "Grok Build：开始新的会话；setup 已配置报告 hooks。",
-    "hermes": "Hermes Agent：开始新的会话。Hermes 会问一次是否信任看板的 hooks，请回答 y。在无法询问的聊天渠道中，先运行 {command} --hermes-trust 预览，再加上 --apply 重新运行同一命令。",
-    "muse": "Muse Code：开始新的会话；setup 已配置报告 hooks。",
-    "gemini": "Gemini CLI：开始新的会话；setup 已配置报告 hooks。",
-    "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件，再开始新的会话。",
-    "openclaw": "OpenClaw：重新启动 OpenClaw，加载 setup 生成的 agent-board 插件，再开始新的对话。",
-    "deepseek": "DeepSeek：关掉 DeepSeek Harness（dsh）再重新打开，让它加载 setup 生成的 agent-board 插件，然后开一个新的对话。",
+    "hermes": "Hermes Agent：Hermes 会问一次是否信任看板的 hooks，请回答 y。在无法询问的聊天渠道中，先运行 {command} --hermes-trust 预览，再加上 --apply 重新运行同一命令。",
+    "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件。",
+    "openclaw": "OpenClaw：重新启动 OpenClaw，加载 setup 生成的 agent-board 插件。",
+    "deepseek": "DeepSeek：关掉 DeepSeek Harness（dsh）再重新打开，让它加载 setup 生成的 agent-board 插件。",
+    "start": "最后在 {agents} 各开一个新的会话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",
     "board": "打开看板：{command}"
@@ -323,23 +320,53 @@ const main = () => {
       return plan.changes.some(change => Object.hasOwn(held, change.file))
     } catch { return false }
   })
-  const lines = selected.map((agent, i) => {
+  const filesByAgent = plans.map(plan => plan.conflicts.length ? [] : [
+    ...plan.changes.map(change => change.file),
+    ...(!apply ? records(plan) : []),
+  ])
+  const owners = new Map()
+  for (const [i, files] of filesByAgent.entries()) for (const file of files) {
+    if (!owners.has(file)) owners.set(file, new Set())
+    owners.get(file).add(i)
+  }
+  const shared = new Set([...owners].filter(([, agents]) => agents.size > 1).map(([file]) => file))
+  const changesFor = (plan, isShared) => plan.changes.filter(change => shared.has(change.file) === isShared)
+  const describe = changes => {
+    if (apply) return changes.length ? words('applied', { count: changes.length }) : ''
+    return [['create', 'previewCreate'], ['update', 'preview'], ['remove', 'previewRemove']]
+      .flatMap(([action, key]) => {
+        const count = changes.filter(change => change.action === action).length
+        return count ? [words(key, { count })] : []
+      }).join('; ')
+  }
+  const fileLine = (file, changes) => {
+    const change = changes.find(one => one.file === file)
+    return `  ${change?.action === 'remove' ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
+  }
+  const sharedChanges = [...new Map(results.flatMap(plan => plan.conflicts.length ? [] : changesFor(plan, true)).map(change => [change.file, change])).values()]
+  const sharedFiles = [...new Set(filesByAgent.flat().filter(file => shared.has(file)))]
+  const lines = []
+  if (sharedFiles.length) {
+    const status = describe(sharedChanges)
+    lines.push(`${words('shared')}:${status ? ` ${status}` : ''}`)
+    if (!apply) lines.push(...sharedFiles.map(file => fileLine(file, sharedChanges)))
+  }
+  lines.push(...selected.map((agent, i) => {
     const plan = results[i]
-    // Earlier selected agents may already have updated this plan's shared files.
-    const alreadyCurrent = apply && !plan.conflicts.length && plan.managedBy !== 'connector' ? Math.max(0, plans[i].changes.length - plan.changes.length) : 0
+    const ownChanges = changesFor(plan, false)
+    const changed = new Set(ownChanges.map(change => change.file))
+    const alreadyCurrent = apply && !plan.conflicts.length && plan.managedBy !== 'connector'
+      ? changesFor(plans[i], false).filter(change => !changed.has(change.file)).length : 0
     const current = alreadyCurrent > 0 ? `; ${words('current', { count: alreadyCurrent })}` : ''
     const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.join(', '), command: setupCommand(['--agent', agent, '--apply']) })
-      : !plan.changes.length ? words('ready') : words(apply ? 'applied' : 'preview', { count: plan.changes.length })
+      : describe(ownChanges) || words('ready')
     const capability = plan.managedBy !== 'connector' && !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
     // An install plan removes a file only to retire the old /board command (#868), so the preview says so.
-    const files = !apply && !plan.conflicts.length ? [
-      ...plan.changes.map(change => change.action === 'remove' ? words('retire', { file: shortPath(change.file) }) : shortPath(change.file)),
-      ...records(plan).map(shortPath),
-    ].map(line => `  ${line}`) : []
+    const files = !apply && !plan.conflicts.length ? filesByAgent[i].filter(file => !shared.has(file)).map(file => fileLine(file, ownChanges)) : []
     // An old /board file the person edited stays; say so in the preview and after applying.
     const kept = plan.conflicts.length ? [] : (plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`)
     return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
-  })
+  }))
   if (hasClaude) lines.push(`Claude Code: ${words('claude')}`)
   const steps = []
   const isTrusted = (plan, codex) => {
@@ -352,8 +379,9 @@ const main = () => {
     try { return doctor.status === 0 && JSON.parse(doctor.stdout).hooksTrusted === true } catch { return false }
   }
   const boardPlan = available.length ? results[selected.indexOf(available[0])] : null
-  const boardCommand = boardPlan ? nodeCommand(boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs')) : ''
+  const boardCommand = boardPlan ? command ? command.replace(/\s+setup\s*$/, '') : nodeCommand(boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs')) : ''
   if (!apply && available.some(agent => plans[selected.indexOf(agent)].changes.length)) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
+  const sessionAgents = []
   for (const agent of available) {
     const plan = results[selected.indexOf(agent)]
     if (plan.managedBy === 'connector') continue
@@ -362,8 +390,20 @@ const main = () => {
     // A repeat run of an unchanged install asks Codex itself whether the board's hooks are trusted,
     // and leaves out the trust step only on its yes; no answer or any other answer keeps it (#808).
     if (codex && !plan.changes.length && isTrusted(plan, codex)) continue
-    steps.push(words(agent === 'codex' ? codex ? 'codex' : 'codexMissing' : plan.capabilities.lifecycle === 'adapter-pending' ? 'skill' : agent, { host: names[agent], command: boardCommand, codex: codex ? quote(codex) : '' }))
+    if (agent === 'codex' && !codex) {
+      steps.push(words('codexMissing'))
+      continue
+    }
+    if (agent !== 'codex' && plan.capabilities.lifecycle === 'adapter-pending') {
+      steps.push(words('skill', { host: names[agent] }))
+      continue
+    }
+    if (['codex', 'hermes', 'opencode', 'openclaw', 'deepseek'].includes(agent)) {
+      steps.push(words(agent, { command: boardCommand, codex: codex ? quote(codex) : '' }))
+    }
+    sessionAgents.push(names[agent])
   }
+  if (sessionAgents.length) steps.push(words('start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
   for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
   if (hasClaude) steps.push(words('plugin'))
   if (available.length) {
