@@ -41,10 +41,14 @@ const reachable = (agent: string, session: string | undefined, target: AgentTarg
   return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
 }
 const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[], now: number, s: Strings, answers?: string): { receipt?: Receipt } => {
-  // A kept question is found by the one message the board sent to answer it; a message with no such link is no
-  // receipt for it. Only the board sets that link, so the question id alone names the message.
-  const one = answers !== undefined ? messages.filter(message => message.answers === answers).at(-1)
-    : session === undefined ? undefined : messages.filter(message => message.to === address(agent || 'claude', session)).at(-1)
+  // A kept question (no live session here) is found by the one message the board sent to answer it; a message
+  // with no such link is no receipt for it. Only the board sets that link, so the question id alone names the
+  // message. On a live question's card, an answer to another question is no receipt for this one (#725), while
+  // a message that answers no question still is.
+  const to = session === undefined ? undefined : address(agent || 'claude', session)
+  const one = to === undefined
+    ? answers === undefined ? undefined : messages.filter(message => message.answers === answers).at(-1)
+    : messages.filter(message => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1)
   return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 // The person's answer to this question reached its session: the session took it, or replied.
