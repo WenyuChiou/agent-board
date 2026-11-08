@@ -4846,8 +4846,8 @@ const shlexSplit = text => {
   if (word !== null) words.push(word)
   return words
 }
-const hermesHooksOf = text => Object.fromEntries([...text.matchAll(/^\s+(\w+):\s*\n\s+- \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+)\}\s*$/gm)].filter(match => /agent-board-hook\.mjs/.test(match[2])).map(match => [match[1], { command: JSON.parse(match[2]), timeout: Number(match[3]) }]))
-const hermesEvents = ['on_session_start', 'pre_llm_call', 'post_llm_call', 'on_session_end']
+const hermesHooksOf = text => Object.fromEntries([...text.matchAll(/^\s+(\w+):\s*\n\s+- \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+)(?:, matcher: (\w+))?\}\s*$/gm)].filter(match => /agent-board-hook\.mjs/.test(match[2])).map(match => [match[1], { command: JSON.parse(match[2]), timeout: Number(match[3]), ...(match[4] === undefined ? {} : { matcher: match[4] }) }]))
+const hermesEvents = ['on_session_start', 'pre_llm_call', 'post_llm_call', 'on_session_end', 'post_tool_call']
 const hermesConfig = f => join(f.home, '.hermes', 'config.yaml')
 const hermesAllowlist = f => join(f.home, '.hermes', 'shell-hooks-allowlist.json')
 // Fire a Hermes hook the way Hermes does: its command split by shlex, no shell, the event's JSON on stdin.
@@ -4858,7 +4858,7 @@ const fireHermes = (f, event, payload) => {
   return spawnSync(argv[0], argv.slice(1), { env: f.env, input: JSON.stringify({ hook_event_name: event, tool_name: null, tool_input: null, ...payload }), encoding: 'utf8', windowsHide: true, timeout: 30000 })
 }
 
-test('Hermes setup writes its four hooks into a fresh config.yaml, quoted for shlex, trusts nothing, and a re-run changes nothing (#1115)', () => fixture(f => {
+test('Hermes setup writes its hooks into a fresh config.yaml, quoted for shlex, trusts nothing, and a re-run changes nothing (#1115)', () => fixture(f => {
   const installed = f.install('--agent', 'hermes', '--apply')
   assert.equal(installed.status, 0, installed.stderr)
   const text = readFileSync(hermesConfig(f), 'utf8')
@@ -4871,7 +4871,11 @@ test('Hermes setup writes its four hooks into a fresh config.yaml, quoted for sh
     // The program, the worker and the board file each survive the split as one word, whatever the folder holds (a space, here).
     assert.equal(argv[0], process.platform === 'win32' ? process.execPath.replaceAll('\\', '/') : process.execPath)
     assert.ok(argv[0].length > 0 && argv.includes('--hook-event') && argv[argv.indexOf('--hook-event') + 1] === event)
-    assert.deepEqual(argv.slice(argv.indexOf('--agent-status')), ['--agent-status', '--agent', 'hermes', '--state', event === 'pre_llm_call' ? 'working' : 'waiting', '--progress-file', process.platform === 'win32' ? f.progress.replaceAll('\\', '/') : f.progress])
+    const expected = event === 'post_tool_call'
+      ? ['--plan-event', '--agent', 'hermes']
+      : ['--agent-status', '--agent', 'hermes', '--state', event === 'pre_llm_call' ? 'working' : 'waiting']
+    assert.deepEqual(argv.slice(argv.indexOf(expected[0])), [...expected, '--progress-file', process.platform === 'win32' ? f.progress.replaceAll('\\', '/') : f.progress])
+    assert.equal(hooks[event].matcher, event === 'post_tool_call' ? 'todo' : undefined)
     assert.equal(argv[4], process.platform === 'win32' ? join(f.root, 'agent-board-hook.mjs').replaceAll('\\', '/') : join(f.root, 'agent-board-hook.mjs'))
     // Every word is double-quoted, so no raw backslash, dollar or backtick is left for the split to read.
     assert.doesNotMatch(hooks[event].command, /\\|\$|`/)
@@ -4895,6 +4899,8 @@ test('Hermes setup keeps a config.yaml with other keys and other hooks, and remo
     'hooks:',
     '  pre_tool_call:',
     '    - {command: "my-guard.sh", timeout: 5}',
+    '  post_tool_call:',
+    '    - {command: "my-todo.sh", matcher: terminal, timeout: 5}',
     '  on_session_start:',
     '    - command: "my-start.sh"',
     '      timeout: 3',
@@ -4918,6 +4924,27 @@ test('Hermes setup keeps a config.yaml with other keys and other hooks, and remo
   assert.equal(removed.status, 0, removed.stderr)
   assert.equal(readFileSync(hermesConfig(f), 'utf8'), original)
   assert.equal(existsSync(join(f.root, 'install-hermes.json')), false)
+}))
+
+test('Hermes setup keeps a rewritten todo matcher and repairs one changed away from todo', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const path = hermesConfig(f)
+  const text = readFileSync(path, 'utf8')
+  const hook = hermesHooksOf(text).post_tool_call
+  assert.equal(hook.matcher, 'todo')
+  const flow = `    - {command: ${JSON.stringify(hook.command)}, timeout: ${hook.timeout}, matcher: todo}`
+  const block = `    - command: ${JSON.stringify(hook.command)}\n      timeout: ${hook.timeout}\n      matcher: todo`
+  assert.ok(text.includes(flow))
+  const rewritten = text.replace(flow, block)
+  f.save(path, rewritten)
+  const again = f.install('--agent', 'hermes', '--apply')
+  assert.equal(again.status, 0, again.stderr)
+  assert.deepEqual(JSON.parse(again.stdout).changes, [])
+  assert.equal(readFileSync(path, 'utf8'), rewritten)
+  f.save(path, rewritten.replace('matcher: todo', 'matcher: shell'))
+  const repaired = f.install('--agent', 'hermes', '--apply')
+  assert.equal(repaired.status, 0, repaired.stderr)
+  assert.equal(hermesHooksOf(readFileSync(path, 'utf8')).post_tool_call.matcher, 'todo')
 }))
 
 test('Hermes setup leaves a config.yaml it cannot merge into byte for byte and reports a conflict (#1115)', () => fixture(f => {
@@ -5005,6 +5032,34 @@ test('Hermes trust is only what the person asks for: the board\'s exact commands
   assert.equal(removed.status, 0, removed.stderr)
   assert.deepEqual(JSON.parse(readFileSync(hermesAllowlist(f), 'utf8')), foreign)
   assert.ok(isAscii(), 'the trust file stays ASCII after removal')
+}))
+
+test('a Hermes upgrade previews trust for the new todo hook without disturbing old approvals', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  assert.equal(f.command(['--hermes-trust', '--apply', '--json']).status, 0)
+  const path = hermesConfig(f)
+  const text = readFileSync(path, 'utf8')
+  const hook = hermesHooksOf(text).post_tool_call
+  const event = `  post_tool_call:\n    - {command: ${JSON.stringify(hook.command)}, timeout: ${hook.timeout}, matcher: todo}\n`
+  assert.ok(text.includes(event))
+  f.save(path, text.replace(event, ''))
+  const manifestFile = join(f.root, 'install-hermes.json')
+  const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+  delete manifest.groups.hooks.post_tool_call
+  f.save(manifestFile, JSON.stringify(manifest, null, 2))
+  const approvals = JSON.parse(readFileSync(hermesAllowlist(f), 'utf8'))
+  approvals.approvals = approvals.approvals.filter(one => one.event !== 'post_tool_call')
+  f.save(hermesAllowlist(f), JSON.stringify(approvals, null, 2))
+  const preview = f.install('--agent', 'hermes')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.ok(JSON.parse(preview.stdout).changes.some(change => change.file === path))
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const trust = f.command(['--hermes-trust', '--json'])
+  assert.equal(trust.status, 0, trust.stderr)
+  assert.deepEqual(JSON.parse(trust.stdout).entries.map(one => [one.event, one.trusted]), hermesEvents.map(event => [event, event !== 'post_tool_call']))
+  assert.deepEqual(JSON.parse(readFileSync(hermesAllowlist(f), 'utf8')), approvals)
+  assert.equal(f.command(['--hermes-trust', '--apply', '--json']).status, 0)
+  assert.equal(JSON.parse(f.command(['--codex-doctor', '--agent', 'hermes', '--json']).stdout).hooksTrusted, true)
 }))
 
 test('Hermes pre_llm_call marks the session working, prints nothing for Hermes to inject, and closes an answered question (#1115)', () => fixture(f => {
@@ -10807,6 +10862,57 @@ test('setup installs the Grok PostToolUse plan hook with the todo_write matcher 
   assert.equal(grok.PostToolUse[0].matcher, '^todo_write$')
   assert.equal(grok.PostToolUse[0].hooks[0].timeout, 5)
   assert.match(grok.PostToolUse[0].hooks[0].command, /--plan-event/)
+}))
+
+const hermesTodo = (id, todos, extra = {}) => ({
+  hook_event_name: 'post_tool_call', tool_name: 'todo', session_id: id,
+  tool_input: { merge: true, todos: [{ id: 'b', status: 'in_progress' }] },
+  extra: { result: JSON.stringify({ todos, summary: {} }) }, ...extra,
+})
+
+test('a Hermes todo merge hook reports the whole result list as plan steps', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const input = hermesTodo('hermes-plan-session-1', [
+    { id: 'a', content: 'Hermes first', status: 'completed' },
+    { id: 'b', content: 'Hermes second', status: 'in_progress' },
+    { id: 'c', content: 'Hermes third', status: 'pending' },
+    { id: 'd', content: 'Hermes dropped', status: 'cancelled' },
+  ])
+  const ran = fireHermes(f, 'post_tool_call', input)
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=hermes/)
+  assert.match(text, /^- \[x\] Hermes first$/m)
+  assert.match(text, /^- \[~\] Hermes second$/m)
+  assert.match(text, /^- \[ \] Hermes third$/m)
+  assert.match(text, /^- \[-\] Hermes dropped$/m)
+}))
+
+test('a Hermes todo hook ignores a bad result or partial merge and uses complete non-merge input when the result is absent', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const id = 'hermes-plan-session-2'
+  const one = [{ id: 'a', content: 'Hermes kept', status: 'in_progress' }]
+  const fallback = hermesTodo(id, [], { tool_input: { merge: false, todos: one }, extra: {} })
+  const first = f.command(['--plan-event', '--agent', 'hermes'], fallback)
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(first.stdout, '')
+  const before = readFileSync(f.progress, 'utf8')
+  assert.match(before, /^- \[~\] Hermes kept$/m)
+  for (const input of [
+    hermesTodo(id, one, { extra: { result: '{broken' } }),
+    { ...fallback, extra: { result: '{broken' } },
+    hermesTodo(id, one, { extra: {} }),
+    hermesTodo(id, one, { extra: { result: '{}' } }),
+    hermesTodo(id, one, { hook_event_name: 'pre_tool_call' }),
+    hermesTodo(id, one, { tool_name: 'terminal' }),
+    hermesTodo(undefined, one),
+  ]) {
+    const ran = f.command(['--plan-event', '--agent', 'hermes'], input)
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.equal(ran.stdout, '')
+    assert.equal(readFileSync(f.progress, 'utf8'), before)
+  }
 }))
 
 test('Windows fixture Node is a hard link to the running executable when linking works', { skip: process.platform !== 'win32' }, t => fixture(f => {

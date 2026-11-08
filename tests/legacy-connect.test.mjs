@@ -144,6 +144,7 @@ const setupThenProbe = agent => withSetup(agent, ({ f, run, owned, before }) => 
 })
 
 test('a connector probe leaves Grok with only the setup hook and reports its installer', () => setupThenProbe('grok'))
+test('a connector probe leaves Hermes with only the setup hooks and reports its installer', () => setupThenProbe('hermes'))
 
 const BOTH_INSTALLERS = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw']
 test('connect and automatic probes leave setup managed agents unchanged', async t => {
@@ -159,6 +160,24 @@ const withBothHooks = (agent, check) => withSetup(agent, async ({ f, run, record
   writeFileSync(recordFile, record)
   await check({ f, run, recordFile, owned, before })
 })
+
+test('a probe removes a prior Hermes plugin hook beside the setup hook', () => withBothHooks('hermes', ({ f, run, owned, before }) => {
+  const output = run('auto')
+  assert.equal(output.state.setup.agents.find(one => one.agent === 'hermes').hook, 'setup')
+  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file])
+  assert.equal(readFileSync(join(f.home, '.hermes', 'config.yaml'), 'utf8'), before[join(f.home, '.hermes', 'config.yaml')])
+}))
+
+test('a probe retires a lone Hermes plugin plan hook beside the setup hooks', () => withBothHooks('hermes', ({ f, run }) => {
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const partial = readFileSync(config, 'utf8').split('\n').filter(line => !line.includes('progress-report.')).join('\n')
+  assert.match(partial, /progress-hook\.mjs/)
+  writeFileSync(config, partial)
+  assert.equal(run('auto').state.setup.agents.find(one => one.agent === 'hermes').hook, 'setup')
+  const after = readFileSync(config, 'utf8')
+  assert.doesNotMatch(after, /progress-hook\.mjs/)
+  assert.match(after, /agent-board-hook\.mjs/)
+}))
 
 test('a probe takes out the hook an earlier probe left beside the setup hook', async t => {
   for (const agent of BOTH_INSTALLERS) await t.test(agent, () => withBothHooks(agent, ({ f, run, owned, before }) => {
@@ -699,6 +718,32 @@ test('a YAML command with combined apostrophe quoting or non-JSON escapes keeps 
     assert.deepEqual(output.result.done, [])
   })
 })
+
+test('a Hermes plugin connection reports todo plans and removes only its own hooks', () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const original = 'model: synthetic\nhooks:\n  post_tool_call:\n    - {command: "my-todo.sh", matcher: terminal, timeout: 5}\n    - {command: "/mine/my-progress-hook.mjs --hook-version 1 --hook-event post_tool_call --plan-event --agent hermes --progress-file /mine/progress.md", matcher: other, timeout: 5}\n'
+  writeFileSync(config, original)
+  const connected = f.run(f.request('connect'))
+  assert.ok(connected.result.done.includes('Hermes Agent'))
+  const text = readFileSync(config, 'utf8')
+  const matched = [...text.matchAll(/^\s+- \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+), matcher: todo\}$/gm)]
+  assert.equal(matched.length, 1)
+  assert.equal(Number(matched[0][2]), 10)
+  const command = JSON.parse(matched[0][1])
+  const argv = [...command.matchAll(/"(?:\\.|[^"\\])*"/g)].map(match => JSON.parse(match[0]))
+  assert.ok(argv.includes('--plan-event'))
+  const todo = { hook_event_name: 'post_tool_call', tool_name: 'todo', session_id: 'hermes-legacy-plan', tool_input: { merge: true, todos: [{ id: 'b' }] }, extra: { result: JSON.stringify({ todos: [{ id: 'a', content: 'Legacy first', status: 'completed' }, { id: 'b', content: 'Legacy second', status: 'in_progress' }] }) } }
+  const fired = spawnSync(argv[0], argv.slice(1), { input: JSON.stringify(todo), encoding: 'utf8', windowsHide: true, timeout: 15000, env: { ...process.env, HOME: f.home, USERPROFILE: f.home } })
+  assert.equal(fired.status, 0, fired.stderr)
+  assert.equal(fired.stdout, '')
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[x\] Legacy first$/m)
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[~\] Legacy second$/m)
+  f.run(f.request('auto'))
+  assert.equal(readFileSync(config, 'utf8'), text)
+  f.run(f.request('remove'))
+  assert.equal(readFileSync(config, 'utf8'), original)
+}))
 
 test('an ordinary update of our own Hermes hook does not claim a repair', () => fixture(async f => {
   rmSync(join(f.home, '.codex'), { recursive: true })

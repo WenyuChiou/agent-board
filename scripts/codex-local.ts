@@ -1272,7 +1272,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // Hermes splits a hook command with shlex and runs it without a shell: every word is double-quoted,
   // and a Windows path takes forward slashes, since a backslash could be read as an escape.
   const hermesCommand = (event: string): string => hookArgs(event, statusEvents.hermes?.[event]).map(word => quote(process.platform === 'win32' ? word.replaceAll('\\', '/') : word)).join(' ')
-  const hermesEvents = (): Array<[string, string]> => Object.keys(statusEvents.hermes ?? {}).map(event => [event, hermesCommand(event)])
+  const hermesEvents = (): Array<[string, string, string?]> => [
+    ...Object.keys(statusEvents.hermes ?? {}).map((event): [string, string] => [event, hermesCommand(event)]),
+    [planEvents.hermes!.event, hermesCommand(planEvents.hermes!.event), planEvents.hermes!.matcher],
+  ]
   let nextAllowlist: string | undefined
   if (agent === 'hermes') {
     const text = initial(nativeConfig) ?? ''
@@ -1284,7 +1287,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const next = !isYamlMapping(text) ? null : remove ? withoutHermesHooks(text, hermesOwns) : withHermesHooks(text, events, hermesOwns)
     if (next === null) conflicts.push(nativeConfig)
     nextConfigText = next ?? text
-    if (!remove && next !== null) groups.hooks = Object.fromEntries(events)
+    if (!remove && next !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
     if (remove) {
       const approvals = readAllowlist(initial(allowlistFile))
       const mine = Object.entries(object(manifest.groups.hooks ?? {}))
