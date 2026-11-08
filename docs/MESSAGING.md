@@ -324,8 +324,8 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | TUI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) |
+| DeepSeek Harness | Web | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-08-deepseek-harness-live.md](../docs/validation/2026-11-08-deepseek-harness-live.md) | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) |
 | dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
