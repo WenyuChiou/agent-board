@@ -209,7 +209,7 @@ dependencies and no install scripts. Pre-releases are on the `next` tag
 | Host | Installed adapter | Separate acceptance / remaining limit |
 | --- | --- | --- |
 | Codex | Seven hooks (six lifecycle, one plan mirror) and explicit own-thread reporter | Scoped native trust and actual CLI/desktop events; [details](CODEX.md) |
-| Cursor | Conversation/generation lifecycle hooks | Native CLI/IDE execution and turn binding |
+| Cursor | Conversation/generation lifecycle hooks | Native CLI/IDE execution and turn binding. On Windows, start `cursor-agent` from PowerShell or Command Prompt: started from Git Bash, it runs none of its hooks (setup says so) |
 | OpenCode | Session event plugin and context-bound progress tool | Plugin reload; status events lack a turn id |
 | Antigravity | Four named native hooks plus shared skill | Native CLI/App/IDE events; no session-end event or turn fence |
 | Grok Build | SessionStart, UserPromptSubmit, Stop, SessionEnd, and a plan mirror on `todo_write` | Prompt/idle/end status; native execution unverified |

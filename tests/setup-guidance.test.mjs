@@ -340,3 +340,16 @@ test('terminal setup installs the plugin when only Claude Code is present', () =
   assert.deepEqual(claudeCalls(f), pluginCommands)
   assert.equal(existsSync(join(f.root, 'data')), false)
 }, ['claude']))
+
+test('on Windows setup says to start cursor-agent from PowerShell, in its preview and after a yes, in every language (#1159)', () => {
+  const isWindows = process.platform === 'win32'
+  for (const [index, lang] of locales.entries()) fixture(setup => {
+    const preview = setup('--agent', 'cursor', '--lang', lang)
+    assert.equal(preview.includes(bootstrap[index].cursorWindows), isWindows, preview)
+  })
+  terminal(f => {
+    const result = f.invoke(['--agent', 'cursor', '--lang', 'en'], 'y\n')
+    succeeded(result)
+    assert.equal(result.stdout.split('Next steps:')[1]?.includes(bootstrap[0].cursorWindows), isWindows, result.stdout)
+  })
+})

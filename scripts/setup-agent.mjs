@@ -64,6 +64,7 @@ const summaries = [
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin.",
     "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin.",
     "deepseek": "DeepSeek: close and reopen DeepSeek Harness (dsh) so it loads the agent-board plugin setup wrote.",
+    "cursorWindows": "Cursor: on Windows, start cursor-agent from PowerShell or Command Prompt. Started from Git Bash, Cursor runs none of the board's hooks, so the board gets nothing from it.",
     "start": "Then start a new session in each of: {agents}.",
     "startOne": "Then start a new session in {agents}.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
@@ -106,6 +107,7 @@ const summaries = [
     "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛。",
     "openclaw": "OpenClaw：重新啟動 OpenClaw，載入 setup 產生的 agent-board 外掛。",
     "deepseek": "DeepSeek：關掉 DeepSeek Harness（dsh）再重新打開，讓它載入 setup 產生的 agent-board 外掛。",
+    "cursorWindows": "Cursor：在 Windows 上，請從 PowerShell 或命令提示字元啟動 cursor-agent。從 Git Bash 啟動時，Cursor 不會執行看板的 hooks，看板就收不到它的任何進度。",
     "start": "最後在 {agents} 各開一個新的工作階段。",
     "startOne": "最後在 {agents} 開一個新的工作階段。",
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
@@ -148,6 +150,7 @@ const summaries = [
     "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件。",
     "openclaw": "OpenClaw：重新启动 OpenClaw，加载 setup 生成的 agent-board 插件。",
     "deepseek": "DeepSeek：关掉 DeepSeek Harness（dsh）再重新打开，让它加载 setup 生成的 agent-board 插件。",
+    "cursorWindows": "Cursor：在 Windows 上，请从 PowerShell 或命令提示符启动 cursor-agent。从 Git Bash 启动时，Cursor 不会运行看板的 hooks，看板就收不到它的任何进度。",
     "start": "最后在 {agents} 各开一个新的会话。",
     "startOne": "最后在 {agents} 开一个新的会话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
@@ -567,6 +570,8 @@ const main = () => {
         if (plan.capabilities.lifecycle === 'adapter-pending') next.push(words('skill', { host: names[agent] }))
         else {
           if (['opencode', 'openclaw', 'deepseek'].includes(agent)) next.push(words(agent))
+          // Started from Git Bash, cursor-agent hands its PowerShell hook commands to bash and none runs (#1159).
+          if (agent === 'cursor' && process.platform === 'win32') next.push(words('cursorWindows'))
           sessions.push(names[agent])
         }
       }
@@ -602,6 +607,7 @@ const main = () => {
     if (['codex', 'hermes', 'opencode', 'openclaw', 'deepseek'].includes(agent)) {
       steps.push(words(agent, { command: boardCommand, codex: codex ? quote(codex) : '' }))
     }
+    if (agent === 'cursor' && process.platform === 'win32') steps.push(words('cursorWindows'))
     sessionAgents.push(names[agent])
   }
   if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))

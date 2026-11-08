@@ -122,6 +122,7 @@ export const EN: Strings = {
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin.",
     "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin.",
     "deepseek": "DeepSeek: close and reopen DeepSeek Harness (dsh) so it loads the agent-board plugin setup wrote.",
+    "cursorWindows": "Cursor: on Windows, start cursor-agent from PowerShell or Command Prompt. Started from Git Bash, Cursor runs none of the board's hooks, so the board gets nothing from it.",
     "start": "Then start a new session in each of: {agents}.",
     "startOne": "Then start a new session in {agents}.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
