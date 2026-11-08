@@ -286,7 +286,7 @@ test('the first plain agent-board in a terminal with nothing set up asks one que
   await firstRun('n\n', ({ status, stdout, stderr }, home) => {
     const asked = stdout.indexOf('Apply these changes? [y/N]')
     assert.ok(asked > 0, stdout)
-    assert.ok(stdout.includes('would update') && stdout.indexOf('--apply') < asked, 'the preview is printed before the question')
+    assert.ok(stdout.includes('would create') && stdout.indexOf('--apply') < asked, 'the preview is printed before the question')
     assert.equal(status, 1)
     assert.match(stderr, /not set up for this account yet/)
     assert.equal(existsSync(join(home, '.agent-board')), false, 'nothing was written')
