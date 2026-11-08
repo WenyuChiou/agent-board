@@ -257,6 +257,30 @@ test('a hook that cannot be taken out is named, and the other agents still conne
   assert.doesNotMatch(readFileSync(config, 'utf8'), /progress-report/)
 }))
 
+test('a Hermes config that cannot be changed keeps the worker and board script until a later remove succeeds', { skip: process.getuid?.() === 0 ? 'root ignores the read-only folder this test needs' : false }, () => withBothHooks('hermes', ({ f, run }) => {
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const worker = join(dirname(f.progress), 'progress-hook.mjs')
+  const board = join(dirname(f.progress), 'agent-board.mjs')
+  const lock = isLocked => process.platform === 'win32'
+    ? execFileSync('attrib', [isLocked ? '+R' : '-R', config])
+    : chmodSync(join(f.home, '.hermes'), isLocked ? 0o555 : 0o755)
+  assert.ok(existsSync(worker))
+  assert.ok(existsSync(board))
+  lock(true)
+  try {
+    const output = run('remove')
+    assert.ok(output.result.problems.some(one => one.key === `removeFailed:${config}`))
+    assert.ok(output.result.problems.some(one => one.key.startsWith('boardRetained:')))
+    assert.ok(existsSync(worker))
+    assert.ok(existsSync(board))
+  } finally {
+    lock(false)
+  }
+  run('remove')
+  assert.equal(existsSync(worker), false)
+  assert.equal(existsSync(board), false)
+}))
+
 test('a config that cannot be parsed is named when its hook cannot be taken out', () => withBothHooks('muse', ({ f, run }) => {
   const config = join(f.home, '.config', 'muse', 'settings.json')
   writeFileSync(config, `// mine\n${readFileSync(config, 'utf8')}`)
@@ -741,6 +765,34 @@ test('a Hermes plugin connection reports todo plans and removes only its own hoo
   assert.match(readFileSync(f.progress, 'utf8'), /^- \[~\] Legacy second$/m)
   f.run(f.request('auto'))
   assert.equal(readFileSync(config, 'utf8'), text)
+  f.run(f.request('remove'))
+  assert.equal(readFileSync(config, 'utf8'), original)
+}))
+
+test('a Hermes plan hook refolded over several lines is kept by connect and removed whole', () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const original = 'model: synthetic\nhooks:\n  on_session_start:\n    - {command: "person-hook.sh", timeout: 5}\n'
+  writeFileSync(config, original)
+  assert.ok(f.run(f.request('connect')).result.done.includes('Hermes Agent'))
+  const connected = readFileSync(config, 'utf8')
+  const item = connected.match(/^    - \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+), matcher: todo\}$/m)
+  assert.ok(item)
+  const words = JSON.parse(item[1]).replaceAll("'", "''").split(' ')
+  const lines = [`  - command: '${words[0]}`]
+  for (const word of words.slice(1)) {
+    if (lines.at(-1).length + 1 + word.length > 80) lines.push(`    ${word}`)
+    else lines[lines.length - 1] += ` ${word}`
+  }
+  assert.ok(lines.length > 1)
+  assert.ok(lines.some(line => line.includes('progress-hook.mjs')))
+  assert.ok(!lines.some(line => line.includes('progress-hook.mjs') && line.includes('--progress-file')))
+  const folded = `${lines.join('\n')}'\n    matcher: todo\n    timeout: ${item[2]}`
+  const saved = connected.replace(item[0], folded)
+  assert.notEqual(saved, connected)
+  writeFileSync(config, saved)
+  f.run(f.request('auto'))
+  assert.equal(readFileSync(config, 'utf8'), saved)
   f.run(f.request('remove'))
   assert.equal(readFileSync(config, 'utf8'), original)
 }))
