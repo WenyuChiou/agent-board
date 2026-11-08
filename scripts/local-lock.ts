@@ -10,8 +10,7 @@ type Bounds = { waitMs?: number; staleMs?: number }
 type Synchronous<T> = T extends PromiseLike<unknown> ? never : T
 type ProcessStart = number | 'inaccessible' | null
 
-// A synchronous local mutation runs for milliseconds; after an hour even a lock without a comparable start time is stale (#1089).
-const MAX_LOCK_AGE_MS = 60 * 60 * 1000
+// Reused process IDs after a crash or reboot start at a different epoch time than the lock owner (#1089).
 const START_DRIFT_MS = 3000
 const FRESH_OWNER_MS = 5000
 
@@ -82,7 +81,7 @@ const linuxStatTicks = (path: string): number | null => {
   return Number.isSafeInteger(ticks) && ticks >= 0 ? ticks : null
 }
 
-const processStarted = (pid: number): ProcessStart => {
+const processStarted = (pid: number, timeoutMs: number): ProcessStart => {
   if (pid === process.pid) return Math.round(performance.timeOrigin)
   if (process.platform === 'linux') {
     try {
@@ -95,11 +94,13 @@ const processStarted = (pid: number): ProcessStart => {
       return code === 'EACCES' || code === 'EPERM' ? 'inaccessible' : null
     }
   }
+  const timeout = Math.floor(timeoutMs)
+  if (timeout <= 0) return null
   if (process.platform !== 'win32') {
     try {
       const out = execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {
         encoding: 'utf8',
-        timeout: 2000,
+        timeout,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'ignore'],
         env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
@@ -118,7 +119,7 @@ const processStarted = (pid: number): ProcessStart => {
       `$p = Get-Process -Id ${pid} -ErrorAction Stop; if ($null -eq $p.StartTime) { 'INACCESSIBLE' } else { $p.StartTime.ToFileTimeUtc() }`,
     ], {
       encoding: 'utf8',
-      timeout: 10000,
+      timeout,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
@@ -128,14 +129,20 @@ const processStarted = (pid: number): ProcessStart => {
   } catch { return null }
 }
 
-const cachedProcessStarted = (pid: number, cache: Map<number, ProcessStart>): ProcessStart => {
+const cachedProcessStarted = (pid: number, cache: Map<number, ProcessStart>, timeoutMs: number): ProcessStart => {
   if (cache.has(pid)) return cache.get(pid) ?? null
-  const value = processStarted(pid)
-  cache.set(pid, value)
+  const value = processStarted(pid, timeoutMs)
+  if (value !== null || Math.floor(timeoutMs) > 0) cache.set(pid, value)
   return value
 }
 
-const isDeadOwner = (text: string, mtimeMs: number, staleMs: number, startedCache: Map<number, ProcessStart>): boolean => {
+const isDeadOwner = (
+  text: string,
+  mtimeMs: number,
+  staleMs: number,
+  startedCache: Map<number, ProcessStart>,
+  timeoutMs: number,
+): boolean => {
   try {
     const owner = JSON.parse(text) as { version?: unknown; pid?: unknown; started?: unknown; token?: unknown }
     if (
@@ -152,11 +159,9 @@ const isDeadOwner = (text: string, mtimeMs: number, staleMs: number, startedCach
       return code === 'ESRCH' || code === 'EPERM'
     }
     const now = Date.now()
-    const ageMs = now - mtimeMs
     if (owner.started === undefined) {
-      if (ageMs >= MAX_LOCK_AGE_MS) return true
-      if (ageMs < FRESH_OWNER_MS) return false
-      const actual = cachedProcessStarted(owner.pid, startedCache)
+      if (now - mtimeMs < FRESH_OWNER_MS) return false
+      const actual = cachedProcessStarted(owner.pid, startedCache, timeoutMs)
       if (actual === 'inaccessible') return true
       if (typeof actual === 'number') return actual > mtimeMs + START_DRIFT_MS
       try { process.kill(owner.pid, 0) } catch (error) {
@@ -164,10 +169,8 @@ const isDeadOwner = (text: string, mtimeMs: number, staleMs: number, startedCach
       }
       return false
     }
-    const ownerAgeMs = now - owner.started
-    if (ageMs >= MAX_LOCK_AGE_MS && ownerAgeMs >= MAX_LOCK_AGE_MS) return true
-    if (ownerAgeMs < Math.max(staleMs, FRESH_OWNER_MS)) return false
-    const actual = cachedProcessStarted(owner.pid, startedCache)
+    if (now - owner.started < Math.max(staleMs, FRESH_OWNER_MS)) return false
+    const actual = cachedProcessStarted(owner.pid, startedCache, timeoutMs)
     if (actual === 'inaccessible') return true
     if (typeof actual === 'number') return Math.abs(actual - owner.started) > START_DRIFT_MS
     try { process.kill(owner.pid, 0) } catch (error) {
@@ -177,7 +180,21 @@ const isDeadOwner = (text: string, mtimeMs: number, staleMs: number, startedCach
   return false
 }
 
-const recover = (file: string, staleMs: number, startedCache: Map<number, ProcessStart>): void => {
+const recover = (file: string, staleMs: number, startedCache: Map<number, ProcessStart>, timeoutMs: number): void => {
+  // Probe outside the non-recoverable gate so an external timeout or SIGKILL during
+  // a process-start lookup never leaves an abandoned .recover file behind.
+  let observed
+  try { observed = lstatSync(file) } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT' || isVanishing(error)) return
+    throw error
+  }
+  if (!observed.isFile() || Date.now() - observed.mtimeMs < staleMs) return
+  let observedText: string
+  try { observedText = readFileSync(file, 'utf8') } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT' || isVanishing(error)) return
+    throw error
+  }
+  if (!isDeadOwner(observedText, observed.mtimeMs, staleMs, startedCache, timeoutMs)) return
   // A single recovery owner rereads the lock after taking this gate. A reclaimer
   // that waited for another must never act on its earlier observation. A crashed
   // recovery gate is deliberately retained: age cannot prove it safe to replace.
@@ -196,7 +213,7 @@ const recover = (file: string, staleMs: number, startedCache: Map<number, Proces
       if ((error as { code?: string }).code === 'ENOENT' || isVanishing(error)) return
       throw error
     }
-    if (!isDeadOwner(text, current.mtimeMs, staleMs, startedCache)) return
+    if (!isDeadOwner(text, current.mtimeMs, staleMs, startedCache, 0)) return
     // Every cooperating reclaimer holds the gate; a dead owner cannot resume its
     // release. Ordinary acquisition cannot replace the still-existing lock.
     unlinkSync(file)
@@ -221,7 +238,7 @@ export const withLocalLock = <T>(file: string, action: () => T & Synchronous<T>,
   for (;;) {
     owner = claim(file, busy)
     if (owner !== null) break
-    recover(file, staleMs, startedCache)
+    recover(file, staleMs, startedCache, Math.max(0, waitMs - (performance.now() - started)))
     owner = claim(file, busy)
     if (owner !== null) break
     if (performance.now() - started >= waitMs) {

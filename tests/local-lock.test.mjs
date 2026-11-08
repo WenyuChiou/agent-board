@@ -163,6 +163,15 @@ test('a paused live native writer cannot be displaced by an expired lock', async
   assert.match(skipped.stderr, /LOCK_BUSY/)
   assert.equal(readFileSync(lock, 'utf8'), owner)
   assert.equal(existsSync(result), false)
+  // Even after the wall clock advances past an hour (as across machine sleep), process identity preserves the live owner.
+  const realNow = Date.now
+  Date.now = () => realNow() + 2 * 3_600_000
+  try {
+    assert.throws(() => withLocalLock(lock, () => assert.fail('mutation ran'), { waitMs: 3000, staleMs: 30000 }), /LOCK_BUSY/)
+    assert.equal(readFileSync(lock, 'utf8'), owner)
+  } finally {
+    Date.now = realNow
+  }
   writeFileSync(release, '')
   assert.equal((await first.done).code, 0)
   assert.equal(existsSync(lock), false)
@@ -200,7 +209,7 @@ test('a stale lock whose pid is reused by a live process is recovered after the 
     assert.throws(() => withLocalLock(lock, () => { called = true }, { waitMs: 0, staleMs: 30000 }), /LOCK_BUSY/)
     assert.equal(called, false)
     utimesSync(lock, pastMinute, pastMinute)
-    withLocalLock(lock, () => { called = true }, { waitMs: 100, staleMs: 30000 })
+    withLocalLock(lock, () => { called = true }, { waitMs: 5000, staleMs: 30000 })
     assert.equal(called, true)
     assert.equal(existsSync(lock), false)
     // A lock written without started (as in FORMAT.md or #1089 reproduction) whose pid is live and mtime is an hour old.
@@ -208,7 +217,7 @@ test('a stale lock whose pid is reused by a live process is recovered after the 
     writeFileSync(lock, legacyStale)
     utimesSync(lock, pastHour, pastHour)
     let legacyCalled = false
-    withLocalLock(lock, () => { legacyCalled = true }, { waitMs: 100, staleMs: 30000 })
+    withLocalLock(lock, () => { legacyCalled = true }, { waitMs: 5000, staleMs: 30000 })
     assert.equal(legacyCalled, true)
     assert.equal(existsSync(lock), false)
   } finally {
