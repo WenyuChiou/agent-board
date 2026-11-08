@@ -915,16 +915,22 @@ const watchLaunch = (child: ChildProcess, onResult: (isOpen: boolean) => void): 
   })
 }
 
-// Start-Process creates the long-lived program without forwarding a shell's extra handles.
-// PowerShell is hidden; a browser started from it keeps its normal visible window.
+// Start-Process creates the long-lived program without forwarding a shell's extra handles: a
+// program Node starts itself inherits the two extra pipes Cursor's shell passes on, since they
+// reach Node as plain inheritable handles outside its standard streams, and holds them open for as
+// long as it runs (#1158). PowerShell is hidden; a browser started from it keeps its normal visible
+// window. Several programs are tried in the one PowerShell run, in order, and the PID printed is
+// the first that started: each PowerShell start costs about a second, and the caller's turn waits
+// for every one of them.
 // PowerShell ends a single-quoted string at the curly quotes too, so each is doubled like '.
 const psLiteral = (value: string): string => `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'`
 const windowsArgument = (value: string): string => `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
 type WindowsStartOptions = { isHidden?: boolean; env?: NodeJS.ProcessEnv; isPiped?: boolean }
-const windowsStart = (bin: string, argv: string[], options: WindowsStartOptions = {}): ChildProcess => {
+const windowsStart = (bins: string | string[], argv: string[], options: WindowsStartOptions = {}): ChildProcess => {
+  const programs = (Array.isArray(bins) ? bins : [bins]).map(psLiteral).join(', ')
   const argumentsPart = argv.length === 0 ? '' : ` -ArgumentList ${psLiteral(argv.map(windowsArgument).join(' '))}`
   const hiddenPart = options.isHidden ? ' -WindowStyle Hidden' : ''
-  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); $started = Microsoft.PowerShell.Management\\Start-Process -FilePath ${psLiteral(bin)}${argumentsPart} -WorkingDirectory ([Management.Automation.WildcardPattern]::Escape(${psLiteral(dirname(path))})) -PassThru${hiddenPart}; if ($started) { [Console]::Out.WriteLine($started.Id) }`
+  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); foreach ($program in @(${programs})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program${argumentsPart} -WorkingDirectory ([Management.Automation.WildcardPattern]::Escape(${psLiteral(dirname(path))})) -PassThru${hiddenPart} } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) { [Console]::Out.WriteLine($started.Id); exit 0 } }; exit 1`
   return spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
     cwd: dirname(path), stdio: options.isPiped ? ['ignore', 'pipe', 'pipe'] : 'ignore', windowsHide: true, env: options.env,
   })
@@ -995,19 +1001,28 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
     )
   }
 
+  const isInstalled = (bin: string): boolean => !(bin.includes('/') || bin.includes('\\')) || existsSync(bin)
+
+  // On Windows every candidate goes into the one PowerShell run (#1158): a start for each would
+  // keep the caller waiting a second per browser that is not there or cannot start, and the Edge
+  // path repeats when only one Program Files folder is set.
+  if (process.platform === 'win32') {
+    const programs = [...new Set(candidates)].filter(isInstalled)
+    if (programs.length === 0) return fallback()
+    try {
+      watchWindowsLaunch(windowsStart(programs, [`--app=${target}`]), isOpen => isOpen ? done(true) : fallback())
+    } catch {
+      fallback()
+    }
+    return
+  }
+
   const tryCandidate = (index: number): void => {
     if (index >= candidates.length) return fallback()
     const bin = candidates[index]!
     try {
-      if (bin.includes('/') || bin.includes('\\')) {
-        if (!existsSync(bin)) return tryCandidate(index + 1)
-      }
-      const child = process.platform === 'win32'
-        ? windowsStart(bin, [`--app=${target}`])
-        : spawn(bin, [`--app=${target}`], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: false })
-      const next = (isOpen: boolean): void => isOpen ? done(true) : tryCandidate(index + 1)
-      if (process.platform === 'win32') watchWindowsLaunch(child, next)
-      else watchLaunch(child, next)
+      if (!isInstalled(bin)) return tryCandidate(index + 1)
+      watchLaunch(spawn(bin, [`--app=${target}`], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: false }), isOpen => isOpen ? done(true) : tryCandidate(index + 1))
     } catch {
       tryCandidate(index + 1)
     }
