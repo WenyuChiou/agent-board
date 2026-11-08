@@ -136,11 +136,12 @@ export const settingsScript = String.raw`
   notificationState();
   if (!notificationType) {
     if (isLan) document.getElementById('settings-notifications').hidden = true;
-    else { notifyButton.disabled = true; notifyButton.title = w('settingsUnavailable'); }
+    // Left enabled, like every control that works without the server; a press says why nothing turns on.
+    else notifyButton.title = w('settingsUnavailable');
   }
   notifyButton.addEventListener('click', function () {
     if (notificationsOn) { notificationsOn = false; notificationState(); settingsSay(w('settingsChanged', w('settingsNotifications'), w('settingsOff'))); return; }
-    if (!notificationType) return;
+    if (!notificationType) { settingsSay(w('settingsUnavailable'), true); return; }
     notifyButton.disabled = true;
     var permission;
     if (notificationType.permission === 'default' && !permissionAsked) {

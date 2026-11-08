@@ -720,18 +720,19 @@ let routes: Record<string, AnswerRoute> = {}
 
 // The progress bar's style, from the board's settings file (#1085); one the page or the pane
 // picked shows at the next draw. A file that cannot be read means the default.
-// Read at most every 10 s, so the page's idle poll does not read the file each time; a pick made
-// here is kept at once.
-const BAR_STYLE_MS = 10_000
-let barStyleKept: { style: BarStyle; at: number } | null = null
-const barStyleNow = (): BarStyle => {
+// The file also holds the language picked in Settings (#1163). One read serves both, at most every
+// 10 s, so the page's idle poll does not read the file each time; a pick made here is kept at once.
+const SETTINGS_MS = 10_000
+let settingsKept: { text: string | null; at: number } | null = null
+const settingsNow = (): string | null => {
   const now = Date.now()
-  if (barStyleKept !== null && now - barStyleKept.at < BAR_STYLE_MS) return barStyleKept.style
-  let style: BarStyle
-  try { style = barStyleOf(read(settingsPath(path))) } catch { style = barStyleOf(null) }
-  barStyleKept = { style, at: now }
-  return style
+  if (settingsKept !== null && now - settingsKept.at < SETTINGS_MS) return settingsKept.text
+  let text: string | null
+  try { text = read(settingsPath(path)) } catch { text = null }
+  settingsKept = { text, at: now }
+  return text
 }
+const barStyleNow = (): BarStyle => barStyleOf(settingsNow())
 // The pick from the page or the `s` key: the settings file's other keys are kept. False when the
 // file exists but does not read as a JSON object: it is left as it is. A read or write error throws.
 const saveBarStyle = (style: BarStyle): boolean => {
@@ -739,7 +740,7 @@ const saveBarStyle = (style: BarStyle): boolean => {
   const next = withBarStyle(read(file), style)
   if (next === null) return false
   writeFileSync(file, next)
-  barStyleKept = { style, at: Date.now() }
+  settingsKept = { text: next, at: Date.now() }
   return true
 }
 
@@ -749,6 +750,7 @@ const saveLanguage = (lang: SettingsLang): boolean => {
   if (next === null) return false
   // A failed write names the file on the page, as a failed read does.
   try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
+  settingsKept = { text: next, at: Date.now() }
   s = wordsNow()
   return true
 }
@@ -1599,7 +1601,7 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
   if (action.type === 'send') return { state: { ...next, note: s.serveSending(agentLabel(action.route.agent || 'claude', s)), tone: 'quiet' }, isQuit: false, isHtml: false, isWrite: false, send: action }
   if (action.type === 'style') {
     // The next style after the one in the file now, not after a pick this board kept up to 10 s ago.
-    barStyleKept = null
+    settingsKept = null
     const style = nextBarStyle(barStyleNow())
     try {
       if (!saveBarStyle(style)) return { state: { ...next, note: s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
@@ -1911,7 +1913,7 @@ const serveChild = (): void => {
       barStyle: barStyleNow,
       setBarStyle: saveBarStyle,
       // With no pick saved, the panel shows the setup language the board uses, not Automatic.
-      language: () => savedLanguage() ?? langOf(BAKED.lang) ?? 'auto',
+      language: () => settingsLangOf(settingsNow()) ?? langOf(BAKED.lang) ?? 'auto',
       setLanguage: saveLanguage,
       sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.

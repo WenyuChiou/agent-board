@@ -3472,6 +3472,9 @@ const viewed = model => {
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
 // `width`: the window's width in pixels (the page folds and moves its sidebar by it); `storage`: a Map behind localStorage;
 // `motion`: 'reduce' or 'full', what the person's system asks for (left out: the page never moves, as in the other tests).
+// The stub now reads every static button with its attributes (#1163). The bulk tidy's confirm and
+// cancel start disabled and wait for a preview, online or not, so the offline checks leave them out.
+const WAITS_FOR_PREVIEW = ['tidy-confirm', 'tidy-cancel']
 const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now, notification, sessionStore, onReload, onFocus } = {}) => {
   const nodes = new Map()
   class Element {
@@ -3609,7 +3612,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     execCommand: () => { copies.push(document.body.childNodes.find(node => node.tag === 'textarea')?.value); return copyAllowed },
   }
   // Parse the static Settings controls too, so tests exercise the rendered panel's real order.
-  const settingsMarkup = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)?.[0] ?? ''
+  // Only the panel: the static controls after it (the bulk tidy, the footer) stay out, as before Settings.
+  const settingsMarkup = html.match(/<div id="settings"[\s\S]*?<p id="settings-result"[^>]*><\/p><\/div><\/div>/)?.[0] ?? ''
   const parents = [document.body]
   for (const token of settingsMarkup.matchAll(/<\/?([a-z][\w-]*)\b([^>]*)>|([^<]+)/g)) {
     if (token[3]) { parents.at(-1).text += token[3]; continue }
@@ -4997,7 +5001,8 @@ test('L5 restarted server: an old page tab disables its buttons and says how to 
           await dom.settle()
         }
         assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).every(button => button.disabled), `${lang}: ${failure}`)
-        assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') !== null && button.className !== 'answer-send').every(button => !button.disabled))
+        const stuck = dom.allButtons().filter(button => button.getAttribute('data-local') !== null && button.className !== 'answer-send' && !WAITS_FOR_PREVIEW.includes(button.id) && button.disabled)
+        assert.deepEqual(stuck.map(button => button.id || button.className), [], `${lang}: ${failure}: local controls stay enabled`)
         assert.equal(dom.node('offline').textContent, line)
         // The line stays in view under the header while the page scrolls, with a rule under it.
         assert.match(html, /#offline\{[^}]*position:sticky;top:0;/)
@@ -5076,7 +5081,7 @@ test('an old page tab keeps its copy buttons working while the board is unreacha
     await dom.settle()
     const local = dom.allButtons().filter(button => button.getAttribute('data-local') !== null)
     assert.ok(local.length >= 6, 'reply, answers, command and both resume buttons are local')
-    assert.ok(local.filter(button => button.className !== 'answer-send').every(button => !button.disabled), 'local controls enabled')
+    assert.ok(local.filter(button => button.className !== 'answer-send' && !WAITS_FOR_PREVIEW.includes(button.id)).every(button => !button.disabled), 'local controls enabled')
     assert.ok(dom.allButtons().filter(button => !local.includes(button)).every(button => button.disabled), 'server buttons disabled')
     const choiceSend = local.find(button => button.className === 'answer-send')
     assert.equal(choiceSend.disabled, true, 'copy needs a choice even when offline')
@@ -11338,13 +11343,14 @@ test('buttons keep desktop size in a narrow window with a mouse', async () => {
 
 test('Close the board uses the quiet button look, the page hit size, and room for its name (#1145)', () => {
   const html = redesignPage()
-  const rule = html.match(/\.pfoot #close\{([^}]*)\}/)[1]
+  // Settings' footer button shares the rule (#1163), so the selector may be a list.
+  const rule = html.match(/(?:^|[}\s])\.pfoot #close(?:,\.pfoot #settings-toggle)?\{([^}]*)\}/)[1]
   assert.match(rule, /(?:^|;)width:auto(?:;|$)/)
   assert.match(rule, /min-width:var\(--hit\)/)
   assert.match(rule, /(?:^|;)height:var\(--hit\)/)
   const touch = mediaBlocks(html, '(pointer:coarse)').join('\n')
-  assert.match(touch, /\.pfoot #close\{[^}]*height:48px;[^}]*min-width:48px/)
-  assert.doesNotMatch(touch, /\.pfoot #close\{(?:[^}]*;)?width:48px/)
+  assert.match(touch, /\.pfoot #close(?:,[^{}]*)?\{[^}]*height:48px;[^}]*min-width:48px/)
+  assert.doesNotMatch(touch, /\.pfoot #close(?:,[^{}]*)?\{(?:[^}]*;)?width:48px/)
   assert.match(html, /\.icon-btn\{[^}]*background:transparent;[^}]*color:var\(--muted\)/)
 })
 
