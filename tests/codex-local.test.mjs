@@ -5270,6 +5270,21 @@ test('a replayed closing-question stop changes nothing', () => fixture(f => {
   assert.equal(sessionRecord(f, session).events.filter(one => one === 'Stop:turn-1').length, 1)
 }))
 
+test('a Grok report binds to the session Grok names even when the folder has another Grok session (#1155)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const env = { CODEX_THREAD_ID: '', AGENT_BOARD_AGENT: '', AGENT_BOARD_SESSION_ID: '', GROK_SESSION_ID: '' }
+  for (const id of ['synthetic-grok-board', 'synthetic-grok-work']) {
+    assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: id, hookEventName: 'UserPromptSubmit' }, env).status, 0)
+  }
+  const steps = { title: 'Synthetic test', state: 'waiting', steps: ['- [x] read claude-one.txt', '- [x] count its lines', '- [?] Blue or green?'] }
+  const reported = f.command(['--codex-report', '--agent', 'grok'], steps, { ...env, GROK_SESSION_ID: 'synthetic-grok-work' })
+  assert.equal(reported.status, 0, reported.stderr)
+  assert.equal(JSON.parse(reported.stdout).block, createHash('sha256').update('grok:synthetic-grok-work').digest('hex').slice(0, 8))
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Blue or green\?/)
+  // With no Grok session id and two Grok sessions in this folder, a report is still refused instead of guessed.
+  assert.notEqual(f.command(['--codex-report', '--agent', 'grok'], steps, env).status, 0)
+}))
+
 test('Grok reopens a done block for a closing question and keeps it done for a plain stop', () => fixture(f => {
   assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
   const id = 'synthetic-grok-done'
