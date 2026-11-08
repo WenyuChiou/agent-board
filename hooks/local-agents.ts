@@ -178,7 +178,11 @@ const run = (mode, payload, session, deadline) => {
   if (result.error?.code === 'ETIMEDOUT') throw Error('HOOK_TIMEOUT')
   // A refused report names the board's reason (INVALID_STEP, say), so the model can correct it (#217).
   const reason = result.error ? undefined : /^AGENT_BOARD_REASON ([A-Z][A-Z0-9_]{2,63})$/m.exec(result.stderr ?? '')?.[1]
-  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason : 'AGENT_BOARD_REPORT_FAILED')
+  let detail
+  if (reason === 'INVALID_STEP') {
+    try { detail = JSON.parse(/^AGENT_BOARD_DETAIL (".*")$/m.exec(result.stderr ?? '')?.[1] ?? 'null') } catch {}
+  }
+  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason + (typeof detail === 'string' ? ': ' + detail : '') : 'AGENT_BOARD_REPORT_FAILED')
   return result.stdout
 }
 

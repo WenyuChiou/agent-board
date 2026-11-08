@@ -116,7 +116,7 @@ Rules:
 - The line after the start marker is the ### title. No other # headings, code
   fences or HTML comments inside the block.
 - Marks: [x] done, [~] doing, [ ] to do, [?] needs me, [>] waiting on someone else,
-  [!] blocked, [-] cancelled. End a yes/no question in a [?] step with "OK?".
+  [!] blocked, [-] cancelled. When you need the user, mark the step [?] and write one line they can answer: end a yes/no question with "OK?", write a choice as "A or B?", put a command in backticks, start a wait with "waiting for".
 - state=waiting when you hand back to me with steps left, working when you start
   again, done when every step is [x] or [-], ended if you stop for good with steps
   left. updated= is the time of this update in UTC, ending in Z.

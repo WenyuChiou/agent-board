@@ -198,20 +198,31 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
 // additionally retain their separately owned lines, without dropping cache validation.
 const reportSteps = (state: unknown, given: unknown, maximum: number): string[] => {
   if (!['working', 'waiting', 'done', 'ended'].includes(String(state))) throw new Error('INVALID_STATE')
-  if (!Array.isArray(given) || given.length === 0 || given.length > maximum) throw new Error('INVALID_STEPS')
+  if (!Array.isArray(given) || given.length === 0) throw new Error('INVALID_STEPS')
+  const invalid = (step: unknown): never => {
+    let text: string
+    try { text = typeof step === 'string' ? step : JSON.stringify(step) ?? String(step) } catch { text = '<unreadable>' }
+    throw Object.assign(new Error('INVALID_STEP'), { code: 'INVALID_STEP', step: Array.from(text).slice(0, 60).join('') })
+  }
   const steps = given.map(step => {
-    const text = line(step)
-    if (!/^- \[[ x~?>!\-]\] .+/.test(text)) throw new Error('INVALID_STEP')
-    return text
+    let text: string
+    try { text = line(step) } catch { return invalid(step) }
+    const item = /^(?:[-*+]|\d+[.)])\s+(.+)$/.exec(text)?.[1]
+    if (item === undefined) return invalid(step)
+    if (!item.startsWith('[')) return `- [ ] ${item}`
+    const marked = /^\[([ xX~?>!\-])\]\s+(.+)$/.exec(item)
+    if (marked === null) return invalid(step)
+    return `- [${marked[1]!.toLowerCase()}] ${marked[2]}`
   })
   if (state === 'done' && steps.some(step => !/^- \[[x\-]\]/.test(step))) throw new Error('UNFINISHED_STEPS')
-  return steps
+  return steps.slice(0, maximum)
 }
 
 export const validateCodexReport = (report: CodexReport, session: string): CodexReport => {
   if (report.session !== session) throw new Error('SESSION_CONFLICT')
   const owned = new Set([report.approval, report.asked].filter((index): index is number =>
     index !== undefined && Number.isInteger(index) && index >= 0 && Array.isArray(report.steps) && index < report.steps.length))
+  if (Array.isArray(report.steps) && report.steps.length > 40 + owned.size) throw new Error('INVALID_STEPS')
   return { ...report, session: line(session), title: line(report.title), project: line(report.project),
     steps: reportSteps(report.state, report.steps, 40 + owned.size) }
 }

@@ -14,7 +14,12 @@ const report = (mode, payload, deadline, session, cwd) => {
   if (result.error?.code === 'ETIMEDOUT') throw Error('HOOK_TIMEOUT')
   // A refused report names the board's reason (INVALID_STEP, say), so the model can correct it.
   const reason = result.error ? undefined : /^AGENT_BOARD_REASON ([A-Z][A-Z0-9_]{2,63})$/m.exec(result.stderr ?? '')?.[1]
-  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason : 'AGENT_BOARD_REPORT_FAILED')
+  let detail
+  if (reason === 'INVALID_STEP') {
+    try { detail = JSON.parse(/^AGENT_BOARD_DETAIL (".*")$/m.exec(result.stderr ?? '')?.[1] ?? 'null') } catch {}
+  }
+  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason + (typeof detail === 'string' ? ': ' + detail : '') : 'AGENT_BOARD_REPORT_FAILED')
+  return result.stdout
 }
 `
 
@@ -78,8 +83,8 @@ export default {
             const payload = { steps: params.steps }
             if (typeof params.title === 'string') payload.title = params.title
             if (['working', 'waiting', 'done', 'ended'].includes(params.state)) payload.state = params.state
-            report('--codex-report', payload, Date.now() + ${hookTimeout('openclaw') - 1000}, session)
-            return { content: [{ type: 'text', text: 'OK' }], details: {} }
+            const result = report('--codex-report', payload, Date.now() + ${hookTimeout('openclaw') - 1000}, session)
+            return { content: [{ type: 'text', text: payload.steps.length > 40 ? result : 'OK' }], details: {} }
           } catch (error) {
             hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
             throw error
@@ -176,8 +181,8 @@ export const apply = ctx => {
         const payload = { steps: args.steps }
         if (typeof args.title === 'string') payload.title = args.title
         if (['working', 'waiting', 'done', 'ended'].includes(args.state)) payload.state = args.state
-        report('--codex-report', payload, Date.now() + 20000, header.id)
-        return { text: 'OK' }
+        const result = report('--codex-report', payload, Date.now() + 20000, header.id)
+        return { text: payload.steps.length > 40 ? result : 'OK' }
       } catch (error) {
         hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
         throw error

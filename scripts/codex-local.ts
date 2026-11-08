@@ -705,6 +705,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     let isFirstSessionEvent = false
     let reportCut = 0
+    let reportDropped = 0
     const apply = (entry: Pending): CodexReport => {
       const { mode, agent, session, now, at, status, event, folder = '', folderDigest, folderCanonicalDigest, isBoardPrompt, payload, run } = entry
       const owner = hash(`${agent}:${session}`)
@@ -778,7 +779,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
       const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
-      if (entry === current) reportCut = cut
+      if (entry === current) {
+        reportCut = cut
+        reportDropped = mode === '--codex-report' && Array.isArray(given.steps) ? Math.max(0, given.steps.length - 40) : 0
+      }
       const saveFullText = (): void => {
         if (entries.length === 0) return
         const now = Date.parse(clock)
@@ -1064,7 +1068,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     if (mode === '--codex-report' && planInput !== undefined) return true
-    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress, cut: reportCut })
+    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress, cut: reportCut, dropped: reportDropped })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
     else if (agent === 'antigravity') {
       // The host supplies the binding; the agent supplies semantic summaries. A first
