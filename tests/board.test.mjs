@@ -11319,13 +11319,15 @@ test('buttons keep desktop size in a narrow window with a mouse', async () => {
   assert.ok(narrow.includes('.col{padding-left') && !/\.btn|\.answers button/.test(narrow))
 })
 
-test('the Close icon uses the quiet button look and the page hit size', () => {
+test('Close the board uses the quiet button look, the page hit size, and room for its name (#1145)', () => {
   const html = redesignPage()
   const rule = html.match(/\.pfoot #close\{([^}]*)\}/)[1]
-  assert.match(rule, /width:var\(--hit\)/)
-  assert.match(rule, /height:var\(--hit\)/)
+  assert.match(rule, /(?:^|;)width:auto(?:;|$)/)
+  assert.match(rule, /min-width:var\(--hit\)/)
+  assert.match(rule, /(?:^|;)height:var\(--hit\)/)
   const touch = mediaBlocks(html, '(pointer:coarse)').join('\n')
-  assert.match(touch, /\.pfoot #close\{[^}]*width:48px;[^}]*height:48px/)
+  assert.match(touch, /\.pfoot #close\{[^}]*height:48px;[^}]*min-width:48px/)
+  assert.doesNotMatch(touch, /\.pfoot #close\{(?:[^}]*;)?width:48px/)
   assert.match(html, /\.icon-btn\{[^}]*background:transparent;[^}]*color:var\(--muted\)/)
 })
 
@@ -11338,7 +11340,7 @@ test('the sidebar version line is quiet', () => {
   assert.match(html, /\.ver-link svg\.i\{width:12px;height:12px\}/)
 })
 
-test('the page footer has no web-chat or clipboard button and Close is an accessible icon in every language', async () => {
+test('the page footer has no web-chat or clipboard button and Close the board shows its name in every language (#1145)', async () => {
   const { servePage } = await sourceBoard()
   for (const words of [EN, ZH_TW, ZH_CN]) {
     for (const isLan of [false, true]) {
@@ -11351,9 +11353,11 @@ test('the page footer has no web-chat or clipboard button and Close is an access
       assert.match(close[1], /\btype="button"/)
       assert.match(close[1], /\bclass="icon-btn"/)
       assert.match(close[1], /\bdata-static\b/)
-      assert.ok(close[1].includes(`aria-label="${words.serveClose}"`))
-      assert.ok(close[1].includes(`title="${words.serveClose}"`))
-      assert.match(close[2], /^<svg class="i"[^>]*aria-hidden="true"><path d="[^"]+"\/><\/svg>$/)
+      // The name is visible text, so the button needs no aria-label or tooltip.
+      assert.ok(!close[1].includes('aria-label=') && !close[1].includes('title='))
+      const shown = close[2].match(/^<svg class="i"[^>]*aria-hidden="true"><path d="[^"]+"\/><\/svg><span>([^<]+)<\/span>$/)
+      assert.ok(shown)
+      assert.equal(shown[1], words.serveClose)
     }
   }
 })
