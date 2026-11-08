@@ -5218,6 +5218,75 @@ test('a Codex question stays waiting through an approval and a stop without a qu
   assert.ok(!/- \[\?\]/.test(answered))
 }))
 
+test('a closing question after the model reported its steps done reopens the block with its card', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.report('done', ['- [x] Read the file', '- [x] Count its lines']).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'It has 1 line.\n\nBlue or green?' }).status, 0)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /state=waiting/)
+  assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
+  assert.match(board, /- \[\?\] Blue or green\?\n<!-- question=[a-f0-9]{64}:\d+ -->/)
+  assert.ok(sessionRecord(f, session).events.includes('Stop:turn-1'))
+}))
+
+test('a stop with no question after a done report keeps the block done and records the stop', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.report('done', ['- [x] Read the file']).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'It has 1 line.' }).status, 0)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /state=done/)
+  assert.ok(!/- \[\?\]/.test(board))
+  assert.ok(sessionRecord(f, session).events.includes('Stop:turn-1'))
+}))
+
+test('a closing question the model already reported as a [?] step stays one line with its card', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.report('waiting', ['- [x] Read the file', '- [?] Blue or green?']).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'It has 1 line.\n\nBlue or green?' }).status, 0)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
+  assert.match(board, /- \[\?\] Blue or green\?\n<!-- question=[a-f0-9]{64}:\d+ -->/)
+  // The next prompt answers that one line.
+  assert.equal(f.event('UserPromptSubmit', 'turn-2').status, 0)
+  const answered = readFileSync(f.progress, 'utf8')
+  assert.equal(answered.match(/- \[[?x]\] Blue or green\?/g)?.length, 1)
+  assert.ok(!/- \[\?\]/.test(answered))
+}))
+
+test('a replayed closing-question stop changes nothing', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.report('done', ['- [x] Read the file']).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'It has 1 line.\n\nBlue or green?' }).status, 0)
+  // A replay still moves appliedAt forward, so later events order after it; nothing else changes.
+  const kept = () => JSON.stringify({ ...sessionRecord(f, session), appliedAt: undefined })
+  const board = readFileSync(f.progress, 'utf8'), record = kept()
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'It has 1 line.\n\nBlue or green?' }).status, 0)
+  assert.equal(readFileSync(f.progress, 'utf8'), board)
+  assert.equal(kept(), record)
+  assert.equal(sessionRecord(f, session).events.filter(one => one === 'Stop:turn-1').length, 1)
+}))
+
+test('Grok reopens a done block for a closing question and keeps it done for a plain stop', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const id = 'synthetic-grok-done'
+  const send = (state, extra = {}) => f.command(['--agent-status', '--agent', 'grok', '--state', state], { sessionId: id, ...extra })
+  const report = () => f.command(['--codex-report', '--agent', 'grok', '--session', id], { title: 'Own report', state: 'done', steps: ['- [x] Read the file'] })
+  assert.equal(send('working', { hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(report().status, 0)
+  assert.equal(send('waiting', { hookEventName: 'Stop', lastAssistantMessage: 'It has 1 line.' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /state=done/)
+  assert.equal(send('working', { hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(report().status, 0)
+  assert.equal(send('waiting', { hookEventName: 'Stop', lastAssistantMessage: 'It has 1 line.\n\nBlue or green?' }).status, 0)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /state=waiting/)
+  assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
+}))
+
 test('the approval step and the question step close and reuse their own lines in either order', () => fixture(f => {
   f.install('--apply')
   const question = { last_assistant_message: 'Which folder should I use?' }

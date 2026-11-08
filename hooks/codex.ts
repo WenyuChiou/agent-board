@@ -138,7 +138,8 @@ export const questionSteps = (held: readonly string[], previousAsked: number | u
     // Hosts may deliver the same closing question again after Stop or an idle status.
     // Only a changed question or a slot closed by a real prompt begins a new incarnation.
     if (asked === undefined || steps[asked] !== `- [?] ${question}`) askedRevision = nextRevision(askedRevision)
-    if (asked === undefined) asked = steps.length
+    // A model that already reported the question as its own [?] step keeps that one line.
+    if (asked === undefined) asked = steps.includes(`- [?] ${question}`) ? steps.indexOf(`- [?] ${question}`) : steps.length
     steps[asked] = `- [?] ${question}`
   }
   return { steps, asked, askedRevision }
@@ -155,11 +156,13 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   if (event !== 'SessionStart' && event !== 'SessionEnd' && turn === null) throw new Error('MISSING_TURN')
   const key = `${String(event)}:${turn ?? ''}`
   if (turn && previous?.retiredTurns?.includes(turn)) throw new Error('STALE_TURN')
+  const isClosingQuestion = event === 'Stop' && typeof input.question === 'string' && input.question.trim() !== ''
   // Cursor can send its reply after Stop with the same generation id.
-  if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest' && !(event === 'Stop' && typeof input.question === 'string' && input.question.trim() !== '')) return previous
+  if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest' && !isClosingQuestion) return previous
   if (previous?.turn && turn && previous.turn !== turn && event !== 'UserPromptSubmit') throw new Error('STALE_TURN')
   const working = event === 'UserPromptSubmit'
-  const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' ? 'done' : 'waiting'
+  // A reply that ends on a question waits for the person, even after the model reported its own steps done.
+  const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' && !isClosingQuestion ? 'done' : 'waiting'
   // Keep the hook's own steps in place: the ledger needs to see their original words closed.
   // A session ending does not answer its last question, but it does end an approval.
   const held = previous?.steps ?? [`- [ ] ${s.codexLifecycle}`]
@@ -185,7 +188,8 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
     ...(approvalRevision === undefined ? {} : { approvalRevision }),
     ...(askedRevision === undefined ? {} : { askedRevision }),
     updated: now,
-    events: [...(previous?.events ?? []), key].slice(-256),
+    // A replayed event keeps the list as it was, so the replay changes no bytes.
+    events: previous?.events?.includes(key) ? previous.events : [...(previous?.events ?? []), key].slice(-256),
     retiredTurns: [...(previous?.retiredTurns ?? []), ...(working && previous?.turn && previous.turn !== turn ? [previous.turn] : [])].slice(-128),
   }
 }

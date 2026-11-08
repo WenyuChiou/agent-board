@@ -739,7 +739,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         title: previous !== null && !Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(previous.title)) ? previous.title : payload.planTitle,
         ...(typeof payload.planProject === 'string' ? { project: previous?.project ?? payload.planProject } : {}),
       }
-      const state = isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' ? 'done' : status
+      // A reply that ends on a question waits for the person, even after the agent reported its own steps done.
+      const state = isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' && !(typeof payload.question === 'string' && payload.question.trim() !== '') ? 'done' : status
       const question = questionSteps(previous?.steps ?? [`- [ ] ${s.localAgentLifecycle}`], previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
       const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s)
         : mode === '--agent-status' ? validateCodexReport({
@@ -829,8 +830,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         return report
       }
       // A replay can skip writes only after a board completion reached the cache too.
+      // A new hook event is not a replay even when the block reads the same: its record keeps the event.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }
