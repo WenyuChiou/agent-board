@@ -194,6 +194,7 @@ export const answerAgentPrompt = (mirror: (ProgressMirror & { confirmedAt?: numb
   if (barrier < 0 || order <= barrier) return null
   return {
     ...mirror, state: 'working', updated: now, promptOrder: order, autoAsk: null,
+    replied: prompt.at ?? now,
     promptQuestion: mirror.tasks.some(one => one.waiting === 'you') ? { order, state: mirror.state, autoAsk: mirror.autoAsk, tasks: mirror.tasks.filter(one => one.waiting === 'you') } : null,
     tasks: mirror.tasks.map(one => one.waiting === 'you' ? answeredStep(one) : one),
   }
