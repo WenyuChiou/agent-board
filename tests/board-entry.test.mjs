@@ -275,7 +275,15 @@ const firstRun = async (answer, check, extraEnv = {}) => {
     const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
     const result = await new Promise(done => {
       const child = execFile(process.execPath, ['--require', shim, launcher], { env, encoding: 'utf8', timeout: 25_000, windowsHide: true }, (error, stdout, stderr) => done({ status: error ? (error.code ?? 1) : 0, stdout, stderr }))
-      child.stdin.end(answer)
+      // { after, text } types the answer only once the question is on screen, as a person does.
+      if (typeof answer === 'string') child.stdin.end(answer)
+      else {
+        let seen = ''
+        child.stdout.on('data', chunk => {
+          seen += chunk
+          if (seen.includes(answer.after) && !child.stdin.writableEnded) child.stdin.end(answer.text)
+        })
+      }
     })
     check(result, home)
   } finally {
@@ -310,6 +318,16 @@ test('the first plain agent-board in a terminal with nothing set up applies setu
     const after = stdout.slice(asked)
     assert.match(after, /Nothing needs you|No work in progress|Progress/, after.slice(-400))
     assert.ok(!stdout.includes('--serve'), 'setup output names the plain command')
+  }, { CI: '1' })
+})
+
+// The launcher opens process.stdin, which leaves the inherited pipe non-blocking on POSIX, so setup's
+// first read of an answer not typed yet fails with EAGAIN; setup must wait for the answer instead.
+test('the first plain agent-board waits for a yes typed after the question, though the launcher left stdin non-blocking (#1162)', { skip: process.platform === 'win32', timeout: 60_000 }, async () => {
+  await firstRun({ after: 'Set these up?', text: 'y\n' }, ({ status, stdout, stderr }, home) => {
+    assert.equal(status, 0, stderr)
+    assert.ok(existsSync(join(home, '.agent-board', 'agent-board.mjs')), stdout)
+    assert.doesNotMatch(stdout, /Apply these changes: /)
   }, { CI: '1' })
 })
 

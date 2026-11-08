@@ -283,7 +283,7 @@ const askYes = () => {
     while (size < 4096) {
       let count
       try { count = readSync(fd, bytes, 0, bytes.length, null) } catch (error) {
-        if (error?.code !== 'EAGAIN') return false
+        if (error) return false
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
         continue
       }
@@ -544,7 +544,7 @@ const main = () => {
       let isPluginReady = !!claude && hasPlugin(claudeDirectory)
       if (isPluginNeeded) {
         let known = null
-        try { known = JSON.parse(readFileSync(join(claudeDirectory, 'plugins', 'known_marketplaces.json'), 'utf8').replace(/^﻿/, '')) } catch {}
+        try { known = JSON.parse(readFileSync(join(claudeDirectory, 'plugins', 'known_marketplaces.json'), 'utf8').replace(/^\uFEFF/, '')) } catch {}
         // A marketplace Claude Code already knows would make "marketplace add" fail; only the install is left.
         const isKnown = known !== null && typeof known === 'object' && Object.hasOwn(known, 'agent-board')
         for (const [part, argv] of [
