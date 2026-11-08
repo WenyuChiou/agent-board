@@ -14,6 +14,7 @@ const ZH_TW_RULE = `# 進度面板（Agent Board）
 - 工作已確實交給其他 session 時，對每個交出的步驟用 TaskUpdate 加 metadata: {"handoffTo": "承接方名稱"}；不要把計畫或送出訊息當作已交接。要自己接回時明確更新 status 為 pending 或 in_progress。交出的步驟會保留為取消項目，不再提示本 session 繼續。
 - 對話壓縮後、或新對話開始時，面板會把進度補進對話。照著接下去做，不要重建已經存在的任務。
 - 標題和每個步驟寫成一行、120 字以內，細節放連結；做完的步驟不要再加長，新的工作開新步驟。超過 120 字的會被截短，全文存到當月的 journal。
+- 需要使用者時，把步驟標成 [?]，寫一行對方能直接回答的話：是非題用「…可以嗎？」結尾，選擇題寫成「A 還是 B？」，指令放在反引號裡，等別人時用「等」開頭。
 - 你自己的工作，就算不在程式專案裡，也用 TaskCreate 列步驟。只有使用者要你幫他記下他自己的事（例如「幫我記：實習申請 10-31 截止」），才在 progress.md 他自己的標題下寫手寫任務：[x] 完成、[~] 正在做、[ ] 還沒做、[?] 等使用者、[>] 在跑、[!] 卡住、[-] 取消；截止日寫「截止 10-31」。其他時候不要手改這個檔。
 - 不要改 <!-- auto … --> 標記之間的內容，那是面板自己維護的。`
 
@@ -26,6 +27,7 @@ const ZH_CN_RULE = `# 进度面板（Agent Board）
 - 工作已确实交给其他 session 时，对每个交出的步骤用 TaskUpdate 加 metadata: {"handoffTo": "承接方名称"}；不要把计划或发出消息当作已交接。要自己接回时明确更新 status 为 pending 或 in_progress。交出的步骤会保留为取消项目，不再提示本 session 继续。
 - 对话压缩后、或新对话开始时，面板会把进度补进对话。照着接下去做，不要重建已经存在的任务。
 - 标题和每个步骤写成一行、120 字以内，细节放链接；做完的步骤不要再加长，新的工作开新步骤。超过 120 字的会被截短，全文存到当月的 journal。
+- 需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。
 - 你自己的工作，就算不在代码项目里，也用 TaskCreate 列步骤。只有用户要你帮他记下他自己的事（例如“帮我记：实习申请 10-31 截止”），才在 progress.md 他自己的标题下写手写任务：[x] 完成、[~] 正在做、[ ] 还没做、[?] 等用户、[>] 在跑、[!] 卡住、[-] 取消；截止日写「截止 10-31」。其他时候不要手改这个文件。
 - 不要改 <!-- auto … --> 标记之间的内容，那是面板自己维护的。`
 
@@ -38,6 +40,7 @@ The person's progress pane mirrors your Task list into ~/.claude/progress.md (Wi
 - Once work has actually transferred to another session, set TaskUpdate metadata {"handoffTo": "recipient name"} on each transferred step. A plan or sent message alone is not a handoff. Explicitly set status to pending or in_progress to reclaim it. Transferred steps remain cancelled pointers and no longer offer Continue here.
 - After a compaction, or at the start of a new session, the pane adds where things stand to the conversation. Continue from it; do not recreate tasks that already exist.
 - Keep the title and each step to one line of at most 120 characters, with a link for detail. Never extend a finished step; add new work as a new step. Longer text is cut to 120 characters and the full text goes to this month's journal.
+- When you need the user, mark the step [?] and write one line they can answer: end a yes/no question with "OK?", write a choice as "A or B?", put a command in backticks, start a wait with "waiting for".
 - Your own work goes in your Task list, inside a code project or not. Only when the person asks you to note something of theirs ("note my internship application, due 10-31") write a hand-kept task under its own heading in progress.md: [x] done, [~] doing, [ ] not started, [?] waiting on the person, [>] running, [!] blocked, [-] cancelled; a due date as "due 10-31". Otherwise never edit that file by hand.
 - Never change anything between <!-- auto … --> markers; the pane keeps those.`
 

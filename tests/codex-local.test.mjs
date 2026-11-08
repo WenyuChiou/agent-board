@@ -4568,6 +4568,82 @@ test('the same report from three agents gives three blocks of the same shape', (
   assert.equal(new Set(shapes).size, 1)
 }))
 
+test('reports normalize list bullets, numbering and uppercase completion marks', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const steps = ['* Star', '+ Plus', '1. Number', '2) Parenthesis', '- Dash', '- [X] Uppercase', '* [x] Complete', '+ [?] Question', '3) [!] Blocked', '- [~] Current', '- [>] Running', '- [-] Cancelled']
+  const result = f.command(['--report'], { title: 'List formats', state: 'working', steps })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).dropped, 0)
+  const text = readFileSync(f.progress, 'utf8')
+  for (const line of ['- [ ] Star', '- [ ] Plus', '- [ ] Number', '- [ ] Parenthesis', '- [ ] Dash', '- [x] Uppercase', '- [x] Complete', '- [?] Question', '- [!] Blocked', '- [~] Current', '- [>] Running', '- [-] Cancelled']) {
+    assert.ok(text.includes(`${line}\n`), line)
+  }
+}))
+
+test('a report with more than forty steps keeps the first forty and reports the number omitted', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const steps = Array.from({ length: 43 }, (_, index) => `- [ ] Step ${index + 1}`)
+  steps[0] = `- [ ] ${'a'.repeat(130)}`
+  const result = f.command(['--report'], { title: 'Long list', state: 'working', steps })
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.cut, 1)
+  assert.equal(output.dropped, 3)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^- \[ \] Step 40$/m)
+  assert.doesNotMatch(text, /^- \[ \] Step (41|42|43)$/m)
+}))
+
+test('a report with more than forty steps keeps a question for the user that comes after the fortieth', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const steps = Array.from({ length: 45 }, (_, index) => `- [ ] Step ${index + 1}`)
+  steps[42] = '- [?] Deploy it, OK?'
+  const result = f.command(['--report'], { title: 'Long list', state: 'working', steps })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).dropped, 5)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^- \[\?\] Deploy it, OK\?$/m)
+  assert.match(text, /^- \[ \] Step 39$/m)
+  assert.doesNotMatch(text, /^- \[ \] Step (40|41|42|44|45)$/m)
+}))
+
+test('an unreadable report step names its first sixty characters and the accepted form', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const step = `Synthetic invalid step ${'z'.repeat(70)}`
+  const result = f.command(['--report', '--lang', 'en'], { title: 'Invalid step', state: 'working', steps: [step] })
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /INVALID_STEP/)
+  assert.ok(result.stderr.includes(step.slice(0, 60)))
+  assert.ok(!result.stderr.includes(step.slice(0, 61)))
+  assert.ok(result.stderr.includes('- [ ] step'))
+  assert.equal(readFileSync(f.progress, 'utf8'), '')
+  for (const bad of ['- [z] Unknown mark', '- [ ]', 'x'.repeat(501)]) {
+    const rejected = f.command(['--report', '--lang', 'en'], { title: 'Invalid step', state: 'working', steps: [bad] })
+    assert.notEqual(rejected.status, 0)
+    assert.match(rejected.stderr, /INVALID_STEP/)
+    assert.ok(rejected.stderr.includes('- [ ] step'))
+  }
+  for (const [bad, expected] of [['- [z]  Keep   spacing', '- [z]  Keep   spacing'], [{ toString: null }, '{\\"toString\\":null}']]) {
+    const rejected = f.command(['--report', '--lang', 'en'], { title: 'Invalid step', state: 'working', steps: [bad] })
+    assert.notEqual(rejected.status, 0)
+    assert.match(rejected.stderr, /INVALID_STEP/)
+    assert.ok(rejected.stderr.includes(expected), rejected.stderr)
+    assert.ok(rejected.stderr.includes('- [ ] step'))
+  }
+}))
+
+test('done reports refuse unfinished steps even beyond the forty kept on the board', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const steps = Array.from({ length: 40 }, (_, index) => `- [X] Finished ${index + 1}`)
+  const rejected = f.command(['--report'], { title: 'Not done', state: 'done', steps: [...steps, '* Pending'] })
+  assert.notEqual(rejected.status, 0)
+  assert.match(rejected.stderr, /UNFINISHED_STEPS/)
+  assert.equal(readFileSync(f.progress, 'utf8'), '')
+  const accepted = f.command(['--report'], { title: 'Done', state: 'done', steps: [...steps, '* [x] Finished 41'] })
+  assert.equal(accepted.status, 0, accepted.stderr)
+  assert.equal(JSON.parse(accepted.stdout).dropped, 1)
+}))
+
 test('a report step over 120 characters is cut on the board and kept in full in the journal', () => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   const title = 'Synthetic title ' + 't'.repeat(130)
@@ -6200,6 +6276,7 @@ test('opencode: a later report for an ended session reopens its row', t => openc
 }))
 
 test('opencode: a refused progress report tells the model why', async () => {
+  const { STRINGS } = await sourceModules()
   // A Chinese board brackets the code in full-width parentheses; the same code comes through.
   for (const lang of ['en', 'zh-TW', 'zh-CN']) await opencodeSpawnFixture(opencodeRealSpawn, async f => {
     assert.ok(readFileSync(join(dirname(f.progress), 'agent-board.mjs'), 'utf8').split('\n', 1)[0].includes(`"lang":"${lang}"`), lang)
@@ -6207,9 +6284,10 @@ test('opencode: a refused progress report tells the model why', async () => {
     const plugin = readFileSync(join(dirname(dirname(f.progress)), '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
     const format = plugin.slice(plugin.indexOf({ en: 'One Markdown task line', 'zh-TW': '一行 Markdown 任務', 'zh-CN': '一行 Markdown 任务' }[lang])).split(')', 1)[0]
     for (const mark of ['x', '~', ' ', '?', '!', '>', '-']) assert.ok(format.includes(`- [${mark}]`), `${lang} ${mark}`)
-    await assert.rejects(f.instance.tool.agent_board_progress.execute({ ...f.payload, title: 'Synthetic refused task', steps: ['Synthetic plain step'] }, f.context), { message: 'AGENT_BOARD_REPORT_FAILED: INVALID_STEP' })
+    await assert.rejects(f.instance.tool.agent_board_progress.execute({ ...f.payload, title: 'Synthetic refused task', steps: ['Synthetic plain step'] }, f.context), { message: `AGENT_BOARD_REPORT_FAILED: INVALID_STEP: ${STRINGS[lang].reporterInvalidStep('Synthetic plain step')}` })
     assert.ok(!readFileSync(f.progress, 'utf8').includes('Synthetic refused task'))
     assert.match(readFileSync(f.log, 'utf8'), /opencode REPORTER_FAILED INVALID_STEP\r?\n/)
+    assert.doesNotMatch(readFileSync(f.log, 'utf8'), /Synthetic plain step/)
   }, { lang })
 })
 
@@ -6448,7 +6526,9 @@ test('OpenClaw session events carry the session folder and progress_card reports
   assert.equal(record().title, 'OpenClaw task')
   assert.match(readFileSync(f.progress, 'utf8'), /^- \[\?\] Pick one$/m)
   await assert.rejects(tool.execute('call-2', { steps: 'not a list' }), /INVALID_STEPS/)
-  await assert.rejects(tool.execute('call-3', { steps: ['not a task line'] }), /AGENT_BOARD_REPORT_FAILED/)
+  await assert.rejects(tool.execute('call-3', { title: 'Invalid', state: 'working', steps: ['not a task line'] }), /Cannot read the step "not a task line".*- \[ \] step/)
+  const long = await tool.execute('call-4', { title: 'Many steps', state: 'working', steps: Array.from({ length: 41 }, (_, index) => `- [ ] Step ${index + 1}`) })
+  assert.equal(JSON.parse(long.content[0].text).dropped, 1)
 }))
 
 test('a report from a folder binds to an openclaw record that holds the folder and refuses one that does not', () => fixture(f => {
@@ -6555,7 +6635,9 @@ test('DeepSeek session events carry the session folder and the agent_board tool 
   assert.equal(record().title, 'DeepSeek task')
   assert.match(readFileSync(f.progress, 'utf8'), /^- \[\?\] Pick one$/m)
   await assert.rejects(tool.execute({ action: 'report', steps: 'not a list' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_STEPS/)
-  await assert.rejects(tool.execute({ action: 'report', steps: ['not a task line'] }, { agent }), /^Error: AGENT_BOARD_REPORT_FAILED: [A-Z][A-Z0-9_]+$/)
+  await assert.rejects(tool.execute({ action: 'report', title: 'Invalid', state: 'working', steps: ['not a task line'] }, { agent }), /Cannot read the step "not a task line".*- \[ \] step/)
+  const long = await tool.execute({ action: 'report', title: 'Many steps', state: 'working', steps: Array.from({ length: 41 }, (_, index) => `- [ ] Step ${index + 1}`) }, { agent })
+  assert.equal(JSON.parse(long.text).dropped, 1)
   await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] Done'] }, {}), /AGENT_BOARD_REPORT_FAILED: NO_SESSION/)
   await assert.rejects(tool.execute({ action: 'close' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_ACTION/)
 }))
@@ -10136,6 +10218,30 @@ const sourceModules = async () => {
     return { ...await import('../scripts/codex-history.ts'), ...await import('../hooks/strings.ts'), ...await import('../hooks/codex.ts') }
   } finally { resolver.deregister() }
 }
+
+test('every reporting prompt gives the same question rule in its own language', async () => {
+  const { STRINGS } = await sourceModules()
+  const { RULES } = await importTs('../hooks/rule.ts')
+  const { RELAY } = await importTs('../hooks/i18n.ts')
+  const { boardRequestWords, isBoardRequest } = await importTs('../hooks/board-commands.ts')
+  const rules = {
+    en: 'When you need the user, mark the step [?] and write one line they can answer: end a yes/no question with "OK?", write a choice as "A or B?", put a command in backticks, start a wait with "waiting for".',
+    'zh-TW': '需要使用者時，把步驟標成 [?]，寫一行對方能直接回答的話：是非題用「…可以嗎？」結尾，選擇題寫成「A 還是 B？」，指令放在反引號裡，等別人時用「等」開頭。',
+    'zh-CN': '需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。',
+  }
+  const words = boardRequestWords(Object.values(STRINGS))
+  for (const [lang, rule] of Object.entries(rules)) {
+    const s = STRINGS[lang]
+    for (const prompt of [s.openclawProgressTool, s.deepseekBoardTool, s.localAgentStepFormat, s.localAgentAntigravityContext('board'), s.localAgentSkill('board'), s.boardSkillPrompt('board'), s.codexFallbackInstructions('board'), RULES[lang]]) {
+      assert.ok(prompt.includes(rule), lang)
+    }
+    // The prior installed skill's text remains recognizable after the new paragraph is added.
+    assert.ok(isBoardRequest(s.boardSkillPrompt('board').split('\n\n')[0], words), lang)
+  }
+  assert.ok(RELAY.includes(rules.en))
+  assert.ok(readFileSync(new URL('../docs/REMOTE_REPORTERS.md', import.meta.url), 'utf8').includes(rules.en))
+  assert.ok(readFileSync(new URL('../scripts/claude-md-rule.md', import.meta.url), 'utf8').includes(rules['zh-TW']))
+})
 
 test('the Codex instructions never tell the person that CODEX_THREAD_ID is missing', async () => {
   const { STRINGS } = await sourceModules()
