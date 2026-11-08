@@ -6714,6 +6714,129 @@ test('the DeepSeek tool reports by session id, and opens the board detached with
   assert.equal(tool.output.render({}, { text: link })[0].text, link)
 }))
 
+test('deepseekLocalPlugin ignores subagents and gives a waiting board message to an idle root agent through agent.followup (#725)', () => fixture(async f => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
+  const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  const { randomUUID } = await import('node:crypto')
+  const { watch } = await import('node:fs')
+  const board = join(f.home, 'deepseek-board.mjs')
+  f.save(board, bundleFromDir(new URL('..', import.meta.url)))
+  const progress = join(f.home, 'deepseek-progress.md')
+  f.save(progress, '')
+  // The plugin runs inside dsh, and its board calls inherit that process's environment: here, this test's.
+  const directory = defaultMessagesDirectory(progress, f.home, process.env, process.platform)
+  const file = join(directory, 'messages.json')
+  const store = () => JSON.parse(readFileSync(file, 'utf8'))
+  const status = id => store().messages.find(one => one.id === id)?.status
+  const queue = (state, session, id, text) => {
+    const now = Date.now()
+    const enrolled = enrollMailbox(state, 'deepseek', session, 'dsh', now, 43_200_000)
+    const target = enrolled.mailboxes.find(one => one.id === mailboxId('deepseek', session))
+    f.save(file, JSON.stringify({ version: 2, ...queueMessage(enrolled, { id, target: target.id, turn: 'session', text }, 'board', target, now).state }))
+  }
+  queue({ messages: [] }, 'deepseek-subagent-session', 'subagent-message', 'Synthetic subagent text')
+  queue(store(), 'deepseek-root-session', 'root-message-1', 'Synthetic answer: blue')
+  // Every board call the plugin starts is a real child of the board script; the test waits for each to close.
+  const children = []
+  const spawnMailbox = (...args) => {
+    const child = spawn(...args)
+    children.push(child)
+    child.on('close', () => { child.isClosed = true })
+    return child
+  }
+  const settled = () => children.every(child => child.isClosed)
+  const until = async (check, label) => {
+    for (const end = Date.now() + 30_000; Date.now() < end; await new Promise(done => setTimeout(done, 50))) if (check()) return
+    assert.fail(label)
+  }
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, board)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, watch, join)
+  const fake = (id, header = {}) => {
+    const agent = { session: { header: { id, ...header } }, status: 'idle', received: [], followup(message) { agent.received.push(message); agent.status = 'running' } }
+    return agent
+  }
+  const root = fake('deepseek-root-session'), sub = fake('deepseek-subagent-session', { origin: 'subagent', parentSession: 'deepseek-root-session' })
+  const hooks = new Map()
+  try {
+    apply({ on: (name, fn) => hooks.set(name, fn) })
+    hooks.get('agent/created')({ agent: sub })
+    hooks.get('agent/created')({ agent: root })
+    await until(() => status('root-message-1') === 'accepted' && settled(), 'the root session took its message')
+    assert.equal(root.received.length, 1)
+    const [message] = root.received
+    assert.equal(message.role, 'user')
+    // dsh's page shows it as one folded line, the board and the answer.
+    assert.deepEqual(message.source, { kind: 'agent-board', form: 'notice', summary: 'Synthetic answer: blue' })
+    assert.match(message.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    assert.ok(Object.isFrozen(message) && Object.isFrozen(message.content) && Object.isFrozen(message.content[0]))
+    assert.deepEqual(message.content.map(one => one.type), ['text'])
+    assert.ok(message.content[0].text.includes('Synthetic answer: blue'))
+    const nonce = store().messages.find(one => one.id === 'root-message-1').nonce
+    assert.match(message.content[0].text, new RegExp(`ACK ${nonce}`))
+    // A subagent's session never enrolls or receives: its message waits, untouched.
+    assert.deepEqual(sub.received, [])
+    assert.equal(status('subagent-message'), 'queued')
+    assert.ok(!children.some(child => child.spawnargs.includes('deepseek-subagent-session')))
+    // A message that comes while the session works waits for it to go idle.
+    queue(store(), 'deepseek-root-session', 'root-message-2', 'Synthetic second answer')
+    await new Promise(done => setTimeout(done, 600))
+    assert.equal(root.received.length, 1)
+    assert.equal(status('root-message-2'), 'queued')
+    root.status = 'idle'
+    hooks.get('agent/status')({ agent: root, status: 'idle' })
+    await until(() => status('root-message-2') === 'accepted' && settled(), 'the session took the message at idle')
+    assert.equal(root.received.length, 2)
+    // An idle session takes a new message as soon as the board writes it, with no event from dsh.
+    root.status = 'idle'
+    queue(store(), 'deepseek-root-session', 'root-message-3', 'Synthetic third answer')
+    await until(() => status('root-message-3') === 'accepted' && settled(), 'the idle session took the new message')
+    assert.equal(root.received.length, 3)
+    assert.ok(root.received[2].content[0].text.includes('Synthetic third answer'))
+    // A closed session ends its mailbox, so its card no longer offers Send.
+    hooks.get('agent/disposed')({ agent: root })
+    await until(() => !store().mailboxes.some(one => one.id === mailboxId('deepseek', 'deepseek-root-session')) && settled(), 'the closed session ended its mailbox')
+    const log = join(f.home, '.agent-board', 'hook-errors.log')
+    if (existsSync(log)) assert.ok(!readFileSync(log, 'utf8').includes('MAILBOX_FAILED'), readFileSync(log, 'utf8'))
+    // A board script that cannot answer is logged, once, however often the session asks.
+    const broken = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, join(f.home, 'missing-board.mjs'))
+    const failed = new Function(...names, `${broken.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, watch, join)
+    const failedHooks = new Map()
+    failed.apply({ on: (name, fn) => failedHooks.set(name, fn) })
+    const lonely = fake('deepseek-lonely-session')
+    failedHooks.get('agent/created')({ agent: lonely })
+    const failures = () => existsSync(log) ? readFileSync(log, 'utf8').split('MAILBOX_FAILED').length - 1 : 0
+    await until(() => failures() === 1 && settled(), 'a failed take was logged')
+    const taken = children.length
+    failedHooks.get('agent/status')({ agent: lonely, status: 'idle' })
+    await until(() => children.length === taken + 1 && settled(), 'the second take ran and closed')
+    assert.equal(failures(), 1)
+    assert.deepEqual(lonely.received, [])
+    failedHooks.get('agent/disposed')({ agent: lonely })
+    await until(settled, 'the end call closed')
+    // A take asked for while another is under way runs right after it, with no further event from dsh.
+    const quick = fake('deepseek-quick-session')
+    const takes = () => children.filter(child => child.spawnargs.includes('take') && child.spawnargs.includes('deepseek-quick-session')).length
+    hooks.get('agent/created')({ agent: quick })
+    hooks.get('agent/status')({ agent: quick, status: 'idle' })
+    await until(() => takes() === 2 && settled(), 'the second take ran right after the first')
+    // A followup that fails is logged and never marked delivered: its claim runs out and the board hands it out again.
+    quick.followup = () => Promise.reject(new Error('SYNTHETIC'))
+    queue(store(), 'deepseek-quick-session', 'quick-message', 'Synthetic refused answer')
+    hooks.get('agent/status')({ agent: quick, status: 'idle' })
+    await until(() => failures() === 2 && settled(), 'the failed followup was logged')
+    assert.notEqual(status('quick-message'), 'accepted')
+    hooks.get('agent/disposed')({ agent: quick })
+    await until(settled, 'the quick session ended')
+  } finally {
+    // A failed check leaves no board call running: each one is stopped and waited for, on Windows too.
+    for (const child of children) if (!child.isClosed) child.kill()
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
+  }
+}))
+
 test('Grok prompt hooks return a waiting session to working through the native shell shape', () => fixture(f => {
   assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
   const hooks = JSON.parse(readFileSync(join(f.home, '.grok', 'hooks', 'agent-board-local.json'))).hooks
