@@ -45,8 +45,8 @@ npx @wenyuchiou/agent-board
 接著：
 
 - 為每個 agent 開一個新對話：原本就開著的對話不會接上。
-- **Claude Code** 改用它的外掛接上：`claude plugin marketplace add WenyuChiou/agent-board`，再執行 `claude plugin install agent-board@agent-board`。
-- **Codex：** 到 `/hooks` 信任它的 hooks（[做法](docs/CODEX.md)）。
+- **Claude Code** 改用它的外掛接上，setup 答 yes 時就會裝好。若 setup 只有預覽：`claude plugin marketplace add WenyuChiou/agent-board`，再執行 `claude plugin install agent-board@agent-board`。
+- **Codex：** setup 答 yes 時就會信任它的 hooks。若 setup 只有預覽，到 `/hooks` 信任（[做法](docs/CODEX.md)）。
 - **OpenCode、OpenClaw：** 重新載入它們的 plugin。
 - **dot 和其他網頁聊天：** 把 [AGENTS.md 最後一段](AGENTS.md#report-your-progress-to-the-progress-pane)貼進那個 agent 的指示，再把它寫出的每個區塊存成檔案，照[遠端回報](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)的做法合併進進度檔。
 

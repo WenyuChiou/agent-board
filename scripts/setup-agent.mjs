@@ -267,8 +267,9 @@ const hermesHome = home => {
   return local && own !== undefined && clean(own) === clean(home) ? join(local, 'hermes') : join(home, 'AppData', 'Local', 'hermes')
 }
 
-// On a POSIX terminal the answer is read from /dev/tty: a parent that opened process.stdin (the npm
-// launcher does) hands down a non-blocking fd 0, whose read fails at once with EAGAIN.
+// On a POSIX terminal the answer is read from /dev/tty. fd 0 can be non-blocking (code in this process
+// opened process.stdin, or a parent shared a non-blocking pipe); a read before the answer is typed then
+// fails with EAGAIN, so setup waits and reads again.
 const askYes = () => {
   process.stdout.write(words('question'))
   let fd = 0

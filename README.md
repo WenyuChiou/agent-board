@@ -45,8 +45,8 @@ Scan the QR code from `npx @wenyuchiou/agent-board --lan` with a phone on the sa
 Then:
 
 - Start a new session of each agent: a session that was already open is not connected.
-- **Claude Code** connects through its plugin instead: `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
-- **Codex:** trust its hooks in `/hooks` ([how](docs/CODEX.md)).
+- **Claude Code** connects through its plugin instead, which a yes to setup installs. If setup only previewed: `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
+- **Codex:** a yes to setup trusts its hooks. If setup only previewed, trust them in `/hooks` ([how](docs/CODEX.md)).
 - **OpenCode, OpenClaw:** reload their plugins.
 - **dot and other web chats:** paste [the last section of AGENTS.md](AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then save each block it writes and merge it into the progress file as [Remote reporters](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) shows.
 

@@ -321,14 +321,21 @@ test('the first plain agent-board in a terminal with nothing set up applies setu
   }, { CI: '1' })
 })
 
-// The launcher opens process.stdin, which leaves the inherited pipe non-blocking on POSIX, so setup's
-// first read of an answer not typed yet fails with EAGAIN; setup must wait for the answer instead.
-test('the first plain agent-board waits for a yes typed after the question, though the launcher left stdin non-blocking (#1162)', { skip: process.platform === 'win32', timeout: 60_000 }, async () => {
-  await firstRun({ after: 'Set these up?', text: 'y\n' }, ({ status, stdout, stderr }, home) => {
-    assert.equal(status, 0, stderr)
-    assert.ok(existsSync(join(home, '.agent-board', 'agent-board.mjs')), stdout)
-    assert.doesNotMatch(stdout, /Apply these changes: /)
-  }, { CI: '1' })
+// A child started through Node gets a blocking fd 0, so the preload opens process.stdin in setup itself:
+// that makes fd 0 non-blocking, and a read before the answer is typed fails with EAGAIN. Setup must wait.
+test('the first plain agent-board waits for a yes typed after the question, though stdin is non-blocking (#1162)', { skip: process.platform === 'win32', timeout: 60_000 }, async () => {
+  const shimDir = mkdtempSync(join(tmpdir(), 'board-first-nonblock-'))
+  try {
+    const openStdin = join(shimDir, 'open-stdin.cjs')
+    writeFileSync(openStdin, "if ((process.argv[1] || '').endsWith('setup-agent.mjs')) process.stdin\n")
+    await firstRun({ after: 'Set these up?', text: 'y\n' }, ({ status, stdout, stderr }, home) => {
+      assert.equal(status, 0, stderr)
+      assert.ok(existsSync(join(home, '.agent-board', 'agent-board.mjs')), stdout)
+      assert.doesNotMatch(stdout, /Apply these changes: /)
+    }, { CI: '1', NODE_OPTIONS: `--require "${openStdin}"` })
+  } finally {
+    removeTree(shimDir)
+  }
 })
 
 test('a first-run setup preview that fails shows its own error and exit status, and asks nothing (#868)', { timeout: 40_000 }, async () => {
