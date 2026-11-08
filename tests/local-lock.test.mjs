@@ -184,6 +184,39 @@ test('a killed native holder is recovered only after the stale bound', async () 
   assert.equal(existsSync(lock), false)
 }))
 
+test('a stale lock whose pid is reused by a live process is recovered after the stale bound (#1089)', async () => fixture(async ({ root, lock }) => {
+  const ready = join(root, 'unrelated-ready')
+  const unrelated = spawn(process.execPath, ['-e', 'const fs = require("node:fs"); fs.writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 10000)', ready], { windowsHide: true, stdio: 'ignore' })
+  try {
+    await until(() => existsSync(ready))
+    const livePid = Number(readFileSync(ready, 'utf8').trim())
+    assert.ok(Number.isSafeInteger(livePid) && livePid > 0)
+    const pastMinute = new Date(Date.now() - 60_000)
+    const pastHour = new Date(Date.now() - 3_600_000 - 5_000)
+    // A lock left by an earlier crashed writer whose pid now belongs to the live unrelated process.
+    const crashedWithStarted = JSON.stringify({ version: 1, pid: livePid, started: Date.now() - 120_000, token: 'a'.repeat(32) })
+    writeFileSync(lock, crashedWithStarted)
+    let called = false
+    assert.throws(() => withLocalLock(lock, () => { called = true }, { waitMs: 0, staleMs: 30000 }), /LOCK_BUSY/)
+    assert.equal(called, false)
+    utimesSync(lock, pastMinute, pastMinute)
+    withLocalLock(lock, () => { called = true }, { waitMs: 100, staleMs: 30000 })
+    assert.equal(called, true)
+    assert.equal(existsSync(lock), false)
+    // A lock written without started (as in FORMAT.md or #1089 reproduction) whose pid is live and mtime is an hour old.
+    const legacyStale = JSON.stringify({ version: 1, pid: livePid, token: 'b'.repeat(32) })
+    writeFileSync(lock, legacyStale)
+    utimesSync(lock, pastHour, pastHour)
+    let legacyCalled = false
+    withLocalLock(lock, () => { legacyCalled = true }, { waitMs: 100, staleMs: 30000 })
+    assert.equal(legacyCalled, true)
+    assert.equal(existsSync(lock), false)
+  } finally {
+    if (unrelated.exitCode === null) unrelated.kill()
+    await once(unrelated, 'exit').catch(() => {})
+  }
+}))
+
 test('two simultaneous reclaimers cannot replace the successor of a dead native owner', async () => fixture(async ({ root, lock, start }) => {
   deadLock(lock)
   const reached = join(root, 'reached'), release = join(root, 'release')
