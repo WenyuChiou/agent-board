@@ -91,6 +91,10 @@ test('Chinese and English questions offer clean choices or a yes and no', () => 
     ['Tests pass. Ready to push?', 'confirm', []],
     // A lead-in goes whole; 或以上 sets a bound, not a choice.
     ['是否要用 A 或 B？', 'choose', ['A', 'B']],
+    ['可以刪除舊的分支或標籤嗎？', 'confirm', []],
+    ['可以删除旧的分支或标签吗？', 'confirm', []],
+    ['是否同意條款或隱私政策？', 'confirm', []],
+    ['是否允許讀取檔案或目錄？', 'confirm', []],
     ['要不要 A 或 B？', 'choose', ['A', 'B']],
     ['是否要用 A 還是 B？', 'choose', ['A', 'B']],
     ['請問你要用 A 或 B？', 'choose', ['A', 'B']],

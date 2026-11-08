@@ -164,10 +164,12 @@ const optionsOf = (text: string): string[] => {
     const options = [firstOption(clauses.at(-1) ?? ''), lastOption(after)]
     // The words after 或 stay in one clause: a 或 in a statement never pairs with a later sentence's ？.
     const isOneClause = !/[，,。；;：:]|是否|要不要|[嗎吗]./.test(after)
+    // 「可以刪除分支或標籤嗎？」 and 「是否同意條款或隱私政策？」 ask for permission over both, not which one.
+    const isPermission = /^(?:請問|请问)?\s*(?:你|您)?\s*(?:可以|能不能|可不可以|能否|可否|是否(?:同意|允許|允许|需要|可以|能))/.test(clauses.at(-1) ?? '')
     const isShort = options.every(one => one !== '' && one.length <= 40)
     const isSingle = !CHOICE_MARKER.test(before) && !CHOICE_MARKER.test(after) && !before.includes('或') && !after.includes('或')
     const isEarlier = match === null || bare.index + (bare[1]?.length ?? 0) + before.length < match.index + (match[1]?.length ?? 0)
-    if (isOneClause && isShort && isSingle && isEarlier) return options
+    if (isOneClause && !isPermission && isShort && isSingle && isEarlier) return options
   }
   if (match === null) return []
   const listed = listBefore(match[1] ?? '')
