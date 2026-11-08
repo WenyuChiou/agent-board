@@ -778,9 +778,10 @@ let isWriting = false
 // read is never an empty file. `change` can run more than once, on newer text each time, and
 // is told when it runs for the last time.
 const rewrite = (file: string, change: (text: string, isLast: boolean) => string | null | typeof AGAIN, onReplaced?: () => void): string | null => {
-  // Reporters hold this same lock across progress and journal publication. A nested
-  // journal write belongs to the outer progress change and must keep its lock.
-  if (!isWriting) {
+  // Only progress and its journal share the reporters' lock; polling the independent
+  // ledgers keeps their existing optimistic writes. Nested journal writes retain it.
+  const isSharedFile = file === path || file.startsWith(`${path.replace(/\.md$/i, '')}-journal-`)
+  if (!isWriting && isSharedFile) {
     try {
       return withLocalLock(`${path}.agent-board-lock`, () => {
         isWriting = true
