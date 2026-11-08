@@ -126,7 +126,20 @@ export const ZH_CN: Strings = {
     "startOne": "最后在 {agents} 开一个新的会话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",
-    "board": "打开看板：{command}"
+    "board": "打开看板：{command}",
+    "thisWill": "会做这几件事：",
+    "question": "要设置这些吗？[Y/n] ",
+    "filesPart": "{host} 设置文件",
+    "trustPart": "在 {host} 批准看板的 hooks",
+    "installPlugin": "安装 Claude Code 插件",
+    "marketplacePart": "Claude Code 插件市场",
+    "pluginPart": "Claude Code 插件",
+    "partDone": "{part}：已完成。",
+    "partFailed": "{part}：失败。请运行：{command}",
+    "thenBoard": "接着在其中任一个输入 /agent-board。",
+    "open": "在 {agents} 各开一个新的会话。",
+    "openOne": "在 {agents} 开一个新的会话。",
+    "thenBoardOne": "接着在那里输入 /agent-board。"
   },
   setupNoAgent: {
     "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",

@@ -126,7 +126,20 @@ export const EN: Strings = {
     "startOne": "Then start a new session in {agents}.",
     "skill": "{host}: open the board with its agent-board skill; automatic reporting is unavailable.",
     "plugin": "Claude Code: run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board.",
-    "board": "Open the board: {command}"
+    "board": "Open the board: {command}",
+    "thisWill": "This will:",
+    "question": "Set these up? [Y/n] ",
+    "filesPart": "{host} files",
+    "trustPart": "Approve the board's hooks in {host}",
+    "installPlugin": "Install the Claude Code plugin",
+    "marketplacePart": "Claude Code marketplace",
+    "pluginPart": "Claude Code plugin",
+    "partDone": "{part}: done.",
+    "partFailed": "{part}: failed. Run: {command}",
+    "thenBoard": "Then type /agent-board in any of them.",
+    "open": "Open a new session in each of: {agents}.",
+    "openOne": "Open a new session in {agents}.",
+    "thenBoardOne": "Then type /agent-board there."
   },
   setupNoAgent: {
     "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",

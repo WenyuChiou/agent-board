@@ -164,7 +164,20 @@ export const ZH_TW = {
     "startOne": "最後在 {agents} 開一個新的工作階段。",
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
     "plugin": "Claude Code：執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。",
-    "board": "開啟看板：{command}"
+    "board": "開啟看板：{command}",
+    "thisWill": "會做這幾件事：",
+    "question": "要設定這些嗎？[Y/n] ",
+    "filesPart": "{host} 設定檔案",
+    "trustPart": "在 {host} 核准看板的 hooks",
+    "installPlugin": "安裝 Claude Code 外掛",
+    "marketplacePart": "Claude Code 外掛市集",
+    "pluginPart": "Claude Code 外掛",
+    "partDone": "{part}：已完成。",
+    "partFailed": "{part}：失敗。請執行：{command}",
+    "thenBoard": "接著在其中任一個輸入 /agent-board。",
+    "open": "在 {agents} 各開一個新的工作階段。",
+    "openOne": "在 {agents} 開一個新的工作階段。",
+    "thenBoardOne": "接著在那裡輸入 /agent-board。"
   },
   setupNoAgent: {
     "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",

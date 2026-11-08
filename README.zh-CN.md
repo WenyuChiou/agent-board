@@ -33,21 +33,20 @@
 
 ```sh
 npx @wenyuchiou/agent-board setup
-npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，不写入任何东西；第二行才真正写入；第三行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若还没设置任何东西，单独运行第三行就会显示同样的预览，问一次 `Apply these changes? [y/N]`，答 yes 就应用并打开看板。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要卸载，见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
+第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，然后问一次 `要设置这些吗？[Y/n]`。答 yes 就写入文件、在 Codex 和 Hermes Agent 批准看板的 hooks，电脑上有 Claude Code 时也一并装好插件；答 no 就什么都不写。没有终端可以回答时（例如在 agent 的对话中），setup 只会预览：这时 `setup --apply` 会写入文件，并列出批准 hooks 和安装插件需要你自己运行的命令。第二行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若还没设置任何东西，单独运行第二行也会先问同一个问题。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要卸载，见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
 
-看板语言跟随系统设置：系统是繁体或简体中文就用中文，其他用英文。要自己指定，在两行 setup 都加上 `--lang zh-CN`（或 `zh-TW`、`en`），之后看板、网页和 `stop` 都会用这个语言。通过 Claude Code 插件接上的账号，改用 `/progress lang`。
+看板语言跟随系统设置：系统是繁体或简体中文就用中文，其他用英文。要自己指定，在 setup 那行加上 `--lang zh-CN`（或 `zh-TW`、`en`），之后看板、网页和 `stop` 都会用这个语言。通过 Claude Code 插件接上的账号，改用 `/progress lang`。
 
 用同一个 Wi-Fi 的手机，扫 `npx @wenyuchiou/agent-board --lan` 印出的二维码。只在信得过的网络上用：这个链接没有加密，拿到的人都能打开网页。详情见[看板的网页](#看板的网页)。
 
 然后：
 
 - 给每个 agent 开一个新对话：原来就开着的对话不会接入。
-- **Claude Code** 改用它的插件接入：`claude plugin marketplace add WenyuChiou/agent-board`，再运行 `claude plugin install agent-board@agent-board`。
-- **Codex：** 到 `/hooks` 信任它的 hooks（[做法](docs/CODEX.md)）。
+- **Claude Code** 改用它的插件接入，setup 答 yes 时就会装好。若 setup 只做了预览：`claude plugin marketplace add WenyuChiou/agent-board`，再运行 `claude plugin install agent-board@agent-board`。
+- **Codex：** setup 答 yes 时就会信任它的 hooks。若 setup 只做了预览，到 `/hooks` 信任（[做法](docs/CODEX.md)）。
 - **OpenCode、OpenClaw：** 重新加载它们的插件。
 - **dot 和其他网页聊天：** 把 [AGENTS.md 最后一段](AGENTS.md#report-your-progress-to-the-progress-pane)贴进那个 agent 的指令，再把它写出的每个区块存成文件，照[远程报告](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)的做法合并进进度文件。
 

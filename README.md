@@ -33,21 +33,20 @@ With Node.js 22+, in any terminal:
 
 ```sh
 npx @wenyuchiou/agent-board setup
-npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the live terminal board over SSH or in an interactive terminal without a display, and the page otherwise. In an agent's chat, `/agent-board` opens the same page. If nothing is set up yet, the third command alone shows the same preview, asks `Apply these changes? [y/N]`, and on yes applies it and opens the board. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. To remove it, see [Update and uninstall](docs/GUIDE.md#update-and-uninstall). More in the [setup guide](docs/SETUP.md#install-with-npm). An agent that needs the board's status reads `agent-board --json`; the [Board JSON reference](docs/BOARD-JSON.md) describes its versioned, redacted fields.
+The first command finds the agents on this computer, shows what setup would change, and asks once: `Set these up? [Y/n]`. A yes writes the files, approves the board's hooks in Codex and Hermes Agent, and installs the Claude Code plugin when Claude Code is on this computer; a no writes nothing. Without a terminal to answer in, such as in an agent's chat, setup only previews: `setup --apply` then writes the files and lists the approval and plugin commands to run yourself. The second command opens the live terminal board over SSH or in an interactive terminal without a display, and the page otherwise. In an agent's chat, `/agent-board` opens the same page. If nothing is set up yet, the second command alone asks the same question first. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. To remove it, see [Update and uninstall](docs/GUIDE.md#update-and-uninstall). More in the [setup guide](docs/SETUP.md#install-with-npm). An agent that needs the board's status reads `agent-board --json`; the [Board JSON reference](docs/BOARD-JSON.md) describes its versioned, redacted fields.
 
-The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise. To choose one, add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to both setup lines; the board, its page and `stop` then use it. An account connected through the Claude Code plugin uses `/progress lang` instead.
+The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise. To choose one, add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to the setup command; the board, its page and `stop` then use it. An account connected through the Claude Code plugin uses `/progress lang` instead.
 
 Scan the QR code from `npx @wenyuchiou/agent-board --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
 
 Then:
 
 - Start a new session of each agent: a session that was already open is not connected.
-- **Claude Code** connects through its plugin instead: `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
-- **Codex:** trust its hooks in `/hooks` ([how](docs/CODEX.md)).
+- **Claude Code** connects through its plugin instead, which a yes to setup installs. If setup only previewed: `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
+- **Codex:** a yes to setup trusts its hooks. If setup only previewed, trust them in `/hooks` ([how](docs/CODEX.md)).
 - **OpenCode, OpenClaw:** reload their plugins.
 - **dot and other web chats:** paste [the last section of AGENTS.md](AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then save each block it writes and merge it into the progress file as [Remote reporters](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) shows.
 
