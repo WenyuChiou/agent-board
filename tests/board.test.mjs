@@ -3332,6 +3332,24 @@ test('with explicit legacy opt-in a reply goes into a closed Grok session once, 
   }
 })
 
+test('a press on the page still acts after a block above its card grows, so its lines moved (#1170)', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const { call, path, rowOf } = board
+    const row = await rowOf('Pick the cache')
+    assert.equal(row.canArchive, true)
+    // Another task is written above the card after the page drew it: every line below moves down.
+    const grown = readFileSync(path, 'utf8').replace('## api-gateway\n', '## Notes\n### Read the logs\n- [ ] Open the file\n- [ ] Find the error\n\n## api-gateway\n')
+    writeFileSync(path, grown)
+    const archived = await call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: row.session, fp: row.fp } })
+    assert.equal(archived.status, 200, archived.body)
+    assert.ok(!readFileSync(path, 'utf8').includes('b2c3d4e5'))
+    assert.ok(readFileSync(path, 'utf8').includes('### Read the logs'))
+  } finally {
+    await board.close()
+  }
+})
+
 test('a press on the page for a task whose block another session took under the same title is refused, and nothing is archived until the page draws the block that is there now', { timeout: 30_000 }, async () => {
   const board = await page()
   try {
