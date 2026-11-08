@@ -588,6 +588,7 @@ export const ZH_CN: Strings = {
   report: '周报',
   notifyOnButton: '通知：开',
   notifyOffButton: '通知：关',
+  notifyDenied: '浏览器已经封锁这个页面的通知，要在浏览器设置里重新打开。',
   legend: '说明',
   legendClose: '收起说明',
   legendDue: '⚑ 两周内截止',

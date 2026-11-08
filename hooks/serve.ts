@@ -11,6 +11,7 @@ import { agentLabel } from './strings'
 import type { Tone } from './palette'
 import { cellCode } from './progress-bar'
 import { RESUME } from './parse'
+import { toldKey } from './remind'
 import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message } from './messaging'
@@ -122,6 +123,9 @@ export type ServeAsk = {
   dir?: string | null
   when?: string
   questionId?: string
+  // The plugin's told key for this question (hooks/remind.ts), so the page can tell
+  // whether it already notified for it; absent when the server is older than the page.
+  notifyKey?: string
   delivery?: Delivery
   receipt?: Receipt
   key: string
@@ -394,6 +398,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId)),
         key: item.key,
         ...(ask.questionId === undefined ? {} : { questionId: ask.questionId }),
+        notifyKey: toldKey(ask.questionId ?? ask.key, ask.text),
         project: ask.project,
         agent: ask.agent,
         ...(isManual ? { isOwn: true as const } : {}),
@@ -779,6 +784,7 @@ const PAGE_WORDS = [
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'noticeAsked', 'notifyTitle', 'notifyOnButton', 'notifyOffButton', 'notifyOn', 'notifyOff', 'notifyDenied',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -1134,7 +1140,7 @@ ${PAGE_CSS}
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static aria-label="${esc(s.serveClose)}" title="${esc(s.serveClose)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></footer>
+<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" class="btn" id="notify-toggle" data-local>${esc(s.notifyOffButton)}</button>`}<button type="button" class="icon-btn" id="close" data-static aria-label="${esc(s.serveClose)}" title="${esc(s.serveClose)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
@@ -1318,7 +1324,9 @@ const PAGE_SCRIPT = String.raw`
   var pageId = newPageId();
   function call(path, body) {
     if (isUnreachable && body !== undefined) return Promise.reject();
-    var headers = { 'x-board-token': token, 'x-board-page': pageId, 'x-board-visible': document.hidden ? '0' : '1' };
+    // The server notification defers to a page that opted in (#1014): the page
+    // says so on every poll, and the server remembers it after the tab closes.
+    var headers = { 'x-board-token': token, 'x-board-page': pageId, 'x-board-visible': document.hidden ? '0' : '1', 'x-board-notify': notifyOn() ? '1' : '0' };
     if (path === '/api/board' && body === undefined && boardEtag) headers['if-none-match'] = boardEtag;
     if (body !== undefined) headers['content-type'] = 'application/json';
     return fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' }).then(function (res) {
@@ -2885,6 +2893,91 @@ const PAGE_SCRIPT = String.raw`
       lostResults.push(card);
     });
   }
+  // The person's opt-in and what this page already told them, kept per origin in
+  // localStorage like the theme and the filter. The told set is the page's version of
+  // the plugin's shared told store (hooks/remind.ts): one key per question, so every
+  // open tab notifies once, not once per tab.
+  var NOTIFY_FLAG = 'agent-board.notify';
+  var NOTIFIED_KEY = 'agent-board.notified';
+  var TOLD_MAX = 500;
+  var TOLD_MS = 3 * 24 * 60 * 60 * 1000;
+  function notifyOn() {
+    try { return localStorage.getItem(NOTIFY_FLAG) === 'on'; } catch (e) { return false; }
+  }
+  function toldSet() {
+    try {
+      var stored = JSON.parse(localStorage.getItem(NOTIFIED_KEY) || '{}');
+      return stored !== null && typeof stored === 'object' ? stored : {};
+    } catch (e) { return {}; }
+  }
+  function saveTold(told, live) {
+    // Drop keys older than three days, keep at most 500, live keys last — the same rule
+    // as keepRecent in hooks/remind.ts.
+    var now = Date.now();
+    var kept = Object.keys(told).filter(function (key) { return now - told[key] < TOLD_MS; });
+    kept.sort(function (a, b) { return (live[b] ? 1 : 0) - (live[a] ? 1 : 0) || told[b] - told[a]; });
+    var next = {};
+    kept.slice(0, TOLD_MAX).forEach(function (key) { next[key] = told[key]; });
+    try { localStorage.setItem(NOTIFIED_KEY, JSON.stringify(next)); } catch (e) {}
+  }
+  // The server's told keys arrive with the poll (#1014): a question the server
+  // told while the browser was closed is told here too, not notified again.
+  function mergeServerTold(keys) {
+    if (!keys || !keys.length) return;
+    var told = toldSet();
+    var live = {};
+    keys.forEach(function (key) { live[key] = true; told[key] = Date.now(); });
+    saveTold(told, live);
+  }
+  function notifyKeyOf(ask) { return ask.notifyKey || ask.key; }
+  // The person is looking at the board, so a notification would be noise.
+  // Visible and focused is the only case that counts: a tab behind another
+  // window still notifies. When the focus state cannot be read, notify.
+  function pageHasFocus() {
+    try {
+      return document.visibilityState === 'visible' && typeof document.hasFocus === 'function' && document.hasFocus();
+    } catch (e) { return false; }
+  }
+  // Mark the questions the person can already see as told, without notifying.
+  // Opting in seeds this way, and so does a focused tab meeting a new question.
+  function markTold(asks) {
+    var told = toldSet();
+    var live = {};
+    asks.forEach(function (ask) {
+      if (ask.isOwn) return;
+      var key = notifyKeyOf(ask);
+      live[key] = true;
+      told[key] = Date.now();
+    });
+    saveTold(told, live);
+  }
+  function maybeNotify(model) {
+    if (!notifyOn() || !('Notification' in window) || Notification.permission !== 'granted') return;
+    var asks = (model.asks || []).filter(function (ask) { return !ask.isOwn; });
+    if (!asks.length) return;
+    // The person sees the question on the page, so mark it told and skip the
+    // notification instead of pinging them about what is in front of them.
+    if (pageHasFocus()) { markTold(asks); return; }
+    var told = toldSet();
+    var live = {};
+    asks.forEach(function (ask) { live[notifyKeyOf(ask)] = true; });
+    var changed = false;
+    asks.forEach(function (ask) {
+      var key = notifyKeyOf(ask);
+      if (told[key] !== undefined) return;
+      // A failed construction must not break the poll: the timer is only rescheduled
+      // when this handler returns, so a throw here would stop the page refreshing.
+      try {
+        new Notification(w('notifyTitle', ask.project), {
+          body: w('noticeAsked', ask.agent || ask.project, ask.text),
+          silent: true,
+        });
+      } catch (e) {}
+      told[key] = Date.now();
+      changed = true;
+    });
+    if (changed) saveTold(told, live);
+  }
   function refresh() {
     if (isClosed) return;
     clearTimeout(timer);
@@ -2905,12 +2998,14 @@ const PAGE_SCRIPT = String.raw`
         return;
       }
       reachable();
+      mergeServerTold(data.serverTold);
       if (data.barStyle) barStyleShown(data.barStyle);
       connections = data.messaging && data.messaging.connections || [];
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; })], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
       if (text !== last) {
         last = text;
         render(data.model);
+        maybeNotify(data.model);
         if (presence) { presence.remove(); presence = null; }
         // Show actionable progress delays, never transport inventory or native identifiers.
         var sessions = (data.messaging && data.messaging.sessions || []).filter(function (one) { return one.status === 'waiting' || one.status === 'timed_out'; });
@@ -2992,6 +3087,41 @@ const PAGE_SCRIPT = String.raw`
     beginPress();
     importBlock(text, true);
   });
+  // The notify toggle is local-only: no server press, and the browser is asked for
+  // permission only in this click handler, never on load or on a poll tick.
+  var notifyBtn = document.getElementById('notify-toggle');
+  if (notifyBtn && !('Notification' in window)) notifyBtn.hidden = true;
+  function paintNotify() {
+    if (!notifyBtn) return;
+    notifyBtn.textContent = notifyOn() && 'Notification' in window && Notification.permission === 'granted'
+      ? w('notifyOnButton') : w('notifyOffButton');
+  }
+  if (notifyBtn) notifyBtn.addEventListener('click', function () {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'denied') { say(w('notifyDenied'), 'alert'); return; }
+    var enable = function () {
+      // Seed first: questions already waiting are told, not notified.
+      markTold(latest && latest.asks || []);
+      try { localStorage.setItem(NOTIFY_FLAG, 'on'); } catch (e) {}
+      paintNotify();
+      say(w('notifyOn'), 'done');
+    };
+    var disable = function () {
+      try { localStorage.removeItem(NOTIFY_FLAG); } catch (e) {}
+      paintNotify();
+      say(w('notifyOff'), 'done');
+    };
+    if (notifyOn()) { disable(); return; }
+    if (Notification.permission === 'granted') { enable(); return; }
+    var asked = Notification.requestPermission();
+    if (asked && typeof asked.then === 'function') {
+      asked.then(function (permission) {
+        if (permission === 'granted') enable();
+        else { paintNotify(); say(w('notifyDenied'), 'alert'); }
+      });
+    }
+  });
+  paintNotify();
   if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
     if (event.key !== 'Escape') return;
     // Only the panel the focus is in (or its More button) closes; with no focus anywhere, every open one does.

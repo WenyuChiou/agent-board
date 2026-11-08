@@ -10343,10 +10343,13 @@ test('a refused block shows its reason, and one of unknown order asks before it 
   assert.equal(failed.paste(text), false)
 })
 
-test("the page's LAN form offers neither Connect a web chat nor Import from clipboard", async () => {
+test("the page's LAN form offers neither Connect a web chat, Import from clipboard nor the notify toggle", async () => {
   const { servePage } = await sourceBoard()
   const html = servePage(EN, 'synthetic', true)
-  for (const id of ['connect-web-chat', 'import-clipboard', 'relay-prompt']) assert.ok(!html.includes(`id="${id}"`))
+  for (const id of ['connect-web-chat', 'import-clipboard', 'relay-prompt', 'notify-toggle']) assert.ok(!html.includes(`id="${id}"`))
+  const home = servePage(EN, 'synthetic', false)
+  assert.ok(home.includes('id="notify-toggle"'))
+  assert.ok(home.includes(`>${EN.notifyOffButton}<`), 'the button renders the off label until the person opts in')
   const dom = await pageDom(html, redesignModel())
   const text = relayFragment(ago(60_000))
   assert.equal(dom.paste(text), true)
@@ -11826,6 +11829,16 @@ test('the page of a grouped board draws each question once, copies an answer and
     assert.ok(lanModel.asks.every(ask => ask.reopen === null))
     assert.ok(rowsOf(lanModel).every(row => row.resume === null))
     assert.ok(rowsOf(lanModel).every(row => !('sessionId' in row)))
+    // The page tells a new waiting question by the plugin's told key, not the board line.
+    const { toldKey } = await import('../hooks/remind.ts')
+    const waitingByKey = new Map(view.waiting.map(one => [one.questionId ?? one.key, one]))
+    assert.ok(homeModel.asks.length > 0)
+    for (const ask of homeModel.asks) {
+      const waiting = waitingByKey.get(ask.questionId ?? ask.key.replace(/^ask:/, '').replace(/@.*$/, ''))
+      assert.ok(waiting, `model ask ${ask.key} names a waiting question`)
+      assert.equal(ask.notifyKey, toldKey(waiting.questionId ?? waiting.key, waiting.text))
+      assert.notEqual(ask.notifyKey, toldKey(ask.key, ask.text), 'the notify key is the waiting question, not the board line')
+    }
     const lanDom = await pageDom(runtime.servePage(EN, 'synthetic', true), lanModel)
     assert.ok(!lanDom.node('board').textContent.includes('Copy resume command'))
     assert.ok(lanDom.node('agent-note').textContent.includes("Codex's progress file could not be read"))

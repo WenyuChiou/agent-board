@@ -632,6 +632,7 @@ export const ZH_TW = {
   report: '週報',
   notifyOnButton: '通知：開',
   notifyOffButton: '通知：關',
+  notifyDenied: '瀏覽器已經封鎖這個頁面的通知，要在瀏覽器設定裡重新打開。',
   legend: '說明',
   legendClose: '收起說明',
   legendDue: '⚑ 兩週內截止',

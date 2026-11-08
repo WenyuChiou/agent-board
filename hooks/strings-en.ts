@@ -591,6 +591,7 @@ export const EN: Strings = {
   report: 'Weekly report',
   notifyOnButton: 'Notifications: on',
   notifyOffButton: 'Notifications: off',
+  notifyDenied: "This page's notifications are blocked in the browser; turn them back on in the browser settings.",
   legend: 'Legend',
   legendClose: 'Hide legend',
   legendDue: '⚑ due within two weeks',

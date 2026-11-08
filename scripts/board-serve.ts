@@ -18,6 +18,7 @@ import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
 import { agentLabel } from '../hooks/strings'
 import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
+import { serverNotifyCheck, serverNotifyCommand } from '../hooks/notify'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
@@ -63,6 +64,10 @@ export type ServeOptions = {
   onReady: (url: string, port: number) => boolean
   onStop: () => void
   idleMs: number
+  // The system notification the server sends itself (#1014): a test spy, or
+  // undefined for the platform command. The page's browser notification is
+  // the other surface; one question notifies once across both.
+  notify?: (title: string, body: string) => void
 }
 
 type Result = { ok: boolean; note: string }
@@ -279,7 +284,7 @@ export const startServer = (o: ServeOptions): void => {
   // says it left is dropped alone, so another page that is still open stays counted. Only a page that reported itself visible
   // counts as a window the person can see; a hidden or minimized one does not. When a newer page has asked, an older page is
   // told it was replaced and stops asking.
-  const pages = new Map<string, { seq: number; at: number; visible: boolean }>()
+  const pages = new Map<string, { seq: number; at: number; visible: boolean; notify: boolean }>()
   let loadedAt = 0
   let pageSeq = 0
   // Pages told they were replaced. They stay replaced: a poll already on its way when the page stopped must not make it the newest again.
@@ -295,6 +300,45 @@ export const startServer = (o: ServeOptions): void => {
     let latest = loadedAt
     for (const one of pages.values()) if (one.visible && one.at > latest) latest = one.at
     return latest === 0 ? null : now - latest
+  }
+  // The questions the server itself already told the person about (#1014),
+  // keyed by notifyKey. The page merges these from the poll, and the server
+  // marks a question told when a page that opted in has seen it, so one
+  // question notifies once across both surfaces.
+  let serverTold: Record<string, number> = {}
+  // Whether a page that opted in has polled recently: the page handles the
+  // question then, so the server stays quiet. A backgrounded tab polls about
+  // once a minute, so the window is the page-staleness one.
+  const notifyPagePresent = (now: number): boolean => {
+    for (const one of pages.values()) if (one.notify && now - one.at < PAGE_STALE_MS) return true
+    return false
+  }
+  // Whether any page at all has polled recently: the poll handler runs the
+  // check on every poll, so the timer only needs to run when none has.
+  const anyPageRecent = (now: number): boolean => {
+    for (const one of pages.values()) if (now - one.at < PAGE_STALE_MS) return true
+    return false
+  }
+  // Tell the person about the model's new waiting questions, unless a page
+  // that opted in is open. Returns the notifyKeys the server has told among
+  // the model's asks, for the page to merge into its own told set.
+  const checkServerNotify = (model: ReturnType<typeof serveModel>, now: number): string[] => {
+    const { due, told } = serverNotifyCheck(model.asks, serverTold, now, notifyPagePresent(now))
+    serverTold = told
+    for (const ask of due) {
+      const title = o.s.notifyTitle(ask.project)
+      const body = o.s.noticeAsked(ask.agent || ask.project, ask.text)
+      if (o.notify !== undefined) {
+        try { o.notify(title, body) } catch {}
+        continue
+      }
+      const command = serverNotifyCommand(process.platform, title, body)
+      if (command === null) continue
+      try {
+        spawn(command.command, command.args, { windowsHide: true, stdio: 'ignore' }).on('error', () => {}).unref()
+      } catch {}
+    }
+    return model.asks.filter(ask => !ask.isOwn).map(ask => ask.notifyKey ?? ask.key).filter(key => serverTold[key] !== undefined)
   }
   let isStopping = false
   // The page on the local network: its own server, address and token, so the computer's token
@@ -412,7 +456,7 @@ export const startServer = (o: ServeOptions): void => {
         retired.add(id)
         // A bound on the memory: the oldest ids are forgotten first.
         if (retired.size > 256) retired.delete(retired.values().next().value as string)
-      } else pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
+      } else pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0', notify: req.headers['x-board-notify'] === '1' })
       // Pages that stopped asking long ago (a crashed window) are forgotten.
       if (pages.size > 32) for (const [other, one] of pages) if (now - one.at > 300_000) pages.delete(other)
     }
@@ -437,7 +481,11 @@ export const startServer = (o: ServeOptions): void => {
           const view = o.view()
           const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', now }
+          const model = serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group)
+          // The server's own notification (#1014): the page merges the told keys
+          // so a question the server told is not notified again from the page.
+          const serverToldKeys = isLan ? [] : checkServerNotify(model, now)
+          const payload = { model, replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', now, serverTold: serverToldKeys }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.
           const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
@@ -601,5 +649,20 @@ export const startServer = (o: ServeOptions): void => {
     }
     const sweeper = setInterval(() => { try { o.sweep() } catch {} }, o.sweepMs)
     server.on('close', () => clearInterval(sweeper))
+    // The server notification's own tick (#1014): with no tab open there are no
+    // polls, and the closed-browser case is the one the server notification
+    // exists for. When a page is polling, the poll handler already runs the
+    // check, so the timer only runs when none has asked recently.
+    const notifier = setInterval(() => {
+      try {
+        const now = Date.now()
+        if (anyPageRecent(now)) return
+        const view = o.view()
+        const state = messaging.snapshot(now, o.reports?.(false))
+        const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
+        checkServerNotify(serveModel(view, o.pending(false), o.s, sending, false, state, o.allowResume, group), now)
+      } catch {}
+    }, 5_000)
+    server.on('close', () => clearInterval(notifier))
   })
 }
