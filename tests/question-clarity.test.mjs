@@ -48,3 +48,63 @@ test('every page language offers the complete choice replies instead of Yes and 
     assert.deepEqual(model.asks[0].answers, options)
   }
 })
+
+test('Chinese and English questions offer clean choices or a yes and no', () => {
+  const rows = [
+    ['藍色或綠色？', 'choose', ['藍色', '綠色']],
+    ['要寫哪種水果？蘋果或香蕉', 'choose', ['蘋果', '香蕉']],
+    ['要 A 或 B 嗎？', 'choose', ['A', 'B']],
+    ['你想用 React 還是 Vue 呢？', 'choose', ['React', 'Vue']],
+    ['选择 A 还是 B？', 'choose', ['A', 'B']],
+    ['Should the retry limit be 3 or 5?', 'choose', ['3', '5']],
+    ['Do you want to use React or Vue?', 'choose', ['React', 'Vue']],
+    ['是否繼續執行？', 'confirm', []],
+    ['Ready to push?', 'confirm', []],
+    ['Want me to continue?', 'confirm', []],
+    ['Continue? (y/n)', 'confirm', []],
+    ['要繼續嗎？(是/否)', 'confirm', []],
+    ['要 A 或 B 嗎？(是/否)', 'choose', ['A', 'B']],
+    ['選 A 或 B 呢？', 'choose', ['A', 'B']],
+    ['要 A 或 B 吗？', 'choose', ['A', 'B']],
+    ['要 A 或 B 吧？', 'choose', ['A', 'B']],
+    ['咖啡館還是酒吧？', 'choose', ['咖啡館', '酒吧']],
+    ['棉布還是毛呢？', 'choose', ['棉布', '毛呢']],
+    ['A or B? (y/n)', 'choose', ['A', 'B']],
+    ['或許明天再說？', 'reply', []],
+    ['或者是說明天？', 'reply', []],
+    ['系統或許需要修復？', 'reply', []],
+    ['藍色或綠色', 'reply', []],
+    [`${'甲'.repeat(41)}或乙？`, 'reply', []],
+    ['Should I keep files that are backed up or delete them?', 'choose', ['Should I keep files that are backed up', 'delete them']],
+    ['Should the size be small, medium, large or huge?', 'choose', ['small', 'medium', 'large', 'huge']],
+    ['Do you want X, Y or Z?', 'choose', ['X', 'Y', 'Z']],
+    ['A、B 還是 C？', 'choose', ['A', 'B', 'C']],
+    ['用 A、B 还是 C？', 'choose', ['A', 'B', 'C']],
+    ['先用旗標給部分人，還是直接全部開？', 'choose', ['先用旗標給部分人', '直接全部開']],
+    ['"Top shelf or bottom shelf?"', 'choose', ['Top shelf', 'bottom shelf']],
+    ['「先開旗標」還是「全部開？」', 'choose', ['先開旗標', '全部開']],
+    // A 或 in a statement never pairs with a later sentence's question mark.
+    ['我覺得 A 或 B 都行。要繼續嗎？', 'confirm', []],
+    ['A 或 B 都可以，要繼續嗎？', 'confirm', []],
+    ['我改了 3 或 4 個檔案。是否繼續？', 'confirm', []],
+    ['這是 A 或 B。你覺得呢？', 'reply', []],
+    ['Tests pass. Ready to push?', 'confirm', []],
+    // A lead-in goes whole; 或以上 sets a bound, not a choice.
+    ['是否要用 A 或 B？', 'choose', ['A', 'B']],
+    ['要不要 A 或 B？', 'choose', ['A', 'B']],
+    ['是否要用 A 還是 B？', 'choose', ['A', 'B']],
+    ['請問你要用 A 或 B？', 'choose', ['A', 'B']],
+    ['Node 18 或以上？', 'reply', []],
+    ['需要 Node 18 或以上嗎？', 'confirm', []],
+    // One-word options share the words after the last one.
+    ['MySQL or Postgres for the DB?', 'choose', ['MySQL', 'Postgres']],
+    ['Tabs or spaces for indentation?', 'choose', ['Tabs', 'spaces']],
+    ['Ship now or wait for the review?', 'choose', ['Ship now', 'wait for the review']],
+  ]
+  for (const [text, kind, options] of rows) {
+    for (const [subject, note] of [[text, ''], ['Pick', text]]) {
+      const result = askOf(subject, note)
+      assert.deepEqual({ kind: result.kind, options: result.options }, { kind, options }, text)
+    }
+  }
+})
