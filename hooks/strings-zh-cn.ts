@@ -122,6 +122,7 @@ export const ZH_CN: Strings = {
     "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件。",
     "openclaw": "OpenClaw：重新启动 OpenClaw，加载 setup 生成的 agent-board 插件。",
     "deepseek": "DeepSeek：关掉 DeepSeek Harness（dsh）再重新打开，让它加载 setup 生成的 agent-board 插件。",
+    "cursorWindows": "Cursor：在 Windows 上，请从 PowerShell 或命令提示符启动 cursor-agent。从 Git Bash 启动时，Cursor 不会运行看板的 hooks，看板就收不到它的任何进度。",
     "start": "最后在 {agents} 各开一个新的会话。",
     "startOne": "最后在 {agents} 开一个新的会话。",
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",

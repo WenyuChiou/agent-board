@@ -340,3 +340,18 @@ test('terminal setup installs the plugin when only Claude Code is present', () =
   assert.deepEqual(claudeCalls(f), pluginCommands)
   assert.equal(existsSync(join(f.root, 'data')), false)
 }, ['claude']))
+
+// Two setup runs only: the three tables are kept identical by the bootstrap test above, and each
+// run takes seconds on a Windows runner, where this file is near its time budget.
+test('on Windows setup says to start cursor-agent from PowerShell, in its preview and after a yes (#1159)', () => {
+  const isWindows = process.platform === 'win32'
+  fixture(setup => {
+    const preview = setup('--agent', 'cursor', '--lang', 'zh-TW')
+    assert.equal(preview.includes(bootstrap[1].cursorWindows), isWindows, preview)
+  })
+  terminal(f => {
+    const result = f.invoke(['--agent', 'cursor', '--lang', 'en'], 'y\n')
+    succeeded(result)
+    assert.equal(result.stdout.split('Next steps:')[1]?.includes(bootstrap[0].cursorWindows), isWindows, result.stdout)
+  })
+})
