@@ -41,13 +41,18 @@ export const markServerTold = (
 
 // One check, both directions: when a page that opted in is open, the page
 // handles the question, so the server only marks it told; otherwise the
-// server tells the person about the questions it has not told yet.
+// server tells the person about the questions it has not told yet. Until an
+// opt-in has ever been seen, nothing is told and nothing fires: the questions
+// already waiting when the server started are not replayed, and the first
+// opted-in poll seeds them as told (the page has seen them).
 export const serverNotifyCheck = (
   asks: readonly NotifyAsk[],
   told: Readonly<Record<string, number>>,
   now: number,
   pagePresent: boolean,
+  hasSeenOptIn: boolean,
 ): { due: NotifyAsk[]; told: Record<string, number> } => {
+  if (!hasSeenOptIn) return { due: [], told }
   if (pagePresent) return { due: [], told: markServerTold(asks, told, now) }
   const due = serverNotifyDue(asks, told)
   return { due, told: markServerTold(due, told, now) }

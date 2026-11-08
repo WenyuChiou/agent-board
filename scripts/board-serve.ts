@@ -306,6 +306,12 @@ export const startServer = (o: ServeOptions): void => {
   // marks a question told when a page that opted in has seen it, so one
   // question notifies once across both surfaces.
   let serverTold: Record<string, number> = {}
+  // Whether a page that opted in has ever polled. The server only notifies
+  // after that: until then the person has not asked for notifications, and
+  // the questions already waiting are seeded as told, not replayed. The flag
+  // survives the tab closing (the page is dropped from `pages` then), and it
+  // is forgotten when the server restarts, the same way the page's opt-in is.
+  let hasSeenOptIn = false
   // Whether a page that opted in has polled recently: the page handles the
   // question then, so the server stays quiet. A backgrounded tab polls about
   // once a minute, so the window is the page-staleness one.
@@ -323,7 +329,7 @@ export const startServer = (o: ServeOptions): void => {
   // that opted in is open. Returns the notifyKeys the server has told among
   // the model's asks, for the page to merge into its own told set.
   const checkServerNotify = (model: ReturnType<typeof serveModel>, now: number): string[] => {
-    const { due, told } = serverNotifyCheck(model.asks, serverTold, now, notifyPagePresent(now))
+    const { due, told } = serverNotifyCheck(model.asks, serverTold, now, notifyPagePresent(now), hasSeenOptIn)
     serverTold = told
     for (const ask of due) {
       const title = o.s.notifyTitle(ask.project)
@@ -457,6 +463,7 @@ export const startServer = (o: ServeOptions): void => {
         // A bound on the memory: the oldest ids are forgotten first.
         if (retired.size > 256) retired.delete(retired.values().next().value as string)
       } else pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0', notify: req.headers['x-board-notify'] === '1' })
+      if (req.headers['x-board-notify'] === '1') hasSeenOptIn = true
       // Pages that stopped asking long ago (a crashed window) are forgotten.
       if (pages.size > 32) for (const [other, one] of pages) if (now - one.at > 300_000) pages.delete(other)
     }

@@ -54,29 +54,43 @@ test('the server tells the person about a new waiting question once, never its o
   const own = ask({ key: 'ask:two', notifyKey: 'ask:bbbb', isOwn: true })
   const second = ask({ key: 'ask:three', notifyKey: 'ask:cccc', text: 'Merge it, OK?' })
   assert.deepEqual(serverNotifyDue([first, own, second], {}), [first, second])
-  const after = serverNotifyCheck([first, own, second], {}, now, false)
+  const after = serverNotifyCheck([first, own, second], {}, now, false, true)
   assert.deepEqual(after.due, [first, second])
   assert.equal(after.told['ask:aaaa'], now)
   assert.equal(after.told['ask:cccc'], now)
   assert.equal(after.told['ask:bbbb'], undefined)
   // Told once: the same questions are due no more.
-  assert.deepEqual(serverNotifyCheck([first, own, second], after.told, now + 1000, false).due, [])
+  assert.deepEqual(serverNotifyCheck([first, own, second], after.told, now + 1000, false, true).due, [])
 })
 
 test('when a page that opted in is open, the server only marks the question told', () => {
   const now = Date.parse('2026-11-08T12:00:00Z')
   const first = ask()
-  const after = serverNotifyCheck([first], {}, now, true)
+  const after = serverNotifyCheck([first], {}, now, true, true)
   assert.deepEqual(after.due, [])
   assert.equal(after.told['ask:aaaa'], now)
   // The page has seen it, so the server does not tell it again after the tab closes.
-  assert.deepEqual(serverNotifyCheck([first], after.told, now + 1000, false).due, [])
+  assert.deepEqual(serverNotifyCheck([first], after.told, now + 1000, false, true).due, [])
+})
+
+test('before any opt-in was seen, the server replays nothing already waiting', () => {
+  const now = Date.parse('2026-11-08T12:00:00Z')
+  const first = ask()
+  const before = serverNotifyCheck([first], {}, now, false, false)
+  assert.deepEqual(before.due, [])
+  assert.deepEqual(before.told, {})
+  // The first opted-in poll seeds the waiting question as told, so it still
+  // does not ping when the browser closes afterwards.
+  const seeded = serverNotifyCheck([first], before.told, now + 1000, true, true)
+  assert.deepEqual(seeded.due, [])
+  assert.equal(seeded.told['ask:aaaa'], now + 1000)
+  assert.deepEqual(serverNotifyCheck([first], seeded.told, now + 2000, false, true).due, [])
 })
 
 test('a question without a server key falls back to its board key', () => {
   const now = Date.parse('2026-11-08T12:00:00Z')
   const bare = ask({ notifyKey: undefined })
-  const after = serverNotifyCheck([bare], {}, now, false)
+  const after = serverNotifyCheck([bare], {}, now, false, true)
   assert.deepEqual(after.due, [bare])
   assert.equal(after.told['ask:one'], now)
 })

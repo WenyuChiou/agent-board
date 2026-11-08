@@ -103,7 +103,10 @@ test('the page notifies once per new waiting question, in every language, and a 
         assert.equal(await toggle.innerText(), s.notifyOffButton)
         assert.deepEqual(await notesOf(page), [])
         // The footer moves into the main column under 560px, so the toggle stays reachable on a phone.
+        // Wait for the reflow after the resize: an immediate isVisible() can catch the
+        // button while the layout is still settling (desktop run 2026-11-08, en only).
         await page.setViewportSize({ width: 375, height: 900 })
+        await toggle.waitFor({ state: 'visible' })
         assert.ok(await toggle.isVisible(), `${lang}: the notify toggle is reachable at phone width`)
         await page.setViewportSize({ width: 1440, height: 900 })
         // Opting in asks the browser once and seeds the already-waiting question: it is told, not notified.
