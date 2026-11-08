@@ -1828,12 +1828,14 @@ const settingsPortOf = (text: string | null): number | null => {
 }
 
 const savePort = (port: number): boolean => {
-  const file = settingsPath(path)
-  const next = withBoardSettings(read(file), { port })
-  if (next === null) return false
-  try { writeFileSync(file, next) } catch { return false }
-  settingsKept = { text: next, at: Date.now() }
-  return true
+  try {
+    const file = settingsPath(path)
+    const next = withBoardSettings(read(file), { port })
+    if (next === null) return false
+    writeFileSync(file, next)
+    settingsKept = { text: next, at: Date.now() }
+    return true
+  } catch { return false }
 }
 
 const readRunning = (file = serveFile()): Running | null => {
@@ -1953,7 +1955,6 @@ const serveChild = (): void => {
           const text = JSON.stringify({ pid: process.pid, port, url, path, built })
           if (process.platform === 'win32') writePrivateRuntimeFile(file, text)
           else writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
-          savePort(port)
         } catch (error) {
           // Another `--serve` that wrote first is the page, so that start stops quietly. Any other
           // failure says why, as a child whose folder check failed does, instead of stopping without
@@ -1963,6 +1964,7 @@ const serveChild = (): void => {
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') process.stderr.write(`${error instanceof RuntimeFolderTimeoutError || isTimeout(error) ? s.serveRuntimeCheckTimeout : isDenied ? s.serveRuntimeDenied : s.serveRuntimePrivate}\n`)
           return false
         }
+        savePort(port)
         // The one line `--serve` waits for. Its pipe closes once it has read it.
         process.stdout.on('error', () => undefined)
         process.stderr.on('error', () => undefined)

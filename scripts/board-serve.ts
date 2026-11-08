@@ -585,6 +585,7 @@ export const startServer = (o: ServeOptions): void => {
   const initial = o.port !== 0 ? o.port : (o.preferredPort ?? 0)
   const attempt = (at: number): void => {
     const fail = (error: NodeJS.ErrnoException): void => {
+      server.off('error', fail)
       server.removeAllListeners('listening')
       if (at !== 0 && o.port === 0) return attempt(0)
       try { messaging.close() } catch {}
