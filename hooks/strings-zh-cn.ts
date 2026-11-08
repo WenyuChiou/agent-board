@@ -125,7 +125,7 @@ export const ZH_CN: Strings = {
     "skill": "{host}：使用 agent-board 技能打开看板；暂无自动报告功能。",
     "plugin": "Claude Code：运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。",
     "board": "打开看板：{command}",
-    "thisWill": "这将会：",
+    "thisWill": "会做这几件事：",
     "question": "要设置这些吗？[Y/n] ",
     "filesPart": "{host} 设置文件",
     "trustPart": "在 {host} 批准看板的 hooks",

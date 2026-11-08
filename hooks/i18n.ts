@@ -163,7 +163,7 @@ export const ZH_TW = {
     "skill": "{host}：使用 agent-board 技能開啟看板；尚無自動回報功能。",
     "plugin": "Claude Code：執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。",
     "board": "開啟看板：{command}",
-    "thisWill": "這將會：",
+    "thisWill": "會做這幾件事：",
     "question": "要設定這些嗎？[Y/n] ",
     "filesPart": "{host} 設定檔案",
     "trustPart": "在 {host} 核准看板的 hooks",
