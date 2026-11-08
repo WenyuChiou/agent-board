@@ -16,8 +16,8 @@ export const settingsPanel = (s: Strings, language: SettingsLang, isLan = false)
   `<p id="settings-result" role="status" aria-live="polite" aria-atomic="true"></p></div></div>`
 
 export const settingsCss = `
-.settings-overlay{position:fixed;inset:0;z-index:40;display:grid;place-items:center;padding:16px;background:rgb(0 0 0 / .35)}
-.settings-panel{width:100%;max-width:420px;max-height:calc(100dvh - 32px);overflow-y:auto;min-width:0;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--radius-m);padding:var(--s4);box-shadow:0 8px 40px rgb(0 0 0 / .15)}
+.settings-overlay{position:fixed;inset:0;z-index:40;display:grid;place-items:center;padding:16px;background:var(--scrim)}
+.settings-panel{width:100%;max-width:420px;max-height:calc(100dvh - 32px);overflow-y:auto;min-width:0;background:var(--ground);border:1px solid var(--line-strong);border-radius:var(--radius-m);padding:var(--s4)}
 .settings-head{display:flex;align-items:center;justify-content:space-between;gap:var(--s2)}
 .settings-head h2{margin:0;font-size:var(--text-lg)}
 .settings-panel h3{margin:0 0 var(--s2);font-size:var(--text-md)}
@@ -25,8 +25,8 @@ export const settingsCss = `
 .settings-panel button,.settings-panel select{min-width:48px;min-height:48px;max-width:100%;font:inherit}
 .settings-panel select{width:100%;padding:0 var(--s2);background:var(--surface);color:var(--ink);border:1px solid var(--btn-line);border-radius:var(--radius-s)}
 .settings-choices{display:flex;flex-wrap:wrap;gap:var(--s2)}
-.settings-choices button,#settings-notify{display:flex;align-items:center;gap:var(--s2);padding:var(--s2) var(--s3);background:var(--surface);border:1px solid var(--btn-line);border-radius:var(--radius-s);cursor:pointer}
-.settings-choices button[aria-checked="true"],#settings-notify[aria-checked="true"]{background:var(--current);border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.settings-choices button,#settings-notifications button{display:flex;align-items:center;gap:var(--s2);padding:var(--s2) var(--s3);background:var(--surface);border:1px solid var(--btn-line);border-radius:var(--radius-s);cursor:pointer}
+.settings-choices button[aria-checked="true"],#settings-notifications button[aria-checked="true"]{background:var(--current);border-color:var(--ink)}
 .settings-label{margin:var(--s3) 0 var(--s2);color:var(--muted)}
 #settings-result{margin:var(--s3) 0 0;min-height:1.5em}
 #settings-result.alert{color:var(--alert)}
