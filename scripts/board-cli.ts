@@ -2021,7 +2021,8 @@ const showLan = async (url: string): Promise<void> => {
     return
   }
   const modules = qrModules(lanUrl)
-  process.stdout.write(`\n${s.serveLanAt(lanUrl)}\n${modules === null ? '' : `${qrText(modules, options().isColor)}\n`}`)
+  // The person shares this link on a network: say it is plain HTTP before they do (#1146).
+  process.stdout.write(`\n${s.serveLanAt(lanUrl)}\n${modules === null ? '' : `${qrText(modules, options().isColor)}\n`}${s.serveLanWarn}\n`)
 }
 
 interface RunningServer {
