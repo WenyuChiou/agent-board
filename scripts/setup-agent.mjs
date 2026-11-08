@@ -284,7 +284,7 @@ const askYes = () => {
     while (size < 4096) {
       let count
       try { count = readSync(fd, bytes, 0, bytes.length, null) } catch (error) {
-        if (error) return false
+        if (error?.code !== 'EAGAIN') return false
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
         continue
       }
