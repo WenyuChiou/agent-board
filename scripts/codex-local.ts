@@ -319,7 +319,7 @@ export const codexTrustOutput = (result: { changes: number; applied: boolean; fi
   return `${line}\n`
 }
 
-type LocalPlan = {
+export type LocalPlan = {
   agent: string
   progress: string
   changes: { file: string; action: string }[]
@@ -436,7 +436,7 @@ const filesByFolder = (mode: string, agent: string): boolean => mode === '--code
 
 // `planInput` is a plan the --plan-event step already turned into a report's input: the report then
 // runs as --report does and prints nothing, because Codex and Gemini read a hook's stdout as a decision.
-export const runCodexLocal = async (args: string[], boardPath: string, s: Strings, planInput?: Json): Promise<boolean> => {
+export const runCodexLocal = async (args: string[], boardPath: string, s: Strings, planInput?: Json, local?: { output: (value: unknown) => void; beforeApply?: (plan: LocalPlan) => void }): Promise<boolean> => {
   args = args.map(arg => arg === '--report' ? '--codex-report' : arg)
   const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event', '--mailbox'].find(one => args.includes(one))
   if (!mode) return false
@@ -560,7 +560,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (rest.some(arg => /["`$%!\\\r\n]/.test(arg))) return boardRun(process.argv[1]!, rest)
     return `${boardRun(process.argv[1]!)} ${rest.map(arg => /^[\w.:=/-]+$/.test(arg) ? arg : quote(arg)).join(' ')}`
   }
-  const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
+  const output = (value: unknown): void => {
+    if (local) local.output(value)
+    else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
+  }
 
   // Keep the connector as the sole writer for its agents, including its next automatic probe.
   if (activeConnection?.setup?.agents.some(one => one.agent === agent && one.hook === 'configured') && initial(manifestFile) === null) {
@@ -1448,7 +1451,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const executable = flag('--codex-bin')
     if (!executable) throw new Error('CODEX_BINARY_REQUIRED')
     const result = await trustCodex(executable, config, manifest.groups, args.includes('--apply'))
-    process.stdout.write(codexTrustOutput(result, s, args.includes('--json'), home))
+    if (local) output(result)
+    else process.stdout.write(codexTrustOutput(result, s, args.includes('--json'), home))
     return true
   }
   if (mode === '--hermes-trust') {
@@ -1533,6 +1537,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // Compare the bytes used to build the plan, not a fresh snapshot taken after
     // planning: another installer or host may have changed them in that interval.
     for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
+    local?.beforeApply?.(plan)
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue

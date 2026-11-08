@@ -4,10 +4,10 @@ import { spawnSync } from 'node:child_process'
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isatty } from 'node:tty'
-import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
 
-const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
 const args = process.argv.slice(2)
 // The npm launcher supplies its package name for the setup command in guidance.
 const command = process.env.AGENT_BOARD_SETUP_COMMAND || ''
@@ -241,23 +241,6 @@ const fail = (code, message, extra = {}) => { throw new SetupFailure(code, messa
 
 // Detect installed commands without starting them during setup. A bare name on Windows is left
 // out: cmd and PowerShell cannot start one, and npm's bare shim always has a .cmd beside it.
-const findOnPath = (commands, extensions = ['.exe', '.cmd', '.bat', '.com', '.ps1']) => {
-  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path')
-  const path = (pathKey ? process.env[pathKey] : '') || ''
-  const filenames = process.platform === 'win32' ? commands.flatMap(command => extensions.map(extension => `${command}${extension}`)) : commands
-  for (const entry of path.split(delimiter)) {
-    const directory = process.platform === 'win32' ? entry.replace(/^"(.*)"$/, '$1') : entry
-    if (!isAbsolute(directory)) continue
-    for (const name of filenames) {
-      const file = resolve(directory, name)
-      try {
-        const stat = statSync(file)
-        if (stat.isFile() && (process.platform === 'win32' || (stat.mode & 0o111) !== 0)) return file
-      } catch {}
-    }
-  }
-}
-
 // The folder Hermes Agent reads, chosen as Hermes does (keep in step with hooks/hermes-home.ts): HERMES_HOME,
 // else %LOCALAPPDATA%\hermes on Windows for the running account, else ~/.hermes.
 const hermesHome = home => {
@@ -303,16 +286,6 @@ const askYes = () => {
   return size > 0 && /^\s*(y|yes|是|好|對|对)?\s*$/i.test(Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0])
 }
 
-const hasPlugin = directory => {
-  const plugin = 'agent-board@agent-board'
-  const read = file => {
-    try { return JSON.parse(readFileSync(join(directory, file), 'utf8').replace(/^\uFEFF/, '')) } catch { return null }
-  }
-  const installed = read('plugins/installed_plugins.json')?.plugins?.[plugin]
-  return (Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === 'object')
-    || read('settings.json')?.enabledPlugins?.[plugin] === true
-}
-
 // npm supplies .cmd shims on Windows; quote each argument for cmd rather than enabling a shell for every program.
 // A plugin install fetches from GitHub, so a stuck one ends after three minutes and counts as failed.
 const runProgram = (program, argv) => {
@@ -331,24 +304,6 @@ const main = () => {
   const homeAt = args.indexOf('--home')
   const home = homeAt < 0 ? homedir() : args[homeAt + 1]
   if (!home || home.startsWith('--') || !selector || selector.startsWith('--')) fail('MISSING_ARGUMENT', missingValue)
-  const signs = {
-    codex: ['.codex'], cursor: ['.cursor'], opencode: ['.config/opencode'],
-    gemini: ['.gemini/settings.json'], grok: ['.grok/config.toml', '.grok/sessions'], muse: ['.config/muse'],
-    hermes: ['.hermes'], openclaw: ['.openclaw'], antigravity: ['.gemini/antigravity-cli', '.gemini/antigravity', '.gemini/antigravity-ide'], deepseek: ['.dsh'],
-  }
-  const commands = {
-    codex: ['codex'], cursor: ['cursor-agent', 'cursor'], opencode: ['opencode'], gemini: ['gemini'],
-    grok: ['grok'], muse: ['muse'], hermes: ['hermes'], openclaw: ['openclaw'],
-    antigravity: ['agy', 'antigravity'], deepseek: ['dsh'],
-  }
-  // Grok Build installs itself here and does not always add it to the PATH (board-serve.ts starts it
-  // from the same place). It sits in the home, so it counts with --home, and GROK_HOME does not move it.
-  const ownPrograms = { grok: join(home, '.grok', 'bin', process.platform === 'win32' ? 'grok.exe' : 'grok') }
-  const apps = process.platform === 'win32'
-    ? process.env.LOCALAPPDATA ? Object.fromEntries(Object.entries({ cursor: 'cursor', antigravity: 'Antigravity' }).map(([agent, folder]) => [agent, [join(process.env.LOCALAPPDATA, 'Programs', folder)]])) : {}
-    : process.platform === 'darwin'
-      ? Object.fromEntries(Object.entries({ codex: 'Codex', cursor: 'Cursor', antigravity: 'Antigravity' }).map(([agent, name]) => [agent, [join('/Applications', `${name}.app`), join(home, 'Applications', `${name}.app`)]]))
-      : {}
   const flag = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1] }
   const hostDirs = {
     codex: flag('--codex-dir') || process.env.CODEX_HOME,
@@ -360,12 +315,7 @@ const main = () => {
   }
   const data = flag('--data-dir') || join(home, '.agent-board')
   // --home can name another account's home; PATH and apps belong to the running account.
-  const selected = selector === 'all' ? targets : selector === 'auto' ? targets.filter(agent =>
-    (hostDirs[agent] ? existsSync(hostDirs[agent]) : signs[agent].some(sign => existsSync(join(home, sign))))
-    || existsSync(join(data, `install-${agent}.json`))
-    || (ownPrograms[agent] !== undefined && existsSync(ownPrograms[agent]))
-    || (homeAt < 0 && (findOnPath(commands[agent]) || apps[agent]?.some(app => existsSync(app)))),
-  ) : selector.split(',')
+  const selected = selector === 'all' ? targets : selector === 'auto' ? discoverSetupAgents(home, data, hostDirs, homeAt < 0) : selector.split(',')
   const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
   const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude'], ['.exe', '.cmd']) : undefined
   const hasClaude = existsSync(claudeDirectory) || (homeAt < 0 && !!claude)
@@ -424,15 +374,9 @@ const main = () => {
   }
   // Applying also rewrites the record of an installed agent that is not being set up, unselected or
   // skipped for a conflict, when it holds a shared file that changes, so the preview names it too.
-  const records = plan => targets.filter(other => !available.includes(other)).map(other => join(plan.data, `install-${other}.json`)).filter(file => {
-    try {
-      const held = JSON.parse(readFileSync(file, 'utf8')).files ?? {}
-      return plan.changes.some(change => Object.hasOwn(held, change.file))
-    } catch { return false }
-  })
   const filesByAgent = plans.map(plan => plan.conflicts.length ? [] : [
     ...plan.changes.map(change => change.file),
-    ...(!isShowingApplied ? records(plan) : []),
+    ...(!isShowingApplied ? setupRecordChanges(plan, available) : []),
   ])
   const owners = new Map()
   for (const [i, files] of filesByAgent.entries()) for (const file of files) {
