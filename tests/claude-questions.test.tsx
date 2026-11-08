@@ -194,6 +194,60 @@ test('a tool approval the person has waited on for 3 seconds shows a waiting ste
   expect(world.files.get(FILE) ?? '').not.toContain('native=')
 })
 
+test('a tool approval that waits behind an open question goes up once that question is answered (#1106)', async ($, on) => {
+  const world: World = { ...worldOf(), hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  let answer!: () => void
+  const answered = new Promise<void>(resolve => { answer = resolve })
+  let entered!: () => void
+  const asking = new Promise<void>(resolve => { entered = resolve })
+  on('tool.call', { tool: 'AskUserQuestion' }, async () => {
+    entered()
+    await answered
+    return { result: { answers: { 'Blue or green?': 'Blue' } } }
+  })
+  let approve!: () => void
+  const approved = new Promise<void>(resolve => { approve = resolve })
+  on('tool.call', { tool: 'Bash' }, async () => {
+    await approved
+    return { result: 'done' }
+  })
+  await start($, 'Update colors')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Check palette', description: '' })
+  const ask = $.tool.call({ tool: 'AskUserQuestion', tool_use_id: 'synthetic-held', questions: [{ question: 'Blue or green?', header: 'Color', options: [{ label: 'Blue', description: 'Blue palette' }, { label: 'Green', description: 'Green palette' }], multiSelect: false }] })
+  await asking
+  await $.tool.check({ ...(approval as object), tool_use_id: 'synthetic-behind' } as never)
+  const call = $.tool.call({ tool: 'Bash', tool_use_id: 'synthetic-behind', command: 'synthetic' })
+  try {
+    await clock.advance(3500)
+    // The open question keeps the board; the approval waits behind it.
+    expect(world.files.get(FILE) ?? '').toContain('- [?] Blue or green?')
+    expect(world.files.get(FILE) ?? '').not.toContain('Claude asks to run Bash')
+    answer()
+    await ask
+    await clock.advance(10)
+    const written = world.files.get(FILE) ?? ''
+    expect(written).not.toContain('- [?] Blue or green?')
+    expect(written).toContain('- [?] Claude asks to run Bash\n<!-- question=')
+    expect(written).toContain('<!-- native=claude -->')
+    // Later saves leave the raised step and its question token as they are.
+    const token = /<!-- question=([^ ]+) -->/.exec(written)?.[1]
+    await $.tool.call({ tool: 'TaskCreate', subject: 'Check contrast', description: '' })
+    await clock.advance(10)
+    const later = world.files.get(FILE) ?? ''
+    expect(later.split('Claude asks to run Bash').length).toBe(2)
+    expect(/<!-- question=([^ ]+) -->/.exec(later)?.[1]).toBe(token)
+  } finally {
+    answer()
+    approve()
+    await ask
+    await call
+  }
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').not.toContain('- [?]')
+})
+
 test('a tool approval answered within 3 seconds never reaches the board', async ($, on) => {
   const world: World = { ...worldOf(), hasTasks: true }
   const clock = engineBeneath(on, world)

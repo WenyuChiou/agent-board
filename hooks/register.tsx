@@ -98,7 +98,7 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, retainApproval, markApproval, toolQuestions, turnTools } from './digest'
+import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, retainApproval, markApproval, raiseApproval, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
 import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
@@ -220,6 +220,8 @@ const showApproval = async ($: EngineInterface, id: string, tool: string): Promi
   if (!pendingApprovals.has(id)) return
   hasApprovalStep = true
   approvalRevision += 1
+  // Another question may hold the board now: saveMine raises this step once that one clears (#1106).
+  readyApprovals.set(id, step)
   await saveMine($, one => pendingApprovals.has(id) ? markApproval(one, step) : one)
   await settle($)
 }
@@ -254,8 +256,13 @@ const finishApproval = async ($: EngineInterface): Promise<void> => {
 
 // No id means the turn or session ended, whatever approvals were pending.
 const dropApproval = async ($: EngineInterface, id?: string): Promise<void> => {
-  if (id === undefined) pendingApprovals.clear()
-  else pendingApprovals.delete(id)
+  if (id === undefined) {
+    pendingApprovals.clear()
+    readyApprovals.clear()
+  } else {
+    pendingApprovals.delete(id)
+    readyApprovals.delete(id)
+  }
   await finishApproval($)
 }
 
@@ -268,6 +275,8 @@ let isTurnRunning = false
 const APPROVAL_MS = 3000
 const pendingApprovals = new Map<string, string>()
 let hasApprovalStep = false
+// Approvals that have waited APPROVAL_MS, with their steps: one may sit behind another question until that one clears.
+const readyApprovals = new Map<string, string>()
 let approvalRevision = 0
 let isClosingApproval = false
 let receiver: Receiver | null = null
@@ -1927,7 +1936,10 @@ const saveMine = async (
 ): Promise<void> => {
   const { current, next } = await updateBackgroundMirror($, one => {
     const changed = change(one)
-    return hasApprovalStep ? retainApproval(one, changed) : changed
+    const kept = hasApprovalStep ? retainApproval(one, changed) : changed
+    // An approval that waited behind another question goes up on the first save after that one clears.
+    const ready = [...readyApprovals].find(([id]) => pendingApprovals.has(id))
+    return ready === undefined ? kept : raiseApproval(kept, ready[1])
   })
   if (next === null || current === null) return
   await $.store.set(`mirror:${next.sessionId}`, { ...next, board: boardTag(await progressPath($)) })
