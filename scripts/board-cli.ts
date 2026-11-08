@@ -924,17 +924,21 @@ const watchLaunch = (child: ChildProcess, onResult: (isOpen: boolean) => void): 
 // for every one of them. Start-Process returns as soon as the program exists, so with `graceMs` a
 // program that exits with an error within that time (no display, no sandbox) counts as not started
 // and the next one is tried, the way watchLaunch does it elsewhere. Start-Process reads -FilePath and
-// -WorkingDirectory as wildcards, so both are escaped.
+// -WorkingDirectory as wildcards, so a program's path and the folder are escaped. A page's address
+// is not: it never names a file, so Start-Process hands it to the shell as written, and an escaped
+// one would reach the browser with backticks in it.
 // PowerShell ends a single-quoted string at the curly quotes too, so each is doubled like '.
 const psLiteral = (value: string): string => `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'`
+const psWildcardLiteral = (value: string): string => `([Management.Automation.WildcardPattern]::Escape(${psLiteral(value)}))`
+const isAddress = (value: string): boolean => /^[a-z][a-z\d+.-]+:\/\//i.test(value)
 const windowsArgument = (value: string): string => `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
 type WindowsStartOptions = { isHidden?: boolean; env?: NodeJS.ProcessEnv; isPiped?: boolean; graceMs?: number }
 const windowsStart = (bins: string | string[], argv: string[], options: WindowsStartOptions = {}): ChildProcess => {
-  const programs = (Array.isArray(bins) ? bins : [bins]).map(psLiteral).join(', ')
+  const programs = (Array.isArray(bins) ? bins : [bins]).map(bin => isAddress(bin) ? psLiteral(bin) : psWildcardLiteral(bin)).join(', ')
   const argumentsPart = argv.length === 0 ? '' : ` -ArgumentList ${psLiteral(argv.map(windowsArgument).join(' '))}`
   const hiddenPart = options.isHidden ? ' -WindowStyle Hidden' : ''
   const gracePart = options.graceMs === undefined ? '' : ` if ($started.WaitForExit(${Math.round(options.graceMs)}) -and $started.ExitCode -ne 0) { [Console]::Error.WriteLine($program + ' exited with ' + $started.ExitCode); continue };`
-  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); foreach ($program in @(${programs})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath ([Management.Automation.WildcardPattern]::Escape($program))${argumentsPart} -WorkingDirectory ([Management.Automation.WildcardPattern]::Escape(${psLiteral(dirname(path))})) -PassThru${hiddenPart} } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) {${gracePart} [Console]::Out.WriteLine($started.Id) }; exit 0 }; exit 1`
+  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); foreach ($program in @(${programs})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program${argumentsPart} -WorkingDirectory ${psWildcardLiteral(dirname(path))} -PassThru${hiddenPart} } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) {${gracePart} [Console]::Out.WriteLine($started.Id) }; exit 0 }; exit 1`
   return spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
     cwd: dirname(path), stdio: options.isPiped ? ['ignore', 'pipe', 'pipe'] : 'ignore', windowsHide: true, env: options.env,
   })

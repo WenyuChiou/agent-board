@@ -5546,6 +5546,39 @@ test('Windows server startup releases Cursor pipes while its page stays running'
   } finally { await board.end([]) }
 })
 
+test('on Windows the page address reaches the shell exactly as served, with no wildcard escaping', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  const opened = join(board.dir, 'opened.txt')
+  const preload = join(board.dir, 'record-open.cjs')
+  // The launcher's own PowerShell runs, so its escaping is the real one, but Start-Process is swapped
+  // for a function that only notes -FilePath: no window opens on the tester's screen.
+  const needle = 'Microsoft.PowerShell.Management\\Start-Process'
+  const recorder = `function Record-Start { param($FilePath, $ArgumentList, $WorkingDirectory, [switch]$PassThru, $WindowStyle) [IO.File]::AppendAllText('${opened}', $FilePath + [Environment]::NewLine) }; `
+  writeFileSync(preload, `const cp = require('node:child_process')
+const spawn = cp.spawn
+cp.spawn = function (file, args, options) {
+  const at = Array.isArray(args) ? args.indexOf('-EncodedCommand') : -1
+  const command = at >= 0 ? Buffer.from(args[at + 1], 'base64').toString('utf16le') : ''
+  if (!command.includes(${JSON.stringify(needle)}) || command.includes('--serve-child')) return spawn.apply(this, arguments)
+  const copy = [...args]
+  copy[at + 1] = Buffer.from(${JSON.stringify(recorder)} + command.split(${JSON.stringify(needle)}).join('Record-Start'), 'utf16le').toString('base64')
+  return spawn.call(this, file, copy, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  let url = null
+  try {
+    const env = { ...board.env, AGENT_BOARD_TEST_PID: '', NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve'], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stdout}\n${stderr}`)) : done(stdout))))
+    url = board.urlOf(out)
+    assert.ok(url, out)
+    for (let tries = 0; !existsSync(opened) && tries < 50; tries++) await delay(100)
+    assert.deepEqual(readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean), [url], 'the address must not gain backticks')
+  } finally {
+    await board.end(url ? [url] : [])
+  }
+})
+
 test('a Windows page starts from a folder whose name holds a curly apostrophe, brackets and PowerShell text, and runs none of it', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
   const board = serveIn()
   // ’ ends a PowerShell single-quoted string as ' does, and Start-Process reads -WorkingDirectory as a wildcard.
