@@ -38,6 +38,10 @@ export type ServeOptions = {
   // What the server answers a second `--serve` with, so it can tell it is the same board.
   ping: Record<string, unknown>
   view: () => View
+  // A read-only view for a background check (#1014): the server notifier reads
+  // the board without recording anything as seen, so it must not rewrite the
+  // seen file. When absent, the notifier falls back to `view`.
+  viewQuiet?: () => View
   pending: (isFresh?: boolean) => PendingTurn[]
   // A tick or an archive, written the way the terminal board writes one: the line to show.
   act: (action: BoardAction) => string
@@ -312,17 +316,23 @@ export const startServer = (o: ServeOptions): void => {
   // survives the tab closing (the page is dropped from `pages` then), and it
   // is forgotten when the server restarts, the same way the page's opt-in is.
   let hasSeenOptIn = false
-  // Whether a page that opted in has polled recently: the page handles the
-  // question then, so the server stays quiet. A backgrounded tab polls about
-  // once a minute, so the window is the page-staleness one.
+  // Two poll intervals (6 s): a page that is open polls every 3 s, so a
+  // longer silence means it is gone, or backgrounded and throttled, in which
+  // case a system notification is still the right surface. The 150 s
+  // page-staleness window would delay the notification for minutes after the
+  // browser closes (the page-gone beacon is best-effort and may not land
+  // before the context is gone).
+  const NOTIFY_PAGE_RECENT_MS = 6_000
+  // Whether a page that opted in is open right now. The page handles the
+  // question then, so the server stays quiet.
   const notifyPagePresent = (now: number): boolean => {
-    for (const one of pages.values()) if (one.notify && now - one.at < PAGE_STALE_MS) return true
+    for (const one of pages.values()) if (one.notify && now - one.at < NOTIFY_PAGE_RECENT_MS) return true
     return false
   }
   // Whether any page at all has polled recently: the poll handler runs the
   // check on every poll, so the timer only needs to run when none has.
-  const anyPageRecent = (now: number): boolean => {
-    for (const one of pages.values()) if (now - one.at < PAGE_STALE_MS) return true
+  const anyPageRecent = (now: number, withinMs: number = PAGE_STALE_MS): boolean => {
+    for (const one of pages.values()) if (now - one.at < withinMs) return true
     return false
   }
   // Tell the person about the model's new waiting questions, unless a page
@@ -663,13 +673,15 @@ export const startServer = (o: ServeOptions): void => {
     const notifier = setInterval(() => {
       try {
         const now = Date.now()
-        if (anyPageRecent(now)) return
-        const view = o.view()
+        if (anyPageRecent(now, NOTIFY_PAGE_RECENT_MS)) return
+        // Read-only: nobody looked at the board, so this must not record
+        // anything as seen (#1014).
+        const view = (o.viewQuiet ?? o.view)()
         const state = messaging.snapshot(now, o.reports?.(false))
         const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
         checkServerNotify(serveModel(view, o.pending(false), o.s, sending, false, state, o.allowResume, group), now)
       } catch {}
-    }, 5_000)
+    }, 2_000)
     server.on('close', () => clearInterval(notifier))
   })
 }

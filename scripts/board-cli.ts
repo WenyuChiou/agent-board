@@ -533,7 +533,7 @@ let progressProjectCache: { source: string; projects: ReturnType<typeof parsePro
 let progressHealthCache: { source: string; isCutSettled: boolean; frozen: ReadonlySet<string>; isSnapshot: boolean; tail: ReturnType<typeof progressTail>; lines: string[] } | null = null
 const observeWriterQuestions = reusableQuestionObservation()
 const observeViewQuestions = reusableQuestionObservation()
-const readBoardView = (source: string, now: number) => {
+const readBoardView = (source: string, now: number, recordSeen = true) => {
   const pageState = sharedPageState()
   viewPageState = pageState
   for (const proof of [...pendingQuestionProofs.values()]) keepQuestionProof(proof.kind, proof.hash)
@@ -570,7 +570,10 @@ const readBoardView = (source: string, now: number) => {
     if (record !== null) {
       seen = record
       // Read-only output must never write a sidecar, even beside interactive flags.
-      if (!args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
+      // A background check (the server notifier, #1014) reads the same way: nobody
+      // looked at the board, so it must not record anything as seen, or it would
+      // rewrite a damaged seen file and unblock a sweep that should have skipped.
+      if (recordSeen && !args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
         let observed = withSeen(record, projects, now, {}, false, true)
         const wrote = rewrite(file, before => {
           const current = parseSeen(before, answeredAge(file))
@@ -696,14 +699,14 @@ const readBoardView = (source: string, now: number) => {
   return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, viewQuestions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
-const view = (source = read(path), now = Date.now()) => {
+const view = (source = read(path), now = Date.now(), recordSeen = true) => {
   isViewQuestionRead = true
-  try { return readBoardView(source, now) } finally { isViewQuestionRead = false }
+  try { return readBoardView(source, now, recordSeen) } finally { isViewQuestionRead = false }
 }
 
-const freshView = () => {
+const freshView = (recordSeen = true) => {
   const before = writes
-  const shown = view()
+  const shown = view(undefined, undefined, recordSeen)
   writes -= before
   return shown
 }
@@ -1886,6 +1889,9 @@ const serveChild = (): void => {
       ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
+      // A background check reads the board without recording anything as seen
+      // (#1014): the server notifier must not rewrite the seen file.
+      viewQuiet: () => freshView(false),
       pending: (isFresh = true) => pending(undefined, isFresh),
       act,
       tidy,
