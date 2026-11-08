@@ -5905,7 +5905,7 @@ export const LINES = [
 "  const working = event === \"UserPromptSubmit\";",
 "  const state = event === \"SessionStart\" ? previous?.state === \"ended\" ? \"waiting\" : previous?.state ?? \"waiting\" : event === \"SessionEnd\" ? previous?.state === \"done\" ? \"done\" : \"ended\" : working ? \"working\" : previous?.state === \"done\" && !isClosingQuestion ? \"done\" : \"waiting\";",
 "  const placeholder = codexLifecycleStep(state, s);",
-"  const held = previous === null ? [placeholder] : previous.steps.map((step, index) => index === 0 && isLifecycleStep(step) ? placeholder : step);",
+"  const held = !Array.isArray(previous?.steps) ? [placeholder] : previous.steps.map((step, index) => index === 0 && isLifecycleStep(step) ? placeholder : step);",
 "  const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined;",
 "  const approvalSteps = held.map((step, index) => event !== \"SessionStart\" && index === earlier ? step.replace(/^- \\[\\?\\] /, \"- [x] \") : step);",
 "  const { steps, asked, askedRevision } = questionSteps(approvalSteps, previous?.asked, working ? \"working\" : event === \"Stop\" ? state : \"ended\", event === \"Stop\" ? input.question : undefined, working && input.prompt_submitted === false, previous?.askedRevision);",

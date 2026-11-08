@@ -177,7 +177,7 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   // Keep the hook's own steps in place: the ledger needs to see their original words closed.
   // A session ending does not answer its last question, but it does end an approval.
   const placeholder = codexLifecycleStep(state, s)
-  const held = previous === null
+  const held = !Array.isArray(previous?.steps)
     ? [placeholder]
     : previous.steps.map((step, index) =>
         index === 0 && isLifecycleStep(step) ? placeholder : step

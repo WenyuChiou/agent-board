@@ -770,7 +770,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A reply that ends on a question waits for the person, even after the agent reported its own steps done.
       const state = isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' && !(typeof payload.question === 'string' && payload.question.trim() !== '') ? 'done' : status
       const placeholder = localAgentLifecycleStep(state, s)
-      const held = previous === null
+      const held = !Array.isArray(previous?.steps)
         ? [placeholder]
         : previous.steps.map((step, index) =>
             index === 0 && isLifecycleStep(step) ? placeholder : step
