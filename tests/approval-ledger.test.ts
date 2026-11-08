@@ -229,7 +229,8 @@ test('internal report validation allows only bounded owned extras and retains in
   expect(() => validateCodexReport({ ...report, approval: undefined }, session)).toThrow('INVALID_STEPS')
   expect(() => validateCodexReport({ ...report, state: 'invalid' as CodexReport['state'] }, session)).toThrow('INVALID_STATE')
   expect(() => validateCodexReport({ ...report, steps: ['not a step'] }, session)).toThrow('INVALID_STEP')
-  expect(() => codexReport(report, session, { ...input, steps: report.steps }, report.updated, words)).toThrow('INVALID_STEPS')
+  // Over forty user steps, the first forty are kept and the rest are reported as dropped, not refused (#1140).
+  expect(() => codexReport(report, session, { ...input, steps: report.steps }, report.updated, words)).not.toThrow()
 })
 
 test('identical Codex Stop replay keeps a resolved question closed but real asks renew it', () => {

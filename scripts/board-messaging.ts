@@ -24,6 +24,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     if (one.framingNonce !== undefined && (typeof one.framingNonce !== 'string' || !/^[0-9a-f]{32}$/.test(one.framingNonce)) || one.awaitsAck !== undefined && typeof one.awaitsAck !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
     if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
     messageId(one.turn)
     messageText(one.from, 300)

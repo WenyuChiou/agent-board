@@ -282,7 +282,11 @@ const run = async () => {
     // Chinese, and the log line keeps that fixed code. A refused report also passes it on, on a
     // line of its own, for the agent to correct (#217).
     const reason = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
-    if (reason && isReport) process.stderr.write('AGENT_BOARD_REASON ' + reason + '\\n')
+    if (reason && isReport) {
+      process.stderr.write('AGENT_BOARD_REASON ' + reason + '\\n')
+      const detail = reason === 'INVALID_STEP' ? /^AGENT_BOARD_DETAIL (".*")$/m.exec(result.stderr ?? '')?.[1] : undefined
+      if (detail && detail.length <= 1024) process.stderr.write('AGENT_BOARD_DETAIL ' + detail + '\\n')
+    }
     const failure = reason ? 'REPORTER_FAILED ' + reason : 'REPORTER_FAILED'
     // A report is answered to its agent, never queued. Any other event that failed is saved, so a failure nobody
     // foresaw (#241) costs a retry, not the event. A refusal of the event itself (INVALID_SESSION, say) would refuse

@@ -1,4 +1,4 @@
-import { boardClient, deliveryPrompt } from './message-client.mjs'
+import { ackLine, boardClient, deliveryPrompt } from './message-client.mjs'
 
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
@@ -25,15 +25,16 @@ export const attachAntigravitySession = async ({ boardUrl, transport, session, s
     if (!pending) return
     const step = value.step_update
     if (value.event === 'step_update' && step?.conversation_id === session && step.step_type === 'user_input' && step.state === 'DONE' && Number.isSafeInteger(step.step_index) && step.step_index > pending.step && !pending.acceptance) {
-      pending.acceptance = pending.accepted()
+      const attempt = pending
+      pending.acceptance = pending.accepted().then(() => { clearTimeout(attempt.timer) })
       void pending.acceptance.catch(pending.reject)
     }
     const result = value.result
     if (value.event !== 'result' || result?.conversation_id !== session || result.num_turns !== pending.before + 1 || !pending.acceptance) return
     if (result.status !== 'SUCCESS') { pending.reject(new Error('NATIVE_TURN_FAILED')); return }
     const response = String(result.response ?? '')
-    const ack = response.split(/\r?\n/).find(line => line === 'ACK ' + pending.nonce || line.startsWith('ACK ' + pending.nonce + ' '))
-    if (ack) pending.done(ack.length > 200 ? 'ACK ' + pending.nonce : ack)
+    const ack = ackLine(response, pending.nonce)
+    if (ack) pending.done(ack)
     else pending.reject(new Error('ACK_REQUIRED'))
     // Permission events and ordinary model text never answer native tool approvals.
   })
@@ -47,7 +48,7 @@ export const attachAntigravitySession = async ({ boardUrl, transport, session, s
       let timer
       const answer = new Promise((done, reject) => {
         timer = setTimeout(() => reject(new Error('ACK_TIMEOUT')), 60000)
-        pending = { nonce: message.nonce, before: current.turns, step: current.step, done, reject, accepted, acceptance: null }
+        pending = { nonce: message.nonce, before: current.turns, step: current.step, done, reject, accepted, acceptance: null, timer }
       })
       void answer.catch(() => undefined)
       const attempt = pending

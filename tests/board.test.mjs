@@ -7170,7 +7170,7 @@ test('with --lan the page also opens on the local network, with a token of its o
   }
 })
 
-test("--serve --lan prints the page's network address and a QR code of it, and a second run gives the same address", { timeout: 60_000 }, async t => {
+test("--serve --lan prints the page's network address, a QR code of it and that the link is unencrypted, and a second run gives the same address", { timeout: 60_000 }, async t => {
   const board = serveIn()
   const urls = []
   const serveLan = () =>
@@ -7187,6 +7187,8 @@ test("--serve --lan prints the page's network address and a QR code of it, and a
     }
     // NO_COLOR: the light modules are the ink, so the code's quiet zone prints as solid lines.
     assert.match(out, /scan this code:\n█{29,}\n█{29,}\n/)
+    // The link is plain HTTP on a shared network, and the output says so (#1146).
+    assert.ok(out.includes(EN.serveLanWarn), out)
     assert.ok(!out.includes('\u001b['))
     const again = await serveLan()
     assert.ok(again.includes(urls[0]), again)
@@ -10055,7 +10057,7 @@ test("the agent row shows each agent's counts and filters the page to that agent
     assert.ok(!sectionWords(dom, 'working').includes('Unblock'), sectionWords(dom, 'working'))
     // An agent with nothing waiting says so; pressing the icon again shows every agent again.
     rowAgent(dom, 'own').click()
-    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestions(EN.pgOwn)), shownWords(dom.node('needs')))
+    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestionsElsewhere(EN.pgOwn, model.view.needs.n)), shownWords(dom.node('needs')))
     rowAgent(dom, 'own').click()
     const all = shownWords(dom.node('needs'))
     assert.ok(all.includes('Blue or green?') && all.includes('Short or detailed?'), all)
@@ -10993,6 +10995,25 @@ test('picking a view shows only that section', async () => {
   } finally { await board.close() }
 })
 
+test('with a project filter on, an empty Needs you says how many questions wait elsewhere, not that nothing needs you (#1144)', async () => {
+  const { board, model, html } = await projectBoard()
+  try {
+    const dom = await pageDom(html, model, { width: 1280 })
+    assert.equal(dom.node('count-needs').textContent, '3')
+    sideProject(dom, 'other-fix-project').click()
+    const needs = shownWords(dom.node('needs'))
+    assert.ok(needs.includes(EN.pgNoQuestionsElsewhere('other-fix-project', 3)), needs)
+    assert.ok(!needs.includes(EN.pgNothing), needs)
+    assert.ok(needs.includes(EN.clearFilters), needs)
+    // The project that holds the questions shows them, with no empty line at all.
+    sideProject(dom, 'other-fix-project').click()
+    sideProject(dom, 'shared-fix-project').click()
+    const shared = shownWords(dom.node('needs'))
+    assert.ok(shared.includes('Blue or green?'), shared)
+    assert.ok(!shared.includes(EN.pgNoQuestions('shared-fix-project')) && !shared.includes('more wait elsewhere'), shared)
+  } finally { await board.close() }
+})
+
 test('a project and an agent filter combine', async () => {
   const { board, model, html } = await projectBoard()
   try {
@@ -11013,7 +11034,7 @@ test('a project and an agent filter combine', async () => {
     // A project the pressed agent has nothing in says so; each filter clears on its own.
     sideProject(dom, 'other-fix-project').click()
     assert.deepEqual(open(), ['', '', ''])
-    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestions(EN.agentNames.cursor)), shownWords(dom.node('needs')))
+    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestionsElsewhere(EN.agentNames.cursor, 3)), shownWords(dom.node('needs')))
     sideProject(dom, 'other-fix-project').click()
     assert.equal(sideProject(dom, 'other-fix-project').getAttribute('aria-pressed'), 'false')
     assert.deepEqual(open(), ['1', '', ''])

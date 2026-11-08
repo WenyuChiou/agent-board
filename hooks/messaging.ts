@@ -20,6 +20,8 @@ export type Message = {
   updated: number
   reply: string
   error: string
+  // Preserves acceptance when a later receipt changes the delivery to uncertain.
+  hasAccepted?: boolean
   hops: number
   claimed: number
   nonce: string
@@ -84,7 +86,7 @@ export const isOpen = (one: Pick<Message, 'status' | 'error'>): boolean => !isFi
 const settled = (one: Message): Message => isFinished(one) && (one.text !== '' || one.reply.length > ACK_MAX) ? { ...one, text: '', reply: one.reply.slice(0, ACK_MAX) } : one
 export const pruneMessages = (state: MessageState, now: number): MessageState => {
   const kept = state.messages.filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(one => settled(
-    ['uncertain', 'accepted'].includes(one.status) && !isFinished(one) && now - one.updated > OPEN_LIMIT_MS
+    (one.status === 'uncertain' || one.status === 'accepted' && (one.error !== '' || isMailboxTarget(one.target))) && !isFinished(one) && now - one.updated > OPEN_LIMIT_MS
       ? { ...one, status: 'uncertain' as const, error: 'EXPIRED', updated: now } : one))
   // Past the count, the oldest finished go first; their ids can then be used again. Two kinds wait for
   // the age limit instead: a message handed out and then expired or dismissed, since the page sends its
@@ -236,7 +238,7 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
     return state
   }
   if (one.status === 'accepted' && status === 'accepted' && one.reply === reply) return state
-  return { ...state, messages: state.messages.map(message => message === one ? settled({ ...one, status, reply, error, updated: now }) : message) }
+  return { ...state, messages: state.messages.map(message => message === one ? settled({ ...one, status, reply, error, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
 }
 export const disconnectMessages = (state: MessageState, target: string, now: number): MessageState => ({
   ...state,

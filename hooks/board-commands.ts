@@ -57,7 +57,7 @@ export const LEGACY_BOARD_PROMPTS = [
 ]
 
 export const boardRequestWords = (strings: readonly Strings[]): string[] => [...strings, ...LEGACY_BOARD_PROMPTS].flatMap(s =>
-  [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''),
+  [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1).flatMap(words => [words, words.split('\n\n')[0] ?? words]), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''),
 )
 
 export const boardPromptText = (value: unknown, depth = 0): string => {

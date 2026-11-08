@@ -28,7 +28,7 @@ import { address, isMailboxTarget, isOpen } from './messaging'
 // that Claude Code session; none: copied, then pasted into the agent's chat.
 export type SendMode = 'send' | 'connected' | 'mailbox' | 'open' | 'claude' | 'none'
 type Delivery = { id: string; turn: string; agent: string }
-type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text'> & { when: string; isMailbox: boolean }
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted'> & { when: string; isMailbox: boolean }
 type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly Omit<Message, 'nonce' | 'hash'>[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
@@ -41,12 +41,19 @@ const reachable = (agent: string, session: string | undefined, target: AgentTarg
   return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
 }
 const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[], now: number, s: Strings, answers?: string): { receipt?: Receipt } => {
-  // A kept question is found by the one message the board sent to answer it; a message with no such link is no
-  // receipt for it. Only the board sets that link, so the question id alone names the message.
-  const one = answers !== undefined ? messages.filter(message => message.answers === answers).at(-1)
-    : session === undefined ? undefined : messages.filter(message => message.to === address(agent || 'claude', session)).at(-1)
-  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
+  // A kept question (no live session here) is found by the one message the board sent to answer it; a message
+  // with no such link is no receipt for it. Only the board sets that link, so the question id alone names the
+  // message. On a live question's card, an answer to another question is no receipt for this one (#725), while
+  // a message that answers no question still is.
+  const to = session === undefined ? undefined : address(agent || 'claude', session)
+  const one = to === undefined
+    ? answers === undefined ? undefined : messages.filter(message => message.answers === answers).at(-1)
+    : messages.filter(message => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1)
+  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...(one.hasAccepted === true ? { hasAccepted: true } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
+// The person's answer to this question reached its session: the session took it, or replied.
+const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
+  messages.some(message => message.answers === questionId && (message.status === 'acknowledged' || message.status === 'accepted' && message.error === '' || message.status === 'uncertain' && message.hasAccepted === true))
 const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerCase() === 'claude'
 // What pressing Send does right now, for a Claude session that is receiving (#316).
 const claudeHint = (agent: string, isWorking: boolean, s: Strings): string => !isClaudeAgent(agent) ? '' : isWorking ? s.claudeSendWorking : s.claudeSendNow
@@ -367,6 +374,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   for (const item of items) {
     if (item.type === 'ask') {
       const { ask } = item
+      // A question gone from its agent's report is kept until it is answered; one the person answered
+      // here, and its session took, needs nothing more from the person.
+      if (!isLan && ask.key.startsWith('retained::') && ask.questionId !== undefined && isAnswerHanded(messaging?.messages ?? [], ask.questionId)) continue
       const isManual = ask.where === 'manual'
       const connection = isManual || isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)
       const isContested = !isManual && !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (ask.agent || 'claude') && one.session === ask.nativeSession) ?? false)
@@ -379,7 +389,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
-        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s)),
+        // A question the board knows gets the receipt of the answer sent to it, not of an earlier message
+        // to the same session.
+        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId)),
         key: item.key,
         ...(ask.questionId === undefined ? {} : { questionId: ask.questionId }),
         project: ask.project,
@@ -752,7 +764,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendNow', 'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveQueueNextTurn', 'serveNextTurnHint', 'serveQueueNextOpen', 'serveNextOpenHint', 'messagesHandedNextTurn', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'serveQueueNextTurn', 'serveNextTurnHint', 'serveQueueNextOpen', 'serveNextOpenHint', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -766,7 +778,7 @@ const PAGE_WORDS = [
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -1502,7 +1514,8 @@ const PAGE_SCRIPT = String.raw`
     if (!receipt) return null;
     clearEnqueueResult(key, receipt);
     if (!agent || String(agent).toLowerCase() === 'claude') return claudeReceipt(receipt, key, canSend);
-    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: receipt.isMailbox ? 'messagesHandedNextTurn' : 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
+    // DeepSeek is handed the message the moment it is idle, not at a turn it starts later (#725).
+    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : String(agent).toLowerCase() === 'deepseek' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     // A mailbox message that was handed over gets no ACK, so its id is done with here: the next send is a new message.
     if (receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
     // The server already took a nonce ACK off; a receipt kept from a version 1 store was
@@ -1510,9 +1523,11 @@ const PAGE_SCRIPT = String.raw`
     var reply = receipt.reply || '';
     var ack = 'ACK ' + receipt.id;
     if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
-    var isFailed = receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error);
-    var labelKey = receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error)
+    var isFailed = receiptFailed(receipt);
+    var isAcceptedUnconfirmed = receipt.status === 'uncertain' && receipt.hasAccepted === true;
+    var labelKey = isFailed && receipt.status === 'uncertain'
       ? 'messagesTimeout'
+      : isAcceptedUnconfirmed ? 'messagesAcceptedUnconfirmed'
       : receipt.status === 'accepted' && !receipt.isMailbox && receipt.error === 'DISCONNECTED'
         ? 'messagesAcceptedDisconnected'
         : labels[receipt.status];
@@ -1537,8 +1552,10 @@ const PAGE_SCRIPT = String.raw`
     var draftKey = input.getAttribute('data-key');
     // Cursor ignores what a hook gives it at a prompt, so its mailbox waits for the chat to open.
     var isOpenOnly = String(agent).toLowerCase() === 'cursor';
+    // DeepSeek's plugin takes its mailbox's message at once and wakes the session (#725): a plain Send, no Copy.
+    var isAtOnce = String(agent).toLowerCase() === 'deepseek';
     var go = mode === 'send' || mode === 'connected' || mode === 'mailbox'
-      ? button(w(mode === 'mailbox' ? (isOpenOnly ? 'serveQueueNextOpen' : 'serveQueueNextTurn') : 'serveSend', mode === 'connected' && (!agent || String(agent).toLowerCase() === 'claude') ? 'Claude' : agentName(agent)), function () {
+      ? button(w(mode === 'mailbox' && !isAtOnce ? (isOpenOnly ? 'serveQueueNextOpen' : 'serveQueueNextTurn') : 'serveSend', mode === 'connected' && (!agent || String(agent).toLowerCase() === 'claude') ? 'Claude' : agentName(agent)), function () {
         var text = input.value.trim();
         if (!text) { say(w('pressEmpty'), 'alert', key); return; }
         // The same text goes again through the same path; the box keeps it until it was sent.
@@ -1563,7 +1580,7 @@ const PAGE_SCRIPT = String.raw`
     if (where) add(footer, el('div', 'where', where));
     if (extras && extras.onCancel) add(footer, navButton(w('pgCancel'), extras.onCancel));
     add(box, input, add(footer, go));
-    if (mode === 'mailbox') {
+    if (mode === 'mailbox' && !isAtOnce) {
       add(footer, button(w('pgCopyAnswer'), function () {
         var text = input.value.trim();
         if (text) copy(text, key); else say(w('pressEmpty'), 'alert', key);
@@ -1616,7 +1633,8 @@ const PAGE_SCRIPT = String.raw`
   // A row with a due date and no age (a hand-kept task) shows the date where the age would be; an
   // agent's row keeps its age, so how fresh its status is stays on the row.
   function dueOf(ref) { var one = source(ref); return one.when ? '' : clean(one.due || ''); }
-  function ageOf(ref) { return clean(source(ref).when || w('pgUnknownAge')); }
+  // A hand-kept task has no time of its own, so it shows none rather than "Unknown time" (#1145).
+  function ageOf(ref) { return clean(source(ref).when || (agentOf(ref) === 'own' ? '' : w('pgUnknownAge'))); }
   // 'own' for the person's hand-kept tasks, '?' for a finished task whose agent the model did not say.
   function agentOf(ref) { return source(ref).isOwn || ref.isOwn ? 'own' : ref.agent || '?'; }
   function markOf(ref) {
@@ -1640,12 +1658,15 @@ const PAGE_SCRIPT = String.raw`
   // The agent filter (icon row or sidebar) and the project filter (sidebar) both apply; either may be empty.
   function matchesAgent(id) { return !pg.filter || pg.filter === id; }
   function matches(id, project) { return matchesAgent(id) && (!pg.project || pg.project === project); }
+  function receiptFailed(receipt) {
+    return !!receipt && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error || ''));
+  }
   // A sent answer is on its way: its card stays on the sheet with its line, but it no longer waits for the person.
   // A message that timed out or was refused waits for the person again.
   function isSent(ref) {
     var one = source(ref);
     var receipt = one.receipt;
-    var isFailed = !!receipt && (receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error || ''));
+    var isFailed = receiptFailed(receipt);
     return one.isSending === true && !isFailed;
   }
   function byTime(a, b) { return (b.at || 0) - (a.at || 0); }
@@ -2339,10 +2360,13 @@ const PAGE_SCRIPT = String.raw`
     });
     setText(pg.nodes.needsCount, count.cards);
     if (pg.nodes.needsCount) pg.nodes.needsFlag.setAttribute('data-needs-count', String(count.cards));
-    setText(pg.nodes.needsText, pg.filter ? w('pgNoQuestions', nameOf(pg.filter)) : w('pgNothing'));
-    setText(pg.nodes.needsSub, pg.filter ? '' : w('pgNothingHint'));
-    reveal(pg.nodes.needsEmpty, count.shown === 0);
     var isFiltered = !!(pg.filter || pg.project);
+    // A filter that hides every question must not read as "nothing needs you" while some wait elsewhere (#1144).
+    var scope = pg.filter ? nameOf(pg.filter) : pg.project;
+    var elsewhere = isFiltered ? Math.max(0, (pg.waitingNow || 0) - count.cards) : 0;
+    setText(pg.nodes.needsText, !isFiltered ? w('pgNothing') : elsewhere > 0 ? w('pgNoQuestionsElsewhere', scope, elsewhere) : w('pgNoQuestions', scope));
+    setText(pg.nodes.needsSub, isFiltered ? '' : w('pgNothingHint'));
+    reveal(pg.nodes.needsEmpty, count.shown === 0);
     pg.nodes.needsClear = clearFilters(pg.nodes.needsEmpty, pg.nodes.needsClear, isFiltered);
     // The Other work view says so when it has nothing, here or on the Stopped shelf; Overview leaves the empty section out.
     setText(pg.nodes.othersText, isFiltered ? w('pgNoOthersFor', pg.filter ? nameOf(pg.filter) : pg.project) : w('pgNoOthers'));

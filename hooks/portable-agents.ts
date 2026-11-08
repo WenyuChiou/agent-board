@@ -1,8 +1,9 @@
 import { STRINGS } from './strings'
 import { HOOK_VERSION, HOOK_WORKER_GRACE, hookGuardSource, hookTimeout } from './hook-safety'
+import { deepseekReceiverSource } from './receivers/deepseek'
 
-// Native metadata observers only. No conversation grant, transcript read, model call
-// or receiving connection is installed by these generated plugins.
+// Native metadata observers. No conversation grant, transcript read or model call is installed by these
+// generated plugins; DeepSeek's alone also receives a board message for its session (hooks/receivers/deepseek.ts).
 const runner = (node: string, script: string, progress: string, agent: string, home: string): string => `import { spawnSync } from 'node:child_process'
 ${hookGuardSource(home, agent)}
 const report = (mode, payload, deadline, session, cwd) => {
@@ -14,7 +15,12 @@ const report = (mode, payload, deadline, session, cwd) => {
   if (result.error?.code === 'ETIMEDOUT') throw Error('HOOK_TIMEOUT')
   // A refused report names the board's reason (INVALID_STEP, say), so the model can correct it.
   const reason = result.error ? undefined : /^AGENT_BOARD_REASON ([A-Z][A-Z0-9_]{2,63})$/m.exec(result.stderr ?? '')?.[1]
-  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason : 'AGENT_BOARD_REPORT_FAILED')
+  let detail
+  if (reason === 'INVALID_STEP') {
+    try { detail = JSON.parse(/^AGENT_BOARD_DETAIL (".*")$/m.exec(result.stderr ?? '')?.[1] ?? 'null') } catch {}
+  }
+  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason + (typeof detail === 'string' ? ': ' + detail : '') : 'AGENT_BOARD_REPORT_FAILED')
+  return result.stdout
 }
 `
 
@@ -78,8 +84,8 @@ export default {
             const payload = { steps: params.steps }
             if (typeof params.title === 'string') payload.title = params.title
             if (['working', 'waiting', 'done', 'ended'].includes(params.state)) payload.state = params.state
-            report('--codex-report', payload, Date.now() + ${hookTimeout('openclaw') - 1000}, session)
-            return { content: [{ type: 'text', text: 'OK' }], details: {} }
+            const result = report('--codex-report', payload, Date.now() + ${hookTimeout('openclaw') - 1000}, session)
+            return { content: [{ type: 'text', text: payload.steps.length > 40 ? result : 'OK' }], details: {} }
           } catch (error) {
             hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
             throw error
@@ -104,8 +110,10 @@ export default {
 // the board page or write progress.md from there. This plugin runs in the dsh process, outside that
 // sandbox, and gives the agent one tool, agent_board, for both. The tool is bound to the session the
 // host gives it (its id and folder); no hook that receives the prompt, messages or model is registered.
+// A board answer for a root session reaches that session directly, with no Copy (#725).
 export const deepseekLocalPlugin = (node: string, script: string, progress: string, home: string, board: string, description = STRINGS.en.deepseekBoardTool, stepFormat = STRINGS.en.localAgentStepFormat): string => `${runner(node, script, progress, 'deepseek', home)}
 import { spawn } from 'node:child_process'
+${deepseekReceiverSource(node, board, progress, home)}
 export const name = 'agent-board-local'
 const folderOf = agent => {
   const cwd = agent?.session?.header?.cwd
@@ -139,12 +147,20 @@ const openBoard = () => new Promise((resolve, reject) => {
 })
 export const apply = ctx => {
   const save = (agent, state) => withHook((_current, deadline) => report('--agent-status', { session_id: agent.session.header.id, state, ...folderOf(agent) }, deadline))
-  ctx.on('agent/created', ({ agent }) => { save(agent, agent.status === 'running' ? 'working' : 'waiting') })
+  const receiver = mailboxReceiver()
+  ctx.on('agent/created', ({ agent }) => {
+    save(agent, agent.status === 'running' ? 'working' : 'waiting')
+    receiver.add(agent)
+  })
   ctx.on('agent/status', ({ agent, status }) => {
     if (!['running', 'idle'].includes(status)) return
     save(agent, status === 'running' ? 'working' : 'waiting')
+    if (status === 'idle') receiver.idle(agent)
   })
-  ctx.on('agent/disposed', ({ agent }) => { save(agent, 'ended') })
+  ctx.on('agent/disposed', ({ agent }) => {
+    save(agent, 'ended')
+    receiver.remove(agent)
+  })
   // Tools are optional: a host without the service still gets the lifecycle events above.
   if (typeof ctx.inject !== 'function') return
   // The shape that defineTool of @deepseek-ai/dsh-tools returns, built by hand: a plugin loaded by file
@@ -176,8 +192,8 @@ export const apply = ctx => {
         const payload = { steps: args.steps }
         if (typeof args.title === 'string') payload.title = args.title
         if (['working', 'waiting', 'done', 'ended'].includes(args.state)) payload.state = args.state
-        report('--codex-report', payload, Date.now() + 20000, header.id)
-        return { text: 'OK' }
+        const result = report('--codex-report', payload, Date.now() + 20000, header.id)
+        return { text: payload.steps.length > 40 ? result : 'OK' }
       } catch (error) {
         hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
         throw error

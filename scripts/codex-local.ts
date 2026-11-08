@@ -438,7 +438,7 @@ const filesByFolder = (mode: string, agent: string): boolean => mode === '--code
 // runs as --report does and prints nothing, because Codex and Gemini read a hook's stdout as a decision.
 export const runCodexLocal = async (args: string[], boardPath: string, s: Strings, planInput?: Json): Promise<boolean> => {
   args = args.map(arg => arg === '--report' ? '--codex-report' : arg)
-  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event'].find(one => args.includes(one))
+  const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event', '--mailbox'].find(one => args.includes(one))
   if (!mode) return false
   const flag = (name: string): string | undefined => {
     const index = args.indexOf(name)
@@ -496,6 +496,33 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const connectorProgress = activeConnection === undefined ? undefined : activeConnection.connectedProgress ?? join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'progress.md')
   const storedProgress = loaded.progress ?? otherManifests.find(one => typeof one.progress === 'string')?.progress ?? connectorProgress
   const progress = localProgressPath(flag('--progress-file'), mode === '--codex-setup' ? join(root, 'progress.md') : boardPath, storedProgress)
+  // DeepSeek's plugin runs in the dsh process and hands a board message to its idle session itself (#725):
+  // it takes the session's next message here (which also keeps the session's mailbox open, so its card
+  // has a Send box), gives it to the session, then marks it delivered here. `watch` is the folder whose
+  // messages.json changes when the board queues a message.
+  if (mode === '--mailbox') {
+    const action = flag('--mailbox'), session = flag('--session')
+    if (agent !== 'deepseek' || session === undefined || !['take', 'accept', 'end'].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
+    const directory = defaultMessagesDirectory(progress, home, process.env, process.platform)
+    const mailbox = hookMailbox(directory, 5000)
+    const answer = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value)}\n`) }
+    if (action === 'take') {
+      const message = await mailbox.turn(agent, session, 'dsh', Date.now())
+      // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
+      const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
+      const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
+      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary } })
+    } else if (action === 'accept') {
+      const id = flag('--id'), nonce = flag('--nonce')
+      if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
+      await mailbox.accept(agent, session, id, nonce, Date.now())
+      answer({ ok: true })
+    } else {
+      await mailbox.end(agent, session, Date.now())
+      answer({ ok: true })
+    }
+    return true
+  }
   // Hermes Agent reads its hooks from config.yaml and its trust answers from shell-hooks-allowlist.json, both in its home (#1115).
   const hermesDir = resolve(flag('--hermes-dir') ?? hermesHome(home, sep, process.env, process.platform))
   const configs: Partial<Record<LocalAgent, string>> = {
@@ -616,7 +643,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? agent === 'antigravity'
           ? (typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID)
           : payload.session_id ?? payload.sessionId ?? payload.sessionID ?? (agent === 'grok' ? env.GROK_SESSION_ID : undefined)
-        : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : (env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined) ?? (agent === 'hermes' ? env.HERMES_SESSION_ID || undefined : undefined) ?? reportSession())
+        : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : (env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined) ?? (agent === 'hermes' ? env.HERMES_SESSION_ID || undefined : undefined) ?? (agent === 'grok' ? env.GROK_SESSION_ID || undefined : undefined) ?? reportSession())
       if (session === undefined && mode === '--codex-report') throw new Error('UNBOUND_REPORT')
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
       const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
@@ -657,7 +684,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
-    const isInferredReport = mode === '--codex-report' && flag('--session') === undefined && (agent === 'codex' ? process.env.CODEX_THREAD_ID === undefined : !(process.env.AGENT_BOARD_AGENT === agent && process.env.AGENT_BOARD_SESSION_ID !== undefined) && !(agent === 'hermes' && process.env.HERMES_SESSION_ID))
+    const isInferredReport = mode === '--codex-report' && flag('--session') === undefined && (agent === 'codex' ? process.env.CODEX_THREAD_ID === undefined : !(process.env.AGENT_BOARD_AGENT === agent && process.env.AGENT_BOARD_SESSION_ID !== undefined) && !(agent === 'hermes' && process.env.HERMES_SESSION_ID) && !(agent === 'grok' && process.env.GROK_SESSION_ID))
     const rawEntry = (raw: Json): Pending => {
       if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
       if (!Array.isArray(raw.argv) || !raw.argv.every(value => typeof value === 'string')) throw new Error('INVALID_RAW_ARGV')
@@ -705,6 +732,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     let isFirstSessionEvent = false
     let reportCut = 0
+    let reportDropped = 0
     const apply = (entry: Pending): CodexReport => {
       const { mode, agent, session, now, at, status, event, folder = '', folderDigest, folderCanonicalDigest, isBoardPrompt, payload, run } = entry
       const owner = hash(`${agent}:${session}`)
@@ -778,7 +806,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
       const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
-      if (entry === current) reportCut = cut
+      if (entry === current) {
+        reportCut = cut
+        reportDropped = mode === '--codex-report' && Array.isArray(given.steps) ? Math.max(0, given.steps.length - 40) : 0
+      }
       const saveFullText = (): void => {
         if (entries.length === 0) return
         const now = Date.parse(clock)
@@ -1064,7 +1095,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     if (mode === '--codex-report' && planInput !== undefined) return true
-    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress, cut: reportCut })
+    if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress, cut: reportCut, dropped: reportDropped })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})
     else if (agent === 'antigravity') {
       // The host supplies the binding; the agent supplies semantic summaries. A first

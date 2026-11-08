@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { boardClient, deliveryPrompt } from './message-client.mjs'
+import { ackLine, boardClient, deliveryPrompt } from './message-client.mjs'
 import { openWebSocketStdio } from './ws-stdio.mjs'
 
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
@@ -62,8 +62,8 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
       if (p?.threadId !== thread || (p.turnId ?? p.turn?.id) !== turn) return
       if (value.method === 'item/completed' && p.item?.type === 'agentMessage' && typeof p.item.text === 'string') {
         for (const [id, ack] of acknowledgements) {
-          const line = p.item.text.split(/\r?\n/).find(line => line === 'ACK ' + id || line.startsWith('ACK ' + id + ' '))
-          if (line) { clearTimeout(ack.timer); acknowledgements.delete(id); ack.done(line.length > 200 ? 'ACK ' + id : line) }
+          const line = ackLine(p.item.text, id)
+          if (line) { clearTimeout(ack.timer); acknowledgements.delete(id); ack.done(line) }
         }
       }
       if (value.method === 'turn/completed') {
@@ -116,6 +116,7 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
           const result = await request('turn/steer', { threadId: thread, expectedTurnId: turn, input: [{ type: 'text', text: prompt, text_elements: [] }] })
           if (result.turnId !== turn) throw new Error('TURN_MISMATCH')
           await accepted()
+          clearTimeout(ackEntry.timer)
           return await answer
         } catch (error) {
           clearTimeout(ackEntry.timer); acknowledgements.delete(message.nonce)

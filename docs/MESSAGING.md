@@ -141,8 +141,12 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 An ACK proves receipt, not successful completion of the requested task. An adapter must
 never manufacture an ACK from an RPC success or a file write. Synthetic adapters in tests
 are labelled synthetic. No live model or desktop acceptance is inferred from those tests.
-An adapter timeout after transport acceptance is persisted as `uncertain` with a bounded
-error code (for example `ACK_TIMEOUT`); it does not stay indefinitely labelled accepted.
+An accepted delivery keeps waiting for its ACK after the adapter's initial timeout, until the
+turn completes or the connection closes. A later ACK acknowledges the same message; a timeout
+before acceptance keeps the earlier behavior.
+When a later receipt makes an accepted delivery uncertain, the store retains the acceptance
+so the page does not offer to send the answer again. Older uncertain records without that
+evidence cannot be distinguished from deliveries that were never accepted.
 
 ### Message ids
 
@@ -161,10 +165,12 @@ are deleted. Finished means
 acknowledged, rejected, or uncertain with error `EXPIRED` or `DISMISSED`. A message drops its
 text the moment it finishes and keeps only a SHA-256 hash of it (of the text as a JSON
 string), which is what an exact retry is compared with, and the first 200 characters of its
-reply; a repeated receipt is compared with those. Accepted or uncertain messages
-older than 30 minutes become final `uncertain` / `EXPIRED`; they no longer block delivery,
-are never handed out again, and reject later receipts with `MESSAGE_EXPIRED`. The page
-continues to show these as no reply confirmed.
+reply; a repeated receipt is compared with those. Uncertain messages, accepted mailbox
+messages, and accepted messages with an error become final `uncertain` / `EXPIRED` after
+30 minutes. They no longer block delivery, are never handed out again, and reject later
+receipts with `MESSAGE_EXPIRED`. A connected adapter's accepted delivery stays open while
+it waits for the turn; after disconnect, the 30-minute limit applies. The page continues
+to show expired messages as no reply confirmed.
 
 The store holds at most 1,000 open messages (`MESSAGE_LIMIT`); finished ones do not count,
 so a store full of finished messages still accepts new ones, short of the 2,000-record
@@ -324,8 +330,8 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | TUI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) |
+| DeepSeek Harness | Web | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-08-deepseek-harness-live.md](../docs/validation/2026-11-08-deepseek-harness-live.md) | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) |
 | dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
