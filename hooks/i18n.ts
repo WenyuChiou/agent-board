@@ -822,7 +822,7 @@ export const ZH_TW = {
   settingsAgentRemove: '移除',
   settingsAgentConfirm: '確認',
   settingsAgentCancel: '取消',
-  settingsAgentSetupConfirm: (name: string, count: number, approves: boolean): string => count > 0 ? `要把 ${name} 接上看板嗎？會改動 ${count} 個檔案` + (approves ? `，並核准看板的 hooks。` : `。`) : approves ? `要核准 ${name} 使用看板的 hooks 嗎？不用改動任何檔案。` : `要把 ${name} 接上看板嗎？不用改動任何檔案。`,
+  settingsAgentSetupConfirm: (name: string, count: number, approves: boolean): string => count > 0 ? `要把 ${name} 接上看板嗎？會改動 ${count} 個檔案` + (approves ? `，並核准看板的 hooks。` : `。`) : approves ? `要核准 ${name} 使用看板的 hooks 嗎？` : `要把 ${name} 接上看板嗎？不用改動任何檔案。`,
   settingsAgentConnector: (name: string): string => `${name} 是在 Claude Code 用 /progress connect 接上的。要移除，請在那裡執行 /progress connect remove；這會一起移除它接上的所有 agent。`,
   settingsAgentRemoveConfirm: (name: string): string => `要把 ${name} 從看板移除嗎？只會拿掉它的設定檔，進度和歷史紀錄都會留著。`,
   settingsAgentSetupDone: (name: string): string => `${name} 接上了，開一個新的工作階段就會開始。`,

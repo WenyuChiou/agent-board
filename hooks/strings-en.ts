@@ -783,7 +783,7 @@ export const EN: Strings = {
   settingsAgentRemove: 'Remove',
   settingsAgentConfirm: 'Confirm',
   settingsAgentCancel: 'Cancel',
-  settingsAgentSetupConfirm: (name: string, count: number, approves: boolean): string => count > 0 ? `Set up ${name}? Setup will change ${count} ${count === 1 ? 'file' : 'files'}.` + (approves ? ` It also approves the board’s hooks.` : '') : approves ? `Approve the board’s hooks for ${name}? No files change.` : `Set up ${name}? No files need to change.`,
+  settingsAgentSetupConfirm: (name: string, count: number, approves: boolean): string => count > 0 ? `Set up ${name}? Setup will change ${count} ${count === 1 ? 'file' : 'files'}.` + (approves ? ` It also approves the board’s hooks.` : '') : approves ? `Approve the board’s hooks for ${name}?` : `Set up ${name}? No files need to change.`,
   settingsAgentConnector: (name: string): string => `${name} was connected with /progress connect in Claude Code. To remove it, run /progress connect remove there. That removes every agent it connected.`,
   settingsAgentRemoveConfirm: (name: string): string => `Remove ${name} from the board? This removes its setup files and keeps progress and history.`,
   settingsAgentSetupDone: (name: string): string => `${name} is set up. Open a new session to start.`,

@@ -777,7 +777,7 @@ export const ZH_CN: Strings = {
   settingsAgentRemove: '移除',
   settingsAgentConfirm: '确认',
   settingsAgentCancel: '取消',
-  settingsAgentSetupConfirm: (name: string, count: number, approves: boolean): string => count > 0 ? `要把 ${name} 接入看板吗？会改动 ${count} 个文件` + (approves ? `，并批准看板的 hooks。` : `。`) : approves ? `要批准 ${name} 使用看板的 hooks 吗？不用改动任何文件。` : `要把 ${name} 接入看板吗？不用改动任何文件。`,
+  settingsAgentSetupConfirm: (name: string, count: number, approves: boolean): string => count > 0 ? `要把 ${name} 接入看板吗？会改动 ${count} 个文件` + (approves ? `，并批准看板的 hooks。` : `。`) : approves ? `要批准 ${name} 使用看板的 hooks 吗？` : `要把 ${name} 接入看板吗？不用改动任何文件。`,
   settingsAgentConnector: (name: string): string => `${name} 是在 Claude Code 里用 /progress connect 接入的。要移除，请在那里运行 /progress connect remove；这会一并移除它接入的所有 agent。`,
   settingsAgentRemoveConfirm: (name: string): string => `要把 ${name} 从看板移除吗？只会删掉它的设置文件，进度和历史记录都会保留。`,
   settingsAgentSetupDone: (name: string): string => `${name} 接入了，开一个新的会话就会开始。`,

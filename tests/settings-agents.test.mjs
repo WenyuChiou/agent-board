@@ -152,10 +152,10 @@ test('Settings setup confirmations describe files and hook approval', () => {
   assert.equal(EN.settingsAgentSetupConfirm('Codex', 2, true), 'Set up Codex? Setup will change 2 files. It also approves the board’s hooks.')
   assert.equal(EN.settingsAgentSetupConfirm('Cursor', 1, false), 'Set up Cursor? Setup will change 1 file.')
   assert.equal(EN.settingsAgentSetupConfirm('Cursor', 2, false), 'Set up Cursor? Setup will change 2 files.')
-  assert.equal(EN.settingsAgentSetupConfirm('Codex', 0, true), 'Approve the board’s hooks for Codex? No files change.')
+  assert.equal(EN.settingsAgentSetupConfirm('Codex', 0, true), 'Approve the board’s hooks for Codex?')
   assert.equal(EN.settingsAgentSetupConfirm('Cursor', 0, false), 'Set up Cursor? No files need to change.')
-  assert.equal(ZH_TW.settingsAgentSetupConfirm('Codex', 0, true), '要核准 Codex 使用看板的 hooks 嗎？不用改動任何檔案。')
-  assert.equal(ZH_CN.settingsAgentSetupConfirm('Codex', 0, true), '要批准 Codex 使用看板的 hooks 吗？不用改动任何文件。')
+  assert.equal(ZH_TW.settingsAgentSetupConfirm('Codex', 0, true), '要核准 Codex 使用看板的 hooks 嗎？')
+  assert.equal(ZH_CN.settingsAgentSetupConfirm('Codex', 0, true), '要批准 Codex 使用看板的 hooks 吗？')
 })
 
 test('Settings keeps every agent and caches detection when the Codex hooks check fails', { timeout: 30_000 }, async () => {
