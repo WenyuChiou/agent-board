@@ -190,6 +190,7 @@ export type ServeRow = {
   tone: Tone
   when: string
   agent: string
+  auto?: 'working' | 'waiting' | 'ended' | null
   done: number
   total: number
   // One character per step for the progress bar (#1085, `hooks/progress-bar.ts` cellCode); '' with no steps.
@@ -465,7 +466,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         tone: row.tone,
         when: row.when,
         agent: row.agent,
-        ...(row.auto === null ? { isOwn: true as const } : {}),
+        ...(row.auto === null ? { isOwn: true as const } : { auto: row.auto }),
         done: row.done,
         total: row.total,
         cells: cellCode(row.cells ?? []),
