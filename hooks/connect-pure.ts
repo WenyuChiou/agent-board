@@ -481,7 +481,11 @@ const hermesSetupItemOf = (lines: readonly string[]): HermesSetupItem | undefine
   if (quoted === undefined) command = word.replace(/[ \t]+#.*$/, '').trimEnd()
   else if (word.startsWith("'")) command = word.slice(1, -1).replace(/''/g, "'")
   else {
-    try { command = JSON.parse(word) as string } catch { return undefined }
+    try { command = JSON.parse(word) as string } catch {
+      const decoded = yamlDoubleQuoted(scalar, true)
+      if (decoded === undefined) return undefined
+      command = decoded
+    }
   }
   const after = rest.slice(scalar.length)
   if (isFlow) {
@@ -1030,17 +1034,31 @@ export const hasOwnConnectData = (home: string, config: string, progress: string
     || path !== `${folder}/progress.md` && (connectedProgress === undefined || path !== connectPath(connectedProgress, isWindows))
 }
 
-// Hermes saves Unicode paths and wrapped commands with YAML escapes that JSON cannot read.
-const yamlDoubleQuoted = (quoted: string): string => quoted.slice(1, -1)
-  .replace(/\\(\r?\n[ \t]*|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[\s\S])|[ \t]*\r?\n[ \t]*/g, (_, escaped: string | undefined) => {
+const YAML_ESCAPES: Readonly<Record<string, string>> = {
+  n: '\n', t: '\t', r: '\r', '0': '\0', a: '\x07', b: '\b', e: '\x1b', f: '\f', v: '\v',
+  N: '\x85', _: '\xa0', L: '\u2028', P: '\u2029', ' ': ' ', '\t': '\t', '"': '"', '/': '/', '\\': '\\',
+}
+
+// Path discovery tolerates old config text. Ownership must reject an invalid escape rather than
+// discard it and risk making a different command match the install record.
+const yamlDoubleQuoted = (quoted: string, isStrict = false): string | undefined => {
+  let hasInvalid = isStrict && /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u0084\u0086-\u009f\ud800-\udfff\ufffe\uffff]/u.test(quoted)
+  const decoded = quoted.slice(1, -1).replace(/\\(\r?\n[ \t]*|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[\s\S])|[ \t]*\r?\n[ \t]*/g, (_, escaped: string | undefined) => {
     if (escaped === undefined) return ' '
     if (/^\r?\n/.test(escaped)) return ''
     if (escaped.length > 1) {
       const point = parseInt(escaped.slice(1), 16)
-      return point <= 0x10ffff ? String.fromCodePoint(point) : ''
+      if (point <= 0x10ffff && (!isStrict || point < 0xd800 || point > 0xdfff)) return String.fromCodePoint(point)
+      hasInvalid = true
+      return ''
     }
-    return ({ n: '\n', t: '\t', r: '\r', '0': '\0', a: '\x07', b: '\b', e: '\x1b', f: '\f', v: '\v', N: '\x85', _: '\xa0', L: '\u2028', P: '\u2029' } as Record<string, string>)[escaped] ?? escaped
+    const value = YAML_ESCAPES[escaped]
+    if (value !== undefined) return value
+    hasInvalid = true
+    return escaped
   })
+  return isStrict && hasInvalid ? undefined : decoded
+}
 
 // Read path data in the formats we write, including JSON-escaped command strings and
 // the numeric literal paths used for board commands with shell-sensitive names.
@@ -1048,7 +1066,10 @@ export const connectDataRoots = (text: string, isNearestOnly = false): string[] 
   const strings = [text, text.replace(/\r?\n[ \t]*/g, ' ')]
   for (const source of [...strings]) for (const match of source.matchAll(/(?<=^|[\s:\-\[,{=(])"(?:\\[\s\S]|[^"\\])*"/g)) {
     try { const value: unknown = JSON.parse(match[0]); if (typeof value === 'string') strings.push(value) }
-    catch { strings.push(yamlDoubleQuoted(match[0])) }
+    catch {
+      const decoded = yamlDoubleQuoted(match[0])
+      if (decoded !== undefined) strings.push(decoded)
+    }
   }
   const roots = new Set<string>()
   for (const source of [...strings]) {

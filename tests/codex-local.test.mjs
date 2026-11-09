@@ -5003,6 +5003,47 @@ test('Hermes removal preserves a foreign bare-dash list item after a recorded ho
   assert.equal(readFileSync(config, 'utf8'), `hooks:\n  post_tool_call:\n${sibling}\n`)
 }))
 
+test('Hermes refresh and removal recognize a recorded Unicode path after YAML escaping', () => fixture(f => {
+  const data = join(f.home, 'caf\u00e9-\u{1f600}')
+  const install = () => f.install('--agent', 'hermes', '--data-dir', data, '--apply')
+  const remove = () => remove774({ ...f, script: join(data, 'agent-board.mjs') }, 'hermes', true, ['--data-dir', data])
+  const installed = install()
+  assert.equal(installed.status, 0, installed.stderr)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  const event = hermesHooksOf(text).post_tool_call
+  const command = JSON.stringify(event.command)
+  const escaped = command.replaceAll('\u00e9', '\\xE9').replaceAll('\u{1f600}', '\\U0001F600')
+  assert.ok(escaped.includes('caf\\xE9-\\U0001F600'), 'the installed command uses the Unicode data path')
+  const line = `    - {command: ${command}, timeout: ${event.timeout}, matcher: todo}`
+  assert.ok(text.includes(line))
+  const foreign = '    - {command: "node ./tools/caf\\xE9-\\U0001F600-agent-board-hook.mjs", timeout: 5}'
+  const formatted = `    - command: ${escaped}\n      timeout: ${event.timeout}\n      matcher: todo\n${foreign}`
+  const rewritten = text.replace(line, formatted)
+  f.save(config, rewritten)
+  const same = install()
+  assert.equal(same.status, 0, same.stderr)
+  assert.deepEqual(JSON.parse(same.stdout).changes, [])
+  assert.equal(readFileSync(config, 'utf8'), rewritten)
+
+  const record = join(data, 'install-hermes.json')
+  const before = readFileSync(record, 'utf8')
+  for (const bad of ['\\caf', '\\U00110000caf']) {
+    const broken = rewritten.replace(escaped, escaped.replaceAll('caf', bad))
+    assert.notEqual(broken, rewritten)
+    f.save(config, broken)
+    assert.notEqual(remove().status, 0, 'an invalid escape must not match the recorded command')
+    assert.equal(readFileSync(config, 'utf8'), broken)
+    assert.equal(readFileSync(record, 'utf8'), before)
+  }
+
+  f.save(config, rewritten)
+  const removed = remove()
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(config, 'utf8'), `hooks:\n  post_tool_call:\n${foreign}\n`)
+  assert.equal(existsSync(record), false)
+}))
+
 test('Hermes removal refuses ambiguous recorded commands and duplicate YAML command keys', () => fixture(f => {
   assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
   const config = hermesConfig(f)
