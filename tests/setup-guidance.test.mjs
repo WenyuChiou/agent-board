@@ -341,6 +341,39 @@ test('terminal setup installs the plugin when only Claude Code is present', () =
   assert.equal(existsSync(join(f.root, 'data')), false)
 }, ['claude']))
 
+const copiedClaudeSettings = f => {
+  for (const name of ['CODEX_HOME', 'GROK_HOME', 'HERMES_HOME', 'OPENCODE_CONFIG_DIR', 'OPENCLAW_STATE_DIR', 'DSH_HOME']) rmSync(f.env[name], { recursive: true, force: true })
+  writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), JSON.stringify({ enabledPlugins: { 'agent-board@agent-board': true }, synthetic: 'keep' }))
+}
+
+test('a copied Claude enable setting still asks once and installs before reporting success', () => terminal(f => {
+  copiedClaudeSettings(f)
+  const result = f.invoke(['--lang', 'en'])
+  succeeded(result)
+  assert.equal(result.stdout.split('Set these up? [Y/n]').length - 1, 1)
+  assert.deepEqual(claudeCalls(f), pluginCommands)
+  assert.match(result.stdout, /Claude Code plugin: done\./)
+  assert.match(result.stdout, /Open a new session in Claude Code\./)
+  assert.equal(existsSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json')), true)
+  assert.equal(JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8')).synthetic, 'keep')
+  f.commands.clear()
+  const repeated = f.invoke(['--lang', 'en'])
+  succeeded(repeated)
+  assert.doesNotMatch(repeated.stdout, /Set these up\?|Install the Claude Code plugin/)
+  assert.deepEqual(claudeCalls(f), [])
+}, ['claude']))
+
+test('a copied Claude enable setting cannot make a silent plugin installation count as done', () => terminal(f => {
+  copiedClaudeSettings(f)
+  f.env.AGENT_BOARD_TEST_CLAUDE_FAIL = 'silent'
+  const result = f.invoke(['--lang', 'en'])
+  succeeded(result)
+  assert.deepEqual(claudeCalls(f), pluginCommands)
+  assert.match(result.stdout, /Claude Code plugin: failed\. Run: claude plugin install agent-board@agent-board/)
+  assert.doesNotMatch(result.stdout, /Claude Code plugin: done\.|Open a new session in Claude Code\./)
+  assert.equal(existsSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json')), false)
+}, ['claude']))
+
 // Two setup runs only: the three tables are kept identical by the bootstrap test above, and each
 // run takes seconds on a Windows runner, where this file is near its time budget.
 test('on Windows setup says to start cursor-agent from PowerShell, in its preview and after a yes (#1159)', () => {

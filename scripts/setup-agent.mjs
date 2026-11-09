@@ -309,8 +309,8 @@ const hasPlugin = directory => {
     try { return JSON.parse(readFileSync(join(directory, file), 'utf8').replace(/^\uFEFF/, '')) } catch { return null }
   }
   const installed = read('plugins/installed_plugins.json')?.plugins?.[plugin]
-  return (Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === 'object')
-    || read('settings.json')?.enabledPlugins?.[plugin] === true
+  // Enabling a plugin in copied settings does not install it on this machine.
+  return Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === 'object'
 }
 
 // npm supplies .cmd shims on Windows; quote each argument for cmd rather than enabling a shell for every program.
