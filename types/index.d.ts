@@ -113,6 +113,8 @@ export type ProgressAuto = {
   // started it, when the writer knew it. Absent on every block a person's conversation writes.
   isRun?: true
   parent?: string
+  // Timestamp when a prompt replied to a waiting question in chat before the next report (#401).
+  replied?: number
 }
 
 export type ProgressTask = {
@@ -221,7 +223,9 @@ export type ProgressMirror = {
   // separately so adding prompt events never reinterprets saved turn/end ranks.
   promptOrder?: number
   // Existing question steps provisionally answered by the latest prompt, never prompt text.
-  promptQuestion?: { order: number; state: ProgressSessionState; autoAsk: string | null; tasks: ProgressMirrorTask[] } | null
+  promptQuestion?: { order: number; turnKey?: string; state: ProgressSessionState; autoAsk: string | null; tasks: ProgressMirrorTask[] } | null
+  // Timestamp when a prompt replied to a waiting question in chat before the next report (#401).
+  replied?: number
   // A person's completion rejects older (or undated) inbox turns without stopping new work.
   confirmedAt?: number
   // Claude's steps the person has answered since they were asked: task id to the stepKey of

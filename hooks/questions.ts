@@ -278,6 +278,14 @@ const inboxSession = (source: QuestionSource): string | undefined => {
   const data = parsedJson(source.data)
   return data !== null && typeof data === 'object' && 'session' in data && typeof data.session === 'string' ? data.session : undefined
 }
+
+export const inboxQuestionOrigin = (source: QuestionSource): { session: string; at: number } | null => {
+  if (source.kind !== 'inbox') return null
+  const data = parsedJson(source.data)
+  if (data === null || typeof data !== 'object' || !('session' in data) || typeof data.session !== 'string' || data.session === '') return null
+  const at = 'sourceAt' in data ? data.sourceAt : 'at' in data ? data.at : undefined
+  return typeof at === 'number' && Number.isFinite(at) && at > 0 ? { session: data.session, at } : null
+}
 // An inbox ask has no task title, so the block its session writes later is known by the full id alone.
 const isSameAsker = (source: QuestionSource | undefined, row: QuestionSource): boolean => {
   if (source?.kind !== 'inbox') return false
@@ -286,9 +294,10 @@ const isSameAsker = (source: QuestionSource | undefined, row: QuestionSource): b
 }
 // An answer closes only the inbox ask of the session that gave it, not a same-prefix peer's.
 // Cursor and Grok emit an empty stop for the asking turn. Only a later text-bearing
-// response or an accepted prompt proves continuation, even if the session moved folders.
+// response proves continuation, even if the session moved folders. A prompt alone
+// only changes what the board shows while it waits for that response.
 export const isContinuationTurn = (turn: AgentTurn | QuestionAnswerEvidence): turn is QuestionAnswerEvidence =>
-  (turn.event === 'prompt' || (turn.event === 'turn' && (!('answer' in turn) || turn.answer.trim() !== '')))
+  turn.event === 'turn' && (!('answer' in turn) || turn.answer.trim() !== '')
   && turn.at !== undefined
   && Number.isFinite(turn.at)
 
@@ -706,7 +715,7 @@ export const observeQuestions = (
     try { source = JSON.parse(record.source.data) as PendingTurn } catch { continue }
     const at = source?.sourceAt ?? source?.at
     // Cursor and Grok emit an empty stop for the asking turn. Only a later text-bearing
-    // response or an accepted prompt proves continuation, even if the session moved folders.
+    // response proves continuation, even if the session moved folders.
     if (!Number.isFinite(at) || !answeredTurns.some(turn => isContinuationTurn(turn) && turn.at > at && isAnsweredBy(record, turn))) continue
     record.isUnresolved = false
     record.isWaiting = false

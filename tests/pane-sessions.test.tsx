@@ -1847,6 +1847,7 @@ test('without a Task list, a turn that changed something is summed up into steps
   const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: EDITED, reply: DIGEST }
   const clock = engineBeneath(on, world)
   const seen = outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
   await start($, '幫我把限流加到 API')
   await $.turn.complete({ answer: '加好了。每把金鑰一分鐘要 100 還是 300？', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10)
@@ -1858,12 +1859,13 @@ test('without a Task list, a turn that changed something is summed up into steps
   expect(written).toContain('> 背景：公開端點被刷爆，要擋掉濫用\n- [x] 加好限流中介層\n- [?] 每把金鑰的上限 — 一分鐘 100 還是 300？\n- [ ] 寫限流測試\n')
   expect(seen.notified).toContain('需要你：每把金鑰的上限')
 
-  // The person answers: the question counts as settled; the next turn adds what it did.
+  // The reply leaves the question open until the next turn reports what it did.
   world.reply = (prompt: string) => (prompt.includes('TITLE:') ? 'TITLE: 幫 API 加上限流\nCONTEXT: -\nDONE: 寫好限流測試\nNEXT: -\nASK: -' : undefined)
-  await $.turn.start({ text: '100', turnId: 't2' })
+  await clock.advance(1)
+  await say($, '100', 't2')
   await clock.advance(10)
-  // Settled as soon as the answer starts a turn, before that turn ends, in the words it asked in.
-  expect(world.files.get(FILE) ?? '').toContain('- [x] 每把金鑰的上限 — 一分鐘 100 還是 300？\n')
+  expect(world.files.get(FILE)).toContain('- [?] 每把金鑰的上限 — 一分鐘 100 還是 300？\n')
+  expect(world.files.get(FILE)).toContain('replied=')
   await $.turn.complete({ answer: '測試寫好了，都過了。', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
   await clock.advance(10)
   const after = world.files.get(FILE) ?? ''
@@ -2626,10 +2628,11 @@ test('a Claude subagent\'s events stay in its parent\'s block and add no row', a
   expect(text).not.toContain('origin=run')
 })
 
-test('a turn that ends on a question waits on you even when Claude did not mark it, until you answer', async ($, on) => {
+test('a closing question Claude did not mark stays open after chat until a real report', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
   const clock = engineBeneath(on, world)
   const seen = outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
   await start($, '幫我重做進度面板')
   await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
   await $.tool.call({ tool: 'TaskCreate', subject: '選配色', description: '' })
@@ -2640,9 +2643,18 @@ test('a turn that ends on a question waits on you even when Claude did not mark 
   expect(world.files.get(FILE) ?? '').toContain('- [?] 選配色 — 要用和色還是 Nord？')
   expect(seen.notified).toContain('需要你：選配色')
 
-  await $.turn.start({ text: '和色', turnId: 't2' })
+  const id = storedQuestion(world, '選配色 — 要用和色還是 Nord？')
+  expect(id.startsWith('question:')).toBe(true)
+  await say($, '和色', 't2')
   await clock.advance(10)
-  expect(world.files.get(FILE) ?? '').toContain('- [~] 選配色\n')
+  expect(world.files.get(FILE) ?? '').toContain(' replied=')
+  expect(storedQuestion(world, '選配色 — 要用和色還是 Nord？')).toBe(id)
+
+  await $.turn.complete({ answer: '我會用和色。', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain('- [~] 選配色 — 你已回覆，等 Claude 處理\n')
+  expect(world.files.get(FILE) ?? '').not.toContain(' replied=')
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{}').records?.find((one: { id: string }) => one.id === id)?.isUnresolved).toBe(false)
 })
 
 test('a review Claude marked as waiting on you stops waiting once you write in that session, so 沒問題 cannot answer it, and shows again only when Claude asks again', async ($, on) => {
@@ -2664,6 +2676,8 @@ test('a review Claude marked as waiting on you stops waiting once you write in t
   await clock.advance(10)
   const asked = '- [?] 檢查圖 2 — 新的座標軸刻度看起來對嗎\n'
   expect(world.files.get(FILE) ?? '').toContain(asked)
+  const reviewId = storedQuestion(world, '檢查圖 2 — 新的座標軸刻度看起來對嗎')
+  expect(reviewId.startsWith('question:')).toBe(true)
   const before = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   expect(await before.find({ type: 'Text', text: '〔看一下〕' })).toBeDefined()
   expect(await before.find({ type: 'Button', key: 'mine::2::沒問題' })).toBeDefined()
@@ -2673,7 +2687,9 @@ test('a review Claude marked as waiting on you stops waiting once you write in t
   await say($, '圖 2 不對，圖例蓋住資料了', 't2')
   await clock.advance(10)
   const answered = '- [~] 檢查圖 2 — 你已回覆，等 Claude 處理\n'
-  expect(world.files.get(FILE) ?? '').toContain(answered)
+  expect(world.files.get(FILE) ?? '').toContain(asked)
+  expect(world.files.get(FILE) ?? '').toContain(' replied=')
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{}').records?.find((record: { id: string }) => record.id === reviewId)?.isUnresolved).toBe(true)
   const after = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   expect(await after.find({ type: 'Text', text: '〔看一下〕' })).toBeUndefined()
   expect(await after.find({ type: 'Button', key: 'mine::2::沒問題' })).toBeUndefined()
@@ -2687,6 +2703,7 @@ test('a review Claude marked as waiting on you stops waiting once you write in t
   await $.turn.complete({ answer: '在改圖例的位置。', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
   await clock.advance(10)
   expect(world.files.get(FILE) ?? '').toContain(answered)
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{}').records?.find((record: { id: string }) => record.id === reviewId)?.isUnresolved).toBe(false)
   expect(seen.notified.filter(text => text === '需要你：檢查圖 2')).toHaveLength(1)
 
   // Claude's own TaskUpdate still decides: asked again, even in the same words, the step
@@ -2718,9 +2735,7 @@ test('only your own message settles this session’s waiting steps: not a backgr
   await say($, '<task-notification>\n<status>completed</status>\n</task-notification>', 't2', { kind: 'task-notification' })
   await say($, '<system-reminder>\n連結的工作階段\n</system-reminder>\n<side-sessions-event>其他工作階段結束了</side-sessions-event>', 't3', { kind: 'sdk' })
   await say($, '檢查 CI', 't4', { kind: 'scheduled-trigger' })
-  // A message whose turn never started (another hook dropped it) is not carried over to a
-  // turn with no typed text, such as a continuation.
-  await $.prompt.submit({ text: '先別動', origin: { kind: 'composer' }, wait: false })
+  // A continuation with no typed text is not the person's reply.
   await $.turn.start({ text: '', turnId: 't5' })
   // A message another hook dropped answers nothing, not even the next turn's.
   await $.prompt.submit({ text: '別管它', origin: { kind: 'composer' }, wait: false })
@@ -2735,7 +2750,8 @@ test('only your own message settles this session’s waiting steps: not a backgr
   await say($, '<system-reminder>\n連結的工作階段\n</system-reminder>\n先不要推，等 CI 跑完', 't6', { kind: 'sdk' })
   await clock.advance(10)
   const text = world.files.get(FILE) ?? ''
-  expect(text).toContain('- [ ] 推上 main — 你已回覆，等 Claude 處理\n')
+  expect(text).toContain(asked)
+  expect(text).toContain(' replied=')
   // The other session's block is its own to change: every line of it is still there.
   expect(text).toContain(other.replace('# 專案進度\n\n', ''))
   const after = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
@@ -2828,7 +2844,7 @@ test('an accepted pane reply cannot mark a same-word producer renewal made durin
   await ui.unmount()
 })
 
-test('your message typed while Claude is still working answers too; a notice delivered into that turn does not', async ($, on) => {
+test('a reply typed during an active Claude turn leaves its durable question open until Claude reports', async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true }
   const clock = engineBeneath(on, world)
   on('prompt.submit', ($, e) => ({ text: e.text }))
@@ -2837,6 +2853,10 @@ test('your message typed while Claude is still working answers too; a notice del
   await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', why: '可以直接推到 main 嗎？' } })
   await $.turn.complete({ answer: '準備好了。', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10)
+  const words = '推上 main — 可以直接推到 main 嗎？'
+  const id = storedQuestion(world, words)
+  expect(id.startsWith('question:')).toBe(true)
+  const record = () => JSON.parse(world.files.get(QUESTIONS) ?? '{}').records?.find((one: { id: string }) => one.id === id)
 
   // A scheduled check runs a turn; a background task's notice reaches Claude inside it.
   await say($, '檢查 CI', 't2', { kind: 'scheduled-trigger' })
@@ -2844,10 +2864,68 @@ test('your message typed while Claude is still working answers too; a notice del
   await clock.advance(10)
   expect(world.files.get(FILE) ?? '').toContain('- [?] 推上 main — 可以直接推到 main 嗎？\n')
 
-  // The person types over that turn: answered now, though no turn of its own starts.
+  // The person types over that turn, without starting a turn of its own.
   await $.prompt.submit({ text: '先不要推', origin: { kind: 'composer' }, turnId: 't2', wait: false })
   await clock.advance(10)
+  expect(world.files.get(FILE) ?? '').toContain(`- [?] ${words}\n`)
+  expect(world.files.get(FILE) ?? '').toContain(' replied=')
+  expect(record()?.isUnresolved).toBe(true)
+  const pending = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await pending.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  await pending.unmount()
+
+  await $.turn.complete({ answer: '會等 CI。', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(record()?.isUnresolved).toBe(false)
+  expect(world.files.get(FILE) ?? '').not.toContain(' replied=')
   expect(world.files.get(FILE) ?? '').toContain('- [ ] 推上 main — 你已回覆，等 Claude 處理\n')
+})
+
+test('pressing Resolve on a provisional Claude question closes its saved record without another report', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Prepare the synthetic release')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Publish', metadata: { waiting: 'you', why: 'Use staging?' } })
+  await $.turn.complete({ answer: 'The synthetic release is ready.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  const id = storedQuestion(world, 'Publish — Use staging?')
+  expect(id.startsWith('question:')).toBe(true)
+  const unresolved = () => JSON.parse(world.files.get(QUESTIONS) ?? '{}').records?.find((record: { id: string }) => record.id === id)?.isUnresolved
+  await say($, 'Yes, staging.', 't2')
+  await clock.advance(10)
+  expect(unresolved()).toBe(true)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'mine::1::resolve', text: ZH_TW.resolveQuestion })).toBeDefined()
+  await ui.press({ key: 'mine::1::resolve' })
+  await clock.advance(10)
+  expect(unresolved()).toBe(false)
+  expect(await ui.find({ type: 'Button', key: 'mine::1::resolve' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a task report that removes the original step still settles its provisional question', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true }
+  const clock = engineBeneath(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  await start($, 'Prepare the synthetic release')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Publish', metadata: { waiting: 'you', why: 'Use staging?' } })
+  await $.turn.complete({ answer: 'The synthetic release is ready.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  const id = storedQuestion(world, 'Publish — Use staging?')
+  expect(id.startsWith('question:')).toBe(true)
+  const unresolved = () => JSON.parse(world.files.get(QUESTIONS) ?? '{}').records?.find((record: { id: string }) => record.id === id)?.isUnresolved
+
+  await say($, 'Yes, staging.', 't2')
+  await clock.advance(10)
+  expect(unresolved()).toBe(true)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'deleted' })
+  await clock.advance(10)
+  expect(unresolved()).toBe(false)
+  expect(world.files.get(FILE) ?? '').not.toContain('Use staging?')
 })
 
 test('a compaction leaves a handoff line in the block', async ($, on) => {
@@ -3285,7 +3363,7 @@ test('a real Grok Build turn takes its request from the session log and ends on 
 
 for (const event of ['turn', 'prompt'] as const) test(event === 'turn'
   ? 'an answer whose ledger write races is settled by the next poll, not lost'
-  : 'a prompt whose ledger write races is settled by the next poll without replaying its receipt', async ($, on) => {
+  : 'an accepted inbox prompt stays provisional through a ledger race and settles only on a later report', async ($, on) => {
   const world: World = {
     files: new Map([[FILE, '# Progress\n'], [`${INBOX}/codex-turn-1792216380-1.json`, CODEX_STOP]]),
     mtime: 1, at: Date.parse('2026-10-17T12:00:00Z'), hasTasks: true, store: { autoConnectOff: true, inboxDone: {} },
@@ -3315,16 +3393,28 @@ for (const event of ['turn', 'prompt'] as const) test(event === 'turn'
   world.mtime += 1
   await clock.advance(5000)
   expect(records().map(row => row.isUnresolved)).toEqual([true])
-  expect(world.files.get(FILE)).not.toContain('- [?]')
+  if (event === 'prompt') {
+    expect(world.files.get(FILE)).toContain('- [?]')
+    expect(world.files.get(FILE)).toContain(' replied=')
+  } else expect(world.files.get(FILE)).not.toContain('- [?]')
   expect([...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`))).toEqual([])
   expect(seen.notified.filter(text => /QUESTION_|INBOX_|NOT_KEPT/.test(text))).toEqual([])
   expect(await ui.find({ type: 'Text', text: ZH_TW.question(ZH_TW.inboxTitle) })).toBeUndefined()
   world.beforeRead = undefined
   await clock.advance(2000)
-  expect(records().map(row => row.isUnresolved)).toEqual([false])
+  expect(records().map(row => row.isUnresolved)).toEqual([event === 'prompt'])
   expect(seen.notified.filter(text => /QUESTION_|INBOX_|NOT_KEPT/.test(text))).toEqual([])
   expect(await ui.find({ type: 'Text', text: ZH_TW.question(ZH_TW.inboxTitle) })).toBeUndefined()
-  if (event === 'prompt') expect(Object.keys(world.store!).filter(key => key.startsWith('agentPrompt:'))).toHaveLength(1)
+  if (event === 'prompt') {
+    expect(Object.keys(world.store!).filter(key => key.startsWith('agentPrompt:'))).toHaveLength(1)
+    world.afterWrite = undefined
+    world.files.set(`${INBOX}/codex-turn-1792216400-3.json`, NEXT_TURN(CODEX_STOP))
+    world.mtime += 1
+    await clock.advance(5000)
+    expect(records().map(row => row.isUnresolved)).toEqual([false])
+    expect(world.files.get(FILE)).not.toContain(' replied=')
+    expect(world.files.get(FILE)).not.toContain('- [?]')
+  }
   await ui.unmount()
 })
 
@@ -3436,6 +3526,9 @@ for (const event of ['turn', 'prompt'] as const) test(`a committed ${event} keep
   await clock.advance(5000)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   let hasFailed = false
+  const inboxRecords = () => (JSON.parse(world.files.get(QUESTIONS)!).records as Array<{ id: string; isUnresolved: boolean; source?: { kind: string } }>).filter(row => row.source?.kind === 'inbox')
+  const original = inboxRecords().map(row => row.id)
+  expect(original).toHaveLength(1)
   world.afterWrite = () => {
     let reads = 0
     world.beforeRead = path => {
@@ -3451,7 +3544,9 @@ for (const event of ['turn', 'prompt'] as const) test(`a committed ${event} keep
   await clock.advance(7000)
   expect(hasFailed).toBe(true)
   expect([...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`))).toEqual([])
-  expect(JSON.parse(world.files.get(QUESTIONS)!).records.filter((row: { source?: { kind: string } }) => row.source?.kind === 'inbox').map((row: { isUnresolved: boolean }) => row.isUnresolved)).toEqual([false])
+  expect(inboxRecords().map(row => row.id)).toEqual(original)
+  expect(inboxRecords().map(row => row.isUnresolved)).toEqual([event === 'prompt'])
+  if (event === 'prompt') expect(world.files.get(FILE)).toContain('replied=')
   expect(seen.notified.filter(text => /QUESTION_|INBOX_|NOT_KEPT|EFBIG/.test(text))).toEqual([])
   expect(await ui.find({ type: 'Text', text: ZH_TW.question(ZH_TW.inboxTitle) })).toBeUndefined()
   await ui.unmount()
@@ -3944,13 +4039,15 @@ test('a set-aside turn whose question is older than three days adds its steps bu
   expect(takenOf(world)).toEqual([])
 })
 
-test('a held turn written before a newer prompt adds its steps but does not reopen its question', async ($, on) => {
+test('a held turn before a newer prompt adds its work and preserves the original provisional question', async ($, on) => {
   const { world } = questionWorld()
   world.reply = () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: Added the limiter\nNEXT: Continue\nASK: Limit — 100 or 300?'
   addPrompt(world, PROMPT_AT + 3000)
   const clock = engineBeneath(on, world)
   await probeStart($)
   await clock.advance(5000)
+  const id = storedQuestion(world, 'Database — Use staging?')
+  expect(id.startsWith('question:')).toBe(true)
   const name = `codex-turn-${PROMPT_AT + 2000}-1.json`
   const store = world.store!
   store.inboxFailed = { [name]: `8:${PROMPT_AT + 2500}:QUESTION_RETENTION_FAILED` }
@@ -3960,7 +4057,10 @@ test('a held turn written before a newer prompt adds its steps but does not reop
   await clock.advance(5000)
   expect(world.files.get(FILE)).toContain('- [x] Added the limiter')
   expect(world.files.get(FILE)).not.toContain('100 or 300')
-  expect(parseProgress(world.files.get(FILE)!).flatMap(project => project.tasks).flatMap(task => task.steps).some(step => step.status === 'waiting')).toBe(false)
+  expect(world.files.get(FILE)).toContain('- [?] Database — Use staging?')
+  expect(world.files.get(FILE)).toContain(' replied=')
+  expect(storedQuestion(world, 'Database — Use staging?')).toBe(id)
+  expect(JSON.parse(world.files.get(QUESTIONS) ?? '{}').records?.find((one: { id: string }) => one.id === id)?.isUnresolved).toBe(true)
   expect(effectivePromptMirror(world).state).toBe('working')
   expect(Object.keys(store).filter(key => key.startsWith('pendingInboxQuestion:'))).toEqual([])
   expect((store.inboxDone as Record<string, string>)[name]).toBeDefined()
@@ -4318,14 +4418,44 @@ test('a held turn whose rename lands although the move reports failure is still 
   expect(seen.notified.some(text => text.includes('INBOX_RETAKE_MOVE_FAILED'))).toBe(false)
 })
 
-test('a board-only reply taken again after three days does not put its question back', async ($, on) => {
+test('a fresh separate inbox board lookup cannot undo a provisional chat reply', async ($, on) => {
+  const { world } = questionWorld()
+  const chat = addPrompt(world, PROMPT_AT + 1000)
+  world.files.set(`${INBOX}/${chat}`, JSON.stringify({ session_id: PROMPT_SESSION, turn_id: 'synthetic-chat-turn' }))
+  const clock = engineBeneath(on, world)
+  await probeStart($)
+  await clock.advance(5000)
+  const original = storedQuestion(world, 'Database — Use staging?')
+  expect(original.startsWith('question:')).toBe(true)
+  expect(world.files.get(FILE)).toContain(' replied=')
+
+  world.files.set(`${INBOX}/codex-prompt-${PROMPT_AT + 2000}-2.json`, JSON.stringify({
+    session_id: PROMPT_SESSION, turn_id: 'synthetic-board-turn', board_request: true,
+  }))
+  world.files.set(`${INBOX}/codex-turn-${PROMPT_AT + 3000}-3.json`, JSON.stringify({
+    session_id: PROMPT_SESSION, turn_id: 'synthetic-board-turn', prompt: '/agent-board',
+    last_assistant_message: 'Progress  ● 0 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today',
+  }))
+  world.mtime += 1
+  await clock.advance(5000)
+  expect(world.files.get(FILE)).toContain(' replied=')
+  expect(storedQuestion(world, 'Database — Use staging?')).toBe(original)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Text', text: '● 0' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a board-only reply taken again after three days leaves a provisional question intact', async ($, on) => {
   const { world } = questionWorld()
   world.at = PROMPT_AT + 4 * 86400000
   const clock = engineBeneath(on, world)
   await probeStart($)
   addPrompt(world, PROMPT_AT + 1000)
   await clock.advance(5000)
-  expect(world.files.get(FILE)).toContain('- [x] Database — Use staging?')
+  expect(world.files.get(FILE)).toContain('- [?] Database — Use staging?')
+  expect(world.files.get(FILE)).toContain(' replied=')
+  const original = storedQuestion(world, 'Database — Use staging?')
+  expect(original.startsWith('question:')).toBe(true)
   const before = world.files.get(FILE)
   const name = `codex-turn-${PROMPT_AT + 2000}-77.json`
   world.store!.inboxFailed = { [name]: `8:${world.at}:QUESTION_RETENTION_FAILED` }
@@ -4333,13 +4463,13 @@ test('a board-only reply taken again after three days does not put its question 
   world.mtime += 1
   await clock.advance(5000)
   expect(world.files.get(FILE)).toBe(before)
-  expect(world.files.get(FILE)).not.toContain('- [?] Database')
+  expect(storedQuestion(world, 'Database — Use staging?')).toBe(original)
   expect((world.store!.inboxDone as Record<string, string>)[name]).toBeDefined()
   expect(world.files.has(`${INBOX}/${name}.failed`)).toBe(false)
   expect(takenOf(world)).toEqual([])
   expect(world.asked).toEqual([])
-  const ledger = JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ isUnresolved?: boolean }>
-  expect(ledger.some(one => one.isUnresolved)).toBe(false)
+  const ledger = JSON.parse(world.files.get(QUESTIONS) ?? '{"records":[]}').records as Array<{ id: string; isUnresolved?: boolean }>
+  expect(ledger.filter(one => one.isUnresolved).map(one => one.id)).toEqual([original])
 })
 
 test('fresh turn files are taken before held turns when the look is full', async ($, on) => {

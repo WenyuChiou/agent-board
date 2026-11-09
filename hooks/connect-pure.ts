@@ -1,4 +1,4 @@
-import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from './board-commands'
+import { boardPromptHelper, boardRequestWords, boardRun, geminiBoardCommand, inboxTurnKeySource, normalizeCommandPath, opencodeBoardCommand } from './board-commands'
 import { HOOK_VERSION, hookGuardSource, hostHookTimeout } from './hook-safety'
 import { INBOX_DROPPED_COPY, INBOX_DROPPED_FILE, INBOX_DROPPED_FOLD_BYTES, INBOX_DROPPED_KEEP_DAYS, INBOX_DROPPED_STALE_MINUTES, INBOX_MAX_BYTES, INBOX_MAX_FILES } from './hook-reporters'
 import { antigravityCommand, antigravityHooks, directHookArgs, encodedCommandText, hookCommandArgs, planEvents } from './local-agents'
@@ -517,7 +517,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: ctx.openclawHome,
       file: [ctx.openclawHome, OPENCLAW_FILE].join(ctx.sep),
       generated: true,
-      edit: generatedFile(openclawPlugin(ctx), boardPromptVariants([openclawPlugin(ctx), openclawPlugin(ctx, false), legacyOpenClawPlugin(ctx), legacyOpenClawPlugin(ctx, false), legacyOpenClawPlugin(ctx, true, false)])),
+      edit: generatedFile(openclawPlugin(ctx), boardPromptVariants([openclawPlugin(ctx), openclawPlugin(ctx, false), openclawPlugin(ctx, true, true, false), legacyOpenClawPlugin(ctx), legacyOpenClawPlugin(ctx, false), legacyOpenClawPlugin(ctx, true, false)])),
     },
     {
       agent: 'openclaw',
@@ -541,7 +541,7 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       setupFile: [opencodeHome, 'plugins', 'agent-board-local.js'].join(ctx.sep),
       old: [opencodeHome, 'plugin', 'progress-pane.js'].join(ctx.sep),
       generated: true,
-      edit: generatedFile(opencodePlugin(ctx), boardPromptVariants([opencodePlugin(ctx), opencodePlugin(ctx, false), legacyOpenCodePlugin(ctx), legacyOpenCodePlugin(ctx, false), legacyOpenCodePlugin(ctx, true, false)])),
+      edit: generatedFile(opencodePlugin(ctx), boardPromptVariants([opencodePlugin(ctx), opencodePlugin(ctx, false), opencodePlugin(ctx, true, true, false), legacyOpenCodePlugin(ctx), legacyOpenCodePlugin(ctx, false), legacyOpenCodePlugin(ctx, true, false)])),
     },
     {
       // Antigravity groups its events under one named definition. Its commands are the
@@ -572,13 +572,13 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
 // OpenCode takes plugins, not commands: this one writes the session's last exchange into the
 // inbox when the session goes idle (a subagent's session aside), and an end when it is
 // deleted. Every export of a plugin file must be a function.
-export const opencodePlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
+export const opencodePlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true, withTurnKey = withPrompt): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
 import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 ${hookGuardSource(ctx.home, 'opencode')}
 
-${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
+${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}${withTurnKey ? inboxTurnKeySource + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
 ${INBOX_CAP}
 const save = (event, payload, current) => {
@@ -607,11 +607,11 @@ const textOf = message =>
     .join('\\n')
 
 export const AgentBoard = async ({ client, directory }) => ({
-${withPrompt ? `  'chat.message': async ({ sessionID }${flagsBoardRequests ? ', output' : ''}) => withHook(async current => {
+${withPrompt ? `  'chat.message': async ({ sessionID }${flagsBoardRequests || withTurnKey ? ', output' : ''}) => withHook(async current => {
       const session = current(await client.session.get({ path: { id: sessionID } }))
       if (session.error) throw Error('HOST_METADATA_FAILED')
       if (!session.data || session.data.id !== sessionID || session.data.parentID) return
-      save('prompt', { session_id: sessionID, cwd: directory${flagsBoardRequests ? ', ...(isBoardRequest(output) ? { board_request: true } : {})' : ''} }, current)
+      save('prompt', { session_id: sessionID, cwd: directory${flagsBoardRequests ? ', ...(isBoardRequest(output) ? { board_request: true } : {})' : ''}${withTurnKey ? ', turn_key: inboxTurnKey(output?.message?.id)' : ''} }, current)
   }),
 ` : ''}\
   event: async ({ event }) => withHook(async current => {
@@ -624,7 +624,14 @@ ${withPrompt ? `  'chat.message': async ({ sessionID }${flagsBoardRequests ? ', 
         if (listed.error) throw Error('HOST_METADATA_FAILED')
         const messages = listed.data ?? []
         const last = role => [...messages].reverse().find(message => message.info?.role === role)
-        save('turn', { session_id: id, cwd: directory, prompt: textOf(last('user')), last_assistant_message: textOf(last('assistant')) }, current)
+${withTurnKey ? `        const user = last('user')
+        const assistant = last('assistant')
+        // A newer user message can arrive before this idle callback reads the exchange.
+        const parent = assistant?.info?.parentID
+        const key = user?.info?.id === parent ? inboxTurnKey(parent) : undefined
+        save('turn', { session_id: id, cwd: directory, prompt: textOf(user), last_assistant_message: textOf(assistant), turn_key: key }, current)
+` : `        save('turn', { session_id: id, cwd: directory, prompt: textOf(last('user')), last_assistant_message: textOf(last('assistant')) }, current)
+`}\
       } else if (event.type === 'session.deleted') {
         const id = event.properties.info?.id
         if (id) save('end', { session_id: id, cwd: directory }, current)
@@ -734,13 +741,13 @@ export const withoutOpenclawPlugin = (config: Json, file: string): Json => {
 // Writes each finished turn into the inbox itself, as the OpenCode plugin does, so it needs
 // no shell. Heartbeat and memory runs are OpenClaw talking to itself, not the person's work;
 // a compaction or a restart does not end the session.
-export const openclawPlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
+export const openclawPlugin = (ctx: ConnectContext, withPrompt = true, flagsBoardRequests = true, withTurnKey = withPrompt): string => `// Written by the Agent Board plugin (/progress connect): reports each finished turn to the Agent Board
 // pane.
 import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 ${hookGuardSource(ctx.home, 'openclaw')}
 
-${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
+${withPrompt && flagsBoardRequests ? BOARD_PROMPT_HELPER + '\n' : ''}${withTurnKey ? inboxTurnKeySource + '\n' : ''}const INBOX = ${JSON.stringify(ctx.inbox)}
 
 ${INBOX_CAP}
 const save = (event, payload, current) => {
@@ -776,7 +783,7 @@ export default {
 ${withPrompt ? `    api.on('before_prompt_build', (_event, ctx) => withHook(current => {
       try {
         if (!ctx?.sessionId || ctx.inputProvenance?.kind !== 'external_user') return
-        save('prompt', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? ''${flagsBoardRequests ? ', ...(isBoardRequest(_event) ? { board_request: true } : {})' : ''} }, current)
+        save('prompt', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? ''${flagsBoardRequests ? ', ...(isBoardRequest(_event) ? { board_request: true } : {})' : ''}${withTurnKey ? ', turn_key: inboxTurnKey(ctx.runId)' : ''} }, current)
       } catch { hookError('REPORTER_FAILED') }
     }))
 ` : ''}\
@@ -787,7 +794,7 @@ ${withPrompt ? `    api.on('before_prompt_build', (_event, ctx) => withHook(curr
         const last = role => [...messages].reverse().find(message => message?.role === role)
         const answer = textOf(last('assistant'))
         if (answer.trim() === '') return
-        save('turn', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? '', prompt: textOf(last('user')), last_assistant_message: answer }, current)
+        save('turn', { session_id: ctx.sessionId, cwd: ctx.workspaceDir ?? '', prompt: textOf(last('user')), last_assistant_message: answer${withTurnKey ? ', turn_key: inboxTurnKey(ctx.runId)' : ''} }, current)
       } catch { hookError('REPORTER_FAILED') }
     }))
     api.on('session_end', (event, ctx) => withHook(current => {

@@ -10,6 +10,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
+import { withLocalLock } from './local-lock'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
 import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -17,6 +18,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
+import { boardLanguage, isLanguageOverridden, settingsLangOf, withBoardSettings } from '../hooks/board-settings'
+import type { SettingsLang } from '../hooks/board-settings'
 import { barStyleName, barStyleOf, nextBarStyle, withBarStyle } from '../hooks/progress-bar'
 import type { BarStyle } from '../hooks/progress-bar'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
@@ -92,7 +95,12 @@ const systemLang = (env: unknown) => {
 }
 
 const path = progressFile()
-const s = STRINGS[langOf(flag('--lang')) ?? langOf(BAKED.lang) ?? systemLang(process.env.LANG) ?? 'en']
+const savedLanguage = (): SettingsLang | null => {
+  try { return settingsLangOf(readFileSync(settingsPath(path), 'utf8')) } catch { return null }
+}
+const langFlag = flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang'))
+const wordsNow = () => STRINGS[boardLanguage(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))]
+let s = wordsNow()
 
 // Files changed since the board last read progress.md in full. A read refused because another
 // program holds the file open can say that nothing was changed only while this is 0. It is
@@ -714,18 +722,19 @@ let routes: Record<string, AnswerRoute> = {}
 
 // The progress bar's style, from the board's settings file (#1085); one the page or the pane
 // picked shows at the next draw. A file that cannot be read means the default.
-// Read at most every 10 s, so the page's idle poll does not read the file each time; a pick made
-// here is kept at once.
-const BAR_STYLE_MS = 10_000
-let barStyleKept: { style: BarStyle; at: number } | null = null
-const barStyleNow = (): BarStyle => {
+// The file also holds the language picked in Settings (#1163). One read serves both, at most every
+// 10 s, so the page's idle poll does not read the file each time; a pick made here is kept at once.
+const SETTINGS_MS = 10_000
+let settingsKept: { text: string | null; at: number } | null = null
+const settingsNow = (): string | null => {
   const now = Date.now()
-  if (barStyleKept !== null && now - barStyleKept.at < BAR_STYLE_MS) return barStyleKept.style
-  let style: BarStyle
-  try { style = barStyleOf(read(settingsPath(path))) } catch { style = barStyleOf(null) }
-  barStyleKept = { style, at: now }
-  return style
+  if (settingsKept !== null && now - settingsKept.at < SETTINGS_MS) return settingsKept.text
+  let text: string | null
+  try { text = read(settingsPath(path)) } catch { text = null }
+  settingsKept = { text, at: now }
+  return text
 }
+const barStyleNow = (): BarStyle => barStyleOf(settingsNow())
 // The pick from the page or the `s` key: the settings file's other keys are kept. False when the
 // file exists but does not read as a JSON object: it is left as it is. A read or write error throws.
 const saveBarStyle = (style: BarStyle): boolean => {
@@ -733,7 +742,18 @@ const saveBarStyle = (style: BarStyle): boolean => {
   const next = withBarStyle(read(file), style)
   if (next === null) return false
   writeFileSync(file, next)
-  barStyleKept = { style, at: Date.now() }
+  settingsKept = { text: next, at: Date.now() }
+  return true
+}
+
+const saveLanguage = (lang: SettingsLang): boolean => {
+  const file = settingsPath(path)
+  const next = withBoardSettings(read(file), { lang })
+  if (next === null) return false
+  // A failed write names the file on the page, as a failed read does.
+  try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
+  settingsKept = { text: next, at: Date.now() }
+  s = wordsNow()
   return true
 }
 
@@ -750,6 +770,7 @@ const REWRITE_TRIES = 3
 // What a change answers to have the file read again before it is made: another write landed
 // while the change was being worked out.
 const AGAIN = Symbol('again')
+let isWriting = false
 
 // A write to a file a Claude Code session may write at the same moment: to a temp file of
 // this process's own (two boards can run at once), renamed over it, then read back; made
@@ -758,6 +779,20 @@ const AGAIN = Symbol('again')
 // read is never an empty file. `change` can run more than once, on newer text each time, and
 // is told when it runs for the last time.
 const rewrite = (file: string, change: (text: string, isLast: boolean) => string | null | typeof AGAIN, onReplaced?: () => void): string | null => {
+  // Only progress and its journal share the reporters' lock; polling the independent
+  // ledgers keeps their existing optimistic writes. Nested journal writes retain it.
+  const isSharedFile = file === path || file.startsWith(`${path.replace(/\.md$/i, '')}-journal-`)
+  if (!isWriting && isSharedFile) {
+    try {
+      return withLocalLock(`${path}.agent-board-lock`, () => {
+        isWriting = true
+        try { return rewrite(file, change, onReplaced) } finally { isWriting = false }
+      })
+    } catch (error) {
+      if (error instanceof BoardFileError) throw error
+      throw fileError(file, error instanceof Error && error.message === 'LOCK_BUSY' ? { code: 'EBUSY' } : error, true)
+    }
+  }
   let failure: unknown = { code: 'EAGAIN' }
   for (let attempt = 0; attempt < REWRITE_TRIES; attempt += 1) {
     const before = read(file)
@@ -1642,7 +1677,7 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
   if (action.type === 'send') return { state: { ...next, note: s.serveSending(agentLabel(action.route.agent || 'claude', s)), tone: 'quiet' }, isQuit: false, isHtml: false, isWrite: false, send: action }
   if (action.type === 'style') {
     // The next style after the one in the file now, not after a pick this board kept up to 10 s ago.
-    barStyleKept = null
+    settingsKept = null
     const style = nextBarStyle(barStyleNow())
     try {
       if (!saveBarStyle(style)) return { state: { ...next, note: s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
@@ -1858,6 +1893,27 @@ const isOwnAddressFile = (file: string): boolean => {
   const own = lstatSync(file)
   return !own.isSymbolicLink() && (process.getuid === undefined || own.uid === process.getuid())
 }
+
+const settingsPortOf = (text: string | null): number | null => {
+  try {
+    const data: unknown = JSON.parse(text ?? '')
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) return null
+    const port = (data as Record<string, unknown>).port
+    return typeof port === 'number' && Number.isSafeInteger(port) && port > 0 && port <= 65535 ? port : null
+  } catch { return null }
+}
+
+const savePort = (port: number): boolean => {
+  try {
+    const file = settingsPath(path)
+    const next = withBoardSettings(read(file), { port })
+    if (next === null) return false
+    writeFileSync(file, next)
+    settingsKept = { text: next, at: Date.now() }
+    return true
+  } catch { return false }
+}
+
 const readRunning = (file = serveFile()): Running | null => {
   try {
     // Only a file of this account's own, never a link to one somewhere else.
@@ -1927,6 +1983,8 @@ const serveChild = (): void => {
   // A child that could not protect the folder cannot start a page: its address file would
   // be unprotected. The parent reuses a running page itself; a child on its own refuses.
   if (runtimeUnprotected) throw runtimeFolderFailure()
+  const explicitPort = flag('--port') !== undefined ? Number(flag('--port')) || 0 : undefined
+  const preferredPort = explicitPort === undefined ? (settingsPortOf(settingsNow()) ?? undefined) : undefined
   // A page a test started stops once that test's process is gone, even after a killed run (#959).
   // Only tests set AGENT_BOARD_TEST_PID, to their own process id.
   const testPid = Number(process.env.AGENT_BOARD_TEST_PID)
@@ -1952,8 +2010,9 @@ const serveChild = (): void => {
         const projects = !isFresh && progressProjectCache !== null ? progressProjectCache.projects : parseProgress(read(path))
         return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
       },
-      s,
-      port: Number(flag('--port') ?? 0) || 0,
+      get s() { return s },
+      port: explicitPort ?? 0,
+      preferredPort,
       ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
@@ -1964,9 +2023,11 @@ const serveChild = (): void => {
       clean: cleanUp,
       bulkTidy,
       barStyle: barStyleNow,
-      setBarStyle: style => {
-        try { return saveBarStyle(style) } catch { return false }
-      },
+      setBarStyle: saveBarStyle,
+      // With no pick saved, the panel shows the setup language the board uses, not Automatic.
+      language: () => settingsLangOf(settingsNow()) ?? langOf(BAKED.lang) ?? 'auto',
+      setLanguage: saveLanguage,
+      isLangOverridden: () => isLanguageOverridden(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG)),
       sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.
       sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,
@@ -1992,6 +2053,7 @@ const serveChild = (): void => {
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') serveChildError(`${error instanceof RuntimeFolderTimeoutError || isTimeout(error) ? s.serveRuntimeCheckTimeout : isDenied ? s.serveRuntimeDenied : s.serveRuntimePrivate}\n`)
           return false
         }
+        savePort(port)
         const ready = flag('--ready-file')
         if (process.platform === 'win32' && ready !== undefined) {
           // Only a pre-created file in this board's private folder may carry the token. A launcher
@@ -2343,7 +2405,12 @@ const serveBoard = async (): Promise<void> => {
     process.stdout.write(`\n${isKept ? `${s.serveKept}\n` : ''}${idleNote}${s.serveAt(url)}\n`)
     // The address comes from a file and goes to a shell on Windows: only the shape this server
     // writes is opened.
-    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && !isPageOpen) await new Promise<void>(done => openInBrowser(url, () => done()))
+    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && !isPageOpen) {
+      const isOpen = await new Promise<boolean>(done => openInBrowser(url, done))
+      if (!isOpen && !process.env.AGENT_BOARD_TEST_PID && !process.env.SSH_CONNECTION && !process.env.SSH_TTY) {
+        process.stderr.write(`${s.serveBrowserNone(url)}\n`)
+      }
+    }
     if (args.includes('--lan')) await showLan(url)
   }
   const server = await serverPromise
@@ -2362,11 +2429,18 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
     return { note: serveFailureNote(failure), isOpen: false }
   }
   const address = server.url
-  const isShape = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
+  const isNoOpen = args.includes('--no-open')
+  const isShape = !isNoOpen && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
   // The page is already in a window: point at it rather than opening another one that would poll too.
   if (isShape && await pageIsOpen(server)) return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
   const isOpen = isShape ? await new Promise<boolean>(done => openInBrowser(address, done, true)) : false
-  return { note: isOpen ? s.boardPageWindowOpened(address) : s.boardPageLink(address), isOpen, url: address }
+  const isSuppressed = Boolean(process.env.AGENT_BOARD_TEST_PID || process.env.SSH_CONNECTION || process.env.SSH_TTY)
+  const note = isOpen
+    ? s.boardPageWindowOpened(address)
+    : isNoOpen || (isSuppressed && !isOpen)
+      ? s.boardPageLink(address)
+      : s.serveBrowserNone(address)
+  return { note, isOpen, url: address }
 }
 
 const openPageSurface = async (): Promise<void> => {

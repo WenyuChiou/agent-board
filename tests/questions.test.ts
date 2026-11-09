@@ -422,10 +422,12 @@ test('a same-prefix peer neither answers an inbox ask nor takes its turn', () =>
   const turn = { project: 'demo', agent: 'codex', id: 'a1b2c3d4', session, text: 'Inbox ask?', isQuestion: true, at: NOW, sourceAt: NOW } as PendingTurn
   const inbox = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'pending', undefined, [turn]).ledger
   const later = NOW + 1000
-  const peer = { agent: 'codex', id: 'a1b2c3d4', session: 'a1b2c3d4-person-b', event: 'prompt' as const, at: later }
+  const peer = { agent: 'codex', id: 'a1b2c3d4', session: 'a1b2c3d4-person-b', event: 'turn' as const, at: later }
   const open = observeQuestions(inbox, [], null, [], later, true, 'pending', undefined, [turn], [peer]).ledger
   expect(open.records.map(record => record.isUnresolved)).toEqual([true])
   expect(buildView([], [], null, later, 0, {}, STRINGS.en, [], {}, open, undefined, [turn]).waiting.map(item => item.text)).toEqual(['Inbox ask?'])
+  const replied = observeQuestions(inbox, [], null, [], later, true, 'pending', undefined, [], [{ ...peer, session, event: 'prompt' }]).ledger
+  expect(replied.records.map(record => record.isUnresolved)).toEqual([true])
   const own = observeQuestions(inbox, [], null, [], later, true, 'pending', undefined, [], [{ ...peer, session }]).ledger
   expect(own.records.map(record => record.isUnresolved)).toEqual([false])
   const { session: _session, ...oldTurn } = turn
@@ -853,15 +855,17 @@ test('an inbox question is resolved by the next turn of the same session', () =>
   expect(replay.records).toEqual(resolved.records)
 })
 
-test("an inbox question is resolved by the person's prompt to that session", () => {
+test("an inbox question is not resolved by the person's prompt to that session", () => {
   const pending = inboxQuestion()
   const initial = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'first', undefined, pending).ledger
   const prompt = inboxTurn(NOW + 1000, 'prompt')
   const mirror = { ...emptyMirror(prompt.id, 'demo', NOW, '/demo', 'codex'), resume: inboxSession, turnOrder: NOW * 2 }
   const asked = markAsked(applyTaskCreate(mirror, { subject: 'Deploy' }, '1', NOW), 'Use staging?')
-  expect(answerAgentPrompt(asked, prompt, NOW + 2000)?.tasks.some(task => task.waiting === 'you')).toBe(false)
-  const resolved = observeQuestions(initial, [], null, [], NOW + 2000, true, 'prompt', undefined, [], [prompt]).ledger
-  expect(resolved.records.map(row => [row.isUnresolved, row.isWaiting, row.isPresent])).toEqual([[false, false, false]])
+  const replied = answerAgentPrompt(asked, prompt, NOW + 2000)
+  expect(replied?.replied).toBe(NOW + 1000)
+  expect(replied?.tasks).toEqual(asked.tasks)
+  const afterPrompt = observeQuestions(initial, [], null, [], NOW + 2000, true, 'prompt', undefined, [], [prompt]).ledger
+  expect(afterPrompt.records.map(row => [row.id, row.isUnresolved])).toEqual([[initial.records[0]?.id, true]])
 })
 
 test("an end, a cleanup or another session's turn does not resolve an inbox question", () => {
@@ -1338,8 +1342,8 @@ test('continuation guard narrows QuestionAnswerEvidence and excludes end events 
   // Nonempty turn is continuation
   expect(isContinuationTurn(baseTurn)).toBe(true)
 
-  // Prompt event is continuation
-  expect(isContinuationTurn({ ...baseTurn, event: 'prompt', answer: '' })).toBe(true)
+  // The person's prompt is provisional; it is not an agent report.
+  expect(isContinuationTurn({ ...baseTurn, event: 'prompt', answer: '' })).toBe(false)
 
   // Turn without answer field (e.g. minimal QuestionAnswerEvidence) is continuation
   const evidence: QuestionAnswerEvidence = { agent: 'codex', id: 'block-1', session: 'sess-1', event: 'turn', at: NOW + 1000 }

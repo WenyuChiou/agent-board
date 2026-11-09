@@ -1,13 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 import { agentHooks, COLLISION, DELETE, openclawPlugin, opencodePlugin } from '../hooks/connect'
 import { hookTimeout, hostHookTimeout } from '../hooks/hook-safety'
-import { answerAgentPrompt, blockId, inboxOrder, normalizeTurnOrder, readTurn, turnOrder, turnsToDigest, withAgentPrompts } from '../hooks/inbox'
+import { answerAgentPrompt, blockId, inboxOrder, normalizeTurnOrder, readTurn, restoreAgentBoardQuestion, turnOrder, turnsToDigest, withAgentPrompts } from '../hooks/inbox'
 import { emptyMirror, isStaleStoreKey } from '../hooks/mirror'
-import { answerTurns, applyDigest, markAsked } from '../hooks/digest'
+import { answerTurns, applyDigest, markAsked, settleChatReply } from '../hooks/digest'
 import { peekInbox } from '../hooks/board'
 import { stepWords, upsertAutoBlock } from '../hooks/blocks'
 import { parseProgress } from '../hooks/parse'
-import { emptyQuestions, observeQuestions } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, resolveQuestion } from '../hooks/questions'
 import { EN } from '../hooks/strings-en'
 
 const CTX = { home: '/h', sep: '/', isWindows: false, script: '/h/progress-report.sh', inbox: '/h/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw' }
@@ -46,7 +46,8 @@ test('prompt ordering preserves saved binary turn and end numbers and answers on
   const current = mirror()
   const next = answerAgentPrompt(current, prompt(), AT + 2000)!
   expect(next.state).toBe('working')
-  expect(next.tasks.some(one => one.waiting === 'you')).toBe(false)
+  expect(next.tasks).toEqual(current.tasks)
+  expect(next.replied).toBe(AT + 1000)
   expect(next.firstPrompt).toBe('Original request')
   expect(next.turnOrder).toBe(AT * 2)
   expect(next.promptOrder).toBe((AT + 1000) * 2)
@@ -59,7 +60,7 @@ test('prompt ordering preserves saved binary turn and end numbers and answers on
   expect(['codex-end-1792152000-1.json', 'codex-turn-1792152000-1.json', 'codex-prompt-1792152000-1.json'].sort(inboxOrder)).toEqual(['codex-prompt-1792152000-1.json', 'codex-turn-1792152000-1.json', 'codex-end-1792152000-1.json'])
 })
 
-test("a prompt keeps the answered question's words on its finished step, so the question's record closes", () => {
+test('an inbox reply keeps the question unresolved until the next agent report or explicit Resolve', () => {
   const asked = { ...markAsked(applyDigest(emptyMirror(ID, 'demo', AT, '/demo', 'codex'), { title: 'Release', context: '', done: '', next: 'Ship it', ask: '', why: '' }, AT), 'Ship it to staging now, OK?'), resume: SESSION, turnOrder: AT * 2 }
   // A note the block writer cleans (a leading `#`, runs of spaces) must close the same way.
   const cleaned = { ...applyDigest(emptyMirror(ID, 'demo', AT, '/demo', 'codex'), { title: 'Migration', context: '', done: '', next: 'Continue', ask: 'Database', why: '#42 is failing,   retry?' }, AT), resume: SESSION, turnOrder: AT * 2 }
@@ -67,13 +68,22 @@ test("a prompt keeps the answered question's words on its finished step, so the 
     const before = upsertAutoBlock('# Progress\n', current, EN)
     const waiting = observeQuestions(emptyQuestions(), parseProgress(before), null, [], AT + 500, true).ledger
     expect(waiting.records.filter(record => record.isUnresolved)).toHaveLength(1)
-    const answered = upsertAutoBlock(before, answerAgentPrompt(current, prompt(), AT + 2000)!, EN)
-    expect(answered).toContain(`- [x] ${waiting.records[0]!.words}`)
-    expect(observeQuestions(waiting, parseProgress(answered), null, [], AT + 2500, true).ledger.records.filter(record => record.isUnresolved)).toEqual([])
+    const original = waiting.records[0]!
+    const replied = answerAgentPrompt(current, prompt(), AT + 2000)!
+    const file = upsertAutoBlock(before, replied, EN)
+    expect(file).toContain(`- [?] ${original.words}`)
+    const pending = observeQuestions(waiting, parseProgress(file), null, [], AT + 2500, true).ledger
+    expect(pending.records.filter(record => record.isUnresolved).map(record => record.id)).toEqual([original.id])
+    expect(resolveQuestion(pending, original.id, AT + 2500).records[0]?.isUnresolved).toBe(false)
+
+    const reported = applyDigest(settleChatReply(replied), { title: current.title, context: '', done: '', next: 'Keep going', ask: '', why: '' }, AT + 3000)
+    const finished = upsertAutoBlock(file, reported, EN)
+    expect(finished).toContain(`- [x] ${original.words}`)
+    expect(observeQuestions(pending, parseProgress(finished), null, [], AT + 3500, true).ledger.records.filter(record => record.isUnresolved)).toEqual([])
   }
 })
 
-test("the person's next prompt keeps this session's summed-up question's words on its finished step, so its record closes", () => {
+test("a later report keeps this session's summed-up question's words on its finished step, so its record closes", () => {
   const mine = applyDigest(emptyMirror('own-session', 'demo', AT, '/demo'), { title: 'Migration', context: '', done: '', next: 'Continue', ask: 'Database', why: '#7 or staging?' }, AT)
   const open = observeQuestions(emptyQuestions(), [], mine, [], AT + 500, true).ledger
   expect(open.records.filter(record => record.isUnresolved)).toHaveLength(1)
@@ -105,6 +115,21 @@ test('immutable prompt receipts project over stale owner writes without answerin
   expect(withAgentPrompts(undefined, [receipt], AT + 5000)).toBeUndefined()
   expect(withAgentPrompts(current, [null, { ...receipt, session: 'foreign' }, { ...receipt, at: 'invalid' }], AT + 5000)).toEqual(current)
   expect(isStaleStoreKey(`agentPrompt:${ID}:old`, receipt, AT + 365 * 86400000, 30 * 86400000)).toBe(false)
+})
+
+test('a board result can reclassify a provisional inbox reply only when it binds the same host turn', () => {
+  const current = mirror()
+  const received = readTurn(`codex-prompt-${AT + 1000}-1.json`, JSON.stringify({ session_id: SESSION, turn_id: 'synthetic-one' }))!
+  const result = (turn: string | undefined) => readTurn(`codex-turn-${AT + 2000}-1.json`, JSON.stringify({
+    session_id: SESSION, turn_id: turn, prompt: '/agent-board',
+  }))!
+  const projected = withAgentPrompts(current, [{ id: ID, agent: 'codex', session: SESSION, turnKey: received.turnKey, at: received.at, updated: AT + 1500 }], AT + 2500)!
+  expect(projected.replied).toBe(AT + 1000)
+  expect(restoreAgentBoardQuestion(projected, result(undefined), AT + 2500)).toBeNull()
+  expect(restoreAgentBoardQuestion(projected, result('synthetic-other'), AT + 2500)).toBeNull()
+  const restored = restoreAgentBoardQuestion(projected, result('synthetic-one'), AT + 2500)!
+  expect(restored.replied).toBeUndefined()
+  expect(restored.tasks).toEqual(current.tasks)
 })
 
 test('prompt receipts compose after manual completion and only newer source prompts resume work', () => {

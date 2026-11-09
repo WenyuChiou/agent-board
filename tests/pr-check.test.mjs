@@ -440,6 +440,42 @@ test('pr-check finds an email address in added docs and the body, but not git, n
   }
 })
 
+test('pr-check accepts public GitHub attachment IDs while checking every other private value', () => {
+  const asset = '12345678-abcd-4ef0-9876-abcdef123456'
+  const session = '87654321-dcba-4fed-9876-fedcba654321'
+  const url = `https://github.com/user-attachments/assets/${asset}`
+  for (const body of [url, `![Synthetic settings](${url})`, `<img alt="Synthetic settings" src="${url}">`, `<${url}>`]) {
+    assert.deepEqual(privateData({ added: [], body }).problems, [], body)
+    assert.deepEqual(privateData({ added: [{ path: 'docs/synthetic.md', line: 1, text: body }], body: '' }).problems, [], body)
+  }
+  for (const body of [
+    `${url} ${session}`,
+    `https://example.invalid/user-attachments/assets/${asset}`,
+    `https://example.invalid/https://github.com/user-attachments/assets/${asset}`,
+    `https://github.com.example.invalid/user-attachments/assets/${asset}`,
+    `https://github.com/other/${asset}`,
+    `https://github.com/USER-ATTACHMENTS/assets/${asset}`,
+    `https://github.com/${session}/../user-attachments/assets/${asset}`,
+    `https://github.com/%2e%2e/${session}/../user-attachments/assets/${asset}`,
+    `${url}/other`, `${url}?other=1`, `${url}#other`,
+    `https://someone@github.com/user-attachments/assets/${asset}`,
+  ]) {
+    assert.ok(privateData({ added: [], body }).problems.some(item => /session id/.test(item.message)), body)
+  }
+  for (const [value, kind] of [
+    ['https://example.invalid/?token=syntheticToken01234567890123456789', 'token'],
+    ['person.synthetic@gmail.com', 'email address'],
+    ['/home/private-synthetic/file', 'home-folder path'],
+  ]) {
+    const checked = privateData({ added: [], body: `${url} ${value}` })
+    assert.equal(checked.problems.length, 1)
+    assert.ok(checked.problems[0].message.includes(kind), kind)
+  }
+  const image = privateData({ added: [], body: `![Actual settings](${url})` })
+  assert.equal(image.problems.length, 1)
+  assert.match(image.problems[0].message, /image without synthetic alt text/)
+})
+
 test('pr-check asks for the rules page when CONTRIBUTING.md, team-process.md or RELEASING.md changes', () => {
   for (const path of ['CONTRIBUTING.md', 'docs/dev/team-process.md', 'docs/RELEASING.md']) {
     const checked = rulesPage({ paths: [path, 'tests/x.test.mjs'], body: '' })
