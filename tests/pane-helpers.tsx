@@ -293,7 +293,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
     value: world.hasTasks ? [{ name: 'TaskCreate', description: '', mcp: false }] : [{ name: 'Read', description: '', mcp: false }],
   }))
   on('process.run', async ($, e) => {
-    if (e.argv[0] === 'node' && e.argv[1] === '-e' && e.argv[2] !== LEDGER_LINK && world.isAddressOwn !== undefined) {
+    if (e.argv[0] === 'node' && e.argv[1] === '-e' && typeof e.argv[2] === 'string' && e.argv[2].includes('process.getuid') && world.isAddressOwn !== undefined) {
       return { value: { exitCode: world.isAddressOwn ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (world.browserExitCode !== undefined && e.argv.some(arg => /\.html$/.test(arg))) {
