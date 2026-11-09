@@ -1,5 +1,5 @@
 import { STRINGS } from './strings'
-import { HOOK_VERSION, HOOK_WORKER_GRACE, hookGuardSource, hookTimeout } from './hook-safety'
+import { HOOK_VERSION, HOOK_WORKER_GRACE, REPORT_TOOL_REPLY, hookGuardSource, hookTimeout } from './hook-safety'
 import { deepseekReceiverSource } from './receivers/deepseek'
 
 // Native metadata observers. No conversation grant, transcript read or model call is installed by these
@@ -22,15 +22,7 @@ const report = (mode, payload, deadline, session, cwd) => {
   if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason + (typeof detail === 'string' ? ': ' + detail : '') : 'AGENT_BOARD_REPORT_FAILED')
   return result.stdout
 }
-// A long report's tool reply carries only how many steps the board left out or shortened. The model needs
-// those counts to trim its list; the writer's session id and progress-file path stay out of the model's context.
-const toolReply = text => {
-  try {
-    const { dropped, cut } = JSON.parse(text)
-    return JSON.stringify({ dropped, cut })
-  } catch { return 'OK' }
-}
-`
+${REPORT_TOOL_REPLY}`
 
 // A session's folder is in no hook context that is free of the conversation: it comes from the tool
 // factory's context (which names the session's workspace), else the default agent workspace. No hook that
@@ -93,7 +85,7 @@ export default {
             if (typeof params.title === 'string') payload.title = params.title
             if (['working', 'waiting', 'done', 'ended'].includes(params.state)) payload.state = params.state
             const result = report('--codex-report', payload, Date.now() + ${hookTimeout('openclaw') - 1000}, session)
-            return { content: [{ type: 'text', text: payload.steps.length > 40 ? toolReply(result) : 'OK' }], details: {} }
+            return { content: [{ type: 'text', text: toolReply(result) }], details: {} }
           } catch (error) {
             hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
             throw error
@@ -201,7 +193,7 @@ export const apply = ctx => {
         if (typeof args.title === 'string') payload.title = args.title
         if (['working', 'waiting', 'done', 'ended'].includes(args.state)) payload.state = args.state
         const result = report('--codex-report', payload, Date.now() + 20000, header.id)
-        return { text: payload.steps.length > 40 ? toolReply(result) : 'OK' }
+        return { text: toolReply(result) }
       } catch (error) {
         hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
         throw error

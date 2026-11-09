@@ -6425,6 +6425,19 @@ test('opencode: a refused progress report tells the model why', async () => {
   }, { lang })
 })
 
+test('an OpenCode report tells the model only how many steps the board left out or shortened', async () => {
+  await opencodeSpawnFixture(opencodeRealSpawn, async f => {
+    const execute = steps => f.instance.tool.agent_board_progress.execute({ ...f.payload, steps }, f.context)
+    assert.equal(await execute(['- [~] Synthetic short step']), 'OK')
+    // The reply names neither the session nor the progress file.
+    const long = await execute(Array.from({ length: 41 }, (_, index) => `- [ ] Synthetic step ${index + 1}`))
+    assert.deepEqual(JSON.parse(long), { dropped: 1, cut: 0 })
+    const cut = await execute([`- [ ] ${'x'.repeat(130)}`])
+    assert.deepEqual(JSON.parse(cut), { dropped: 0, cut: 1 })
+    for (const reply of [long, cut]) assert.doesNotMatch(reply, /session|progress|[\\/]/)
+  })
+})
+
 test('an OpenCode report retries once when the runtime ends spawnSync early with ETIMEDOUT', async () => {
   await opencodeSpawnFixture((file, args, options, realSpawnSync, count) => count === 1 ? opencodeTimeoutResult() : realSpawnSync(file, args, options), async f => {
     f.payload.state = 'done'
@@ -6669,6 +6682,9 @@ test('OpenClaw session events carry the session folder and progress_card reports
   assert.deepEqual(Object.keys(reply).sort(), ['cut', 'dropped'])
   assert.equal(reply.dropped, 1)
   assert.doesNotMatch(long.content[0].text, /session|progress|[\\/]/)
+  // A shortened step is counted too, even in a short list.
+  const cut = await tool.execute('call-6', { title: 'Many steps', state: 'working', steps: [`- [ ] ${'x'.repeat(130)}`] })
+  assert.deepEqual(JSON.parse(cut.content[0].text), { dropped: 0, cut: 1 })
 }))
 
 test('a report from a folder binds to an openclaw record that holds the folder and refuses one that does not', () => fixture(f => {
@@ -6784,6 +6800,9 @@ test('DeepSeek session events carry the session folder and the agent_board tool 
   assert.deepEqual(Object.keys(reply).sort(), ['cut', 'dropped'])
   assert.equal(reply.dropped, 1)
   assert.doesNotMatch(long.text, /session|progress|[\\/]/)
+  // A shortened step is counted too, even in a short list.
+  const cut = await tool.execute({ action: 'report', title: 'Many steps', state: 'working', steps: [`- [ ] ${'x'.repeat(130)}`] }, { agent })
+  assert.deepEqual(JSON.parse(cut.text), { dropped: 0, cut: 1 })
   await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] Done'] }, {}), /AGENT_BOARD_REPORT_FAILED: NO_SESSION/)
   await assert.rejects(tool.execute({ action: 'close' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_ACTION/)
 }))

@@ -1,6 +1,6 @@
 import { boardPromptHelper, boardRequestWords } from './board-commands'
 import { STRINGS } from './strings'
-import { HOOK_VERSION, HOOK_WORKER_GRACE, hookBootstrap, hookGuardSource, hookTimeout, hostHookTimeout } from './hook-safety'
+import { HOOK_VERSION, HOOK_WORKER_GRACE, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookTimeout, hostHookTimeout } from './hook-safety'
 
 const BOARD_PROMPT_HELPER = boardPromptHelper(boardRequestWords(Object.values(STRINGS)))
 
@@ -186,7 +186,7 @@ const run = (mode, payload, session, deadline) => {
   if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason + (typeof detail === 'string' ? ': ' + detail : '') : 'AGENT_BOARD_REPORT_FAILED')
   return result.stdout
 }
-
+${REPORT_TOOL_REPLY}
 // A one-shot \`opencode run\` exits without session.deleted (#217). As OpenCode exits, the
 // top-level sessions reported here and not seen to end are ended, all within one hook limit;
 // a board that is too slow gets them queued or logged, and OpenCode's exit never waits longer.
@@ -305,7 +305,7 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
       // The board takes each step as one Markdown task line (#217).
       args: { title: tool.schema.string(), project: tool.schema.string(), state: tool.schema.enum(['working', 'waiting', 'done', 'ended']), steps: tool.schema.array(tool.schema.string().describe(${JSON.stringify(stepFormat)})) },
       execute: async (args, context) => {
-        try { return run('--codex-report', args, context.sessionID) }
+        try { return toolReply(run('--codex-report', args, context.sessionID)) }
         catch (error) {
           hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
           throw error
