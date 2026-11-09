@@ -4472,7 +4472,7 @@ export const register: Register = (on, options) => {
       const branch = await branchName($)
       await saveMine($, one => ({ ...one, branch, replied: undefined }))
       // A turn that ended on a question waits on the person even if Claude did not mark it.
-      if (question !== null && mirror.source === 'tasks') await saveMine($, one => markAsked(one, question, hasRunningTurnBackgroundJob))
+      if (question !== null && (mirror.source === 'tasks' || isDelivery)) await saveMine($, one => markAsked(one, question, hasRunningTurnBackgroundJob))
       await settle($)
       if (!mirror.isTitleFinal) {
         $.clock.after(1, () => {
