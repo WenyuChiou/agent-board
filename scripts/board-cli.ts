@@ -2283,7 +2283,12 @@ const serveBoard = async (): Promise<void> => {
     process.stdout.write(`\n${isKept ? `${s.serveKept}\n` : ''}${idleNote}${s.serveAt(url)}\n`)
     // The address comes from a file and goes to a shell on Windows: only the shape this server
     // writes is opened.
-    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && !isPageOpen) await new Promise<void>(done => openInBrowser(url, () => done()))
+    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && !isPageOpen) {
+      const isOpen = await new Promise<boolean>(done => openInBrowser(url, done))
+      if (!isOpen && !process.env.AGENT_BOARD_TEST_PID && !process.env.SSH_CONNECTION && !process.env.SSH_TTY) {
+        process.stderr.write(`${s.serveBrowserNone(url)}\n`)
+      }
+    }
     if (args.includes('--lan')) await showLan(url)
   }
   const server = await serverPromise
@@ -2302,11 +2307,18 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
     return { note: serveFailureNote(failure), isOpen: false }
   }
   const address = server.url
-  const isShape = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
+  const isNoOpen = args.includes('--no-open')
+  const isShape = !isNoOpen && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
   // The page is already in a window: point at it rather than opening another one that would poll too.
   if (isShape && await pageIsOpen(server)) return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
   const isOpen = isShape ? await new Promise<boolean>(done => openInBrowser(address, done, true)) : false
-  return { note: isOpen ? s.boardPageWindowOpened(address) : s.boardPageLink(address), isOpen, url: address }
+  const isSuppressed = Boolean(process.env.AGENT_BOARD_TEST_PID || process.env.SSH_CONNECTION || process.env.SSH_TTY)
+  const note = isOpen
+    ? s.boardPageWindowOpened(address)
+    : isNoOpen || (isSuppressed && !isOpen)
+      ? s.boardPageLink(address)
+      : s.serveBrowserNone(address)
+  return { note, isOpen, url: address }
 }
 
 const openPageSurface = async (): Promise<void> => {
