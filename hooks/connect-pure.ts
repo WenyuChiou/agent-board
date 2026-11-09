@@ -308,6 +308,7 @@ const EMPTY_HOOKS = /^hooks\s*:\s*\{\s*\}\s*(?:#[^\n]*)?$/
 const indentOf = (line: string): number => line.length - line.trimStart().length
 
 const isContent = (line: string): boolean => line.trim() !== '' && !line.trimStart().startsWith('#')
+const isHermesItem = (line: string): boolean => /^-(?:\s|$)/.test(line.trimStart())
 
 // Whether the key on line `at` has anything under it (YAML lets a list sit at the key's own
 // indent).
@@ -316,7 +317,7 @@ const hasChildren = (lines: string[], at: number): boolean => {
   const next = lines.slice(at + 1).find(isContent)
   if (next === undefined) return false
 
-  return indentOf(next) > indent || (indentOf(next) === indent && next.trimStart().startsWith('- '))
+  return indentOf(next) > indent || (indentOf(next) === indent && isHermesItem(next))
 }
 
 // Adding ours again keeps a `hooks:` that only held ours, so they go back where they were
@@ -324,8 +325,7 @@ const hasChildren = (lines: string[], at: number): boolean => {
 // Our list items, each with the lines that continue it: a YAML dumper (Hermes' own setup,
 // or a person tidying the file) writes our flow-style item in block style, its timeout on a
 // line of its own. A comment or another line that names the script is no item of ours.
-// `owns` tells an item of ours from a person's: the connector's reporter script by default, or the
-// installed worker for setup's hooks (#1115).
+// The legacy connector recognizes its reporter; independent setup has an exact install record.
 const hermesItems = (lines: readonly string[], owns: RegExp = OURS): Array<[number, number]> => {
   const items: Array<[number, number]> = []
   lines.forEach((line, at) => {
@@ -355,7 +355,15 @@ const stripHermesHooks = (text: string, isKeepingTop: boolean, owns: RegExp = OU
 
 export const withoutHermesHooks = (text: string, owns: RegExp = OURS): string => stripHermesHooks(text, false, owns)
 
-export const withHermesHooks = (text: string, events: Array<[string, string, string?]>, owns: RegExp = OURS): string | null => {
+type HermesEvents = Array<[string, string, string?]>
+const hermesHasTimeout = (item: string): boolean => [...item.matchAll(/(?:^|[,{\n])\s*timeout\s*:\s*(\d+)/g)].some(match => Number(match[1]) >= hostHookTimeout('hermes'))
+const hermesHasMatcher = (item: string, expected: string | undefined): boolean => {
+  if (expected === undefined) return true
+  const match = /(?:^|[,{\n])\s*matcher\s*:\s*(?:"([^"]*)"|'([^']*)'|([^,\s}#]+))/.exec(item)
+  return (match?.[1] ?? match?.[2] ?? match?.[3]) === expected
+}
+
+export const withHermesHooks = (text: string, events: HermesEvents, owns: RegExp = OURS): string | null => {
   // Ours all there already, in whatever style Hermes last wrote them: nothing to change, so
   // a session start neither rewrites the file nor says it connected Hermes again.
   const lines0 = text.split('\n')
@@ -366,17 +374,14 @@ export const withHermesHooks = (text: string, events: Array<[string, string, str
   const flat = (one: string): string => one.replace(/\s+/g, ' ')
   const isItemOf = (item: string, command: string): boolean =>
     [command, JSON.stringify(command), `'${command.replace(/'/g, "''")}'`].some(form => flat(item).includes(flat(form)))
-  const hasTimeout = (item: string): boolean => [...item.matchAll(/(?:^|[,{\n])\s*timeout\s*:\s*(\d+)/g)].some(match => Number(match[1]) >= hostHookTimeout('hermes'))
-  const hasMatcher = (item: string, expected: string | undefined): boolean => {
-    if (expected === undefined) return true
-    const match = /(?:^|[,{\n])\s*matcher\s*:\s*(?:"([^"]*)"|'([^']*)'|([^,\s}#]+))/.exec(item)
-    return (match?.[1] ?? match?.[2] ?? match?.[3]) === expected
-  }
-  if (items.length === events.length && events.every(([, command, matcher]) => items.some(item => isItemOf(item, command) && hasTimeout(item) && hasMatcher(item, matcher)))) return text
-  const base = stripHermesHooks(text, true, owns)
+  if (items.length === events.length && events.every(([, command, matcher]) => items.some(item => isItemOf(item, command) && hermesHasTimeout(item) && hermesHasMatcher(item, matcher)))) return text
+  return addHermesHooks(stripHermesHooks(text, true, owns), events, text.includes('\r\n'))
+}
+
+const addHermesHooks = (base: string, events: HermesEvents, isCrLf: boolean): string | null => {
   const item = (command: string, matcher?: string): string => `- {command: ${JSON.stringify(command)}, timeout: ${hostHookTimeout('hermes')}${matcher === undefined ? '' : `, matcher: ${matcher === 'todo' ? matcher : JSON.stringify(matcher)}`}}`
   // Lines of ours end the way the file's own lines do.
-  const eol = text.includes('\r\n') ? '\r' : ''
+  const eol = isCrLf ? '\r' : ''
   // An empty `hooks: {}` becomes a bare `hooks:` that ours go under.
   const lines = base
     .replace(/\n+$/, '')
@@ -405,13 +410,158 @@ export const withHermesHooks = (text: string, events: Array<[string, string, str
     const after = (lines[key] ?? '').replace(/^[^:]*:/, '').trim()
     if (after !== '' && !after.startsWith('#')) return null
     const next = lines.slice(key + 1, end).find(isContent)
-    const nested = next !== undefined && (indentOf(next) > indent || (indentOf(next) === indent && next.trimStart().startsWith('- ')))
+    const nested = next !== undefined && (indentOf(next) > indent || (indentOf(next) === indent && isHermesItem(next)))
     lines.splice(key + 1, 0, `${' '.repeat(nested && next !== undefined ? indentOf(next) : indent + 2)}${item(command, matcher)}${eol}`)
     if (key < insert) insert += 1
     end += 1
   }
 
   return `${lines.join('\n')}\n`
+}
+
+const foldHermesQuoted = (word: string): string => word.replace(/\r?\n[ \t]+/g, ' ')
+const HERMES_COMMAND = /^(?:command|"command"|'command')[ \t]*:[ \t]*/
+const HERMES_OPTION = /^(?:"(timeout|matcher)"|'(timeout|matcher)'|(timeout|matcher))[ \t]*:[ \t]*("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[\w.-]+)[ \t]*(?:#[^\r\n]*)?$/
+
+// An edited hook may share an anchor with another entry. Remove only the simple item shape we
+// write, so a successful removal cannot strand an alias elsewhere in the config.
+const hasSimpleHermesOptions = (options: readonly string[]): boolean => {
+  const seen = new Set<string>()
+  for (const option of options.filter(isContent)) {
+    const match = HERMES_OPTION.exec(option.trim())
+    const key = match?.[1] ?? match?.[2] ?? match?.[3]
+    if (key === undefined || seen.has(key) || (key === 'timeout' && !/^\d+$/.test(match?.[4] ?? ''))) return false
+    seen.add(key)
+  }
+  return true
+}
+
+type HermesSetupItem = { command: string; isSimple: boolean }
+
+// Decode identity separately from whether the item can be removed. A command written with YAML
+// escapes still belongs to its install record even when an anchor or alias prevents editing it.
+const hermesSetupItemOf = (lines: readonly string[]): HermesSetupItem | undefined => {
+  const first = lines[0]
+  if (first === undefined) return undefined
+  const lead = first.trimStart().slice(1).trimStart()
+  if (/^[&*]/.test(lead)) return undefined
+  const isFlow = lead.startsWith('{')
+  const propertyIndent = !isContent(lead) ? indentOf(lines.slice(1).find(isContent) ?? '') : first.indexOf(lead)
+  const keys = lines.flatMap((line, i) => i > 0 && indentOf(line) === propertyIndent &&
+    HERMES_COMMAND.test(line.trimStart()) ? [i] : [])
+  const at = isFlow || HERMES_COMMAND.test(lead) ? 0 : keys[0]
+  if (at === undefined || (!isFlow && keys.length > (at === 0 ? 0 : 1))) return undefined
+  const field = at === 0 ? lead.replace(/^\{\s*/, '') : (lines[at] ?? '').trimStart()
+  const prefix = HERMES_COMMAND.exec(field)
+  if (prefix === null) return undefined
+  const words = [field.slice(prefix[0].length), ...lines.slice(at + 1)]
+  const rest = words.join('\n')
+  const quoted = /^(?:"(?:\\[\s\S]|[^"\\])*"|'(?:''|[^'])*')/.exec(rest)?.[0]
+  // A person's command may be an ordinary unquoted YAML scalar. Do not mistake an anchor, tag,
+  // block scalar, or other structural syntax for one.
+  const plain = isFlow ? /^[\w./~$][^,{}\r\n]*/ : /^[\w./~$][^\r\n]*/
+  let scalar = quoted ?? plain.exec(rest)?.[0]
+  if (scalar === undefined) return undefined
+  if (quoted === undefined && !isFlow && !/[ \t]+#/.test(scalar)) {
+    // Hermes can fold a long plain command onto more-indented lines. The next option is back
+    // at the command's property indentation; only fold words that belong to the scalar.
+    let end = 1
+    for (const line of words.slice(1)) {
+      if (!isContent(line) || indentOf(line) <= propertyIndent) break
+      if (/:[ \t]/.test(line)) return undefined
+      end += 1
+      if (/[ \t]+#/.test(line)) break
+    }
+    if (end > 1) scalar = words.slice(0, end).join('\n').trimEnd()
+  }
+  if (/\r?\n[ \t]*\r?\n/.test(scalar)) return undefined
+  const word = foldHermesQuoted(scalar)
+  if (/[\r\n]/.test(word)) return undefined
+  let command: string
+  if (quoted === undefined) command = word.replace(/[ \t]+#.*$/, '').trimEnd()
+  else if (word.startsWith("'")) command = word.slice(1, -1).replace(/''/g, "'")
+  else {
+    try { command = JSON.parse(word) as string } catch { return undefined }
+  }
+  const after = rest.slice(scalar.length)
+  if (isFlow) {
+    const closing = /^[ \t]*((?:,[^}\r\n]*)?)\}[ \t]*(?:#[^\r\n]*)?\r?(?:\n|$)/.exec(after)
+    const isSimple = closing !== null && hasSimpleHermesOptions((closing[1] ?? '').split(',').slice(1)) &&
+      !after.slice(closing[0].length).split('\n').some(isContent)
+    return { command, isSimple }
+  }
+  const ending = /^[ \t]*(?:#[^\r\n]*)?\r?(?:\n|$)/.exec(after)
+  const preceding = at === 0 ? [] : [lead, ...lines.slice(1, at)]
+  const isSimple = ending !== null && hasSimpleHermesOptions([...preceding, ...after.slice(ending[0].length).split('\n')])
+  return { command, isSimple }
+}
+
+type HermesSetupEdit = { text: string; hasOwned: boolean }
+
+// Only the top-level hooks map and the recorded event/command pair can identify a setup entry.
+// Ambiguous copies are left alone rather than claiming both.
+export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string>, isRemoving: boolean): HermesSetupEdit | null => {
+  const lines = text.split('\n')
+  const tops = lines.flatMap((line, at) => /^(?:hooks|"hooks"|'hooks')\s*:/.test(line) ? [at] : [])
+  const top = tops[0]
+  if (tops.length > 1 || (top !== undefined && !TOP_HOOKS.test(lines[top] ?? '') && !EMPTY_HOOKS.test(lines[top] ?? ''))) return null
+  const desired = new Map(events.map(([event, command, matcher]) => [event, { command, matcher }]))
+  const seen = new Set<string>()
+  const owned = new Map<string, { command: string; item: string }>()
+  const drop = new Set<number>()
+  if (top !== undefined) {
+    const stop = lines.findIndex((line, at) => at > top && isContent(line) && indentOf(line) === 0)
+    const end = stop === -1 ? lines.length : stop
+    const content = lines.slice(top + 1, end).find(isContent)
+    const indent = content === undefined ? 2 : indentOf(content)
+    const keys = lines.flatMap((line, at) => at > top && at < end && isContent(line) &&
+      indentOf(line) === indent && !isHermesItem(line) ? [at] : [])
+    for (const [index, key] of keys.entries()) {
+      const header = lines[key] ?? ''
+      const name = /^\s*(?:"([a-z_]+)"|'([a-z_]+)'|([a-z_]+))\s*:/.exec(header)
+      const event = name?.[1] ?? name?.[2] ?? name?.[3]
+      if (event === undefined || (!recorded.has(event) && (isRemoving || !desired.has(event)))) continue
+      if (seen.has(event) || !HERMES_KEY.test(header)) return null
+      seen.add(event)
+      const last = keys[index + 1] ?? end
+      const members = lines.slice(key + 1, last)
+      const children = members.find(isContent)
+      if (children === undefined) continue
+      const itemIndent = indentOf(children)
+      if (members.some(line => isContent(line) && (indentOf(line) < itemIndent || indentOf(line) === itemIndent && !isHermesItem(line)))) return null
+      const items = members.flatMap((line, at) => indentOf(line) === itemIndent && isHermesItem(line) ? [key + 1 + at] : [])
+      const previous = recorded.get(event)
+      const wanted = isRemoving ? undefined : desired.get(event)?.command
+      for (const [itemIndex, start] of items.entries()) {
+        const after = items[itemIndex + 1] ?? last
+        const parts = lines.slice(start, after)
+        const parsed = hermesSetupItemOf(parts)
+        // Even when one item matches, another unreadable item can hide a duplicate. Leave the
+        // whole config and install record alone until every item in this event is understood.
+        if (parsed?.isSimple !== true) return null
+        const { command } = parsed
+        const item = parts.join('\n')
+        if (command !== previous) {
+          if (command === wanted) return null
+          continue
+        }
+        if (owned.has(event)) return null
+        owned.set(event, { command, item })
+        for (let at = start; at < after; at += 1) if (isContent(lines[at] ?? '')) drop.add(at)
+      }
+      if (owned.has(event) && !lines.slice(key + 1, last).some((line, at) => isContent(line) && !drop.has(key + 1 + at))) drop.add(key)
+    }
+    if (isRemoving && owned.size > 0 && /^hooks\s*:\s*$/.test(lines[top] ?? '') &&
+        !lines.slice(top + 1, end).some((line, at) => isContent(line) && !drop.has(top + 1 + at))) drop.add(top)
+  }
+  const hasOwned = owned.size > 0
+  if (!isRemoving && events.every(([event, command, matcher]) => {
+    const entry = owned.get(event)
+    return entry?.command === command && hermesHasTimeout(entry.item) && hermesHasMatcher(entry.item, matcher)
+  })) return { text, hasOwned }
+  const kept = lines.filter((_, at) => !drop.has(at)).join('\n')
+  const next = isRemoving ? kept : addHermesHooks(kept, events, text.includes('\r\n'))
+  return next === null ? null : { text: next, hasOwned }
 }
 
 export const agentHooks = (ctx: ConnectContext): AgentHook[] => {

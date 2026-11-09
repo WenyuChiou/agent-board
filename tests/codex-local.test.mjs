@@ -4947,6 +4947,116 @@ test('Hermes setup keeps a rewritten todo matcher and repairs one changed away f
   assert.equal(hermesHooksOf(readFileSync(path, 'utf8')).post_tool_call.matcher, 'todo')
 }))
 
+test('Hermes install, refresh and removal keep foreign hooks with the board worker name in their commands', () => fixture(f => {
+  const config = hermesConfig(f)
+  const foreign = [
+    '    - {command: "node ./tools/example-agent-board-hook.mjs", timeout: 5}',
+    '    - command: "node ./custom/agent-board-hook.mjs"',
+    '      matcher: terminal',
+    '      timeout: 6',
+    '    - command: node ./tools/plain-agent-board-hook.mjs # personal hook',
+    '      timeout: 7',
+    '    - command: node ./tools/folded-agent-board-hook.mjs',
+    '        --personal',
+    '      timeout: 9',
+    '    - {command: node ./tools/flow-agent-board-hook.mjs, timeout: 8}',
+  ]
+  const original = ['model: synthetic/model', 'hooks:', '  pre_tool_call:', foreign[0],
+    '  post_tool_call:', ...foreign.slice(1), 'display:', '  skin: plain', ''].join('\n')
+  f.save(config, original)
+  const install = () => {
+    const result = f.install('--agent', 'hermes', '--apply')
+    assert.equal(result.status, 0, result.stderr)
+    const text = readFileSync(config, 'utf8')
+    for (const line of foreign) assert.ok(text.split('\n').includes(line), line)
+    return text
+  }
+  const installed = install()
+  const hook = hermesHooksOf(installed).post_tool_call
+  assert.equal(hook.matcher, 'todo')
+  const flow = `    - {command: ${JSON.stringify(hook.command)}, timeout: ${hook.timeout}, matcher: todo}`
+  assert.ok(installed.includes(flow))
+  const copied = `    - {command: ${JSON.stringify(hook.command)}, timeout: 5}`
+  const addCopy = text => text.replace('  pre_tool_call:\n', `  pre_tool_call:\n${copied}\n`)
+  // A dumper may write the recorded command as a folded, single-quoted block entry.
+  const folded = hook.command.replaceAll("'", "''").replace(' "--progress-file"', '\n        "--progress-file"')
+  assert.notEqual(folded, hook.command)
+  const stale = `    - command: '${folded}'\n      timeout: 3\n      matcher: shell`
+  f.save(config, addCopy(installed).replace(flow, stale))
+  assert.equal(install(), addCopy(installed))
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(config, 'utf8'), addCopy(original))
+}))
+
+test('Hermes removal preserves a foreign bare-dash list item after a recorded hook', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  const event = hermesHooksOf(text).post_tool_call
+  const line = `    - {command: ${JSON.stringify(event.command)}, timeout: ${event.timeout}, matcher: todo}`
+  assert.ok(text.includes(line))
+  const sibling = '    -\n      command: "node ./tools/personal-agent-board-hook.mjs"\n      timeout: 5'
+  f.save(config, text.replace(line, `${line}\n${sibling}`))
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(config, 'utf8'), `hooks:\n  post_tool_call:\n${sibling}\n`)
+}))
+
+test('Hermes removal refuses ambiguous recorded commands and duplicate YAML command keys', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  const event = hermesHooksOf(text).post_tool_call
+  const line = `    - {command: ${JSON.stringify(event.command)}, timeout: ${event.timeout}, matcher: todo}`
+  assert.ok(text.includes(line))
+  const duplicate = `${line}\n${line}`
+  const quoted = `    - command: ${JSON.stringify(event.command)}\n      "command": "node ./tools/foreign.mjs"\n      timeout: 5`
+  for (const replacement of [duplicate, quoted]) {
+    const ambiguous = text.replace(line, replacement)
+    f.save(config, ambiguous)
+    const removed = remove774(f, 'hermes')
+    assert.notEqual(removed.status, 0)
+    assert.equal(readFileSync(config, 'utf8'), ambiguous)
+    assert.ok(existsSync(join(f.root, 'install-hermes.json')))
+  }
+}))
+
+test('Hermes leaves the file intact when a foreign hook uses a recorded hook YAML anchor', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  const event = hermesHooksOf(text).post_tool_call
+  const line = `    - {command: ${JSON.stringify(event.command)}, timeout: ${event.timeout}, matcher: todo}`
+  assert.ok(text.includes(line))
+  const shared = text.replace(line, [
+    '    -',
+    `      command: ${JSON.stringify(event.command)}`,
+    '      timeout: &shared_timeout 10',
+    '      matcher: todo',
+    '    - command: "node ./tools/foreign.mjs"',
+    '      timeout: *shared_timeout',
+  ].join('\n'))
+  const command = JSON.stringify(event.command)
+  const escapedCommand = command.replace('agent-board-hook.mjs', '\\u0061gent-board-hook.mjs')
+  assert.notEqual(escapedCommand, command)
+  assert.equal(JSON.parse(escapedCommand), event.command)
+  const escaped = shared.replace(`      command: ${command}`, `      command: ${escapedCommand}`)
+  assert.notEqual(escaped, shared)
+  // YAML also accepts hexadecimal escapes that the JSON scalar reader cannot decode.
+  const opaque = escaped.replace('\\u0061gent-board-hook.mjs', '\\x61gent-board-hook.mjs')
+  assert.notEqual(opaque, escaped)
+  const duplicate = opaque.replace('  post_tool_call:\n', `  post_tool_call:\n${line}\n`)
+  assert.notEqual(duplicate, opaque)
+  for (const variant of [shared, escaped, opaque, duplicate]) {
+    f.save(config, variant)
+    const removed = remove774(f, 'hermes')
+    assert.notEqual(removed.status, 0, 'leave a recorded YAML command with a shared anchor intact')
+    assert.equal(readFileSync(config, 'utf8'), variant)
+    assert.ok(existsSync(join(f.root, 'install-hermes.json')))
+  }
+}))
+
 test('Hermes setup leaves a config.yaml it cannot merge into byte for byte and reports a conflict (#1115)', () => fixture(f => {
   for (const original of ['hooks: {pre_tool_call: [{command: "mine.sh"}]}\nmodel: x\n', '- not\n- a mapping\n', 'hooks:\n  on_session_start: [{command: "mine.sh"}]\n']) {
     f.save(hermesConfig(f), original)
