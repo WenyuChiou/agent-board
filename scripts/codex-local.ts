@@ -437,7 +437,7 @@ const filesByFolder = (mode: string, agent: string): boolean => mode === '--code
 // `planInput` is a plan the --plan-event step already turned into a report's input: the report then
 // runs as --report does and prints nothing, because Codex and Gemini read a hook's stdout as a decision.
 export const runCodexLocal = async (args: string[], boardPath: string, s: Strings, planInput?: Json): Promise<boolean> => {
-  args = args.map(arg => arg === '--report' ? '--codex-report' : arg)
+  args = args.map(arg => arg === '--report' ? '--codex-report' : arg === '--remove' ? '--codex-remove' : arg)
   const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event', '--mailbox'].find(one => args.includes(one))
   if (!mode) return false
   const flag = (name: string): string | undefined => {
@@ -447,6 +447,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (!value || value.startsWith('--')) throw new Error('MISSING_ARGUMENT')
     return value
   }
+  const removingAgents = (flag('--removing')?.split(',') ?? []).map(one => one.trim()).filter(Boolean)
   const baked = (globalThis as { AGENT_BOARD?: { codexRoot?: string } }).AGENT_BOARD
   // Reporting needs a known board name, while setup and lifecycle events need a native adapter.
   const agent = (flag('--agent') ?? (mode === '--hermes-trust' ? 'hermes' : 'codex')) as LocalAgent
@@ -1370,7 +1371,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (remove && shared) {
       // The same record that keeps a shared file out of this removal names the
       // agents still using it, so the preview says why the file stays (#816).
-      const usedBy = otherAgents.filter((_, index) => otherManifests[index]?.files !== undefined)
+      const usedBy = otherAgents.filter((one, index) => !removingAgents.includes(one) && otherManifests[index]?.files !== undefined)
       if (usedBy.length) { keptShared.push({ file, usedBy }); continue }
     }
     if (remove && existing === null && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
@@ -1422,8 +1423,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (folder === dirname(folder)) break
       }
     }
-    const siblingIndex = otherManifests.findIndex(one => one.files !== undefined)
-    const hasOtherManifest = otherAgents.some(other => initial(join(root, `install-${other}.json`)) !== null)
+    const siblingIndex = otherManifests.findIndex((one, idx) => !removingAgents.includes(otherAgents[idx]) && one.files !== undefined)
+    const hasOtherManifest = otherAgents.some((other, idx) => !removingAgents.includes(other) && initial(join(root, `install-${other}.json`)) !== null)
     if (!hasOtherManifest) for (const runtime of [join(home, '.cache', 'agent-board'), ...(process.env.XDG_RUNTIME_DIR ? [join(process.env.XDG_RUNTIME_DIR, 'agent-board')] : [])]) {
       candidates.add(runtime)
       try { for (const name of readdirSync(runtime)) if (name.endsWith('-messages')) candidates.add(join(runtime, name)) } catch {}

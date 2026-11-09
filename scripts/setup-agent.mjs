@@ -415,7 +415,7 @@ const main = () => {
   const isShowingApplied = apply
   const script = fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
   const run = (agent, isApplying) => {
-    const runArgs = isRemove ? ['--codex-remove', ...common.filter(arg => arg !== '--remove')] : common
+    const runArgs = isRemove ? ['--codex-remove', '--removing', selected.join(','), ...common.filter(arg => arg !== '--remove')] : common
     const result = spawnSync(process.execPath, [script, ...runArgs, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
     const fallback = () => {
       const cause = isCode(result.error?.code) ? result.error.code : 'UNKNOWN'

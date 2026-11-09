@@ -78,7 +78,9 @@ test('setup-agent --remove previews and applies across all touched agents with s
     assert.ok(!fileListing.includes(home), `file listings should use short paths, found absolute home: ${fileListing}`)
     assert.ok(fileListing.includes('~'), `file listings should contain short path ~, got: ${fileListing}`)
 
-    // Must name both agents in one preview
+    // Must show Shared files and name both agents in preview without count drift
+    assert.ok(preview.stdout.includes('Shared: would remove'), preview.stdout)
+    assert.ok(preview.stdout.includes('agent-board.mjs'), preview.stdout)
     assert.ok(preview.stdout.includes('Codex:'), preview.stdout)
     assert.ok(preview.stdout.includes('Antigravity:'), preview.stdout)
 
@@ -95,6 +97,7 @@ test('setup-agent --remove previews and applies across all touched agents with s
     // 3. Apply remove: should remove files for both agents in one run
     const apply = run('--remove', '--lang', 'en', '--apply')
     assert.equal(apply.status, 0, apply.stderr)
+    assert.ok(apply.stdout.includes('Shared: removed'), apply.stdout)
 
     // install records should be gone
     assert.ok(!existsSync(join(dataDir, 'install-codex.json')), 'install-codex.json should be removed')
@@ -149,6 +152,37 @@ test('setup-agent --remove supports traditional and simplified Chinese', () => {
     assert.ok(!cnFiles.includes(home), cnFiles)
     assert.ok(cn.stdout.includes('Antigravity') && cn.stdout.includes('移除'), cn.stdout)
     assert.ok(cn.stdout.includes('progress-questions.json'), cn.stdout)
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+})
+
+test('installed agent-board.mjs supports --remove with --agent', () => {
+  const home = mkdtempSync(join(tmpdir(), 'setup-remove-standalone-'))
+  try {
+    const env = makeEnv(home)
+    const run = (...args) => spawnSync(process.execPath, [installer, '--home', home, ...args], {
+      cwd: home,
+      env,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30000,
+    })
+    const install = run('--agent', 'antigravity', '--apply')
+    assert.equal(install.status, 0, install.stderr)
+
+    const boardScript = join(home, '.agent-board', 'agent-board.mjs')
+    assert.ok(existsSync(boardScript), 'agent-board.mjs must exist after install')
+
+    const standalone = spawnSync(process.execPath, [boardScript, '--remove', '--agent', 'antigravity'], {
+      cwd: home,
+      env,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30000,
+    })
+    assert.equal(standalone.status, 0, standalone.stderr)
+    assert.ok(standalone.stdout.includes('antigravity') || standalone.stdout.includes('Antigravity') || standalone.stdout.includes('progress.md'), standalone.stdout)
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
   }

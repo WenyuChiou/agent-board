@@ -164,18 +164,25 @@ claude plugin install agent-board@agent-board
 
 獨立安裝：將乾淨 checkout 更新到指定版本，預覽 `node scripts/setup-agent.mjs`，再套用已核准範圍。修改過的檔案列為衝突，不覆寫。host 可能要重新載入；不安裝自動更新器或開機服務。
 
-用已安裝程式一次預覽／套用所有設定過之 agent 的移除，或指定 `--agent` 只移除特定 agent（`codex`、`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
-
-```sh
-node "$HOME/.agent-board/agent-board.mjs" --remove
-node "$HOME/.agent-board/agent-board.mjs" --remove --apply
-```
-
-或透過 npx：
+透過 `agent-board remove` 一次預覽／套用所有設定過之 agent 的移除，或指定 `--agent` 只移除特定 agent（`codex`、`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
 
 ```sh
 npx agent-board remove
 npx agent-board remove --apply
+```
+
+從程式庫 checkout 目錄：
+
+```sh
+node scripts/setup-agent.mjs --remove
+node scripts/setup-agent.mjs --remove --apply
+```
+
+或使用已安裝的輔助程式移除個別 agent：
+
+```sh
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex --apply
 ```
 
 `--remove`（及相容保留之 `--codex-remove`）會以短路徑預覽所有碰過的 agent 移除內容，並清楚列出保留在 `progress.md` 旁邊的個人資料檔案。先關閉該看板。移除會刪除未修改的看板檔案、自有 hook 定義、對應的 Codex 信任項、setup 建立且已空的 hooks 設定，以及 setup 建立的空目錄。其他目標還需要的共用檔案保留。使用者修改保留。
@@ -249,7 +256,7 @@ npx agent-board remove --apply
 
 ### 怎麼移除？
 
-獨立安裝：先關閉看板，預覽 `node "$HOME/.agent-board/agent-board.mjs" --remove`（或 `npx agent-board remove`），確認後加上 `--apply`。這會一次檢視並移除所有安裝過的 agent 設定，同時列出並完整保留 `progress.md` 旁邊的資料檔案。若只想移除特定 agent，可指定 `--agent <name>`。詳見[更新與移除](#更新與移除)。選用 Claude 外掛的移除方式：
+獨立安裝：先關閉看板，預覽 `npx agent-board remove`（或 `node scripts/setup-agent.mjs --remove`），確認後加上 `--apply`。這會一次檢視並移除所有安裝過的 agent 設定，同時列出並完整保留 `progress.md` 旁邊的資料檔案。若只想移除特定 agent，可指定 `--agent <name>` 或執行 `node "$HOME/.agent-board/agent-board.mjs" --remove --agent <name>`。詳見[更新與移除](#更新與移除)。選用 Claude 外掛的移除方式：
 
 ```sh
 claude -p "/progress connect remove"
