@@ -1,5 +1,5 @@
 import type { AskKind } from './ask'
-import { answersOf, boardItems, fingerprint, olderKey, remainingInbox } from './board'
+import { answersOf, boardItems, fingerprint, guardStep, olderKey, remainingInbox } from './board'
 import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { groupBoard } from './grouping'
@@ -630,7 +630,8 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   // can be reworded under it: the press goes through only on the block and words the page drew.
   const item = items.find(one => one.key === request.key)
 
-  return item !== undefined && request.fp === fingerprint(item, items, request.type === 'tick' && request.line !== undefined) ? action : { type: 'refuse', note: s.boardLineChanged }
+  if (item === undefined || request.fp !== fingerprint(item, items, request.type === 'tick' && request.line !== undefined)) return { type: 'refuse', note: s.boardLineChanged }
+  return action.type === 'tick' ? { ...action, ref: guardStep(action.ref, items) } : action
 }
 
 const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean): ServeAction => {

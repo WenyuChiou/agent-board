@@ -22,7 +22,7 @@ import { boardLanguage, settingsLangOf, withBoardSettings } from '../hooks/board
 import type { SettingsLang } from '../hooks/board-settings'
 import { barStyleName, barStyleOf, nextBarStyle, withBarStyle } from '../hooks/progress-bar'
 import type { BarStyle } from '../hooks/progress-bar'
-import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
+import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, manualStepRef, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
@@ -1187,13 +1187,22 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     // ticked by this press.
     let isFound = false
     let isReplaced = false
+    let isChanged = false
     const writesBefore = writes
     const added = new Map<string, number>()
     const line = journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)
     let wrote: string | null
     try {
       wrote = rewrite(path, text => {
-        const after = setManualStep(text, action.ref, 'x', now)
+        const selected = manualStepRef(text, action.ref, s)
+        if (selected === null) {
+          if (isReplaced) return text
+          isChanged = true
+          // Keep the progress lock while undoing a tentative tick's journal entry.
+          undoJournal(added, journal, writesBefore)
+          return null
+        }
+        const after = setManualStep(text, selected, 'x', now, s)
         if (after !== text) {
           // Save history before ticking: a journal failure must leave the step available
           // to retry. A failed board replacement removes only this press's journal line.
@@ -1212,6 +1221,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       error.isUnchanged = true
       throw error
     }
+    if (isChanged) return s.boardLineChanged
     if (wrote === null) return s.boardWriteFailed
     if (!isFound) return s.boardTickGone
     return done(s.boardTicked(action.ref.step))

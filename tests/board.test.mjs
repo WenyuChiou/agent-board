@@ -2920,6 +2920,118 @@ test('a saved checkbox press refuses after another card moves its twin lines (#1
   }
 })
 
+for (const ordering of ['lock', 'retry', 'readback', 'replacement']) test('a checkbox keeps its original twin through the actual write boundary: ' + ordering, { timeout: 30_000 }, async () => {
+  const faults = mkdtempSync(join(tmpdir(), 'board-checkbox-write-'))
+  const preload = join(faults, 'boundary.cjs')
+  const armed = join(faults, 'armed')
+  const blocked = join(faults, 'blocked')
+  const release = join(faults, 'release')
+  const injected = join(faults, 'injected')
+  const env = { NODE_OPTIONS: '--require ' + JSON.stringify(preload), AGENT_BOARD_TEST_CHECKBOX_PROGRESS: '' }
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const progress = process.env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS
+const arm = ${JSON.stringify(armed)}, blocked = ${JSON.stringify(blocked)}, injected = ${JSON.stringify(injected)}
+const ordering = ${JSON.stringify(ordering)}
+const open = fs.openSync, rename = fs.renameSync
+const change = () => {
+  const before = fs.readFileSync(progress, 'utf8')
+  const after = ordering === 'replacement'
+    ? before.replace('### Twin steps', '### Replacement task')
+    : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  fs.writeFileSync(progress, after)
+  fs.writeFileSync(injected, '')
+}
+fs.openSync = (file, ...args) => {
+  try { return open(file, ...args) } catch (error) {
+    if (ordering === 'lock' && String(file) === progress + '.agent-board-lock' && error.code === 'EEXIST' && fs.existsSync(arm) && !fs.existsSync(blocked)) fs.writeFileSync(blocked, '')
+    throw error
+  }
+}
+fs.renameSync = (from, to, ...args) => {
+  const controlled = ordering !== 'lock' && String(to) === progress && fs.existsSync(arm) && !fs.existsSync(injected)
+  if (controlled && ordering !== 'readback') {
+    change()
+    throw Object.assign(new Error('synthetic competing write before rename'), { code: 'EPERM' })
+  }
+  const result = rename(from, to, ...args)
+  if (controlled) change()
+  return result
+}
+syncBuiltinESMExports()
+`)
+  let board, holder, holderExit, watcher
+  try {
+    board = await page('## home\n### Earlier card\n- [ ] Check the sample\n### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n', env, [], undefined, BOARD_SCRIPT, (_dir, path) => { env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS = path })
+    const row = await board.rowOf('Twin steps')
+    const before = readFileSync(board.path, 'utf8')
+    const shifted = before.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    const replaced = before.replace('### Twin steps', '### Replacement task')
+    const body = { key: row.key, type: 'tick', text: 'Inspect the map', line: row.steps[1].fileLine, fp: row.tickFp }
+    if (ordering === 'lock') {
+      const worker = join(faults, 'holder.mjs')
+      writeFileSync(worker, `import { withLocalLock } from ${JSON.stringify(new URL('../scripts/local-lock.ts', import.meta.url).href)}
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
+  process.stdout.write('held\\n')
+  const deadline = Date.now() + 5000
+  while (!existsSync(${JSON.stringify(release)})) {
+    if (Date.now() >= deadline) throw new Error('CONTROL_NOT_RELEASED')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+  }
+  const file = ${JSON.stringify(board.path)}
+  writeFileSync(file, readFileSync(file, 'utf8').replace('### Twin steps', '> Synthetic extra context\\n### Twin steps'))
+})
+`)
+      holder = spawn(process.execPath, [worker], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      holderExit = new Promise((done, fail) => { holder.once('error', fail); holder.once('exit', done) })
+      const held = new Promise(done => holder.stdout.once('data', done))
+      await Promise.race([held, holderExit.then(code => { throw new Error('the lock holder exited before its barrier: ' + code) })])
+    }
+    const observed = ordering !== 'lock' ? null : new Promise((done, fail) => {
+      watcher = fs.watch(faults, () => { if (existsSync(blocked)) done() })
+      watcher.on('error', fail)
+    })
+    writeFileSync(armed, '')
+    const sent = board.call('POST', '/api/act', { body })
+    if (ordering === 'lock') {
+      // The real server must already have failed to acquire the real shared lock.
+      await Promise.race([observed, sent.then(() => { throw new Error('the action ended before the blocked lock boundary') })])
+      writeFileSync(release, '')
+      assert.equal(await holderExit, 0)
+    }
+    const response = await sent
+    const after = readFileSync(board.path, 'utf8')
+    if (ordering !== 'lock') assert.ok(existsSync(injected), 'the competing write must reach the intended production boundary')
+    const journal = readdirSync(board.dir).filter(name => /^progress-journal-/.test(name)).map(name => readFileSync(join(board.dir, name), 'utf8')).join('\n')
+    if (ordering === 'replacement') {
+      assert.equal(response.status, 409, 'a replaced task must not receive the old checkbox press')
+      assert.equal(after, replaced)
+      assert.doesNotMatch(journal, /Inspect the map/, 'a refused tentative tick must not leave a false journal entry')
+    } else if (response.status === 409) {
+      assert.equal(ordering === 'readback', false, 'a tick that landed must remain a single completed action')
+      assert.equal(after, shifted)
+      assert.doesNotMatch(journal, /Inspect the map/)
+    } else {
+      assert.equal(response.status, 200, response.body)
+      const lines = after.split('\n')
+      const task = lines.indexOf('### Twin steps')
+      assert.equal(lines[task + 1], '- [ ] Inspect the map', 'the first twin must remain open after the original second-twin press')
+      assert.match(lines[task + 2], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      assert.equal(after.replace(/- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->/, '- [ ] Inspect the map'), shifted)
+    }
+  } finally {
+    watcher?.close()
+    if (holder !== undefined && holder.exitCode === null) {
+      writeFileSync(release, '')
+      const timer = setTimeout(() => holder.kill(), 5000)
+      try { await holderExit } finally { clearTimeout(timer) }
+    }
+    if (board !== undefined) await board.close()
+    rmSync(faults, { recursive: true, force: true })
+  }
+})
+
 test('ticking the next step from the page still works when the step list folded it out of view', { timeout: 30_000 }, async () => {
   const board = await page(`
 ## home

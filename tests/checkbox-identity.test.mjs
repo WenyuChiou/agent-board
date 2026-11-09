@@ -8,14 +8,16 @@ const loader = registerHooks({
     return nextResolve(specifier, context)
   },
 })
-let boardItems, buildView, parseProgress, serveAction, serveModel, setManualStep, EN
+let boardItems, boardKey, emptyBoardState, pinned, buildView, parseProgress, serveAction, serveModel, setManualStep, EN, ZH_TW, ZH_CN
 try {
-  ;({ boardItems } = await import('../hooks/board.ts'))
+  ;({ boardItems, boardKey, emptyBoardState, pinned } = await import('../hooks/board.ts'))
   ;({ buildView } = await import('../hooks/view.ts'))
   ;({ parseProgress } = await import('../hooks/parse.ts'))
   ;({ serveAction, serveModel } = await import('../hooks/serve.ts'))
   ;({ setManualStep } = await import('../hooks/blocks.ts'))
   ;({ EN } = await import('../hooks/strings-en.ts'))
+  ;({ ZH_TW } = await import('../hooks/i18n.ts'))
+  ;({ ZH_CN } = await import('../hooks/strings-zh-cn.ts'))
 } finally { loader.deregister() }
 
 const now = Date.parse('2026-11-09T06:00:00Z')
@@ -72,4 +74,77 @@ test('a line-specific checkbox press without its drawn line fingerprint asks for
   const action = serveAction(before.items, { ...request(before.row), fp: before.row.fp }, EN)
   assert.equal(action.type, 'refuse')
   assert.equal(action.note, EN.boardLineChanged)
+})
+
+test('a validated checkbox follows its original twin when the file moves before writing', () => {
+  const before = draw(source)
+  const action = serveAction(before.items, request(before.row), EN)
+  assert.equal(action.type, 'tick')
+  const shifted = source.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+  const result = setManualStep(shifted, action.ref, 'x', now, EN)
+  const row = draw(shifted).row
+  const lines = result.split('\n')
+  assert.equal(lines[row.steps[0].fileLine], '- [ ] Inspect the map')
+  assert.match(lines[row.steps[1].fileLine], /^- \[x\] Inspect the map/)
+})
+
+test('a validated checkbox refuses a replaced task even when its steps keep the same words', () => {
+  const before = draw(source)
+  const action = serveAction(before.items, request(before.row), EN)
+  assert.equal(action.type, 'tick')
+  const replaced = source.replace('### Twin steps', '### Replacement task')
+  assert.equal(setManualStep(replaced, action.ref, 'x', now, EN), replaced)
+})
+
+test('the terminal tick follows its original first twin after an earlier line is removed', () => {
+  const before = draw(source)
+  const state = pinned({ ...emptyBoardState, key: before.row.key }, before.items)
+  const action = boardKey(state, 'x', before.items, EN).action
+  assert.equal(action.type, 'tick')
+  const shifted = source.replace('- [ ] Check the sample\n', '')
+  const result = setManualStep(shifted, action.ref, 'x', now, EN)
+  const row = draw(shifted).row
+  const lines = result.split('\n')
+  assert.match(lines[row.steps[0].fileLine], /^- \[x\] Inspect the map/)
+  assert.equal(lines[row.steps[1].fileLine], '- [ ] Inspect the map')
+})
+
+test('guarded checkboxes keep unnamed projects addressable in all three languages', () => {
+  const text = '### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const view = buildView(parseProgress(text), [], null, now, 0, {}, words)
+    const items = boardItems(view, [], true)
+    const row = serveModel(view, [], words).groups.flatMap(group => group.rows).find(row => row.title === 'Twin steps')
+    assert.ok(row)
+    const action = serveAction(items, request(row), words)
+    assert.equal(action.type, 'tick')
+    const result = setManualStep(text, action.ref, 'x', now, words)
+    assert.equal(result.split('\n')[row.steps[0].fileLine], '- [ ] Inspect the map')
+    assert.match(result.split('\n')[row.steps[1].fileLine], /^- \[x\] Inspect the map/)
+  }
+})
+
+const identicalCards = '## Synthetic project\n' + '### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n'.repeat(2)
+const drawIdenticalCards = () => {
+  const view = buildView(parseProgress(identicalCards), [], null, now, 0, {}, EN)
+  return { items: boardItems(view, [], true), rows: serveModel(view, [], EN).groups.flatMap(group => group.rows) }
+}
+
+test('a fresh guarded checkbox still selects the second of two identical task cards', () => {
+  const { items, rows } = drawIdenticalCards()
+  const action = serveAction(items, request(rows[1]), EN)
+  assert.equal(action.type, 'tick')
+  const result = setManualStep(identicalCards, action.ref, 'x', now, EN).split('\n')
+  for (const step of rows[0].steps) assert.equal(result[step.fileLine], '- [ ] Inspect the map')
+  assert.equal(result[rows[1].steps[0].fileLine], '- [ ] Inspect the map')
+  assert.match(result[rows[1].steps[1].fileLine], /^- \[x\] Inspect the map/)
+})
+
+test('a guarded checkbox refuses when an identical task card moves into its old position', () => {
+  const { items, rows } = drawIdenticalCards()
+  const action = serveAction(items, request(rows[1]), EN)
+  assert.equal(action.type, 'tick')
+  const shifted = identicalCards.replace('### Twin steps', '\n\n\n### Twin steps')
+  assert.equal(shifted.split('\n')[action.ref.guard.task.line], '### Twin steps', 'the other identical card now occupies the old task line')
+  assert.equal(setManualStep(shifted, action.ref, 'x', now, EN), shifted, 'ambiguous task movement must not tick the other card')
 })

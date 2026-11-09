@@ -63,7 +63,7 @@ export type CurrentView = {
 }
 
 // A step of a hand-kept task, addressed so a press can tick exactly the line it showed.
-export type StepRef = { project: string; title: string; step: string; line: number; raw: string }
+export type StepRef = { project: string; title: string; step: string; line: number; raw: string; guard?: { task: ConfirmRef; step: number; lines: readonly number[] } }
 
 // What a row's 封存 press takes out: a session's block by its id, or a hand-kept task by its
 // heading line, checked against the title so a task that moved is still found once.

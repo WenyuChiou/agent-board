@@ -716,6 +716,16 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLine
   return sha256(parts.join('\u0000')).slice(0, 12)
 }
 
+// Preserve the selected step's ordinal and task identity through the writer's lock and retries.
+export const guardStep = (ref: StepRef, items: readonly BoardItem[]): StepRef => {
+  const item = items.find(one => one.type === 'row' && one.row.project === ref.project && one.row.title === ref.title && one.row.steps.some(step => step.line === ref.line))
+  if (item?.type !== 'row' || item.row.confirm == null) return ref
+  const step = item.row.steps.findIndex(step => step.line === ref.line)
+  const expected = item.row.confirm.expected
+  const lines = [...new Set(items.flatMap(one => one.type === 'row' && one.row.project === ref.project && one.row.confirm?.expected === expected ? [one.row.confirm.line] : []))].sort((a, b) => a - b)
+  return { ...ref, guard: { task: item.row.confirm, step, lines } }
+}
+
 // What each key does on the selected line, so the footer lists only keys that do something.
 export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
   ask.native !== undefined ? [] : ask.kind === 'confirm' ? [s.yesAnswer, s.noAnswer] : ask.kind === 'choose' ? ask.options.slice(0, 9) : []
@@ -767,7 +777,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (key === 'enter' || key === ' ') return { state: { ...state, selected: at, key: item.key, open: state.open === item.key ? null : item.key, note: state.open === item.key ? s.pressClosed : s.pressOpened, tone: 'done' }, action: null }
   if (item.type === 'ask') {
     const { ask } = item
-    if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: ask.step } }
+    if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: guardStep(ask.step, items) } }
     if (key === 'h' && ask.hideKey !== '' && ask.canHide !== false) return { state, action: { type: 'hide', key: ask.hideKey, text: ask.text } }
     if (key === 'c' && (ask.command ?? ask.link) !== null) return { state, action: { type: 'copy', text: plain((ask.command ?? ask.link) as string) } }
     // Copy an actionable command on demand; a raw session id is not a clipboard action.
@@ -786,7 +796,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   }
   if (item.type === 'row') {
     const { row } = item
-    if (key === 'x' && row.next !== null) return { state, action: { type: 'tick', ref: row.next } }
+    if (key === 'x' && row.next !== null) return { state, action: { type: 'tick', ref: guardStep(row.next, items) } }
     if (key === 'a' && row.archive !== null) return { state, action: { type: 'archive', ref: row.archive, title: row.title } }
     if (key === 'a' && (row.auto === 'working' || row.auto === 'waiting')) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
     if (key === 'd' && row.confirm != null) return { state, action: { type: 'done', ref: row.confirm, title: row.title } }
