@@ -316,4 +316,4 @@ The pane follows Claude Code's theme (`/config`, then **Theme**); the page follo
 
 [MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) and belong to their owners; an agent without a logo is shown by its initial.
 
-<p align="center"><sub>Latest stable version: 0.24.2 · <a href="CHANGELOG.md">Changelog</a></sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="Source version 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>Latest stable version: 0.24.2 · <a href="CHANGELOG.md">Changelog</a> · macOS was not tested for 0.24.3.</sub></p>

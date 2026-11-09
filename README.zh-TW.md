@@ -316,4 +316,4 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 
 [MIT](LICENSE)。agent 的圖示來自 [Simple Icons](https://simpleicons.org)（CC0）和 [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT），這些圖示屬於各自的擁有者；沒有圖示的 agent 以名字的第一個字母表示。
 
-<p align="center"><sub>最新穩定版本 0.24.2 · <a href="CHANGELOG.md">更新紀錄</a></sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="原始碼版本 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>最新穩定版本 0.24.2 · <a href="CHANGELOG.md">更新紀錄</a> · 0.24.3 未測試 macOS。</sub></p>
