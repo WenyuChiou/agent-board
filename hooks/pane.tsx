@@ -187,7 +187,9 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const color = (tone: Tone): string => toneColor(palette, tone)
   const isOpen = (id: string): boolean => model.opened.includes(id)
   const resultTask = model.resolveResult?.key.replace(/::[^:]*$/, '') ?? ''
-  const hasDetachedResult = resultTask !== '' && !view.stopped.some(row => row.key === resultTask) && !view.recent.some(item => item.key === resultTask)
+  const isActiveResult = resultTask !== '' && (resultTask === 'mine' && view.current !== null
+    || [...view.due, ...view.active, ...view.idle, ...view.groups.flatMap(group => group.rows)].some(row => row.key === resultTask))
+  const hasDetachedResult = resultTask !== '' && !isActiveResult && !view.stopped.some(row => row.key === resultTask) && !view.recent.some(item => item.key === resultTask)
   const hasResult = (item: WaitingItem): boolean => {
     const result = model.resolveResult
     return result !== null && result !== undefined && (result.kind === 'changed' ? item.key === result.key : item.questionId !== undefined && result.questionId === item.questionId)
@@ -209,6 +211,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       )}
     </Box>
   )
+
+  const repliedQuestions = (key: string) => {
+    const items = (view.provisional ?? []).filter(item => item.key.replace(/::[^:]*$/, '') === key)
+    return items.length === 0 && resultTask !== key ? null : shelfQuestions(items, key)
+  }
 
   const spacer = () => <Box flexGrow={1} />
   const muted = (text: string, wrap: 'wrap' | 'truncate-end' = 'wrap') => (
@@ -613,6 +620,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             {row.context !== '' && muted(s.contextLine(row.context))}
             {row.handoff !== '' && muted(s.handoffLine(row.handoff))}
             {steps(row.steps)}
+            {repliedQuestions(row.key)}
             {rowActions(row)}
             {cardResult(row.key)}
           </Box>
@@ -716,6 +724,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         <Text color={current.tone === 'quiet' ? palette.muted : color(current.tone)} wrap="wrap">
           {current.status}
         </Text>
+        {repliedQuestions('mine')}
         {current.runs !== undefined && muted(current.runs, 'truncate-end')}
         {showAll ? (
           <Box flexDirection="column" marginTop={1}>

@@ -646,7 +646,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : (env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined) ?? (agent === 'hermes' ? env.HERMES_SESSION_ID || undefined : undefined) ?? (agent === 'grok' ? env.GROK_SESSION_ID || undefined : undefined) ?? reportSession())
       if (session === undefined && mode === '--codex-report') throw new Error('UNBOUND_REPORT')
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
-      const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
+      const now = new Date(at).toISOString()
       if (mode === '--agent-status' && (agent === 'codex' || agent === 'cursor')) throw new Error('INVALID_EVENT')
       const status = flag('--state') ?? payload.state
       if (mode === '--agent-status' && !['working', 'waiting', 'ended'].includes(String(status))) throw new Error('INVALID_STATE')
@@ -667,6 +667,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // Hermes carries the turn's reply under extra, on post_llm_call only (#1115).
       const hermesReply = agent === 'hermes' && raw.hook_event_name === 'post_llm_call' && typeof raw.extra === 'object' && raw.extra !== null && !Array.isArray(raw.extra) ? (raw.extra as Json).assistant_response : undefined
       const message = typeof raw.last_assistant_message === 'string' ? raw.last_assistant_message : typeof raw.lastAssistantMessage === 'string' ? raw.lastAssistantMessage : typeof hermesReply === 'string' ? hermesReply : ''
+      const hasResponse = agent === 'codex' && raw.hook_event_name === 'Stop' && message.trim() !== ''
+        || agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' && typeof raw.text === 'string' && raw.text.trim() !== ''
       const question = mode === '--codex-event' && agent === 'codex' && raw.hook_event_name === 'Stop' ? lastQuestion(String(raw.last_assistant_message ?? ''))
         : mode === '--codex-event' && agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' ? lastQuestion(String(raw.text ?? ''))
           : mode === '--agent-status' && status === 'waiting' && (agent === 'grok' || agent === 'opencode' || agent === 'hermes') ? lastQuestion(message)
@@ -679,6 +681,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         payload: mode === '--codex-report' ? payload : mode === '--codex-event' ? {
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
           turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
+          ...(hasResponse ? { has_response: true } : {}),
           ...(question === null ? {} : { question }),
         } : { ...(question === null ? {} : { question }) },
       }
@@ -776,7 +779,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             index === 0 && isLifecycleStep(step) ? placeholder : step
           )
       const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
-      const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, prompt_submitted: false } : payload, clock, s)
+      // The monotonic display clock cannot make an old queued prompt or report newer.
+      const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, board_request: true } : payload, clock, s, at <= Date.now() ? now : '')
         : mode === '--agent-status' ? validateCodexReport({
           // These are already validated stored steps, including up to two owned lines beyond
           // the explicit report's forty user steps. A status is not a fresh task report.

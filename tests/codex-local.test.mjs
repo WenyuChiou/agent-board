@@ -5282,21 +5282,38 @@ test('a Codex report after an approval keeps the approval closed, not waiting', 
   assert.ok(!reported.includes('native=codex'))
 }))
 
-test('a Codex Stop whose last message ends on a question adds a waiting step with that question, and the next prompt closes it', () => fixture(f => {
+test('a native Codex chat reply keeps the durable question open until the next work report', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
   assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'The change is ready.\n\nShall I open the pull request now?' }).status, 0)
   const asked = readFileSync(f.progress, 'utf8')
   assert.match(asked, /- \[\?\] Shall I open the pull request now\?\n/)
   assert.ok(!asked.includes('native=codex'))
-  assert.equal(f.event('UserPromptSubmit', 'turn-2').status, 0)
-  const answered = readFileSync(f.progress, 'utf8')
-  assert.ok(answered.includes('- [x] Shall I open the pull request now?'))
-  assert.ok(!/- \[\?\]/.test(answered))
-  assert.ok(!answered.includes('native=codex'))
+  const observe = () => {
+    assert.equal(f.command(['--keys', 'j']).status, 0)
+    return JSON.parse(readFileSync(f.progress.replace(/\.md$/, '-questions.json'), 'utf8')).records
+  }
+  const first = observe().find(record => record.isUnresolved)
+  assert.ok(first)
+  assert.equal(f.event('UserPromptSubmit', 'turn-2', { prompt: 'SYNTHETIC-PRIVATE-CHAT' }).status, 0)
+  const replied = readFileSync(f.progress, 'utf8')
+  assert.match(replied, / replied=\S+Z/)
+  assert.match(replied, /- \[\?\] Shall I open the pull request now\?/)
+  assert.doesNotMatch(replied, /SYNTHETIC-PRIVATE-CHAT|native=codex/)
+  assert.deepEqual(observe().filter(record => record.isUnresolved).map(record => record.id), [first.id])
+
+  assert.equal(f.event('UserPromptSubmit', 'board-turn', { prompt: '/agent-board' }).status, 0)
+  assert.equal(f.event('Stop', 'board-turn', { last_assistant_message: 'Here is the board.' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), / replied=\S+Z/)
+  assert.deepEqual(observe().filter(record => record.isUnresolved).map(record => record.id), [first.id])
+
+  assert.equal(f.report('working', ['- [~] Prepare the pull request']).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Shall I open the pull request now\?/)
+  assert.doesNotMatch(readFileSync(f.progress, 'utf8'), / replied=/)
+  assert.equal(observe().find(record => record.id === first.id)?.isUnresolved, false)
 }))
 
-test('a Codex question stays owned through a board prompt, and the next prompt closes it', () => fixture(f => {
+test('a Codex question stays owned through a board prompt, a chat reply and the next Stop', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
   assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which folder should I use?' }).status, 0)
@@ -5305,6 +5322,8 @@ test('a Codex question stays owned through a board prompt, and the next prompt c
   assert.equal(sessionRecord(f, session).askedRevision, original.askedRevision)
   assert.ok(readFileSync(f.progress, 'utf8').includes('- [?] Which folder should I use?'))
   assert.equal(f.event('UserPromptSubmit', 'turn-3').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Which folder should I use\?/)
+  assert.equal(f.event('Stop', 'turn-3', { last_assistant_message: 'I used the synthetic folder.' }).status, 0)
   const answered = readFileSync(f.progress, 'utf8')
   assert.ok(answered.includes('- [x] Which folder should I use?'))
   assert.ok(!/- \[\?\]/.test(answered))
@@ -5332,7 +5351,7 @@ test('a Codex Stop keeps nothing of the last message but its closing question', 
   assert.ok(!existsSync(join(f.root, 'pending')) || readdirSync(join(f.root, 'pending')).every(name => !readFileSync(join(f.root, 'pending', name), 'utf8').includes(secret)))
 }))
 
-test('a Codex question stays waiting through an approval and a stop without a question, until the next prompt', () => fixture(f => {
+test('a Codex question stays waiting through an approval and a board lookup, then settles after chat and a report', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
   assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which folder should I use?' }).status, 0)
@@ -5349,6 +5368,8 @@ test('a Codex question stays waiting through an approval and a stop without a qu
   assert.equal(held.match(/- \[[?x]\] Which folder should I use\?/g)?.length, 1)
   assert.ok(held.includes('- [?] Which folder should I use?'))
   assert.equal(f.event('UserPromptSubmit', 'turn-3').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Which folder should I use\?/)
+  assert.equal(f.event('Stop', 'turn-3', { last_assistant_message: 'I used the synthetic folder.' }).status, 0)
   const answered = readFileSync(f.progress, 'utf8')
   assert.ok(answered.includes('- [x] Which folder should I use?'))
   assert.ok(!/- \[\?\]/.test(answered))
@@ -5495,7 +5516,7 @@ test('Grok keeps only its closing question through board and end events, then cl
   assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Choose blue or green\?/)
 }))
 
-test('Cursor records a closing question on either side of stop and the next prompt closes it once', () => fixture(f => {
+test('Cursor records a closing question on either side of stop and settles it after chat and a report', () => fixture(f => {
   assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
   for (const [index, order] of [['response-first', ['afterAgentResponse', 'stop']], ['stop-first', ['stop', 'afterAgentResponse']]]) {
     const id = `synthetic-cursor-${index}`
@@ -5508,6 +5529,12 @@ test('Cursor records a closing question on either side of stop and the next prom
     assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Proceed now\?/)
     assert.ok(!readFileSync(recordFile, 'utf8').includes('SYNTHETIC-PRIVATE-CURSOR'))
     assert.equal(send('beforeSubmitPrompt', 'generation-2').status, 0)
+    assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Proceed now\?/)
+    // An empty Stop can arrive before the actual response; only the latter settles the question.
+    assert.equal(send('stop', 'generation-2').status, 0)
+    assert.match(readFileSync(f.progress, 'utf8'), / replied=\S+Z/)
+    assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Proceed now\?/)
+    assert.equal(send('afterAgentResponse', 'generation-2', { text: 'Continuing the synthetic work.' }).status, 0)
     const answered = JSON.parse(readFileSync(recordFile, 'utf8'))
     assert.equal(answered.steps.filter(step => step === '- [x] Proceed now?').length, 1)
     assert.ok(!answered.steps.some(step => step.startsWith('- [?] ')))

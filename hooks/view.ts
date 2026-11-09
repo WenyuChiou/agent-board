@@ -246,6 +246,9 @@ export type View = {
   overview: Overview
   focus: Focus | null
   waiting: WaitingItem[]
+  // Still-open questions the person replied to in chat. The pane can Resolve
+  // them from their row, outside the shared Needs you list and count.
+  provisional?: WaitingItem[]
   // Questions the person marked answered, until their session asks something else.
   hidden: WaitingItem[]
   reminder?: WaitingItem[]
@@ -901,6 +904,7 @@ export const buildView = (
   }
   if (counts !== undefined && recordsByScope !== null) counts.indexRecords += records.length
   const waiting: WaitingItem[] = []
+  const provisional: WaitingItem[] = []
   const inactiveHidden: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
   const active: Array<TaskRow & { rank: number; order: number }> = []
@@ -1049,7 +1053,7 @@ export const buildView = (
           return held
         }
         let value: boolean
-        if (isRepliedTask) {
+        if (isRepliedTask && task.steps[index]?.native === undefined) {
           value = false
         } else if (isFrozen) {
           const saved = savedAt(index)
@@ -1131,12 +1135,12 @@ export const buildView = (
         if (counts !== undefined) counts.indexLookups += 1
         return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
       }))
-      if (!isInactive && !isRepliedTask) waiting.push(...taskQuestions)
-      if (isRepliedTask) {
-        for (const item of taskQuestions) {
+      for (const item of taskQuestions) {
+        if (isRepliedTask && item.native === undefined) {
           if (item.questionId) repliedQuestions.add(item.questionId)
           if (item.hideKey) repliedQuestions.add(item.hideKey)
-        }
+          if (!isInactive) provisional.push(item)
+        } else if (!isInactive) waiting.push(item)
       }
 
       let completion: DoneItem & { at: number } | null = null
@@ -1337,12 +1341,14 @@ export const buildView = (
     return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
   const isRepliedMine = mine !== null && mine.replied !== undefined && Number.isFinite(mine.replied) && (mine.updated === null || mine.replied >= (mine.updated ?? 0))
-  if (isRepliedMine && mine !== null) {
-    for (const item of ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null)))) {
-      if (item.hideKey) repliedQuestions.add(item.hideKey)
+  const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).flatMap(item => {
+    if (!isRepliedMine || item.native !== undefined) return [{ ...item, questionId: item.hideKey }]
+    if (item.hideKey) {
+      repliedQuestions.add(item.hideKey)
+      provisional.push({ ...item, questionId: item.hideKey })
     }
-  }
-  const own = mine === null || mine.isRun === true || isRepliedMine ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).map(item => ({ ...item, questionId: item.hideKey }))
+    return []
+  })
   // Each record by its id, once: a board holds hundreds of questions and thousands of records.
   const recordOf = new Map<string, QuestionRecord>()
   const rankOf = new Map<string, number>()
@@ -1494,6 +1500,10 @@ export const buildView = (
     current.status = isRepliedMine ? s.answeredWaiting : s.answeredNote
     current.tone = 'quiet'
   }
+  const replyActions = provisional.filter(item => {
+    const record = recordsById.get(item.questionId ?? '')
+    return record?.isUnresolved === true && record.source !== undefined
+  })
   return {
     now,
     current,
@@ -1501,6 +1511,7 @@ export const buildView = (
     overview: { waiting: asks.length, active: rows.length + due.length, due: due.length, today, idle: idle.length, stopped: stopped.length },
     focus,
     waiting: asks,
+    ...(replyActions.length === 0 ? {} : { provisional: replyActions }),
     hidden,
     reminder,
     older,

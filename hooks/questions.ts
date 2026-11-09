@@ -286,9 +286,10 @@ const isSameAsker = (source: QuestionSource | undefined, row: QuestionSource): b
 }
 // An answer closes only the inbox ask of the session that gave it, not a same-prefix peer's.
 // Cursor and Grok emit an empty stop for the asking turn. Only a later text-bearing
-// response or an accepted prompt proves continuation, even if the session moved folders.
+// response proves continuation, even if the session moved folders. A prompt alone
+// only changes what the board shows while it waits for that response.
 export const isContinuationTurn = (turn: AgentTurn | QuestionAnswerEvidence): turn is QuestionAnswerEvidence =>
-  (turn.event === 'prompt' || (turn.event === 'turn' && (!('answer' in turn) || turn.answer.trim() !== '')))
+  turn.event === 'turn' && (!('answer' in turn) || turn.answer.trim() !== '')
   && turn.at !== undefined
   && Number.isFinite(turn.at)
 
@@ -706,7 +707,7 @@ export const observeQuestions = (
     try { source = JSON.parse(record.source.data) as PendingTurn } catch { continue }
     const at = source?.sourceAt ?? source?.at
     // Cursor and Grok emit an empty stop for the asking turn. Only a later text-bearing
-    // response or an accepted prompt proves continuation, even if the session moved folders.
+    // response proves continuation, even if the session moved folders.
     if (!Number.isFinite(at) || !answeredTurns.some(turn => isContinuationTurn(turn) && turn.at > at && isAnsweredBy(record, turn))) continue
     record.isUnresolved = false
     record.isWaiting = false

@@ -90,11 +90,13 @@ test('a board-only reply restores an existing question on every board surface an
   const { EN } = await import('../hooks/strings-en.ts')
   const at = 1792216380000
   const session = 'synthetic-board-owner'
+  const turn_id = 'synthetic-lookup'
   const mirror = { ...applyDigest(emptyMirror(blockId('codex', session), 'demo', at, '/demo', 'codex'), { title: 'Limit', context: '', done: '', next: 'Continue', ask: 'Per-key limit', why: '100 or 300 a minute?' }, at), resume: session, turnOrder: at * 2 }
-  const prompt = readTurn(`codex-prompt-${at + 1000}-1.json`, JSON.stringify({ session_id: session }))
+  const prompt = readTurn(`codex-prompt-${at + 1000}-1.json`, JSON.stringify({ session_id: session, turn_id }))
   const answered = answerAgentPrompt(mirror, prompt, at + 1000)
-  assert.ok(answered.tasks.every(one => one.waiting !== 'you'))
-  const board = readTurn(`codex-turn-${at + 2000}-1.json`, JSON.stringify({ session_id: session, prompt: 'where do things stand?', last_assistant_message: 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' }))
+  assert.equal(answered.replied, at + 1000)
+  assert.equal(answered.tasks.filter(one => one.waiting === 'you').length, 1)
+  const board = readTurn(`codex-turn-${at + 2000}-1.json`, JSON.stringify({ session_id: session, turn_id, prompt: 'where do things stand?', last_assistant_message: 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' }))
   const restored = restoreAgentBoardQuestion(answered, board, at + 2000)
   assert.equal(restored.state, mirror.state)
   assert.equal(restored.tasks.filter(one => one.waiting === 'you').length, 1)
@@ -105,12 +107,12 @@ test('a board-only reply restores an existing question on every board surface an
   assert.equal(restoreAgentBoardQuestion(answered, { ...board, session: 'foreign-session' }, at + 4000), null)
   assert.equal(restoreAgentBoardQuestion({ ...answered, confirmedAt: at + 3000 }, board, at + 4000), null)
   assert.equal(restoreAgentBoardQuestion({ ...answered, tasks: answered.tasks.map(one => ({ ...one, subject: 'New work' })) }, board, at + 4000), null)
-  const receipt = { id: prompt.id, agent: prompt.agent, session, at: prompt.at, updated: at + 1000 }
+  const receipt = { id: prompt.id, agent: prompt.agent, session, at: prompt.at, updated: at + 1000, turnKey: prompt.turnKey }
   assert.deepEqual(withAgentPrompts(restored, [receipt], at + 4000), restored)
   const projects = one => parseProgress(upsertAutoBlock('# Progress\n', one, EN))
   let ledger = observeQuestions(emptyQuestions(), projects(mirror), null, [], at).ledger
   ledger = observeQuestions(ledger, projects(answered), null, [], at + 1000).ledger
-  assert.equal(ledger.records.filter(one => one.isUnresolved).length, 0)
+  assert.equal(ledger.records.filter(one => one.isUnresolved).length, 1)
   ledger = observeQuestions(ledger, projects(restored), null, [], at + 2000).ledger
   assert.equal(ledger.records.filter(one => one.isUnresolved).length, 1)
   const view = buildView(projects(restored), [], null, at + 3000, 0, {}, EN, [], {}, ledger)
@@ -177,9 +179,9 @@ test('pre-safety board-request plugins upgrade by exact bytes and preserve perso
   const words = LEGACY_BOARD_PROMPTS.flatMap(s => [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''))
   const frozenWords = /^const BOARD_WORDS = \[.*\]$/m.exec(boardPromptHelper(words))?.[0]
   assert.ok(frozenWords)
-  for (const [agent, prior, current, hash] of [
-    ['opencode', legacyOpenCodePlugin, opencodePlugin, '78d56525458590086447cac30700f5102795ba2a1c88d3ba60c42e4e2f01faf2'],
-    ['openclaw', legacyOpenClawPlugin, openclawPlugin, '4b3126f741792fa08b5680f0d884f83e5159d86d885115294e84df7fd95d8d1a'],
+  for (const [agent, prior, current, hash, beforeTurnKeyHash] of [
+    ['opencode', legacyOpenCodePlugin, opencodePlugin, '78d56525458590086447cac30700f5102795ba2a1c88d3ba60c42e4e2f01faf2', '44a35b6e30141db9deb65e2f58944c631490fc034521c4c16051a52e92901b0c'],
+    ['openclaw', legacyOpenClawPlugin, openclawPlugin, '4b3126f741792fa08b5680f0d884f83e5159d86d885115294e84df7fd95d8d1a', 'f0f03ed3ed4dd3943f84a5f43d699bb26a0127776ba6b3b35e7e8bc180df4bca'],
   ]) {
     const old = prior(ctx).replace(/^const BOARD_WORDS = \[.*\]$/m, frozenWords)
     assert.equal(createHash('sha256').update(old).digest('hex'), hash)
@@ -189,6 +191,10 @@ test('pre-safety board-request plugins upgrade by exact bytes and preserve perso
     const released = current(ctx).replace(/^const BOARD_WORDS = \[.*\]$/m, () => frozenWords)
     assert.equal(hook.edit(released, false), current(ctx))
     assert.equal(hook.edit(released + '// personal edit\n', false), COLLISION)
+    const withoutTurnKey = current(ctx, true, true, false)
+    assert.equal(createHash('sha256').update(withoutTurnKey).digest('hex'), beforeTurnKeyHash)
+    assert.equal(hook.edit(withoutTurnKey, false), current(ctx))
+    assert.equal(hook.edit(withoutTurnKey + '// personal edit\n', false), COLLISION)
   }
 })
 
@@ -243,6 +249,55 @@ const fixture = async fn => {
   try { await fn(home) } finally { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 const receipts = home => existsSync(join(home, 'progress-inbox')) ? readdirSync(join(home, 'progress-inbox')).map(file => ({ file, body: readFileSync(join(home, 'progress-inbox', file), 'utf8') })) : []
+
+for (const agent of ['opencode', 'openclaw']) test(`the installed ${agent} inbox plugin pairs a board result with its own prompt without storing the prompt text`, () => fixture(async home => {
+  const { answerAgentPrompt, blockId, readTurn, restoreAgentBoardQuestion } = await import('../hooks/inbox.ts')
+  const { applyDigest } = await import('../hooks/digest.ts')
+  const { emptyMirror } = await import('../hooks/mirror.ts')
+  const path = join(home, 'agent-board.mjs')
+  const context = { home, inbox: join(home, 'progress-inbox') }
+  const session = 'synthetic-owner'
+  const turn = 'synthetic-message'
+  const answer = 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today'
+  const words = 'PRIVATE_BOARD_LOOKUP'
+  writeFileSync(path, (agent === 'opencode' ? opencodePlugin : openclawPlugin)(context))
+  const plugin = await import(pathToFileURL(path).href)
+  if (agent === 'opencode') {
+    const hooks = await plugin.AgentBoard({ directory: '/demo', client: { session: {
+      get: async () => ({ data: { id: session } }),
+      messages: async () => ({ data: [
+        { info: { role: 'user', id: turn }, parts: [{ type: 'text', text: words }] },
+        { info: { role: 'assistant', parentID: turn }, parts: [{ type: 'text', text: answer }] },
+      ] }),
+    } } })
+    await hooks['chat.message']({ sessionID: session }, { message: { id: turn }, parts: [{ type: 'text', text: words }] })
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: session } } })
+  } else {
+    const callbacks = new Map()
+    plugin.default.register({ on: (name, fn) => callbacks.set(name, fn) })
+    const ctx = { sessionId: session, runId: turn, workspaceDir: '/demo', inputProvenance: { kind: 'external_user' } }
+    await callbacks.get('before_prompt_build')({ prompt: words }, ctx)
+    await callbacks.get('agent_end')({ messages: [{ role: 'user', content: words }, { role: 'assistant', content: answer }] }, ctx)
+  }
+  const saved = receipts(home)
+  assert.equal(saved.length, 2)
+  const promptFile = saved.find(one => one.file.includes('-prompt-'))
+  const resultFile = saved.find(one => one.file.includes('-turn-'))
+  assert.ok(promptFile && resultFile)
+  assert.ok(!promptFile.body.includes(words) && !promptFile.body.includes(turn))
+  const prompt = readTurn(promptFile.file, promptFile.body)
+  const result = readTurn(resultFile.file, resultFile.body)
+  assert.match(prompt.turnKey ?? '', /^[0-9a-f]{64}$/)
+  assert.equal(result.turnKey, prompt.turnKey)
+  const at = 1792216380000
+  const waiting = { ...applyDigest(emptyMirror(blockId(agent, session), 'demo', at, '/demo', agent), { title: 'Limit', context: '', done: '', next: 'Continue', ask: 'Per-key limit', why: '100 or 300 a minute?' }, at), resume: session, turnOrder: at * 2 }
+  const replied = answerAgentPrompt(waiting, { ...prompt, at: at + 1000 }, at + 1000)
+  assert.equal(replied.replied, at + 1000)
+  assert.equal(restoreAgentBoardQuestion(replied, { ...result, at: at + 2000, turnKey: 'f'.repeat(64) }, at + 2000), null)
+  const restored = restoreAgentBoardQuestion(replied, { ...result, at: at + 2000 }, at + 2000)
+  assert.equal(restored.replied, undefined)
+  assert.equal(restored.state, waiting.state)
+}))
 
 test('prompt receipt diagnostics distinguish fixed failure codes without exposing fixture data', () => fixture(async home => {
   const log = join(home, '.agent-board', 'hook-errors.log')
@@ -320,6 +375,9 @@ test('generated PowerShell bounds application lookup to one executable', async (
 test('the sh reporter writes a prompt receipt with no prompt words from stdin or an argument', () => fixture(async home => {
   const { reporterSh, shellQuote } = await import('../hooks/connect-pure.ts')
   const { powershellReporter } = await import('../hooks/hook-reporters.ts')
+  const { readTurn } = await import('../hooks/inbox.ts')
+  const turn = 'synthetic-shell-turn'
+  const turnResult = readTurn('gemini-turn-1792216381000-1.json', JSON.stringify({ session_id: 'synthetic-owner', turn_id: turn }))
   const file = join(home, 'progress-report.sh')
   const diagnostic = join(home, 'classifier-probe.txt')
   const diagnostics = []
@@ -330,7 +388,7 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
   assert.equal(source.split(embedded).length, 2)
   writeFileSync(file, source.replace(embedded, () => shellQuote(observeClassifier(powershellReporter(true), diagnostic))))
   for (const mode of ['stdin', 'argument']) for (const prompt of ['/board', 'PRIVATE_REAL_ANSWER']) {
-    const raw = JSON.stringify({ session_id: `synthetic-${mode}-${prompt === '/board'}`, cwd: '/synthetic/中文', prompt, transcript_path: 'PRIVATE_TRANSCRIPT' })
+    const raw = JSON.stringify({ session_id: `synthetic-${mode}-${prompt === '/board'}`, cwd: '/synthetic/中文', turn_id: turn, prompt, transcript_path: 'PRIVATE_TRANSCRIPT' })
     rmSync(diagnostic, { force: true })
     const logged = existsSync(log) ? readFileSync(log, 'utf8').length : 0
     const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt', ...(mode === 'argument' ? [raw] : [])], { env, input: mode === 'stdin' ? raw : undefined, encoding: 'utf8', windowsHide: true })
@@ -340,19 +398,25 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
   }
   const saved = receipts(home)
   assert.equal(saved.length, 4, diagnostics.join('; '))
-  for (const { body } of saved) {
+  for (const { file, body } of saved) {
     assert.ok(!/[^\x20-\x7e]/.test(body))
     const { cwd, ...receipt } = JSON.parse(body)
     // The POSIX sh timeout fallback leaves a non-ASCII folder out (#351), so only a run that logged
     // REPORTER_TIMEOUT may miss it; the classifier keeps it.
     assert.ok(cwd === '/synthetic/中文' || (cwd === undefined && timedOut.has(receipt.session_id)), body)
-    assert.deepEqual(receipt, { session_id: receipt.session_id, ...(receipt.session_id.endsWith('true') ? { board_request: true } : {}) })
-    assert.ok(!body.includes('PRIVATE_') && !body.includes('/board'))
+    const expected = timedOut.has(receipt.session_id) ? undefined : turnResult.turnKey
+    assert.deepEqual(receipt, { session_id: receipt.session_id, ...(receipt.session_id.endsWith('true') ? { board_request: true } : {}), ...(expected === undefined ? {} : { turn_key: expected }) })
+    assert.equal(readTurn(file, body).turnKey, expected)
+    assert.ok(!body.includes('PRIVATE_') && !body.includes('/board') && !body.includes(turn))
   }
+  assert.ok(saved.some(({ file, body }) => readTurn(file, body).turnKey !== undefined), diagnostics.join('; '))
 }))
 
 test('the PowerShell reporter writes a prompt receipt with no prompt words', { skip: process.platform !== 'win32' }, () => fixture(async home => {
   const { reporterPs1 } = await import('../hooks/connect-pure.ts')
+  const { readTurn } = await import('../hooks/inbox.ts')
+  const turn = 'synthetic-powershell-turn'
+  const turnResult = readTurn('codex-turn-1792216381000-1.json', JSON.stringify({ session_id: 'synthetic-owner', turn_id: turn }))
   const file = join(home, 'progress-report.ps1')
   const diagnostic = join(home, 'classifier-probe.txt')
   const diagnostics = []
@@ -360,7 +424,7 @@ test('the PowerShell reporter writes a prompt receipt with no prompt words', { s
   assert.ok(!reporterPs1().includes('[Console]::OutputEncoding'))
   for (const prompt of ['/board', '$agent-board', '/agent-board', 'PRIVATE_REAL_ANSWER']) {
     rmSync(diagnostic, { force: true })
-    const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], { input: JSON.stringify({ session_id: 'synthetic-owner', cwd: '/synthetic/中文', prompt, transcript_path: 'PRIVATE_TRANSCRIPT' }), encoding: 'utf8', windowsHide: true })
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], { input: JSON.stringify({ session_id: 'synthetic-owner', cwd: '/synthetic/中文', turnId: turn, prompt, transcript_path: 'PRIVATE_TRANSCRIPT' }), encoding: 'utf8', windowsHide: true })
     diagnostics.push(classifierDiagnostic(diagnostic))
     assert.equal(result.status, 0, result.stderr)
   }
@@ -370,7 +434,39 @@ test('the PowerShell reporter writes a prompt receipt with no prompt words', { s
   assert.equal(values.filter(one => one.board_request === true).length, 3, diagnostics.join('; '))
   assert.ok(values.every(one => one.cwd === '/synthetic/中文'))
   assert.ok(saved.every(one => !/[^\x20-\x7e]/.test(one.body)))
-  assert.ok(saved.every(one => !one.body.includes('PRIVATE_') && !one.body.includes('/board') && !one.body.includes('$agent-board')))
+  assert.ok(turnResult.turnKey)
+  assert.ok(saved.every(one => readTurn(one.file, one.body).turnKey === turnResult.turnKey), diagnostics.join('; '))
+  assert.ok(saved.every(one => !one.body.includes('PRIVATE_') && !one.body.includes('/board') && !one.body.includes('$agent-board') && !one.body.includes(turn)))
+}))
+
+test('the legacy Cursor reporter pairs beforeSubmitPrompt with its own afterAgentResponse', () => fixture(async home => {
+  const { reporterPs1, reporterSh } = await import('../hooks/connect-pure.ts')
+  const { readTurn } = await import('../hooks/inbox.ts')
+  const windows = process.platform === 'win32'
+  const file = join(home, windows ? 'progress-report.ps1' : 'progress-report.sh')
+  writeFileSync(file, windows ? reporterPs1() : reporterSh(join(home, 'progress-inbox')))
+  const [command, ...args] = windows
+    ? ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file]
+    : [sh, file]
+  const env = { ...process.env, HOME: home, USERPROFILE: home }
+  const binding = { conversation_id: 'synthetic-cursor-owner', generation_id: 'synthetic-cursor-generation' }
+  const report = (kind, payload) => {
+    const result = spawnSync(command, [...args, 'cursor', kind], { input: JSON.stringify({ ...binding, ...payload }), env, encoding: 'utf8', windowsHide: true })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  report('prompt', { hook_event_name: 'beforeSubmitPrompt', prompt: 'PRIVATE_CURSOR_LOOKUP' })
+  report('turn', { hook_event_name: 'afterAgentResponse', response: 'Progress  ● 1 waiting  ▸ 0 in progress  ⚑ 0 due soon  ✓ 0 done today' })
+  const saved = receipts(home)
+  assert.equal(saved.length, 2)
+  const promptFile = saved.find(one => one.file.includes('-prompt-'))
+  const resultFile = saved.find(one => one.file.includes('-turn-'))
+  assert.ok(promptFile && resultFile)
+  assert.ok(!promptFile.body.includes('PRIVATE_CURSOR_LOOKUP') && !promptFile.body.includes(binding.generation_id))
+  const prompt = readTurn(promptFile.file, promptFile.body)
+  const result = readTurn(resultFile.file, resultFile.body)
+  assert.match(prompt.turnKey ?? '', /^[0-9a-f]{64}$/)
+  assert.equal(result.turnKey, prompt.turnKey)
+  assert.equal(result.session, prompt.session)
 }))
 
 test('a reporter that cannot run node still writes the receipt and the board drops its words', () => fixture(async home => {

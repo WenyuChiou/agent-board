@@ -1,4 +1,5 @@
 import type { Strings } from './i18n'
+import { sha256 } from './sha256.ts'
 
 // Native command-file syntax is separate from the shell command it contains.
 export const boardRun = (path: string, args: string[] = []): string => {
@@ -34,6 +35,19 @@ export const BOARD_REQUEST = /^\s*(?:\/board|[$/]agent-board)\s*$/
 export const RECEIPT_SESSION_KEYS = ['session_id', 'sessionId', 'sessionID', 'thread-id', 'thread_id', 'conversation_id', 'conversationId'] as const
 export const RECEIPT_FOLDER_KEYS = ['cwd', 'workspaceRoot', 'workspace', 'project_dir', 'directory'] as const
 export const RECEIPT_KEYS = [...RECEIPT_SESSION_KEYS, ...RECEIPT_FOLDER_KEYS, 'hook_event_name', 'hookEventName'] as const
+const HOST_TURN_ID = /^[A-Za-z0-9_-]{1,128}$/
+export const HOST_TURN_KEYS = ['turn_id', 'turnId', 'generation_id'] as const
+
+// Correlation also checks the owning agent and session. Receipts keep only the
+// digest of a host turn identity and never use text or a timestamp in its place.
+export const inboxTurnKey = (value: unknown): string | undefined =>
+  typeof value === 'string' && HOST_TURN_ID.test(value) ? sha256(value) : undefined
+
+export const inboxTurnKeySource = `const inboxTurnKey = value =>
+  typeof value === 'string' && ${HOST_TURN_ID}.test(value)
+    ? require('node:crypto').createHash('sha256').update(value).digest('hex')
+    : undefined
+`
 // Timeout receipts conservatively keep board requests from answering a question.
 export const BOARD_REQUEST_HINTS = ['board', '--chat', '--serve']
 
@@ -101,12 +115,17 @@ const isBoardRequest = value => {
 // Strip prose from valid JSON before it reaches a temporary inbox file. Native
 // binding and workspace metadata remain usable by old readers.
 export const promptReceiptScript = (words: readonly string[]): string => `${boardPromptHelper(words)}
+${inboxTurnKeySource}
 try {
   const raw = JSON.parse((process.argv[1] ?? require('node:fs').readFileSync(0, 'utf8')).replace(/^\\uFEFF/, ''))
   const record = { ...(raw?.extra ?? {}), ...raw }
   const receipt = {}
   for (const key of [${RECEIPT_KEYS.map(key => `'${key}'`).join(', ')}]) {
     if (typeof record[key] === 'string') receipt[key] = record[key]
+  }
+  for (const key of ${JSON.stringify(HOST_TURN_KEYS)}) {
+    const digest = inboxTurnKey(record[key])
+    if (digest !== undefined) { receipt.turn_key = digest; break }
   }
   if (Array.isArray(record.workspace_roots)) receipt.workspace_roots = record.workspace_roots.filter(one => typeof one === 'string')
   if (record.board_request === true || isBoardRequest(record)) receipt.board_request = true
