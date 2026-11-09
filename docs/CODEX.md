@@ -88,7 +88,7 @@ a turn id. Stale turns are rejected and recent repeated events are no-ops. Retir
 ids and event keys are bounded to 128 and 256 per session. This protects lifecycle replay;
 it is not an authenticated message-delivery channel.
 
-A seventh hook, `PostToolUse` with the matcher `update_plan`, copies each plan Codex sets (its step text and status) into the session's steps through the same writer as `--report`, with no model call. It prints nothing. Gemini CLI's `AfterTool` hook with the matcher `^write_todos$` does the same for its todos. Grok Build's `PostToolUse` hook with the matcher `^todo_write$` does it from the tool's result, which holds the whole list after a merge call (nothing is written for a truncated, duplicate-id or empty result). OpenCode's plugin does it on the `todo.updated` event (top-level session only), and OpenClaw's plugin on `after_tool_call` for `progress_card` or the older `update_plan` (skipped when the call failed or carries no plan); both send only each step's text and status, and neither adds a hook to the host's configuration.
+A seventh hook, `PostToolUse` with the matcher `update_plan`, copies each plan Codex sets (its step text and status) into the session's steps through the same writer as `--report`, with no model call. It prints nothing. Gemini CLI's `AfterTool` hook with the matcher `^write_todos$` does the same for its todos. Grok Build's `PostToolUse` hook with the matcher `^todo_write$` does it from the tool's result, which holds the whole list after a merge call (nothing is written for a truncated, duplicate-id or empty result). OpenCode's plugin does it on the `todo.updated` event (top-level session only), and OpenClaw's plugin on `after_tool_call` for `update_plan` (skipped when the call failed or carries no plan); both send only each step's text and status, and neither adds a hook to the host's configuration.
 
 A real resume/start and new prompt reactivate the same session's block. Changing reporters
 or starting a follow-up task is not evidence that a session ended: never mark a legacy
@@ -103,8 +103,9 @@ ending in a question mark on the last line, cut to one line). It shows under Nee
 closes it. A board-only prompt keeps it waiting. The hook marks its question and approval steps done when they end,
 then reuses their lines for later asks; ending a session leaves its question waiting. OpenCode fetches its last
 assistant message on idle and passes its text to the board script. Antigravity's hooks carry no reply text, so
-the board reads the last 256 KiB of its own `transcript.jsonl`, and ignores an earlier reply if a newer user prompt
-has appeared. This format is undocumented and was checked on agy 1.5.2. Nothing of any reply but its closing question
+the board reads the last 256 KiB of the transcript its hook names (`transcript.jsonl`, or `transcript_full.jsonl`,
+which agy 1.5.2 names, with the same line shape), and ignores an earlier reply if a newer user prompt
+has appeared. This format is undocumented and was checked live on agy 1.5.2. Nothing of any reply but its closing question
 is saved. A Stop the hook wrapper copied raw to its queue has no question; one the reporter queued itself keeps its
 one line. For Codex, what they open from `transcript_path` is the
 first record of the session's own Codex history file (the `rollout-<time>-<session id>.jsonl` file named for the
@@ -286,8 +287,9 @@ and cloud bots still need a host-proven binding; accepting their names does not 
 | Legacy Gemini CLI | SessionStart, BeforeAgent, AfterAgent, SessionEnd | Separate enterprise/API compatibility; not Antigravity |
 | Grok Build | SessionStart, Stop, SessionEnd | Coarse status; no working-turn event |
 | Muse Code | Stop, SessionEnd | Coarse status; no working-turn event |
-| Hermes Agent | Board and agent-specific skill installed | Native adapter pending |
+| Hermes Agent | Board, skill and four shell hooks installed | Hermes asks once to trust the hooks; native execution unverified |
 | OpenClaw | Shared board and skill installed | Native adapter pending; no conversation grant added |
+| DeepSeek Harness | Cordis lifecycle plugin with the session folder, an `agent_board` tool (open, report) and skill | Runs outside the shell sandbox; checked live on Windows in dsh web 0.2.2-rc.1, CLI and Desktop unchecked |
 | Antigravity | Named native lifecycle hooks and board skill | No session-end event or turn fence; verify CLI/App/IDE separately |
 
 Doctor's `--json` result distinguishes `installed`, `ready` and `connected`. Pending native adapters never

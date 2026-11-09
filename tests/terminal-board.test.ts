@@ -1,8 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 import { confirmTask, takeTask } from '../hooks/blocks'
-import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, pinned, routesOf, terminalLook } from '../hooks/board'
+import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, peekInbox, pinned, routesOf, terminalLook } from '../hooks/board'
 import type { AnswerRoute } from '../hooks/board'
-import { isLifecycleStep, LIFECYCLE_STEPS } from '../hooks/codex'
+import { codexEvent, codexLifecycleStep, isLifecycleStep, LIFECYCLE_STEPS, localAgentLifecycleStep, putCodexBlock } from '../hooks/codex'
+import { answerAgentPrompt } from '../hooks/inbox'
 import { DARK, LIGHT } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
 import { serveModel } from '../hooks/serve'
@@ -438,7 +439,7 @@ const lifecycleBoard = (state: string, step: string): string => `# Progress
 test('a working Codex session with no block of its own names its project once on the terminal board and does not say it waits', () => {
   const s = STRINGS.en
   // Today's words, and those an earlier release wrote, which old blocks still hold.
-  for (const step of [s.codexLifecycle, s.localAgentLifecycle, 'Local session activity; Codex explicitly reports task steps', STRINGS['zh-TW'].codexLifecycle]) {
+  for (const step of [s.codexLifecycle, s.codexLifecycleWorking, s.localAgentLifecycle, s.localAgentLifecycleWorking, 'Local session activity; Codex explicitly reports task steps', STRINGS['zh-TW'].codexLifecycle, STRINGS['zh-TW'].codexLifecycleWorking]) {
     const view = viewOf(lifecycleBoard('working', step))
     const screen = boardScreen(view, [], pinned(emptyBoardState, boardItems(view, [])), s, { width: 100, isColor: false })
     expect(screen.toLowerCase().split('demo-garden').length - 1).toBe(1)
@@ -453,11 +454,13 @@ test('a working Codex session with no block of its own names its project once on
 test('every placeholder step a hook writes, in every language and as earlier releases wrote it, is known as one', () => {
   for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
     expect(isLifecycleStep(STRINGS[lang].codexLifecycle)).toBe(true)
+    expect(isLifecycleStep(STRINGS[lang].codexLifecycleWorking)).toBe(true)
     expect(isLifecycleStep(STRINGS[lang].localAgentLifecycle)).toBe(true)
+    expect(isLifecycleStep(STRINGS[lang].localAgentLifecycleWorking)).toBe(true)
   }
   for (const earlier of ['Native session activity; the current agent explicitly reports task steps', '本地 session 活动状态；任务步骤由 Codex 明确报告']) expect(isLifecycleStep(earlier)).toBe(true)
   expect(isLifecycleStep('Water the synthetic rows')).toBe(false)
-  expect([...LIFECYCLE_STEPS].length).toBeGreaterThanOrEqual(9)
+  expect([...LIFECYCLE_STEPS].length).toBeGreaterThanOrEqual(12)
 })
 
 test('an Antigravity session stopped on a limit leaves the working list', () => {
@@ -496,6 +499,21 @@ test('a silence-classified row does not offer confirmation or archive that the w
   }
 })
 
+test('a silence-classified row past the stale time offers confirmation and archive that the write guard accepts (#898)', () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+    const file = `## scratch\n<!-- auto session=ab770011 agent=antigravity state=working updated=${at(13 * 60)} -->\n### Local antigravity task\n- [ ] ${s.localAgentLifecycle}\n<!-- /auto session=ab770011 -->\n`
+    const view = viewOf(file, lang)
+    expect(view.stopped.length).toBe(1)
+    const stoppedRow = view.stopped[0]!
+    expect(stoppedRow.confirm).not.toBeNull()
+    expect(stoppedRow.archive).not.toBeNull()
+    // Both write guards accept a row past STALE_MS, so the row's offers land
+    expect(confirmTask(file, stoppedRow.confirm!, NOW, s)).not.toBeNull()
+    expect(takeTask(file, stoppedRow.archive!, NOW, s)).not.toBeNull()
+  }
+})
+
 test('a working row with a doing step remains counted after thirty minutes', () => {
   for (const agent of ['antigravity', 'codex'] as const) {
     for (const age of [5, 30, 31, 58]) {
@@ -511,3 +529,159 @@ test('a working row with a doing step remains counted after thirty minutes', () 
   }
 })
 
+test('a working Codex or local agent placeholder step matches its state in all languages (#1142)', () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+    expect(codexLifecycleStep('working', s)).toBe(`- [ ] ${s.codexLifecycleWorking}`)
+    expect(codexLifecycleStep('waiting', s)).toBe(`- [ ] ${s.codexLifecycle}`)
+    expect(localAgentLifecycleStep('working', s)).toBe(`- [ ] ${s.localAgentLifecycleWorking}`)
+    expect(localAgentLifecycleStep('waiting', s)).toBe(`- [ ] ${s.localAgentLifecycle}`)
+
+    // Codex hook events transition placeholder step between waiting and working
+    const start = codexEvent(null, { session_id: 's-1142', hook_event_name: 'SessionStart' }, at(5), s)
+    expect(start.state).toBe('waiting')
+    expect(start.steps).toEqual([`- [ ] ${s.codexLifecycle}`])
+
+    const prompt = codexEvent(start, { session_id: 's-1142', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }, at(4), s)
+    expect(prompt.state).toBe('working')
+    expect(prompt.steps).toEqual([`- [ ] ${s.codexLifecycleWorking}`])
+
+    const stop = codexEvent(prompt, { session_id: 's-1142', hook_event_name: 'Stop', turn_id: 'turn-1' }, at(3), s)
+    expect(stop.state).toBe('waiting')
+    expect(stop.steps).toEqual([`- [ ] ${s.codexLifecycle}`])
+
+    // Prompt submitted with closing question
+    const askStop = codexEvent(prompt, { session_id: 's-1142', hook_event_name: 'Stop', turn_id: 'turn-1', question: 'Should we proceed?' }, at(2), s)
+    expect(askStop.state).toBe('waiting')
+    expect(askStop.steps).toEqual([`- [ ] ${s.codexLifecycle}`, '- [?] Should we proceed?'])
+
+    const answered = codexEvent(askStop, { session_id: 's-1142', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-2' }, at(1), s)
+    expect(answered.state).toBe('working')
+    expect(answered.steps).toEqual([`- [ ] ${s.codexLifecycleWorking}`, '- [x] Should we proceed?'])
+  }
+})
+
+test('a reply typed in the agent chat moves its question out of Needs you to You replied (#401)', () => {
+  const OWNER = '0'.repeat(64)
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+
+    // 1. Codex: Prompt submitted in agent chat
+    const start = codexEvent(null, { session_id: 's-401', hook_event_name: 'SessionStart' }, at(10), s)
+    const prompt1 = codexEvent(start, { session_id: 's-401', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }, at(9), s)
+    const askStop = codexEvent(prompt1, { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-1', question: 'Deploy to production?' }, at(5), s)
+    expect(askStop.state).toBe('waiting')
+
+    const fileWaiting = `# Progress\n\n## backend\n${putCodexBlock('', askStop, OWNER)}\n`
+    const viewWaiting = buildView(parseProgress(fileWaiting), [], null, NOW, 0, {}, s)
+    expect(viewWaiting.overview.waiting).toBe(1)
+    expect(viewWaiting.waiting.length).toBe(1)
+    expect(viewWaiting.waiting[0]?.text).toBe('Deploy to production?')
+
+    // Older prompt or prompt with no time changes nothing
+    const olderPrompt = codexEvent(askStop, { session_id: 's-401', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-old' }, at(6), s)
+    expect(olderPrompt.replied).toBeUndefined()
+    const undatedPrompt = codexEvent(askStop, { session_id: 's-401', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-undated' }, 'invalid-time', s)
+    expect(undatedPrompt.replied).toBeUndefined()
+
+    // Newer prompt submitted in Codex session chat: question leaves Needs you, row says answeredWaiting
+    const answered = codexEvent(askStop, { session_id: 's-401', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-2' }, at(2), s)
+    expect(answered.replied).toBe(at(2))
+
+    const fileReplied = `# Progress\n\n## backend\n${putCodexBlock('', answered, OWNER)}\n`
+    const viewReplied = buildView(parseProgress(fileReplied), [], null, NOW, 0, {}, s)
+    expect(viewReplied.overview.waiting).toBe(0)
+    expect(viewReplied.waiting).toEqual([])
+    expect(viewReplied.groups[0]?.rows[0]?.status).toBe(s.answeredWaiting)
+
+    // Agent's next report without question settles it
+    const nextStop = codexEvent(answered, { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-2' }, at(1), s)
+    expect(nextStop.replied).toBeUndefined()
+    const fileSettled = `# Progress\n\n## backend\n${putCodexBlock('', nextStop, OWNER)}\n`
+    const viewSettled = buildView(parseProgress(fileSettled), [], null, NOW, 0, {}, s)
+    expect(viewSettled.overview.waiting).toBe(0)
+    expect(viewSettled.waiting).toEqual([])
+
+    // Agent's next report with a new question asks again
+    const askAgain = codexEvent(answered, { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-2', question: 'Should we run migrations?' }, at(1), s)
+    const fileAskAgain = `# Progress\n\n## backend\n${putCodexBlock('', askAgain, OWNER)}\n`
+    const viewAskAgain = buildView(parseProgress(fileAskAgain), [], null, NOW, 0, {}, s)
+    expect(viewAskAgain.overview.waiting).toBe(1)
+    expect(viewAskAgain.waiting.length).toBe(1)
+    expect(viewAskAgain.waiting[0]?.text).toBe('Should we run migrations?')
+
+    // 2. Inbox: An inbox agent prompt event answers the waiting question
+    const geminiMirror = {
+      sessionId: 's-inbox',
+      agent: 'gemini',
+      resume: 's-inbox',
+      project: 'frontend',
+      title: 'Build frontend',
+      firstPrompt: 'build',
+      state: 'waiting' as const,
+      source: 'tasks' as const,
+      updated: NOW - 100_000,
+      turnOrder: (NOW - 100_000) * 2,
+      tasks: [
+        { id: '1', subject: 'Ready to build, OK?', status: 'pending' as const, waiting: 'you' as const, why: '' },
+      ],
+    }
+    const fileGeminiWaiting = `# Progress\n\n## frontend\n<!-- auto session=s-inbox agent=gemini state=waiting updated=${new Date(NOW - 100_000).toISOString()} -->\n### Build frontend\n- [?] Ready to build, OK?\n<!-- /auto session=s-inbox -->\n`
+    const viewGeminiWaiting = buildView(parseProgress(fileGeminiWaiting), [], null, NOW, 0, {}, s)
+    expect(viewGeminiWaiting.overview.waiting).toBe(1)
+    expect(viewGeminiWaiting.waiting.length).toBe(1)
+
+    // Older prompt or prompt with no time returns null
+    const olderPromptTurn = { agent: 'gemini', event: 'prompt' as const, session: 's-inbox', id: 's-inbox', cwd: '/workspace/frontend', project: 'frontend', prompt: '', answer: '', transcript: '', at: NOW - 120_000 }
+    expect(answerAgentPrompt(geminiMirror, olderPromptTurn, NOW)).toBeNull()
+
+    // Newer prompt answers agent: sets replied, leaves Needs you, row says answeredWaiting
+    const promptTurn = { agent: 'gemini', event: 'prompt' as const, session: 's-inbox', id: 's-inbox', cwd: '/workspace/frontend', project: 'frontend', prompt: '', answer: '', transcript: '', at: NOW - 50_000 }
+    const answeredMirror = answerAgentPrompt(geminiMirror, promptTurn, NOW)!
+    expect(answeredMirror).not.toBeNull()
+    expect(answeredMirror.updated).toBe(NOW - 50_000)
+    expect(answeredMirror.replied).toBe(answeredMirror.updated)
+
+    const fileGeminiReplied = `# Progress\n\n## frontend\n<!-- auto session=s-inbox agent=gemini state=working updated=${new Date(answeredMirror.updated).toISOString()} replied=${new Date(answeredMirror.replied).toISOString()} -->\n### Build frontend\n- [?] Ready to build, OK?\n<!-- /auto session=s-inbox -->\n`
+    const viewGeminiReplied = buildView(parseProgress(fileGeminiReplied), [], null, NOW, 0, {}, s)
+    expect(viewGeminiReplied.overview.waiting).toBe(0)
+    expect(viewGeminiReplied.waiting).toEqual([])
+    expect(viewGeminiReplied.groups[0]?.rows[0]?.status).toBe(s.answeredWaiting)
+
+    // 3. Claude Mirror: Typing in chat sets replied and leaves Needs you
+    const claudeMirror = {
+      sessionId: 'claude-sess-1',
+      project: 'core',
+      title: 'Fix issue',
+      firstPrompt: '',
+      state: 'waiting' as const,
+      source: 'tasks' as const,
+      updated: NOW - 100_000,
+      tasks: [
+        { id: '1', subject: 'Verify fix?', status: 'pending' as const, waiting: 'you' as const, why: 'Needs your approval' },
+      ],
+    }
+    const viewClaudeWaiting = buildView([], [], claudeMirror, NOW, 0, {}, s)
+    expect(viewClaudeWaiting.overview.waiting).toBe(1)
+    expect(viewClaudeWaiting.waiting.length).toBe(1)
+
+    // Later prompt submitted in Claude chat
+    const claudeReplied = { ...claudeMirror, replied: NOW - 50_000 }
+    const viewClaudeReplied = buildView([], [], claudeReplied, NOW, 0, {}, s)
+    expect(viewClaudeReplied.overview.waiting).toBe(0)
+    expect(viewClaudeReplied.waiting).toEqual([])
+    expect(viewClaudeReplied.current?.status).toBe(s.answeredWaiting)
+
+    // Next Claude report with new question asks again
+    const claudeAskAgain = {
+      ...claudeReplied,
+      updated: NOW - 10_000,
+      tasks: [
+        { id: '2', subject: 'Merge PR?', status: 'pending' as const, waiting: 'you' as const, why: 'Needs your confirmation' },
+      ],
+    }
+    const viewClaudeAskAgain = buildView([], [], claudeAskAgain, NOW, 0, {}, s)
+    expect(viewClaudeAskAgain.overview.waiting).toBe(1)
+    expect(viewClaudeAskAgain.waiting.length).toBe(1)
+  }
+})

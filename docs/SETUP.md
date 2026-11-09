@@ -184,7 +184,7 @@ files: the board script lands at `~/.agent-board/agent-board.mjs`, and no hook p
 npm's cache, so clearing that cache breaks nothing. `npm install -g @wenyuchiou/agent-board` gives a
 lasting `agent-board` command in place of `npx`.
 
-On a first plain `agent-board` run with nothing set up, it prints the setup preview, asks `Apply these changes? [y/N]`, and on yes applies it and opens the board. OpenCode and Gemini CLI use `/agent-board`; setup removes an unchanged old `/board` file and keeps one you edited.
+In a terminal, setup prints its preview and asks once: `Set these up? [Y/n]` (Enter means yes). A yes writes the files, approves the board's hooks in Codex and Hermes Agent for the agents it set up, and, when `claude` is on the PATH and the plugin is not installed, runs `claude plugin marketplace add WenyuChiou/agent-board` (left out when Claude Code already knows that marketplace) and `claude plugin install agent-board@agent-board`. Each part prints done, or failed with the command to run by hand, and a failed part does not stop the others. A no writes nothing. Without a terminal (piped input, `--json`, an agent's shell tool that is not a terminal) setup only previews. `setup --apply` writes the files only, in a terminal too, and lists the approval and plugin commands: only a yes typed at the question approves hooks or installs the plugin. On a first plain `agent-board` run with nothing set up, the launcher hands over to the same question and opens the board after a yes. OpenCode and Gemini CLI use `/agent-board`; setup removes an unchanged old `/board` file and keeps one you edited.
 
 A plain `agent-board` call opens the interactive local page on a desktop, from an agent or
 in a non-interactive call. An interactive terminal over SSH or without a display opens the
@@ -209,14 +209,14 @@ dependencies and no install scripts. Pre-releases are on the `next` tag
 | Host | Installed adapter | Separate acceptance / remaining limit |
 | --- | --- | --- |
 | Codex | Seven hooks (six lifecycle, one plan mirror) and explicit own-thread reporter | Scoped native trust and actual CLI/desktop events; [details](CODEX.md) |
-| Cursor | Conversation/generation lifecycle hooks | Native CLI/IDE execution and turn binding |
+| Cursor | Conversation/generation lifecycle hooks | Native CLI/IDE execution and turn binding. On Windows, start `cursor-agent` from PowerShell or Command Prompt: started from Git Bash, it runs none of its hooks (setup says so) |
 | OpenCode | Session event plugin and context-bound progress tool | Plugin reload; status events lack a turn id |
 | Antigravity | Four named native hooks plus shared skill | Native CLI/App/IDE events; no session-end event or turn fence |
 | Grok Build | SessionStart, UserPromptSubmit, Stop, SessionEnd, and a plan mirror on `todo_write` | Prompt/idle/end status; native execution unverified |
 | Muse Code | Stop, SessionEnd | Coarse status and native execution unverified |
-| Hermes Agent | Board and skill | Independent native hook adapter pending |
+| Hermes Agent | `on_session_start`, `pre_llm_call`, `post_llm_call` (carries the reply) and `on_session_end` shell hooks in `config.yaml`, a plan mirror on its `todo` tool, plus the skill | Hermes asks once to trust each hook (or `--hermes-trust` adds only the board's commands to its allowlist); native execution unverified |
 | OpenClaw | Independent metadata plugin and native skill | Native host execution unverified; requires sanitized lifecycle subscription API |
-| DeepSeek Harness | Native Cordis lifecycle plugin and skill | Loader/event contract checked; full CLI/Web/Desktop execution unverified |
+| DeepSeek Harness | Native Cordis lifecycle plugin, `agent_board` tool and skill | Checked live on Windows in dsh web 0.2.2-rc.1 (report, open, page stays up after dsh closes); CLI and Desktop unchecked |
 
 ## Portable host paths and lifecycle
 
@@ -230,22 +230,46 @@ changes; no receiving connection or model call is added by setup.
 | OpenClaw | `~/.openclaw/openclaw.json`, `skills/agent-board/` and a private local plugin with its manifest | `--openclaw-dir`, then `OPENCLAW_STATE_DIR` |
 | DeepSeek Harness | `~/.dsh/cordis.patch.yml`, `skills/agent-board/` and a private Cordis plugin | `--deepseek-dir`, then `DSH_HOME` |
 | Grok Build | `~/.grok/hooks/agent-board-local.json` | `--grok-dir`, then `GROK_HOME` |
+| Hermes Agent | the `hooks:` block of `config.yaml` in the Hermes folder, `~/.hermes` (`%LOCALAPPDATA%\hermes` on Windows) (only the board's four entries; other hooks and keys stay) and `skills/agent-board/` | `--hermes-dir`, then `HERMES_HOME` |
 
 OpenClaw receives `session_start`, `session_end` and sanitized lifecycle start/end/error
-events. Only the native session/run ids and state are reported; stale runs cannot replace
-the current one. It explicitly denies conversation access. Hosts lacking the subscription
+events. Only the native session/run ids, state and the session's workspace folder are reported;
+stale runs cannot replace the current one. It explicitly denies conversation access. Hosts lacking the subscription
 API fail visibly rather than falling back to transcript access. Reload the plugin in each
-host; installation cannot enumerate every previously open session. When OpenClaw's
-`progress_card` (or the older `update_plan`) call succeeds with a plan, the plugin copies each
-step's text and status into the board's steps; OpenCode's plugin does the same with its todo list, and Grok Build's `PostToolUse` hook (matcher `^todo_write$`, timeout 5 s, prints nothing) copies the full list from the tool's result.
+host; installation cannot enumerate every previously open session. The plugin
+registers a `progress_card` tool (`title`, `state`, `steps`) that reports to the board's report
+writer for the plugin's own session, so it needs no folder lookup. When OpenClaw's own
+`update_plan` call succeeds with a plan, the plugin copies each step's text and status into the
+board's steps; the plugin reads no reply text, so the installed skill and the tool's description tell the agent to
+send a closing question as a `- [?] <the question>` step before the turn ends; OpenCode's plugin does the same with its todo list, and Grok Build's `PostToolUse` hook (matcher `^todo_write$`, timeout 5 s, prints nothing) copies the full list from the tool's result.
 
 DeepSeek uses `agent/created`, `agent/status` (running/idle) and `agent/disposed`, retaining
-its own agent identity. Its owned entry is appended to a plain root YAML patch sequence;
+its own agent identity and sending the session's folder (`cwd` from the session header), so its block is filed under the workspace. The plugin runs in the Harness process, outside the shell sandbox, and registers one tool, `agent_board`: `action: open` starts the board page (detached) and returns the one line it prints, and `action: report` (`title`, `state`, `steps`) reports to the board's writer by the tool's own session id; the session start already told the board its folder. The installed skill tells DeepSeek to call that tool instead of a shell command, because its Windows sandbox writes only inside the workspace and cannot reach the board's address folder or progress file. No prompt, message or model hook is registered. Its owned entry is appended to a plain root YAML patch sequence;
 complex/edited YAML is a conflict requiring review. Existing entries remain untouched.
 A JSON config that is not a JSON object, or holds a number JSON cannot keep exactly (such as
 an id past 2^53), is a conflict too, and is left untouched.
 Native skill roots are used as well as the shared skill. Restart profiles without
 configuration HMR. No credential, telemetry or provider setting is changed.
+
+Hermes Agent runs its shell hooks from the `hooks:` mapping of `config.yaml`. Setup adds one
+entry each under `on_session_start`, `pre_llm_call` (a turn begins, so the block says working and an
+answered question closes; it prints nothing, because Hermes reads that hook's output as context for the
+model), `post_llm_call` (its `extra.assistant_response` is the reply, so a closing question becomes a card)
+and `on_session_end` (which Hermes fires after every turn, so it only marks the session idle), and one
+`post_tool_call` entry with `matcher: todo`, which copies the whole list from the `todo` tool's result into
+the block's steps. Entries are found again by the installed worker's name; other keys and
+hooks are kept as they are. A `hooks:` written in flow style, or a root that is not a mapping, is a
+conflict and the file is left untouched. Each command is double-quoted for Hermes's `shlex` split
+(no shell), with forward slashes on Windows. Setup never sets `hooks_auto_accept` or passes
+`--accept-hooks`: Hermes asks once at a terminal, and a chat gateway cannot ask, so for that
+preview `--hermes-trust` and add `--apply`. That writes only the board's exact (event, command)
+pairs into `shell-hooks-allowlist.json`; `--codex-remove --agent hermes` takes the same pairs out.
+`HERMES_SESSION_ID`, when a tool's process has it, binds `--codex-report --agent hermes`.
+Hermes puts the whole conversation in the input of `pre_llm_call` and `post_llm_call`. Past 1 MB, the Hermes
+hook reads on to the end without keeping it, scans the first 1 MB for the event name, session, folder and
+the reply, and keeps nothing else; a reply cut off there reports the status with no question. Other agents'
+hooks still refuse an input over 1 MB.
+The Hermes folder is `HERMES_HOME`, else `%LOCALAPPDATA%\hermes` on Windows, else `~/.hermes`, as Hermes chooses it.
 
 OpenCode's metadata lookup must return the exact session before it reports; missing or
 foreign responses are ignored. Changing an installed host directory requires removing

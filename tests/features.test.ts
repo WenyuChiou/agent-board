@@ -14,7 +14,7 @@ import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, 
 import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, progressReport, unwrittenEntries } from '../hooks/journal'
-import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, nameReply, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
 import { LANGS, ZH_TW } from '../hooks/i18n'
@@ -24,6 +24,7 @@ import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
 import { qrModules, qrText } from '../hooks/qr'
 import { STALE_MS } from '../hooks/parse'
+import { DOING_QUIET_MS, WORKING_MS } from '../hooks/grouping'
 import { confirmMatches, confirmTask } from '../hooks/blocks'
 import { applyCompletionOverlay, completionKey, completionOfBlock, completionOverlay, isCompletionOverlay } from '../hooks/mirror'
 import { RELEASED } from '../hooks/released'
@@ -403,11 +404,13 @@ test('Confirm done preserves canceled and hidden steps and guards every agent at
   }
 })
 
-test('every agent keeps live blocks safe across terminal and page at the twelve-hour boundary in every language', () => {
+test('every agent keeps live blocks safe across terminal and page at the working limit and the twelve-hour boundary in every language', () => {
   const now = Date.parse('2026-10-19T12:00:00Z')
   for (const s of Object.values(STRINGS)) for (const agent of ARCHIVE_AGENTS) {
     for (const state of ['working', 'waiting', 'ended']) for (const age of [0, STALE_MS, STALE_MS + 1]) {
-      const live = state !== 'ended' && age <= STALE_MS
+      // A working row with no doing step stops being live after thirty minutes (#1000);
+      // a waiting row stays live until the twelve-hour stale time.
+      const live = state !== 'ended' && (state === 'working' ? age <= WORKING_MS : age <= STALE_MS)
       const file = `## Demo\n<!-- auto session=11223344 agent=${agent} state=${state} updated=${new Date(now - age).toISOString()} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
       const view = buildView(parseProgress(file), [], null, now, 0, {}, s)
       const items = boardItems(view, [])
@@ -432,6 +435,42 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
       expect(takeTask(file, ref, now, s) === null).toBe(live)
       expect(takeArchivable(file, now, undefined, s, true).text).toBe(file)
     }
+    // A working row with no readable `updated` has unknown age: ordinary age rules never
+    // archive it, whatever its state (#1000, Codex P1 on #1087).
+    for (const marker of ['', ' updated=not-a-date']) {
+      const unknown = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working${marker} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
+      const unknownView = buildView(parseProgress(unknown), [], null, now, 0, {}, s)
+      const unknownItems = boardItems(unknownView, [])
+      const unknownItem = unknownItems[0]
+      expect(unknownItem?.type).toBe('row')
+      if (unknownItem?.type !== 'row') throw new Error('Missing synthetic row')
+      expect(unknownItem.row.archive).toBe(null)
+      const unknownDrawn = pinned({ ...emptyBoardState, isIdleOpen: true }, unknownItems)
+      expect(boardKey(unknownDrawn, 'a', unknownItems, s).action?.type ?? null).toBe(null)
+      expect(boardScreen(unknownView, [], unknownDrawn, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(false)
+      const unknownModel = serveModel(unknownView, [], s)
+      const unknownPage = [...unknownModel.groups.flatMap(group => group.rows), ...unknownModel.stopped][0]
+      expect(unknownPage?.canArchive).toBe(false)
+      expect(unknownPage?.archiveNote === s.archiveLive).toBe(true)
+      expect(serveAction(unknownItems, { key: unknownItem.key, type: 'archive', text: '', session: '', fp: fingerprint(unknownItem, unknownItems) }, s)).toEqual({ type: 'refuse', note: s.archiveLive })
+      expect(takeTask(unknown, { project: 'Demo', title: 'Synthetic task', line: 2, session: '11223344' }, now, s)).toBe(null)
+    }
+    // The local observation a display falls back to proves nothing here either: the gate
+    // reads the writer time, like the write guard (#1000, lane review on #1087).
+    for (const marker of ['', ' updated=not-a-date']) {
+      const unknown = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working${marker} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
+      const parsed = parseProgress(unknown)
+      const task = parsed[0]?.tasks[0]
+      if (task === undefined) throw new Error('Missing synthetic task')
+      const seen = { [taskFingerprint('Demo', task)]: now - 10 * 60 * 60 * 1000 }
+      const seenView = buildView(parsed, [], null, now, 0, {}, s, [], seen)
+      const seenItems = boardItems(seenView, [])
+      const seenItem = seenItems[0]
+      expect(seenItem?.type).toBe('row')
+      if (seenItem?.type !== 'row') throw new Error('Missing synthetic row')
+      expect(seenItem.row.archive).toBe(null)
+      expect(takeTask(unknown, { project: 'Demo', title: 'Synthetic task', line: 2, session: '11223344' }, now, s, seen)).toBe(null)
+    }
     const asked = `## Demo\n<!-- auto session=11223344 agent=${agent} state=waiting updated=${new Date(now).toISOString()} -->\n### Question\n- [?] Choose a limit?\n<!-- /auto session=11223344 -->\n`
     const view = buildView(parseProgress(asked), [], null, now, 0, {}, s)
     expect(boardScreen(view, [], emptyBoardState, s, { width: 160, isColor: false })).not.toContain(s.archiveLive)
@@ -440,6 +479,39 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
     // A selected stopped block that resumes before the queued write stays owned.
     expect(takeTask(asked, { project: 'Demo', title: 'Question', line: 2, session: '11223344' }, now, s)).toBe(null)
     expect(takeTask(asked.replace(/ updated=[^ ]+/, ''), { project: 'Demo', title: 'Question', line: 2, session: '11223344' }, now, s)).toBe(null)
+  }
+})
+
+test('a working row quiet past the Working now limit can be archived on the terminal and the page (#1000)', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  // A doing step counts for two quiet hours, any other activity for thirty minutes (#1054):
+  // past that the row is no longer at work, so a session killed mid-step can be archived
+  // instead of waiting out the twelve-hour stale time.
+  const cases: Array<[string, string, number, boolean]> = [
+    ['- [~] Write a test\n', DOING_QUIET_MS / 60_000 - 60, false],
+    ['- [~] Write a test\n', DOING_QUIET_MS / 60_000 + 60, true],
+    ['- [ ] Next step\n', WORKING_MS / 60_000 - 20, false],
+    ['- [ ] Next step\n', WORKING_MS / 60_000 + 10, true],
+  ]
+  for (const s of Object.values(STRINGS)) for (const agent of ['codex', 'claude']) for (const [steps, minutes, archivable] of cases) {
+    const file = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working updated=${new Date(now - minutes * 60_000).toISOString()} -->\n### Synthetic task\n${steps}<!-- /auto session=11223344 -->\n`
+    const view = buildView(parseProgress(file), [], null, now, 0, {}, s)
+    const items = boardItems(view, [])
+    const item = items.find(one => one.type === 'row')
+    expect(item?.type).toBe('row')
+    if (item?.type !== 'row') throw new Error('Missing synthetic row')
+    expect(item.row.archive === null).toBe(!archivable)
+    const drawn = pinned({ ...emptyBoardState, isIdleOpen: true }, items)
+    const pressed = boardKey(drawn, 'a', items, s)
+    expect(pressed.action?.type ?? null).toBe(archivable ? 'archive' : null)
+    expect(boardScreen(view, [], pressed.state, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(!archivable)
+    const model = serveModel(view, [], s)
+    const page = [...model.groups.flatMap(group => group.rows), ...model.stopped][0]
+    expect(page?.canArchive).toBe(archivable)
+    expect(page?.archiveNote === s.archiveLive).toBe(!archivable)
+    const action = serveAction(items, { key: item.key, type: 'archive', text: '', session: '', fp: fingerprint(item, items) }, s)
+    expect(action.type).toBe(archivable ? 'archive' : 'refuse')
+    if (!archivable) expect(action).toEqual({ type: 'refuse', note: s.archiveLive })
   }
 })
 
@@ -633,8 +705,13 @@ test('an ended session offers the command that reopens it where it ran', () => {
 test('the status line says where things stand, and nothing when nothing does', () => {
   const projects = parseProgress('## 求職\n### Google 暑期實習\n> 截止 10-18\n- [?] 推薦信\n')
   const line = statusLine(buildView(projects, [], { ...working(), pr: PR }, NOW))
-  expect(line).toBe('進度 · 重做進度面板 1/2 · Claude 正在做 · 1 件等你 · 1 件快到期 · PR #12 · CI 失敗 2 · 要求修改')
+  // Two steps or more: the bar takes the place of the status words, and the title stays (#1085).
+  expect(line).toBe('進度 · 重做進度面板 ━╸ 1/2 · 1 件等你 · 1 件快到期 · PR #12 · CI 失敗 2 · 要求修改')
   expect(statusLine(buildView([], [], null, NOW))).toBe(undefined)
+  // One step keeps its words: there is no bar to draw.
+  let one = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
+  one = applyTaskCreate(one, { subject: '讀 API' }, '1', NOW)
+  expect(statusLine(buildView([], [], { ...one, title: '只有一步', state: 'working' }, NOW))).toBe('進度 · 只有一步 0/1 · Claude 正在做')
 })
 
 test('two 和色 sets: the light one under a light theme, the dark one otherwise', () => {
@@ -1117,6 +1194,65 @@ test('a choice with a comma before 還是 / or still reads both options', () => 
   })
 })
 
+test('a list of options before or / 還是 offers every option, and a clause before it stays one option (#1111)', () => {
+  for (const [question, options] of [
+    ['Small, medium, large or huge?', ['Small', 'medium', 'large', 'huge']],
+    ['Small, medium, large, or huge?', ['Small', 'medium', 'large', 'huge']],
+    ['Should the size be small, medium, large or huge?', ['small', 'medium', 'large', 'huge']],
+    ['Which size, small, medium or large?', ['small', 'medium', 'large']],
+    ['A、B 還是 C？', ['A', 'B', 'C']],
+    ['用 A、B 还是 C？', ['A', 'B', 'C']],
+    // A clause before or / 還是 is still one option, as before.
+    ['A first, or B?', ['A first', 'B']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['Which metric, win rate or Elo?', ['win rate', 'Elo']],
+    ['I checked the logs, restart or wait?', ['restart', 'wait']],
+    ['If it fails, retry or stop?', ['retry', 'stop']],
+    ['我看了日誌，要重啟還是等？', ['重啟', '等']],
+    // A lead-in before the comma is not an option.
+    ['Tests pass, merge now or wait?', ['merge now', 'wait']],
+    ['Great, ship or hold?', ['ship', 'hold']],
+    ['Quick question, A or B?', ['A', 'B']],
+    ['Done, ready to merge or not?', ['ready to merge', 'not']],
+    ['Do you want X, Y or Z?', ['X', 'Y', 'Z']],
+  ] as const) {
+    expect(askOf(question, '')).toMatchObject({ kind: 'choose', options: [...options] })
+    expect(askOf('Pick', question)).toMatchObject({ kind: 'choose', options: [...options] })
+  }
+})
+
+test('an English "Should X be A or B?" question offers A and B as the answers, without the question words', () => {
+  expect(askOf('Should the retry limit be 3 or 5?', '')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
+  expect(askOf('Retry limit', 'Should the retry limit be 3 or 5?')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
+  // An imperative lead is not a question frame: it stays whole.
+  expect(askOf('Keep the old screenshots or redraw them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Keep the old screenshots', 'redraw them'],
+  })
+})
+
+test('an English question with a relative clause keeps its words and does not strip to the clause\'s verb', () => {
+  expect(askOf('Should I keep files that are backed up or delete them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep files that are backed up', 'delete them'],
+  })
+  expect(askOf('Should I keep files which are backed up or delete them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep files which are backed up', 'delete them'],
+  })
+  expect(askOf('Should I keep the person who is responsible or let them go?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep the person who is responsible', 'let them go'],
+  })
+  // A copula in an if-clause is not the main verb either.
+  expect(askOf('Should I keep files if they are backed up or delete them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep files if they are backed up', 'delete them'],
+  })
+  // A leading `that` is the subject itself, not a clause: it still strips.
+  expect(askOf('Should that file be deleted or kept?', '')).toMatchObject({ kind: 'choose', options: ['deleted', 'kept'] })
+})
+
 test('archiving never ages out a block with no time, and keeps a section someone left empty', () => {
   const text = `# P
 
@@ -1233,6 +1369,41 @@ test('titles and background are cut by terminal width, at a word in English, nev
   expect(clip('Add a README.md to this repo describing index.js', 38)).toBe('Add a README.md to this repo…')
 })
 
+test('a naming reply accepts short titles and background in Chinese and English', () => {
+  expect(nameReply('「重做進度面板」\n背景：讓大家一眼看到工作進度')).toEqual({ title: '重做進度面板', context: '讓大家一眼看到工作進度' })
+  expect(nameReply('Build the progress board\nContext: Make the work visible to everyone.')).toEqual({ title: 'Build the progress board', context: 'Make the work visible to everyone.' })
+  expect(nameReply('Build the progress board')).toEqual({ title: 'Build the progress board', context: '' })
+  expect(nameReply('測試'.repeat(2))).not.toBeNull()
+  expect(nameReply('測試'.repeat(7))).not.toBeNull()
+  expect(nameReply('one two three')).not.toBeNull()
+  expect(nameReply('Fix README.md links')).toEqual({ title: 'Fix README.md links', context: '' })
+  expect(nameReply('Release 0.24.3 notes')).not.toBeNull()
+  expect(nameReply('v0.24.3 發版準備')).not.toBeNull()
+  expect(nameReply('Update the claude-one.txt notes')).not.toBeNull()
+  expect(nameReply('one two three four five six seven')).not.toBeNull()
+  expect(nameReply(`重做進度面板\n${'字'.repeat(40)}`)).not.toBeNull()
+  expect(nameReply(`Build the progress board\n${Array(19).fill('word').join(' ')}`)).not.toBeNull()
+})
+
+test('a naming reply rejects refusals, sentences, extra lines and answers outside the prompt limits', () => {
+  expect(nameReply('我無法讀取 claude-one.txt，對話中也沒有附上檔案\n請把檔案內容貼到對話中，我會依照你的格式要求回覆兩行')).toBeNull()
+  expect(nameReply('重做進度面板\n說明背景\n多出一行')).toBeNull()
+  expect(nameReply('重做進度面板。')).toBeNull()
+  expect(nameReply('Can you provide the file?')).toBeNull()
+  expect(nameReply('Fix the links. Then ship it')).toBeNull()
+  expect(nameReply('')).toBeNull()
+  expect(nameReply('短標題')).toBeNull()
+  expect(nameReply('長'.repeat(15))).toBeNull()
+  expect(nameReply(`修復命名保護 ${'a'.repeat(70)}`)).toBeNull()
+  expect(nameReply('two words')).toBeNull()
+  expect(nameReply('one two three four five six seven eight')).toBeNull()
+  expect(nameReply(`${'word'.repeat(10)} ${'word'.repeat(10)} end`)).toBeNull()
+  expect(nameReply(`重做進度面板\n${'字'.repeat(41)}`)).toBeNull()
+  expect(nameReply(`Build the progress board\n${Array(20).fill('word').join(' ')}`)).toBeNull()
+  expect(nameReply(`Build the progress board\n${Array(20).fill('lengthyword').join(' ')}`)).toBeNull()
+  expect(nameReply('重做進度面板\n背景：')).toBeNull()
+})
+
 test('封存 takes out one task now: an ended block by its session, a hand-kept task by its heading', () => {
   const text = `# 專案進度
 
@@ -1276,7 +1447,8 @@ test('封存 leaves the file alone when it cannot be sure which task it means', 
   const twins = '# 專案進度\n\n## a\n### 同名\n- [ ] 一\n\n## b\n### 同名\n- [ ] 二\n'
   expect(takeTask(twins, { project: 'a', title: '同名', line: 0, session: null }, NOW)).toBeNull()
   // A title inside some session's block is that session's, not the person's.
-  const inside = '## p\n<!-- auto session=aaaaaaaa state=working updated=2026-10-16T11:00:00.000Z -->\n### 修 CI\n- [ ] 修\n<!-- /auto session=aaaaaaaa -->\n'
+  // The session reported fifteen minutes ago, so its row is live and has no 封存 (#1000).
+  const inside = '## p\n<!-- auto session=aaaaaaaa state=working updated=2026-10-16T11:45:00.000Z -->\n### 修 CI\n- [ ] 修\n<!-- /auto session=aaaaaaaa -->\n'
   expect(takeTask(inside, { project: 'p', title: '修 CI', line: 0, session: null }, NOW)).toBeNull()
   // A block that lost its end marker.
   expect(takeTask('## p\n<!-- auto session=bbbbbbbb state=ended updated=2026-10-16T11:00:00.000Z -->\n### x\n', { project: 'p', title: 'x', line: 2, session: 'bbbbbbbb' }, NOW)).toBeNull()
@@ -1444,6 +1616,18 @@ test('the question a reply ends on: its last paragraph only, without code or mar
   // An underscore inside a word belongs to it (a name, a token); at the edge of one it is markdown.
   expect(lastQuestion('Should I rename `snake_case` to ghp_16C7e42F in CI?')).toBe('Should I rename snake_case to ghp_16C7e42F in CI?')
   expect(lastQuestion('Use _this_ or __that__, not my__name?')).toBe('Use this or that, not my__name?')
+})
+
+test('a link\'s own question mark is not a question, and a question with a link keeps it whole (#1108)', () => {
+  expect(lastQuestion('http://127.0.0.1:58561/?t=abc123')).toBeNull()
+  expect(lastQuestion('The board is open at http://127.0.0.1:58561/?t=abc123')).toBeNull()
+  expect(lastQuestion('See https://example.com/?q=1.')).toBeNull()
+  expect(lastQuestion('Done.\n\nCan you open https://example.com/a?q=1&b=2.html?')).toBe('Can you open https://example.com/a?q=1&b=2.html?')
+  expect(lastQuestion('I opened http://127.0.0.1:5173/?t=x. Ship it?')).toBe('Ship it?')
+  expect(lastQuestion('預覽在 https://example.com/?p=1，可以合併嗎？')).toBe('預覽在 https://example.com/?p=1，可以合併嗎？')
+  // A link ends at Chinese punctuation, so text after the question no longer hides it (#1121).
+  expect(lastQuestion('預覽在 https://example.com，可以合併嗎？（測試已通過）')).toBe('預覽在 https://example.com，可以合併嗎？')
+  expect(lastQuestion('預覽在 https://example.com/?p=1，可以合併嗎？請回覆。')).toBe('預覽在 https://example.com/?p=1，可以合併嗎？')
 })
 
 test('a reply that is JSON is not cut at its question mark and shown as a question', () => {
@@ -4419,6 +4603,20 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
 })
 
+test('hiding a question on a state=waiting session reflects answeredWaiting rather than plain working (#1143)', () => {
+  const key = 'a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'
+  for (const s of Object.values(STRINGS)) {
+    expect(s.answeredWaiting).toBeTruthy()
+    const hiddenView = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, s, [key])
+    const row = hiddenView.groups.find(group => group.project === 'api-gateway')?.rows.find(r => r.title === 'Rate-limit the public endpoints')
+    expect(row?.status).toBe(s.answeredWaiting)
+    expect(row?.tone).toBe('quiet')
+    const model = serveModel(hiddenView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(model.view.working.some(ref => ref.key === `row:${row?.key}`)).toBe(true)
+    expect(pageWords(s).answeredWaiting).toBe(s.answeredWaiting)
+  }
+})
+
 test('a quick answer pressed while the page showed one question is refused once the same step asks another', () => {
   const asked = boardItems(serveView(), [])
   const shown = asked.find(item => item.type === 'ask' && item.ask.agent === 'codex')?.key ?? ''
@@ -4700,9 +4898,10 @@ test("the redesigned pages speak the page's language in every new word", () => {
   const keys = ['pgNeeds', 'pgWorking', 'pgOthers', 'pgStopped', 'pgDone', 'pgAgents', 'pgOlder', 'pgOlderOne', 'pgSideFold', 'pgSideOpen', 'showAllQuestions'] as const
   for (const s of Object.values(STRINGS)) {
     const live = servePage(s, 'synthetic')
-    // One icon button switches between light and dark; it names the theme it switches to, in the page's language.
-    for (const label of [s.themeToDark, s.themeToLight]) expect(live).toContain(label)
-    expect(live).toContain('data-theme-toggle')
+    // Settings holds the look (#1163), in the page's language.
+    for (const label of [s.settingsTitle, s.themeMenu, s.themeLight, s.themeDark, s.settingsAutomatic, s.barStyleHead, s.barStyleInk, s.barStyleBlue, s.barStyleGreen]) expect(live).toContain(label)
+    expect(live).toContain('data-settings-toggle')
+    expect(live).not.toContain('data-theme-toggle')
     expect(live).not.toContain('data-theme-pick')
     for (const label of [s.pgViews, s.pgOverview, s.pgNeeds, s.pgWorking, s.pgOthers, s.pgDone, s.pgProjects, s.pgAgents, s.pgSideFold]) expect(live).toContain(label)
     expect(live).toContain(s.serveLive)

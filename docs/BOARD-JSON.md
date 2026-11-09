@@ -1,6 +1,6 @@
 # Board JSON, schema version 1
 
-Run `agent-board --json` to read the board as one JSON document followed by a newline. It reads the selected progress file, its existing sidecars, inbox and today's journal. It writes no file, starts no server and opens no browser, including when combined with `--serve`, `--watch`, `--tidy` or `--keys`. Setup subcommands retain their separate `--json` protocol. The hook modes `--codex-report`, `--codex-event` and `--agent-status` do not: beside `--json`, the board read runs and the hook mode does not. No hook that setup writes passes `--json`.
+Run `agent-board --json` to read the board as one JSON document followed by a newline. It reads the selected progress file, its existing sidecars, inbox and today's journal. Pass `--days N` (1–90, default 7) to include what finished in the last N days, and optionally `--project <name>` to narrow to a single project. It writes no file, starts no server and opens no browser, including when combined with `--serve`, `--watch`, `--tidy` or `--keys`. Setup subcommands retain their separate `--json` protocol. The hook modes `--codex-report`, `--codex-event` and `--agent-status` do not: beside `--json`, the board read runs and the hook mode does not. No hook that setup writes passes `--json`.
 
 MCP's `board_status` returns this same document, built by the same code ([MESSAGING.md](MESSAGING.md#stdio-mcp)).
 
@@ -25,6 +25,7 @@ Keys are English camelCase; values use the board's selected language. Every stri
 | `doneRecently` | Finished tasks on the page's Done shelf, newest first. |
 | `doneToday` | Today's journal report lines as strings, in the report's own wording, with redaction. |
 | `notices` | The page model's warning and details lines, when present, with redaction. |
+| `finished` | Optional array of finished tasks over the requested window when `--days N` is passed; omitted otherwise. |
 
 ## Counts
 
@@ -76,6 +77,18 @@ The current page has no separate old-time uncertainty marker: known old timestam
 | `title` | Finished task title. |
 | `agent` | The agent identifier, or an empty string when hand-kept or not reported. |
 | `age` | The page's relative age wording, or its localized unknown-time label. |
+
+## Finished tasks (`--days N`)
+
+Run `agent-board --json --days N` (where N is an integer between 1 and 90, defaulting to 7 when `--days` is given without a number) to include finished work from the last N days across monthly journals and completed task history. Pass `--project <name>` to narrow to that project. Passing `--days 0`, negative numbers, numbers greater than 90, or non-integer values causes the CLI to exit with code `1` and output its usage line.
+
+| Field | Meaning |
+|---|---|
+| `project` | The repository or project heading name. |
+| `title` | Finished task title. |
+| `agent` | The agent identifier, or an empty string when hand-kept or not reported. |
+| `finishedDate` | Completion date (`YYYY-MM-DD`). |
+| `steps` | Array of completed steps, each with `text` and optional completion `date`. |
 
 ## Pure function and errors
 

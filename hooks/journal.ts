@@ -8,7 +8,7 @@ import { countSteps, currentStepIndex, isTaskComplete, readable } from './parse'
 // week" has an answer after the blocks themselves are archived.
 //   - 2026-10-16 14:32 · persona_framework · 重做進度面板 · 寫測試
 
-export type JournalEntry = { at: string; project: string; task: string; step: string }
+export type JournalEntry = { at: string; stamp?: string; project: string; task: string; step: string }
 
 const pad = (value: number): string => String(value).padStart(2, '0')
 
@@ -205,7 +205,7 @@ export const journalLine = (entry: Omit<JournalEntry, 'at'>, now: number, s: Str
 export const appendJournal = (text: string, lines: readonly string[], s: Strings = ZH_TW): string =>
   lines.length === 0 ? text : `${text.trim() === '' ? `${s.journalTitle}\n` : text.replace(/\s*$/, '\n')}${lines.join('\n')}\n`
 
-const LINE = /^- (\d{4}-\d{2}-\d{2}) \d{2}:\d{2} · (.+?) · (.+?) · (.+)$/
+const LINE = /^- ((\d{4}-\d{2}-\d{2})(?: \d{2}:\d{2})?) · (.+?) · (.+?) · (.+)$/
 
 // Steps finished on the day `now` falls on, for the count at the top of the pane.
 export const countDay = (text: string, now: number): number => {
@@ -217,8 +217,8 @@ export const parseJournal = (text: string): JournalEntry[] =>
   text.split(/\r?\n/).flatMap(line => {
     const match = LINE.exec(line)
     if (match === null) return []
-    const [, at = '', project = '', task = '', step = ''] = match
-    return [{ at, project, task, step }]
+    const [, stamp = '', at = '', project = '', task = '', step = ''] = match
+    return [{ at, stamp, project, task, step }]
   })
 
 // What finished in the last `days` days, what is open, and what waits on you: plain text a

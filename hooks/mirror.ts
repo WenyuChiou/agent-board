@@ -434,21 +434,42 @@ export const fallbackTitle = (mirror: ProgressMirror): string => {
 }
 
 // What the model answered, made into a title: one line, no quotes or end punctuation.
-export const cleanTitle = (answer: string): string => {
+export const cleanTitle = (answer: string, width = 48): string => {
   const line = answer.split(/\r?\n/).find(one => one.trim() !== '')?.trim() ?? ''
   const bare = line.replace(/^["'「『《【\s]+|["'」』》】。．.！!？?\s]+$/g, '').replace(/^(任務名稱|名稱|Title)[:：]\s*/i, '')
 
-  return clip(bare, 48)
+  return clip(bare, width)
 }
 
 // The model's second line, made into one line of background.
-export const cleanContext = (answer: string): string => {
+export const cleanContext = (answer: string, width = 120): string => {
   const line = answer
     .replace(/^["'「『\s]+|["'」』\s]+$/g, '')
     .replace(/^(背景|Background|Context)\s*[:：]\s*/i, '')
     .replace(/\s+/g, ' ')
 
-  return clip(line.trim(), 120)
+  return clip(line.trim(), width)
+}
+
+// Reject a refusal or an overlong answer before clipping can make it look like a name.
+export const nameReply = (reply: string): { title: string; context: string } | null => {
+  const lines = reply.split(/\r?\n/).filter(line => line.trim() !== '')
+  // A full stop ends a sentence only before a space or the line's end, so a version (0.24.3) or a file name (README.md) stays.
+  if (lines.length < 1 || lines.length > 2 || /[。．！!？?]|\.(?=\s|$)/u.test(lines[0] ?? '')) return null
+
+  const title = cleanTitle(lines[0] ?? '')
+  const fullTitle = cleanTitle(lines[0] ?? '', Infinity)
+  const context = cleanContext(lines[1] ?? '', Infinity)
+  const hasCjk = (text: string): boolean => /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(text)
+  const isTitle = (text: string): boolean => {
+    const isCjk = hasCjk(text)
+    const length = isCjk ? [...text].length : text.split(/\s+/u).length
+    return isCjk ? length >= 4 && length <= 14 : length >= 3 && length <= 7
+  }
+  if (!isTitle(title) || !isTitle(fullTitle)) return null
+  if (lines.length === 2 && (context === '' || (hasCjk(context) ? [...context].length > 40 : context.split(/\s+/u).length >= 20))) return null
+
+  return { title, context: clip(context, 120) }
 }
 
 // Text from progress.md, which any program can write, made fit to show Claude as data: one

@@ -11,12 +11,14 @@ import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, WORKING_MS } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
+import { cellsOf, plainBar } from './progress-bar'
+import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
 import { observeQuestions, partsKey2, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
-import { identity } from './grouping'
+import { identity, isSilenceTask, isWorkingTask } from './grouping'
 import { closedCopies, mergeCopies, recordFolder } from './question-merge'
 import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
 import type { RunGroup } from './runs'
@@ -54,6 +56,8 @@ export type CurrentView = {
   done: number
   total: number
   steps: ViewStep[]
+  // One cell per step, unfolded, for the progress bar (#1085).
+  cells: Cell[]
   // The runs this session started for itself, as one line; absent when it started none (#399).
   runs?: string
 }
@@ -161,6 +165,8 @@ export type TaskRow = {
   // stale or silent block, which does not mean the session is closed.
   isRecordedEnded?: true
   steps: ViewStep[]
+  // One cell per step, unfolded, for the progress bar (#1085).
+  cells: Cell[]
   // Every open step, unfolded: what a take-over hands on.
   left: string[]
   next: StepRef | null
@@ -410,13 +416,17 @@ export const foldSteps = (steps: readonly ViewStep[], room = 6, s: Strings = ZH_
 const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
   if (mirror.tasks.length === 0) return null
   const doing = doingTask(mirror)
-  const waitingYou = mirror.tasks.find(task => waitsOnYou(mirror, task))
+  const isReplied = mirror.replied !== undefined && Number.isFinite(mirror.replied) && (mirror.updated === null || mirror.replied >= (mirror.updated ?? 0))
+  const waitingYou = isReplied ? undefined : mirror.tasks.find(task => waitsOnYou(mirror, task))
   const blocked = mirror.tasks.find(task => task.status !== 'completed' && task.blocked !== null)
   const done = mirror.tasks.filter(task => task.status === 'completed' && !task.handoffTo).length
   let status = s.waitingReply
   let tone: Tone = 'warn'
   if (mirror.state === 'done') {
     status = s.allDone
+    tone = 'quiet'
+  } else if (isReplied) {
+    status = s.answeredWaiting
     tone = 'quiet'
   } else if (waitingYou !== undefined) {
     status = s.waitsOnYou(waitingYou.subject)
@@ -428,7 +438,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     tone = 'accent'
   }
   const steps = mirror.tasks.map((task, index) => {
-    const hasAnswer = isAnswered(mirror, task)
+    const hasAnswer = isAnswered(mirror, task) || isReplied
     let stepStatus: ProgressStepStatus = task.handoffTo ? 'cancelled' : task.status === 'completed' ? 'done' : 'todo'
     if (task.status !== 'completed') {
       if (task.blocked !== null) stepStatus = 'blocked'
@@ -460,6 +470,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     done,
     total: mirror.tasks.filter(task => !task.handoffTo).length,
     steps: foldSteps(steps, 6, s),
+    cells: cellsOf(withCurrent(steps)),
   }
 }
 
@@ -563,6 +574,19 @@ const contextFor = (mirror: ProgressMirror): string => {
   if (title === '') return request
 
   return request === title || request.startsWith(title.replace(/…$/, '')) ? '' : request
+}
+
+// A plan with no step in progress still shows where it stands: its first open step is the current one.
+const withCurrent = (steps: readonly ViewStep[]): ViewStep[] => {
+  if (steps.some(step => step.isCurrent)) return [...steps]
+  const open = steps.findIndex(step => step.status !== 'done' && step.status !== 'cancelled')
+  return steps.map((step, index) => (index === open ? { ...step, isCurrent: true } : step))
+}
+
+const rowCells = (task: ProgressTask): Cell[] => {
+  const current = currentStepIndex(task)
+
+  return cellsOf(task.steps.map((step, index) => ({ status: step.status, isCurrent: index === current })))
 }
 
 const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
@@ -918,6 +942,7 @@ export const buildView = (
     return key
   }
   // How many tasks share each project and title, counted once rather than for every row (#371).
+  const repliedQuestions = new Set<string>()
   const twins = new Map<string, number>()
   for (const project of projects) {
     for (const task of project.tasks) {
@@ -958,8 +983,9 @@ export const buildView = (
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now, updated, staleMs)
-      const isSilence = task.auto?.state === 'working' && hasTime(lastActive) && now - lastActive > WORKING_MS && (task.steps.length === 0 || task.steps.every(step => isLifecycleStep(step.text)))
+      const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
+      const isRepliedTask = task.auto?.replied !== undefined && Number.isFinite(task.auto.replied) && (task.auto.updated === null || task.auto.replied >= task.auto.updated)
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
       const taskQuestions: WaitingItem[] = []
@@ -1023,7 +1049,9 @@ export const buildView = (
           return held
         }
         let value: boolean
-        if (isFrozen) {
+        if (isRepliedTask) {
+          value = false
+        } else if (isFrozen) {
           const saved = savedAt(index)
           value = saved === undefined ? true : saved.isUnresolved === true && saved.source !== undefined && !marked.has(saved.id)
         } else if (marked.has(keys[index] ?? '')) {
@@ -1103,7 +1131,13 @@ export const buildView = (
         if (counts !== undefined) counts.indexLookups += 1
         return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
       }))
-      if (!isInactive) waiting.push(...taskQuestions)
+      if (!isInactive && !isRepliedTask) waiting.push(...taskQuestions)
+      if (isRepliedTask) {
+        for (const item of taskQuestions) {
+          if (item.questionId) repliedQuestions.add(item.questionId)
+          if (item.hideKey) repliedQuestions.add(item.hideKey)
+        }
+      }
 
       let completion: DoneItem & { at: number } | null = null
       if (isComplete) {
@@ -1141,16 +1175,19 @@ export const buildView = (
       // A hook's placeholder step says the session waits; while it works the row shows no step (#612).
       const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
       const { done, total } = countSteps(shown)
+      const isAnsweredWaiting = !isBlocked && (auto === 'waiting' || isRepliedTask) && (task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index)) || isRepliedTask)
       const phrase =
         auto === 'working' && isBlocked
           ? stepPhrase(task, s, isPrompt)
-          : auto === 'working'
-          ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
-          : auto === 'ended'
-            ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
-            : !isBlocked && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
-              ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
-              : stepPhrase(task, s, isPrompt)
+          : isAnsweredWaiting
+            ? { status: s.answeredWaiting, tone: 'quiet' as const }
+            : auto === 'working'
+            ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
+            : auto === 'ended'
+              ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
+              : !isBlocked && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
+                ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
+                : stepPhrase(task, s, isPrompt)
       const open = task.steps[currentStepIndex(task)]
       const group = folded.runs.get(task)
       const row: TaskRow = {
@@ -1168,6 +1205,7 @@ export const buildView = (
         isHere,
         auto,
         steps: rowSteps(shown, s),
+        cells: rowCells(shown),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
         questions: isInactive ? unresolved : [],
         question: isInactive ? unresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
@@ -1187,15 +1225,24 @@ export const buildView = (
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142). Nor does a row whose block state is
         // already done offer confirm (#876).
-        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && !isSilence)))
+        // A silence row past the stale time is accepted by both write guards (blocks.ts),
+        // so it offers what they accept instead of nothing (#898).
+        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && (!isSilence || stale))))
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
-            : auto === 'ended' && !isSilence && task.auto !== null
+            : auto === 'ended' && (!isSilence || stale) && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
-              : null,
+              // A working row quiet past the Working now limit is no longer at work: the
+              // person can archive it instead of waiting out the 12 h stale time (#1000).
+              // A row waiting on the person keeps today's refusal. The gate reads the
+              // writer time, like the write guard: an unknown age never archives, and
+              // the local observation the display falls back to proves nothing here.
+              : auto === 'working' && !isSilence && task.auto !== null && hasTime(updated) && !isWorkingTask(task.steps, updated, now)
+                ? { project: name, title: task.title, line: task.line, session: task.auto.session }
+                : null,
         target: targetOf(task.auto),
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         ...(group === undefined ? {} : { runs: runsText(group, now, s) }),
@@ -1243,7 +1290,7 @@ export const buildView = (
       row: {
         key,
         project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
-        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], left: [], next: null, due: null, pr: '',
+        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], cells: [], left: [], next: null, due: null, pr: '',
         agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
         archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
       },
@@ -1272,7 +1319,15 @@ export const buildView = (
     else group.rows.push(row)
   }
 
-  const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined).flatMap(turn => {
+  for (const turn of pending) {
+    if (turn.isQuestion && turn.id !== undefined && turn.replied !== undefined && turn.replied > turn.at) {
+      const scope = questionScope(turn.project, turn.agent, turn.id ?? '')
+      const id = observed?.keys[pendingQuestionSlot(scope, turn.text)] ?? observed?.ledger.records.find(record => record.scope === scope && record.isUnresolved && record.producerSources?.includes(JSON.stringify(turn)))?.id
+      if (id !== undefined) repliedQuestions.add(id)
+    }
+  }
+
+  const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined && !(turn.replied !== undefined && turn.replied > turn.at)).flatMap(turn => {
     const updated = inactiveScopes.get(questionScope(turn.project, turn.agent, turn.id ?? ''))
     if (updated !== undefined && turn.at <= updated) return []
     const scope = questionScope(turn.project, turn.agent, turn.id ?? '')
@@ -1281,7 +1336,13 @@ export const buildView = (
     const parts = splitNote(turn.text)
     return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
-  const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).map(item => ({ ...item, questionId: item.hideKey }))
+  const isRepliedMine = mine !== null && mine.replied !== undefined && Number.isFinite(mine.replied) && (mine.updated === null || mine.replied >= (mine.updated ?? 0))
+  if (isRepliedMine && mine !== null) {
+    for (const item of ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null)))) {
+      if (item.hideKey) repliedQuestions.add(item.hideKey)
+    }
+  }
+  const own = mine === null || mine.isRun === true || isRepliedMine ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).map(item => ({ ...item, questionId: item.hideKey }))
   // Each record by its id, once: a board holds hundreds of questions and thousands of records.
   const recordOf = new Map<string, QuestionRecord>()
   const rankOf = new Map<string, number>()
@@ -1323,7 +1384,7 @@ export const buildView = (
   const runSessions = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto?.isRun === true ? [sessionIdentity(task.auto)] : [])).filter(identity => identity !== null))
   const starterOf = startersOf(projects)
   for (const record of observed?.ledger.records ?? []) {
-    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id) || foldedScopes.has(record.scope)) continue
+    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id) || foldedScopes.has(record.scope) || repliedQuestions.has(record.id)) continue
     const source = record.source
     const saved = source.kind === 'block' ? sourceSnapshot(source.data) : null
     let agent = source.agent
@@ -1429,8 +1490,8 @@ export const buildView = (
   if (current !== null && !asks.some(item => item.where === 'here') && all.some(item => item.where === 'here' && item.ageStage !== 'pending')) {
     current.status = reminder.some(item => item.where === 'here') ? s.sectionQuestionReminders : s.sectionOlderQuestions
     current.tone = 'quiet'
-  } else if (current !== null && own.some(isResolved) && !all.some(item => item.where === 'here')) {
-    current.status = s.answeredNote
+  } else if (current !== null && (own.some(isResolved) || isRepliedMine) && !all.some(item => item.where === 'here')) {
+    current.status = isRepliedMine ? s.answeredWaiting : s.answeredNote
     current.tone = 'quiet'
   }
   return {
@@ -1465,28 +1526,28 @@ const clip = (text: string, room: number): string => {
   return chars.length > room ? `${chars.slice(0, room - 1).join('')}…` : text
 }
 
+// The session's task on the line under the prompt. With two steps or more the bar takes the place
+// of the clipped status words (#1085): `建立兩個內容為 hi… ━━━━╸── 5/7`. One step keeps the words.
+const currentPart = (current: CurrentView): string => {
+  const bar = plainBar(current.cells ?? [])
+  return bar === ''
+    ? `${clip(current.title, 14)} ${current.done}/${current.total} · ${clip(current.status, 18)}`
+    : `${clip(current.title, 14)} ${bar} ${current.done}/${current.total}`
+}
+
 // One line under the prompt for when the pane is not on screen: this session's task, what
 // waits on you, what is due soon, and the pull request.
 export const statusLine = (view: View, s: Strings = ZH_TW): string | undefined => {
   const current = view.current
   const urgent = view.overview.due
   const parts = [
-    current === null || current.state === 'done'
-      ? ''
-      : `${clip(current.title, 14)} ${current.done}/${current.total} · ${clip(current.status, 18)}`,
+    current === null || current.state === 'done' ? '' : currentPart(current),
     view.overview.waiting > 0 ? s.statusWaiting(view.overview.waiting) : '',
     urgent > 0 ? s.statusDue(urgent) : '',
     view.pr === null ? '' : view.pr.text,
   ].filter(part => part !== '')
 
   return parts.length === 0 ? undefined : `${s.statusPrefix} · ${parts.join(' · ')}`
-}
-
-export const progressBar = (done: number, total: number, width: number): { filled: string; rest: string } => {
-  const cells = Math.max(4, width)
-  const filled = total === 0 ? 0 : Math.round((done / total) * cells)
-
-  return { filled: '━'.repeat(filled), rest: '─'.repeat(cells - filled) }
 }
 
 // The board's view, built once for the same inputs (#373). After each change of the file the pane,

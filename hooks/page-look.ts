@@ -36,6 +36,9 @@ export const pageTokens = (headHeight = '54px'): string => {
     'hover': 'color-mix(in srgb,var(--ink) 5%,transparent)', 'current': 'color-mix(in srgb,var(--ink) 8%,transparent)', 'press': 'color-mix(in srgb,var(--ink) 12%,transparent)',
     // Colour roles. Everything you press is ink, so the only colours on the page carry news: amber needs you, green is alive, red is wrong.
     'act': 'var(--ink)', 'on-act': 'var(--surface)', 'alive': 'var(--done)',
+    // The progress bar's done and current cells (#1085) in the default Ink style: the ink at 60 % and full ink.
+    // The page's `data-bar` picks Blue or Green over them.
+    'bar-done': 'color-mix(in srgb,var(--ink) 60%,var(--surface))', 'bar-now': 'var(--ink)',
     'btn-line': 'color-mix(in srgb,var(--ink) 55%,var(--surface))',
     'ring': '0 0 0 3px color-mix(in srgb,var(--ink) 18%,transparent)',
     'head-h': headHeight,
@@ -49,7 +52,7 @@ export const pageTokens = (headHeight = '54px'): string => {
 @media (max-width:640px){:root{--text-lg:max(18px,1.125rem)}}`
 }
 
-// This runs before styles and delegates presses because the switch is parsed later.
+// The browser's theme is applied before paint; Settings delegates its presses after parsing.
 export const themeHead = String.raw`
 (() => {
   var root = document.documentElement;
@@ -68,17 +71,23 @@ export const themeHead = String.raw`
   }
   if (saved === 'light' || saved === 'dark') choice = saved;
   var scheme = typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  function each(selector, run) { try { Array.prototype.forEach.call(document.querySelectorAll(selector) || [], run); } catch (e) {} }
   function apply() {
     if (choice) root.setAttribute('data-theme', choice);
     else root.removeAttribute('data-theme');
     var shown = choice || (scheme && scheme.matches ? 'dark' : 'light');
-    // The button shows the theme it switches to: a moon while the page is light, a sun while it is dark.
-    document.querySelectorAll('[data-theme-toggle]').forEach(function (button) {
-      var label = button.getAttribute(shown === 'dark' ? 'data-to-light' : 'data-to-dark') || '';
-      button.setAttribute('data-now', shown);
-      button.setAttribute('aria-label', label);
-      button.setAttribute('title', label);
-    });
+    each('[data-settings-toggle]', function (button) { button.setAttribute('data-now', shown); });
+    each('[data-theme-set]', function (item) { item.setAttribute('aria-checked', String(item.getAttribute('data-theme-set') === (choice || 'system'))); });
+  }
+  function pick(next) {
+    choice = next === 'system' ? '' : next;
+    // Blocked storage only means the pick is not kept: this page still shows it.
+    try { if (choice) localStorage.setItem('agent-board.theme', choice); else localStorage.removeItem('agent-board.theme'); } catch (e) {}
+    try { document.cookie = 'agent-board.theme=' + (choice || 'system') + '; Path=/; SameSite=Strict; Max-Age=' + (choice ? 365 * 24 * 3600 : 0); } catch (e) {}
+    root.classList.add('theming');
+    clearTimeout(timer);
+    apply();
+    timer = setTimeout(() => { root.classList.remove('theming'); }, 300);
   }
   apply();
   try { if (scheme && scheme.addEventListener) scheme.addEventListener('change', apply); } catch (e) {}
@@ -86,15 +95,8 @@ export const themeHead = String.raw`
   document.addEventListener('click', function (event) {
     var node = event.target;
     while (node && node !== document) {
-      if (node.getAttribute && node.getAttribute('data-theme-toggle') !== null) {
-        choice = (choice || (scheme && scheme.matches ? 'dark' : 'light')) === 'dark' ? 'light' : 'dark';
-        // Blocked storage only means the pick is not kept: this page still shows it.
-        try { localStorage.setItem('agent-board.theme', choice); } catch (e) {}
-        try { document.cookie = 'agent-board.theme=' + choice + '; Path=/; SameSite=Strict; Max-Age=' + 365 * 24 * 3600; } catch (e) {}
-        root.classList.add('theming');
-        clearTimeout(timer);
-        apply();
-        timer = setTimeout(() => { root.classList.remove('theming'); }, 300);
+      if (node.getAttribute && node.getAttribute('data-theme-set') !== null) {
+        pick(node.getAttribute('data-theme-set'));
         return;
       }
       node = node.parentNode;
@@ -105,14 +107,14 @@ export const themeHead = String.raw`
 
 const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 
-const THEME_ICONS = {
-  moon: '<path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1z"/>',
-  sun: '<circle cx="8" cy="8" r="3"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/>',
-} as const
-
-// One icon button for the theme: it shows the theme it switches to (a moon on a light page, a sun on a dark one).
-export const themeToggle = (s: Strings): string =>
-  `<button type="button" class="icon-btn" data-local data-theme-toggle data-now="light" data-to-dark="${esc(s.themeToDark)}" data-to-light="${esc(s.themeToLight)}" aria-label="${esc(s.themeToDark)}" title="${esc(s.themeToDark)}"><svg class="i i-moon" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS.moon}</svg><svg class="i i-sun" viewBox="0 0 16 16" aria-hidden="true">${THEME_ICONS.sun}</svg></button>`
+// Settings keeps the existing theme and shared progress-bar choices together.
+const SWATCH = '<span class="sw" aria-hidden="true"><i class="c-x"></i><i class="c-x"></i><i class="c-c"></i><i class="c-t"></i></span>'
+export const themeControls = (s: Strings): string =>
+  `<div class="settings-choices" role="radiogroup" aria-label="${esc(s.themeMenu)}">` +
+  (['light', 'dark', 'system'] as const).map(theme => `<button type="button" role="radio" aria-checked="false" data-local data-theme-set="${theme}" data-changed="${esc(s.settingsChanged(s.themeMenu, theme === 'light' ? s.themeLight : theme === 'dark' ? s.themeDark : s.settingsAutomatic))}">${esc(theme === 'light' ? s.themeLight : theme === 'dark' ? s.themeDark : s.settingsAutomatic)}</button>`).join('') +
+  `</div><p class="settings-label">${esc(s.barStyleHead)}</p><div class="settings-choices" role="radiogroup" aria-label="${esc(s.barStyleHead)}">` +
+  (['ink', 'blue', 'green'] as const).map(style => `<button type="button" role="radio" aria-checked="${style === 'ink'}" data-local data-bar-set="${style}" data-sw="${style}">${SWATCH}${esc(style === 'blue' ? s.barStyleBlue : style === 'green' ? s.barStyleGreen : s.barStyleInk)}</button>`).join('') +
+  `</div>`
 
 // Bubble a, the board's mark: a lowercase a whose foot turns out into a speech-bubble tail, an agent
 // talking to you. One path on a 64 grid, in the brand colour.
@@ -226,8 +228,6 @@ svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .icon-btn{display:inline-grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
 .icon-btn:hover{background:var(--hover);color:var(--ink)}
 .icon-btn:active{background:var(--press)}
-[data-theme-toggle] .i-sun,[data-theme-toggle][data-now="dark"] .i-moon{display:none}
-[data-theme-toggle][data-now="dark"] .i-sun{display:block}
 @media (pointer:coarse){.icon-btn{width:44px;height:44px}}
 .quiet,.meta{color:var(--muted)}
 button:hover,.btn:hover,summary:hover{background-color:var(--hover)}

@@ -113,6 +113,63 @@ const withHook = async action => {
 `
 
 // Late events queue under the board's data folder: the script's own folder unless named (#285).
+// Hermes Agent hands every hook the whole conversation (conversation_history on pre_llm_call and post_llm_call),
+// which passes the 1 MB limit in a long session. For Hermes only, the worker then keeps reading to the end without
+// storing it, keeps the first 1 MB, and takes the few fields it needs from that prefix with a JSON string scan:
+// hook_event_name, session_id and cwd at the top, and assistant_response inside extra. Hermes writes them before the
+// history, in this order. A string the prefix cuts off is left out (a reply with no closing question), never guessed.
+export const HERMES_PREFIX_SOURCE = String.raw`const hermesPrefix = text => {
+  const isSpace = c => c === ' ' || c === '\n' || c === '\r' || c === '\t'
+  const skipSpace = i => { while (i < text.length && (isSpace(text[i]) || text[i] === ',')) i++; return i }
+  // The index after the string that opens at i, or -1 when the text stops inside it.
+  const stringEnd = i => {
+    for (let j = i + 1; j < text.length; j++) {
+      if (text[j] === '\\') j++
+      else if (text[j] === '"') return j + 1
+    }
+    return -1
+  }
+  // The index after the value at i (a string, object, array or plain word), or -1 when the text stops inside it.
+  const skipValue = i => {
+    if (text[i] === '"') return stringEnd(i)
+    if (text[i] === '{' || text[i] === '[') {
+      let depth = 0
+      for (let j = i; j < text.length; j++) {
+        const c = text[j]
+        if (c === '"') { j = stringEnd(j); if (j < 0) return -1; j-- }
+        else if (c === '{' || c === '[') depth++
+        else if (c === '}' || c === ']') { depth--; if (depth === 0) return j + 1 }
+      }
+      return -1
+    }
+    let j = i
+    while (j < text.length && !isSpace(text[j]) && text[j] !== ',' && text[j] !== '}' && text[j] !== ']') j++
+    return j < text.length ? j : -1
+  }
+  const members = (from, strings, inner) => {
+    const found = {}
+    let i = skipSpace(from)
+    while (i < text.length && text[i] === '"') {
+      const keyEnd = stringEnd(i)
+      if (keyEnd < 0) return found
+      const key = JSON.parse(text.slice(i, keyEnd))
+      i = skipSpace(keyEnd)
+      if (text[i] !== ':') return found
+      i = skipSpace(i + 1)
+      if (key === inner && text[i] === '{') { found[key] = members(i + 1, ['assistant_response']); return found }
+      const end = skipValue(i)
+      if (end < 0) return found
+      if (strings.includes(key) && text[i] === '"') found[key] = JSON.parse(text.slice(i, end))
+      i = skipSpace(end)
+    }
+    return found
+  }
+  const start = text.search(/\S/)
+  if (start < 0 || text[start] !== '{') throw Error('NOT_OBJECT')
+  return members(start + 1, ['hook_event_name', 'session_id', 'cwd'], 'extra')
+}
+`
+
 export const hookWorker = (home: string, script: string, boardPromptHelper: string, dataRoot?: string): string => `import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const { spawn, spawnSync } = require('node:child_process')
@@ -123,6 +180,7 @@ ${boardPromptHelper}
 const args = process.argv.slice(2)
 const value = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1] }
 const agent = value('--agent')
+${HERMES_PREFIX_SOURCE}
 const policies = ${JSON.stringify(HOOK_TIMEOUTS)}
 const safeAgent = Object.hasOwn(policies, agent) ? agent : 'unknown'
 ${hookLogSource(home, '__AGENT__', true).replace(JSON.stringify('__AGENT__'), 'safeAgent')}
@@ -155,17 +213,17 @@ const run = async () => {
   // A report is never queued, so it waits only until its deadline.
   const budget = isReport || isPlan ? deadline - Date.now() : Math.max(started + hostTimeout - 300 - Date.now(), ${HOOK_LATE_INPUT_GRACE})
   if (budget <= 0) return fail('REPORTER_TIMEOUT')
-  let text = '', timer
+  let text = '', timer, isCut = false
   process.stdin.setEncoding('utf8')
   try {
     await Promise.race([
-      (async () => { for await (const chunk of process.stdin) { text += chunk; if (Buffer.byteLength(text) > 1048576) throw Error('INPUT_TOO_LARGE') } })(),
+      (async () => { for await (const chunk of process.stdin) { if (isCut) continue; text += chunk; if (Buffer.byteLength(text) > 1048576) { if (agent !== 'hermes') throw Error('INPUT_TOO_LARGE'); isCut = true; text = text.slice(0, 1048576) } } })(),
       new Promise((_, reject) => { timer = setTimeout(() => reject(Error('INPUT_TIMEOUT')), budget) }),
     ])
   } catch (error) { process.stdin.destroy(); return fail(error.message === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'INPUT_TIMEOUT') }
   finally { clearTimeout(timer) }
   let payload
-  try { payload = JSON.parse(text.replace(/^\\uFEFF/, '')); if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error() }
+  try { payload = isCut ? hermesPrefix(text) : JSON.parse(text.replace(/^\\uFEFF/, '')); if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error() }
   catch { return fail('INCOMPLETE_INPUT') }
   const internal = ['--hook-version', '--hook-event', '--hook-deadline', '--hook-started', '--home']
   const reporterArgs = args.filter((arg, index) => !internal.includes(arg) && !internal.includes(args[index - 1]))
@@ -224,7 +282,11 @@ const run = async () => {
     // Chinese, and the log line keeps that fixed code. A refused report also passes it on, on a
     // line of its own, for the agent to correct (#217).
     const reason = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
-    if (reason && isReport) process.stderr.write('AGENT_BOARD_REASON ' + reason + '\\n')
+    if (reason && isReport) {
+      process.stderr.write('AGENT_BOARD_REASON ' + reason + '\\n')
+      const detail = reason === 'INVALID_STEP' ? /^AGENT_BOARD_DETAIL (".*")$/m.exec(result.stderr ?? '')?.[1] : undefined
+      if (detail && detail.length <= 1024) process.stderr.write('AGENT_BOARD_DETAIL ' + detail + '\\n')
+    }
     const failure = reason ? 'REPORTER_FAILED ' + reason : 'REPORTER_FAILED'
     // A report is answered to its agent, never queued. Any other event that failed is saved, so a failure nobody
     // foresaw (#241) costs a retry, not the event. A refusal of the event itself (INVALID_SESSION, say) would refuse

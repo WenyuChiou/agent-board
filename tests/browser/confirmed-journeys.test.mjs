@@ -66,7 +66,7 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
       await browserFixture(`reserved-agent-clipboard-${lang}`, async ({ page, progress, evidence, startServer }) => {
         await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
         const board = new BoardPage(page)
-        await board.open(await startServer({ lang }))
+        await board.open(await startServer({ language: lang }))
         const before = readFileSync(progress)
         const title = 'Synthetic corrected web chat report'
         const report = block('a823cafe', 'claude', 'working', 'Synthetic clipboard', title, ['- [~] Check synthetic relay'])
@@ -192,7 +192,9 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
 
       const question = board.question('Bold or quiet?')
       await question.waitFor()
-      await question.getByRole('button', { name: 'Copy "Bold"', exact: true }).waitFor()
+      // A Copy-only question: its options are choices and one Copy arrow, never a Send (#1107).
+      await question.getByRole('button', { name: 'Bold', exact: true }).waitFor()
+      await question.getByRole('button', { name: 'Copy', exact: true }).waitFor()
       assert.equal(await question.getByRole('button', { name: /^Send/ }).count(), 0)
       await question.getByRole('button', { name: 'More', exact: true }).click()
       await question.getByRole('button', { name: 'Already answered, hide', exact: true }).click()

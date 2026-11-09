@@ -12,6 +12,7 @@ import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
 import { isOutranked, pickParent } from './runs'
 import { cutLine, oneLine, plain } from './step-words'
+import { isSilenceTask, isWorkingTask } from './grouping'
 import { isStale, observedTime } from './parse'
 import type { JournalEntry } from './journal'
 
@@ -98,6 +99,7 @@ const markerOf = (mirror: ProgressMirror, parent?: string): string => {
     mirror.cwd ? `dir=${encodeURIComponent(mirror.cwd)}` : '',
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
+    mirror.replied !== undefined && Number.isFinite(mirror.replied) ? `replied=${new Date(mirror.replied).toISOString()}` : '',
     // A session an agent started for itself (#399); a person's has no such mark.
     mirror.isRun === true ? 'origin=run' : '',
     mirror.isRun === true && parent !== undefined && RESUME.test(parent) ? `parent=${parent}` : '',
@@ -695,6 +697,8 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
     if (span === undefined || !span.isClosed) return null
     // Recheck ownership at the write boundary: a stopped row may have resumed since it
     // was drawn. Unknown clocks cannot prove that a working/waiting session stopped.
+    // A working row quiet past the Working now limit is no longer at work (#1000), so
+    // its archive goes through, as the row offers; a waiting row keeps today's refusal.
     if (span.state === 'working' || span.state === 'waiting') {
       const tasks = parseProgress(text).flatMap(project => project.tasks)
       const task = tasks.find(one => one.line === span.heading)
@@ -702,7 +706,13 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       // The older block of a twin pair is offered for archive while it still looks live (#399):
       // a newer block with the same agent and full id is the one that runs.
       const isTwin = ref.isDuplicate === true && task !== undefined && isOutranked(tasks, task)
-      if (auto === null || !isTwin && !isStale(auto, now, observedTime(auto, now, observations).updated, staleMs)) return null
+      const updated = auto === null ? 0 : observedTime(auto, now, observations).updated
+      // A silence-classified row is kept for review: the write guard refuses its archive
+      // as the row does (#1051, #1000).
+      const isSilence = span.state === 'working' && task !== undefined && isSilenceTask(task.steps, updated, now)
+      // The quiet-time path needs a readable time: unknown age never archives (#1000).
+      const stopped = isTwin || auto !== null && isStale(auto, now, updated, staleMs) || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
+      if (auto === null || !stopped) return null
     }
 
     return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }

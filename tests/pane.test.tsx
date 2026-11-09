@@ -1351,7 +1351,8 @@ test('Claude’s task calls fill the file and the pane by themselves', async ($,
     expect(await ui.find({ type: 'Text', text: '等教授回覆' })).toBeDefined()
     // The card is short: where it stands and what comes next, not every step.
     expect(await ui.find({ type: 'Text', text: '正在做：寫 Mod 中' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^1\/3$/ })).toBeDefined()
+    // The count sits beside the progress bar (#1085).
+    expect(await ui.find({ type: 'Text', text: /^ 1\/3$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '○ 下一步：推分支' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ ← 現在$/ })).toBeUndefined()
     // 全部 3 步 opens the numbered list, the step being done marked.

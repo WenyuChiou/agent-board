@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, readSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,14 +34,14 @@ const usage = [
   `agent-board ${v}: a local board for coding agents.
 
 Set up, once per computer:
-  agent-board setup            preview what setup would change; writes nothing
+  agent-board setup            preview setup; in a terminal, confirm once to apply
   agent-board setup --apply    make those changes
   setup options: --agent <name>[,<name>] or all, --home <folder>, --data-dir <folder>
 
 The board:
   agent-board                  open the terminal board over SSH or without a display; open the page otherwise
   agent-board stop             stop the board's page
-  agent-board --json           read the board as JSON for an agent
+  agent-board --json           read the board as JSON for an agent (--days N for finished)
 
 All options: agent-board --help all (--watch, --print, --tidy, ...)
 
@@ -52,14 +52,14 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：給程式 agent 用的本機看板。
 
 設定（每台電腦一次）：
-  agent-board setup            先看設定會改什麼，不寫入任何東西
+  agent-board setup            預覽設定；在終端機確認一次即可套用
   agent-board setup --apply    套用這些變更
   setup 選項：--agent <名稱>[,<名稱>] 或 all、--home <資料夾>、--data-dir <資料夾>
 
 看板：
   agent-board                  SSH 或無顯示器的終端機開終端看板，其他情況開網頁
   agent-board stop             停止看板網頁
-  agent-board --json           供 agent 以 JSON 讀取看板
+  agent-board --json           供 agent 以 JSON 讀取看板（--days N 包含已完成工作）
 
 所有選項：agent-board --help all（--watch、--print、--tidy...）
 
@@ -70,14 +70,14 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：给编程 agent 用的本机看板。
 
 设置（每台电脑一次）：
-  agent-board setup            先看设置会改什么，不写入任何东西
+  agent-board setup            预览设置；在终端确认一次即可应用
   agent-board setup --apply    应用这些更改
   setup 选项：--agent <名称>[,<名称>] 或 all、--home <文件夹>、--data-dir <文件夹>
 
 看板：
   agent-board                  SSH 或无显示器的终端打开终端看板，其他情况打开网页
   agent-board stop             停止看板网页
-  agent-board --json           供 agent 以 JSON 读取看板
+  agent-board --json           供 agent 以 JSON 读取看板（--days N 包含已完成工作）
 
 所有选项：agent-board --help all（--watch、--print、--tidy...）
 
@@ -90,7 +90,7 @@ const usageAll = [
   `agent-board ${v}: a local board for coding agents.
 
 Set up, once per computer:
-  agent-board setup            preview what setup would change; writes nothing
+  agent-board setup            preview setup; in a terminal, confirm once to apply
   agent-board setup --apply    make those changes
   setup options: --agent <name>[,<name>] or all, --home <folder>, --data-dir <folder>
 
@@ -98,7 +98,7 @@ The board:
   agent-board                  open the board where you are
   agent-board stop             stop the board's page
   agent-board --print          print the board as text
-  agent-board --json           read the board as JSON for an agent
+  agent-board --json           read the board as JSON for an agent (--days N [--project name])
   agent-board --status         one line for a status bar: needs you and working
   agent-board --watch          the board in this terminal, with keys
   agent-board --serve          old; the same as no option: the board's page in your browser
@@ -117,7 +117,7 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：給程式 agent 用的本機看板。
 
 設定（每台電腦一次）：
-  agent-board setup            先看設定會改什麼，不寫入任何東西
+  agent-board setup            預覽設定；在終端機確認一次即可套用
   agent-board setup --apply    套用這些變更
   setup 選項：--agent <名稱>[,<名稱>] 或 all、--home <資料夾>、--data-dir <資料夾>
 
@@ -125,7 +125,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board                  在所在位置打開看板
   agent-board stop             停止看板網頁
   agent-board --print          印出純文字看板
-  agent-board --json           供 agent 以 JSON 讀取看板
+  agent-board --json           供 agent 以 JSON 讀取看板（--days N [--project 名稱]）
   agent-board --status         狀態列的一行摘要：等你與進行中項目
   agent-board --watch          在這個終端機開看板，可用按鍵操作
   agent-board --serve          舊用法，同不加選項：在瀏覽器開看板網頁
@@ -144,7 +144,7 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：给编程 agent 用的本机看板。
 
 设置（每台电脑一次）：
-  agent-board setup            先看设置会改什么，不写入任何东西
+  agent-board setup            预览设置；在终端确认一次即可应用
   agent-board setup --apply    应用这些更改
   setup 选项：--agent <名称>[,<名称>] 或 all、--home <文件夹>、--data-dir <文件夹>
 
@@ -152,7 +152,7 @@ Without installing: npx ${name} <the same options>`,
   agent-board                  在所在位置打开看板
   agent-board stop             停止看板网页
   agent-board --print          打印纯文本看板
-  agent-board --json           供 agent 以 JSON 读取看板
+  agent-board --json           供 agent 以 JSON 读取看板（--days N [--project 名称]）
   agent-board --status         状态栏的一行摘要：等你与进行中项目
   agent-board --watch          在这个终端打开看板，可用按键操作
   agent-board --serve          旧用法，同不加选项：在浏览器打开看板网页
@@ -237,31 +237,16 @@ const candidates = [
   ]),
 ]
 let installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
-// One yes in place of "setup, then setup --apply": only the plain command, in a terminal someone is typing at.
-const askYes = question => {
-  process.stdout.write(question)
-  let answer = ''
-  try {
-    const bytes = Buffer.alloc(64)
-    answer = bytes.toString('utf8', 0, readSync(0, bytes, 0, bytes.length, null))
-  } catch {}
-  return /^\s*(y|yes|是|好|對|对)\s*$/i.test(answer.split(/\r?\n/)[0])
-}
-// Setup edits other agents' files, so the person sees its preview first and then answers one question.
+// Setup owns the preview and the single consent question for both entry points.
 if (!installed && args.length === 0 && process.stdin.isTTY && process.stdout.isTTY) {
   const setup = [join(pkg, 'scripts/setup-agent.mjs')]
   const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name} setup` }
-  const preview = spawnSync(process.execPath, setup, { stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8', env: setupEnv, windowsHide: true })
-  process.stdout.write(preview.stdout ?? '')
-  // A preview that fails says why itself; the "not set up" text below would only send the person back to it.
-  process.stderr.write(preview.stderr ?? (preview.error ? `${preview.error.message}\n` : ''))
-  if (preview.status !== 0) process.exit(preview.status ?? 1)
-  // The preview offers its --apply step only when something would change; with nothing to do, nothing is asked.
-  if (preview.status === 0 && (preview.stdout ?? '').includes('--apply') && askYes(message('Apply these changes? [y/N] ', '套用這些變更嗎？[y/N] ', '应用这些变更吗？[y/N] '))) {
-    const applied = spawnSync(process.execPath, [...setup, '--apply'], { stdio: ['inherit', 'inherit', 'inherit'], env: setupEnv, windowsHide: true })
-    if (applied.status !== 0) process.exit(applied.status ?? 1)
-    installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
-  }
+  const result = spawnSync(process.execPath, setup, { stdio: ['inherit', 'inherit', 'pipe'], encoding: 'utf8', env: setupEnv, windowsHide: true })
+  process.stderr.write(result.stderr ?? (result.error ? `${result.error.message}\n` : ''))
+  if (result.status !== 0) process.exit(result.status ?? 1)
+  installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
+  // A plugin-only setup opens its board in the next Claude session; a declined preview also ends here.
+  if (!installed) process.exit(0)
 }
 if (!installed) {
   const list = candidates.map(path => `  ${shown(path)}`).join('\n')

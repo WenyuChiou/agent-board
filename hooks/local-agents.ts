@@ -42,6 +42,10 @@ export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> =
   gemini: { SessionStart: 'waiting', BeforeAgent: 'working', AfterAgent: 'waiting', SessionEnd: 'ended' },
   grok: { SessionStart: 'waiting', UserPromptSubmit: 'working', Stop: 'waiting', SessionEnd: 'ended' },
   muse: { UserPromptSubmit: 'working', Stop: 'waiting', SessionEnd: 'ended' },
+  // Hermes Agent's shell hooks (#1115): a session starts, a turn begins (pre_llm_call; it prints nothing, since Hermes
+  // reads its output as context for the model), a turn ends (the reply rides on post_llm_call),
+  // and on_session_end fires after every turn, so it is idle and not the end of the session.
+  hermes: { on_session_start: 'waiting', pre_llm_call: 'working', post_llm_call: 'waiting', on_session_end: 'waiting' },
   antigravity: { SessionStart: 'waiting', PreInvocation: 'working', PostInvocation: 'working', Stop: 'waiting' },
 }
 // The one tool call each agent's plan list rides on (#922): the group's own matcher picks it, so
@@ -51,12 +55,12 @@ export const planEvents: Partial<Record<LocalAgent, { event: string; matcher: st
   gemini: { event: 'AfterTool', matcher: '^write_todos$' },
   // Grok runs PostToolUse as a gate (600 s by default) and reads stdout: the hook prints nothing, timeout 5.
   grok: { event: 'PostToolUse', matcher: '^todo_write$' },
+  hermes: { event: 'post_tool_call', matcher: 'todo' },
 }
 // Plugin hosts have no hook groups: OpenCode's plugin sends todo.updated and OpenClaw's after_tool_call,
 // each as a --plan-event with the plan in the same shape as Codex's or Gemini's (#922).
 export const planPlugins: readonly LocalAgent[] = ['opencode', 'openclaw']
-export const lifecycleCapability = (agent: LocalAgent): string =>
-  agent === 'hermes' ? 'adapter-pending' : 'adapter-installed-unverified'
+export const lifecycleCapability = (_agent: LocalAgent): string => 'adapter-installed-unverified'
 
 // Antigravity groups events under a named definition, rather than hooks.<event>.
 // Stop ends an execution loop, not the conversation. No session-end event is invented.
@@ -175,7 +179,11 @@ const run = (mode, payload, session, deadline) => {
   if (result.error?.code === 'ETIMEDOUT') throw Error('HOOK_TIMEOUT')
   // A refused report names the board's reason (INVALID_STEP, say), so the model can correct it (#217).
   const reason = result.error ? undefined : /^AGENT_BOARD_REASON ([A-Z][A-Z0-9_]{2,63})$/m.exec(result.stderr ?? '')?.[1]
-  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason : 'AGENT_BOARD_REPORT_FAILED')
+  let detail
+  if (reason === 'INVALID_STEP') {
+    try { detail = JSON.parse(/^AGENT_BOARD_DETAIL (".*")$/m.exec(result.stderr ?? '')?.[1] ?? 'null') } catch {}
+  }
+  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason + (typeof detail === 'string' ? ': ' + detail : '') : 'AGENT_BOARD_REPORT_FAILED')
   return result.stdout
 }
 

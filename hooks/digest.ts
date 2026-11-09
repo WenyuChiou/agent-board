@@ -115,6 +115,10 @@ export const lastQuestion = (answer: string, isFull = false): string | null => {
   return prose === null ? null : lastQuestionInProse(prose, isFull)
 }
 
+// A web link, without the punctuation or closing quote that follows it in a sentence
+// (`… at https://x.dev/a?`, `“Review https://x.dev/a?”`).
+const LINK = /https?:\/\/[^\s<>"'`“”‘’「」『』，。！？、；：（）]*[^\s<>"'`“”‘’「」『』.,;:!?？。！，、；：（)\]）]/g
+
 // For callers that already normalized the reply: do not parse it a second time.
 export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
   const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, '$1')
@@ -125,12 +129,15 @@ export const lastQuestionInProse = (answer: string, isFull = false): string | nu
     .split(/\r?\n/)
     .map(line => withoutEmphasis(line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')).trim())
     .filter(line => line !== '')
-  const tail = lines.at(-1) ?? ''
+  // A link's own `?` and `.` (`http://127.0.0.1:5173/?t=…`) neither ask nor end a sentence
+  // (#1108): each link stands in as a mark with neither, and is put back in the question.
+  const links: string[] = []
+  const tail = (lines.at(-1) ?? '').replace(LINK, link => `\u0000${links.push(link) - 1}\u0000`)
   if (!/[?？]/.test(tail)) return null
   // Keep closing wrappers after the question mark so choice parsing can distinguish
   // a wrapped question from a word's own leading apostrophe, such as '90s.
   const sentences = tail.match(/[^.。!！?？]*[?？]["'”」』)]*/g) ?? []
-  const question = (sentences.at(-1) ?? '').trim()
+  const question = (sentences.at(-1) ?? '').replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '').trim()
 
   return question === '' ? null : isFull ? question : clip(question, 120)
 }
@@ -260,6 +267,11 @@ export const markApproval = (mirror: ProgressMirror, step: string): ProgressMirr
 
   return { ...mirror, questionSequence: renewed.questionRevision, tasks: [...mirror.tasks.filter(one => one.id !== APPROVAL), renewed] }
 }
+
+// An approval that waited behind another question goes up once nothing else waits (#1106); a step
+// already there stays as it is, so its question token does not change on every save.
+export const raiseApproval = (mirror: ProgressMirror, step: string): ProgressMirror =>
+  mirror.tasks.some(one => one.id === APPROVAL) ? mirror : markApproval(mirror, step)
 
 // The dialog is over (answered, declined, or the turn ended): the step goes, it was never the model's.
 export const clearApproval = (mirror: ProgressMirror): ProgressMirror =>

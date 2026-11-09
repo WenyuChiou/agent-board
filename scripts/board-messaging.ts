@@ -3,7 +3,7 @@ import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, 
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { acceptMailboxMessage, endMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
-import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isFinished, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, shownMessage, textHash } from '../hooks/messaging'
+import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, shownMessage, textHash } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
@@ -23,6 +23,8 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     messageId(one.id)
     if (one.framingNonce !== undefined && (typeof one.framingNonce !== 'string' || !/^[0-9a-f]{32}$/.test(one.framingNonce)) || one.awaitsAck !== undefined && typeof one.awaitsAck !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
     if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
     messageId(one.turn)
     messageText(one.from, 300)
@@ -144,9 +146,12 @@ const openMessaging = (directory: string, isDefault = false) => {
   const isFreshDefault = isDefault && isCreated
   try {
     if (lstatSync(root).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_DIRECTORY')
+    // A start that created the folder secures it before any claim file is written inside it.
+    // A parallel start that found the default folder already there without a handoff waits if
+    // another start is still setting its ACL (#1100), then claims it.
     if (process.platform === 'win32' && trusted === undefined && (isCreated || isDefault)) {
       try {
-        privateFolder(root)
+        privateFolder(root, !isCreated)
       } catch (error) { throw new Error(isTimeout(error) ? 'ACL_CHECK_TIMEOUT' : 'MESSAGE_STORE_ACL', { cause: error }) }
     }
     const claim = claimMessageStore(root)

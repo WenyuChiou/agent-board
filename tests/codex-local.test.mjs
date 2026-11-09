@@ -1361,7 +1361,7 @@ test('setup on a zh-TW system with no LANG previews in zh-TW and bakes zh-TW', (
   const system = { ...f, env: { ...f.env, ...systemLanguageEnv() } }
   const preview = setupAgent(system, '--agent', 'codex')
   assert.equal(preview.status, 0, preview.stderr)
-  assert.match(preview.stdout, /將更新/)
+  assert.match(preview.stdout, /將建立/)
   assert.ok(!preview.stdout.includes('would update'))
   const applied = setupAgent(system, '--agent', 'codex', '--apply')
   assert.equal(applied.status, 0, applied.stderr)
@@ -1391,7 +1391,7 @@ test('a hook on a zh-TW install writes its step in zh-TW', () => fixture(f => {
 }))
 
 test('--lang and LANG still win over a zh-TW system', () => fixture(f => {
-  for (const [args, LANG, expected] of [[['--lang', 'en'], '', /would update/], [[], 'en_US.UTF-8', /would update/], [['--lang', 'zh-CN'], '', /将更新/]]) {
+  for (const [args, LANG, expected] of [[['--lang', 'en'], '', /would create/], [[], 'en_US.UTF-8', /would create/], [['--lang', 'zh-CN'], '', /将创建/]]) {
     const result = setupAgent({ ...f, env: { ...f.env, ...systemLanguageEnv(), LANG } }, '--agent', 'codex', ...args)
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, expected, JSON.stringify({ args, LANG }))
@@ -1476,7 +1476,7 @@ test('setup preview names the record of another installed agent that apply would
   assert.deepEqual(changedSince(skipped), listedIn(mixed.stdout))
 }))
 
-test('setup preview groups files per agent and shortens only paths inside the selected home', () => fixture(f => {
+test('setup preview groups shared and agent files and shortens only paths inside the selected home', () => fixture(f => {
   const home = join(f.home, 'home')
   const data = join(f.home, 'home-other')
   mkdirSync(home)
@@ -1493,13 +1493,17 @@ test('setup preview groups files per agent and shortens only paths inside the se
   assert.equal(preview.status, 0, preview.stderr)
   const lines = preview.stdout.split(/\r?\n/)
   const plans = JSON.parse(json.stdout).plans
-  let offset = 0
+  const shared = new Set(plans[0].changes.map(change => change.file).filter(file => plans[1].changes.some(change => change.file === file)))
+  const shown = file => file.startsWith(`${home}/`) || file.startsWith(`${home}\\`) ? `~${file.slice(home.length)}` : file
+  assert.ok(lines[0].startsWith('Shared:'))
+  assert.deepEqual(lines.slice(1, shared.size + 1), [...shared].map(file => `  ${shown(file)}`))
+  let offset = shared.size + 1
   for (const [index, name] of ['Codex', 'Hermes Agent'].entries()) {
     const plan = plans[index]
     assert.ok(lines[offset].startsWith(`${name}:`))
-    const expected = plan.changes.map(change => `  ${change.file.startsWith(`${home}/`) || change.file.startsWith(`${home}\\`) ? `~${change.file.slice(home.length)}` : change.file}`)
-    assert.deepEqual(lines.slice(offset + 1, offset + 1 + plan.changes.length), expected)
-    offset += 1 + plan.changes.length
+    const expected = plan.changes.filter(change => !shared.has(change.file)).map(change => `  ${shown(change.file)}`)
+    assert.deepEqual(lines.slice(offset + 1, offset + 1 + expected.length), expected)
+    offset += 1 + expected.length
   }
   assert.ok(preview.stdout.includes(`  ${join(data, 'agent-board.mjs')}\n`))
   assert.deepEqual(homeSnapshot(f.home), before)
@@ -1548,7 +1552,10 @@ test('setup prints a plain summary with each agent and the next steps, and --jso
   }
   assert.equal(new Set(summaries).size, 3)
 
-  assert.match(summaries[0], /Hermes Agent.*automatic reporting is unavailable/i)
+  assert.match(summaries[0], /Hermes Agent: would create \d+ setup files/)
+  assert.doesNotMatch(summaries[0], /automatic reporting is unavailable/i)
+  assert.match(summaries[0], /^\d+\. Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y\..*--hermes-trust.*--apply/m)
+  assert.match(summaries[0], /^\d+\. Then start a new session in each of: Codex, Hermes Agent./m)
   const childPlans = ['codex', 'hermes'].map(agent => JSON.parse(f.install('--lang', 'zh-CN', '--agent', agent).stdout))
   const json = setupAgent(f, '--lang', 'zh-CN', '--agent', 'codex,hermes', '--json')
   assert.equal(json.status, 0, json.stderr)
@@ -2073,11 +2080,12 @@ test('doctor and removal say plainly when an adapter is pending, a connector hol
   }
 
   assert.equal(f.install('--agent', 'hermes', '--lang', 'en', '--apply').status, 0)
-  const pending = board(runner, '--codex-doctor', '--agent', 'hermes', '--lang', 'en')
-  assert.equal(pending.status, 0, pending.stderr)
-  assert.ok(pending.stdout.includes('Automatic reporting adapter is not available yet.'), pending.stdout)
-  assert.ok(pending.stdout.includes('Next: open the board with the agent-board skill'), pending.stdout)
-  assert.ok(isOneNext(pending.stdout), pending.stdout)
+  // Hermes has its hooks now, so it is no longer a host whose adapter is pending (#1115).
+  const hermes = board(runner, '--codex-doctor', '--agent', 'hermes', '--lang', 'en')
+  assert.equal(hermes.status, 0, hermes.stderr)
+  assert.ok(!hermes.stdout.includes('Automatic reporting adapter is not available yet.'), hermes.stdout)
+  assert.ok(hermes.stdout.includes('Next: start a new Hermes Agent session'), hermes.stdout)
+  assert.ok(isOneNext(hermes.stdout), hermes.stdout)
 
   mkdirSync(join(f.home, '.codex'), { recursive: true })
   const connected = legacyConnect(f, join(f.home, '.claude', 'progress.md'))
@@ -3009,7 +3017,7 @@ test('a queued event from every host is replayed by the next hook', async t => {
         }
       } else {
         const callbacks = new Map()
-        const apply = instantiate(deepseekLocalPlugin(process.execPath, worker, f.progress, f.home), 'return apply')
+        const apply = instantiate(deepseekLocalPlugin(process.execPath, worker, f.progress, f.home, f.script), 'return apply')
         apply({ on: (name, callback) => callbacks.set(name, callback) })
         await callbacks.get('agent/status')({ agent: { session: { header: { id: payload.session_id } } }, status: 'running' })
       }
@@ -4102,9 +4110,14 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
       assert.equal(out.error, undefined, hookFailure(out))
       assert.equal(out.status, 0, hookFailure(out))
       assert.equal(out.stdout.trim(), '{}')
-      assert.equal(existsSync(pidFile), true, `exercise the real classifier process, case ${index}: ${hookLog(f)}`)
+      // On Windows the 2 s budget is shared with the reporter's own JSON work, so on a loaded runner Node can be
+      // killed at the deadline before its preload writes a PID (#1080). The reporter's own record that it started
+      // and ended the process is the proof there, as in the interrupted-PID test below.
       if (isWindows) assertClassifierExited(exitProof)
-      else assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+      else {
+        assert.equal(existsSync(pidFile), true, `exercise the real classifier process, case ${index}: ${hookLog(f)}`)
+        assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
+      }
       isGone = true
       const files = readdirSync(inbox)
       const log = hookLog(f)
@@ -4143,6 +4156,26 @@ test('a classifier interrupted while publishing its PID marker still proves its 
   const files = readdirSync(inbox)
   assert.equal(files.length, 1)
   assert.deepEqual(JSON.parse(readFileSync(join(inbox, files[0]), 'utf8')), { session_id: 'synthetic-partial-pid' })
+  assert.match(hookLog(f), /REPORTER_TIMEOUT/)
+}))
+
+// A loaded machine can kill the classifier before its own code writes anything, so the proof must not need it (#1080).
+test('a classifier that never writes anything still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const script = join(f.root, 'progress-report.ps1'), exitProof = join(f.home, 'classifier-exit.json')
+  const preload = join(f.home, 'silent-classifier.cjs')
+  f.save(script, observeClassifierExit(reporterPs1(), exitProof))
+  f.save(preload, 'setInterval(() => {}, 1000)\n')
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
+    JSON.stringify({ session_id: 'synthetic-silent-classifier', prompt: 'PRIVATE_RAW_PROMPT' }))
+  assertClassifierExited(exitProof)
+  assert.equal(out.error, undefined, hookFailure(out))
+  assert.equal(out.status, 0, hookFailure(out))
+  assert.equal(out.stdout.trim(), '{}')
+  const inbox = join(f.root, 'progress-inbox')
+  const files = readdirSync(inbox)
+  assert.equal(files.length, 1)
+  assert.deepEqual(JSON.parse(readFileSync(join(inbox, files[0]), 'utf8')), { session_id: 'synthetic-silent-classifier' })
   assert.match(hookLog(f), /REPORTER_TIMEOUT/)
 }))
 
@@ -4540,6 +4573,82 @@ test('the same report from three agents gives three blocks of the same shape', (
   assert.equal(new Set(shapes).size, 1)
 }))
 
+test('reports normalize list bullets, numbering and uppercase completion marks', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const steps = ['* Star', '+ Plus', '1. Number', '2) Parenthesis', '- Dash', '- [X] Uppercase', '* [x] Complete', '+ [?] Question', '3) [!] Blocked', '- [~] Current', '- [>] Running', '- [-] Cancelled']
+  const result = f.command(['--report'], { title: 'List formats', state: 'working', steps })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).dropped, 0)
+  const text = readFileSync(f.progress, 'utf8')
+  for (const line of ['- [ ] Star', '- [ ] Plus', '- [ ] Number', '- [ ] Parenthesis', '- [ ] Dash', '- [x] Uppercase', '- [x] Complete', '- [?] Question', '- [!] Blocked', '- [~] Current', '- [>] Running', '- [-] Cancelled']) {
+    assert.ok(text.includes(`${line}\n`), line)
+  }
+}))
+
+test('a report with more than forty steps keeps the first forty and reports the number omitted', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const steps = Array.from({ length: 43 }, (_, index) => `- [ ] Step ${index + 1}`)
+  steps[0] = `- [ ] ${'a'.repeat(130)}`
+  const result = f.command(['--report'], { title: 'Long list', state: 'working', steps })
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.cut, 1)
+  assert.equal(output.dropped, 3)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^- \[ \] Step 40$/m)
+  assert.doesNotMatch(text, /^- \[ \] Step (41|42|43)$/m)
+}))
+
+test('a report with more than forty steps keeps a question for the user that comes after the fortieth', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const steps = Array.from({ length: 45 }, (_, index) => `- [ ] Step ${index + 1}`)
+  steps[42] = '- [?] Deploy it, OK?'
+  const result = f.command(['--report'], { title: 'Long list', state: 'working', steps })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).dropped, 5)
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^- \[\?\] Deploy it, OK\?$/m)
+  assert.match(text, /^- \[ \] Step 39$/m)
+  assert.doesNotMatch(text, /^- \[ \] Step (40|41|42|44|45)$/m)
+}))
+
+test('an unreadable report step names its first sixty characters and the accepted form', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const step = `Synthetic invalid step ${'z'.repeat(70)}`
+  const result = f.command(['--report', '--lang', 'en'], { title: 'Invalid step', state: 'working', steps: [step] })
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /INVALID_STEP/)
+  assert.ok(result.stderr.includes(step.slice(0, 60)))
+  assert.ok(!result.stderr.includes(step.slice(0, 61)))
+  assert.ok(result.stderr.includes('- [ ] step'))
+  assert.equal(readFileSync(f.progress, 'utf8'), '')
+  for (const bad of ['- [z] Unknown mark', '- [ ]', 'x'.repeat(501)]) {
+    const rejected = f.command(['--report', '--lang', 'en'], { title: 'Invalid step', state: 'working', steps: [bad] })
+    assert.notEqual(rejected.status, 0)
+    assert.match(rejected.stderr, /INVALID_STEP/)
+    assert.ok(rejected.stderr.includes('- [ ] step'))
+  }
+  for (const [bad, expected] of [['- [z]  Keep   spacing', '- [z]  Keep   spacing'], [{ toString: null }, '{\\"toString\\":null}']]) {
+    const rejected = f.command(['--report', '--lang', 'en'], { title: 'Invalid step', state: 'working', steps: [bad] })
+    assert.notEqual(rejected.status, 0)
+    assert.match(rejected.stderr, /INVALID_STEP/)
+    assert.ok(rejected.stderr.includes(expected), rejected.stderr)
+    assert.ok(rejected.stderr.includes('- [ ] step'))
+  }
+}))
+
+test('done reports refuse unfinished steps even beyond the forty kept on the board', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const steps = Array.from({ length: 40 }, (_, index) => `- [X] Finished ${index + 1}`)
+  const rejected = f.command(['--report'], { title: 'Not done', state: 'done', steps: [...steps, '* Pending'] })
+  assert.notEqual(rejected.status, 0)
+  assert.match(rejected.stderr, /UNFINISHED_STEPS/)
+  assert.equal(readFileSync(f.progress, 'utf8'), '')
+  const accepted = f.command(['--report'], { title: 'Done', state: 'done', steps: [...steps, '* [x] Finished 41'] })
+  assert.equal(accepted.status, 0, accepted.stderr)
+  assert.equal(JSON.parse(accepted.stdout).dropped, 1)
+}))
+
 test('a report step over 120 characters is cut on the board and kept in full in the journal', () => fixture(async f => {
   assert.equal(f.install('--apply').status, 0)
   const title = 'Synthetic title ' + 't'.repeat(130)
@@ -4716,6 +4825,323 @@ for (const agent of ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'h
     assert.equal(report('done', ['- [x] Genuinely new work']).status, 0)
   }))
 }
+
+// Hermes Agent runs a hook command as shlex.split(command) with no shell (#1115). This is that split for the
+// quoting setup writes: double quotes, and a backslash escapes only a quote or a backslash inside them.
+const shlexSplit = text => {
+  const words = []
+  let word = null, quoted = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (quoted) {
+      if (c === '"') quoted = false
+      else if (c === '\\' && (text[i + 1] === '"' || text[i + 1] === '\\')) word += text[++i]
+      else word += c
+    } else if (c === '"') { quoted = true; word ??= '' }
+    else if (/\s/.test(c)) { if (word !== null) words.push(word); word = null }
+    else if (c === '\\') word = (word ?? '') + (text[++i] ?? '')
+    else word = (word ?? '') + c
+  }
+  assert.equal(quoted, false, 'unterminated quote')
+  if (word !== null) words.push(word)
+  return words
+}
+const hermesHooksOf = text => Object.fromEntries([...text.matchAll(/^\s+(\w+):\s*\n\s+- \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+)(?:, matcher: (\w+))?\}\s*$/gm)].filter(match => /agent-board-hook\.mjs/.test(match[2])).map(match => [match[1], { command: JSON.parse(match[2]), timeout: Number(match[3]), ...(match[4] === undefined ? {} : { matcher: match[4] }) }]))
+const hermesEvents = ['on_session_start', 'pre_llm_call', 'post_llm_call', 'on_session_end', 'post_tool_call']
+const hermesConfig = f => join(f.home, '.hermes', 'config.yaml')
+const hermesAllowlist = f => join(f.home, '.hermes', 'shell-hooks-allowlist.json')
+// Fire a Hermes hook the way Hermes does: its command split by shlex, no shell, the event's JSON on stdin.
+const fireHermes = (f, event, payload) => {
+  const hook = hermesHooksOf(readFileSync(hermesConfig(f), 'utf8'))[event]
+  assert.ok(hook, event)
+  const argv = shlexSplit(hook.command)
+  return spawnSync(argv[0], argv.slice(1), { env: f.env, input: JSON.stringify({ hook_event_name: event, tool_name: null, tool_input: null, ...payload }), encoding: 'utf8', windowsHide: true, timeout: 30000 })
+}
+
+test('Hermes setup writes its hooks into a fresh config.yaml, quoted for shlex, trusts nothing, and a re-run changes nothing (#1115)', () => fixture(f => {
+  const installed = f.install('--agent', 'hermes', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const text = readFileSync(hermesConfig(f), 'utf8')
+  assert.match(text, /^hooks:\n/)
+  const hooks = hermesHooksOf(text)
+  assert.deepEqual(Object.keys(hooks), hermesEvents)
+  for (const event of hermesEvents) {
+    assert.equal(hooks[event].timeout, 10)
+    const argv = shlexSplit(hooks[event].command)
+    // The program, the worker and the board file each survive the split as one word, whatever the folder holds (a space, here).
+    assert.equal(argv[0], process.platform === 'win32' ? process.execPath.replaceAll('\\', '/') : process.execPath)
+    assert.ok(argv[0].length > 0 && argv.includes('--hook-event') && argv[argv.indexOf('--hook-event') + 1] === event)
+    const expected = event === 'post_tool_call'
+      ? ['--plan-event', '--agent', 'hermes']
+      : ['--agent-status', '--agent', 'hermes', '--state', event === 'pre_llm_call' ? 'working' : 'waiting']
+    assert.deepEqual(argv.slice(argv.indexOf(expected[0])), [...expected, '--progress-file', process.platform === 'win32' ? f.progress.replaceAll('\\', '/') : f.progress])
+    assert.equal(hooks[event].matcher, event === 'post_tool_call' ? 'todo' : undefined)
+    assert.equal(argv[4], process.platform === 'win32' ? join(f.root, 'agent-board-hook.mjs').replaceAll('\\', '/') : join(f.root, 'agent-board-hook.mjs'))
+    // Every word is double-quoted, so no raw backslash, dollar or backtick is left for the split to read.
+    assert.doesNotMatch(hooks[event].command, /\\|\$|`/)
+  }
+  assert.doesNotMatch(text, /hooks_auto_accept|accept/i)
+  assert.equal(existsSync(hermesAllowlist(f)), false)
+  const manifest = JSON.parse(readFileSync(join(f.root, 'install-hermes.json'), 'utf8'))
+  assert.ok(manifest.files[join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')])
+  assert.deepEqual(Object.keys(manifest.groups.hooks), hermesEvents)
+  assert.equal(manifest.config, hermesConfig(f))
+  const again = f.install('--agent', 'hermes', '--apply')
+  assert.equal(again.status, 0, again.stderr)
+  assert.deepEqual(JSON.parse(again.stdout).changes, [])
+  assert.equal(readFileSync(hermesConfig(f), 'utf8'), text)
+}))
+
+test('Hermes setup keeps a config.yaml with other keys and other hooks, and removal takes out only its own (#1115)', () => fixture(f => {
+  const original = [
+    'model: synthetic/model',
+    'hooks_auto_accept: false',
+    'hooks:',
+    '  pre_tool_call:',
+    '    - {command: "my-guard.sh", timeout: 5}',
+    '  post_tool_call:',
+    '    - {command: "my-todo.sh", matcher: terminal, timeout: 5}',
+    '  on_session_start:',
+    '    - command: "my-start.sh"',
+    '      timeout: 3',
+    'display:',
+    '  skin: plain',
+    '',
+  ].join('\n')
+  f.save(hermesConfig(f), original)
+  const installed = f.install('--agent', 'hermes', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const text = readFileSync(hermesConfig(f), 'utf8')
+  for (const line of original.split('\n').filter(Boolean)) assert.ok(text.split('\n').includes(line), line)
+  assert.deepEqual(Object.keys(hermesHooksOf(text)).sort(), [...hermesEvents].sort())
+  // The person's own on_session_start entry still sits under that event, with ours beside it.
+  const start = text.slice(text.indexOf('  on_session_start:'), text.indexOf('display:'))
+  assert.match(start, /my-start\.sh/)
+  assert.match(start, /agent-board-hook\.mjs/)
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  assert.equal(readFileSync(hermesConfig(f), 'utf8'), text)
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(hermesConfig(f), 'utf8'), original)
+  assert.equal(existsSync(join(f.root, 'install-hermes.json')), false)
+}))
+
+test('Hermes setup keeps a rewritten todo matcher and repairs one changed away from todo', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const path = hermesConfig(f)
+  const text = readFileSync(path, 'utf8')
+  const hook = hermesHooksOf(text).post_tool_call
+  assert.equal(hook.matcher, 'todo')
+  const flow = `    - {command: ${JSON.stringify(hook.command)}, timeout: ${hook.timeout}, matcher: todo}`
+  const block = `    - command: ${JSON.stringify(hook.command)}\n      timeout: ${hook.timeout}\n      matcher: todo`
+  assert.ok(text.includes(flow))
+  const rewritten = text.replace(flow, block)
+  f.save(path, rewritten)
+  const again = f.install('--agent', 'hermes', '--apply')
+  assert.equal(again.status, 0, again.stderr)
+  assert.deepEqual(JSON.parse(again.stdout).changes, [])
+  assert.equal(readFileSync(path, 'utf8'), rewritten)
+  f.save(path, rewritten.replace('matcher: todo', 'matcher: shell'))
+  const repaired = f.install('--agent', 'hermes', '--apply')
+  assert.equal(repaired.status, 0, repaired.stderr)
+  assert.equal(hermesHooksOf(readFileSync(path, 'utf8')).post_tool_call.matcher, 'todo')
+}))
+
+test('Hermes setup leaves a config.yaml it cannot merge into byte for byte and reports a conflict (#1115)', () => fixture(f => {
+  for (const original of ['hooks: {pre_tool_call: [{command: "mine.sh"}]}\nmodel: x\n', '- not\n- a mapping\n', 'hooks:\n  on_session_start: [{command: "mine.sh"}]\n']) {
+    f.save(hermesConfig(f), original)
+    const preview = f.install('--agent', 'hermes')
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.deepEqual(JSON.parse(preview.stdout).conflicts, [hermesConfig(f)], original)
+    const applied = f.install('--agent', 'hermes', '--apply')
+    assert.notEqual(applied.status, 0)
+    assert.equal(readFileSync(hermesConfig(f), 'utf8'), original)
+    assert.equal(existsSync(join(f.root, 'install-hermes.json')), false)
+  }
+}))
+
+test('Hermes hook events open a session block with its folder, show a closing question as a card, and idle keeps it (#1115)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const id = '20261107_101010_ab12cd'
+  const project = join(f.home, 'a project')
+  mkdirSync(project)
+  const fire = (event, extra) => {
+    const result = fireHermes(f, event, { session_id: id, cwd: project, extra })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, '')
+  }
+  fire('on_session_start', { model: 'synthetic', platform: 'cli' })
+  const opened = readFileSync(f.progress, 'utf8')
+  assert.match(opened, /^## hermes$/m)
+  assert.match(opened, new RegExp(`state=waiting .*resume=${id}`))
+  assert.doesNotMatch(opened, /- \[\?\]/)
+  const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`hermes:${id}`).digest('hex')}.json`), 'utf8'))
+  assert.equal(record.folderDigest, createHash('sha256').update(process.platform === 'win32' ? project.toLowerCase() : project).digest('hex'))
+  const secret = 'DO-NOT-STORE-THIS-PRIVATE-TEXT'
+  fire('post_llm_call', { user_message: secret, assistant_response: 'I built the page.\n\nBlue or green?', conversation_history: [{ role: 'user', content: secret }] })
+  const asked = readFileSync(f.progress, 'utf8')
+  assert.match(asked, /- \[\?\] Blue or green\?/)
+  assert.ok(!asked.includes(secret) && !JSON.stringify(record).includes(secret))
+  fire('on_session_end', { completed: true, interrupted: false })
+  const idle = readFileSync(f.progress, 'utf8')
+  assert.match(idle, /- \[\?\] Blue or green\?/)
+  assert.match(idle, /state=waiting/)
+  // A reply that asks nothing opens no card for a new session.
+  const other = fireHermes(f, 'post_llm_call', { session_id: '20261107_111111_ef34ab', cwd: project, extra: { assistant_response: 'Done.' } })
+  assert.equal(other.status, 0, other.stderr)
+  assert.equal((readFileSync(f.progress, 'utf8').match(/- \[\?\]/g) ?? []).length, 1)
+  // The hook files its events under the session Hermes names, so a report from inside that session binds to it.
+  const reported = f.command(['--codex-report', '--agent', 'hermes'], { title: 'Page', state: 'working', steps: ['- [x] Built the page', '- [~] Asking about colour'] }, { HERMES_SESSION_ID: id, CODEX_THREAD_ID: '', AGENT_BOARD_AGENT: '', AGENT_BOARD_SESSION_ID: '' })
+  assert.equal(reported.status, 0, reported.stderr)
+  assert.equal(JSON.parse(reported.stdout).block, createHash('sha256').update(`hermes:${id}`).digest('hex').slice(0, 8))
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[~\] Asking about colour/)
+  // With no Hermes session id and no one session in this folder, a report is refused instead of guessed.
+  const unbound = f.command(['--codex-report', '--agent', 'hermes'], { title: 'Page', state: 'working', steps: ['- [~] Step'] }, { HERMES_SESSION_ID: '', CODEX_THREAD_ID: '', AGENT_BOARD_AGENT: '', AGENT_BOARD_SESSION_ID: '' })
+  assert.notEqual(unbound.status, 0)
+}))
+
+test('Hermes trust is only what the person asks for: the board\'s exact commands, others kept, removed with the hooks (#1115)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  // Without an owned Hermes install there is nothing to trust.
+  assert.notEqual(f.command(['--hermes-trust', '--apply']).status, 0)
+  assert.equal(existsSync(hermesAllowlist(f)), false)
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const doctor = () => JSON.parse(f.command(['--codex-doctor', '--agent', 'hermes', '--json']).stdout)
+  assert.equal(doctor().hooksTrusted, false)
+  const preview = f.command(['--hermes-trust', '--json'])
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.deepEqual(JSON.parse(preview.stdout).entries.map(entry => [entry.event, entry.trusted]), hermesEvents.map(event => [event, false]))
+  assert.equal(existsSync(hermesAllowlist(f)), false)
+  // A non-ASCII command: Hermes reads this file in the system code page, so it must stay ASCII.
+  const foreign = { approvals: [{ approved_at: '2026-01-01T00:00:00Z', command: 'C:/使用者/my-guard.sh', event: 'pre_tool_call', script_mtime_at_approval: null }] }
+  const isAscii = () => [...readFileSync(hermesAllowlist(f))].every(byte => byte < 0x80)
+  f.save(hermesAllowlist(f), JSON.stringify(foreign, null, 2))
+  const applied = f.command(['--hermes-trust', '--apply', '--json'])
+  assert.equal(applied.status, 0, applied.stderr)
+  const approvals = JSON.parse(readFileSync(hermesAllowlist(f), 'utf8')).approvals
+  const hooks = hermesHooksOf(readFileSync(hermesConfig(f), 'utf8'))
+  assert.deepEqual(approvals[0], foreign.approvals[0])
+  assert.ok(isAscii(), 'the trust file stays ASCII after --apply')
+  assert.deepEqual(approvals.slice(1).map(entry => [entry.event, entry.command]), hermesEvents.map(event => [event, hooks[event].command]))
+  assert.equal(doctor().hooksTrusted, true)
+  assert.doesNotMatch(readFileSync(hermesConfig(f), 'utf8'), /accept/i)
+  const before = readFileSync(hermesAllowlist(f), 'utf8')
+  assert.equal(f.command(['--hermes-trust', '--apply', '--json']).status, 0)
+  assert.equal(readFileSync(hermesAllowlist(f), 'utf8'), before)
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(hermesAllowlist(f), 'utf8')), foreign)
+  assert.ok(isAscii(), 'the trust file stays ASCII after removal')
+}))
+
+test('a Hermes upgrade previews trust for the new todo hook without disturbing old approvals', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  assert.equal(f.command(['--hermes-trust', '--apply', '--json']).status, 0)
+  const path = hermesConfig(f)
+  const text = readFileSync(path, 'utf8')
+  const hook = hermesHooksOf(text).post_tool_call
+  const event = `  post_tool_call:\n    - {command: ${JSON.stringify(hook.command)}, timeout: ${hook.timeout}, matcher: todo}\n`
+  assert.ok(text.includes(event))
+  f.save(path, text.replace(event, ''))
+  const manifestFile = join(f.root, 'install-hermes.json')
+  const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+  delete manifest.groups.hooks.post_tool_call
+  f.save(manifestFile, JSON.stringify(manifest, null, 2))
+  const approvals = JSON.parse(readFileSync(hermesAllowlist(f), 'utf8'))
+  approvals.approvals = approvals.approvals.filter(one => one.event !== 'post_tool_call')
+  f.save(hermesAllowlist(f), JSON.stringify(approvals, null, 2))
+  const preview = f.install('--agent', 'hermes')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.ok(JSON.parse(preview.stdout).changes.some(change => change.file === path))
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const trust = f.command(['--hermes-trust', '--json'])
+  assert.equal(trust.status, 0, trust.stderr)
+  assert.deepEqual(JSON.parse(trust.stdout).entries.map(one => [one.event, one.trusted]), hermesEvents.map(event => [event, event !== 'post_tool_call']))
+  assert.deepEqual(JSON.parse(readFileSync(hermesAllowlist(f), 'utf8')), approvals)
+  assert.equal(f.command(['--hermes-trust', '--apply', '--json']).status, 0)
+  assert.equal(JSON.parse(f.command(['--codex-doctor', '--agent', 'hermes', '--json']).stdout).hooksTrusted, true)
+}))
+
+test('Hermes pre_llm_call marks the session working, prints nothing for Hermes to inject, and closes an answered question (#1115)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const id = '20261107_121212_cd56ef'
+  const project = join(f.home, 'project')
+  mkdirSync(project)
+  assert.equal(fireHermes(f, 'on_session_start', { session_id: id, cwd: project, extra: {} }).status, 0)
+  const asked = fireHermes(f, 'post_llm_call', { session_id: id, cwd: project, extra: { assistant_response: 'Built it.\n\nBlue or green?' } })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Blue or green\?/)
+  // Hermes reads this hook's stdout as context to put in front of the model, so it must stay empty.
+  const next = fireHermes(f, 'pre_llm_call', { session_id: id, cwd: project, extra: { user_message: 'green', is_first_turn: false } })
+  assert.equal(next.status, 0, next.stderr)
+  assert.equal(next.stdout, '')
+  assert.equal(next.stderr, '')
+  const working = readFileSync(f.progress, 'utf8')
+  assert.match(working, /state=working/)
+  assert.doesNotMatch(working, /- \[\?\]/)
+}))
+
+test('Hermes post_llm_call with a 3 MB conversation_history still lands its status and question, and keeps none of the history (#1115)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const project = join(f.home, 'project')
+  mkdirSync(project)
+  const marker = 'HISTORY-MARKER-DO-NOT-KEEP'
+  const history = [{ role: 'user', content: marker + ' ' + 'h'.repeat(3 * 1024 * 1024) }]
+  const big = fireHermes(f, 'post_llm_call', { session_id: '20261107_131313_aa11bb', cwd: project, extra: { assistant_response: 'Done.\n\nShip it now?', conversation_history: history } })
+  assert.equal(big.status, 0, big.stderr + hookLog(f))
+  assert.equal(big.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /^## hermes$/m, hookLog(f))
+  assert.match(text, /- \[\?\] Ship it now\?/)
+  assert.equal(hookLog(f).includes('INPUT_TOO_LARGE'), false)
+  // A reply that is itself cut by the 1 MB limit gives a status and no question.
+  const cut = fireHermes(f, 'post_llm_call', { session_id: '20261107_141414_bb22cc', cwd: project, extra: { assistant_response: 'r'.repeat(2 * 1024 * 1024) + ' Which one?', conversation_history: history } })
+  assert.equal(cut.status, 0, cut.stderr)
+  const after = readFileSync(f.progress, 'utf8')
+  assert.match(after, /state=waiting .*resume=20261107_141414_bb22cc/)
+  assert.equal((after.match(/- \[\?\]/g) ?? []).length, 1)
+  assert.ok(!after.includes('Which one?'))
+  // Nothing from the history reaches the progress file, a session record or a queued copy.
+  for (const name of readdirSync(f.root, { recursive: true })) {
+    const path = join(f.root, name)
+    if (statSync(path).isFile() && statSync(path).size < 5e6) assert.ok(!readFileSync(path, 'utf8').includes(marker), name)
+  }
+  assert.ok(!after.includes(marker))
+}))
+
+test('a Codex hook input past 1 MB is still refused as INPUT_TOO_LARGE, only Hermes keeps reading (#1115)', () => fixture(f => {
+  f.install('--apply')
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  spawnSync(process.execPath, [worker, '--hook-version', '1', '--hook-event', 'UserPromptSubmit', '--codex-event', '--agent', 'codex', '--progress-file', f.progress, '--hook-started', String(Date.now())], { env: f.env, input: JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'turn-big', prompt: 'x'.repeat(2 * 1024 * 1024) }), encoding: 'utf8', windowsHide: true, timeout: 30000 })
+  assert.match(hookLog(f), /INPUT_TOO_LARGE/)
+}))
+
+test('the Hermes folder follows Hermes itself: HERMES_HOME, then LOCALAPPDATA on Windows, then ~/.hermes (#1115)', async () => {
+  const { hermesHome } = await importTs('../hooks/hermes-home.ts')
+  const posix = hermesHome('/home/ann', '/', {}, 'linux')
+  assert.equal(posix, '/home/ann/.hermes')
+  assert.equal(hermesHome('/home/ann', '/', { LOCALAPPDATA: '/x' }, 'darwin'), '/home/ann/.hermes')
+  const own = { USERPROFILE: 'C:\\Users\\ann', LOCALAPPDATA: 'C:\\Users\\ann\\AppData\\Local' }
+  assert.equal(hermesHome('C:\\Users\\ann', '\\', own, 'win32'), 'C:\\Users\\ann\\AppData\\Local\\hermes')
+  // Same folder spelled differently still counts as the running account's.
+  assert.equal(hermesHome('c:/users/ANN/', '\\', own, 'win32'), 'C:\\Users\\ann\\AppData\\Local\\hermes')
+  // No LOCALAPPDATA: Hermes's own fallback under the profile.
+  assert.equal(hermesHome('C:\\Users\\ann', '\\', { USERPROFILE: 'C:\\Users\\ann' }, 'win32'), 'C:\\Users\\ann\\AppData\\Local\\hermes')
+  // Another account's folder never borrows this account's LOCALAPPDATA.
+  assert.equal(hermesHome('C:\\Users\\bob', '\\', own, 'win32'), 'C:\\Users\\bob\\AppData\\Local\\hermes')
+  // HERMES_HOME wins everywhere, trimmed; an empty one is ignored.
+  assert.equal(hermesHome('C:\\Users\\ann', '\\', { ...own, HERMES_HOME: ' D:\\h ' }, 'win32'), 'D:\\h')
+  assert.equal(hermesHome('/home/ann', '/', { HERMES_HOME: '/srv/h' }, 'linux'), '/srv/h')
+  assert.equal(hermesHome('/home/ann', '/', { HERMES_HOME: '  ' }, 'linux'), '/home/ann/.hermes')
+})
+
+test('setup writes Hermes config where --hermes-dir says, ahead of HERMES_HOME (#1115)', () => fixture(f => {
+  const elsewhere = join(f.home, 'elsewhere')
+  const installed = spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', elsewhere, '--agent', 'hermes', '--apply'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  assert.ok(existsSync(join(elsewhere, 'config.yaml')))
+  assert.equal(existsSync(hermesConfig(f)), false)
+}))
 
 test('Codex lifecycle hooks never retain conversation and approval payloads, and open nothing that is not a Codex history file', () => fixture(f => {
   f.install('--apply')
@@ -4926,6 +5352,90 @@ test('a Codex question stays waiting through an approval and a stop without a qu
   const answered = readFileSync(f.progress, 'utf8')
   assert.ok(answered.includes('- [x] Which folder should I use?'))
   assert.ok(!/- \[\?\]/.test(answered))
+}))
+
+test('a closing question after the model reported its steps done reopens the block with its card', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.report('done', ['- [x] Read the file', '- [x] Count its lines']).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'It has 1 line.\n\nBlue or green?' }).status, 0)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /state=waiting/)
+  assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
+  assert.match(board, /- \[\?\] Blue or green\?\n<!-- question=[a-f0-9]{64}:\d+ -->/)
+  assert.ok(sessionRecord(f, session).events.includes('Stop:turn-1'))
+}))
+
+test('a stop with no question after a done report keeps the block done and records the stop', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.report('done', ['- [x] Read the file']).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'It has 1 line.' }).status, 0)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /state=done/)
+  assert.ok(!/- \[\?\]/.test(board))
+  assert.ok(sessionRecord(f, session).events.includes('Stop:turn-1'))
+}))
+
+test('a closing question the model already reported as a [?] step stays one line with its card', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.report('waiting', ['- [x] Read the file', '- [?] Blue or green?']).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'It has 1 line.\n\nBlue or green?' }).status, 0)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
+  assert.match(board, /- \[\?\] Blue or green\?\n<!-- question=[a-f0-9]{64}:\d+ -->/)
+  // The next prompt answers that one line.
+  assert.equal(f.event('UserPromptSubmit', 'turn-2').status, 0)
+  const answered = readFileSync(f.progress, 'utf8')
+  assert.equal(answered.match(/- \[[?x]\] Blue or green\?/g)?.length, 1)
+  assert.ok(!/- \[\?\]/.test(answered))
+}))
+
+test('a replayed closing-question stop changes nothing', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.report('done', ['- [x] Read the file']).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'It has 1 line.\n\nBlue or green?' }).status, 0)
+  // A replay still moves appliedAt forward, so later events order after it; nothing else changes.
+  const kept = () => JSON.stringify({ ...sessionRecord(f, session), appliedAt: undefined })
+  const board = readFileSync(f.progress, 'utf8'), record = kept()
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'It has 1 line.\n\nBlue or green?' }).status, 0)
+  assert.equal(readFileSync(f.progress, 'utf8'), board)
+  assert.equal(kept(), record)
+  assert.equal(sessionRecord(f, session).events.filter(one => one === 'Stop:turn-1').length, 1)
+}))
+
+test('a Grok report binds to the session Grok names even when the folder has another Grok session (#1155)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const env = { CODEX_THREAD_ID: '', AGENT_BOARD_AGENT: '', AGENT_BOARD_SESSION_ID: '', GROK_SESSION_ID: '' }
+  for (const id of ['synthetic-grok-board', 'synthetic-grok-work']) {
+    assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: id, hookEventName: 'UserPromptSubmit' }, env).status, 0)
+  }
+  const steps = { title: 'Synthetic test', state: 'waiting', steps: ['- [x] read claude-one.txt', '- [x] count its lines', '- [?] Blue or green?'] }
+  const reported = f.command(['--codex-report', '--agent', 'grok'], steps, { ...env, GROK_SESSION_ID: 'synthetic-grok-work' })
+  assert.equal(reported.status, 0, reported.stderr)
+  assert.equal(JSON.parse(reported.stdout).block, createHash('sha256').update('grok:synthetic-grok-work').digest('hex').slice(0, 8))
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Blue or green\?/)
+  // With no Grok session id and two Grok sessions in this folder, a report is still refused instead of guessed.
+  assert.notEqual(f.command(['--codex-report', '--agent', 'grok'], steps, env).status, 0)
+}))
+
+test('Grok reopens a done block for a closing question and keeps it done for a plain stop', () => fixture(f => {
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const id = 'synthetic-grok-done'
+  const send = (state, extra = {}) => f.command(['--agent-status', '--agent', 'grok', '--state', state], { sessionId: id, ...extra })
+  const report = () => f.command(['--codex-report', '--agent', 'grok', '--session', id], { title: 'Own report', state: 'done', steps: ['- [x] Read the file'] })
+  assert.equal(send('working', { hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(report().status, 0)
+  assert.equal(send('waiting', { hookEventName: 'Stop', lastAssistantMessage: 'It has 1 line.' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /state=done/)
+  assert.equal(send('working', { hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(report().status, 0)
+  assert.equal(send('waiting', { hookEventName: 'Stop', lastAssistantMessage: 'It has 1 line.\n\nBlue or green?' }).status, 0)
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /state=waiting/)
+  assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
 }))
 
 test('the approval step and the question step close and reuse their own lines in either order', () => fixture(f => {
@@ -5150,6 +5660,12 @@ test('Antigravity reads only a current closing question from a bounded transcrip
   save([model('a'.repeat(300000)), user, model('A long transcript.\n\nUse the blue one?')])
   assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting'], { conversationId: 'synthetic-agy-long-tail', transcriptPath: file }).status, 0)
   assert.ok(record('synthetic-agy-long-tail').steps.includes('- [?] Use the blue one?'))
+  // agy 1.5.2 hooks name transcript_full.jsonl, with the same line shape.
+  const full = join(f.home, 'conversation', 'transcript_full.jsonl')
+  f.save(full, [user, model('SYNTHETIC-PRIVATE-REPLY\n\nShould I pick a third name?')].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+  assert.equal(send('synthetic-agy-full-transcript', 'waiting', 'Stop', full).status, 0)
+  assert.ok(record('synthetic-agy-full-transcript').steps.includes('- [?] Should I pick a third name?'))
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-PRIVATE'))
 }))
 
 test('queued Grok status retains only the closing question and replays it', () => fixture(f => {
@@ -5820,6 +6336,7 @@ test('opencode: a later report for an ended session reopens its row', t => openc
 }))
 
 test('opencode: a refused progress report tells the model why', async () => {
+  const { STRINGS } = await sourceModules()
   // A Chinese board brackets the code in full-width parentheses; the same code comes through.
   for (const lang of ['en', 'zh-TW', 'zh-CN']) await opencodeSpawnFixture(opencodeRealSpawn, async f => {
     assert.ok(readFileSync(join(dirname(f.progress), 'agent-board.mjs'), 'utf8').split('\n', 1)[0].includes(`"lang":"${lang}"`), lang)
@@ -5827,9 +6344,10 @@ test('opencode: a refused progress report tells the model why', async () => {
     const plugin = readFileSync(join(dirname(dirname(f.progress)), '.config', 'opencode', 'plugins', 'agent-board-local.js'), 'utf8')
     const format = plugin.slice(plugin.indexOf({ en: 'One Markdown task line', 'zh-TW': '一行 Markdown 任務', 'zh-CN': '一行 Markdown 任务' }[lang])).split(')', 1)[0]
     for (const mark of ['x', '~', ' ', '?', '!', '>', '-']) assert.ok(format.includes(`- [${mark}]`), `${lang} ${mark}`)
-    await assert.rejects(f.instance.tool.agent_board_progress.execute({ ...f.payload, title: 'Synthetic refused task', steps: ['Synthetic plain step'] }, f.context), { message: 'AGENT_BOARD_REPORT_FAILED: INVALID_STEP' })
+    await assert.rejects(f.instance.tool.agent_board_progress.execute({ ...f.payload, title: 'Synthetic refused task', steps: ['Synthetic plain step'] }, f.context), { message: `AGENT_BOARD_REPORT_FAILED: INVALID_STEP: ${STRINGS[lang].reporterInvalidStep('Synthetic plain step')}` })
     assert.ok(!readFileSync(f.progress, 'utf8').includes('Synthetic refused task'))
     assert.match(readFileSync(f.log, 'utf8'), /opencode REPORTER_FAILED INVALID_STEP\r?\n/)
+    assert.doesNotMatch(readFileSync(f.log, 'utf8'), /Synthetic plain step/)
   }, { lang })
 })
 
@@ -6022,6 +6540,74 @@ test('OpenClaw native metadata callbacks fence stale runs and never request conv
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
+test('OpenClaw session events carry the session folder and progress_card reports to the plugin session', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'openclaw', '--apply').status, 0)
+  const plugin = (await import(pathToFileURL(join(f.root, 'adapters', 'openclaw', 'agent-board-local.mjs')))).default
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, 'adapters', 'openclaw', 'openclaw.plugin.json'))).contracts, { tools: ['progress_card'] })
+  const work = join(f.home, 'work'), other = join(f.home, 'other')
+  mkdirSync(work)
+  mkdirSync(other)
+  const hooks = new Map()
+  let subscription, factory, options
+  plugin.register({
+    on: (name, fn) => hooks.set(name, fn), config: {}, runtime: { agent: { resolveAgentWorkspaceDir: () => work } },
+    registerTool: (value, given) => { factory = value; options = given },
+    agent: { events: { registerAgentEventSubscription: value => { subscription = value } } },
+  })
+  assert.deepEqual(options, { names: ['progress_card'] })
+  const id = 'openclaw-folder-session-1'
+  const record = () => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`openclaw:${id}`).digest('hex') + '.json'), 'utf8'))
+  // Session start has no workspace in its context: the default agent workspace names the folder.
+  await hooks.get('session_start')({ sessionId: id }, { sessionId: id })
+  const digestOf = folder => createHash('sha256').update(process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)).digest('hex')
+  assert.equal(record().folderDigest, digestOf(work))
+  assert.equal(record().project, 'work')
+  // The report command finds that record by its folder.
+  const bound = folderReport(f, work, reportPayload, ['--agent', 'openclaw'])
+  assert.equal(bound.status, 0, bound.stderr)
+  // The tool factory's context names the session's real workspace, which the lifecycle events then carry.
+  assert.equal(factory({}), null)
+  const tool = factory({ sessionId: id, workspaceDir: other })
+  await subscription.handle({ stream: 'lifecycle', sessionId: id, runId: 'folder-run-1', data: { phase: 'start' } })
+  assert.equal(record().folderDigest, digestOf(other))
+  // No hook that receives the prompt or the conversation is registered.
+  for (const name of ['before_prompt_build', 'agent_turn_prepare', 'before_model_resolve', 'before_agent_reply', 'llm_input', 'llm_output', 'before_agent_finalize', 'agent_end', 'before_agent_run', 'before_agent_start']) assert.ok(!hooks.has(name), name)
+  assert.equal(tool.name, 'progress_card')
+  assert.deepEqual(tool.parameters.required, ['steps'])
+  // The plugin reads no reply text: the tool description and the installed skill both tell the agent
+  // to send a closing question as a [?] step before the turn ends.
+  assert.match(tool.description, /- \[\?\] <the question>/)
+  assert.match(tool.description, /before you end the turn/)
+  const skillText = readFileSync(join(f.home, '.openclaw', 'skills', 'agent-board', 'SKILL.md'), 'utf8')
+  assert.match(skillText, /OpenClaw use the progress_card tool/)
+  assert.match(skillText, /`- \[\?\] <the question>` step with state waiting, before ending the turn/)
+  await tool.execute('call-1', { title: 'OpenClaw task', state: 'waiting', steps: ['- [?] Pick one', '- [ ] Continue'] })
+  assert.equal(record().state, 'waiting')
+  assert.equal(record().title, 'OpenClaw task')
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[\?\] Pick one$/m)
+  await assert.rejects(tool.execute('call-2', { steps: 'not a list' }), /INVALID_STEPS/)
+  await assert.rejects(tool.execute('call-3', { title: 'Invalid', state: 'working', steps: ['not a task line'] }), /Cannot read the step "not a task line".*- \[ \] step/)
+  const long = await tool.execute('call-4', { title: 'Many steps', state: 'working', steps: Array.from({ length: 41 }, (_, index) => `- [ ] Step ${index + 1}`) })
+  assert.equal(JSON.parse(long.content[0].text).dropped, 1)
+}))
+
+test('a report from a folder binds to an openclaw record that holds the folder and refuses one that does not', () => fixture(f => {
+  f.install('--agent', 'openclaw', '--apply')
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  const normalized = resolve(cwd)
+  const folderDigest = createHash('sha256').update(process.platform === 'win32' ? normalized.toLowerCase() : normalized).digest('hex')
+  const id = 'synthetic-openclaw-session'
+  const saveRecord = extra => f.save(join(f.root, 'sessions', createHash('sha256').update(`openclaw:${id}`).digest('hex') + '.json'), JSON.stringify({ session: id, agent: 'openclaw', state: 'waiting', updated: new Date().toISOString(), ...extra }))
+  saveRecord({})
+  const refused = folderReport(f, cwd, reportPayload, ['--agent', 'openclaw'])
+  assert.notEqual(refused.status, 0)
+  assert.equal(refused.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
+  saveRecord({ folder: 'demo', folderDigest })
+  const bound = folderReport(f, cwd, reportPayload, ['--agent', 'openclaw'])
+  assert.equal(bound.status, 0, bound.stderr)
+}))
+
 test('DeepSeek setup appends an owned native patch and preserves other YAML on removal', () => fixture(f => {
   f.env.DSH_HOME = join(f.home, '.dsh')
   const file = join(f.env.DSH_HOME, 'cordis.patch.yml')
@@ -6076,6 +6662,269 @@ test('DeepSeek native callbacks report their own identity and preserve task comp
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
+test('DeepSeek session events carry the session folder and the agent_board tool reports to the plugin session', () => fixture(async f => {
+  f.env.DSH_HOME = join(f.home, '.dsh')
+  assert.equal(f.install('--agent', 'deepseek', '--apply').status, 0)
+  const plugin = await import(pathToFileURL(join(f.root, 'adapters', 'deepseek.mjs')))
+  assert.equal(plugin.inject, undefined, 'tools stay optional: a missing service must not stop the lifecycle events')
+  const work = join(f.home, 'work')
+  mkdirSync(work)
+  const hooks = new Map(), tools = []
+  plugin.apply({ on: (name, fn) => hooks.set(name, fn), inject: (_names, fn) => fn({ tools: { register: tool => tools.push(tool) } }) })
+  // No hook that receives the prompt, the messages or the model is registered.
+  assert.deepEqual([...hooks.keys()].sort(), ['agent/created', 'agent/disposed', 'agent/status'])
+  assert.equal(tools.length, 1)
+  const [tool] = tools
+  assert.equal(tool.name, 'agent_board')
+  assert.deepEqual(tool.parameters.required, ['action'])
+  assert.deepEqual(tool.parameters.properties.action.enum, ['report', 'open'])
+  assert.match(tool.description, /- \[\?\] <the question>/)
+  const id = 'deepseek-folder-session-1'
+  const agent = { session: { header: { id, cwd: work } }, status: 'idle' }
+  const record = () => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`deepseek:${id}`).digest('hex') + '.json'), 'utf8'))
+  await hooks.get('agent/created')({ agent })
+  const digestOf = folder => createHash('sha256').update(process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)).digest('hex')
+  assert.equal(record().folderDigest, digestOf(work))
+  assert.equal(record().project, 'work')
+  assert.equal(record().agent, 'deepseek')
+  const skillText = readFileSync(join(f.env.DSH_HOME, 'skills', 'agent-board', 'SKILL.md'), 'utf8')
+  assert.match(skillText, /In DeepSeek, do not run the board command in a shell; use the agent_board tool/)
+  assert.match(skillText, /action open to open the board/)
+  await tool.execute({ action: 'report', title: 'DeepSeek task', state: 'waiting', steps: ['- [?] Pick one', '- [ ] Continue'] }, { agent })
+  assert.equal(record().state, 'waiting')
+  assert.equal(record().title, 'DeepSeek task')
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[\?\] Pick one$/m)
+  await assert.rejects(tool.execute({ action: 'report', steps: 'not a list' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_STEPS/)
+  await assert.rejects(tool.execute({ action: 'report', title: 'Invalid', state: 'working', steps: ['not a task line'] }, { agent }), /Cannot read the step "not a task line".*- \[ \] step/)
+  const long = await tool.execute({ action: 'report', title: 'Many steps', state: 'working', steps: Array.from({ length: 41 }, (_, index) => `- [ ] Step ${index + 1}`) }, { agent })
+  assert.equal(JSON.parse(long.text).dropped, 1)
+  await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] Done'] }, {}), /AGENT_BOARD_REPORT_FAILED: NO_SESSION/)
+  await assert.rejects(tool.execute({ action: 'close' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_ACTION/)
+}))
+
+test('DeepSeek lifecycle events still save when the host has no tools service', () => fixture(async f => {
+  f.env.DSH_HOME = join(f.home, '.dsh')
+  assert.equal(f.install('--agent', 'deepseek', '--apply').status, 0)
+  const plugin = await import(pathToFileURL(join(f.root, 'adapters', 'deepseek.mjs')))
+  const hooks = new Map()
+  let injected = 0
+  // A bare context: inject is there but never runs its callback, as with no tools service.
+  plugin.apply({ on: (name, fn) => hooks.set(name, fn), inject: () => { injected++ } })
+  assert.equal(injected, 1)
+  const id = 'deepseek-no-tools-session'
+  await hooks.get('agent/created')({ agent: { session: { header: { id } }, status: 'idle' } })
+  assert.match(readFileSync(f.progress, 'utf8'), /agent=deepseek .*state=waiting/)
+  await hooks.get('agent/disposed')({ agent: { session: { header: { id } } } })
+  assert.match(readFileSync(f.progress, 'utf8'), /state=ended/)
+}))
+
+test('the DeepSeek tool reports by session id, and opens the board detached without keeping its address', () => fixture(async f => {
+  const portable = await (async () => {
+    const resolver = registerHooks({ resolve(specifier, context, next) {
+      try { return next(specifier, context) } catch (error) {
+        if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+        return next(`${specifier}.ts`, context)
+      }
+    } })
+    try { return await import('../hooks/portable-agents.ts') } finally { resolver.deregister() }
+  })()
+  const worker = join(f.root, 'agent-board-hook.mjs'), board = join(f.root, 'agent-board.mjs')
+  const calls = [], children = []
+  let answer = { status: 0, stdout: '', stderr: '' }
+  const spawned = (command, args, options) => {
+    const listeners = {}, outputs = {}
+    const child = {
+      unrefs: 0, command, args: [...args], options,
+      on: (name, fn) => { listeners[name] = fn },
+      fail: () => listeners.error?.(new Error('synthetic spawn failure')),
+      unref() { child.unrefs++ },
+      stdout: { setEncoding() {}, on: (name, fn) => { outputs[name] = fn }, destroy() { child.destroyed = true } },
+      print: (text, code) => { outputs.data?.(Buffer.from(text)); listeners.close?.(code) },
+    }
+    children.push(child)
+    return child
+  }
+  const source = portable.deepseekLocalPlugin(process.execPath, worker, f.progress, f.home, board)
+  const { apply } = new Function('createRequire', 'spawnSync', 'spawn', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, (command, args, options) => { calls.push({ command, args: [...args], options, input: options.input }); return answer }, spawned)
+  const hooks = new Map(), tools = []
+  apply({ on: (name, fn) => hooks.set(name, fn), inject: (_names, fn) => fn({ tools: { register: tool => tools.push(tool) } }) })
+  const [tool] = tools
+  const work = join(f.home, 'session-folder')
+  const agent = { session: { header: { id: 'deepseek-tool-session-2', cwd: work } }, status: 'idle' }
+  // Lifecycle payloads carry the folder from the session header, and only when it has one.
+  await hooks.get('agent/created')({ agent })
+  await hooks.get('agent/created')({ agent: { session: { header: { id: 'deepseek-no-folder' } }, status: 'idle' } })
+  assert.equal(JSON.parse(calls[0].input).cwd, work)
+  assert.equal('cwd' in JSON.parse(calls[1].input), false)
+  calls.length = 0
+  // The report names the agent and the session and runs from the session folder.
+  const done = await tool.execute({ action: 'report', title: 'T', state: 'done', steps: ['- [x] One'] }, { agent })
+  assert.deepEqual(done, { text: 'OK' })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].command, process.execPath)
+  assert.equal(calls[0].args[0], worker)
+  for (const word of ['--codex-report', '--agent', 'deepseek', '--session', 'deepseek-tool-session-2']) assert.ok(calls[0].args.includes(word), word)
+  assert.equal(calls[0].args[calls[0].args.indexOf('--agent') + 1], 'deepseek')
+  assert.equal(calls[0].args[calls[0].args.indexOf('--session') + 1], 'deepseek-tool-session-2')
+  assert.equal(calls[0].options.cwd, undefined, 'the writer binds by session id, so a missing folder cannot fail the report')
+  assert.deepEqual(JSON.parse(calls[0].input), { steps: ['- [x] One'], title: 'T', state: 'done' })
+  // A refused report names the board's reason.
+  answer = { status: 1, stdout: '', stderr: 'AGENT_BOARD_REASON INVALID_STEP\n' }
+  await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] One'] }, { agent }), { message: 'AGENT_BOARD_REPORT_FAILED: INVALID_STEP' })
+  answer = { status: 1, stdout: '', stderr: 'free text\n' }
+  await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] One'] }, { agent }), { message: 'AGENT_BOARD_REPORT_FAILED' })
+  // open starts the board's own command detached and returns the one line it prints.
+  const link = 'http://127.0.0.1:43210/?t=synthetic-token'
+  const opened = tool.execute({ action: 'open' }, { agent })
+  const [child] = children
+  assert.equal(child.command, process.execPath)
+  assert.deepEqual(child.args, [board, '--html'])
+  assert.equal(child.options.detached, true)
+  assert.equal(child.options.windowsHide, true)
+  assert.equal(child.options.stdio[0], 'ignore')
+  assert.equal(child.unrefs, 1)
+  child.print(`${link}\n`, 0)
+  assert.deepEqual(await opened, { text: link })
+  assert.equal(child.destroyed, true)
+  // A failed start returns its line and no address; the address is in no log.
+  const refused = tool.execute({ action: 'open' }, { agent })
+  children[1].print('This AI\'s sandbox can\'t write the board page\'s address folder.\n', 1)
+  await assert.rejects(refused, /^Error: AGENT_BOARD_OPEN_FAILED: This AI's sandbox/)
+  // A spawn error, and an exit 0 with nothing printed, both fail the call.
+  const broken = tool.execute({ action: 'open' }, { agent })
+  children[2].fail()
+  await assert.rejects(broken, { message: 'AGENT_BOARD_OPEN_FAILED' })
+  const silent = tool.execute({ action: 'open' }, { agent })
+  children[3].print('', 0)
+  await assert.rejects(silent, { message: 'AGENT_BOARD_OPEN_FAILED' })
+  const log = join(f.root, 'hook-errors.log')
+  if (existsSync(log)) assert.ok(!readFileSync(log, 'utf8').includes('127.0.0.1'))
+  assert.equal(tool.output.render({}, { text: link })[0].text, link)
+}))
+
+test('deepseekLocalPlugin ignores subagents and gives a waiting board message to an idle root agent through agent.followup (#725)', () => fixture(async f => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
+  const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  const { randomUUID } = await import('node:crypto')
+  const { watch } = await import('node:fs')
+  const board = join(f.home, 'deepseek-board.mjs')
+  f.save(board, bundleFromDir(new URL('..', import.meta.url)))
+  const progress = join(f.home, 'deepseek-progress.md')
+  f.save(progress, '')
+  // The plugin runs inside dsh, and its board calls inherit that process's environment: here, this test's.
+  const directory = defaultMessagesDirectory(progress, f.home, process.env, process.platform)
+  const file = join(directory, 'messages.json')
+  const store = () => JSON.parse(readFileSync(file, 'utf8'))
+  const status = id => store().messages.find(one => one.id === id)?.status
+  const queue = (state, session, id, text) => {
+    const now = Date.now()
+    const enrolled = enrollMailbox(state, 'deepseek', session, 'dsh', now, 43_200_000)
+    const target = enrolled.mailboxes.find(one => one.id === mailboxId('deepseek', session))
+    f.save(file, JSON.stringify({ version: 2, ...queueMessage(enrolled, { id, target: target.id, turn: 'session', text }, 'board', target, now).state }))
+  }
+  queue({ messages: [] }, 'deepseek-subagent-session', 'subagent-message', 'Synthetic subagent text')
+  queue(store(), 'deepseek-root-session', 'root-message-1', 'Synthetic answer: blue')
+  // Every board call the plugin starts is a real child of the board script; the test waits for each to close.
+  const children = []
+  const spawnMailbox = (...args) => {
+    const child = spawn(...args)
+    children.push(child)
+    child.on('close', () => { child.isClosed = true })
+    return child
+  }
+  const settled = () => children.every(child => child.isClosed)
+  const until = async (check, label) => {
+    for (const end = Date.now() + 30_000; Date.now() < end; await new Promise(done => setTimeout(done, 50))) if (check()) return
+    assert.fail(label)
+  }
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, board)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, watch, join)
+  const fake = (id, header = {}) => {
+    const agent = { session: { header: { id, ...header } }, status: 'idle', received: [], followup(message) { agent.received.push(message); agent.status = 'running' } }
+    return agent
+  }
+  const root = fake('deepseek-root-session'), sub = fake('deepseek-subagent-session', { origin: 'subagent', parentSession: 'deepseek-root-session' })
+  const hooks = new Map()
+  try {
+    apply({ on: (name, fn) => hooks.set(name, fn) })
+    hooks.get('agent/created')({ agent: sub })
+    hooks.get('agent/created')({ agent: root })
+    await until(() => status('root-message-1') === 'accepted' && settled(), 'the root session took its message')
+    assert.equal(root.received.length, 1)
+    const [message] = root.received
+    assert.equal(message.role, 'user')
+    // dsh's page shows it as one folded line, the board and the answer.
+    assert.deepEqual(message.source, { kind: 'agent-board', form: 'notice', summary: 'Synthetic answer: blue' })
+    assert.match(message.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    assert.ok(Object.isFrozen(message) && Object.isFrozen(message.content) && Object.isFrozen(message.content[0]))
+    assert.deepEqual(message.content.map(one => one.type), ['text'])
+    assert.ok(message.content[0].text.includes('Synthetic answer: blue'))
+    const nonce = store().messages.find(one => one.id === 'root-message-1').nonce
+    assert.match(message.content[0].text, new RegExp(`ACK ${nonce}`))
+    // A subagent's session never enrolls or receives: its message waits, untouched.
+    assert.deepEqual(sub.received, [])
+    assert.equal(status('subagent-message'), 'queued')
+    assert.ok(!children.some(child => child.spawnargs.includes('deepseek-subagent-session')))
+    // A message that comes while the session works waits for it to go idle.
+    queue(store(), 'deepseek-root-session', 'root-message-2', 'Synthetic second answer')
+    await new Promise(done => setTimeout(done, 600))
+    assert.equal(root.received.length, 1)
+    assert.equal(status('root-message-2'), 'queued')
+    root.status = 'idle'
+    hooks.get('agent/status')({ agent: root, status: 'idle' })
+    await until(() => status('root-message-2') === 'accepted' && settled(), 'the session took the message at idle')
+    assert.equal(root.received.length, 2)
+    // An idle session takes a new message as soon as the board writes it, with no event from dsh.
+    root.status = 'idle'
+    queue(store(), 'deepseek-root-session', 'root-message-3', 'Synthetic third answer')
+    await until(() => status('root-message-3') === 'accepted' && settled(), 'the idle session took the new message')
+    assert.equal(root.received.length, 3)
+    assert.ok(root.received[2].content[0].text.includes('Synthetic third answer'))
+    // A closed session ends its mailbox, so its card no longer offers Send.
+    hooks.get('agent/disposed')({ agent: root })
+    await until(() => !store().mailboxes.some(one => one.id === mailboxId('deepseek', 'deepseek-root-session')) && settled(), 'the closed session ended its mailbox')
+    const log = join(f.home, '.agent-board', 'hook-errors.log')
+    if (existsSync(log)) assert.ok(!readFileSync(log, 'utf8').includes('MAILBOX_FAILED'), readFileSync(log, 'utf8'))
+    // A board script that cannot answer is logged, once, however often the session asks.
+    const broken = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, join(f.home, 'missing-board.mjs'))
+    const failed = new Function(...names, `${broken.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, watch, join)
+    const failedHooks = new Map()
+    failed.apply({ on: (name, fn) => failedHooks.set(name, fn) })
+    const lonely = fake('deepseek-lonely-session')
+    failedHooks.get('agent/created')({ agent: lonely })
+    const failures = () => existsSync(log) ? readFileSync(log, 'utf8').split('MAILBOX_FAILED').length - 1 : 0
+    await until(() => failures() === 1 && settled(), 'a failed take was logged')
+    const taken = children.length
+    failedHooks.get('agent/status')({ agent: lonely, status: 'idle' })
+    await until(() => children.length === taken + 1 && settled(), 'the second take ran and closed')
+    assert.equal(failures(), 1)
+    assert.deepEqual(lonely.received, [])
+    failedHooks.get('agent/disposed')({ agent: lonely })
+    await until(settled, 'the end call closed')
+    // A take asked for while another is under way runs right after it, with no further event from dsh.
+    const quick = fake('deepseek-quick-session')
+    const takes = () => children.filter(child => child.spawnargs.includes('take') && child.spawnargs.includes('deepseek-quick-session')).length
+    hooks.get('agent/created')({ agent: quick })
+    hooks.get('agent/status')({ agent: quick, status: 'idle' })
+    await until(() => takes() === 2 && settled(), 'the second take ran right after the first')
+    // A followup that fails is logged and never marked delivered: its claim runs out and the board hands it out again.
+    quick.followup = () => Promise.reject(new Error('SYNTHETIC'))
+    queue(store(), 'deepseek-quick-session', 'quick-message', 'Synthetic refused answer')
+    hooks.get('agent/status')({ agent: quick, status: 'idle' })
+    await until(() => failures() === 2 && settled(), 'the failed followup was logged')
+    assert.notEqual(status('quick-message'), 'accepted')
+    hooks.get('agent/disposed')({ agent: quick })
+    await until(settled, 'the quick session ended')
+  } finally {
+    // A failed check leaves no board call running: each one is stopped and waited for, on Windows too.
+    for (const child of children) if (!child.isClosed) child.kill()
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
+  }
+}))
+
 test('Grok prompt hooks return a waiting session to working through the native shell shape', () => fixture(f => {
   assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
   const hooks = JSON.parse(readFileSync(join(f.home, '.grok', 'hooks', 'agent-board-local.json'))).hooks
@@ -6105,18 +6954,19 @@ test('auto setup does not mistake an Antigravity profile or the shared gemini di
   assert.deepEqual(JSON.parse(run().stdout).targets, ['gemini', 'antigravity'])
 }))
 
-test('all targets initialize one shared board and explicitly name unfinished native adapters', () => fixture(f => {
+test('all targets initialize one shared board and name each adapter capability', () => fixture(f => {
   const installer = resolve('scripts/setup-agent.mjs')
   const result = spawnSync(process.execPath, [installer, '--agent', 'all', '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply', '--json'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
   assert.equal(result.status, 0, `${JSON.stringify({ error: result.error?.code, signal: result.signal })}\n${result.stderr}`)
   const plans = JSON.parse(result.stdout).plans
   assert.equal(plans.length, 10)
   assert.equal(new Set(plans.map(plan => plan.progress)).size, 1)
-  assert.equal(plans.find(plan => plan.agent === 'hermes').capabilities.lifecycle, 'adapter-pending')
+  assert.equal(plans.find(plan => plan.agent === 'hermes').capabilities.lifecycle, 'adapter-installed-unverified')
   for (const agent of ['openclaw', 'deepseek']) assert.equal(plans.find(plan => plan.agent === agent).capabilities.lifecycle, 'adapter-installed-unverified')
   assert.equal(plans.find(plan => plan.agent === 'antigravity').capabilities.lifecycle, 'adapter-installed-unverified')
   assert.ok(existsSync(join(f.home, '.gemini', 'commands', 'agent-board.toml')))
   assert.ok(existsSync(join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')))
+  assert.match(readFileSync(join(f.home, '.hermes', 'config.yaml'), 'utf8'), /^hooks:\n {2}on_session_start:\n/)
   for (const agent of ['gemini', 'grok', 'muse']) {
     const response = f.command(['--agent-status', '--agent', agent, '--state', 'waiting'], { session_id: `shared-${agent}-session-123`, prompt: 'PRIVATE_PAYLOAD' })
     assert.equal(response.status, 0, response.stderr)
@@ -6185,6 +7035,24 @@ test('Windows Antigravity verified Node commands bypass PowerShell and preserve 
     assert.equal(actual.dev, expected.dev)
     assert.equal(actual.ino, expected.ino)
     assert.ok(!/powershell(?:\.exe)?/i.test(hook.command), hook.command)
+  }
+}))
+
+test('Windows Muse Code hooks run when the host escapes each quote for cmd, as Muse Code 1.4.14 does', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const home = join(f.home, 'muse home')
+  mkdirSync(home)
+  const env = isolatedEnv(home)
+  const installed = spawnSync(process.execPath, [setup, '--home', home, '--agent', 'muse', '--apply'], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.equal(installed.status, 0, installed.stderr)
+  const hooks = JSON.parse(readFileSync(join(home, '.config', 'muse', 'settings.json'), 'utf8')).hooks
+  const record = join(home, '.agent-board', 'sessions', createHash('sha256').update('muse:synthetic-muse-session').digest('hex') + '.json')
+  for (const [event, state] of [['UserPromptSubmit', 'working'], ['Stop', 'waiting'], ['SessionEnd', 'ended']]) {
+    const command = hooks[event][0].hooks[0].command
+    assert.ok(!command.includes('"'), command)
+    // Without verbatim arguments Node quotes this one argument as Muse does: each quote inside becomes \".
+    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', command], { env, input: JSON.stringify({ session_id: 'synthetic-muse-session' }), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    assert.equal(result.status, 0, hookFailure(result))
+    assert.equal(JSON.parse(readFileSync(record, 'utf8')).state, state, event)
   }
 }))
 
@@ -9411,6 +10279,30 @@ const sourceModules = async () => {
   } finally { resolver.deregister() }
 }
 
+test('every reporting prompt gives the same question rule in its own language', async () => {
+  const { STRINGS } = await sourceModules()
+  const { RULES } = await importTs('../hooks/rule.ts')
+  const { RELAY } = await importTs('../hooks/i18n.ts')
+  const { boardRequestWords, isBoardRequest } = await importTs('../hooks/board-commands.ts')
+  const rules = {
+    en: 'When you need the user, mark the step [?] and write one line they can answer: end a yes/no question with "OK?", write a choice as "A or B?", put a command in backticks, start a wait with "waiting for".',
+    'zh-TW': '需要使用者時，把步驟標成 [?]，寫一行對方能直接回答的話：是非題用「…可以嗎？」結尾，選擇題寫成「A 還是 B？」，指令放在反引號裡，等別人時用「等」開頭。',
+    'zh-CN': '需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。',
+  }
+  const words = boardRequestWords(Object.values(STRINGS))
+  for (const [lang, rule] of Object.entries(rules)) {
+    const s = STRINGS[lang]
+    for (const prompt of [s.openclawProgressTool, s.deepseekBoardTool, s.localAgentStepFormat, s.localAgentAntigravityContext('board'), s.localAgentSkill('board'), s.boardSkillPrompt('board'), s.codexFallbackInstructions('board'), RULES[lang]]) {
+      assert.ok(prompt.includes(rule), lang)
+    }
+    // The prior installed skill's text remains recognizable after the new paragraph is added.
+    assert.ok(isBoardRequest(s.boardSkillPrompt('board').split('\n\n')[0], words), lang)
+  }
+  assert.ok(RELAY.includes(rules.en))
+  assert.ok(readFileSync(new URL('../docs/REMOTE_REPORTERS.md', import.meta.url), 'utf8').includes(rules.en))
+  assert.ok(readFileSync(new URL('../scripts/claude-md-rule.md', import.meta.url), 'utf8').includes(rules['zh-TW']))
+})
+
 test('the Codex instructions never tell the person that CODEX_THREAD_ID is missing', async () => {
   const { STRINGS } = await sourceModules()
   for (const s of Object.values(STRINGS)) {
@@ -9972,6 +10864,57 @@ test('setup installs the Grok PostToolUse plan hook with the todo_write matcher 
   assert.match(grok.PostToolUse[0].hooks[0].command, /--plan-event/)
 }))
 
+const hermesTodo = (id, todos, extra = {}) => ({
+  hook_event_name: 'post_tool_call', tool_name: 'todo', session_id: id,
+  tool_input: { merge: true, todos: [{ id: 'b', status: 'in_progress' }] },
+  extra: { result: JSON.stringify({ todos, summary: {} }) }, ...extra,
+})
+
+test('a Hermes todo merge hook reports the whole result list as plan steps', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const input = hermesTodo('hermes-plan-session-1', [
+    { id: 'a', content: 'Hermes first', status: 'completed' },
+    { id: 'b', content: 'Hermes second', status: 'in_progress' },
+    { id: 'c', content: 'Hermes third', status: 'pending' },
+    { id: 'd', content: 'Hermes dropped', status: 'cancelled' },
+  ])
+  const ran = fireHermes(f, 'post_tool_call', input)
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.equal(ran.stdout, '')
+  const text = readFileSync(f.progress, 'utf8')
+  assert.match(text, /agent=hermes/)
+  assert.match(text, /^- \[x\] Hermes first$/m)
+  assert.match(text, /^- \[~\] Hermes second$/m)
+  assert.match(text, /^- \[ \] Hermes third$/m)
+  assert.match(text, /^- \[-\] Hermes dropped$/m)
+}))
+
+test('a Hermes todo hook ignores a bad result or partial merge and uses complete non-merge input when the result is absent', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const id = 'hermes-plan-session-2'
+  const one = [{ id: 'a', content: 'Hermes kept', status: 'in_progress' }]
+  const fallback = hermesTodo(id, [], { tool_input: { merge: false, todos: one }, extra: {} })
+  const first = f.command(['--plan-event', '--agent', 'hermes'], fallback)
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(first.stdout, '')
+  const before = readFileSync(f.progress, 'utf8')
+  assert.match(before, /^- \[~\] Hermes kept$/m)
+  for (const input of [
+    hermesTodo(id, one, { extra: { result: '{broken' } }),
+    { ...fallback, extra: { result: '{broken' } },
+    hermesTodo(id, one, { extra: {} }),
+    hermesTodo(id, one, { extra: { result: '{}' } }),
+    hermesTodo(id, one, { hook_event_name: 'pre_tool_call' }),
+    hermesTodo(id, one, { tool_name: 'terminal' }),
+    hermesTodo(undefined, one),
+  ]) {
+    const ran = f.command(['--plan-event', '--agent', 'hermes'], input)
+    assert.equal(ran.status, 0, ran.stderr)
+    assert.equal(ran.stdout, '')
+    assert.equal(readFileSync(f.progress, 'utf8'), before)
+  }
+}))
+
 test('Windows fixture Node is a hard link to the running executable when linking works', { skip: process.platform !== 'win32' }, t => fixture(f => {
   const node = join(f.home, 'linked node.exe')
   placeNode(node)
@@ -10105,20 +11048,20 @@ test('an OpenCode todo.updated event becomes the session steps; a child session,
   assert.match(text, /^- \[-\] Dropped idea$/m)
 }))
 
-test('an OpenClaw progress_card or update_plan call becomes the session steps; an error, no plan or another tool writes nothing', () => fixture(async f => {
+test('an OpenClaw update_plan call becomes the session steps; an error, no plan or another tool writes nothing', () => fixture(async f => {
   const id = 'openclaw-plan-session-1'
   const plan = [{ step: 'Read the spec', status: 'completed' }, { step: 'Write the code', status: 'in_progress' }, { step: 'Ship it', status: 'pending' }]
   const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }, saved) => {
     const handlers = new Map()
     plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
     const fire = (event, ctx = { sessionId: id }) => handlers.get('after_tool_call')?.(event, ctx)
-    fire({ toolName: 'progress_card', params: { plan }, error: 'tool failed' })
-    fire({ toolName: 'progress_card', params: { markdown: 'only text' } })
-    fire({ toolName: 'progress_card', params: { plan: [] } })
+    fire({ toolName: 'update_plan', params: { plan }, error: 'tool failed' })
+    fire({ toolName: 'update_plan', params: { markdown: 'only text' } })
+    fire({ toolName: 'update_plan', params: { plan: [] } })
     fire({ toolName: 'read_file', params: { plan } })
     fire({ toolName: 'update_plan', params: { plan } }, {})
     assert.equal(saved.length, 0)
-    fire({ toolName: 'progress_card', params: { plan } })
+    fire({ toolName: 'update_plan', params: { plan } })
   })
   assert.equal(got.saved.length, 1)
   assert.ok(got.saved[0].args.includes('--plan-event'))
@@ -10156,7 +11099,7 @@ test('a plan of 250 items reaches the board as its first 40 steps, from OpenCode
     const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }) => {
       const handlers = new Map()
       plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
-      handlers.get('after_tool_call')?.({ toolName: 'progress_card', params: { plan: many.map(step => ({ step, status: 'pending' })) } }, { sessionId: 'openclaw-plan-session-many' })
+      handlers.get('after_tool_call')?.({ toolName: 'update_plan', params: { plan: many.map(step => ({ step, status: 'pending' })) } }, { sessionId: 'openclaw-plan-session-many' })
     })
     assert.equal(got.saved.length, 1)
     assert.equal(JSON.parse(got.saved[0].input).tool_input.plan.length, 200)
@@ -10164,17 +11107,6 @@ test('a plan of 250 items reaches the board as its first 40 steps, from OpenCode
     fortySteps(f.progress)
   })
 })
-
-test('the older OpenClaw update_plan name reaches the board too', () => fixture(async f => {
-  const got = await planPlugin(f, 'openclaw', 'return { plugin }', ({ plugin }) => {
-    const handlers = new Map()
-    plugin.register({ on: (name, handler) => handlers.set(name, handler), agent: { events: { registerAgentEventSubscription: () => {} } } })
-    handlers.get('after_tool_call')?.({ toolName: 'update_plan', params: { plan: [{ step: 'Old name step', status: 'in_progress' }] } }, { sessionId: 'openclaw-plan-session-2' })
-  })
-  assert.equal(got.saved.length, 1)
-  assert.equal(got.deliver(got.saved[0]).status, 0)
-  assert.match(readFileSync(f.progress, 'utf8'), /^- \[~\] Old name step$/m)
-}))
 
 // #922: a new block joins its project's section, and a plan event with no block files like a status event.
 const sharedReports = (f, eol) => {
@@ -10355,3 +11287,56 @@ for (const agent of ['gemini', 'opencode']) {
     assert.equal(readFileSync(edited.old, 'utf8'), `${edited.text}\nMy own line\n`)
   }))
 }
+
+const cursorSessionRecord = (f, id) => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`cursor:${id}`).digest('hex') + '.json'), 'utf8'))
+const cursorHook = (f, name, id, cwd, extra = {}) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-event', '--agent', 'cursor'], {
+  cwd: f.home, env: { ...f.env, CODEX_THREAD_ID: undefined }, input: JSON.stringify({ conversation_id: id, generation_id: `gen-${id}`, hook_event_name: name, workspace_roots: [cwd], ...extra }), encoding: 'utf8', windowsHide: true, timeout: 15000,
+})
+const cursorReport = (f, cwd, payload, extraEnv = {}) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-report', '--agent', 'cursor'], {
+  cwd, env: { ...f.env, CODEX_THREAD_ID: undefined, AGENT_BOARD_AGENT: undefined, AGENT_BOARD_SESSION_ID: undefined, ...extraEnv }, input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 15000,
+})
+const cursorSteps = { title: 'Synthetic Cursor task', project: 'demo', state: 'waiting', steps: ['- [x] Read the files', '- [~] Write the change', '- [?] Blue or green?'] }
+
+test('a Cursor report with no injected environment lands under the one active Cursor session of this folder', () => fixture(f => {
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  for (const name of ['sessionStart', 'beforeSubmitPrompt']) assert.equal(cursorHook(f, name, 'cursor-session-one', cwd).status, 0)
+  assert.match(cursorSessionRecord(f, 'cursor-session-one').folderDigest, /^[a-f0-9]{64}$/)
+  const report = cursorReport(f, cwd, cursorSteps)
+  assert.equal(report.status, 0, report.stderr)
+  assert.equal(JSON.parse(report.stdout).session, 'cursor-session-one')
+  const text = readFileSync(f.progress, 'utf8')
+  for (const step of cursorSteps.steps) assert.ok(text.includes(step), text)
+}))
+
+test('a Cursor report with no injected environment is not connected when two Cursor sessions are active in the folder', () => fixture(f => {
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  for (const id of ['cursor-session-one', 'cursor-session-two']) for (const name of ['sessionStart', 'beforeSubmitPrompt']) assert.equal(cursorHook(f, name, id, cwd).status, 0)
+  const report = cursorReport(f, cwd, cursorSteps)
+  assert.notEqual(report.status, 0)
+  assert.equal(report.stdout, '')
+  assert.equal(report.stderr.trim(), 'This report is not bound to a session; continue your work without editing the board.')
+}))
+
+test('a Cursor report with the injected environment still binds to that session', () => fixture(f => {
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const cwd = join(f.home, 'demo')
+  mkdirSync(cwd)
+  for (const id of ['cursor-session-one', 'cursor-session-two']) for (const name of ['sessionStart', 'beforeSubmitPrompt']) assert.equal(cursorHook(f, name, id, cwd).status, 0)
+  const report = cursorReport(f, cwd, cursorSteps, { AGENT_BOARD_AGENT: 'cursor', AGENT_BOARD_SESSION_ID: 'cursor-session-two' })
+  assert.equal(report.status, 0, report.stderr)
+  assert.equal(JSON.parse(report.stdout).session, 'cursor-session-two')
+}))
+
+test('the local agent instructions tell Cursor to report from the project folder without waiting for injected variables', async () => {
+  const { STRINGS } = await sourceModules()
+  for (const [lang, s] of Object.entries(STRINGS)) {
+    const skill = s.localAgentSkill('board')
+    assert.doesNotMatch(skill, /AGENT_BOARD_SESSION_ID|AGENT_BOARD_AGENT/, lang)
+    assert.match(skill, /Cursor|cursor/, lang)
+    assert.ok(skill.includes('board --codex-report --agent cursor'), lang)
+  }
+})

@@ -33,21 +33,20 @@
 
 ```sh
 npx @wenyuchiou/agent-board setup
-npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，不写入任何东西；第二行才真正写入；第三行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若还没设置任何东西，单独运行第三行就会显示同样的预览，问一次 `Apply these changes? [y/N]`，答 yes 就应用并打开看板。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要卸载，见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
+第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，然后问一次 `要设置这些吗？[Y/n]`。答 yes 就写入文件、在 Codex 和 Hermes Agent 批准看板的 hooks，电脑上有 Claude Code 时也一并装好插件；答 no 就什么都不写。没有终端可以回答时（例如在 agent 的对话中），setup 只会预览：这时 `setup --apply` 会写入文件，并列出批准 hooks 和安装插件需要你自己运行的命令。第二行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若还没设置任何东西，单独运行第二行也会先问同一个问题。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要卸载，见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
 
-看板语言跟随系统设置：系统是繁体或简体中文就用中文，其他用英文。要自己指定，在两行 setup 都加上 `--lang zh-CN`（或 `zh-TW`、`en`），之后看板、网页和 `stop` 都会用这个语言。通过 Claude Code 插件接上的账号，改用 `/progress lang`。
+看板语言跟随系统设置：系统是繁体或简体中文就用中文，其他用英文。要自己指定，在 setup 那行加上 `--lang zh-CN`（或 `zh-TW`、`en`），之后看板、网页和 `stop` 都会用这个语言。通过 Claude Code 插件接上的账号，改用 `/progress lang`。在网页的**设置**里选了语言，就以那个为准；选**自动**则跟随系统语言。
 
 用同一个 Wi-Fi 的手机，扫 `npx @wenyuchiou/agent-board --lan` 印出的二维码。只在信得过的网络上用：这个链接没有加密，拿到的人都能打开网页。详情见[看板的网页](#看板的网页)。
 
 然后：
 
 - 给每个 agent 开一个新对话：原来就开着的对话不会接入。
-- **Claude Code** 改用它的插件接入：`claude plugin marketplace add WenyuChiou/agent-board`，再运行 `claude plugin install agent-board@agent-board`。
-- **Codex：** 到 `/hooks` 信任它的 hooks（[做法](docs/CODEX.md)）。
+- **Claude Code** 改用它的插件接入，setup 答 yes 时就会装好。若 setup 只做了预览：`claude plugin marketplace add WenyuChiou/agent-board`，再运行 `claude plugin install agent-board@agent-board`。
+- **Codex：** setup 答 yes 时就会信任它的 hooks。若 setup 只做了预览，到 `/hooks` 信任（[做法](docs/CODEX.md)）。
 - **OpenCode、OpenClaw：** 重新加载它们的插件。
 - **dot 和其他网页聊天：** 把 [AGENTS.md 最后一段](AGENTS.md#report-your-progress-to-the-progress-pane)贴进那个 agent 的指令，再把它写出的每个区块存成文件，照[远程报告](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)的做法合并进进度文件。
 
@@ -154,7 +153,7 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE、CLI | Hooks 和 CLI 结尾问题 | 复制 |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | 四个 hooks 和结尾问题 | 复制；对话结束后可用 `--allow-resume` |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | CLI | 两个 hooks（停下、结束） | 复制 |
-| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | 聊天软件 | 看板和它的 skill；它自己的 hooks 还没做好 | 复制 |
+| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | 聊天软件 | 四个 shell hooks、结尾问题和汇报的步骤 | 复制 |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | 聊天软件 | 它的插件发来的对话事件 | 复制 |
 | <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | CLI | 它的插件发来的对话事件 | 复制 |
 | | dot、其他网页聊天 | 网页 | 你合并进来的区块 | 在它的对话里回 |
@@ -185,8 +184,8 @@ Hooks 说明对话在做事还是在等；任务步骤和什么时候算完成�
 | Cursor | IDE (Composer) | 3 | 未知 | Implemented（已实现） | 未测试 | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
-| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
+| DeepSeek Harness | TUI | 1 | &#91;P1&#93; | Implemented（已实现） | 未测试 | [hooks/receivers/deepseek.ts](hooks/receivers/deepseek.ts) |
+| DeepSeek Harness | Web | 1 | &#91;P1&#93; | Verified（已验证） | [docs/validation/2026-11-08-deepseek-harness-live.md](docs/validation/2026-11-08-deepseek-harness-live.md) | [hooks/receivers/deepseek.ts](hooks/receivers/deepseek.ts) |
 | dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
 | dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed（规划中） | 未测试 | 无 |
@@ -292,7 +291,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 <details>
 <summary><b>颜色和符号</b></summary>
 
-面板跟着 Claude Code 的主题走（`/config`，再选 **Theme**）；网页跟着你电脑的浅色或深色模式，直到你选了亮色或暗色。看板网页的开关在**关闭看板**旁边：位于展开的侧栏底部；窄屏幕或侧栏收起时，则在任务列表下方。每个符号形状都不一样，不看颜色也分得出来；网页上还没做的步骤画成小圆点，不画圆圈，免得看起来像能点的按钮：
+面板跟着 Claude Code 的主题走（`/config`，再选 **Theme**）；网页跟着你电脑的浅色或深色模式，直到你选了亮色或暗色。看板网页的**设置**按钮在**关闭看板**旁边，点开可调整语言、外观和通知，更改立即生效。语言可选自动、English、繁體中文或简体中文；外观可选浅色、深色、自动，以及进度条的三种样式：墨（默认）、蓝、绿。通知默认关闭，开启时会向浏览器请求权限，每个等待回答或批准的问题只通知一次。进度条每一步一格，旁边写数字，例如 `━━━━╸── 5/7`；选好的样式在网页、侧栏和终端看板都一样（侧栏用 `/progress style blue`，终端看板按 `s`）。按钮位于展开的侧栏底部；窄屏幕或侧栏收起时，则在任务列表下方。每个符号形状都不一样，不看颜色也分得出来；网页上还没做的步骤画成小圆点，不画圆圈，免得看起来像能点的按钮：
 
 | 符号 | 意思 | | 符号 | 意思 |
 |:-:|---|---|:-:|---|

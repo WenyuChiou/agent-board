@@ -886,6 +886,148 @@ test('the terminal board quarantines torn ledgers and rebuilds captured identiti
   }
 })
 
+// A virus scanner or indexer can hold the ledger for a moment on Windows (#696): the
+// rename is refused, then lands after a short wait, instead of failing the press. The
+// refusal here is a stubbed rename, not a held file: it stands in for the transient
+// EPERM the scanner gives, so the retry itself runs on every system, while the test
+// below it holds the file open for real on Windows. The tick rewrites the ledger (the
+// answered question's record changes); a hide writes only the hidden list, and the
+// default file's choice question has no tickable step, so neither would meet the rename.
+const HAND_FILE = '# Progress\n\n## demo\n### Hand task\n- [?] Ship it, OK?\n'
+test('a ledger rename refused for a moment waits and lands instead of failing the press', () => {
+  const seed = chatRun(['--keys', ''], { file: () => HAND_FILE, inspect: questionFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const original = JSON.parse(seed.files['progress-questions.json'])
+  assert.equal(original.records.length, 1)
+  const inspect = dir => ({ ...questionFiles(dir), progress: readFileSync(join(dir, 'progress.md'), 'utf8') })
+  const ran = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    // Four refusals: the three tight retries of the old code all meet one, and the
+    // rename after the waits is the one that lands.
+    preload: questionFault(`let refused = 0
+const originalRename = fs.renameSync
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === ledger && refused < 4) {
+    refused += 1
+    throw Object.assign(new Error('synthetic held ledger'), { code: 'EPERM' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.progress.includes('- [x] Ship it, OK?'), ran.progress)
+  assert.notEqual(ran.files['progress-questions.json'], seed.files['progress-questions.json'], 'the tick rewrote the ledger')
+})
+
+test('a refused rename retry rechecks the destination and preserves another writer\'s progress or question update', () => {
+  const seed = chatRun(['--keys', ''], { file: () => HAND_FILE, inspect: questionFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const peerFile = '# Progress\n\n## demo\n### Concurrent task\n- [?] Keep peer question, OK?\n'
+  const peerAnswered = chatRun(['--keys', 'x'], { file: () => peerFile, inspect: questionFiles })
+  assert.equal(peerAnswered.status, 0, peerAnswered.stderr)
+  const peerRecord = JSON.parse(peerAnswered.files['progress-questions.json']).records[0]
+  assert.equal(peerRecord.isWaiting, false)
+  const concurrentLedger = JSON.stringify({
+    ...JSON.parse(seed.files['progress-questions.json']),
+    records: [...JSON.parse(seed.files['progress-questions.json']).records, peerRecord],
+  })
+  const inspect = dir => ({
+    ...questionFiles(dir),
+    progress: readFileSync(join(dir, 'progress.md'), 'utf8'),
+    temps: readdirSync(dir).filter(name => name.endsWith('.board-tmp')),
+  })
+
+  // 1. A refused progress rename preserves another writer's task and the requested tick.
+  const progressRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+let refused = false
+fs.renameSync = (from, to, ...rest) => {
+  if (!refused && String(to) === progress) {
+    refused = true
+    fs.writeFileSync(progress, fs.readFileSync(progress, 'utf8') + '\\n### Concurrent task\\n- [~] Added while progress rename was refused\\n')
+    throw Object.assign(new Error('synthetic held progress'), { code: 'EPERM' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(progressRan.status, 0, progressRan.stderr)
+  assert.ok(progressRan.progress.includes('- [x] Ship it, OK?'), progressRan.progress)
+  assert.ok(progressRan.progress.includes('### Concurrent task\n- [~] Added while progress rename was refused'), progressRan.progress)
+  assert.deepEqual(progressRan.temps, [])
+
+  // 2. A refused question-ledger rename preserves a concurrent question update and the requested answer,
+  // without running the missing-ledger fallback or leaving stale temp files.
+  const ledgerRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+const originalLink = fs.linkSync
+const originalSpawn = cp.spawnSync
+const probe = { links: 0, moves: 0, sources: [] }
+let refused = false
+fs.linkSync = (from, to) => {
+  if (String(to) === ledger && String(from).endsWith('.board-tmp')) probe.links += 1
+  return originalLink(from, to)
+}
+cp.spawnSync = (tool, argv, options) => {
+  if (Array.isArray(argv) && argv.some(arg => String(arg).includes('.board-tmp'))) probe.moves += 1
+  return originalSpawn(tool, argv, options)
+}
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === ledger && fs.readFileSync(progress, 'utf8').includes('- [x] Ship it, OK?')) {
+    probe.sources.push(path.basename(String(from)))
+    if (!refused) {
+      refused = true
+      fs.writeFileSync(ledger, ${JSON.stringify(concurrentLedger)})
+      throw Object.assign(new Error('synthetic held ledger'), { code: 'EPERM' })
+    }
+  }
+  return originalRename(from, to, ...rest)
+}
+process.on('exit', () => fs.writeFileSync(ledger + '.probe', JSON.stringify(probe)))`),
+  })
+  assert.equal(ledgerRan.status, 0, ledgerRan.stderr)
+  const finalLedger = JSON.parse(ledgerRan.files['progress-questions.json'])
+  const tickedRecord = finalLedger.records.find(one => one.words.includes('Ship it'))
+  const concurrentRecord = finalLedger.records.find(one => one.words.includes('Keep peer question'))
+  assert.ok(tickedRecord, ledgerRan.files['progress-questions.json'])
+  assert.equal(tickedRecord.isWaiting, false)
+  assert.ok(concurrentRecord, ledgerRan.files['progress-questions.json'])
+  const probe = JSON.parse(ledgerRan.files['progress-questions.json.probe'])
+  assert.equal(probe.links, 0)
+  assert.equal(probe.moves, 0)
+  assert.equal(probe.sources.length, 2)
+  assert.notEqual(probe.sources[0], probe.sources[1], 'the stale temp was discarded and a fresh temp was written from current contents')
+  assert.deepEqual(ledgerRan.temps, [])
+
+  // 3. A changed destination after a refused rename does not count a replacement or run onReplaced:
+  // if the restarted rewrite then fails persistently, the journal line is still rolled back.
+  const rollbackRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+let refused = false
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === progress) {
+    if (!refused) {
+      refused = true
+      fs.writeFileSync(progress, fs.readFileSync(progress, 'utf8') + '\\n### Concurrent task\\n- [~] Still preserved\\n')
+      throw Object.assign(new Error('synthetic held progress'), { code: 'EPERM' })
+    }
+    throw Object.assign(new Error('persistent progress refusal'), { code: 'EACCES' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(rollbackRan.status, 1)
+  assert.match(rollbackRan.stdout + rollbackRan.stderr, /nothing was changed/)
+  assert.ok(rollbackRan.progress.includes('- [?] Ship it, OK?'), rollbackRan.progress)
+  assert.ok(rollbackRan.progress.includes('### Concurrent task\n- [~] Still preserved'), rollbackRan.progress)
+  assert.deepEqual(rollbackRan.temps, [])
+})
+
 test('the terminal board preserves unknown JSON ledgers and never overwrites a quarantine collision', () => {
   const unknown = '{"version":99,"future":"keep these bytes"}\n'
   const kept = chatRun(['--keys', 'down h'], { beside: { 'progress-questions.json': unknown }, inspect: questionFiles })
@@ -2561,7 +2703,7 @@ test('served questions keep hidden identities across reordered reports and a fre
 test('the terminal board and the page retire a resolution once the agent ticks its step', { timeout: 30_000 }, async () => {
   for (const surface of ['terminal', 'page']) {
     const dir = surface === 'terminal' ? mkdtempSync(join(tmpdir(), 'board-resolve-')) : null
-    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true }) }
+    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
     try {
       const script = join(board.dir, 'agent-board.mjs')
       if (surface === 'terminal') writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: board.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
@@ -2787,7 +2929,7 @@ test('ticking the next step from the page still works when the step list folded 
 
 const relayFragment = (at, state = 'waiting', step = '- [?] Ship it Friday, OK?') => `## launch\n<!-- auto session=c0ffee12 agent=muse state=${state} updated=${at} -->\n### Draft the launch post\n${step}\n<!-- /auto session=c0ffee12 -->`
 
-test('Connect a web chat copies the prompt in the guide, and a block filled in from it is accepted', { timeout: 30_000 }, async () => {
+test('a block filled in from the web-chat guide is accepted', { timeout: 30_000 }, async () => {
   // Run the actual CLI sources in the scratch directory, before the maintainer rebuilds the bundle.
   const root = new URL('../', import.meta.url).href
   const source = `import { registerHooks, stripTypeScriptTypes } from 'node:module'
@@ -2807,15 +2949,6 @@ await import(${JSON.stringify(new URL('../scripts/board-cli.ts', import.meta.url
     assert.equal(home.status, 200, home.body)
     const guide = readFileSync(new URL('../docs/REMOTE_REPORTERS.md', import.meta.url), 'utf8').replaceAll('\r\n', '\n')
     const prompt = guide.split('### Chat relay: a prompt to paste')[1].split('```text\n')[1].split('\n```')[0]
-    const encoded = home.body.match(/<script type="application\/json" id="relay-prompt">([\s\S]*?)<\/script>/)?.[1]
-    assert.ok(encoded)
-    assert.ok(!encoded.includes('<'))
-    assert.equal(JSON.parse(encoded), prompt)
-    const dom = await pageDom(home.body, redesignModel(), { clipboard: true })
-    dom.node('connect-web-chat').click()
-    await dom.settle()
-    assert.deepEqual(dom.copied, [prompt])
-    assert.ok(dom.node('.pfoot').textContent.includes(EN.webChatCopied))
     // One second in the past: the board refuses any source time ahead of its own clock, and this test's
     // process and the board's can read a few milliseconds apart on Windows (#954).
     const text = prompt.slice(prompt.indexOf('## <project>'), prompt.indexOf('<!-- /auto session=<ID> -->') + '<!-- /auto session=<ID> -->'.length)
@@ -3237,6 +3370,24 @@ test('with explicit legacy opt-in a reply goes into a closed Grok session once, 
   }
 })
 
+test('a press on the page still acts after a block above its card grows, so its lines moved (#1170)', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const { call, path, rowOf } = board
+    const row = await rowOf('Pick the cache')
+    assert.equal(row.canArchive, true)
+    // Another task is written above the card after the page drew it: every line below moves down.
+    const grown = readFileSync(path, 'utf8').replace('## api-gateway\n', '## Notes\n### Read the logs\n- [ ] Open the file\n- [ ] Find the error\n\n## api-gateway\n')
+    writeFileSync(path, grown)
+    const archived = await call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: row.session, fp: row.fp } })
+    assert.equal(archived.status, 200, archived.body)
+    assert.ok(!readFileSync(path, 'utf8').includes('b2c3d4e5'))
+    assert.ok(readFileSync(path, 'utf8').includes('### Read the logs'))
+  } finally {
+    await board.close()
+  }
+})
+
 test('a press on the page for a task whose block another session took under the same title is refused, and nothing is archived until the page draws the block that is there now', { timeout: 30_000 }, async () => {
   const board = await page()
   try {
@@ -3359,7 +3510,10 @@ const viewed = model => {
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
 // `width`: the window's width in pixels (the page folds and moves its sidebar by it); `storage`: a Map behind localStorage;
 // `motion`: 'reduce' or 'full', what the person's system asks for (left out: the page never moves, as in the other tests).
-const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now } = {}) => {
+// The stub now reads every static button with its attributes (#1163). The bulk tidy's confirm and
+// cancel start disabled and wait for a preview, online or not, so the offline checks leave them out.
+const WAITS_FOR_PREVIEW = ['tidy-confirm', 'tidy-cancel']
+const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now, notification, sessionStore, onReload, onFocus } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -3377,6 +3531,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       nodes.set(value, this)
     }
     get id() { return this.attributes.id ?? '' }
+    get hidden() { return 'hidden' in this.attributes }
+    set hidden(value) { if (value) this.attributes.hidden = ''; else delete this.attributes.hidden }
     get tagName() { return this.tag.toUpperCase() }
     set textContent(value) {
       this.textWrites += 1
@@ -3429,13 +3585,17 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     }
     click() {
       if (this.disabled) return
-      this.events.click?.()
+      this.events.click?.({ target: this })
       if (this.tag === 'summary' && this.parentNode?.tag === 'details') {
         this.parentNode.open = !this.parentNode.open
         this.parentNode.events.toggle?.()
       }
     }
     focus() { document.activeElement = this }
+    closest(selector) {
+      for (let node = this; node; node = node.parentNode) if (matches(node, selector)) return node
+      return null
+    }
     blur() { if (document.activeElement === this) document.activeElement = null }
     scrollIntoView() { this.scrolled = true }
     setSelectionRange() {}
@@ -3446,16 +3606,10 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     return nodes.get(id)
   }
   get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
-  const relay = html.match(/<script[^>]*id="relay-prompt"[^>]*>([\s\S]*?)<\/script>/)
-  if (relay) get('relay-prompt').textContent = relay[1]
-  for (const id of ['connect-web-chat', 'import-clipboard']) {
-    if (!html.includes(`id="${id}"`)) continue
-    get(id).tag = 'button'
-    get('.pfoot').appendChild(get(id))
-  }
   get('.pfoot').appendChild(get('close'))
   for (const id of ['close']) get(id).tag = 'button'
   const matches = (node, selector) => {
+    if (selector.includes(',')) return selector.split(',').some(one => matches(node, one.trim()))
     if (selector === 'button') return node.tag === 'button'
     if (selector === 'button:not([data-local])') return node.tag === 'button' && node.getAttribute('data-local') === null
     if (selector === 'button[data-static]') return node.tag === 'button' && node.getAttribute('data-static') !== null
@@ -3469,12 +3623,13 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   for (const found of html.matchAll(/<button\b([^>]*)>/g)) {
     const id = found[1].match(/id="([^"]+)"/)?.[1]
     if (!id) continue
-    for (const attr of ['data-local', 'data-static']) if (found[1].includes(attr)) get(id).setAttribute(attr, '')
+    get(id).tag = 'button'
+    for (const attr of found[1].matchAll(/([\w-]+)(?:="([^"]*)")?/g)) get(id).setAttribute(attr[1], attr[2] ?? '')
   }
   const copied = []
   const copies = []
   const document = {
-    getElementById: id => ['relay-prompt', 'connect-web-chat', 'import-clipboard'].includes(id) && !nodes.has(id) ? null : get(id),
+    getElementById: id => get(id),
     createElement: tag => new Element(tag),
     createTextNode: text => {
       const node = new Element('text')
@@ -3487,9 +3642,27 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     title: '',
     hidden: false,
     events: {},
-    addEventListener(name, run) { this.events[name] = run },
+    addEventListener(name, run) {
+      const previous = this.events[name]
+      this.events[name] = event => { previous?.(event); run(event) }
+    },
     body: new Element('body'),
     execCommand: () => { copies.push(document.body.childNodes.find(node => node.tag === 'textarea')?.value); return copyAllowed },
+  }
+  // Parse the static Settings controls too, so tests exercise the rendered panel's real order.
+  // Only the panel: the static controls after it (the bulk tidy, the footer) stay out, as before Settings.
+  const settingsMarkup = html.match(/<div id="settings"[\s\S]*?<p id="settings-result"[^>]*><\/p><\/div><\/div>/)?.[0] ?? ''
+  const parents = [document.body]
+  for (const token of settingsMarkup.matchAll(/<\/?([a-z][\w-]*)\b([^>]*)>|([^<]+)/g)) {
+    if (token[3]) { parents.at(-1).text += token[3]; continue }
+    if (token[0].startsWith('</')) { parents.pop(); continue }
+    const attrs = Object.fromEntries([...token[2].matchAll(/([\w-]+)(?:="([^"]*)")?/g)].map(one => [one[1], one[2] ?? '']))
+    const node = attrs.id ? get(attrs.id) : new Element(token[1])
+    node.tag = token[1]
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value)
+    if ('hidden' in attrs) node.hidden = true
+    parents.at(-1).appendChild(node)
+    if (!token[0].endsWith('/>')) parents.push(node)
   }
   let model = viewed(first)
   let clockNow = now === undefined ? Date.now() : now
@@ -3498,6 +3671,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   const windowEvents = {}
   const win = {
     confirm, isSecureContext: !!clipboard,
+    focus: onFocus,
+    location: { reload: onReload },
     ...(width === undefined ? {} : { innerWidth: width, addEventListener: (name, run) => { windowEvents[name] = run } }),
     ...(motion === undefined ? {} : { matchMedia: () => ({ matches: motion === 'reduce', addEventListener: () => {} }) }),
   }
@@ -3512,6 +3687,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     URLSearchParams,
     navigator: clipboard ? { clipboard: { writeText: async text => { copied.push(text) }, ...(readClipboard ? { readText: readClipboard } : {}) } } : {},
     window: win,
+    ...(notification === undefined ? {} : { Notification: notification }),
+    ...(sessionStore === undefined ? {} : { sessionStorage: { getItem: key => sessionStore.get(key), setItem: (key, value) => sessionStore.set(key, value), removeItem: key => sessionStore.delete(key) } }),
     ...(storage === undefined ? {} : { localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { storage.set(key, value) }, removeItem: key => { storage.delete(key) } } }),
     ...(motion === undefined ? {} : { requestAnimationFrame: run => { run(); return 1 } }),
     crypto: { randomUUID: () => `synthetic-offline-attempt-${requests.length}` },
@@ -3634,12 +3811,13 @@ test('the serve page and the terminal board answer every action with a visible l
       dom.boxes().forEach(box => { box.value = 'A synthetic reply' })
       const button = dom.buttons()[index]
       const key = pageCard(button).getAttribute('data-card-key')
+      if (button.className === 'answer-send') selectAnswer(pageCard(button), 'Yes')
       button.click()
       await dom.flush()
       await dom.flush()
       // An answer that copies has its own failure line; the other copies show the text in a box to copy from.
       const isInCard = (() => { for (let node = button; node; node = node.parentNode) if (node.tag === 'article') return true; return false })()
-      const isAnswer = label.startsWith('Copy "') || label === words.pgCopyAnswer && isInCard
+      const isAnswer = button.className === 'answer-send' || label === words.pgCopyAnswer && isInCard
       const isCopy = isAnswer || /Copy/.test(label)
       // Read the board again at once so the offline advice becomes the plain failure.
       if (!isCopy) await dom.redraw(model)
@@ -3678,6 +3856,15 @@ const PRESS_KINDS = ['needs-you', 'live-ask', 'stopped', 'unknown-session', 'blo
 const PRESS_CELLS = PRESS_HOSTS.flatMap(agent => ['own', 'other'].flatMap(source => PRESS_KINDS.map(kind => ({ agent, source, kind, title: `${kind} ${agent} ${source}` }))))
 const PRESS_NOW = Date.parse('2026-10-17T09:00:00Z')
 const pressWalk = node => [node, ...node.childNodes.flatMap(pressWalk)]
+const selectAnswer = (card, answer) => {
+  const nodes = pressWalk(card)
+  const choice = nodes.find(node => node.className === 'choice' && node.textContent === answer)
+  const send = nodes.find(node => node.className === 'answer-send')
+  assert.ok(choice, `missing choice ${answer}`)
+  assert.ok(send, 'missing answer send button')
+  choice.click()
+  return send
+}
 
 // Exercise the generated entry point's real actions without launching its interactive loop.
 // Only the external clipboard and filesystem boundaries are replaced during an action.
@@ -3832,7 +4019,8 @@ const pressRuntime = async () => {
         syncBuiltinESMExports()
         process.exitCode = 0
         assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep))
-        rmSync(root, { recursive: true, force: true })
+        // A held file on Windows refuses the delete; retry it the way the page fixture does (#991).
+        rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
       },
     }
   } catch (error) {
@@ -3844,7 +4032,7 @@ const pressRuntime = async () => {
     fs.unlinkSync = originalUnlink
     childProcess.spawnSync = originalSpawn
     syncBuiltinESMExports()
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     throw error
   }
 }
@@ -4014,11 +4202,16 @@ test('every serve page action on every card kind from every agent answers with a
         } })
         // The line after a copy (Copy again, Answered) only exists once something was copied; it is not an offered action.
         const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain, runtime.s.pgAnswered]
-        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent))
+        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent)).flatMap(button =>
+          button.className === 'answer-send'
+            ? pressWalk(pageCard(button)).filter(node => node.className === 'choice').map(choice => ({ button, choice }))
+            : [{ button, choice: null }],
+        )
         assert.equal(actionButtons.length, projected.expected, `${cell.title}: exact offered button set`)
         dom.boxes().forEach(box => { box.value = 'Synthetic reply' })
-        const button = actionButtons[index]
+        const { button, choice } = actionButtons[index] ?? {}
         assert.ok(button, `${cell.title}: button ${index}`)
+        if (choice) choice.click()
         button.click()
         await dom.flush(); await dom.flush()
         const key = pageCard(button).getAttribute('data-card-key')
@@ -4026,7 +4219,7 @@ test('every serve page action on every card kind from every agent answers with a
         const label = key === 'recent' ? runtime.s.pgDone : card?.task || card?.title || card?.project
         assert.notEqual(label, undefined, `${cell.title}: the original card has a label`)
         const results = pageHasCard(refreshed, key) ? pageCardResults(dom, key) : pageLostResults(dom, label)
-        const context = `${cell.title} / ${button.textContent} / ${failing ? 'refused' : 'normal'}`
+        const context = `${cell.title} / ${choice?.textContent ?? button.textContent} / ${failing ? 'refused' : 'normal'}`
         if (serverNote !== undefined) {
           const result = results.find(node => node.text === serverNote)
           assert.ok(result, `${context}: the complete result line stays beside its card`)
@@ -4041,14 +4234,14 @@ test('every serve page action on every card kind from every agent answers with a
         } else {
           // An answer copied from a card has its own failure line and, on success, the card's line about where to paste.
           const isInCard = (() => { for (let node = button; node; node = node.parentNode) if (node.tag === 'article') return true; return false })()
-          const isAnswer = button.textContent.startsWith('Copy "') || button.textContent === runtime.s.pgCopyAnswer && isInCard
+          const isAnswer = !!choice || button.textContent === runtime.s.pgCopyAnswer && isInCard
           const expected = failing ? isAnswer ? runtime.s.pgCopyFailed : runtime.s.boardCopyFailedBelow : runtime.s.copied
           if (isAnswer && !failing) assert.ok(!results.some(node => node.textContent), `${context}: the card says where to paste, not a result line`)
           else assert.ok(results.some(node => node.textContent === expected), context)
           {
             const text = button.textContent === runtime.s.serveCopyResume ? projected.ask?.reopen ?? projected.row?.resume
               : button.textContent === runtime.s.serveCopyCommand ? projected.ask?.command : button.textContent === runtime.s.pgCopyAnswer ? 'Synthetic reply'
-                : button.textContent.startsWith('Copy "') ? button.textContent.slice(6, -1) : button.textContent
+                : choice ? choice.textContent : button.textContent
             assert.deepEqual(dom.copies, [text], `${context}: exact text reached the clipboard`)
             if (failing && !isAnswer) assert.ok(results.some(node => node.childNodes.some(child => child.tag === 'textarea' && child.value === text && child.isSelected)), context)
           }
@@ -4094,6 +4287,71 @@ test('a press on the terminal board shows its result under the pressed card', as
     assert.equal(footer.at(-1), 'Page opened')
     assert.match(footer.at(-2), /[↑↓]/)
   } finally { fixture.close() }
+})
+
+// A virus scanner or indexer can hold the ledger for a moment on Windows (#696), and the
+// rename onto it is refused until the hold lifts. This holds the ledger open the way a
+// scanner does — readable, but not renameable — and the press still lands. The rename
+// count proves the hold was in the rename's way: a rename that lands on the first try
+// means the hold was never there, and the test proved nothing.
+test('a press whose ledger is held open for a moment still lands on Windows', { skip: process.platform !== 'win32' && 'Windows file holds only', timeout: 60_000 }, async () => {
+  const fixture = await pressRuntime()
+  const { runtime } = fixture
+  const ledger = join(fixture.root, 'progress-questions.json')
+  const marker = join(fixture.root, 'ledger-held')
+  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const quote = text => `'${text.replaceAll("'", "''")}'`
+  let holder = null
+  try {
+    // A hand-kept question, ticked: the tick answers it, so the next view rewrites the
+    // ledger, which is the rename the hold must meet.
+    let found = null
+    for (const cell of PRESS_CELLS.filter(one => one.kind === 'hand-kept')) {
+      fixture.reset(cell)
+      const view = runtime.view()
+      const items = runtime.boardItems(view, runtime.pending(), true, true)
+      const item = pressItemFor(items, cell.title)
+      if (item === undefined) continue
+      if (!pressKeysFor(item).includes('x')) continue
+      found = { cell, items, item }
+      break
+    }
+    assert.ok(found, 'a tickable hand-kept question is offered')
+    const { items, item } = found
+    const at = items.indexOf(item)
+    const state = runtime.pinned({ ...runtime.emptyBoardState, selected: at, isIdleOpen: true, isOlderOpen: true }, items)
+    const offered = runtime.boardKey(state, 'x', items, runtime.s)
+    assert.equal(offered.action?.type, 'tick')
+    // Count the ledger renames from here: the search above may already have rewritten
+    // it, and only the renames under the hold prove anything.
+    let ledgerRenames = 0
+    const patchedRename = fs.renameSync
+    fs.renameSync = (from, to, ...rest) => {
+      if (resolve(String(to)) === resolve(ledger)) ledgerRenames += 1
+      return patchedRename(from, to, ...rest)
+    }
+    syncBuiltinESMExports()
+    // Readable, but not renameable, for 500 ms: inside the waits the rename allows, and
+    // long past the three tight retries that used to meet the hold.
+    let holderErr = ''
+    holder = spawn(powershell, ['-NoProfile', '-NonInteractive', '-Command',
+      `$fs = [System.IO.File]::Open(${quote(ledger)}, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read); [System.IO.File]::WriteAllText(${quote(marker)}, 'held'); Start-Sleep -Milliseconds 500; $fs.Close()`],
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    holder.stderr.on('data', chunk => { holderErr += chunk })
+    for (let tries = 0; !existsSync(marker) && tries < 300; tries++) await delay(100)
+    assert.ok(existsSync(marker), `the holder never took hold: ${holderErr}`)
+    const pressed = runtime.press(state, 'x')
+    assert.equal(pressed.state.note, pressExpected(runtime, offered.action), 'the tick lands while the ledger is held')
+    runtime.view()
+    pressChanged(fixture, offered.action, 'held ledger tick')
+    assert.ok(ledgerRenames >= 2, `the hold was in the rename's way: ${ledgerRenames} ledger renames`)
+    const exited = holder.exitCode !== null ? Promise.resolve() : new Promise(resolve => holder.once('exit', resolve))
+    await Promise.race([exited, delay(10_000)])
+    assert.ok(holder.exitCode !== null, 'the holder is still running')
+  } finally {
+    if (holder !== null && holder.exitCode === null) holder.kill()
+    fixture.close()
+  }
 })
 
 test('a long press result under a card wraps to the width instead of being cut', async () => {
@@ -4781,7 +5039,8 @@ test('L5 restarted server: an old page tab disables its buttons and says how to 
           await dom.settle()
         }
         assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).every(button => button.disabled), `${lang}: ${failure}`)
-        assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') !== null).every(button => !button.disabled))
+        const stuck = dom.allButtons().filter(button => button.getAttribute('data-local') !== null && button.className !== 'answer-send' && !WAITS_FOR_PREVIEW.includes(button.id) && button.disabled)
+        assert.deepEqual(stuck.map(button => button.id || button.className), [], `${lang}: ${failure}: local controls stay enabled`)
         assert.equal(dom.node('offline').textContent, line)
         // The line stays in view under the header while the page scrolls, with a rule under it.
         assert.match(html, /#offline\{[^}]*position:sticky;top:0;/)
@@ -4860,12 +5119,16 @@ test('an old page tab keeps its copy buttons working while the board is unreacha
     await dom.settle()
     const local = dom.allButtons().filter(button => button.getAttribute('data-local') !== null)
     assert.ok(local.length >= 6, 'reply, answers, command and both resume buttons are local')
-    assert.ok(local.every(button => !button.disabled), 'copy buttons enabled')
+    assert.ok(local.filter(button => button.className !== 'answer-send' && !WAITS_FOR_PREVIEW.includes(button.id)).every(button => !button.disabled), 'local controls enabled')
     assert.ok(dom.allButtons().filter(button => !local.includes(button)).every(button => button.disabled), 'server buttons disabled')
-    // The buttons that only open or reveal something (More, Write your own, a row) work without the server too, but copy nothing.
+    const choiceSend = local.find(button => button.className === 'answer-send')
+    assert.equal(choiceSend.disabled, true, 'copy needs a choice even when offline')
+    local.find(button => button.className === 'choice').click()
+    assert.equal(choiceSend.disabled, false)
+    // The buttons that only open or reveal something work without the server too, but copy nothing.
     for (const button of local.filter(button => button.getAttribute('data-nav') === null)) button.click()
     await dom.settle()
-    for (const text of ['Synthetic copied reply', 'synthetic command', 'synthetic resume', 'synthetic row resume', ...ask.answers]) assert.ok(dom.copied.includes(text), text)
+    for (const text of ['Synthetic copied reply', 'synthetic command', 'synthetic resume', 'synthetic row resume', ask.answers[0]]) assert.ok(dom.copied.includes(text), text)
     assert.deepEqual(dom.requests, [])
   } finally { await board.close() }
 })
@@ -5073,6 +5336,58 @@ test('--serve starts the page in the background once, and the next --serve bring
     const again = await board.serve()
     assert.ok(again.includes(url), again)
   } finally { await board.end([url]) }
+})
+
+test('--serve prefers the last port when it is free and falls back to a random port when it is taken (#1164)', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  let url1 = null
+  let url2 = null
+  let url3 = null
+  let dummy = null
+  const closeServer = async url => {
+    if (!url) return
+    const { port, searchParams } = new URL(url)
+    await new Promise(done => {
+      const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+      req.on('error', done)
+      req.end('{}')
+    })
+    for (let tries = 0; existsSync(board.served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
+  }
+  try {
+    const first = await board.serve()
+    url1 = board.urlOf(first)
+    assert.ok(url1, first)
+    const port1 = Number(new URL(url1).port)
+    assert.ok(port1 > 0)
+    await closeServer(url1)
+
+    // Restart: since port1 is free, it should be reused
+    const second = await board.serve()
+    url2 = board.urlOf(second)
+    assert.ok(url2, second)
+    const port2 = Number(new URL(url2).port)
+    assert.equal(port2, port1, 'free last port is reused on restart')
+    await closeServer(url2)
+
+    // Occupy port1 with another listener
+    dummy = createNetServer()
+    await new Promise((done, fail) => {
+      dummy.once('error', fail)
+      dummy.listen(port1, '127.0.0.1', done)
+    })
+
+    // Third start: port1 is busy, server must fall back to a random free port without failing
+    const third = await board.serve()
+    url3 = board.urlOf(third)
+    assert.ok(url3, third)
+    const port3 = Number(new URL(url3).port)
+    assert.ok(port3 > 0)
+    assert.notEqual(port3, port1, 'occupied last port falls back to a free port')
+  } finally {
+    if (dummy !== null) dummy.close()
+    await board.end([url1, url2, url3])
+  }
 })
 
 test('/progress looks for the board script beside a Windows or a POSIX progress path', () => {
@@ -6134,6 +6449,36 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
+// An AI whose sandbox writes only inside its workspace is refused the address folder: the line says so
+// and names the way out, instead of saying the file could not be protected.
+test('Windows page start refused access to its address folder says this AI cannot write there', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  const preload = join(board.dir, 'folder-refused.cjs')
+  writeFileSync(preload, `const fs = require('node:fs'); const original = fs.mkdirSync
+fs.mkdirSync = (path, ...rest) => { if (String(path).toLowerCase() === ${JSON.stringify(folder.toLowerCase())}) throw Object.assign(new Error('synthetic sandbox denial'), { code: 'EPERM' }); return original(path, ...rest) }
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    for (const mode of ['--serve', '--serve-child']) {
+      const ran = spawnSync(process.execPath, [board.script, mode, '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+      assert.equal(ran.status, 1, ran.stderr)
+      assert.equal(mode === '--serve-child' ? ran.stderr.trim() : ran.stdout.trim(), EN.serveRuntimeDenied)
+      assert.ok(!(ran.stdout + ran.stderr).includes(board.dir) && !(ran.stdout + ran.stderr).includes('http:'))
+      assert.ok(!existsSync(board.served))
+    }
+  } finally { await board.end([]) }
+})
+
+test('the refused-access line exists in every language and is not the protect-the-file line', () => {
+  assert.match(EN.serveRuntimeDenied, /sandbox can't write/)
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    assert.ok(words.serveRuntimeDenied && words.serveRuntimeDenied !== words.serveRuntimePrivate)
+    assert.ok(!words.serveRuntimeDenied.includes(words.serveRuntimePrivate), 'the parent tells the two apart by what the child prints')
+  }
+})
+
 // The server child used to stop without a word here, so the command could only say the server
 // did not start; it now names the check that refused (#799).
 test('Windows page start discards a new address file whose owner cannot be set or whose access list is not private, and says why', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
@@ -6967,7 +7312,7 @@ test('with --lan the page also opens on the local network, with a token of its o
   }
 })
 
-test("--serve --lan prints the page's network address and a QR code of it, and a second run gives the same address", { timeout: 60_000 }, async t => {
+test("--serve --lan prints the page's network address, a QR code of it and that the link is unencrypted, and a second run gives the same address", { timeout: 60_000 }, async t => {
   const board = serveIn()
   const urls = []
   const serveLan = () =>
@@ -6984,6 +7329,8 @@ test("--serve --lan prints the page's network address and a QR code of it, and a
     }
     // NO_COLOR: the light modules are the ink, so the code's quiet zone prints as solid lines.
     assert.match(out, /scan this code:\n█{29,}\n█{29,}\n/)
+    // The link is plain HTTP on a shared network, and the output says so (#1146).
+    assert.ok(out.includes(EN.serveLanWarn), out)
     assert.ok(!out.includes('\u001b['))
     const again = await serveLan()
     assert.ok(again.includes(urls[0]), again)
@@ -9241,18 +9588,25 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
     removeAttribute: name => { delete attributes[name] },
     classList: { add: name => classes.add(name), remove: name => classes.delete(name) },
   }
-  // One icon button switches the theme on the live page.
-  const buttons = [...html.matchAll(/<button\b([^>]*data-theme-toggle[^>]*)>/g)].map(found => {
-    assert.match(found[1], /data-local/)
-    const attrs = { ...Object.fromEntries([...found[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]])), 'data-theme-toggle': '' }
-    return { getAttribute: name => attrs[name] ?? null, setAttribute: (name, value) => { attrs[name] = value } }
-  })
+  const node = (tag, raw, flag) => {
+    assert.match(raw, /data-local/)
+    const attrs = { ...Object.fromEntries([...raw.matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]])), [flag]: attrs0(raw, flag) }
+    return { tag, focused: 0, getAttribute: name => attrs[name] ?? null, setAttribute: (name, value) => { attrs[name] = value }, focus() { this.focused += 1 } }
+  }
+  const attrs0 = (raw, flag) => (new RegExp(`${flag}="([^"]*)"`).exec(raw)?.[1] ?? '')
+  // Settings includes the same three themes and progress-bar styles.
+  const buttons = [...html.matchAll(/<button\b([^>]*data-settings-toggle[^>]*)>/g)].map(found => node('button', found[1], 'data-settings-toggle'))
   assert.equal(buttons.length, 1)
+  const themes = [...html.matchAll(/<button\b([^>]*data-theme-set[^>]*)>/g)].map(found => node('button', found[1], 'data-theme-set'))
+  assert.deepEqual(themes.map(item => item.getAttribute('data-theme-set')), ['light', 'dark', 'system'])
+  const styles = [...html.matchAll(/<button\b([^>]*data-bar-set[^>]*)>/g)].map(found => node('button', found[1], 'data-bar-set'))
+  assert.deepEqual(styles.map(item => item.getAttribute('data-bar-set')), ['ink', 'blue', 'green'])
+  const select = selector => selector === '[data-settings-toggle]' ? buttons : selector === '[data-theme-set]' ? themes : []
   const events = {}
   let finish
   runInNewContext(themeScript(html), {
     document: {
-      documentElement: root, querySelectorAll: () => buttons, addEventListener: (name, run) => { events[name] = run },
+      documentElement: root, querySelectorAll: select, addEventListener: (name, run) => { events[name] = run },
       get cookie() { return jar.value },
       set cookie(line) {
         const pair = line.split(';')[0]
@@ -9270,46 +9624,36 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
   }, { timeout: 1000 })
   events.DOMContentLoaded()
   return {
-    attributes, classes, button: buttons[0],
-    toggle: () => events.click({ target: { parentNode: buttons[0] } }),
+    attributes, classes, themes, styles, button: buttons[0],
+    pick: theme => events.click({ target: themes.find(item => item.getAttribute('data-theme-set') === theme) }),
     finish: () => finish(),
   }
 }
 
-test('the serve page offers a light and a dark theme, follows the system until one is picked, and remembers the choice', () => {
+test('Settings offers light, dark and automatic themes, follows the system and remembers the browser choice', () => {
   const html = redesignPage()
   const storage = new Map()
   const jar = { value: '' }
   const dom = themeDom(html, storage, false, jar)
-  // One icon button; a first visit follows the system, and the button names the theme it switches to.
   assert.equal(dom.attributes['data-theme'], undefined)
-  assert.equal(dom.button.getAttribute('data-now'), 'light')
-  assert.equal(dom.button.getAttribute('aria-label'), EN.themeToDark)
-  assert.equal(dom.button.getAttribute('title'), EN.themeToDark)
-  const onDark = themeDom(html, new Map(), false, { value: '' }, 'dark')
-  assert.equal(onDark.button.getAttribute('data-now'), 'dark')
-  assert.equal(onDark.button.getAttribute('aria-label'), EN.themeToLight)
-  dom.toggle()
+  assert.equal(dom.button.getAttribute('aria-haspopup'), 'dialog')
+  assert.deepEqual(dom.themes.map(item => item.getAttribute('aria-checked')), ['false', 'false', 'true'])
+  assert.equal(themeDom(html, new Map(), false, { value: '' }, 'dark').button.getAttribute('data-now'), 'dark')
+  dom.pick('dark')
   assert.equal(storage.get('agent-board.theme'), 'dark')
   assert.equal(dom.attributes['data-theme'], 'dark')
-  assert.equal(dom.button.getAttribute('data-now'), 'dark')
-  assert.equal(dom.button.getAttribute('aria-label'), EN.themeToLight)
+  assert.deepEqual(dom.themes.map(item => item.getAttribute('aria-checked')), ['false', 'true', 'false'])
   assert.ok(dom.classes.has('theming'))
   dom.finish()
   assert.ok(!dom.classes.has('theming'))
-  // The live page starts on a new port each time, with empty storage; the cookie keeps the pick.
   assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], 'dark')
   const reload = themeDom(html, storage, false, jar)
-  assert.equal(reload.attributes['data-theme'], 'dark')
-  reload.toggle()
+  reload.pick('light')
   assert.equal(storage.get('agent-board.theme'), 'light')
-  assert.equal(reload.attributes['data-theme'], 'light')
-  assert.equal(reload.button.getAttribute('aria-label'), EN.themeToDark)
-  // A dark system flips to light on the first press.
-  const first = themeDom(html, new Map(), false, { value: '' }, 'dark')
-  first.toggle()
-  assert.equal(first.attributes['data-theme'], 'light')
-  assert.match(html, /<script nonce="synthetic">[\s\S]*agent-board.theme/)
+  reload.pick('system')
+  assert.equal(storage.has('agent-board.theme'), false)
+  assert.equal(reload.attributes['data-theme'], undefined)
+  assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], undefined)
   assert.match(html, /prefers-reduced-motion:reduce/)
 })
 
@@ -9320,7 +9664,7 @@ test('the theme is applied before the page paints and survives blocked browser s
     assert.ok(!themeScript(html).includes('(function ()'))
     const dom = themeDom(html, new Map(), true)
     assert.equal(dom.attributes['data-theme'], undefined)
-    dom.toggle()
+    dom.pick('dark')
     assert.equal(dom.attributes['data-theme'], 'dark')
     assert.equal(dom.button.getAttribute('data-now'), 'dark')
     assert.equal(themeDom(html, new Map([['agent-board.theme', 'unknown']])).attributes['data-theme'], undefined)
@@ -9471,13 +9815,14 @@ test("every card kind on the page carries its agent's mark", async () => {
   assert.ok(pressWalk(hidden).find(node => node.className === 'c-meta').textContent.includes('Codex'))
 })
 
-test('a question card puts the answer buttons first and the hide button last', async () => {
+test('a question card puts choices before its copy button and the hide button last', async () => {
   const dom = await pageDom(await sourcePage(), cardsModel())
   const card = cardWithKey(dom, 'ask')
   // The answers come first; what More holds follows: the command, the link, the resume command, then Already answered, hide.
-  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), ['Copy "Yes"', 'Copy "No"', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
   const answers = card.childNodes.flatMap(node => pressWalk(node)).find(node => node.className === 'answers')
-  assert.deepEqual(answers.childNodes.map(node => node.textContent).slice(0, 2), ['Copy "Yes"', 'Copy "No"'])
+  assert.deepEqual(answers.childNodes[0].childNodes.slice(0, 2).map(node => node.textContent), ['Yes', 'No'])
+  assert.equal(answers.childNodes.at(-1).getAttribute('aria-label'), EN.pgCopyChoice)
   // The box for the person's own words comes after the answers, and the line after a copy last.
   const kinds = card.childNodes.map(node => pressWalk(node).find(one => ['answers', 'composer', 'state'].includes(one.className))?.className)
   assert.deepEqual(kinds.filter(Boolean), ['answers', 'composer', 'state'])
@@ -9494,7 +9839,8 @@ test('a card with more than three actions shows three and the rest behind More',
   const card = cardWithKey(dom, 'ask')
   const actions = cardActionNodes(card)
   // Three answers show; the command, the link, the resume command and Already answered, hide wait behind More.
-  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), ['Copy "Yes"', 'Copy "No"', 'Copy "Maybe"'])
+  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), ['↑'])
+  assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No', 'Maybe'])
   const more = cardMore(card)
   assert.equal(more.length, 1)
   assert.equal(more[0].getAttribute('aria-expanded'), 'false')
@@ -9507,6 +9853,58 @@ test('a card with more than three actions shows three and the rest behind More',
   assert.ok(cardActionNodes(cardWithKey(dom, 'row')).length > 0)
 })
 
+test('a choose question selects one option and sends it only when its arrow is pressed', async () => {
+  const model = cardsModel()
+  model.asks[0] = { ...model.asks[0], text: 'Choose a colour', answers: ['Blue', 'Green', 'Red', 'Gold'], send: 'send', session: 'synthetic-session' }
+  let release
+  const dom = await pageDom(await sourcePage(), model, { post: () => new Promise(done => { release = () => done({ ok: true, json: async () => ({ ok: true }) }) }) })
+  const card = () => cardWithKey(dom, 'ask')
+  const choices = () => pressWalk(card()).filter(node => node.className === 'choice')
+  const send = () => pressWalk(card()).find(node => node.className === 'answer-send')
+  assert.deepEqual(choices().map(node => node.textContent), ['Blue', 'Green', 'Red', 'Gold'])
+  assert.ok(choices().every(node => node.getAttribute('aria-pressed') === 'false'))
+  assert.equal(send().getAttribute('aria-label'), EN.pgSendChoice)
+  assert.equal(send().textContent, '↑')
+  assert.equal(send().disabled, true)
+  send().click()
+  assert.deepEqual(dom.requests, [])
+  choices()[0].focus()
+  dom.key({ key: ' ' })
+  assert.deepEqual(choices().map(node => node.getAttribute('aria-pressed')), ['true', 'false', 'false', 'false'])
+  assert.equal(send().disabled, false)
+  assert.deepEqual(dom.requests, [])
+  cardMore(card())[0].click()
+  choices()[3].focus()
+  dom.key({ key: 'Enter' })
+  assert.deepEqual(choices().map(node => node.getAttribute('aria-pressed')), ['false', 'false', 'false', 'true'])
+  await dom.redraw(model)
+  assert.deepEqual(choices().map(node => node.getAttribute('aria-pressed')), ['false', 'false', 'false', 'true'])
+  const changed = { ...model, asks: [{ ...model.asks[0], fp: 'changed' }] }
+  await dom.redraw(changed)
+  assert.ok(choices().every(node => node.getAttribute('aria-pressed') === 'false'))
+  assert.equal(send().disabled, true)
+  selectAnswer(card(), 'Gold').click()
+  await dom.flush()
+  assert.deepEqual(dom.requests.map(request => [request.body.type, request.body.text]), [['send', 'Gold']])
+  assert.equal(send().disabled, true)
+  choices()[0].click()
+  send().click()
+  assert.deepEqual(dom.requests.map(request => request.body.text), ['Gold'])
+  release()
+  await dom.settle()
+})
+
+test('a question already sending disables every choice and its send arrow', async () => {
+  for (const mode of ['send', 'connected', 'mailbox']) {
+    const model = cardsModel()
+    model.asks[0] = { ...model.asks[0], answers: ['One', 'Two', 'Three', 'Four'], send: mode, isSending: true }
+    const dom = await pageDom(await sourcePage(), model)
+    const controls = pressWalk(cardWithKey(dom, 'ask'))
+    assert.ok(controls.filter(node => node.className === 'choice').every(node => node.disabled), mode)
+    assert.equal(controls.find(node => node.className === 'answer-send').disabled, true, mode)
+  }
+})
+
 test('a card with nothing behind More shows no More button', async () => {
   const html = await sourcePage()
   for (const canHide of [false, true]) {
@@ -9515,10 +9913,11 @@ test('a card with nothing behind More shows no More button', async () => {
     model.groups[0].rows[0] = { ...model.groups[0].rows[0], resume: null, canConfirm: canHide }
     const dom = await pageDom(html, model)
     const card = cardWithKey(dom, 'ask')
-    // With nothing to hide the two answers are all there is; Already answered, hide alone still goes behind More.
-    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['Copy "Yes"', 'Copy "No"'])
+    // Already answered, hide alone still goes behind More.
+    assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice').map(node => node.textContent), ['Yes', 'No'])
+    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
     assert.equal(cardMore(card).length, canHide ? 1 : 0)
-    assert.equal(cardActionNodes(card).length, canHide ? 3 : 2)
+    assert.equal(cardActionNodes(card).length, canHide ? 2 : 1)
     const row = cardWithKey(dom, 'row')
     assert.equal(cardActionNodes(row).length, canHide ? 2 : 1)
     assert.ok(cardActionNodes(row).every(isPageVisible) || !isPageVisible(row))
@@ -9531,12 +9930,15 @@ test('a question with four answers shows three and keeps the fourth behind More'
   model.asks[0] = { ...model.asks[0], kind: 'choose', answers: ['A', 'B', 'C', 'D'] }
   const dom = await pageDom(await sourcePage(), model)
   const card = cardWithKey(dom, 'ask')
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['Copy "A"', 'Copy "B"', 'Copy "C"'])
+  const visibleChoices = () => pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent)
+  assert.deepEqual(visibleChoices(), ['A', 'B', 'C'])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
   const more = cardMore(card)[0]
   assert.ok(more)
   more.click()
   assert.equal(more.getAttribute('aria-expanded'), 'true')
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['Copy "A"', 'Copy "B"', 'Copy "C"', 'Copy "D"', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(visibleChoices(), ['A', 'B', 'C', 'D'])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
 })
 
 test('More opens and closes by keyboard and keeps its state across a refresh', async () => {
@@ -9767,7 +10169,7 @@ test("the agent row shows each agent's counts and filters the page to that agent
     assert.ok(!sectionWords(dom, 'working').includes('Unblock'), sectionWords(dom, 'working'))
     // An agent with nothing waiting says so; pressing the icon again shows every agent again.
     rowAgent(dom, 'own').click()
-    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestions(EN.pgOwn)), shownWords(dom.node('needs')))
+    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestionsElsewhere(EN.pgOwn, model.view.needs.n)), shownWords(dom.node('needs')))
     rowAgent(dom, 'own').click()
     const all = shownWords(dom.node('needs'))
     assert.ok(all.includes('Blue or green?') && all.includes('Short or detailed?'), all)
@@ -9870,18 +10272,18 @@ test('a reply button on an unconnected question says it copies and the card then
     const dom = await pageDom(html, model, { copyAllowed: true })
     assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
     const card = key => dom.node('needs').querySelectorAll('[data-ref-key]').find(one => shownWords(one).includes(key))
-    // No message button on a question the board cannot send to: every answer is a Copy button.
-    const labels = dom.buttons().map(button => button.textContent)
-    assert.ok(labels.includes(EN.pgCopyReply('Blue')), labels.join())
-    assert.ok(!labels.some(label => label.startsWith('Send "')), labels.join())
+    // A question the board cannot send to has one Copy button for its choices.
+    const labels = dom.buttons().map(button => button.getAttribute('aria-label'))
+    assert.ok(labels.includes(EN.pgCopyChoice), labels.join())
+    assert.ok(!labels.includes(EN.pgSendChoice), labels.join())
     // An agent that is open (Codex has working tasks) is told to paste into it; the answer is copied.
-    dom.buttons().find(button => button.textContent === EN.pgCopyReply('Blue')).click()
+    selectAnswer(card('Blue or green?'), 'Blue').click()
     await dom.settle()
     assert.ok(dom.copies.includes('Blue'))
     assert.deepEqual(dom.requests, [])
     assert.ok(shownWords(card('Blue or green?')).includes(EN.pgPasteIn('Blue', EN.agentNames.codex)), shownWords(card('Blue or green?')))
     // An agent the board has not seen lately is told to paste once it is open again.
-    dom.buttons().find(button => button.textContent === EN.pgCopyReply('Short')).click()
+    selectAnswer(card('Short or detailed?'), 'Short').click()
     await dom.settle()
     assert.ok(shownWords(card('Short or detailed?')).includes(EN.pgPasteLater('Short', EN.agentNames.gemini)), shownWords(card('Short or detailed?')))
     // And the same lines in the other two languages.
@@ -9966,35 +10368,6 @@ test('Ctrl+V in a text field pastes there and imports nothing', async () => {
   }
   await dom.settle()
   assert.equal(dom.requests.length, 0)
-})
-
-test('Import from clipboard posts a block, says when there is none, and says to use Ctrl+V when the browser refuses', async () => {
-  let text = relayFragment(ago(60_000))
-  let isRefused = false
-  const html = await sourcePage()
-  const dom = await pageDom(html, redesignModel(), { clipboard: true, readClipboard: async () => {
-    if (isRefused) throw new Error('Synthetic refusal')
-    return text
-  } })
-  dom.node('import-clipboard').click()
-  await dom.settle()
-  assert.deepEqual(dom.requests, [{ path: '/api/paste', body: { text } }])
-  text = 'not a block'
-  dom.node('import-clipboard').click()
-  await dom.settle()
-  assert.ok(dom.node('.pfoot').textContent.includes(EN.importNoBlock))
-  assert.equal(dom.requests.length, 1)
-  isRefused = true
-  dom.node('import-clipboard').click()
-  await dom.settle()
-  assert.ok(dom.node('.pfoot').textContent.includes(EN.importUseKeys))
-  for (const clipboard of [false, true]) {
-    const missing = await pageDom(html, redesignModel(), { clipboard })
-    missing.node('import-clipboard').click()
-    await missing.settle()
-    assert.ok(missing.node('.pfoot').textContent.includes(EN.importUseKeys))
-    assert.equal(missing.requests.length, 0)
-  }
 })
 
 test('a block the parser would read is posted once while it is on its way, and not at all on a closed page', async () => {
@@ -10101,7 +10474,7 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   // The message is sent: the card says it is sending, then that it was sent; the next board brings the reply.
   let release
   const dom = await pageDom(html, model, { post: () => new Promise(done => { release = () => done({ ok: true, json: async () => ({ note: '' }) }) }) })
-  dom.buttons().find(button => button.textContent === EN.pgSendReply('Yes')).click()
+  selectAnswer(card(dom), 'Yes').click()
   await dom.flush()
   assert.deepEqual(dom.requests.map(request => request.body.text), ['Yes'])
   assert.equal(pageCardResults(dom, 'ask-send')[0].textContent, EN.serveSending(EN.agentNames.codex))
@@ -10114,7 +10487,7 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   assert.ok(shownWords(card(dom)).includes(`${EN.messagesAcknowledged} · Shipped`), shownWords(card(dom)))
   // A message the board refused: the line says so and the card offers Send again and Copy message.
   const refused = await pageDom(html, model, { post: async () => ({ ok: false, json: async () => ({ note: 'Synthetic refusal' }) }) })
-  refused.buttons().find(button => button.textContent === EN.pgSendReply('No')).click()
+  selectAnswer(card(refused), 'No').click()
   await refused.settle()
   const failure = pageCardResults(refused, 'ask-send').find(node => node.textContent.startsWith('Synthetic refusal'))
   assert.ok(failure, pageCardResults(refused, 'ask-send').map(node => node.textContent).join())
@@ -10139,7 +10512,7 @@ test('words sent again after a Claude message went nowhere are a new message, no
   model.asks = [ask]
   const dom = await pageDom(html, model, { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
   const answer = ask.answers[0]
-  const press = () => dom.buttons().find(button => button.textContent === EN.pgSendReply(answer)).click()
+  const press = () => selectAnswer(cardWithKey(dom, ask.key), answer).click()
   const ids = []
   for (const ending of [{ status: 'uncertain', error: 'DISMISSED' }, { status: 'uncertain', error: 'EXPIRED' }, { status: 'rejected', error: 'STOPPED' }, { status: 'acknowledged', error: '' }]) {
     await dom.redraw(model)
@@ -10209,13 +10582,12 @@ test('an agent with no open session shows as offline and its answers copy', asyn
   assert.equal(rowAgent(dom, 'codex').getAttribute('data-presence'), 'open')
   assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label').includes(EN.pgOffline), false)
   // Its question offers Copy, never Send; the card then says to paste once it is open again.
-  const labels = dom.buttons().map(button => button.textContent)
-  assert.ok(labels.includes(EN.pgCopyReply('Yes')), labels.join())
-  assert.ok(!labels.some(label => label.startsWith('Send "')), labels.join())
+  const labels = dom.buttons().map(button => button.getAttribute('aria-label'))
+  assert.ok(labels.includes(EN.pgCopyChoice), labels.join())
+  assert.ok(!labels.includes(EN.pgSendChoice), labels.join())
   const copying = await pageDom(await sourcePage(), model, { copyAllowed: true })
   const card = copying.node('needs').querySelectorAll('[data-ref-key]').find(one => shownWords(one).includes('Beta question'))
-  const yes = pressWalk(card).find(node => node.tag === 'button' && node.textContent === EN.pgCopyReply('Yes'))
-  yes.click()
+  selectAnswer(card, 'Yes').click()
   await copying.settle()
   assert.ok(copying.copies.includes('Yes'))
   assert.ok(shownWords(card).includes(EN.pgPasteLater('Yes', EN.agentNames.gemini)), shownWords(card))
@@ -10529,6 +10901,13 @@ test('a new question from an agent the board does not know by name uses the gene
   assert.equal(awayLine(dom), 'Away for 10 min · 1 agent asked a question')
 })
 
+test('a new question from an agent named like an object member counts as one question (#974)', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-ctor', agent: 'constructor', task: 'Ctor plan', text: 'Ctor, OK?' }] }
+  const dom = await awayAfter(base, later, 10)
+  assert.equal(awayLine(dom), 'Away for 10 min · 1 agent asked a question')
+})
+
 test('new questions from two agents show the agent count', async () => {
   const base = cardsModel('codex')
   const later = {
@@ -10728,6 +11107,25 @@ test('picking a view shows only that section', async () => {
   } finally { await board.close() }
 })
 
+test('with a project filter on, an empty Needs you says how many questions wait elsewhere, not that nothing needs you (#1144)', async () => {
+  const { board, model, html } = await projectBoard()
+  try {
+    const dom = await pageDom(html, model, { width: 1280 })
+    assert.equal(dom.node('count-needs').textContent, '3')
+    sideProject(dom, 'other-fix-project').click()
+    const needs = shownWords(dom.node('needs'))
+    assert.ok(needs.includes(EN.pgNoQuestionsElsewhere('other-fix-project', 3)), needs)
+    assert.ok(!needs.includes(EN.pgNothing), needs)
+    assert.ok(needs.includes(EN.clearFilters), needs)
+    // The project that holds the questions shows them, with no empty line at all.
+    sideProject(dom, 'other-fix-project').click()
+    sideProject(dom, 'shared-fix-project').click()
+    const shared = shownWords(dom.node('needs'))
+    assert.ok(shared.includes('Blue or green?'), shared)
+    assert.ok(!shared.includes(EN.pgNoQuestions('shared-fix-project')) && !shared.includes('more wait elsewhere'), shared)
+  } finally { await board.close() }
+})
+
 test('a project and an agent filter combine', async () => {
   const { board, model, html } = await projectBoard()
   try {
@@ -10748,7 +11146,7 @@ test('a project and an agent filter combine', async () => {
     // A project the pressed agent has nothing in says so; each filter clears on its own.
     sideProject(dom, 'other-fix-project').click()
     assert.deepEqual(open(), ['', '', ''])
-    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestions(EN.agentNames.cursor)), shownWords(dom.node('needs')))
+    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestionsElsewhere(EN.agentNames.cursor, 3)), shownWords(dom.node('needs')))
     sideProject(dom, 'other-fix-project').click()
     assert.equal(sideProject(dom, 'other-fix-project').getAttribute('aria-pressed'), 'false')
     assert.deepEqual(open(), ['1', '', ''])
@@ -10990,7 +11388,7 @@ test('the sidebar and the theme button keep working while the board is unreachab
   assert.equal(dom.node('shell').getAttribute('data-view'), 'needs')
   assert.equal(dom.requests.length, 0)
   const theme = themeDom(html)
-  theme.toggle()
+  theme.pick('dark')
   assert.equal(theme.attributes['data-theme'], 'dark')
 })
 
@@ -11002,12 +11400,17 @@ test('the page uses ink for actions and amber only for what needs you', async ()
   assert.ok(html.includes('--act:var(--ink)') && html.includes('--on-act:var(--surface)') && html.includes('--btn-line:'))
   const primary = rules.find(([selector]) => selector === 'button.primary')[1]
   assert.ok(primary.includes('var(--act)') && primary.includes('var(--on-act)'), primary)
-  // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words and the Needs you view.
-  assert.deepEqual(using('waiting'), ['.badge', '.flag', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
-  assert.deepEqual(using('accent'), [], 'the blue accent is not on the live page')
+  // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words, the Needs you view, and a progress-bar cell for a step that waits on the person (#1085).
+  assert.deepEqual(using('waiting'), ['.badge', '.flag', '.pbar .c-w', '.pbar.cont u.c-w', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
+  // The blue accent is on the live page only when the person picks the Blue progress-bar style (#1085), and on its swatch in the look menu.
+  assert.deepEqual(using('accent'), ['[data-bar="blue"] .pbar .c-x,[data-bar="blue"] .pbar .c-c,[data-bar="blue"] .pbar.cont b,[data-bar="blue"] .pbar.cont u.c-c,[data-sw="blue"] .sw .c-x,[data-sw="blue"] .sw .c-c'], 'the blue accent is only the Blue bar style')
+  // The question card's send arrow is an action, so it is ink on the page colour, like a primary button (#1107).
+  const arrow = rules.find(([selector]) => selector === '.answers button.answer-send')[1]
+  assert.ok(arrow.includes('var(--act)') && arrow.includes('var(--on-act)'), arrow)
   // Green is for what is alive, red for what is wrong, and a finished task is muted.
   assert.ok(html.includes('--alive:var(--done)'))
-  assert.deepEqual(using('alive'), ['.chip.working::after', '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', '.s-agent.working .ag::after', '.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after', '.s-running', '.v-working>svg.i'].sort())
+  // A progress-bar cell for a step that runs (CI, handed over) is alive too (#1085).
+  assert.deepEqual(using('alive'), ['.chip.working::after', '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', '.pbar .c-r', '.pbar.cont u.c-r', '.s-agent.working .ag::after', '.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after', '.s-running', '.v-working>svg.i'].sort())
   for (const selector of ['#offline', '.t-alert', '.badge.bad', '.s-blocked']) assert.ok(using('alert').includes(selector), selector)
   assert.ok(rules.some(([selector, body]) => selector.includes('.s-done') && body.includes('var(--muted)')))
 })
@@ -11028,32 +11431,48 @@ test('buttons keep desktop size in a narrow window with a mouse', async () => {
   assert.ok(narrow.includes('.col{padding-left') && !/\.btn|\.answers button/.test(narrow))
 })
 
-test('the actions at the foot of the sidebar look like buttons, not underlined links', () => {
+test('Close the board uses the quiet button look, the page hit size, and room for its name (#1145)', () => {
   const html = redesignPage()
-  // The owner's rule (product principles): an action is a button. Only GitHub stays a link.
-  const rules = [...html.matchAll(/([^{}]*\.side \.pfoot[^{}]*)\{([^}]*)\}/g)].map(found => ({ selector: found[1], body: found[2] }))
-  const actions = rules.filter(rule => /#close|\.btn\b/.test(rule.selector))
-  assert.ok(actions.length > 0)
-  for (const rule of actions) assert.doesNotMatch(rule.body, /underline|background:transparent|border-color:transparent/, rule.selector)
-  assert.match(html, /\.btn,[^{}]*\.pfoot #close[^{}]*\{[^}]*border:1px solid var\(--btn-line\)/)
-  const foot = html.match(/<footer class="pfoot"[\s\S]*?<\/footer>/)[0]
-  for (const id of ['connect-web-chat', 'import-clipboard', 'close']) assert.match(foot, new RegExp('<button type="button"[^>]*id="' + id + '"'))
+  // Settings' footer button shares the rule (#1163), so the selector may be a list.
+  const rule = html.match(/(?:^|[}\s])\.pfoot #close(?:,\.pfoot #settings-toggle)?\{([^}]*)\}/)[1]
+  assert.match(rule, /(?:^|;)width:auto(?:;|$)/)
+  assert.match(rule, /min-width:var\(--hit\)/)
+  assert.match(rule, /(?:^|;)height:var\(--hit\)/)
+  const touch = mediaBlocks(html, '(pointer:coarse)').join('\n')
+  assert.match(touch, /\.pfoot #close(?:,[^{}]*)?\{[^}]*height:48px;[^}]*min-width:48px/)
+  assert.doesNotMatch(touch, /\.pfoot #close(?:,[^{}]*)?\{(?:[^}]*;)?width:48px/)
+  assert.match(html, /\.icon-btn\{[^}]*background:transparent;[^}]*color:var\(--muted\)/)
 })
 
-test('the sidebar foot actions are small quiet buttons and the version line is quieter', () => {
+test('the sidebar version line is quiet', () => {
   const html = redesignPage()
-  const rule = html.match(/\.side \.pfoot #close,\.side \.pfoot \.btn\{([^}]*)\}/)[1]
-  // The page's smallest text size, a token and not a number; at least 24px tall; still a button.
-  assert.match(rule, /font-size:var\(--text-xs\)/)
-  assert.match(rule, /color:var\(--muted\)/)
-  const height = Number(rule.match(/min-height:(\d+)px/)[1])
-  assert.ok(height >= 24 && height <= 28, rule)
-  assert.doesNotMatch(rule, /font-size:\d/)
   // The version line takes the smallest size and a colour fainter than the muted one, in both themes (the colour mixes tokens).
   const ver = html.match(/\.ver-link\{([^}]*)\}/)[1]
   assert.match(ver, /font-size:var\(--text-xs\)/)
   assert.match(ver, /color:color-mix\(in srgb,var\(--muted\) \d+%,var\(--surface\)\)/)
   assert.match(html, /\.ver-link svg\.i\{width:12px;height:12px\}/)
+})
+
+test('the page footer has no web-chat or clipboard button and Close the board shows its name in every language (#1145)', async () => {
+  const { servePage } = await sourceBoard()
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    for (const isLan of [false, true]) {
+      const html = servePage(words, 'synthetic', isLan)
+      const foot = html.match(/<footer class="pfoot"[\s\S]*?<\/footer>/)?.[0]
+      assert.ok(foot)
+      for (const id of ['connect-web-chat', 'import-clipboard']) assert.ok(!foot.includes(`id="${id}"`))
+      const close = foot.match(/<button\b([^>]*\bid="close"[^>]*)>([\s\S]*?)<\/button>/)
+      assert.ok(close)
+      assert.match(close[1], /\btype="button"/)
+      assert.match(close[1], /\bclass="icon-btn"/)
+      assert.match(close[1], /\bdata-static\b/)
+      // The name is visible text, so the button needs no aria-label or tooltip.
+      assert.ok(!close[1].includes('aria-label=') && !close[1].includes('title='))
+      const shown = close[2].match(/^<svg class="i"[^>]*aria-hidden="true"><path d="[^"]+"\/><\/svg><span>([^<]+)<\/span>$/)
+      assert.ok(shown)
+      assert.equal(shown[1], words.serveClose)
+    }
+  }
 })
 
 test('a row whose title is its current step shows the step once', async () => {
@@ -11501,9 +11920,9 @@ test('the page of a grouped board draws each question once, copies an answer and
     assert.ok(working.length > 0)
     assert.equal(working.length, model.view.working.length)
     assert.doesNotMatch(drawn, /\b(?:Send|Undo|Message (?:Codex|Gemini|Cursor))\b/)
-    const answer = dom.buttons().find(button => button.textContent === 'Copy "Blue"')
-    assert.ok(answer, drawn)
-    answer.click()
+    const ask = model.asks.find(one => one.text === 'Blue or green?')
+    assert.ok(ask, drawn)
+    selectAnswer(cardWithKey(dom, ask.key), 'Blue').click()
     await dom.settle()
     assert.ok(dom.copies.includes('Blue') || dom.copied.includes('Blue'))
     assert.deepEqual(dom.requests, [])
@@ -12094,12 +12513,13 @@ test('after Send the hide button named by each README is visible without More', 
     const model = cardsModel()
     model.asks[0].send = 'send'
     const dom = await pageDom(html, model, { confirm: () => true, post: async () => ({ ok: true, json: async () => ({ ok: true, note: 'Synthetic sent notice' }) }) })
-    const send = dom.buttons().find(button => button.textContent === words.pgSendReply.replace('\u0001', 'Yes'))
+    const card = pressWalk(dom.node('board')).find(node => node.getAttribute('data-ref-key') === 'ask')
+    const send = selectAnswer(card, 'Yes')
+    assert.equal(send.getAttribute('aria-label'), words.pgSendChoice)
     assert.ok(send)
     send.click()
     await dom.flush()
     await dom.flush()
-    const card = pressWalk(dom.node('board')).find(node => node.getAttribute('data-ref-key') === 'ask')
     const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
     assert.ok(hide, 'the documented hide button is visible after sending')
     assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), readme)
@@ -12107,4 +12527,242 @@ test('after Send the hide button named by each README is visible without More', 
     await dom.flush()
     assert.equal(dom.requests.at(-1).body.type, 'hide')
   }
+})
+
+test('#1085: the page draws a cell per step up to 12, one fill with a mark at the current step above, and the count alone for one step', async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const rowOf = (title, cells, done, total) => ({ ...model.groups[0].rows[0], key: title, title, due: '', cells, done, total, steps: [{ text: 'Synthetic step', status: 'doing', isCurrent: true, line: [{ text: 'Synthetic step' }] }] })
+  model.groups[0].rows = [
+    rowOf('Seven steps', 'xxxx~ -', 4, 6),
+    rowOf('Thirty steps', `x ~${' '.repeat(27)}`, 1, 30),
+    rowOf('One step', '~', 0, 1),
+  ]
+  const dom = await pageDom(html, model)
+  const all = pressWalk(dom.node('board'))
+  const progress = title => {
+    const row = all.find(node => node.tag === 'li' && pressWalk(node).some(one => one.className === 'r-title' && one.textContent === title))
+    assert.ok(row, title)
+    return pressWalk(row).find(node => node.className === 'prog')
+  }
+  const seven = progress('Seven steps')
+  assert.equal(seven.getAttribute('aria-label'), '4/6 · Synthetic step')
+  const bar = pressWalk(seven).find(node => node.className === 'pbar')
+  assert.equal(bar.getAttribute('aria-hidden'), 'true')
+  assert.deepEqual(bar.childNodes.map(node => node.className), ['c-x', 'c-x', 'c-x', 'c-x', 'c-c', 'c-t', 'c-n'])
+  assert.equal(pressWalk(seven).find(node => node.className === 'pcount').textContent, '4/6')
+  const thirty = pressWalk(progress('Thirty steps')).find(node => node.className === 'pbar cont')
+  const [fill, mark] = thirty.childNodes
+  assert.equal(fill.style.width, '3.3%')
+  // The mark sits at the [~] step (the third), not at the open step before it.
+  assert.equal(mark.className, 'c-c')
+  assert.equal(mark.style.left, 'calc(6.7% - 1px)')
+  const one = progress('One step')
+  assert.equal(pressWalk(one).some(node => String(node.className).startsWith('pbar')), false)
+  assert.equal(pressWalk(one).find(node => node.className === 'pcount').textContent, '0/1')
+})
+
+test('#1085: a style picked on the page is written to the settings file with its other keys, served at once, and a bad pick or an unreadable file changes nothing', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const settings = join(board.dir, 'progress-settings.json')
+    writeFileSync(settings, '{"historyDays":3}')
+    assert.equal((await board.call('GET', '/api/board')).json().barStyle, 'ink')
+    const picked = await board.call('POST', '/api/style', { body: { style: 'green' } })
+    assert.equal(picked.status, 200)
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green' })
+    // Served at once: the server keeps its own pick without waiting for its 10-second read.
+    assert.equal((await board.call('GET', '/api/board')).json().barStyle, 'green')
+    for (const body of [{ style: 'pink' }, { style: 3 }, {}]) assert.equal((await board.call('POST', '/api/style', { body })).status, 400)
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green' })
+    writeFileSync(settings, '{"historyDays":3,')
+    assert.equal((await board.call('POST', '/api/style', { body: { style: 'blue' } })).status, 409)
+    assert.equal(readFileSync(settings, 'utf8'), '{"historyDays":3,')
+  } finally { await board.close() }
+})
+
+test('Settings has one labelled button and three accessible sections in every language and keeps focus inside until closed', async () => {
+  for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
+    const html = await sourcePage(lang)
+    assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
+    assert.doesNotMatch(html, /data-theme-toggle|data-look-menu/)
+    assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
+    const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
+    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 3)
+    const dom = await pageDom(html, redesignModel(), { width: 375 })
+    assert.equal(dom.node('settings').hidden, true)
+    dom.node('settings-toggle').click()
+    assert.equal(dom.node('settings').hidden, false)
+    assert.equal(dom.node('shell').inert, true)
+    assert.equal(dom.active(), dom.node('settings-close'))
+    let prevented = false
+    dom.node('settings-lang').focus()
+    dom.key({ key: 'Tab', shiftKey: true, preventDefault: () => { prevented = true } })
+    assert.equal(prevented, false, 'normal Tab moves through the panel')
+    dom.node('settings-close').focus()
+    dom.key({ key: 'Tab', shiftKey: true, preventDefault: () => { prevented = true } })
+    assert.equal(prevented, true)
+    assert.notEqual(dom.active(), dom.node('settings-toggle'), 'Shift+Tab remains in the panel')
+    dom.key({ key: 'Escape', preventDefault() {} })
+    assert.equal(dom.node('settings').hidden, true)
+    assert.equal(dom.node('shell').inert, false)
+    assert.equal(dom.active(), dom.node('settings-toggle'))
+    dom.node('settings-toggle').click()
+    dom.node('settings-close').click()
+    assert.equal(dom.active(), dom.node('settings-toggle'))
+  }
+})
+
+test('Settings language in the file beats baked and system language, --lang beats the file, and Automatic follows the system', () => {
+  const code = `process.env.LANG = 'zh-CN'\n${BOARD_SCRIPT}`
+  const saved = { 'progress-settings.json': '{"lang":"en"}' }
+  assert.ok(run('zh-TW', [], saved, FILE, code).startsWith('Progress'))
+  assert.ok(run('en', [], { 'progress-settings.json': '{"lang":"zh-TW"}' }, FILE, code).startsWith('進度'))
+  assert.ok(run('en', [], { 'progress-settings.json': '{"lang":"zh-CN"}' }, FILE, code).startsWith('进度'))
+  assert.ok(run('en', ['--lang', 'zh-TW'], saved, FILE, code).startsWith('進度'))
+  assert.ok(run('zh-TW', [], { 'progress-settings.json': '{"lang":"auto"}' }, FILE, code).startsWith('进度'))
+  assert.ok(run('zh-TW', ['--lang', 'auto'], saved, FILE, code).startsWith('进度'))
+  assert.ok(run('zh-TW', [], { 'progress-settings.json': '{"lang":"unknown"}' }, FILE, code).startsWith('進度'))
+  assert.ok(run('zh-TW', [], {}, FILE, code).startsWith('進度'))
+  assert.ok(run('', [], {}, FILE, code).startsWith('进度'))
+})
+
+test('Settings language saves alongside other keys, reloads the running page, localizes later actions and refuses damaged settings', { timeout: 30_000 }, async () => {
+  const board = await page('', { LANG: 'zh-TW' })
+  try {
+    const settings = join(board.dir, 'progress-settings.json')
+    writeFileSync(settings, '{"historyDays":3,"style":"green"}')
+    for (const [lang, words] of [['zh-CN', ZH_CN], ['zh-TW', ZH_TW], ['en', EN], ['auto', ZH_TW]]) {
+      const picked = await board.call('POST', '/api/language', { body: { lang } })
+      assert.equal(picked.status, 200)
+      assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green', lang })
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      assert.ok(html.includes(`<h2 id="settings-title">${words.settingsTitle}</h2>`))
+      assert.ok(html.includes(`<option value="${lang}" selected>`))
+      assert.equal((await board.call('GET', '/api/board')).json().lang, lang)
+      assert.equal((await board.call('POST', '/api/style', { body: { style: 'wrong' } })).json().note, words.pressFailed)
+    }
+    for (const lang of ['wrong', 3, null, {}, 'zh']) assert.equal((await board.call('POST', '/api/language', { body: { lang } })).status, 400)
+    for (const damaged of ['{"historyDays":3,', 'null', '[]']) {
+      writeFileSync(settings, damaged)
+      const failed = await board.call('POST', '/api/language', { body: { lang: 'en' } })
+      assert.equal(failed.status, 409)
+      assert.equal(failed.json().note, ZH_TW.barStyleUnreadable)
+      assert.equal(readFileSync(settings, 'utf8'), damaged)
+    }
+  } finally { await board.close() }
+})
+
+test('Settings shows the setup language the board uses when no language is saved, not Automatic', { timeout: 30_000 }, async () => {
+  // The helper's board script holds English from setup; the system says Traditional Chinese.
+  const board = await page('', { LANG: 'zh-TW' })
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    assert.ok(html.includes('<option value="en" selected>'), 'the setup language is the one shown')
+    assert.ok(!html.includes('<option value="auto" selected>'))
+  } finally { await board.close() }
+})
+
+test('Settings language reloads after a successful change, restores its notice, and reports a failed write without reloading', async () => {
+  const html = await sourcePage()
+  const sessionStore = new Map()
+  let reloads = 0
+  let isOk = true
+  const dom = await pageDom(html, redesignModel(), {
+    sessionStore, onReload: () => { reloads += 1 },
+    post: async request => {
+      assert.equal(request.path, '/api/language')
+      return { ok: isOk, json: async () => ({ note: isOk ? EN.settingsLanguageChanged : EN.barStyleUnreadable }) }
+    },
+  })
+  dom.node('settings-lang').value = 'zh-TW'
+  dom.node('settings-lang').events.change()
+  await dom.settle()
+  assert.equal(reloads, 1)
+  assert.deepEqual(dom.requests[0].body, { lang: 'zh-TW' })
+  const reloaded = await pageDom(await sourcePage('zh-TW'), redesignModel(), { sessionStore })
+  assert.equal(reloaded.node('settings').hidden, false)
+  assert.equal(reloaded.node('settings-result').textContent, ZH_TW.settingsLanguageChanged)
+  isOk = false
+  dom.node('settings-lang').value = 'zh-CN'
+  dom.node('settings-lang').events.change()
+  await dom.settle()
+  assert.equal(reloads, 1)
+  assert.equal(dom.node('settings-result').textContent, EN.barStyleUnreadable)
+  assert.equal(dom.node('settings-lang').value, 'zh-TW', 'a failed write restores the last saved choice')
+  assert.equal(dom.node('settings-lang').disabled, false)
+})
+
+test('Settings notifications start off, ask permission once, notify each new waiting card once across reloads and focus the page on a click', async () => {
+  const notices = []
+  let prompts = 0
+  let focuses = 0
+  class Notification {
+    static permission = 'default'
+    static async requestPermission() { prompts += 1; this.permission = 'granted'; return 'granted' }
+    constructor(title, options) { this.title = title; this.options = options; notices.push(this) }
+    close() { this.closed = true }
+  }
+  const storage = new Map()
+  const model = redesignModel()
+  model.asks = [{ ...model.asks[0], questionId: 'settings-question-one', agent: 'codex', text: 'Review this change?', isSending: false }]
+  const html = await sourcePage()
+  const dom = await pageDom(html, model, { storage, notification: Notification, onFocus: () => { focuses += 1 } })
+  assert.equal(notices.length, 0)
+  assert.equal(dom.node('settings-notify').getAttribute('aria-checked'), 'false')
+  dom.node('settings-notify').click()
+  await dom.flush()
+  assert.equal(prompts, 1)
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0].title, 'Review this change?')
+  assert.equal(notices[0].options.body, 'Codex')
+  notices[0].onclick()
+  assert.equal(focuses, 1)
+  assert.equal(notices[0].closed, true)
+  await dom.redraw(model)
+  assert.equal(notices.length, 1)
+  const reloaded = await pageDom(html, model, { storage, notification: Notification })
+  assert.equal(notices.length, 1)
+  assert.equal(prompts, 1)
+  const approval = { ...model, asks: [...model.asks, { ...model.asks[0], key: 'new-approval', questionId: 'settings-approval-two', text: 'Approve this change?' }] }
+  await reloaded.redraw(approval)
+  assert.equal(notices.length, 2)
+  await reloaded.redraw(approval)
+  assert.equal(notices.length, 2)
+  reloaded.node('settings-notify').click()
+  assert.equal(storage.get('agent-board.notifications'), 'off')
+})
+
+test('Settings notifications stay off after denial or dismissal without another prompt and unavailable phone notifications are hidden', async () => {
+  for (const answer of ['denied', 'default']) {
+    let prompts = 0
+    class Notification {
+      static permission = 'default'
+      static async requestPermission() { prompts += 1; this.permission = answer; return answer }
+    }
+    const storage = new Map()
+    const html = await sourcePage()
+    const dom = await pageDom(html, redesignModel(), { storage, notification: Notification })
+    dom.node('settings-notify').click()
+    await dom.flush()
+    assert.equal(dom.node('settings-notify').getAttribute('aria-checked'), 'false')
+    if (answer === 'denied') assert.equal(dom.node('settings-result').textContent, EN.settingsDenied)
+    dom.node('settings-notify').click()
+    await dom.flush()
+    const reload = await pageDom(html, redesignModel(), { storage, notification: Notification })
+    reload.node('settings-notify').click()
+    await reload.flush()
+    assert.equal(prompts, 1)
+    assert.equal(storage.get('agent-board.notifications'), 'off')
+  }
+  const { servePage } = await sourceBoard()
+  const phone = await pageDom(servePage(EN, 'synthetic', true), redesignModel())
+  assert.equal(phone.node('settings-notifications').hidden, true)
+  class InsecureNotification {
+    static permission = 'denied'
+    static async requestPermission() { throw Error('an insecure phone must not ask') }
+  }
+  const insecure = await pageDom(servePage(EN, 'synthetic', true), redesignModel(), { notification: InsecureNotification })
+  assert.equal(insecure.node('settings-notifications').hidden, true)
 })

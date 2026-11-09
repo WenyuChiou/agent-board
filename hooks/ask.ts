@@ -19,19 +19,26 @@ export type Ask = { kind: AskKind; options: string[]; command: string | null; li
 
 // The words are matched in Chinese (繁 and 简) and English alike, whichever the pane speaks.
 const CHOICE = /(.+?)\s*(?:還是|还是|或是|\bor\b)\s*(.+?)[？?]/i
-// Every CHOICE match contains one of these markers at a word boundary, so a text without
-// any of them cannot hold a choice and the lazy CHOICE scan is skipped. A text with a
-// marker still runs CHOICE, which decides; this test only ever skips a certain miss.
+// Bare 或 also occurs inside words, so it has its own short, question-bounded scan.
+const BARE_CHOICE = /(^|[？?])([^？?]{1,80}?)或(?!是|許|许|者|然|以上|以下|以內|以内|以外|以後|以后|更多|更少)([^？?]{1,80})([？?]|$)/
+// Skip each scan when its marker is absent, including 或 inside common words.
 const CHOICE_MARKER = /(?:還是|还是|或是|\bor\b)/i
+// 或以上 and 或更多 set a bound (`Node 18 或以上？`), not a choice.
+const BARE_MARKER = /或(?!是|許|许|者|然|以上|以下|以內|以内|以外|以後|以后|更多|更少)/
 const CONFIRM =
-  /(嗎|吗|可以嗎|可以吗|好嗎|好吗|要不要|可不可以|是否|\bok\?|\bokay\?)\s*[？?]?\s*$|^(可以|要不要|能不能)|^(shall i|should i|can i|may i|is it ok|ok to)\b/i
+  /(嗎|吗|可以嗎|可以吗|好嗎|好吗|要不要|可不可以|是否|\bok\?|\bokay\?)\s*[？?]?\s*$|^(可以|要不要|能不能|是否)|^(shall i|should i|can i|may i|is it ok|ok to)\b/i
 const DO =
   /^(請|请|please)?\s*(在|到|去|幫我|帮我)?.{0,8}(跑|執行|执行|按|點|点|建立|建|登入|登录|安裝|安装|設定|设置|下載|下载|上傳|上传|貼|贴|開啟|开启|打開|打开|授權|授权|簽|签|寄|送出|push|run|install|click|log ?in|sign in|create|open|paste|set up)/i
 const REVIEW = /(看一下|看看|檢查|检查|確認一下|确认一下|過目|过目|review|預覽|预览|校對|校对|讀一下|读一下|take a look|look at|check)/i
 const WAIT = /^(等|在等|waiting for|waiting on|wait for|等待)/i
-// An English yes/no question: it opens with an auxiliary or an action and ends with `?`.
+// An English yes/no question opens with an auxiliary or an action; a suffix can say yes/no explicitly.
 const YES_NO =
-  /^(is|are|can|could|should|shall|may|do|does|did|will|would|ok|okay|push|merge|deploy|ship|delete|remove|proceed|continue|go ahead|approve|publish|release)\b[^?]*\?\s*$/i
+  /^(is|are|can|could|should|shall|may|do|does|did|will|would|ok|okay|push|merge|deploy|ship|delete|remove|proceed|continue|go ahead|approve|publish|release|ready|want)\b[^?]*\?\s*$|\(\s*(?:y\s*\/\s*n|yes\s*\/\s*no|是\s*\/\s*否)\s*\)\s*$/i
+// An agent often says what it did first and asks last (`我改了 3 個檔案。是否繼續？`): the last sentence asks too.
+const isYesNo = (words: string): boolean => {
+  const last = (words.split(/(?<=[。！!；;]|\.\s)/).map(one => one.trim()).filter(one => one !== '').at(-1) ?? words).trim()
+  return CONFIRM.test(words) || YES_NO.test(words) || (last !== words.trim() && (CONFIRM.test(last) || YES_NO.test(last)))
+}
 const INPUT = /(提供|給我|给我|告訴我|告诉我|哪個|哪个|哪裡|哪里|多少|什麼|什么|幾|几|名稱|名称|路徑|路径|帳號|账号|金鑰|密钥|\bkey\b|token|網址|网址|which|where|what|how many|name of|path)/i
 const URL = /https?:\/\/\S+/
 const CODE = /`([^`]+)`/
@@ -61,20 +68,121 @@ const questionWords = (text: string): string => {
   return question
 }
 
+// An English choice that opens with a question word keeps the whole question frame in
+// its first option (`Should the retry limit be 3` for `Should the retry limit be 3 or 5?`),
+// and the button then sends that frame as the person's answer. Each frame below leaves
+// the option itself after a verb the option directly follows, so an imperative
+// (`Keep the old screenshots`) and a lead with no such verb (`Should I set the limit to 3`)
+// stay whole. An infinitive after `want` stays whole except for the tool after `want to use`.
+const QUESTION_FRAMES = [
+  // `Should the retry limit be 3` — the option follows the copula. The copula must be
+  // the question's main verb: the scan stops at a word that opens a subordinate clause
+  // (`that`, `which`, `who`, `if`, …), so a copula buried in a relative or conditional
+  // clause (`files that are backed up`) never strips. A leading `that` is the subject
+  // itself (`Should that file be deleted`), not a clause. Words that head a noun-phrase
+  // modifier (`after`, `before`, `as`) are not clause openers and do not stop the scan.
+  /^(?:should|shall|can|could|may|might|will|would|do|does|did|is|are|was|were)\b(?:\s*that\s+)?(?:(?!\b(?:that|which|who|whom|whose|if|when|while|where|because|unless|although|though)\b).)*?\b(?:be|is|are|was|were)\s+/i,
+  // `Is it 3` — the option follows a pronoun subject.
+  /^(?:is|are|was|were)\s+(?:it|this|that|they|he|she|we|you|i)\s+/i,
+  // `Do you want to use React` — the option follows the requested tool.
+  /^(?:do|does|did|would|will|shall|should|can|could|may|might)\s+(?:you|we|they|he|she|it|i)\s+want\s+to\s+use\s+/i,
+  // `Do you want 3` — the option is the verb's direct object.
+  /^(?:do|does|did|would|will|shall|should|can|could|may|might)\s+(?:you|we|they|he|she|it|i)\s+(?:want|prefer|like|need|choose|pick|take|use)\b\s+(?!to\b)/i,
+  // `Which do you prefer 3` — the same direct object after a which-clause.
+  /^which\b[^,]*?\b(?:prefer|like|want|choose|pick|need)\b\s+(?!to\b)/i,
+]
+const stripQuestionFrame = (lead: string): string => {
+  for (const frame of QUESTION_FRAMES) {
+    const stripped = lead.replace(frame, '').trim()
+    if (stripped !== '' && stripped !== lead) return stripped
+  }
+  return lead
+}
+
+// The lead-in goes whole: 是否要用 and 要不要 never leave 否要用 or 不要 on the first button.
+const firstOption = (text: string): string =>
+  stripQuestionFrame(text)
+    .replace(/^(?:請問|请问)?\s*(?:你|您)?\s*(?:是否要用|是否要|要不要用|想要用|想用|要用|選擇|选择|是否|要不要|想要|要|用|選|选|是)\s*/, '')
+    .trim()
+
+// Options are parallel: when the first is one word, the words after the last option's first word and a
+// preposition are the question's shared context (`MySQL or Postgres for the DB?`).
+const SHARED_TAIL = /^(\S+)\s+(?:for|in|on|with|to|at|as|from|into|via)\s+\S.*$/i
+const pairedLast = (first: string, last: string): string => /^[^\s㐀-鿿]+$/.test(first) ? last.replace(SHARED_TAIL, '$1') : last
+
+const lastOption = (text: string): string => {
+  const option = text.trim()
+  // These common nouns end in the same characters as question particles.
+  const isNoun = /(?:毛呢|(?:酒|網|网|氧|清|書|书|水|茶|餐|咖啡)吧)$/.test(option)
+  const withoutParticle = isNoun ? option : option.replace(/[呢嗎吗吧]$/, '').trim()
+  return withoutParticle || option
+}
+
+// A list item never opens like a clause or a question: a subject, an auxiliary, a question
+// word or a joining word marks the words before the list (`Which size`, `If it fails`).
+const CLAUSE_OPENING =
+  /^(?:i|we|you|he|she|they|should|shall|can|could|may|might|will|would|do|does|did|is|are|was|were|which|what|how|who|where|when|why|whether|if|once|after|before|since|because|unless|although|though|while|so|then|but|and)\b/i
+const CJK = /[㐀-鿿]/
+// `Small, medium, large or huge?` and `A、B 還是 C？` list every option before the last one
+// (#1111). The list is the run after the last colon or full stop: items split at `、`, or at
+// commas in a text with no Chinese (where a comma joins clauses). Short words opening a
+// question (`Which size, small, medium or large?`) lead it and are dropped. A comma also
+// follows a lead-in (`Great, ship or hold?`, `Tests pass, merge now or wait?`), so a comma
+// run is a list only with three items before `or`, a comma before `or`, or a question that
+// opens it. Anything else, such as a clause (`A first, or B?`, `先開旗標，還是全部開？`), is
+// not a list: null.
+const listBefore = (before: string): string[] | null => {
+  const run = (before.split(/[：:；;。]/).at(-1) ?? '').trim()
+  const isListed = run.includes('、')
+  if (!isListed && (CJK.test(run) || !run.includes(','))) return null
+  const items = run.split(isListed ? '、' : ',').map(one => one.trim())
+  const isSerial = items.at(-1) === ''
+  if (isSerial) items.pop()
+  const first = firstOption(items[0] ?? '')
+  const isAsked = first !== items[0] || CLAUSE_OPENING.test(first)
+  if (first === items[0] && CLAUSE_OPENING.test(first)) {
+    if (first.split(/\s+/).length > 4) return null
+    items.shift()
+  } else items[0] = first
+  const isItem = (one: string): boolean => one !== '' && one.length <= 40 && one.split(/\s+/).length <= 4 && !CLAUSE_OPENING.test(one)
+  const isList = isListed || items.length >= 3 || isSerial || isAsked
+  return isList && items.length >= 2 && items.every(isItem) ? items : null
+}
+
 // Splits `0.6.0 還是 1.0.0？` or a list Claude gave into options. The first option is the
 // clause right before 還是 / or, so `先開旗標，還是全部開？` and `A first, or B?` read too.
 const optionsOf = (text: string): string[] => {
-  if (!CHOICE_MARKER.test(text)) return []
-  const match = CHOICE.exec(text)
+  const hasChoice = CHOICE_MARKER.test(text)
+  const hasBareChoice = BARE_MARKER.test(text)
+  if (!hasChoice && !hasBareChoice) return []
+  const match = hasChoice ? CHOICE.exec(text) : null
+  const bare = hasBareChoice ? BARE_CHOICE.exec(text) : null
+  if (bare !== null && (bare[1] !== '' || bare[4] !== '')) {
+    const before = bare[2] ?? ''
+    const after = bare[3] ?? ''
+    const clauses = before.split(/[，,：:；;。]/).map(one => one.trim()).filter(one => one !== '')
+    const options = [firstOption(clauses.at(-1) ?? ''), lastOption(after)]
+    // The words after 或 stay in one clause: a 或 in a statement never pairs with a later sentence's ？.
+    const isOneClause = !/[，,。；;：:]|是否|要不要|[嗎吗]./.test(after)
+    // 「可以刪除分支或標籤嗎？」 and 「是否同意條款或隱私政策？」 ask for permission over both, not which one.
+    const isPermission = /^(?:請問|请问)?\s*(?:你|您)?\s*(?:可以|能不能|可不可以|能否|可否|是否(?:同意|允許|允许|需要|可以|能))/.test(clauses.at(-1) ?? '')
+    const isShort = options.every(one => one !== '' && one.length <= 40)
+    const isSingle = !CHOICE_MARKER.test(before) && !CHOICE_MARKER.test(after) && !before.includes('或') && !after.includes('或')
+    const isEarlier = match === null || bare.index + (bare[1]?.length ?? 0) + before.length < match.index + (match[1]?.length ?? 0)
+    if (isOneClause && !isPermission && isShort && isSingle && isEarlier) return options
+  }
   if (match === null) return []
+  const listed = listBefore(match[1] ?? '')
+  if (listed !== null) return [...listed, lastOption(match[2] ?? '')].filter(one => one !== '')
   const clauses = (match[1] ?? '')
     .split(/[，,：:；;。]/)
     .map(one => one.trim())
     .filter(one => one !== '')
   const lead = clauses[clauses.length - 1] ?? ''
-  const rest = (match[2] ?? '').trim()
+  const rest = lastOption(match[2] ?? '')
   // Reply length must not turn a real choice into a yes/no question; interfaces clip labels.
-  return [lead.replace(/^(要|用|選|是)/, '').trim(), rest].filter(one => one !== '')
+  const first = firstOption(lead)
+  return [first, pairedLast(first, rest)].filter(one => one !== '')
 }
 
 // A note that opens by asking for a look or an action. These are stricter than REVIEW and DO, which
@@ -85,7 +193,7 @@ const NOTE_ACT = /^(請|请|please\s+)?\s*(在|到|去|幫我|帮我)?\s*(跑|�
 // options the note already yielded, so the choice scan is not run twice for one note.
 const noteDecides = (note: string, fromNote: string[]): boolean =>
   note !== '' && fromNote.length < 2 &&
-  (CONFIRM.test(note) || YES_NO.test(note) || URL.test(note) || CODE.test(note) || NOTE_LOOK.test(note) || NOTE_ACT.test(note))
+  (isYesNo(note) || URL.test(note) || CODE.test(note) || NOTE_LOOK.test(note) || NOTE_ACT.test(note))
 
 // The question is read before the note, and the first of them with two options is used; a lone
 // option reads as before, from the note when there is one, else from the question.
@@ -123,7 +231,7 @@ export const askOf = (
   let kind: AskKind = 'reply'
   if (WAIT.test(noteWords) || (noteWords === '' && WAIT.test(subjectWords))) kind = 'wait'
   else if (options.length >= 2) kind = 'choose'
-  else if (CONFIRM.test(words) || YES_NO.test(words)) kind = 'confirm'
+  else if (isYesNo(words)) kind = 'confirm'
   else if (link !== null || REVIEW.test(words)) kind = 'review'
   else if (command !== null || DO.test(words)) kind = 'do'
   else if (INPUT.test(words)) kind = 'input'

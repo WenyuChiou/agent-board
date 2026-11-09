@@ -2,11 +2,11 @@ import assert from 'node:assert/strict'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
-import { pageFixture } from './page-reader-fixture.mjs'
+import { pageFixture, PAGE_NOW } from './page-reader-fixture.mjs'
 
 test('a page poll that catches its shared state mid-write keeps processed inbox files excluded', async () => {
-  const name = 'codex-turn-1793793600000-1.json'
-  const state = { version: 1, inboxDone: { [name]: 'synthetic:1793793600000' }, store: 0, pruned: {} }
+  const name = `codex-turn-${PAGE_NOW}-1.json`
+  const state = { version: 1, inboxDone: { [name]: `synthetic:${PAGE_NOW}` }, store: 0, pruned: {} }
   const fixture = await pageFixture('', { [name]: JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', last_assistant_message: 'Publish the synthetic build?' }) }, state)
   try {
     assert.equal((await fixture.api()).counts.waiting, 0)
@@ -18,7 +18,7 @@ test('a page poll that catches its shared state mid-write keeps processed inbox 
 })
 
 test('a page poll that catches its shared state mid-write keeps its measured storage notices', async () => {
-  const state = { version: 1, inboxDone: {}, store: 2 * 1024 * 1024, pruned: { '2026-11-04': { agent: 2, mirror: 3 } } }
+  const state = { version: 1, inboxDone: {}, store: 2 * 1024 * 1024, pruned: { [new Date(PAGE_NOW).toISOString().slice(0, 10)]: { agent: 2, mirror: 3 } } }
   const fixture = await pageFixture('', {}, state)
   try {
     const before = await fixture.api()

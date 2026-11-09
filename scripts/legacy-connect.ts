@@ -1,10 +1,11 @@
-import { reporterPs1, reporterSh, agentHooks, setupOwnership, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
+import { reporterPs1, reporterSh, agentHooks, setupOwnership, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHermesHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
 import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
 import { codexApproval } from './codex-approval'
 import type { CodexCheck, CodexFound } from './codex-approval'
 import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback'
+import { hermesHome as defaultHermesHome } from '../hooks/hermes-home'
 import { sha256 } from '../hooks/sha256'
 import { hookWorker } from '../hooks/hook-safety'
 import { boardPromptHelper, boardRequestWords } from '../hooks/board-commands'
@@ -35,7 +36,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     try { return sha256(readLocal(codexConfig)) } catch { return undefined }
   }
   const grokHome = request.dirs?.grok ?? [home, '.grok'].join(sep)
-  const hermesHome = request.dirs?.hermes ?? [home, '.hermes'].join(sep)
+  const hermesHome = request.dirs?.hermes ?? defaultHermesHome(home, sep, process.env, isWin ? 'win32' : 'posix')
   const openclawHome = request.dirs?.openclaw ?? [home, '.openclaw'].join(sep)
   const opencodeHome = request.dirs?.opencode ?? [home, '.config', 'opencode'].join(sep)
   const folder = path.replace(/[\\/][^\\/]*$/, '')
@@ -107,7 +108,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   // compares the whole file: an edited bundle, old or new, is preserved.
   const knownBoards = (text: string): boolean => Object.values(STRINGS).some(words => text === boardScript(path, words.lang)) || isReleasedBoard(text, path)
   const hasBoard = remove || (sharedFile(board, boardCode, knownBoards))
-  // Antigravity's commands run the board through this worker, which queues a late event under
+  // Antigravity's and Hermes' commands run the board through this worker, which queues a late event under
   // the data folder the board's Codex reports already use (#285). Written once, when needed.
   const worker = folder + sep + HOOK_WORKER
   const workerCode = hookWorker(home, board, boardPromptHelper(boardRequestWords(Object.values(STRINGS))), [home, '.agent-board'].join(sep))
@@ -143,7 +144,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         if (!existsSync(file)) continue
         const before = readLocal(file)
         isReading = false
-        if (before === '' || (!hook.generated && hook.agent !== 'openclaw' && !(hook.agent === 'antigravity' ? before.includes('"agent-board"') : hasOurHook(before)))) continue
+        if (before === '' || (!hook.generated && hook.agent !== 'openclaw' && !(hook.agent === 'antigravity' ? before.includes('"agent-board"') : hook.agent === 'hermes' ? hasOurHermesHook(before) : hasOurHook(before)))) continue
         const after = hook.edit(before, true, previousOutput(file))
         if (after === COLLISION) preserve(file)
         else if (after === null) warn(`removeFailed:${file}`, { message: 'connectRemoveFailed', args: [file] })
@@ -209,9 +210,8 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     }
     // Found, but its reporter or the board script is not ours to run: the problem with that
     // file is named above, and the agent is named as not set up.
-    // Antigravity's commands need the board and its worker, not the reporter; where setup-agent
-    // hooked it, none of ours are written, and neither is the worker.
-    if (!remove && hook.label !== '' && (failed.has(hook.agent) || (hook.agent === 'antigravity' ? !hasInstallerAntigravityHook(readMaybe(hook.file) ?? '') && !hasWorker() : !hasReporter))) {
+    // Antigravity needs the worker, while Hermes needs both its turn reporter and the worker.
+    if (!remove && hook.label !== '' && (failed.has(hook.agent) || (hook.agent === 'antigravity' ? !hasInstallerAntigravityHook(readMaybe(hook.file) ?? '') && !hasWorker() : !hasReporter || hook.agent === 'hermes' && !hasWorker()))) {
       mark(hook, 'failed')
       continue
     }
@@ -380,8 +380,9 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     }
   }
   if (remove) {
-    // The worker stays while Antigravity's hooks that run it could not be taken out.
-    if (!failedLabels.has('Antigravity') && existsSync(worker)) sharedFile(worker, workerCode)
+    // Keep both files while a hook that runs the worker could not be taken out.
+    if (failedLabels.has('Hermes Agent')) canRemoveBoard = false
+    if (!failedLabels.has('Antigravity') && !failedLabels.has('Hermes Agent') && existsSync(worker)) sharedFile(worker, workerCode)
     if (canRemoveBoard) sharedFile(board, boardCode, knownBoards)
     else if (existsSync(board)) warn(`boardRetained:${board}`, { message: 'connectBoardRetained', args: [board] })
   }

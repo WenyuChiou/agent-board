@@ -2,9 +2,12 @@ import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
+import fs from 'node:fs'
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import os from 'node:os'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
 
@@ -288,6 +291,69 @@ test('preflight removes dead owners\' worktrees and folders while keeping live o
     for (const checkout of [orphanCheckout, liveCheckout]) f.run('git', ['worktree', 'remove', '--force', checkout], { cwd: f.cwd })
     await stopUnrelatedProcess(live)
     for (const folder of [orphan, folderOnly, liveFolder, other]) rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  }
+})
+
+test('preflight leaves another account\'s private orphan folders untouched and completes its handover', async t => {
+  const f = mainFixture(t)
+  const dead = await startUnrelatedProcess()
+  const deadPid = dead.pid
+  await stopUnrelatedProcess(dead)
+  const registered = mkdtempSync(join(tmpdir(), `agent-board-preflight-main-${deadPid}-`))
+  const unregistered = mkdtempSync(join(tmpdir(), `agent-board-preflight-main-${deadPid}-`))
+  const checkout = join(registered, 'repo')
+  f.git('worktree', 'add', '--detach', checkout, f.sha)
+  for (const folder of [registered, unregistered]) {
+    chmodSync(folder, 0o700)
+    writeFileSync(join(folder, 'marker'), 'another account')
+  }
+  const keyOf = path => {
+    const key = resolve(path).replaceAll('\\', '/')
+    return process.platform === 'win32' ? key.toLowerCase() : key
+  }
+  const foreign = new Set([registered, unregistered].flatMap(path => [keyOf(path), keyOf(realpathSync.native(path))]))
+  const foreignCheckouts = new Set([keyOf(checkout), keyOf(realpathSync.native(checkout))])
+  const listedCheckout = realpathSync.native(checkout).replaceAll('\\', '/').toLowerCase()
+  const removed = []
+  const readStat = fs.lstatSync
+  const remove = fs.rmSync
+  const account = os.userInfo()
+  const uid = account.uid === -1 ? 1001 : account.uid
+  // Synthetic metadata exercises Unix ownership on every runner without another account or elevated access.
+  const accountMock = t.mock.method(os, 'userInfo', () => ({ ...account, uid }))
+  const statMock = t.mock.method(fs, 'lstatSync', (path, ...args) => {
+    const stat = readStat(path, ...args)
+    return foreign.has(keyOf(path)) ? Object.assign(Object.create(stat), { uid: uid + 1 }) : stat
+  })
+  const removeMock = t.mock.method(fs, 'rmSync', (path, ...args) => {
+    if (foreign.has(keyOf(path))) {
+      removed.push(keyOf(path))
+      throw Object.assign(new Error('synthetic foreign account permissions'), { code: 'EACCES' })
+    }
+    return remove(path, ...args)
+  })
+  syncBuiltinESMExports()
+  try {
+    const checks = await f.check({
+      isNoFetch: false,
+      run: (program, args, options) => {
+        if (program === 'git' && args[0] === 'worktree' && args[1] === 'remove' && foreignCheckouts.has(keyOf(args.at(-1)))) {
+          removed.push(keyOf(checkout))
+          return { status: 1, stdout: '', stderr: 'synthetic foreign account permissions' }
+        }
+        return f.run(program, args, options)
+      },
+    })
+    assert.deepEqual(removed, [])
+    assert.ok(has(checks, 'PASS', `preflight from origin/main ${f.sha}`), JSON.stringify(checks))
+    assert.equal(checks.some(item => item.state === 'FAIL'), false, JSON.stringify(checks))
+    for (const folder of [registered, unregistered]) assert.equal(readFileSync(join(folder, 'marker'), 'utf8'), 'another account')
+    assert.ok(f.git('worktree', 'list', '--porcelain').replaceAll('\\', '/').toLowerCase().includes(listedCheckout))
+  } finally {
+    for (const mock of [accountMock, statMock, removeMock]) mock.mock.restore()
+    syncBuiltinESMExports()
+    f.run('git', ['worktree', 'remove', '--force', checkout], { cwd: f.cwd })
+    for (const folder of [registered, unregistered]) rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
 })
 

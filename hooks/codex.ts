@@ -32,6 +32,8 @@ export type CodexReport = Origin & {
   approvalRevision?: string
   askedRevision?: string
   updated: string
+  // ISO timestamp when a prompt replied to a waiting question in chat (#401).
+  replied?: string
   events?: string[]
   retiredTurns?: string[]
   agent?: LocalAgent
@@ -46,23 +48,31 @@ export const codexEvents = ['SessionStart', 'UserPromptSubmit', 'PermissionReque
 // The plan a tool call carries, as a report input (#922). Codex's update_plan sends
 // `plan: [{step, status}]` and Gemini's write_todos `todos: [{description, status}]`; nothing else of
 // the call is read. Grok Build's todo_write may carry only the changed items, so its list is read from
-// the result, which holds the whole list after the merge (camelCase payload). Null when it is another
-// tool, no session id, or no usable step.
+// the result, which holds the whole list after the merge (camelCase payload). Hermes' todo tool puts
+// that list in extra.result as JSON. Null when it is another tool, no session id, or no usable step.
 const PLAN_MARKS: Record<string, string> = { completed: 'x', in_progress: '~', pending: ' ', cancelled: '-', blocked: '!' }
 const asRecord = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
 export const planReport = (raw: Record<string, unknown>): { session: string; input: { state: 'working'; steps: string[]; planTitle: string } } | null => {
   const isGrok = raw.toolName === 'todo_write'
   const isCodex = raw.tool_name === 'update_plan'
+  const isHermes = raw.tool_name === 'todo' && raw.hook_event_name === 'post_tool_call'
+  const hermesList = (): unknown => {
+    const input = asRecord(raw.tool_input)
+    const result = asRecord(raw.extra).result
+    if (result === undefined) return input.merge === true ? undefined : input.todos
+    if (typeof result !== 'string') return undefined
+    try { return asRecord(JSON.parse(result)).todos } catch { return undefined }
+  }
   // A truncated result is half a list, and a DuplicateId or InvalidArgument result has none.
   const list = isGrok ? (raw.toolResultTruncated === true ? undefined : asRecord(asRecord(raw.toolResult).TodosUpdated).todos)
-    : isCodex ? asRecord(raw.tool_input).plan : raw.tool_name === 'write_todos' ? asRecord(raw.tool_input).todos : undefined
+    : isCodex ? asRecord(raw.tool_input).plan : raw.tool_name === 'write_todos' ? asRecord(raw.tool_input).todos : isHermes ? hermesList() : undefined
   const session = isGrok ? raw.sessionId : raw.session_id
   if (typeof session !== 'string' || !Array.isArray(list)) return null
   const items: { mark: string; text: string }[] = []
   for (const item of list) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) continue
     const one = item as Record<string, unknown>
-    const words = one[isGrok ? 'content' : isCodex ? 'step' : 'description']
+    const words = one[isGrok || isHermes ? 'content' : isCodex ? 'step' : 'description']
     if (typeof words !== 'string') continue
     let text = words.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()
     // The report check refuses a step line over 500 characters, its `- [m] ` marker included: a longer
@@ -121,10 +131,21 @@ const EARLIER_LIFECYCLE_STEPS = [
   '原生 session 活动状态；任务步骤由当前 agent 明确报告',
 ]
 export const LIFECYCLE_STEPS: ReadonlySet<string> = new Set([
-  ...LANGS.flatMap(lang => [STRINGS[lang].codexLifecycle, STRINGS[lang].localAgentLifecycle]),
+  ...LANGS.flatMap(lang => [
+    STRINGS[lang].codexLifecycle,
+    STRINGS[lang].codexLifecycleWorking,
+    STRINGS[lang].localAgentLifecycle,
+    STRINGS[lang].localAgentLifecycleWorking,
+  ]),
   ...EARLIER_LIFECYCLE_STEPS,
 ])
-export const isLifecycleStep = (text: string): boolean => LIFECYCLE_STEPS.has(text.trim())
+export const isLifecycleStep = (text: string): boolean => LIFECYCLE_STEPS.has(text.replace(/^- \[[ x~?!]\] /, '').trim())
+
+export const codexLifecycleStep = (state: string, s: Strings): string =>
+  state === 'working' ? `- [ ] ${s.codexLifecycleWorking}` : `- [ ] ${s.codexLifecycle}`
+
+export const localAgentLifecycleStep = (state: string, s: Strings): string =>
+  state === 'working' ? `- [ ] ${s.localAgentLifecycleWorking}` : `- [ ] ${s.localAgentLifecycle}`
 
 // The hook keeps one line so the ledger sees the same words when a prompt answers it.
 export const questionSteps = (held: readonly string[], previousAsked: number | undefined, state: unknown, value: unknown, isBoardPrompt = false, previousRevision?: string): { steps: string[]; asked: number | undefined; askedRevision: string | undefined } => {
@@ -138,7 +159,8 @@ export const questionSteps = (held: readonly string[], previousAsked: number | u
     // Hosts may deliver the same closing question again after Stop or an idle status.
     // Only a changed question or a slot closed by a real prompt begins a new incarnation.
     if (asked === undefined || steps[asked] !== `- [?] ${question}`) askedRevision = nextRevision(askedRevision)
-    if (asked === undefined) asked = steps.length
+    // A model that already reported the question as its own [?] step keeps that one line.
+    if (asked === undefined) asked = steps.includes(`- [?] ${question}`) ? steps.indexOf(`- [?] ${question}`) : steps.length
     steps[asked] = `- [?] ${question}`
   }
   return { steps, asked, askedRevision }
@@ -155,14 +177,28 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   if (event !== 'SessionStart' && event !== 'SessionEnd' && turn === null) throw new Error('MISSING_TURN')
   const key = `${String(event)}:${turn ?? ''}`
   if (turn && previous?.retiredTurns?.includes(turn)) throw new Error('STALE_TURN')
+  const isClosingQuestion = event === 'Stop' && typeof input.question === 'string' && input.question.trim() !== ''
   // Cursor can send its reply after Stop with the same generation id.
-  if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest' && !(event === 'Stop' && typeof input.question === 'string' && input.question.trim() !== '')) return previous
+  if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest' && !isClosingQuestion) return previous
   if (previous?.turn && turn && previous.turn !== turn && event !== 'UserPromptSubmit') throw new Error('STALE_TURN')
   const working = event === 'UserPromptSubmit'
-  const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' ? 'done' : 'waiting'
+  const isHumanPrompt = working && input.prompt_submitted !== false
+  if (isHumanPrompt && previous?.asked !== undefined) {
+    const promptAt = Date.parse(now)
+    const questionAt = Date.parse(previous.updated)
+    // A prompt with no time of its own, or one older than the question, changes nothing (#401).
+    if (!Number.isFinite(promptAt) || promptAt < questionAt) return previous
+  }
+  // A reply that ends on a question waits for the person, even after the model reported its own steps done.
+  const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' && !isClosingQuestion ? 'done' : 'waiting'
   // Keep the hook's own steps in place: the ledger needs to see their original words closed.
   // A session ending does not answer its last question, but it does end an approval.
-  const held = previous?.steps ?? [`- [ ] ${s.codexLifecycle}`]
+  const placeholder = codexLifecycleStep(state, s)
+  const held = !Array.isArray(previous?.steps)
+    ? [placeholder]
+    : previous.steps.map((step, index) =>
+        index === 0 && isLifecycleStep(step) ? placeholder : step
+      )
   const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
   const approvalSteps = held.map((step, index) => event !== 'SessionStart' && index === earlier ? step.replace(/^- \[\?\] /, '- [x] ') : step)
   const { steps, asked, askedRevision } = questionSteps(approvalSteps, previous?.asked, working ? 'working' : event === 'Stop' ? state : 'ended', event === 'Stop' ? input.question : undefined, working && input.prompt_submitted === false, previous?.askedRevision)
@@ -185,7 +221,9 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
     ...(approvalRevision === undefined ? {} : { approvalRevision }),
     ...(askedRevision === undefined ? {} : { askedRevision }),
     updated: now,
-    events: [...(previous?.events ?? []), key].slice(-256),
+    ...(isHumanPrompt && previous?.asked !== undefined ? { replied: now } : {}),
+    // A replayed event keeps the list as it was, so the replay changes no bytes.
+    events: previous?.events?.includes(key) ? previous.events : [...(previous?.events ?? []), key].slice(-256),
     retiredTurns: [...(previous?.retiredTurns ?? []), ...(working && previous?.turn && previous.turn !== turn ? [previous.turn] : [])].slice(-128),
   }
 }
@@ -194,20 +232,34 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
 // additionally retain their separately owned lines, without dropping cache validation.
 const reportSteps = (state: unknown, given: unknown, maximum: number): string[] => {
   if (!['working', 'waiting', 'done', 'ended'].includes(String(state))) throw new Error('INVALID_STATE')
-  if (!Array.isArray(given) || given.length === 0 || given.length > maximum) throw new Error('INVALID_STEPS')
+  if (!Array.isArray(given) || given.length === 0) throw new Error('INVALID_STEPS')
+  const invalid = (step: unknown): never => {
+    let text: string
+    try { text = typeof step === 'string' ? step : JSON.stringify(step) ?? String(step) } catch { text = '<unreadable>' }
+    throw Object.assign(new Error('INVALID_STEP'), { code: 'INVALID_STEP', step: Array.from(text).slice(0, 60).join('') })
+  }
   const steps = given.map(step => {
-    const text = line(step)
-    if (!/^- \[[ x~?>!\-]\] .+/.test(text)) throw new Error('INVALID_STEP')
-    return text
+    let text: string
+    try { text = line(step) } catch { return invalid(step) }
+    const item = /^(?:[-*+]|\d+[.)])\s+(.+)$/.exec(text)?.[1]
+    if (item === undefined) return invalid(step)
+    if (!item.startsWith('[')) return `- [ ] ${item}`
+    const marked = /^\[([ xX~?>!\-])\]\s+(.+)$/.exec(item)
+    if (marked === null) return invalid(step)
+    return `- [${marked[1]!.toLowerCase()}] ${marked[2]}`
   })
   if (state === 'done' && steps.some(step => !/^- \[[x\-]\]/.test(step))) throw new Error('UNFINISHED_STEPS')
-  return steps
+  if (steps.length <= maximum) return steps
+  // Over the limit, a question for the user is never the step left out.
+  let room = maximum - Math.min(maximum, steps.filter(step => step.startsWith('- [?]')).length)
+  return steps.filter(step => step.startsWith('- [?]') || room-- > 0).slice(0, maximum)
 }
 
 export const validateCodexReport = (report: CodexReport, session: string): CodexReport => {
   if (report.session !== session) throw new Error('SESSION_CONFLICT')
   const owned = new Set([report.approval, report.asked].filter((index): index is number =>
     index !== undefined && Number.isInteger(index) && index >= 0 && Array.isArray(report.steps) && index < report.steps.length))
+  if (Array.isArray(report.steps) && report.steps.length > 40 + owned.size) throw new Error('INVALID_STEPS')
   return { ...report, session: line(session), title: line(report.title), project: line(report.project),
     steps: reportSteps(report.state, report.steps, 40 + owned.size) }
 }
@@ -317,7 +369,8 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const resume = RESUME.test(report.session) ? ` resume=${report.session}` : ''
   // Only a run is marked: a person's session is the default, so its block stays as it was.
   const run = report.origin === 'run' ? ` origin=run${report.parent !== undefined && RESUME.test(report.parent) ? ` parent=${report.parent}` : ''}` : ''
-  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${resume}${run} -->`
+  const replied = report.replied ? ` replied=${report.replied}` : ''
+  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${replied}${resume}${run} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const block = [marker, `### ${report.title}`, ...stepLines(report, owner, true), `<!-- /auto session=${id} -->`].join(eol)
   // Use the board's scanner: Markdown examples are not task ownership, and a
