@@ -197,11 +197,11 @@ test('the npm launcher forwards status without a build-comparison notice on ever
 })
 
 test('the status line leaves out hidden questions when answered or questions sidecars exist (#832)', () => {
-  // aaaa1111's question is hidden via answered sidecar; back in working
+  // aaaa1111's question is hidden via answered sidecar; stays waiting, out of working (#1206)
   const answered = { answered: ['aaaa1111 1 First choice?'] }
   const result = run([], { answered })
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(result.stdout, '1 need you · 4 working\n')
+  assert.equal(result.stdout, '1 need you · 3 working\n')
   assert.equal(result.stderr, '')
 })
 
@@ -269,7 +269,7 @@ test('one count across all three surfaces: page, terminal board and --status mat
   const answered = { answered: ['aaaa1111 1 First choice?'] }
   const result = run([], { answered })
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(result.stdout, '1 need you · 4 working\n')
+  assert.equal(result.stdout, '1 need you · 3 working\n')
 
   const { parseProgress } = await import('../hooks/parse.ts')
   const { buildView, parseAnswered } = await import('../hooks/view.ts')
@@ -293,11 +293,11 @@ test('one count across all three surfaces: page, terminal board and --status mat
   const terminalText = boardText(view, [], s, { width: 100, isColor: false })
   const countLine = terminalText.split('\n')[0]
 
-  // 3. Status surface (already verified 1 need you · 4 working)
+  // 3. Status surface (already verified 1 need you · 3 working)
   assert.equal(pageNeeds, 1, 'page needs count matches')
-  assert.equal(pageWorking, 4, 'page working count matches')
+  assert.equal(pageWorking, 3, 'page working count matches')
   assert.ok(countLine.includes('● 1 waiting'), `terminal waiting count line: ${countLine}`)
-  assert.ok(countLine.includes('▸ 4 in progress'), `terminal active count line: ${countLine}`)
+  assert.ok(countLine.includes('▸ 3 in progress'), `terminal active count line: ${countLine}`)
 })
 
 test('the status line counts a new inbox question when a valid questions ledger exists (#1000)', async () => {

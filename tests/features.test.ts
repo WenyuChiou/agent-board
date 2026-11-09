@@ -2751,10 +2751,11 @@ test('a chat board puts the questions first, each with its project and agent, an
   expect(text).toContain('\n▸ acme-web › Dark mode for the settings page — next Settings page\n')
   for (const question of ['Per-key limit', 'Publish the fixed pages', 'Ship it to staging']) expect(at('▸ acme-web')).toBeGreaterThan(at(question))
   // One marked answered in a pane on this machine, and one hidden since, are not asked again.
+  // The waiting session leaves Needs you and stays waiting, out of Working now / in progress (#1206).
   const answered = chatText(chatView(CHAT_FILE, ['a1b2c3d4 2 Per-key limit — 100 or 300 a minute?']), [], [], STRINGS.en, '/home/jane')
   expect(answered).not.toContain('Per-key limit')
   expect(answered).toContain('[Confirm] Publish the fixed pages, OK?')
-  expect(answered.startsWith('Progress  ● 1 waiting  ▸ 2 in progress')).toBe(true)
+  expect(answered.startsWith('Progress  ● 1 waiting  ▸ 1 in progress')).toBe(true)
   // They are counted, as on the terminal board, after the questions that remain.
   expect(answered).toContain('    [Confirm] Publish the fixed pages, OK?\n  1 answered, hidden\n')
   // Its task goes on with the work that is not waiting, and its next step is the one after the question.
@@ -4602,17 +4603,50 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
 })
 
-test('hiding a question on a state=waiting session reflects answeredWaiting rather than plain working (#1143)', () => {
+test('hiding a question on a state=waiting session reflects answeredWaiting rather than plain working (#1143, #1206)', () => {
   const key = 'a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'
   for (const s of Object.values(STRINGS)) {
     expect(s.answeredWaiting).toBeTruthy()
+    // 1. Before hide: question is in asks, waiting session is not in Working now
+    const beforeView = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, s)
+    const beforeItems = boardItems(beforeView, [])
+    const askItem = beforeItems.find(item => item.type === 'ask' && item.key.includes('a1b2c3d4'))
+    expect(askItem).toBeDefined()
+    const beforeModel = serveModel(beforeView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(beforeModel.view.working.some(ref => ref.project === 'api-gateway')).toBe(false)
+
+    // 2. Hide through the page hide action
+    const acted = serveAction(beforeItems, { key: askItem!.key, type: 'hide', text: '', session: '' }, s)
+    expect(acted).toMatchObject({ type: 'hide', key })
+
+    // 3. After hide: question left Needs you, still-waiting session stays out of Working now and its count
     const hiddenView = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, s, [key])
     const row = hiddenView.groups.find(group => group.project === 'api-gateway')?.rows.find(r => r.title === 'Rate-limit the public endpoints')
     expect(row?.status).toBe(s.answeredWaiting)
     expect(row?.tone).toBe('quiet')
     const model = serveModel(hiddenView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
-    expect(model.view.working.some(ref => ref.key === `row:${row?.key}`)).toBe(true)
+    expect(model.view.working.some(ref => ref.key === `row:${row?.key}`)).toBe(false)
+    expect(model.view.working.filter(ref => ref.project === 'api-gateway').length).toBe(0)
+    expect(model.view.all.open.some(ref => ref.key === `row:${row?.key}`)).toBe(true)
+    expect(model.hidden.some(item => item.task === 'Rate-limit the public endpoints')).toBe(true)
     expect(pageWords(s).answeredWaiting).toBe(s.answeredWaiting)
+
+    // Unhide route remains available
+    const hiddenItems = boardItems(hiddenView, [])
+    expect(serveAction(hiddenItems, { key: `hidden:${key}`, type: 'unhide', text: '', session: '' }, s)).toEqual({ type: 'unhide', key })
+
+    // 4. Later real working report moves the session into Working now
+    const resumedFile = SERVE_FILE.replace(
+      '<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z',
+      '<!-- auto session=a1b2c3d4 agent=codex state=working updated=2026-10-17T08:44:00Z',
+    )
+    const resumedView = buildView(parseProgress(resumedFile), [], null, SERVE_NOW, 0, {}, s, [key])
+    const resumedRow = resumedView.groups.find(group => group.project === 'api-gateway')?.rows.find(r => r.title === 'Rate-limit the public endpoints')
+    expect(resumedRow?.status).toBe(s.agentWorking('Codex'))
+    expect(resumedRow?.tone).toBe('accent')
+    const resumedModel = serveModel(resumedView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(resumedModel.view.working.some(ref => ref.key === `row:${resumedRow?.key}`)).toBe(true)
+    expect(resumedModel.view.working.filter(ref => ref.project === 'api-gateway').length).toBe(1)
   }
 })
 

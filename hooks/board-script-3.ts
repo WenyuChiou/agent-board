@@ -4017,7 +4017,7 @@ export const LINES = [
 "        tone: row.tone,",
 "        when: row.when,",
 "        agent: row.agent,",
-"        ...row.auto === null ? { isOwn: true } : {},",
+"        ...row.auto === null ? { isOwn: true } : { auto: row.auto },",
 "        done: row.done,",
 "        total: row.total,",
 "        cells: cellCode(row.cells ?? []),",
