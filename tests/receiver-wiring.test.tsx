@@ -67,7 +67,7 @@ test('a board message whose reply ends on a question waits on you in a session w
   expect(submitted.length).toBe(1)
   await $.turn.start({ text: PROMPT, turnId: 'd1' })
   await $.turn.complete({ answer: `ACK ${NONCE}\nShould I pick a third name?`, durationMs: 1, isAborted: false, turnId: 'd1', reason: 'answer' })
-  await clock.advance(10)
+  await clock.advance(2100)
   const board = world.files.get(FILE) ?? ''
   expect(board).toContain('- [?] Should I pick a third name?')
   for (const leak of [WORDS, NONCE, 'ACK']) expect(board).not.toContain(leak)
@@ -87,7 +87,7 @@ test('a board message whose reply ends on a question waits on you in a session w
   expect(world.files.get(FILE) ?? '').toContain('Picked a fish name')
   await $.turn.start({ text: PROMPT, turnId: 'd1' })
   await $.turn.complete({ answer: `ACK ${NONCE}\nShould I pick a third name?`, durationMs: 1, isAborted: false, turnId: 'd1', reason: 'answer' })
-  await clock.advance(10)
+  await clock.advance(2100)
   expect(sent.filter(one => one.action === 'receipt').map(one => one.body.status)).toEqual(['accepted', 'acknowledged'])
   expect(sent.find(one => one.body.status === 'acknowledged')?.body.reply).toBe(`ACK ${NONCE}`)
   const board = world.files.get(FILE) ?? ''
