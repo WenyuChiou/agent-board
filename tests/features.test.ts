@@ -22,6 +22,8 @@ import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
+import { boardLanguage, isLanguageOverridden, type SettingsLang } from '../hooks/board-settings'
+import { settingsPanel } from '../hooks/page-settings'
 import { qrModules, qrText } from '../hooks/qr'
 import { STALE_MS } from '../hooks/parse'
 import { DOING_QUIET_MS, WORKING_MS } from '../hooks/grouping'
@@ -5041,4 +5043,41 @@ test('a native ask reaches the page model with its options and where to answer, 
   const page = servePage(STRINGS.en, 'n')
   expect(page).toContain('} else if (ask.native) {')
   expect(page.slice(page.indexOf('} else if (ask.native) {'), page.indexOf('} else if (ask.isOwn) {'))).not.toContain('canWrite = true')
+})
+
+test('Settings language override detects CLI flag precedence and displays override warning', () => {
+  expect(isLanguageOverridden(null, 'zh-TW', 'en', 'en')).toBe(false)
+  expect(isLanguageOverridden('en', 'zh-TW', 'en', 'en')).toBe(true)
+  expect(isLanguageOverridden('en', 'en', 'en', 'en')).toBe(false)
+  expect(isLanguageOverridden('auto', 'en', null, 'zh-TW')).toBe(true)
+
+  const enOverridden = settingsPanel(STRINGS.en, 'zh-TW', false, true)
+  expect(enOverridden).toContain('id="settings-lang-override"')
+  expect(enOverridden).toContain(STRINGS.en.settingsLanguageOverridden)
+
+  const enNormal = settingsPanel(STRINGS.en, 'en', false, false)
+  expect(enNormal).not.toContain('id="settings-lang-override"')
+})
+
+test('Settings language request on a server started with --lang en preserves precedence, shows override and reloads English', () => {
+  const flag = 'en'
+  let saved: SettingsLang = 'en'
+  expect(boardLanguage(flag, saved, 'en', 'zh-TW')).toBe('en')
+  expect(isLanguageOverridden(flag, saved, 'en', 'zh-TW')).toBe(false)
+
+  saved = 'zh-TW'
+  expect(boardLanguage(flag, saved, 'en', 'zh-TW')).toBe('en')
+  const isOverridden = isLanguageOverridden(flag, saved, 'en', 'zh-TW')
+  expect(isOverridden).toBe(true)
+
+  const reloadedHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverridden)
+  expect(reloadedHtml).toContain(`<h2 id="settings-title">${STRINGS.en.settingsTitle}</h2>`)
+  expect(reloadedHtml).toContain('<option value="zh-TW" selected>')
+  expect(reloadedHtml).toContain(`<p class="settings-label" id="settings-lang-override">${STRINGS.en.settingsLanguageOverridden}</p>`)
+
+  saved = 'en'
+  const isOverriddenAfterReset = isLanguageOverridden(flag, saved, 'en', 'zh-TW')
+  expect(isOverriddenAfterReset).toBe(false)
+  const resetHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverriddenAfterReset)
+  expect(resetHtml).not.toContain('id="settings-lang-override"')
 })
