@@ -6665,6 +6665,52 @@ test('OpenClaw session events carry the session folder and progress_card reports
   assert.equal(JSON.parse(long.content[0].text).dropped, 1)
 }))
 
+test('OpenClaw progress_card derives omitted fields from steps and uses the host workspace on the first report', () => fixture(async f => {
+  const installed = f.install('--agent', 'openclaw', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const plugin = (await import(pathToFileURL(join(f.root, 'adapters', 'openclaw', 'agent-board-local.mjs')))).default
+  const work = join(f.home, 'work'), other = join(f.home, 'other')
+  mkdirSync(work)
+  mkdirSync(other)
+  const hooks = new Map()
+  let factory, subscription
+  plugin.register({
+    on: (name, fn) => hooks.set(name, fn), config: {}, runtime: { agent: { resolveAgentWorkspaceDir: () => work } },
+    registerTool: make => { factory = make },
+    agent: { events: { registerAgentEventSubscription: value => { subscription = value } } },
+  })
+  const id = 'openclaw-progress-defaults'
+  const recordOf = session => join(f.root, 'sessions', createHash('sha256').update('openclaw:' + session).digest('hex') + '.json')
+  const record = () => JSON.parse(readFileSync(recordOf(id), 'utf8'))
+  await hooks.get('session_start')({ sessionId: id })
+  assert.equal(record().project, 'work')
+  const tool = factory({ sessionId: id, workspaceDir: other })
+  const waiting = ['1. [~] Check the result', '+ [?] Continue the synthetic check?']
+  const first = await tool.execute('defaults', { steps: waiting })
+  assert.equal(first.content[0].text, 'OK')
+  assert.equal(record().project, 'other')
+  assert.equal(record().title, 'Check the result')
+  assert.equal(record().state, 'waiting')
+  assert.deepEqual(record().steps, ['- [~] Check the result', '- [?] Continue the synthetic check?'])
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /^## other\r?\n[\s\S]*^### Check the result\r?$/m)
+  assert.equal(board.split('### Check the result').length, 2)
+  assert.ok(!board.includes(other))
+
+  await subscription.handle({ stream: 'lifecycle', sessionId: id, runId: 'openclaw-defaults-run', data: { phase: 'start' } })
+  await tool.execute('state-only', { state: 'waiting', steps: ['- [?] Keep it?'] })
+  assert.equal(record().title, 'Keep it?')
+  assert.equal(record().state, 'waiting')
+  const injected = 'synthetic-other-session'
+  await tool.execute('title-only', { title: 'Keep my title', steps: ['- Continue'], sessionId: injected, workspaceDir: work, project: 'wrong' })
+  assert.equal(record().title, 'Keep my title')
+  assert.equal(record().state, 'working')
+  assert.equal(record().project, 'other')
+  assert.equal(existsSync(recordOf(injected)), false)
+  await assert.rejects(tool.execute('bad-state', { state: 'missing', steps: ['- [ ] Continue'] }), /INVALID_STATE/)
+  await assert.rejects(tool.execute('bad-title', { title: null, steps: ['- [ ] Continue'] }), /INVALID_TEXT/)
+}))
+
 test('a report from a folder binds to an openclaw record that holds the folder and refuses one that does not', () => fixture(f => {
   f.install('--agent', 'openclaw', '--apply')
   const cwd = join(f.home, 'demo')
