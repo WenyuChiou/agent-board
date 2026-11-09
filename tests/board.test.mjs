@@ -2898,6 +2898,24 @@ test('ticking twin steps from the page ticks each line it showed', { timeout: 30
   }
 })
 
+test('fresh untitled checkbox presses from the page tick the second twin and then the first', { timeout: 30_000 }, async () => {
+  const board = await page('## Untitled project\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
+  try {
+    for (const index of [1, 0]) {
+      const row = (await board.rows()).find(one => one.project === 'Untitled project' && one.title === EN.unnamed)
+      assert.ok(row)
+      const step = row.steps[index]
+      const response = await board.call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: step.text, line: step.fileLine, fp: row.tickFp } })
+      assert.equal(response.status, 200, response.body)
+      const lines = readFileSync(board.path, 'utf8').split('\n')
+      assert.match(lines[step.fileLine], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      if (index === 1) assert.equal(lines[row.steps[0].fileLine], '- [ ] Inspect the map')
+    }
+  } finally {
+    await board.close()
+  }
+})
+
 test('a saved checkbox press refuses after another card moves its twin lines (#1204)', { timeout: 30_000 }, async () => {
   const board = await page('## home\n### Earlier card\n- [ ] Check the sample\n### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
   try {
@@ -2920,11 +2938,12 @@ test('a saved checkbox press refuses after another card moves its twin lines (#1
   }
 })
 
-for (const ordering of ['lock', 'retry', 'readback', 'replacement', 'folded-visible', 'folded-lock', 'card-lock', 'card-readback']) test('a checkbox keeps its original twin through the actual write boundary: ' + ordering, { timeout: 30_000 }, async () => {
+for (const ordering of ['lock', 'retry', 'readback', 'replacement', 'folded-visible', 'folded-lock', 'card-lock', 'card-readback', 'untitled-lock']) test('a checkbox keeps its original twin through the actual write boundary: ' + ordering, { timeout: 30_000 }, async () => {
   const isLocked = ordering.endsWith('lock')
   const isCards = ordering.startsWith('card-')
   const isHiddenNext = ordering === 'folded-lock'
   const isFoldedVisible = ordering === 'folded-visible'
+  const isUntitled = ordering === 'untitled-lock'
   const faults = mkdtempSync(join(tmpdir(), 'board-checkbox-write-'))
   const preload = join(faults, 'boundary.cjs')
   const armed = join(faults, 'armed')
@@ -2967,11 +2986,11 @@ syncBuiltinESMExports()
   let board, holder, holderExit, watcher
   try {
     const twins = '### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
-    const manual = isCards ? twins.repeat(2) : isHiddenNext ? '### Twin steps\n' + Array.from({ length: 5 }, (_, i) => '- [ ] Ordinary step ' + i + '\n').join('') + '- [~] Inspect the map\n- [~] Inspect the map\n' : isFoldedVisible ? '### Twin steps\n- [x] Completed one\n- [x] Completed two\n' + '- [ ] Inspect the map\n'.repeat(6) : twins
+    const manual = isUntitled ? '## Untitled project\n' + twins.replace('### Twin steps\n', '') : isCards ? twins.repeat(2) : isHiddenNext ? '### Twin steps\n' + Array.from({ length: 5 }, (_, i) => '- [ ] Ordinary step ' + i + '\n').join('') + '- [~] Inspect the map\n- [~] Inspect the map\n' : isFoldedVisible ? '### Twin steps\n- [x] Completed one\n- [x] Completed two\n' + '- [ ] Inspect the map\n'.repeat(6) : twins
     board = await page('## home\n### Earlier card\n- [ ] Check the sample\n' + manual, env, [], undefined, BOARD_SCRIPT, (_dir, path) => { env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS = path })
-    const row = isCards ? (await board.rows()).filter(one => one.title === 'Twin steps').at(-1) : await board.rowOf('Twin steps')
+    const row = isUntitled ? (await board.rows()).find(one => one.project === 'Untitled project' && one.title === EN.unnamed) : isCards ? (await board.rows()).filter(one => one.title === 'Twin steps').at(-1) : await board.rowOf('Twin steps')
     const before = readFileSync(board.path, 'utf8')
-    const shifted = isFoldedVisible ? before : isHiddenNext ? before.replace('- [ ] Check the sample\n', '') : before.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    const shifted = isUntitled ? before.replace('## Untitled project', '> Synthetic extra context\n## Untitled project') : isFoldedVisible ? before : isHiddenNext ? before.replace('- [ ] Check the sample\n', '') : before.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
     const replaced = before.replace('### Twin steps', '### Replacement task')
     const at = before.lastIndexOf('### Twin steps')
     const changedCard = before.slice(0, at) + before.slice(at).replace('### Twin steps\n', '### Twin steps\n> Changed selected card\n')
@@ -2993,7 +3012,7 @@ withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
   const file = ${JSON.stringify(board.path)}
   const before = readFileSync(file, 'utf8')
   const at = before.lastIndexOf('### Twin steps')
-  const after = ordering === 'folded-lock' ? before.replace('- [ ] Check the sample\\n', '') : ordering === 'card-lock' ? before.slice(0, at) + before.slice(at).replace('### Twin steps\\n', '### Twin steps\\n> Changed selected card\\n') : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  const after = ordering === 'untitled-lock' ? before.replace('## Untitled project', '> Synthetic extra context\\n## Untitled project') : ordering === 'folded-lock' ? before.replace('- [ ] Check the sample\\n', '') : ordering === 'card-lock' ? before.slice(0, at) + before.slice(at).replace('### Twin steps\\n', '### Twin steps\\n> Changed selected card\\n') : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
   writeFileSync(file, after)
 })
 `)
@@ -3026,10 +3045,10 @@ withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
       assert.equal(ordering.endsWith('readback') || isFoldedVisible, false, 'a landed tick or a fresh visible checkbox must remain a single completed action')
       assert.equal(after, shifted)
       assert.doesNotMatch(journal, /Inspect the map/)
-    } else if (isCards || isHiddenNext || isFoldedVisible) {
+    } else if (isCards || isHiddenNext || isFoldedVisible || isUntitled) {
       assert.equal(response.status, 200, response.body)
       const expected = shifted.split('\n')
-      const header = isCards ? expected.lastIndexOf('### Twin steps') : expected.indexOf('### Twin steps')
+      const header = isUntitled ? expected.indexOf('## Untitled project') : isCards ? expected.lastIndexOf('### Twin steps') : expected.indexOf('### Twin steps')
       const target = header + (isHiddenNext ? 6 : isFoldedVisible ? 4 : 2)
       const raw = isHiddenNext ? '- [~] Inspect the map' : '- [ ] Inspect the map'
       assert.equal(expected[target], raw)

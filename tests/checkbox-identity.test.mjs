@@ -194,3 +194,57 @@ test('a manual question keeps its write guard when its task row is in the collap
   const shifted = text.replace('- [ ] Check the sample\n', '')
   assert.equal(setManualStep(shifted, action.ref, 'x', now, EN), shifted)
 })
+
+const untitledSource = '## Earlier project\n### Earlier card\n- [ ] Check the sample\n## Untitled project\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+const drawUntitled = (text, words) => {
+  const view = buildView(parseProgress(text), [], null, now, 0, {}, words)
+  const items = boardItems(view, [], true)
+  const row = serveModel(view, [], words).groups.flatMap(group => group.rows).find(row => row.project === 'Untitled project' && row.title === words.unnamed)
+  assert.ok(row)
+  return { items, row }
+}
+
+for (const [language, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
+  test('an untitled checkbox refuses a moved source without ticking its twin in ' + language, () => {
+    const { items, row } = drawUntitled(untitledSource, words)
+    const action = serveAction(items, request(row), words)
+    assert.equal(action.type, 'tick')
+    const shifted = untitledSource.replace('## Untitled project', '> Synthetic extra context\n## Untitled project')
+    assert.equal(setManualStep(shifted, action.ref, 'x', now, words), shifted)
+  })
+
+  test('fresh untitled checkbox presses tick the second twin and then the first in ' + language, () => {
+    let text = untitledSource
+    for (const index of [1, 0]) {
+      const { items, row } = drawUntitled(text, words)
+      const action = serveAction(items, request(row, index), words)
+      assert.equal(action.type, 'tick')
+      text = setManualStep(text, action.ref, 'x', now, words)
+      const lines = text.split('\n')
+      assert.match(lines[row.steps[index].fileLine], /^- \[x\] Inspect the map/)
+      if (index === 1) assert.equal(lines[row.steps[0].fileLine], '- [ ] Inspect the map')
+    }
+    assert.equal(text.split('\n').filter(line => line.startsWith('- [x] Inspect the map')).length, 2)
+  })
+}
+
+test('fresh identical untitled task cards keep their own checkbox in repeated project sections', () => {
+  const text = '## Untitled project\n- [ ] Inspect the map\n- [ ] Inspect the map\n'.repeat(2)
+  const view = buildView(parseProgress(text), [], null, now, 0, {}, EN)
+  const items = boardItems(view, [], true)
+  const rows = serveModel(view, [], EN).groups.flatMap(group => group.rows)
+  const action = serveAction(items, request(rows[1]), EN)
+  assert.equal(action.type, 'tick')
+  const result = setManualStep(text, action.ref, 'x', now, EN).split('\n')
+  for (const step of rows[0].steps) assert.equal(result[step.fileLine], '- [ ] Inspect the map')
+  assert.equal(result[rows[1].steps[0].fileLine], '- [ ] Inspect the map')
+  assert.match(result[rows[1].steps[1].fileLine], /^- \[x\] Inspect the map/)
+})
+
+test('the terminal refuses an untitled checkbox after an earlier source line disappears', () => {
+  const { items, row } = drawUntitled(untitledSource, EN)
+  const action = boardKey(pinned({ ...emptyBoardState, key: row.key }, items), 'x', items, EN).action
+  assert.equal(action.type, 'tick')
+  const shifted = untitledSource.replace('- [ ] Check the sample\n', '')
+  assert.equal(setManualStep(shifted, action.ref, 'x', now, EN), shifted)
+})

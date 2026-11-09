@@ -716,7 +716,7 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLine
         ? [session, item.row.target?.resume ?? '', item.row.project, item.row.title, item.row.next?.step ?? '', item.row.question ?? '', item.row.resume ?? '']
         : [item.turn.agent, item.turn.project, item.turn.text]
   // Card actions survive unrelated line moves; a tick's absolute line must still name the drawn step.
-  if (item.type === 'row') parts.push(item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => step)))
+  if (item.type === 'row') parts.push(item.row.stepTask?.expected ?? item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => step)))
   if (item.type === 'row' && isLineTick) parts.push(JSON.stringify([item.row.next?.line ?? null, item.row.steps.map(step => step.line)]))
   if (item.type !== 'turn' && session === '') parts.push(String(twinsOf(item, items)))
 
@@ -727,10 +727,11 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLine
 export const guardStep = (ref: StepRef, items: readonly BoardItem[]): StepRef => {
   if (ref.guard !== undefined) return ref
   const item = items.find(one => one.type === 'row' && one.row.project === ref.project && one.row.title === ref.title && one.row.stepLines?.includes(ref.line))
-  if (item?.type !== 'row' || item.row.confirm == null) return ref
-  const expected = item.row.confirm.expected
-  const lines = [...new Set(items.flatMap(one => one.type === 'row' && one.row.project === ref.project && one.row.confirm?.expected === expected ? [one.row.confirm.line] : []))].sort((a, b) => a - b)
-  return { ...ref, guard: { task: item.row.confirm, steps: item.row.stepLines ?? [], lines } }
+  if (item?.type !== 'row' || item.row.stepTask == null) return ref
+  const expected = item.row.stepTask.expected
+  // An untitled task has no heading; its first source step anchors that candidate instead.
+  const lines = [...new Set(items.flatMap(one => one.type === 'row' && one.row.project === ref.project && one.row.stepTask?.expected === expected ? [one.row.stepTask.line >= 0 ? one.row.stepTask.line : one.row.stepLines?.[0] ?? -1] : []))].sort((a, b) => a - b)
+  return { ...ref, guard: { task: item.row.stepTask, steps: item.row.stepLines ?? [], lines } }
 }
 
 // What each key does on the selected line, so the footer lists only keys that do something.

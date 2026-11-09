@@ -775,10 +775,10 @@ export const manualStepRef = (text: string, ref: StepRef, s: Strings = ZH_TW): S
   const guard = ref.guard
   if (guard === undefined) return ref
   const matches = confirmedTasks(text, guard.task, s)
-  const lines = matches.map(task => task.line).sort((a, b) => a - b)
+  const lines = matches.map(task => task.line >= 0 ? task.line : task.steps[0]?.line ?? -1).sort((a, b) => a - b)
   if (lines.length !== guard.lines.length || lines.some((line, index) => line !== guard.lines[index])) return null
-  const task = matches.find(task => task.line === guard.task.line)
-  if (task === undefined || task.steps.length !== guard.steps.length || task.steps.some((step, index) => step.line !== guard.steps[index])) return null
+  const task = matches.find(task => task.line === guard.task.line && task.steps.length === guard.steps.length && task.steps.every((step, index) => step.line === guard.steps[index]))
+  if (task === undefined) return null
   const step = task.steps.find(step => step.line === ref.line)
   return step !== undefined && withoutStamp(step.raw) === withoutStamp(ref.raw)
     ? { ...ref, line: step.line, raw: step.raw, guard: undefined }
