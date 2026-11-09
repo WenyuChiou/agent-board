@@ -823,7 +823,7 @@ export const LINES = [
 "      };",
 "      const state = isBoardPrompt && previous ? previous.state : status === \"working\" ? \"working\" : previous?.state === \"done\" && !(typeof payload.question === \"string\" && payload.question.trim() !== \"\") ? \"done\" : status;",
 "      const placeholder = localAgentLifecycleStep(state, s);",
-"      const held = !Array.isArray(previous?.steps) ? [placeholder] : previous.steps.map((step, index) => index === 0 && isLifecycleStep(step) ? placeholder : step);",
+"      const held = !Array.isArray(previous?.steps) ? [placeholder] : previous.steps.map((step, index) => index === 0 && isLifecycleStep(step) ? state === \"done\" && /^- \\[[x\\-]\\]/.test(step) ? step : placeholder : step);",
 "      const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision);",
 "      const base = mode === \"--codex-event\" ? codexEvent(previous, isBoardPrompt ? { ...payload, board_request: true } : payload, clock, s, sourceAt, { lastAppliedAt: original?.appliedAt, observedAt }) : mode === \"--agent-status\" ? validateCodexReport({",
 "        ...previous ?? codexReport(null, session, { title: s.localAgentTask(agent), project: agent, state, steps: question.steps }, clock, s),",
