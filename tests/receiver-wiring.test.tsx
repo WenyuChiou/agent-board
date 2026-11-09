@@ -31,7 +31,7 @@ const hub = (on: Parameters<Parameters<typeof test>[1]>[1], world: World) => {
 }
 
 test('a board message runs as one turn whose words and reply stay out of the board', async ($, on) => {
-  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: 'TITLE: x\nCONTEXT: -\nDONE: leaked\nNEXT: -\nASK: -' }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: () => 'TITLE: x\nCONTEXT: -\nDONE: leaked\nNEXT: -\nASK: -' }
   const clock = engineBeneath(on, world)
   outside(on, world)
   const { sent, submitted } = hub(on, world)
@@ -74,7 +74,7 @@ test('a board message whose reply ends on a question waits on you in a session w
 })
 
 test('a board message whose reply ends on a question waits on you in a session without a Task list, on an existing summary row', async ($, on) => {
-  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: 'TITLE: Pick the pets\nCONTEXT: -\nDONE: Picked a fish name\nNEXT: -\nASK: -' }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: () => 'TITLE: Pick the pets\nCONTEXT: -\nDONE: Picked a fish name\nNEXT: -\nASK: -' }
   const clock = engineBeneath(on, world)
   outside(on, world)
   const { submitted } = hub(on, world)
