@@ -4486,7 +4486,6 @@ export const register: Register = (on, options) => {
     }
     if (mirror !== null && mirror.tasks.length === 0 && mirror.source === 'turns') {
       await saveMine($, one => ({ ...one, replied: undefined }))
-      if (question !== null && isDelivery) await saveMine($, one => markAsked(one, question, hasRunningTurnBackgroundJob))
       await settle($)
     }
     // No Task list: a turn that changed something, or any turn once the session is tracked,
