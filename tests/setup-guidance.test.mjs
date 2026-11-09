@@ -374,6 +374,38 @@ test('a copied Claude enable setting cannot make a silent plugin installation co
   assert.equal(existsSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json')), false)
 }, ['claude']))
 
+const installedClaude = f => {
+  copiedClaudeSettings(f)
+  const directory = join(f.env.CLAUDE_CONFIG_DIR, 'plugins')
+  mkdirSync(directory, { recursive: true })
+  writeFileSync(join(directory, 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'agent-board@agent-board': [{ scope: 'user' }] } }))
+}
+
+for (const [index, lang] of locales.entries()) {
+  test('an installed Claude-only repeat gives session guidance instead of reinstall instructions in ' + lang, () => terminal(f => {
+    installedClaude(f)
+    const result = f.invoke(['--lang', lang])
+    succeeded(result)
+    assert.ok(!result.stdout.includes(bootstrap[index].plugin), 'the installed plugin must not be offered for installation again')
+    assert.ok(result.stdout.includes(bootstrap[index].openOne.replace('{agents}', 'Claude Code')))
+    assert.ok(result.stdout.includes(bootstrap[index].thenBoardOne))
+    assert.deepEqual(claudeCalls(f), [])
+    assert.equal(JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8')).synthetic, 'keep')
+    assert.equal(existsSync(join(f.root, 'data')), false)
+  }, ['claude']))
+
+  test('a files-only setup keeps installed Claude out of plugin instructions in ' + lang, () => terminal(f => {
+    installedClaude(f)
+    const result = f.invoke(['--agent', 'grok', '--lang', lang, '--apply'])
+    succeeded(result)
+    assert.ok(!result.stdout.includes(bootstrap[index].plugin), 'another selected agent must not reintroduce Claude install guidance')
+    const agents = ['Grok Build', 'Claude Code'].join(lang === 'en' ? ', ' : '、')
+    assert.ok(result.stdout.includes(bootstrap[index].start.replace('{agents}', agents)))
+    assert.deepEqual(claudeCalls(f), [], 'files-only setup must not run plugin commands')
+    assert.equal(JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8')).synthetic, 'keep')
+  }, ['claude']))
+}
+
 // Two setup runs only: the three tables are kept identical by the bootstrap test above, and each
 // run takes seconds on a Windows runner, where this file is near its time budget.
 test('on Windows setup says to start cursor-agent from PowerShell, in its preview and after a yes (#1159)', () => {
