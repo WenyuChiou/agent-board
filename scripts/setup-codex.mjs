@@ -10,7 +10,10 @@ const dir = mkdtempSync(join(tmpdir(), 'agent-board-setup-'))
 try {
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, code)
-  const result = spawnSync(process.execPath, [script, '--codex-setup', ...process.argv.slice(2)], { stdio: 'inherit', windowsHide: true })
+  const isRemove = process.argv.includes('--codex-remove') || process.argv.includes('--remove')
+  const forwarded = process.argv.slice(2).filter(arg => arg !== '--remove' && arg !== '--codex-remove')
+  const mode = isRemove ? '--codex-remove' : '--codex-setup'
+  const result = spawnSync(process.execPath, [script, mode, ...forwarded], { stdio: 'inherit', windowsHide: true })
   if (result.error) throw result.error
   process.exitCode = result.status ?? 1
 } finally {

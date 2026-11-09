@@ -140,7 +140,13 @@ export const EN: Strings = {
     "thenBoard": "Then type /agent-board in any of them.",
     "open": "Open a new session in each of: {agents}.",
     "openOne": "Open a new session in {agents}.",
-    "thenBoardOne": "Then type /agent-board there."
+    "thenBoardOne": "Then type /agent-board there.",
+    "appliedRemove": "removed {count} setup files",
+    "noInstalled": "no installed Agent Board setups to remove",
+    "keptData": "Keeps your data and history beside {progress} (answers, questions, journal, archive, sessions):",
+    "applyRemove": "Apply this removal: {command}",
+    "restartRemove": "Restart each of: {agents} to unload their removed reporting hooks.",
+    "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks."
   },
   setupNoAgent: {
     "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
