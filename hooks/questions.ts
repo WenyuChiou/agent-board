@@ -278,6 +278,14 @@ const inboxSession = (source: QuestionSource): string | undefined => {
   const data = parsedJson(source.data)
   return data !== null && typeof data === 'object' && 'session' in data && typeof data.session === 'string' ? data.session : undefined
 }
+
+export const inboxQuestionOrigin = (source: QuestionSource): { session: string; at: number } | null => {
+  if (source.kind !== 'inbox') return null
+  const data = parsedJson(source.data)
+  if (data === null || typeof data !== 'object' || !('session' in data) || typeof data.session !== 'string' || data.session === '') return null
+  const at = 'sourceAt' in data ? data.sourceAt : 'at' in data ? data.at : undefined
+  return typeof at === 'number' && Number.isFinite(at) && at > 0 ? { session: data.session, at } : null
+}
 // An inbox ask has no task title, so the block its session writes later is known by the full id alone.
 const isSameAsker = (source: QuestionSource | undefined, row: QuestionSource): boolean => {
   if (source?.kind !== 'inbox') return false

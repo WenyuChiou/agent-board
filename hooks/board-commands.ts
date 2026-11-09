@@ -35,16 +35,17 @@ export const BOARD_REQUEST = /^\s*(?:\/board|[$/]agent-board)\s*$/
 export const RECEIPT_SESSION_KEYS = ['session_id', 'sessionId', 'sessionID', 'thread-id', 'thread_id', 'conversation_id', 'conversationId'] as const
 export const RECEIPT_FOLDER_KEYS = ['cwd', 'workspaceRoot', 'workspace', 'project_dir', 'directory'] as const
 export const RECEIPT_KEYS = [...RECEIPT_SESSION_KEYS, ...RECEIPT_FOLDER_KEYS, 'hook_event_name', 'hookEventName'] as const
-const HOST_TURN_ID = /^[A-Za-z0-9_-]{1,128}$/
+const HOST_TURN_ID = /^[A-Za-z0-9_-]+$/
+const HOST_TURN_ID_MAX = 128
 export const HOST_TURN_KEYS = ['turn_id', 'turnId', 'generation_id'] as const
 
 // Correlation also checks the owning agent and session. Receipts keep only the
 // digest of a host turn identity and never use text or a timestamp in its place.
 export const inboxTurnKey = (value: unknown): string | undefined =>
-  typeof value === 'string' && HOST_TURN_ID.test(value) ? sha256(value) : undefined
+  typeof value === 'string' && value.length <= HOST_TURN_ID_MAX && HOST_TURN_ID.test(value) ? sha256(value) : undefined
 
 export const inboxTurnKeySource = `const inboxTurnKey = value =>
-  typeof value === 'string' && ${HOST_TURN_ID}.test(value)
+  typeof value === 'string' && value.length <= ${HOST_TURN_ID_MAX} && ${HOST_TURN_ID}.test(value)
     ? require('node:crypto').createHash('sha256').update(value).digest('hex')
     : undefined
 `

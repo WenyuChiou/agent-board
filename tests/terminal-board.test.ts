@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { confirmTask, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, peekInbox, pinned, routesOf, terminalLook } from '../hooks/board'
+import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, chatText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, peekInbox, pinned, routesOf, terminalLook } from '../hooks/board'
 import type { AnswerRoute } from '../hooks/board'
 import { codexEvent, codexLifecycleStep, isLifecycleStep, LIFECYCLE_STEPS, localAgentLifecycleStep, putCodexBlock } from '../hooks/codex'
 import { applyDigest, noteChatReply, settleChatReply } from '../hooks/digest'
@@ -580,6 +580,7 @@ test('a reply typed in chat changes every board surface while its durable questi
       expect(page.counts.waiting).toBe(0)
       expect(page.groups[0]?.rows[0]?.status).toBe(s.answeredWaiting)
       expect(boardScreen(view, [], emptyBoardState, s, { width: 120, isColor: false })).toContain(s.answeredWaiting)
+      expect(chatText(view, [], [], s, '/synthetic/home')).toContain(s.answeredWaiting)
     }
 
     // 1. Codex: Prompt submitted in agent chat
@@ -601,6 +602,19 @@ test('a reply typed in chat changes every board surface while its durable questi
       expect(codexEvent(askStop, typed, at(2), s, stamp)).toEqual(askStop)
     expect(codexEvent(askStop, { ...typed, prompt_submitted: false }, at(2), s).replied).toBeUndefined()
     expect(() => codexEvent(askStop, { ...typed, session_id: 'foreign-owner' }, at(2), s)).toThrow('SESSION_CONFLICT')
+
+    // Recovery can retain a whole-second display value while the host's source
+    // clock orders the question, reply and report inside that second.
+    const second = Date.parse(at(5))
+    const timing = { lastAppliedAt: second + 300, observedAt: second + 900 }
+    expect(codexEvent(askStop, typed, at(5), s, second + 300, timing)).toEqual(askStop)
+    const sameSecond = codexEvent(askStop, typed, at(5), s, second + 500, timing)
+    expect(Date.parse(sameSecond.replied!)).toBe(second + 500)
+    const report = { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-2', has_response: true }
+    expect(codexEvent(sameSecond, report, at(5), s, second + 500, timing)).toEqual(sameSecond)
+    const reported = codexEvent(sameSecond, report, at(5), s, second + 700, timing)
+    expect(reported.replied).toBeUndefined()
+    expect(reported.steps[reported.asked!]).toBe('- [x] Deploy to production?')
 
     // Newer prompt submitted in Codex session chat: question leaves Needs you, row says answeredWaiting
     const answered = codexEvent(askStop, typed, at(2), s)

@@ -5313,6 +5313,43 @@ test('a native Codex chat reply keeps the durable question open until the next w
   assert.equal(observe().find(record => record.id === first.id)?.isUnresolved, false)
 }))
 
+test('a future queued Codex prompt cannot move the clock past a real chat reply', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'asking-turn').status, 0)
+  assert.equal(f.event('Stop', 'asking-turn', { last_assistant_message: 'Which folder should I use?' }).status, 0)
+  const original = sessionRecord(f, session)
+  const board = readFileSync(f.progress)
+  const future = Date.now() + 30_000
+  f.save(join(f.root, 'pending', '001.raw.json'), JSON.stringify({
+    version: 1, kind: 'raw', at: future, env: {},
+    argv: ['--codex-event', '--agent', 'codex', '--progress-file', f.progress],
+    payload: { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'future-turn', prompt: 'SYNTHETIC-FUTURE-CHAT' },
+  }))
+  f.save(join(f.root, 'pending', '002.json'), JSON.stringify({
+    version: 1, mode: '--codex-event', progress: f.progress, agent: 'codex', session,
+    at: original.appliedAt, now: new Date(future).toISOString(), isPrompt: false, isBoardPrompt: false,
+    payload: { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'future-display-turn' },
+  }))
+  const recovered = f.command(['--recover-hooks'])
+  assert.equal(recovered.status, 0, recovered.stderr)
+  assert.deepEqual(JSON.parse(recovered.stdout), { recoveryVersion: 1, processed: 2, pending: 0 })
+  assert.deepEqual(sessionRecord(f, session), original)
+  assert.deepEqual(readFileSync(f.progress), board)
+  assert.equal((hookLog(f).match(/INVALID_EVENT_TIME/g) ?? []).length, 2)
+  assert.doesNotMatch(hookLog(f), /SYNTHETIC-FUTURE-CHAT/)
+
+  const replied = f.event('UserPromptSubmit', 'real-turn')
+  assert.equal(replied.status, 0, replied.stderr)
+  const active = sessionRecord(f, session)
+  assert.equal(active.turn, 'real-turn')
+  assert.ok(active.appliedAt > original.appliedAt && active.appliedAt < future)
+  assert.match(readFileSync(f.progress, 'utf8'), /replied=\S+Z/)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Which folder should I use\?/)
+  assert.equal(f.event('Stop', 'real-turn', { last_assistant_message: 'I used the synthetic folder.' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Which folder should I use\?/)
+  assert.doesNotMatch(readFileSync(f.progress, 'utf8'), /replied=/)
+}))
+
 test('a Codex question stays owned through a board prompt, a chat reply and the next Stop', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
@@ -5406,11 +5443,16 @@ test('a closing question the model already reported as a [?] step stays one line
   const board = readFileSync(f.progress, 'utf8')
   assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
   assert.match(board, /- \[\?\] Blue or green\?\n<!-- question=[a-f0-9]{64}:\d+ -->/)
-  // The next prompt answers that one line.
+  // The next prompt answers that one line without settling it.
   assert.equal(f.event('UserPromptSubmit', 'turn-2').status, 0)
   const answered = readFileSync(f.progress, 'utf8')
   assert.equal(answered.match(/- \[[?x]\] Blue or green\?/g)?.length, 1)
-  assert.ok(!/- \[\?\]/.test(answered))
+  assert.match(answered, / replied=\S+Z/)
+  assert.match(answered, /- \[\?\] Blue or green\?/)
+  assert.equal(f.event('Stop', 'turn-2', { last_assistant_message: 'I picked blue.' }).status, 0)
+  const settled = readFileSync(f.progress, 'utf8')
+  assert.match(settled, /- \[x\] Blue or green\?/)
+  assert.doesNotMatch(settled, / replied=|- \[\?\]/)
 }))
 
 test('a replayed closing-question stop changes nothing', () => fixture(f => {
@@ -5478,8 +5520,13 @@ test('the approval step and the question step close and reuse their own lines in
   assert.ok(second.includes('- [?] Which folder should I use?'))
   assert.equal(f.event('UserPromptSubmit', 'turn-3').status, 0)
   const answered = readFileSync(f.progress, 'utf8')
-  assert.ok(answered.includes('- [x] Which folder should I use?'))
-  assert.ok(!/- \[\?\]/.test(answered))
+  assert.match(answered, / replied=\S+Z/)
+  assert.match(answered, /- \[\?\] Which folder should I use\?/)
+  assert.doesNotMatch(answered, /native=codex/)
+  assert.equal(f.event('Stop', 'turn-3', { last_assistant_message: 'I used the folder.' }).status, 0)
+  const settled = readFileSync(f.progress, 'utf8')
+  assert.match(settled, /- \[x\] Which folder should I use\?/)
+  assert.doesNotMatch(settled, / replied=|- \[\?\]/)
 }))
 
 test('Grok keeps only its closing question through board and end events, then closes and reuses it', () => fixture(f => {
@@ -8292,7 +8339,7 @@ test('L5 locked file: the hook retries, exits 0, and the Stop event lands on the
   assert.ok(Number.isFinite(entry.at))
   assert.ok(files[0].startsWith(`${String(entry.at).padStart(15, '0')}-`))
   assert.equal(entry.progress, f.progress)
-  assert.deepEqual(entry.payload, { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' })
+  assert.deepEqual(entry.payload, { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1', has_response: true })
   unlinkSync(locked.marker)
   const nextSession = 'test-codex-session-456'
   const next = f.event('UserPromptSubmit', 'turn-2', { session_id: nextSession })

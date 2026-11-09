@@ -241,7 +241,7 @@ const atomic = (file: string, text: string | Buffer, current: () => void = () =>
 // Only board-defined codes may be copied from an error into the diagnostic log.
 const pendingErrorCodes = new Set([
   'INVALID_JSON_OBJECT', 'INVALID_RAW_ENTRY', 'INVALID_RAW_ARGV', 'INVALID_RAW_MODE', 'INVALID_RAW_ENV',
-  'INVALID_SESSION', 'INVALID_EVENT', 'INVALID_STATE', 'INVALID_EVENT_STATE', 'SESSION_CONFLICT',
+  'INVALID_SESSION', 'INVALID_EVENT', 'INVALID_EVENT_TIME', 'INVALID_STATE', 'INVALID_EVENT_STATE', 'SESSION_CONFLICT',
   'UNBOUND_SESSION', 'MISSING_TURN', 'STALE_TURN', 'INVALID_TEXT', 'INVALID_STEPS', 'INVALID_STEP',
   'UNFINISHED_STEPS', 'INVALID_OWNER', 'BLOCK_CONFLICT', 'BLOCK_NOT_VISIBLE',
 ])
@@ -646,7 +646,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         : flag('--session') ?? (agent === 'codex' ? env.CODEX_THREAD_ID ?? reportSession() : (env.AGENT_BOARD_AGENT === agent ? env.AGENT_BOARD_SESSION_ID : undefined) ?? (agent === 'hermes' ? env.HERMES_SESSION_ID || undefined : undefined) ?? (agent === 'grok' ? env.GROK_SESSION_ID || undefined : undefined) ?? reportSession())
       if (session === undefined && mode === '--codex-report') throw new Error('UNBOUND_REPORT')
       if (typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session)) throw new Error('INVALID_SESSION')
-      const now = new Date(at).toISOString()
+      const now = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
       if (mode === '--agent-status' && (agent === 'codex' || agent === 'cursor')) throw new Error('INVALID_EVENT')
       const status = flag('--state') ?? payload.state
       if (mode === '--agent-status' && !['working', 'waiting', 'ended'].includes(String(status))) throw new Error('INVALID_STATE')
@@ -736,16 +736,24 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     let isFirstSessionEvent = false
     let reportCut = 0
     let reportDropped = 0
-    const apply = (entry: Pending): CodexReport => {
+    const apply = (entry: Pending, isRawReplay = false): CodexReport => {
       const { mode, agent, session, now, at, status, event, folder = '', folderDigest, folderCanonicalDigest, isBoardPrompt, payload, run } = entry
+      const displayAt = Date.parse(now)
+      const sourceAt = at ?? displayAt
+      const observedAt = Date.now()
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
       const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number; pushed?: string[] }
+      // Raw recovery can start a fresh session within its allowed clock skew.
+      // An existing session's clock must not move past the next real hook.
+      const isSkewedBootstrap = isRawReplay && original === null
+      if (mode === '--codex-event' && (!Number.isFinite(sourceAt) || !Number.isFinite(displayAt) ||
+        !isSkewedBootstrap && (sourceAt > observedAt || displayAt > observedAt))) throw new Error('INVALID_EVENT_TIME')
       if (entry === current && original === null) isFirstSessionEvent = true
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
       // Direct events can arrive out of order too, before they ever enter the pending queue.
-      if (mode !== '--codex-report' && original !== null && (at ?? Date.parse(now)) < (original.appliedAt ?? Date.parse(original.updated))) {
+      if (mode !== '--codex-report' && original !== null && sourceAt < (original.appliedAt ?? Date.parse(original.updated))) {
         const signal = cleanSignal(run)
         // A newer explicit person statement is never undone by older run proof.
         if (signal === undefined || !isStrongRun(signal) || isStrongRun(original) || original.origin === 'person' && original.isWeak !== true) return original
@@ -763,7 +771,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const bytes = isRun ? Buffer.alloc(0) : readBytes(progress) ?? Buffer.alloc(0)
       const text = bytes.toString('utf8')
       const previous = original === null || mode === '--codex-report' || isRun ? original : boardConfirmedReport(text, original, owner)
-      const clock = previous === null ? now : new Date(Math.max(Date.parse(now), Date.parse(previous.updated))).toISOString()
+      const clock = previous === null ? now : new Date(Math.max(displayAt, Date.parse(previous.updated))).toISOString()
       // A mirrored plan keeps the block's own title, unless it is still the generic one a lifecycle event wrote.
       const given = typeof payload.planTitle !== 'string' ? payload : {
         state: payload.state, steps: payload.steps,
@@ -779,8 +787,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             index === 0 && isLifecycleStep(step) ? placeholder : step
           )
       const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
-      // The monotonic display clock cannot make an old queued prompt or report newer.
-      const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, board_request: true } : payload, clock, s, at <= Date.now() ? now : '')
+      // Keep the recovery format. Causality uses the host event's milliseconds,
+      // which the display clock can round or carry forward.
+      const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, board_request: true } : payload, clock, s, sourceAt, { lastAppliedAt: original?.appliedAt, observedAt })
         : mode === '--agent-status' ? validateCodexReport({
           // These are already validated stored steps, including up to two owned lines beyond
           // the explicit report's forty user steps. A status is not a fresh task report.
@@ -803,7 +812,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const stillGeneric = previous !== null && Object.values(STRINGS).some(one => one.localAgentTask(agent) === previous.title)
       const distinctAntigravity = mode === '--agent-status' && agent === 'antigravity' && (previous === null || stillGeneric)
       const initial = (filesByFolder(mode, agent) && !previous) || distinctAntigravity ? validateCodexReport({
-        ...base, title: sessionTitle(name, s.localAgentTask(agent), distinctAntigravity ? distinctStarted(at ?? Date.parse(now)) : ''), project: previous?.project ?? (name || agent),
+        ...base, title: sessionTitle(name, s.localAgentTask(agent), distinctAntigravity ? distinctStarted(sourceAt) : ''), project: previous?.project ?? (name || agent),
       }, session) : base
       const priorActivity = previous?.activity ?? []
       // Only a weak hint needs a parent; a strong run keeps its record without a block.
@@ -814,7 +823,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? { folder: name, folderDigest, folderCanonicalDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
-      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(at ?? Date.parse(now), original?.appliedAt ?? Date.parse(original?.updated ?? now)), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
       if (entry === current) {
         reportCut = cut
@@ -979,11 +988,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             let dropped: string | undefined
             try {
               stored = readPending(file)
-              const entry = name.endsWith('.raw.json') ? rawEntry(stored) : stored as Pending
+              const isRaw = name.endsWith('.raw.json')
+              const entry = isRaw ? rawEntry(stored) : stored as Pending
               if (entry.version === 1 && typeof entry.progress === 'string' && isHookEntry(entry)) {
                 if (entry.progress !== progress) continue
                 const signal = cleanSignal(entry.run)
-                if (!isOverdue(entry) || signal !== undefined && isStrongRun(signal)) apply(entry)
+                if (!isOverdue(entry) || signal !== undefined && isStrongRun(signal)) apply(entry, isRaw)
                 else dropped = 'OVERDUE'
               } else dropped = 'UNKNOWN_VERSION'
             } catch (error) {

@@ -578,10 +578,11 @@ export const chatText = (
     }
   }
   // A question is told above, answered or not: it is never the "next step" of its task.
-  const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
+  const isNext = (step: ViewStep): boolean => step.number !== null && step.isReplyPending !== true && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
     const next = (row.steps.find(step => step.isCurrent && isNext(step)) ?? row.steps.find(isNext))?.text
-    const words = `${mark} ${isSameName(row.project, row.title) ? named(row.project) : `${named(row.project)} › ${row.title}`}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}${row.runs ? ` · ${row.runs}` : ''}`
+    const status = row.status === s.answeredWaiting ? ` · ${row.status}` : ''
+    const words = `${mark} ${isSameName(row.project, row.title) ? named(row.project) : `${named(row.project)} › ${row.title}`}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${status}${next === undefined ? '' : ` — ${s.reportNext(next)}`}${row.runs ? ` · ${row.runs}` : ''}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
   if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) items.push(s.empty)
@@ -1005,7 +1006,8 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       // Under In progress a row also names its project, which has no heading there.
       const lead = [(isWorking || isStuck) && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
       // The step it is on, in the accent colour, where its status only says that it works.
-      const step = needs === null && (row.tone === 'quiet' || row.tone === 'accent') ? row.steps.find(one => one.isCurrent && (one.status === 'doing' || one.status === 'todo')) : undefined
+      const step = needs === null && row.status !== s.answeredWaiting && (row.tone === 'quiet' || row.tone === 'accent')
+        ? row.steps.find(one => one.isCurrent && one.isReplyPending !== true && (one.status === 'doing' || one.status === 'todo')) : undefined
       const bar = rowBar(row, o, isWide)
       const barRoom = bar.width === 0 ? 0 : bar.width + 1
       const status = cut(`${lead}${needs !== null ? needsWords(needs, s) : step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve - barRoom)

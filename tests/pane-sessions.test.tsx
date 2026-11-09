@@ -1847,6 +1847,7 @@ test('without a Task list, a turn that changed something is summed up into steps
   const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: EDITED, reply: DIGEST }
   const clock = engineBeneath(on, world)
   const seen = outside(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
   await start($, '幫我把限流加到 API')
   await $.turn.complete({ answer: '加好了。每把金鑰一分鐘要 100 還是 300？', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10)
@@ -1858,12 +1859,13 @@ test('without a Task list, a turn that changed something is summed up into steps
   expect(written).toContain('> 背景：公開端點被刷爆，要擋掉濫用\n- [x] 加好限流中介層\n- [?] 每把金鑰的上限 — 一分鐘 100 還是 300？\n- [ ] 寫限流測試\n')
   expect(seen.notified).toContain('需要你：每把金鑰的上限')
 
-  // The person answers: the question counts as settled; the next turn adds what it did.
+  // The reply leaves the question open until the next turn reports what it did.
   world.reply = (prompt: string) => (prompt.includes('TITLE:') ? 'TITLE: 幫 API 加上限流\nCONTEXT: -\nDONE: 寫好限流測試\nNEXT: -\nASK: -' : undefined)
-  await $.turn.start({ text: '100', turnId: 't2' })
+  await clock.advance(1)
+  await say($, '100', 't2')
   await clock.advance(10)
-  // Settled as soon as the answer starts a turn, before that turn ends, in the words it asked in.
-  expect(world.files.get(FILE) ?? '').toContain('- [x] 每把金鑰的上限 — 一分鐘 100 還是 300？\n')
+  expect(world.files.get(FILE)).toContain('- [?] 每把金鑰的上限 — 一分鐘 100 還是 300？\n')
+  expect(world.files.get(FILE)).toContain('replied=')
   await $.turn.complete({ answer: '測試寫好了，都過了。', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
   await clock.advance(10)
   const after = world.files.get(FILE) ?? ''
@@ -3524,6 +3526,9 @@ for (const event of ['turn', 'prompt'] as const) test(`a committed ${event} keep
   await clock.advance(5000)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   let hasFailed = false
+  const inboxRecords = () => (JSON.parse(world.files.get(QUESTIONS)!).records as Array<{ id: string; isUnresolved: boolean; source?: { kind: string } }>).filter(row => row.source?.kind === 'inbox')
+  const original = inboxRecords().map(row => row.id)
+  expect(original).toHaveLength(1)
   world.afterWrite = () => {
     let reads = 0
     world.beforeRead = path => {
@@ -3539,7 +3544,9 @@ for (const event of ['turn', 'prompt'] as const) test(`a committed ${event} keep
   await clock.advance(7000)
   expect(hasFailed).toBe(true)
   expect([...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`))).toEqual([])
-  expect(JSON.parse(world.files.get(QUESTIONS)!).records.filter((row: { source?: { kind: string } }) => row.source?.kind === 'inbox').map((row: { isUnresolved: boolean }) => row.isUnresolved)).toEqual([false])
+  expect(inboxRecords().map(row => row.id)).toEqual(original)
+  expect(inboxRecords().map(row => row.isUnresolved)).toEqual([event === 'prompt'])
+  if (event === 'prompt') expect(world.files.get(FILE)).toContain('replied=')
   expect(seen.notified.filter(text => /QUESTION_|INBOX_|NOT_KEPT|EFBIG/.test(text))).toEqual([])
   expect(await ui.find({ type: 'Text', text: ZH_TW.question(ZH_TW.inboxTitle) })).toBeUndefined()
   await ui.unmount()

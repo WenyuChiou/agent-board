@@ -568,9 +568,9 @@ const questionWorld = () => {
   const world: World = { files: new Map([[FILE, upsertAutoBlock('# Progress\n', mirror, ZH_TW)]]), mtime: 1, hasTasks: true, asked: [], reads: [], store: { inboxDone: {}, autoConnectOff: true, [`agent:${PROMPT_ID}`]: mirror }, reply: () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: -\nNEXT: Continue\nASK: Old decision — OLD_QUESTION?' }
   return { world, mirror }
 }
-const addPrompt = (world: World, at: number, session = PROMPT_SESSION): string => {
+const addPrompt = (world: World, at: number, session = PROMPT_SESSION, turnId?: string): string => {
   const name = `codex-prompt-${at}-77.json`
-  world.files.set(`${INBOX}/${name}`, JSON.stringify({ session_id: session, prompt: 'PRIVATE_NEW_INPUT', last_assistant_message: 'PRIVATE_FAKE_REPLY?', transcript_path: '/home/me/.codex/sessions/2026/10/16/rollout-prompt.jsonl' }))
+  world.files.set(`${INBOX}/${name}`, JSON.stringify({ session_id: session, turn_id: turnId, prompt: 'PRIVATE_NEW_INPUT', last_assistant_message: 'PRIVATE_FAKE_REPLY?', transcript_path: '/home/me/.codex/sessions/2026/10/16/rollout-prompt.jsonl' }))
   world.mtime += 1
   return name
 }

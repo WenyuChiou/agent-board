@@ -76,6 +76,7 @@ test('AskUserQuestion is in Needs you while Claude waits and leaves when the nat
 test('a Claude Code closing question preserves completed Task steps', async ($, on) => {
   const world = { ...worldOf(), hasTasks: true }
   const clock = engineBeneath(on, world)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
   await start($, 'Update colors')
   await $.tool.call({ tool: 'TaskCreate', subject: 'Check palette', description: '' })
   await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
@@ -84,10 +85,20 @@ test('a Claude Code closing question preserves completed Task steps', async ($, 
   expect(world.files.get(FILE) ?? '').toContain('- [x] Check palette')
   visibleQuestion(world, 'Blue or green?')
   expect(world.store?.[`mirror:${SESSION}`]).toBeDefined()
+  const records = () => parseQuestions(world.files.get(FILE.replace('.md', '-questions.json')) ?? '')?.records
+  const id = records()?.find(record => record.isUnresolved)?.id
+  expect(id).toBeDefined()
+  await clock.advance(1)
+  await $.prompt.submit({ text: 'Blue', origin: { kind: 'composer' }, wait: false })
   await $.turn.start({ text: 'Blue', turnId: 't2' })
   await clock.advance(10)
-  const ledger = parseQuestions(world.files.get(FILE.replace('.md', '-questions.json')) ?? '')
-  expect(ledger?.records.some(record => record.isUnresolved)).toBe(false)
+  expect(records()?.find(record => record.id === id)?.isUnresolved).toBe(true)
+  expect(world.files.get(FILE)).toContain('replied=')
+  expect(world.files.get(FILE)).toContain('- [?]')
+  await $.turn.complete({ answer: 'Updated the palette.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(records()?.find(record => record.id === id)?.isUnresolved).toBe(false)
+  expect(world.files.get(FILE)).toContain('- [x] Check palette')
 })
 
 test('a Claude Code closing question survives an empty summary without Task tools', async ($, on) => {

@@ -15,7 +15,7 @@ import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, i
 import { cellsOf, plainBar } from './progress-bar'
 import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
-import { observeQuestions, partsKey2, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
+import { inboxQuestionOrigin, observeQuestions, partsKey2, partsKey3, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
 import { identity, isSilenceTask, isWorkingTask } from './grouping'
@@ -37,6 +37,7 @@ export type ViewStep = {
   text: string
   note: string
   status: ProgressStepStatus
+  isReplyPending?: true
   depth: number
   isCurrent: boolean
   number: number | null
@@ -420,7 +421,8 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
   if (mirror.tasks.length === 0) return null
   const doing = doingTask(mirror)
   const isReplied = mirror.replied !== undefined && Number.isFinite(mirror.replied) && (mirror.updated === null || mirror.replied >= (mirror.updated ?? 0))
-  const waitingYou = isReplied ? undefined : mirror.tasks.find(task => waitsOnYou(mirror, task))
+  const hasChatReply = (task: ProgressMirror['tasks'][number]): boolean => isReplied && task.native === undefined && waitsOnYou(mirror, task)
+  const waitingYou = mirror.tasks.find(task => waitsOnYou(mirror, task) && !hasChatReply(task))
   const blocked = mirror.tasks.find(task => task.status !== 'completed' && task.blocked !== null)
   const done = mirror.tasks.filter(task => task.status === 'completed' && !task.handoffTo).length
   let status = s.waitingReply
@@ -428,20 +430,20 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
   if (mirror.state === 'done') {
     status = s.allDone
     tone = 'quiet'
-  } else if (isReplied) {
-    status = s.answeredWaiting
-    tone = 'quiet'
   } else if (waitingYou !== undefined) {
     status = s.waitsOnYou(waitingYou.subject)
   } else if (blocked !== undefined) {
     status = s.stuck(blocked.blocked || blocked.subject)
     tone = 'alert'
+  } else if (isReplied) {
+    status = s.answeredWaiting
+    tone = 'quiet'
   } else if (mirror.state === 'working') {
     status = doing === undefined ? ((mirror.backgroundJobs ?? 0) > 0 && !mirror.isTurnRunning ? s.backgroundRunning : s.claudeWorking) : s.doingStep(doing.activeForm || doing.subject)
     tone = 'accent'
   }
   const steps = mirror.tasks.map((task, index) => {
-    const hasAnswer = isAnswered(mirror, task) || isReplied
+    const hasAnswer = isAnswered(mirror, task) || hasChatReply(task)
     let stepStatus: ProgressStepStatus = task.handoffTo ? 'cancelled' : task.status === 'completed' ? 'done' : 'todo'
     if (task.status !== 'completed') {
       if (task.blocked !== null) stepStatus = 'blocked'
@@ -454,6 +456,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
       text: `${task.subject}${suffixOf(stepStatus, s)}`,
       note,
       status: stepStatus,
+      ...(hasChatReply(task) ? { isReplyPending: true as const } : {}),
       depth: 0,
       isCurrent: task === doing,
       number: index + 1,
@@ -586,25 +589,31 @@ const withCurrent = (steps: readonly ViewStep[]): ViewStep[] => {
   return steps.map((step, index) => (index === open ? { ...step, isCurrent: true } : step))
 }
 
-const rowCells = (task: ProgressTask): Cell[] => {
+const isRepliedStep = (step: ProgressStep, isReplied: boolean): boolean => isReplied && step.status === 'waiting' && step.native === undefined
+
+const rowCells = (task: ProgressTask, isReplied = false): Cell[] => {
   const current = currentStepIndex(task)
 
-  return cellsOf(task.steps.map((step, index) => ({ status: step.status, isCurrent: index === current })))
+  return cellsOf(task.steps.map((step, index) => ({ status: isRepliedStep(step, isReplied) ? 'todo' : step.status, isCurrent: index === current })))
 }
 
-const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
+const rowSteps = (task: ProgressTask, s: Strings, isReplied = false): ViewStep[] => {
   const current = currentStepIndex(task)
 
   return foldSteps(
-    task.steps.map((step, index) => ({
-      ...shownStep(task, step.text, s),
-      status: step.status,
-      depth: step.depth,
-      isCurrent: index === current,
-      number: index + 1,
-      line: step.line,
-      raw: step.raw,
-    })),
+    task.steps.map((step, index): ViewStep => {
+      const isReplyPending = isRepliedStep(step, isReplied)
+      return {
+        ...shownStep(task, step.text, s),
+        status: isReplyPending ? 'todo' : step.status,
+        ...(isReplyPending ? { isReplyPending: true as const } : {}),
+        depth: step.depth,
+        isCurrent: index === current,
+        number: index + 1,
+        line: step.line,
+        raw: step.raw,
+      }
+    }),
     5,
     s,
   )
@@ -945,8 +954,13 @@ export const buildView = (
     usedKeys.add(key)
     return key
   }
-  // How many tasks share each project and title, counted once rather than for every row (#371).
   const repliedQuestions = new Set<string>()
+  const replyRows = new Map<string, { key: string; at: number }>()
+  const replyFor = (agent: string, id: string, session: string | undefined, at: number) => {
+    const row = session === undefined || replyRows.size === 0 ? undefined : replyRows.get(partsKey3(agent, id, session))
+    return row !== undefined && row.at > at ? row : undefined
+  }
+  // How many tasks share each project and title, counted once rather than for every row (#371).
   const twins = new Map<string, number>()
   for (const project of projects) {
     for (const task of project.tasks) {
@@ -989,7 +1003,12 @@ export const buildView = (
       const stale = isStale(task.auto, now, updated, staleMs)
       const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
-      const isRepliedTask = task.auto?.replied !== undefined && Number.isFinite(task.auto.replied) && (task.auto.updated === null || task.auto.replied >= task.auto.updated)
+      const repliedAt = task.auto?.replied
+      const isRepliedTask = repliedAt !== undefined && Number.isFinite(repliedAt) && repliedAt >= (task.auto?.updated ?? 0)
+      if (isRepliedTask && !isInactive && !isFrozen && task.auto !== null && task.auto.resume !== null && repliedAt <= now) {
+        const binding = partsKey3(task.auto.agent, task.auto.session, task.auto.resume)
+        if (repliedAt > (replyRows.get(binding)?.at ?? 0)) replyRows.set(binding, { key, at: repliedAt })
+      }
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
       const taskQuestions: WaitingItem[] = []
@@ -1208,8 +1227,8 @@ export const buildView = (
         ...(clock.isFuture ? { hasFutureTime: true } : {}),
         isHere,
         auto,
-        steps: rowSteps(shown, s),
-        cells: rowCells(shown),
+        steps: rowSteps(shown, s, isRepliedTask),
+        cells: rowCells(shown, isRepliedTask),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
         questions: isInactive ? unresolved : [],
         question: isInactive ? unresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
@@ -1332,6 +1351,7 @@ export const buildView = (
   }
 
   const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined && !(turn.replied !== undefined && turn.replied > turn.at)).flatMap(turn => {
+    if (replyFor(turn.agent, turn.id!, turn.session, turn.sourceAt ?? turn.at) !== undefined) return []
     const updated = inactiveScopes.get(questionScope(turn.project, turn.agent, turn.id ?? ''))
     if (updated !== undefined && turn.at <= updated) return []
     const scope = questionScope(turn.project, turn.agent, turn.id ?? '')
@@ -1417,6 +1437,14 @@ export const buildView = (
     const isStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
     const stage = isStopped ? 'older' : age.stage
     const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, dir: recordFolder(record) ?? saved?.auto?.dir ?? null, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), at: record.firstObserved, ...askOf(parts.text, parts.note), where: 'other', agent: agent === 'claude' ? '' : agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
+    // The inbox file can be gone while its ledger copy still waits for the report.
+    // Require the full binding and a newer source clock before moving its Resolve action.
+    const origin = replyRows.size > 0 && !isStopped ? inboxQuestionOrigin(source) : null
+    const reply = origin === null ? undefined : replyFor(source.agent, source.session, origin.session, origin.at)
+    if (reply !== undefined && !marked.has(record.id)) {
+      provisional.push({ ...item, key: `${reply.key}::inbox-${sha256(record.id)}` })
+      continue
+    }
     if (marked.has(record.id)) hidden.push(item)
     else {
       retained.push(item)

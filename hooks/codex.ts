@@ -170,7 +170,7 @@ export const questionSteps = (held: readonly string[], previousAsked: number | u
 }
 
 // Hooks describe lifecycle, not task completion. Only an explicit report can say done.
-export const codexEvent = (previous: CodexReport | null, input: Record<string, unknown>, now: string, s: Strings, eventAt = now): CodexReport => {
+export const codexEvent = (previous: CodexReport | null, input: Record<string, unknown>, now: string, s: Strings, eventAt: string | number = now, timing: { lastAppliedAt?: number; observedAt?: number } = {}): CodexReport => {
   const session = line(input.session_id)
   const event = input.hook_event_name
   if (!codexEvents.some(one => one === event)) throw new Error('INVALID_EVENT')
@@ -185,21 +185,28 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   const isWorkStop = event === 'Stop' && !isBoardTurn && (input.has_response === true || isClosingQuestion)
   // Cursor can send its textless Stop before or after the response for the same turn.
   // Seeing one must not consume the other event's proof of a report.
-  const key = `${isWorkStop ? 'StopReport' : String(event)}:${turn ?? ''}`
+  const key = `${isWorkStop && previous?.agent === 'cursor' ? 'StopReport' : String(event)}:${turn ?? ''}`
   // Cursor can send its reply after Stop with the same generation id.
   if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest' && !isClosingQuestion) return previous
   if (previous?.turn && turn && previous.turn !== turn && event !== 'UserPromptSubmit') throw new Error('STALE_TURN')
   const isHumanPrompt = working && !isBoardTurn && input.prompt_submitted !== false
   const hasOpenQuestion = previous?.asked !== undefined && previous.steps[previous.asked]?.startsWith('- [?] ') === true
+  const sourceAt = typeof eventAt === 'number' ? eventAt : Date.parse(eventAt)
+  const displayAt = Date.parse(now)
+  const observedAt = timing.observedAt ?? displayAt
+  const isAfter = (earlier: number): boolean =>
+    Number.isFinite(earlier) && Number.isFinite(sourceAt) && sourceAt > earlier && sourceAt <= observedAt
   if (isHumanPrompt && hasOpenQuestion) {
-    const promptAt = Date.parse(eventAt)
     const questionAt = Date.parse(previous!.updated)
     // Equal or unknown clocks cannot prove this prompt came after the question.
-    if (!Number.isFinite(promptAt) || !Number.isFinite(questionAt) || promptAt <= questionAt || promptAt > Date.parse(now)) return previous!
+    if (!isAfter(Math.max(questionAt, timing.lastAppliedAt ?? questionAt))) return previous!
   }
   const isReport = isWorkStop || event === 'PermissionRequest'
-  if (isReport && previous?.replied !== undefined && !(Date.parse(eventAt) > Date.parse(previous.replied))) return previous
+  if (isReport && previous?.replied !== undefined && !isAfter(Date.parse(previous.replied))) return previous
   const isSettlingReply = hasOpenQuestion && previous?.replied !== undefined && isReport
+  const acceptedAt = isHumanPrompt ? sourceAt : Date.parse(previous?.replied ?? '')
+  const replied = hasOpenQuestion && !isSettlingReply && (isHumanPrompt || previous?.replied !== undefined)
+    ? acceptedAt > displayAt ? new Date(acceptedAt).toISOString() : now : undefined
   // A reply that ends on a question waits for the person, even after the model reported its own steps done.
   const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' && !isClosingQuestion ? 'done' : 'waiting'
   // Keep the hook's own steps in place: the ledger needs to see their original words closed.
@@ -232,7 +239,7 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
     ...(approvalRevision === undefined ? {} : { approvalRevision }),
     ...(askedRevision === undefined ? {} : { askedRevision }),
     updated: now,
-    ...(hasOpenQuestion && !isSettlingReply && (isHumanPrompt || previous?.replied !== undefined) ? { replied: now } : {}),
+    ...(replied === undefined ? {} : { replied }),
     ...(isBoardTurn ? { isBoardTurn: true } : {}),
     // A replayed event keeps the list as it was, so the replay changes no bytes.
     events: previous?.events?.includes(key) ? previous.events : [...(previous?.events ?? []), key].slice(-256),

@@ -563,18 +563,20 @@ test('an expanded board command sent by Gemini or OpenCode counts as a board req
   }
 })
 
-test('restoring several questions advances each revision beyond the previous one', async () => {
+test('restoring several questions from the same board turn keeps their original revisions', async () => {
   const { answerAgentPrompt, blockId, restoreAgentBoardQuestion } = await import('../hooks/inbox.ts')
   const { emptyMirror, applyTaskCreate } = await import('../hooks/mirror.ts')
   const at = 1792216380000, session = 'multiple-questions'
   let mirror = emptyMirror(blockId('codex', session), 'demo', at, '/demo', 'codex')
   for (const id of ['one', 'two']) mirror = applyTaskCreate(mirror, { subject: id, metadata: { waiting: 'you', why: 'Choose?' } }, id, at)
   mirror = { ...mirror, resume: session, turnOrder: at * 2 }
-  const turn = { id: mirror.sessionId, agent: 'codex', session, cwd: '', project: '', prompt: '', answer: '', transcript: '' }
+  const turn = { id: mirror.sessionId, agent: 'codex', session, cwd: '', project: '', prompt: '', answer: '', transcript: '', turnKey: 'a'.repeat(64) }
   const answered = answerAgentPrompt(mirror, { ...turn, event: 'prompt', at: at + 1000 }, at + 1000)
   const restored = restoreAgentBoardQuestion(answered, { ...turn, event: 'turn', prompt: '/board', at: at + 2000 }, at + 2000)
-  assert.deepEqual(restored.tasks.map(one => one.questionRevision), ['3', '4'])
-  assert.equal(restored.questionSequence, '4')
+  assert.equal(restored.replied, undefined)
+  assert.deepEqual(restored.tasks.map(one => one.questionRevision), ['1', '2'])
+  assert.deepEqual(restored.tasks, mirror.tasks)
+  assert.equal(restored.questionSequence, '2')
 })
 
 test('legacy SDK reporters remove their partial temporary files and preserve foreign collisions', async () => {

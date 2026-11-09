@@ -200,7 +200,7 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
 // original question or introducing an ask from before the person's reply.
 export const applyLateDigest = (mirror: ProgressMirror, digest: Digest, now: number, s: Strings, hasRunningTurnBackgroundJob = false): ProgressMirror => {
   const next = applyDigest(mirror, { ...digest, ask: '', why: '' }, now, s, hasRunningTurnBackgroundJob)
-  return { ...next, autoAsk: mirror.autoAsk, replied: now, tasks: [...next.tasks, ...mirror.tasks.filter(one => waitsOnYou(mirror, one))] }
+  return { ...next, updated: mirror.updated, autoAsk: mirror.autoAsk, tasks: [...next.tasks, ...mirror.tasks.filter(one => waitsOnYou(mirror, one))] }
 }
 
 // A turn that ended on a question, in a session whose list says nothing waits on the
