@@ -3814,7 +3814,7 @@ export const LINES = [
 "  const one = to === undefined ? answers === undefined ? undefined : messages.filter((message) => message.answers === answers).at(-1) : messages.filter((message) => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1);",
 "  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...one.hasAccepted === true ? { hasAccepted: true } : {}, isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } };",
 "};",
-"var isAnswerHanded = (messages, questionId) => messages.some((message) => message.answers === questionId && (message.status === \"acknowledged\" || message.status === \"accepted\" && message.error === \"\" || message.status === \"uncertain\" && message.hasAccepted === true));",
+"var isAnswerHanded = (messages, questionId) => messages.some((message) => message.answers === questionId && (message.status === \"acknowledged\" || message.status === \"accepted\" || message.status === \"uncertain\" && message.hasAccepted === true));",
 "var isClaudeAgent = (agent) => agent === \"\" || agent.toLowerCase() === \"claude\";",
 "var claudeHint = (agent, isWorking, s) => !isClaudeAgent(agent) ? \"\" : isWorking ? s.claudeSendWorking : s.claudeSendNow;",
 "var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
