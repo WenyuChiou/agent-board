@@ -16,8 +16,8 @@ const owner = 'a'.repeat(64)
 const words = STRINGS.en
 const projectsOf = (mirror: ProgressMirror) => parseProgress(`## demo\n${renderAutoBlock(mirror, words).join('\n')}\n`)
 const codexProjects = (report: CodexReport) => parseProgress(putCodexBlock('', report, owner))
-const event = (previous: CodexReport | null, name: string, turn: string, extra: Record<string, unknown> = {}) =>
-  codexEvent(previous, { session_id: session, hook_event_name: name, turn_id: turn, ...extra }, new Date(NOW).toISOString(), words)
+const event = (previous: CodexReport | null, name: string, turn: string, extra: Record<string, unknown> = {}, now = NOW) =>
+  codexEvent(previous, { session_id: session, hook_event_name: name, turn_id: turn, ...extra }, new Date(now).toISOString(), words)
 
 test('a tool approval closed after the ledger saw it leaves Needs you', () => {
   const task = applyTaskCreate(emptyMirror('a1b2c3d4-claude-session', 'demo', NOW), { subject: 'Real task' }, '1', NOW)
@@ -40,7 +40,7 @@ test('a tool approval closed after the ledger saw it leaves Needs you', () => {
   expect(closeApproval(cleared)).toBe(cleared)
 })
 
-test('a Codex approval or question the hook took back leaves Needs you', () => {
+test('a Codex approval settles immediately while a chat reply leaves its question open until the next report', () => {
   for (const kind of ['PermissionRequest', 'Stop']) {
     const started = event(null, 'UserPromptSubmit', 'turn-1')
     const waiting = event(started, kind, 'turn-1', kind === 'Stop' ? { question: 'Which folder?' } : {})
@@ -49,11 +49,17 @@ test('a Codex approval or question the hook took back leaves Needs you', () => {
     expect(open.records.filter(record => record.isUnresolved)).toHaveLength(1)
     expect(buildView(openProjects, [], null, NOW, 0, {}, words, [], {}, open).waiting).toHaveLength(1)
 
-    const finished = event(waiting, 'UserPromptSubmit', 'turn-2')
-    const closedProjects = codexProjects(finished)
-    const closed = observeQuestions(open, closedProjects, null, [], NOW + 1, true).ledger
-    expect(closed.records.filter(record => record.isUnresolved)).toEqual([])
-    expect(buildView(closedProjects, [], null, NOW + 1, 0, {}, words, [], {}, closed).waiting).toEqual([])
+    const replied = event(waiting, 'UserPromptSubmit', 'turn-2', {}, NOW + 1)
+    const repliedProjects = codexProjects(replied)
+    const afterReply = observeQuestions(open, repliedProjects, null, [], NOW + 1, true).ledger
+    expect(afterReply.records.filter(record => record.isUnresolved).map(record => record.id))
+      .toEqual(kind === 'Stop' ? [open.records[0]!.id] : [])
+    expect(buildView(repliedProjects, [], null, NOW + 1, 0, {}, words, [], {}, afterReply).waiting).toEqual([])
+    if (kind === 'Stop') {
+      const finished = event(replied, 'Stop', 'turn-2', { has_response: true }, NOW + 2)
+      const closed = observeQuestions(afterReply, codexProjects(finished), null, [], NOW + 2, true).ledger
+      expect(closed.records.filter(record => record.isUnresolved)).toEqual([])
+    }
   }
 })
 
@@ -250,8 +256,8 @@ test('identical Codex Stop replay keeps a resolved question closed but real asks
   expect(changed.askedRevision).not.toBe(first.askedRevision)
   const changedLedger = observeQuestions(held, codexProjects(changed), null, [], NOW + 3, true).ledger
   expect(changedLedger.records.filter(record => record.isUnresolved)).toHaveLength(1)
-  const working = event(replay, 'UserPromptSubmit', 'turn-2')
-  const renewed = event(working, 'Stop', 'turn-2', { question: 'Which folder?' })
+  const working = event(replay, 'UserPromptSubmit', 'turn-2', {}, NOW + 1)
+  const renewed = event(working, 'Stop', 'turn-2', { question: 'Which folder?' }, NOW + 2)
   const renewedLedger = observeQuestions(held, codexProjects(renewed), null, [], NOW + 3, true).ledger
   expect(renewed.askedRevision).not.toBe(first.askedRevision)
   expect(renewedLedger.records.find(record => record.isUnresolved)?.id).not.toBe(oldId)

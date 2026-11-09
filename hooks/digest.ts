@@ -1,5 +1,5 @@
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
-import { cleanContext, cleanTitle, clip, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
+import { cleanContext, cleanTitle, clip, markAnswered, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
 import { answeredStep, oneLine } from './step-words'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -196,6 +196,13 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
   }
 }
 
+// A summary of an earlier report can add finished work without replacing the
+// original question or introducing an ask from before the person's reply.
+export const applyLateDigest = (mirror: ProgressMirror, digest: Digest, now: number, s: Strings, hasRunningTurnBackgroundJob = false): ProgressMirror => {
+  const next = applyDigest(mirror, { ...digest, ask: '', why: '' }, now, s, hasRunningTurnBackgroundJob)
+  return { ...next, updated: mirror.updated, autoAsk: mirror.autoAsk, tasks: [...next.tasks, ...mirror.tasks.filter(one => waitsOnYou(mirror, one))] }
+}
+
 // A turn that ended on a question, in a session whose list says nothing waits on the
 // person: the step in progress (else the next one) waits on them, with the question as its
 // note, until they answer.
@@ -251,7 +258,7 @@ export const toolQuestions = (mirror: ProgressMirror, questions: unknown, call: 
   return added.reduce((current, one) => {
     const renewed = renewQuestion(one, current.questionSequence)
     return { ...current, source: mirror.tasks.length === 0 ? 'turns' : mirror.source, tasks: [...current.tasks.filter(task => task.id !== one.id), renewed], questionSequence: renewed.questionRevision, updated: now }
-  }, mirror)
+  }, added.length === 0 ? mirror : settleChatReply(mirror))
 }
 
 // The id of the step a tool approval puts into a Task list (#1048): one at a time, in the dialog's own window.
@@ -262,10 +269,11 @@ const APPROVAL = 'approval'
 // keeps its question, and a session without a Task list has nothing to hang the step on.
 export const markApproval = (mirror: ProgressMirror, step: string): ProgressMirror => {
   if (mirror.source !== 'tasks' || mirror.tasks.length === 0) return mirror
-  if (mirror.tasks.some(one => one.id !== APPROVAL && waitsOnYou(mirror, one))) return mirror
-  const renewed = renewQuestion({ ...task(APPROVAL, step, 'pending', null), waiting: 'you', native: { agent: 'claude', options: [] } }, mirror.questionSequence)
+  const reported = settleChatReply(mirror)
+  if (reported.tasks.some(one => one.id !== APPROVAL && waitsOnYou(reported, one))) return mirror
+  const renewed = renewQuestion({ ...task(APPROVAL, step, 'pending', null), waiting: 'you', native: { agent: 'claude', options: [] } }, reported.questionSequence)
 
-  return { ...mirror, questionSequence: renewed.questionRevision, tasks: [...mirror.tasks.filter(one => one.id !== APPROVAL), renewed] }
+  return { ...reported, questionSequence: renewed.questionRevision, tasks: [...reported.tasks.filter(one => one.id !== APPROVAL), renewed] }
 }
 
 // An approval that waited behind another question goes up once nothing else waits (#1106); a step
@@ -326,7 +334,7 @@ export const isPersonsAnswer = (e: Submitted): boolean => {
   return text !== '' && !APP_EVENT.test(text)
 }
 
-// Summed-up questions are answered by the next prompt: the waiting step counts as done.
+// A real agent report can keep an older summed-up question as a closed line.
 export const answerTurns = (mirror: ProgressMirror): ProgressMirror =>
   mirror.source !== 'turns'
     ? mirror
@@ -334,6 +342,24 @@ export const answerTurns = (mirror: ProgressMirror): ProgressMirror =>
         ...mirror,
         tasks: mirror.tasks.map(one => (one.waiting === 'you' ? answeredStep(one) : one)),
       }
+
+// Chat replies do not answer native permission or selection dialogs.
+const isChatQuestion = (mirror: ProgressMirror, one: ProgressMirrorTask): boolean => one.native === undefined && waitsOnYou(mirror, one)
+
+export const noteChatReply = (mirror: ProgressMirror, at: number): ProgressMirror =>
+  Number.isFinite(at) && at > (mirror.updated ?? 0) && mirror.tasks.some(one => isChatQuestion(mirror, one))
+    ? { ...mirror, replied: at } : mirror
+
+// Only the agent's next report settles a chat reply. Keep the previous words
+// so the question ledger has proof even when the report asks another question.
+export const settleChatReply = (mirror: ProgressMirror): ProgressMirror => {
+  if (mirror.replied === undefined) return mirror
+  const ids = mirror.tasks.filter(one => isChatQuestion(mirror, one)).map(one => one.id)
+  const next = mirror.source === 'turns'
+    ? { ...mirror, tasks: mirror.tasks.map(one => ids.includes(one.id) ? answeredStep(one) : one) }
+    : markAnswered(mirror, ids)
+  return { ...next, autoAsk: null, replied: undefined }
+}
 
 // Whether the list grew enough since the title and background were written to look again.
 export const needsRefresh = (mirror: ProgressMirror): boolean =>
