@@ -6661,8 +6661,14 @@ test('OpenClaw session events carry the session folder and progress_card reports
   assert.match(readFileSync(f.progress, 'utf8'), /^- \[\?\] Pick one$/m)
   await assert.rejects(tool.execute('call-2', { steps: 'not a list' }), /INVALID_STEPS/)
   await assert.rejects(tool.execute('call-3', { title: 'Invalid', state: 'working', steps: ['not a task line'] }), /Cannot read the step "not a task line".*- \[ \] step/)
-  const long = await tool.execute('call-4', { title: 'Many steps', state: 'working', steps: Array.from({ length: 41 }, (_, index) => `- [ ] Step ${index + 1}`) })
-  assert.equal(JSON.parse(long.content[0].text).dropped, 1)
+  const full = await tool.execute('call-4', { title: 'Many steps', state: 'working', steps: Array.from({ length: 40 }, (_, index) => `- [ ] Step ${index + 1}`) })
+  assert.equal(full.content[0].text, 'OK')
+  const long = await tool.execute('call-5', { title: 'Many steps', state: 'working', steps: Array.from({ length: 41 }, (_, index) => `- [ ] Step ${index + 1}`) })
+  // The model is told how many steps were left out, and nothing about the session or the file.
+  const reply = JSON.parse(long.content[0].text)
+  assert.deepEqual(Object.keys(reply).sort(), ['cut', 'dropped'])
+  assert.equal(reply.dropped, 1)
+  assert.doesNotMatch(long.content[0].text, /session|progress|[\\/]/)
 }))
 
 test('a report from a folder binds to an openclaw record that holds the folder and refuses one that does not', () => fixture(f => {
@@ -6770,8 +6776,14 @@ test('DeepSeek session events carry the session folder and the agent_board tool 
   assert.match(readFileSync(f.progress, 'utf8'), /^- \[\?\] Pick one$/m)
   await assert.rejects(tool.execute({ action: 'report', steps: 'not a list' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_STEPS/)
   await assert.rejects(tool.execute({ action: 'report', title: 'Invalid', state: 'working', steps: ['not a task line'] }, { agent }), /Cannot read the step "not a task line".*- \[ \] step/)
+  const full = await tool.execute({ action: 'report', title: 'Many steps', state: 'working', steps: Array.from({ length: 40 }, (_, index) => `- [ ] Step ${index + 1}`) }, { agent })
+  assert.equal(full.text, 'OK')
   const long = await tool.execute({ action: 'report', title: 'Many steps', state: 'working', steps: Array.from({ length: 41 }, (_, index) => `- [ ] Step ${index + 1}`) }, { agent })
-  assert.equal(JSON.parse(long.text).dropped, 1)
+  // The model is told how many steps were left out, and nothing about the session or the file.
+  const reply = JSON.parse(long.text)
+  assert.deepEqual(Object.keys(reply).sort(), ['cut', 'dropped'])
+  assert.equal(reply.dropped, 1)
+  assert.doesNotMatch(long.text, /session|progress|[\\/]/)
   await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] Done'] }, {}), /AGENT_BOARD_REPORT_FAILED: NO_SESSION/)
   await assert.rejects(tool.execute({ action: 'close' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_ACTION/)
 }))

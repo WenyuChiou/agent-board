@@ -22,6 +22,14 @@ const report = (mode, payload, deadline, session, cwd) => {
   if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason + (typeof detail === 'string' ? ': ' + detail : '') : 'AGENT_BOARD_REPORT_FAILED')
   return result.stdout
 }
+// A long report's tool reply carries only how many steps the board left out or shortened. The model needs
+// those counts to trim its list; the writer's session id and progress-file path stay out of the model's context.
+const toolReply = text => {
+  try {
+    const { dropped, cut } = JSON.parse(text)
+    return JSON.stringify({ dropped, cut })
+  } catch { return 'OK' }
+}
 `
 
 // A session's folder is in no hook context that is free of the conversation: it comes from the tool
@@ -85,7 +93,7 @@ export default {
             if (typeof params.title === 'string') payload.title = params.title
             if (['working', 'waiting', 'done', 'ended'].includes(params.state)) payload.state = params.state
             const result = report('--codex-report', payload, Date.now() + ${hookTimeout('openclaw') - 1000}, session)
-            return { content: [{ type: 'text', text: payload.steps.length > 40 ? result : 'OK' }], details: {} }
+            return { content: [{ type: 'text', text: payload.steps.length > 40 ? toolReply(result) : 'OK' }], details: {} }
           } catch (error) {
             hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
             throw error
@@ -193,7 +201,7 @@ export const apply = ctx => {
         if (typeof args.title === 'string') payload.title = args.title
         if (['working', 'waiting', 'done', 'ended'].includes(args.state)) payload.state = args.state
         const result = report('--codex-report', payload, Date.now() + 20000, header.id)
-        return { text: payload.steps.length > 40 ? result : 'OK' }
+        return { text: payload.steps.length > 40 ? toolReply(result) : 'OK' }
       } catch (error) {
         hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
         throw error
