@@ -1215,7 +1215,10 @@ fs.readFileSync = (file, ...args) => {
 }
 const spawn = childProcess.spawn
 childProcess.spawn = (command, args, ...rest) => {
-  if (Array.isArray(args) && args.includes('--serve-child')) fs.appendFileSync(${JSON.stringify(spawns)}, 'spawn\\n')
+  // On Windows the server starts through PowerShell's Start-Process, so its arguments are inside -EncodedCommand.
+  const encoded = Array.isArray(args) ? args.indexOf('-EncodedCommand') : -1
+  const isServeChild = Array.isArray(args) && (args.includes('--serve-child') || (encoded >= 0 && Buffer.from(String(args[encoded + 1]), 'base64').toString('utf16le').includes('--serve-child')))
+  if (isServeChild) fs.appendFileSync(${JSON.stringify(spawns)}, 'spawn\\n')
   return spawn(command, args, ...rest)
 }
 require('node:module').syncBuiltinESMExports()
@@ -1297,7 +1300,10 @@ const childProcess = require('node:child_process')
 ${fault}
 const spawn = childProcess.spawn
 childProcess.spawn = (command, args, ...rest) => {
-  if (Array.isArray(args) && args.includes('--serve-child')) fs.appendFileSync(${JSON.stringify(spawns)}, 'spawn\\n')
+  // On Windows the server starts through PowerShell's Start-Process, so its arguments are inside -EncodedCommand.
+  const encoded = Array.isArray(args) ? args.indexOf('-EncodedCommand') : -1
+  const isServeChild = Array.isArray(args) && (args.includes('--serve-child') || (encoded >= 0 && Buffer.from(String(args[encoded + 1]), 'base64').toString('utf16le').includes('--serve-child')))
+  if (isServeChild) fs.appendFileSync(${JSON.stringify(spawns)}, 'spawn\\n')
   return spawn(command, args, ...rest)
 }
 require('node:module').syncBuiltinESMExports()
