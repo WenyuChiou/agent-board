@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { hermesHome } from '../hooks/hermes-home'
-import { agentHooks, BOARD_FOR, isReleased, readConfig, withHermesHooks, withoutHermesHooks } from '../hooks/connect-pure'
+import { agentHooks, BOARD_FOR, editHermesSetup, isReleased, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { parseProgress, STALE_MS } from '../hooks/parse'
@@ -1292,7 +1292,6 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   // The trust file Hermes keeps beside config.yaml: an approval is an (event, command) pair, and only ours are touched here.
   const allowlistFile = join(hermesDir, 'shell-hooks-allowlist.json')
-  const hermesOwns = /agent-board-hook\.mjs/
   // Hermes splits a hook command with shlex and runs it without a shell: every word is double-quoted,
   // and a Windows path takes forward slashes, since a backslash could be read as an escape.
   const hermesCommand = (event: string): string => hookArgs(event, statusEvents.hermes?.[event]).map(word => quote(process.platform === 'win32' ? word.replaceAll('\\', '/') : word)).join(' ')
@@ -1303,15 +1302,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   let nextAllowlist: string | undefined
   if (agent === 'hermes') {
     const text = initial(nativeConfig) ?? ''
-    if (manifest.groups.hooks !== undefined && !hermesOwns.test(text)) {
+    const events = hermesEvents()
+    const recorded = new Map(Object.entries(object(manifest.groups.hooks ?? {})).filter((pair): pair is [string, string] => typeof pair[1] === 'string'))
+    const patch = isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove) : null
+    if (manifest.groups.hooks !== undefined && patch !== null && !patch.hasOwned) {
       if (remove) alreadyGone.push(`${nativeConfig}:hooks`)
       else hasMissingGroup = true
     }
-    const events = hermesEvents()
-    const next = !isYamlMapping(text) ? null : remove ? withoutHermesHooks(text, hermesOwns) : withHermesHooks(text, events, hermesOwns)
-    if (next === null) conflicts.push(nativeConfig)
-    nextConfigText = next ?? text
-    if (!remove && next !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
+    if (patch === null) conflicts.push(nativeConfig)
+    nextConfigText = patch?.text ?? text
+    if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
     if (remove) {
       const approvals = readAllowlist(initial(allowlistFile))
       const mine = Object.entries(object(manifest.groups.hooks ?? {}))
