@@ -3900,7 +3900,7 @@ export const LINES = [
 "  return { missing, records: [...priorWritten, ...kept, ...added] };",
 "};",
 "var field = (text, s) => text.replace(/\\s+/g, \" \").replace(/\\s·\\s/g, \"・\").trim() || s.unnamed;",
-"var journalLine = (entry, now, s = ZH_TW) => `- ${localStamp(now)} · ${field(entry.project, s)} · ${field(entry.task, s)} · ${field(entry.step, s)}`;",
+"var journalLine = (entry, now, s = ZH_TW) => `${entry.isEvidence === true ? \"> \" : \"\"}- ${localStamp(now)} · ${field(entry.project, s)} · ${field(entry.task, s)} · ${field(entry.step, s)}`;",
 "var appendJournal = (text, lines, s = ZH_TW) => lines.length === 0 ? text : `${text.trim() === \"\" ? `${s.journalTitle}",
 "` : text.replace(/\\s*$/, `",
 "`)}${lines.join(`",

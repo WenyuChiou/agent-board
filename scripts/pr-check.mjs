@@ -500,6 +500,12 @@ const homePattern = /(?:[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}|\/(?:Users|home)\/)([
 // A web address, such as https://github.com/users/<name>, is not a home folder; file:///home/…,
 // ssh://host/home/… and vscode-remote://wsl+Ubuntu/home/… still are.
 const webAddress = /\bhttps?:\/\/[^\s"'`/][^\s"'`]*/gi
+const attachmentPrefix = 'https://github.com/user-attachments/assets/'
+const attachmentIdPattern = new RegExp(`^(${uuidPattern.source})([)>]*)$`, 'i')
+const publicAttachmentId = address => {
+  if (!address.startsWith(attachmentPrefix)) return null
+  return attachmentIdPattern.exec(address.slice(attachmentPrefix.length))?.[1] ?? null
+}
 // ana and li are the made-up people of docs/preview/samples.ts.
 const placeholders = new Set(['you', 'me', 'user', 'username', 'name', 'example', 'jane', 'john', 'alice', 'bob', 'ana', 'li', 'someone', 'runner', '...', '…'])
 const safeText = text => {
@@ -517,7 +523,13 @@ export const privateData = ({ added, body }) => {
   for (const { path, line, text } of entries) {
     const location = path ? `${safeText(path)} line ${line}` : `body line ${line}`
     const add = (kind, fix) => output.problems.push(problem('private-data', `${kind} in ${location}.`, fix))
-    if ([...text.matchAll(uuidPattern)].some(match => new Set(match[0].replace(/-/g, '').toLowerCase()).size > 2)) {
+    // A public screenshot's asset UUID is not a session. Other UUIDs on the same
+    // line and every other privacy check still see their original text.
+    const sessionText = text.replace(webAddress, address => {
+      const id = publicAttachmentId(address)
+      return id === null ? address : address.replace(id, '<attachment-id>')
+    })
+    if ([...sessionText.matchAll(uuidPattern)].some(match => new Set(match[0].replace(/-/g, '').toLowerCase()).size > 2)) {
       add('session id', 'use a placeholder such as <session-id>; a made-up id of repeated digits, such as 00000000-0000-0000-0000-000000000001, also passes.')
     }
     if ([...text.replace(webAddress, ' ').matchAll(homePattern)].some(match => !placeholders.has(match[1].toLowerCase()) && !/^[<$%]/.test(match[1]))) {

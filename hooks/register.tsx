@@ -58,7 +58,7 @@ import {
   pendingArchivePath,
   unwrittenEntries,
 } from './journal'
-import type { JournalEntry } from './journal'
+import type { JournalEntry, JournalRecord } from './journal'
 import {
   applyTaskCreate,
   applyTaskUpdate,
@@ -1737,7 +1737,7 @@ const saveCutTextNow = async ($: EngineInterface): Promise<void> => {
   const tail = (line: string): string => line.replace(/^(?:> )?- \d{4}-\d{2}-\d{2} \d{2}:\d{2} · /, '')
   const seen = new Set(past.split(/\r?\n/).map(tail))
   const isNew = fresh.filter(entry => !seen.has(tail(journalLine(entry, at, s))))
-  if (isNew.length > 0) await journal($, isNew)
+  if (isNew.length > 0) await journal($, isNew.map(entry => ({ ...entry, isEvidence: true })))
   for (const entry of fresh) journaledCuts.add(JSON.stringify(entry))
 }
 
@@ -1791,7 +1791,7 @@ const countToday = async ($: EngineInterface): Promise<void> => {
 }
 
 // Keep the original month and timestamp across retries, including a module reload.
-const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, 'at'>> = [], storedKey?: string, outcome?: { isSaved: boolean; isDeferred?: boolean }): Promise<void> => {
+const journal = ($: EngineInterface, entries: ReadonlyArray<JournalRecord> = [], storedKey?: string, outcome?: { isSaved: boolean; isDeferred?: boolean }): Promise<void> => {
   let hasPending = entries.length > 0
   let key = storedKey ?? ''
   return enqueue(async () => {
