@@ -56,6 +56,7 @@ export type ServeOptions = {
   setBarStyle?: (style: BarStyle) => boolean
   language?: () => SettingsLang
   setLanguage?: (lang: SettingsLang) => boolean
+  isLangOverridden?: () => boolean
   sweep: () => void
   sweepMs: number
   paste: (text: string, reviewToken?: string) => { isAdded: boolean; note: string; review?: { token: string; current: string; incoming: string } }
@@ -428,7 +429,7 @@ export const startServer = (o: ServeOptions): void => {
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
-      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.()))
+      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false))
       return
     }
     if (req.method === 'GET') {
@@ -541,7 +542,9 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/language') {
         const lang = body.lang
         if (!isSettingsLang(lang) || o.setLanguage === undefined) return json(res, 400, { note: o.s.pressFailed })
-        return o.setLanguage(lang) ? json(res, 200, { lang, note: o.s.settingsLanguageChanged }) : json(res, 409, { note: o.s.barStyleUnreadable })
+        if (!o.setLanguage(lang)) return json(res, 409, { note: o.s.barStyleUnreadable })
+        const isOverridden = o.isLangOverridden?.() ?? false
+        return json(res, 200, { lang, isOverridden, note: isOverridden ? o.s.settingsLanguageOverridden : o.s.settingsLanguageChanged })
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()

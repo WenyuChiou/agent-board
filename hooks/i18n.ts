@@ -807,6 +807,7 @@ export const ZH_TW = {
   settingsTraditional: '繁體中文',
   settingsSimplified: '简体中文',
   settingsLanguageChanged: '語言已更新。',
+  settingsLanguageOverridden: '看板目前使用繁體中文（--lang）。此處的選擇會在稍後啟動時生效。',
   settingsNotifications: '通知',
   settingsOn: '開啟',
   settingsOff: '關閉',

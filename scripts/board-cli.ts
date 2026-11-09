@@ -18,7 +18,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
-import { boardLanguage, settingsLangOf, withBoardSettings } from '../hooks/board-settings'
+import { boardLanguage, isLanguageOverridden, settingsLangOf, withBoardSettings } from '../hooks/board-settings'
 import type { SettingsLang } from '../hooks/board-settings'
 import { barStyleName, barStyleOf, nextBarStyle, withBarStyle } from '../hooks/progress-bar'
 import type { BarStyle } from '../hooks/progress-bar'
@@ -98,7 +98,8 @@ const path = progressFile()
 const savedLanguage = (): SettingsLang | null => {
   try { return settingsLangOf(readFileSync(settingsPath(path), 'utf8')) } catch { return null }
 }
-const wordsNow = () => STRINGS[boardLanguage(flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang')), savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))]
+const langFlag = flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang'))
+const wordsNow = () => STRINGS[boardLanguage(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))]
 let s = wordsNow()
 
 // Files changed since the board last read progress.md in full. A read refused because another
@@ -1965,6 +1966,7 @@ const serveChild = (): void => {
       // With no pick saved, the panel shows the setup language the board uses, not Automatic.
       language: () => settingsLangOf(settingsNow()) ?? langOf(BAKED.lang) ?? 'auto',
       setLanguage: saveLanguage,
+      isLangOverridden: () => isLanguageOverridden(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG)),
       sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.
       sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,
