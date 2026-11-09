@@ -11015,6 +11015,49 @@ test('OpenCode idle events send the last assistant text and preserve status on f
   }
 }))
 
+test('OpenCode drops an older idle result after a newer prompt, busy status or session deletion', () => fixture(async f => {
+  const got = await planPlugin(f, 'opencode', 'return AgentBoardLocal', async factory => {
+    const cases = ['prompt', 'busy', 'deleted']
+    let enterLookup
+    let releaseLookup
+    const freshQuestion = 'Should I use the current draft?'
+    const answer = text => ({ data: [{ info: { role: 'assistant' }, parts: [{ type: 'text', text }] }] })
+    const client = { session: {
+      get: async ({ path }) => ({ data: { id: path.id } }),
+      messages: async ({ path }) => path.id === 'synthetic-current-idle' ? answer(freshQuestion) : new Promise(resolve => {
+        releaseLookup = resolve
+        enterLookup()
+      }),
+    } }
+    const hooks = await factory({ client, directory: f.home })
+    const idle = sessionID => hooks.event({ event: { type: 'session.idle', properties: { sessionID } } })
+    for (const kind of cases) {
+      const id = `synthetic-old-idle-${kind}`
+      const entered = new Promise(resolve => { enterLookup = resolve })
+      const pending = idle(id)
+      await entered
+      if (kind === 'prompt') {
+        await hooks['chat.message']({ sessionID: id }, { parts: [{ type: 'text', text: 'Start the new draft.' }] })
+        // A different session can report its own current question while the first lookup is held.
+        await idle('synthetic-current-idle')
+      } else if (kind === 'busy') {
+        await hooks.event({ event: { type: 'session.status', properties: { sessionID: id, status: { type: 'busy' } } } })
+      } else {
+        await hooks.event({ event: { type: 'session.deleted', properties: { info: { id } } } })
+      }
+      releaseLookup(answer('Should I use the old draft?'))
+      await pending
+    }
+  })
+  const reports = got.saved.map(call => JSON.parse(call.input))
+  assert.deepEqual(reports.map(({ session_id, state, last_assistant_message }) => [session_id, state, last_assistant_message]), [
+    ['synthetic-old-idle-prompt', 'working', undefined],
+    ['synthetic-current-idle', 'waiting', 'Should I use the current draft?'],
+    ['synthetic-old-idle-busy', 'working', undefined],
+    ['synthetic-old-idle-deleted', 'ended', undefined],
+  ])
+}))
+
 test('an OpenCode todo.updated event becomes the session steps; a child session, another event, no session, no todos or a failed session lookup write nothing', () => fixture(async f => {
   const id = 'ses_opencode_plan_1', child = 'ses_opencode_child_1'
   const todos = [

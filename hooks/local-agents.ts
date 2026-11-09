@@ -196,6 +196,7 @@ const run = (mode, payload, session, deadline) => {
 const OPEN_SESSIONS = Symbol.for('agent-board.opencode-open-sessions')
 const isFirstLoad = globalThis[OPEN_SESSIONS] === undefined
 const open = globalThis[OPEN_SESSIONS] ??= new Map()
+const pendingIdle = globalThis[Symbol.for('agent-board.opencode-pending-idle')] ??= new Map()
 if (isFirstLoad) process.once('exit', () => {
   try {
     const deadline = Date.now() + ${hookTimeout('opencode') - 1000}
@@ -213,8 +214,24 @@ const folderOf = (info, directory) => {
   return typeof folder === 'string' ? { cwd: folder } : {}
 }
 
+// A pending idle lookup can report only until this session has newer activity.
+const withStatusEvent = (event, action) => {
+  const p = event?.properties ?? {}
+  const session = p.sessionID ?? p.info?.id
+  const isIdle = event?.type === 'session.idle' || event?.type === 'session.status' && p.status?.type === 'idle'
+  if (!isIdle || !session) return withHook((current, deadline) => action(current, deadline, isIdle, () => true))
+  const token = {}
+  pendingIdle.set(session, token)
+  const isLatest = () => pendingIdle.get(session) === token
+  return withHook((current, deadline) => action(current, deadline, isIdle, isLatest)).finally(() => {
+    // Even a timed-out lookup must leave no token behind; a newer lookup keeps its own.
+    if (isLatest()) pendingIdle.delete(session)
+  })
+}
+
 export const AgentBoardLocal = async ({ client, directory }) => ({
   'chat.message': async ({ sessionID }, output) => withHook(async (current, deadline) => {
+      pendingIdle.delete(sessionID)
       // A known session notes the new reply at once, as events do before their lookup.
       if (open.has(sessionID)) open.get(sessionID).isReplying = true
       const info = current(await client.session.get({ path: { id: sessionID } }))
@@ -227,7 +244,7 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
       else open.set(sessionID, { isReplying: true, where })
       run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...where, ...(isBoardRequest(output) ? { board_request: true } : {}) }, undefined, deadline)
   }),
-  event: async ({ event }) => withHook(async (current, deadline) => {
+  event: async ({ event }) => withStatusEvent(event, async (current, deadline, isIdle, isLatest) => {
     const p = event.properties ?? {}
     // The plan mirror (#922): OpenCode's own todo list, in full each time. Only the top-level session
     // is mirrored, as for status; only each todo's text and status are sent.
@@ -244,19 +261,22 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
     if (!session || !['session.created', 'session.status', 'session.idle', 'session.deleted'].includes(event.type)) return
     if (event.type === 'session.status' && !['busy', 'retry', 'idle'].includes(p.status?.type)) return
     const state = event.type === 'session.deleted' ? 'ended' : event.type === 'session.status' && p.status?.type !== 'idle' ? 'working' : 'waiting'
+    if (state === 'working') pendingIdle.delete(session)
     // A known session notes a finished reply at once: OpenCode may exit before the lookup returns.
     if (open.has(session) && state !== 'ended') open.get(session).isReplying = state === 'working'
     const info = event.type === 'session.deleted' ? { data: p.info } : current(await client.session.get({ path: { id: session } }))
     if (info.error) throw Error('HOST_METADATA_FAILED')
-    if (!info.data || info.data.id !== session || info.data.parentID) return
+    if (!info.data || info.data.id !== session || info.data.parentID || !isLatest()) return
     const where = folderOf(info.data, directory)
     // A known session keeps the state its latest event noted: an earlier lookup may return last.
     const known = open.get(session)
-    if (state === 'ended') open.delete(session)
-    else if (known) known.where = where
+    if (state === 'ended') {
+      pendingIdle.delete(session)
+      open.delete(session)
+    } else if (known) known.where = where
     else open.set(session, { isReplying: state === 'working', where })
     let reply
-    if (event.type === 'session.idle' || event.type === 'session.status' && p.status?.type === 'idle') {
+    if (isIdle) {
       // Leave time for the status even if the messages request never settles.
       const wait = deadline - Date.now() - 1000
       if (wait > 0) {
@@ -277,7 +297,7 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
         } catch {} finally { clearTimeout(timer) }
       }
     }
-    run('--agent-status', { session_id: session, state, ...where, ...(reply === undefined ? {} : { last_assistant_message: reply }) }, undefined, deadline)
+    if (isLatest()) run('--agent-status', { session_id: session, state, ...where, ...(reply === undefined ? {} : { last_assistant_message: reply }) }, undefined, deadline)
   }),
   tool: {
     agent_board_progress: tool({
