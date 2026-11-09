@@ -116,9 +116,7 @@ const markerOf = (mirror: ProgressMirror, parent?: string): string => {
 // 120 and leave the question listed as waiting. A handoff keeps its suffix whole and cuts the subject.
 const fullStepWords = (task: ProgressMirrorTask): string => {
   const note = task.blocked !== null && task.blocked !== '' ? task.blocked : task.status === 'completed' ? '' : (task.why ?? '')
-  const oneSubject = oneLine(task.subject)
-  const oneNote = oneLine(note)
-  return note === '' || oneSubject === oneNote ? oneSubject : `${oneSubject} — ${oneNote}`
+  return `${oneLine(task.subject)}${note === '' ? '' : ` — ${oneLine(note)}`}`
 }
 export const stepWords = (task: ProgressMirrorTask, s: Strings = ZH_TW): string => {
   if (task.handoffTo) return `${cutLine(oneLine(task.subject)).text} — ${s.transferredTo(oneLine(task.handoffTo))}`
