@@ -6665,6 +6665,52 @@ test('OpenClaw session events carry the session folder and progress_card reports
   assert.equal(JSON.parse(long.content[0].text).dropped, 1)
 }))
 
+test('OpenClaw progress_card derives omitted fields from steps and uses the host workspace on the first report', () => fixture(async f => {
+  const installed = f.install('--agent', 'openclaw', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const plugin = (await import(pathToFileURL(join(f.root, 'adapters', 'openclaw', 'agent-board-local.mjs')))).default
+  const work = join(f.home, 'work'), other = join(f.home, 'other')
+  mkdirSync(work)
+  mkdirSync(other)
+  const hooks = new Map()
+  let factory, subscription
+  plugin.register({
+    on: (name, fn) => hooks.set(name, fn), config: {}, runtime: { agent: { resolveAgentWorkspaceDir: () => work } },
+    registerTool: make => { factory = make },
+    agent: { events: { registerAgentEventSubscription: value => { subscription = value } } },
+  })
+  const id = 'openclaw-progress-defaults'
+  const recordOf = session => join(f.root, 'sessions', createHash('sha256').update('openclaw:' + session).digest('hex') + '.json')
+  const record = () => JSON.parse(readFileSync(recordOf(id), 'utf8'))
+  await hooks.get('session_start')({ sessionId: id })
+  assert.equal(record().project, 'work')
+  const tool = factory({ sessionId: id, workspaceDir: other })
+  const waiting = ['1. [~] Check the result', '+ [?] Continue the synthetic check?']
+  const first = await tool.execute('defaults', { steps: waiting })
+  assert.equal(first.content[0].text, 'OK')
+  assert.equal(record().project, 'other')
+  assert.equal(record().title, 'Check the result')
+  assert.equal(record().state, 'waiting')
+  assert.deepEqual(record().steps, ['- [~] Check the result', '- [?] Continue the synthetic check?'])
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /^## other\r?\n[\s\S]*^### Check the result\r?$/m)
+  assert.equal(board.split('### Check the result').length, 2)
+  assert.ok(!board.includes(other))
+
+  await subscription.handle({ stream: 'lifecycle', sessionId: id, runId: 'openclaw-defaults-run', data: { phase: 'start' } })
+  await tool.execute('state-only', { state: 'waiting', steps: ['- [?] Keep it?'] })
+  assert.equal(record().title, 'Keep it?')
+  assert.equal(record().state, 'waiting')
+  const injected = 'synthetic-other-session'
+  await tool.execute('title-only', { title: 'Keep my title', steps: ['- Continue'], sessionId: injected, workspaceDir: work, project: 'wrong' })
+  assert.equal(record().title, 'Keep my title')
+  assert.equal(record().state, 'working')
+  assert.equal(record().project, 'other')
+  assert.equal(existsSync(recordOf(injected)), false)
+  await assert.rejects(tool.execute('bad-state', { state: 'missing', steps: ['- [ ] Continue'] }), /INVALID_STATE/)
+  await assert.rejects(tool.execute('bad-title', { title: null, steps: ['- [ ] Continue'] }), /INVALID_TEXT/)
+}))
+
 test('a report from a folder binds to an openclaw record that holds the folder and refuses one that does not', () => fixture(f => {
   f.install('--agent', 'openclaw', '--apply')
   const cwd = join(f.home, 'demo')
@@ -11087,6 +11133,49 @@ test('OpenCode idle events send the last assistant text and preserve status on f
     assert.equal(sent.state, 'waiting')
     assert.equal(sent.last_assistant_message, undefined)
   }
+}))
+
+test('OpenCode drops an older idle result after a newer prompt, busy status or session deletion', () => fixture(async f => {
+  const got = await planPlugin(f, 'opencode', 'return AgentBoardLocal', async factory => {
+    const cases = ['prompt', 'busy', 'deleted']
+    let enterLookup
+    let releaseLookup
+    const freshQuestion = 'Should I use the current draft?'
+    const answer = text => ({ data: [{ info: { role: 'assistant' }, parts: [{ type: 'text', text }] }] })
+    const client = { session: {
+      get: async ({ path }) => ({ data: { id: path.id } }),
+      messages: async ({ path }) => path.id === 'synthetic-current-idle' ? answer(freshQuestion) : new Promise(resolve => {
+        releaseLookup = resolve
+        enterLookup()
+      }),
+    } }
+    const hooks = await factory({ client, directory: f.home })
+    const idle = sessionID => hooks.event({ event: { type: 'session.idle', properties: { sessionID } } })
+    for (const kind of cases) {
+      const id = `synthetic-old-idle-${kind}`
+      const entered = new Promise(resolve => { enterLookup = resolve })
+      const pending = idle(id)
+      await entered
+      if (kind === 'prompt') {
+        await hooks['chat.message']({ sessionID: id }, { parts: [{ type: 'text', text: 'Start the new draft.' }] })
+        // A different session can report its own current question while the first lookup is held.
+        await idle('synthetic-current-idle')
+      } else if (kind === 'busy') {
+        await hooks.event({ event: { type: 'session.status', properties: { sessionID: id, status: { type: 'busy' } } } })
+      } else {
+        await hooks.event({ event: { type: 'session.deleted', properties: { info: { id } } } })
+      }
+      releaseLookup(answer('Should I use the old draft?'))
+      await pending
+    }
+  })
+  const reports = got.saved.map(call => JSON.parse(call.input))
+  assert.deepEqual(reports.map(({ session_id, state, last_assistant_message }) => [session_id, state, last_assistant_message]), [
+    ['synthetic-old-idle-prompt', 'working', undefined],
+    ['synthetic-current-idle', 'waiting', 'Should I use the current draft?'],
+    ['synthetic-old-idle-busy', 'working', undefined],
+    ['synthetic-old-idle-deleted', 'ended', undefined],
+  ])
 }))
 
 test('an OpenCode todo.updated event becomes the session steps; a child session, another event, no session, no todos or a failed session lookup write nothing', () => fixture(async f => {

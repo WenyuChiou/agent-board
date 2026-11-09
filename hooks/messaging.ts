@@ -87,7 +87,7 @@ const settled = (one: Message): Message => isFinished(one) && (one.text !== '' |
 export const pruneMessages = (state: MessageState, now: number): MessageState => {
   const kept = state.messages.filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(one => settled(
     (one.status === 'uncertain' || one.status === 'accepted' && (one.error !== '' || isMailboxTarget(one.target))) && !isFinished(one) && now - one.updated > OPEN_LIMIT_MS
-      ? { ...one, status: 'uncertain' as const, error: 'EXPIRED', updated: now } : one))
+      ? { ...one, status: 'uncertain' as const, error: 'EXPIRED', updated: now, ...(one.status === 'accepted' ? { hasAccepted: true } : {}) } : one))
   // Past the count, the oldest finished go first; their ids can then be used again. Two kinds wait for
   // the age limit instead: a message handed out and then expired or dismissed, since the page sends its
   // id again and it may have arrived, and each session's latest delivery, which its next send reads its

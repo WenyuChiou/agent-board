@@ -127,7 +127,7 @@ test('a naming refusal keeps the fallback title and background without creating 
   const store: Record<string, unknown> = { autoConnectOff: true, inboxDone: {}, [`mirror:${SESSION}`]: mirror }
   const world: World = {
     files: new Map(), mtime: 1, hasTasks: true, store, asked: [],
-    named: '我無法讀取 claude-one.txt，對話中也沒有附上檔案\n請把檔案內容貼到對話中，我會依照你的格式要求回覆兩行',
+    named: 'I cannot read the file',
   }
   const clock = engineBeneath(on, world)
   await start($, request)
@@ -143,6 +143,7 @@ test('a naming refusal keeps the fallback title and background without creating 
   expect(Object.keys(store).sort()).toEqual(keys)
   expect(store[`mirror:${SESSION}`]).toMatchObject({ title: request, context, isTitleFinal: true })
 
+  world.named = '任務名稱：「我無法讀取檔案」'
   for (const subject of ['整理資料', '檢查結果', '完成測試']) await $.tool.call({ tool: 'TaskCreate', subject, description: '' })
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10)
