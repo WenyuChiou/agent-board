@@ -11,7 +11,7 @@ const role = process.argv.includes('--serve-child') ? 'child' : 'parent'
 const isPowerShell = file => /(?:^|[\\/])(?:powershell|pwsh)(?:\.exe)?$/i.test(String(file))
 const isIcacls = file => /(?:^|[\\/])icacls(?:\.exe)?$/i.test(String(file))
 let isFirst = true
-const note = () => { if (log) try { fs.appendFileSync(log, `${role}\n`) } catch {} }
+const note = (kind = role) => { if (log) try { fs.appendFileSync(log, `${kind}\n`) } catch {} }
 // What each PowerShell start read and returned, and each icacls call, in a file beside the count,
 // so a failing count says which step started the extra PowerShell.
 const detail = line => { if (log) try { fs.appendFileSync(`${log}.detail`, `${role} ${line}\n`) } catch {} }
@@ -39,7 +39,7 @@ cp.execFileSync = function (file, args, options) {
 for (const name of ['spawnSync', 'spawn', 'execFile']) {
   const wrapped = cp[name]
   cp[name] = function (file) {
-    if (isPowerShell(file)) note()
+    if (isPowerShell(file)) note(name === 'spawn' && Array.isArray(arguments[1]) && arguments[1].includes('-EncodedCommand') ? 'launcher' : role)
     return wrapped.apply(this, arguments)
   }
 }
