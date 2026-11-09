@@ -220,6 +220,8 @@ export type ServeRow = {
   send: SendMode
   session: string
   fp: string
+  // A checkbox also binds the file lines drawn with the card, so a moved twin cannot replace it.
+  tickFp: string
   where: string
   info: string
   isSending: boolean
@@ -489,6 +491,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         send,
         session: connection?.session ?? row.target?.session ?? '',
         fp: fingerprint(item, items),
+        tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (row.target?.dir ?? '') : send === 'connected' ? claudeHint(row.agent, row.auto === 'working', s) : '',
         // A row says why only when a reply could otherwise be expected here.
         info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
@@ -627,7 +630,7 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   // can be reworded under it: the press goes through only on the block and words the page drew.
   const item = items.find(one => one.key === request.key)
 
-  return item !== undefined && request.fp === fingerprint(item, items) ? action : { type: 'refuse', note: s.boardLineChanged }
+  return item !== undefined && request.fp === fingerprint(item, items, request.type === 'tick' && request.line !== undefined) ? action : { type: 'refuse', note: s.boardLineChanged }
 }
 
 const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean): ServeAction => {
@@ -1739,7 +1742,7 @@ const PAGE_SCRIPT = String.raw`
       var isNext = step.fileLine !== undefined ? step.fileLine === row.nextFileLine : step.text === row.next;
       if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && !isNext) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
-        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp, undefined, step.fileLine); }, 'btn');
+        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.tickFp, undefined, step.fileLine); }, 'btn');
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
         tick.title = step.text;
         add(line, tick);
@@ -1967,7 +1970,7 @@ const PAGE_SCRIPT = String.raw`
         // the step list names a step, so the server can tell it from a twin with the same text.
         var nextStep = null;
         for (var index = 0; index < row.steps.length; index += 1) if (row.nextFileLine !== undefined && row.steps[index].fileLine === row.nextFileLine) { nextStep = row.steps[index]; break; }
-        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.fp, undefined, row.nextFileLine); }, 'primary');
+        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.tickFp, undefined, row.nextFileLine); }, 'primary');
         // A long step is named by its first words; the whole step is its title (#463).
         if (row.nextLabel) tickNext.title = row.next;
         add(acts, tickNext);

@@ -2882,17 +2882,39 @@ test('ticking twin steps from the page ticks each line it showed', { timeout: 30
     assert.equal(lines.length, 2)
     assert.ok(lines.every(line => typeof line === 'number'), 'the board names each step by its file line')
     // The second twin first: its press must not tick the first line.
-    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.fp } })
+    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.tickFp } })
     assert.equal(second.status, 200, second.body)
     let left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[lines[1]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
     assert.equal(left[lines[0]], '- [ ] Draft the notes')
     // Then the first twin, with the board drawn again.
     const again = await rowOf('Draft the notes')
-    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.fp } })
+    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.tickFp } })
     assert.equal(first.status, 200, first.body)
     left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[lines[0]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
+  } finally {
+    await board.close()
+  }
+})
+
+test('a saved checkbox press refuses after another card moves its twin lines (#1204)', { timeout: 30_000 }, async () => {
+  const board = await page('## home\n### Earlier card\n- [ ] Check the sample\n### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
+  try {
+    const { path, call, rowOf } = board
+    const row = await rowOf('Twin steps')
+    const request = { key: row.key, type: 'tick', text: 'Inspect the map', line: row.steps[1].fileLine, fp: row.tickFp }
+    const shifted = readFileSync(path, 'utf8').replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    writeFileSync(path, shifted)
+    const stale = await call('POST', '/api/act', { body: request })
+    assert.equal(stale.status, 409)
+    assert.equal(readFileSync(path, 'utf8'), shifted, 'refusing the stale checkbox must not write either twin')
+    const fresh = await rowOf('Twin steps')
+    const ticked = await call('POST', '/api/act', { body: { ...request, fp: fresh.tickFp, line: fresh.steps[1].fileLine } })
+    assert.equal(ticked.status, 200, ticked.body)
+    const left = readFileSync(path, 'utf8').split('\n')
+    assert.equal(left[fresh.steps[0].fileLine], '- [ ] Inspect the map')
+    assert.match(left[fresh.steps[1].fileLine], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
   } finally {
     await board.close()
   }
@@ -2917,7 +2939,7 @@ test('ticking the next step from the page still works when the step list folded 
     assert.equal(row.next, 'Step six')
     assert.equal(typeof row.nextFileLine, 'number')
     assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the next step is folded out of the shown steps')
-    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.fp } })
+    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.tickFp } })
     assert.equal(ticked.status, 200, ticked.body)
     const left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[row.nextFileLine], /^- \[x\] Step six <!-- done \d{4}-\d\d-\d\d -->$/)

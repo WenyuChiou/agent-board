@@ -700,7 +700,7 @@ const twinsOf = (item: BoardItem, items: readonly BoardItem[]): number => {
 // fingerprint, and a tick, an archive, a reply or a copy acts only while the line still has it.
 // `items` are the lines drawn together with it: a hand-kept task has no block id, so its
 // fingerprint also holds how many tasks share its project and title.
-export const fingerprint = (item: BoardItem, items: readonly BoardItem[]): string => {
+export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLineTick = false): string => {
   const session = item.type === 'ask' ? (item.ask.target?.session ?? item.ask.session) : item.type === 'row' ? (item.row.archive?.session ?? item.row.target?.session ?? '') : ''
   const parts =
     item.type === 'ask'
@@ -708,9 +708,9 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[]): strin
       : item.type === 'row'
         ? [session, item.row.target?.resume ?? '', item.row.project, item.row.title, item.row.next?.step ?? '', item.row.question ?? '', item.row.resume ?? '']
         : [item.turn.agent, item.turn.project, item.turn.text]
-  // A step's line number moves whenever a block above it grows or shrinks, so it stays out: a press
-  // from the drawn card still acts (#1170). A tick by line is checked against the current line.
+  // Card actions survive unrelated line moves; a tick's absolute line must still name the drawn step.
   if (item.type === 'row') parts.push(item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => step)))
+  if (item.type === 'row' && isLineTick) parts.push(JSON.stringify([item.row.next?.line ?? null, item.row.steps.map(step => step.line)]))
   if (item.type !== 'turn' && session === '') parts.push(String(twinsOf(item, items)))
 
   return sha256(parts.join('\u0000')).slice(0, 12)
