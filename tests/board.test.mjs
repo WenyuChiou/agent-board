@@ -2920,7 +2920,11 @@ test('a saved checkbox press refuses after another card moves its twin lines (#1
   }
 })
 
-for (const ordering of ['lock', 'retry', 'readback', 'replacement']) test('a checkbox keeps its original twin through the actual write boundary: ' + ordering, { timeout: 30_000 }, async () => {
+for (const ordering of ['lock', 'retry', 'readback', 'replacement', 'folded-visible', 'folded-lock', 'card-lock', 'card-readback']) test('a checkbox keeps its original twin through the actual write boundary: ' + ordering, { timeout: 30_000 }, async () => {
+  const isLocked = ordering.endsWith('lock')
+  const isCards = ordering.startsWith('card-')
+  const isHiddenNext = ordering === 'folded-lock'
+  const isFoldedVisible = ordering === 'folded-visible'
   const faults = mkdtempSync(join(tmpdir(), 'board-checkbox-write-'))
   const preload = join(faults, 'boundary.cjs')
   const armed = join(faults, 'armed')
@@ -2944,13 +2948,13 @@ const change = () => {
 }
 fs.openSync = (file, ...args) => {
   try { return open(file, ...args) } catch (error) {
-    if (ordering === 'lock' && String(file) === progress + '.agent-board-lock' && error.code === 'EEXIST' && fs.existsSync(arm) && !fs.existsSync(blocked)) fs.writeFileSync(blocked, '')
+    if (ordering.endsWith('lock') && String(file) === progress + '.agent-board-lock' && error.code === 'EEXIST' && fs.existsSync(arm) && !fs.existsSync(blocked)) fs.writeFileSync(blocked, '')
     throw error
   }
 }
 fs.renameSync = (from, to, ...args) => {
-  const controlled = ordering !== 'lock' && String(to) === progress && fs.existsSync(arm) && !fs.existsSync(injected)
-  if (controlled && ordering !== 'readback') {
+  const controlled = !ordering.endsWith('lock') && ordering !== 'folded-visible' && String(to) === progress && fs.existsSync(arm) && !fs.existsSync(injected)
+  if (controlled && !ordering.endsWith('readback')) {
     change()
     throw Object.assign(new Error('synthetic competing write before rename'), { code: 'EPERM' })
   }
@@ -2962,16 +2966,23 @@ syncBuiltinESMExports()
 `)
   let board, holder, holderExit, watcher
   try {
-    board = await page('## home\n### Earlier card\n- [ ] Check the sample\n### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n', env, [], undefined, BOARD_SCRIPT, (_dir, path) => { env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS = path })
-    const row = await board.rowOf('Twin steps')
+    const twins = '### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+    const manual = isCards ? twins.repeat(2) : isHiddenNext ? '### Twin steps\n' + Array.from({ length: 5 }, (_, i) => '- [ ] Ordinary step ' + i + '\n').join('') + '- [~] Inspect the map\n- [~] Inspect the map\n' : isFoldedVisible ? '### Twin steps\n- [x] Completed one\n- [x] Completed two\n' + '- [ ] Inspect the map\n'.repeat(6) : twins
+    board = await page('## home\n### Earlier card\n- [ ] Check the sample\n' + manual, env, [], undefined, BOARD_SCRIPT, (_dir, path) => { env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS = path })
+    const row = isCards ? (await board.rows()).filter(one => one.title === 'Twin steps').at(-1) : await board.rowOf('Twin steps')
     const before = readFileSync(board.path, 'utf8')
-    const shifted = before.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    const shifted = isFoldedVisible ? before : isHiddenNext ? before.replace('- [ ] Check the sample\n', '') : before.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
     const replaced = before.replace('### Twin steps', '### Replacement task')
-    const body = { key: row.key, type: 'tick', text: 'Inspect the map', line: row.steps[1].fileLine, fp: row.tickFp }
-    if (ordering === 'lock') {
+    const at = before.lastIndexOf('### Twin steps')
+    const changedCard = before.slice(0, at) + before.slice(at).replace('### Twin steps\n', '### Twin steps\n> Changed selected card\n')
+    const visible = row.steps.filter(step => step.text === 'Inspect the map' && typeof step.fileLine === 'number')
+    const body = { key: row.key, type: 'tick', text: 'Inspect the map', line: isHiddenNext ? row.nextFileLine : visible[1].fileLine, fp: row.tickFp }
+    if (isHiddenNext) assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the primary target is outside the folded display')
+    if (isLocked) {
       const worker = join(faults, 'holder.mjs')
       writeFileSync(worker, `import { withLocalLock } from ${JSON.stringify(new URL('../scripts/local-lock.ts', import.meta.url).href)}
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+const ordering = ${JSON.stringify(ordering)}
 withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
   process.stdout.write('held\\n')
   const deadline = Date.now() + 5000
@@ -2980,7 +2991,10 @@ withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
   }
   const file = ${JSON.stringify(board.path)}
-  writeFileSync(file, readFileSync(file, 'utf8').replace('### Twin steps', '> Synthetic extra context\\n### Twin steps'))
+  const before = readFileSync(file, 'utf8')
+  const at = before.lastIndexOf('### Twin steps')
+  const after = ordering === 'folded-lock' ? before.replace('- [ ] Check the sample\\n', '') : ordering === 'card-lock' ? before.slice(0, at) + before.slice(at).replace('### Twin steps\\n', '### Twin steps\\n> Changed selected card\\n') : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  writeFileSync(file, after)
 })
 `)
       holder = spawn(process.execPath, [worker], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
@@ -2988,13 +3002,13 @@ withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
       const held = new Promise(done => holder.stdout.once('data', done))
       await Promise.race([held, holderExit.then(code => { throw new Error('the lock holder exited before its barrier: ' + code) })])
     }
-    const observed = ordering !== 'lock' ? null : new Promise((done, fail) => {
+    const observed = !isLocked ? null : new Promise((done, fail) => {
       watcher = fs.watch(faults, () => { if (existsSync(blocked)) done() })
       watcher.on('error', fail)
     })
     writeFileSync(armed, '')
     const sent = board.call('POST', '/api/act', { body })
-    if (ordering === 'lock') {
+    if (isLocked) {
       // The real server must already have failed to acquire the real shared lock.
       await Promise.race([observed, sent.then(() => { throw new Error('the action ended before the blocked lock boundary') })])
       writeFileSync(release, '')
@@ -3002,16 +3016,28 @@ withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
     }
     const response = await sent
     const after = readFileSync(board.path, 'utf8')
-    if (ordering !== 'lock') assert.ok(existsSync(injected), 'the competing write must reach the intended production boundary')
+    if (!isLocked && !isFoldedVisible) assert.ok(existsSync(injected), 'the competing write must reach the intended production boundary')
     const journal = readdirSync(board.dir).filter(name => /^progress-journal-/.test(name)).map(name => readFileSync(join(board.dir, name), 'utf8')).join('\n')
-    if (ordering === 'replacement') {
+    if (ordering === 'replacement' || ordering === 'card-lock') {
       assert.equal(response.status, 409, 'a replaced task must not receive the old checkbox press')
-      assert.equal(after, replaced)
+      assert.equal(after, ordering === 'card-lock' ? changedCard : replaced)
       assert.doesNotMatch(journal, /Inspect the map/, 'a refused tentative tick must not leave a false journal entry')
     } else if (response.status === 409) {
-      assert.equal(ordering === 'readback', false, 'a tick that landed must remain a single completed action')
+      assert.equal(ordering.endsWith('readback') || isFoldedVisible, false, 'a landed tick or a fresh visible checkbox must remain a single completed action')
       assert.equal(after, shifted)
       assert.doesNotMatch(journal, /Inspect the map/)
+    } else if (isCards || isHiddenNext || isFoldedVisible) {
+      assert.equal(response.status, 200, response.body)
+      const expected = shifted.split('\n')
+      const header = isCards ? expected.lastIndexOf('### Twin steps') : expected.indexOf('### Twin steps')
+      const target = header + (isHiddenNext ? 6 : isFoldedVisible ? 4 : 2)
+      const raw = isHiddenNext ? '- [~] Inspect the map' : '- [ ] Inspect the map'
+      assert.equal(expected[target], raw)
+      const actual = after.split('\n')
+      assert.match(actual[target], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      actual[target] = raw
+      assert.equal(actual.join('\n'), shifted, 'only the original selected source checkbox may change')
+      assert.equal(journal.split('\n').filter(line => line.includes('Inspect the map')).length, 1)
     } else {
       assert.equal(response.status, 200, response.body)
       const lines = after.split('\n')

@@ -769,17 +769,17 @@ export const manualTaskCount = (text: string, entry: QuickEntry): number => {
 // without its hidden done date (done-stamp.ts), so a press on a line drawn before the board
 // stamped it still finds it. With `now`, a step the press makes done or cancelled is stamped
 // that day (one that was already done keeps its date); any other mark carries no stamp.
-// A task may move after the page checked its line. Its unchanged content and the selected
-// step's ordinal identify that step again inside each read/change/write snapshot.
+// A guarded page/terminal press must retain its task, candidate set and source positions
+// inside every write snapshot. Ambiguous movement refuses; content alone cannot identify twins.
 export const manualStepRef = (text: string, ref: StepRef, s: Strings = ZH_TW): StepRef | null => {
   const guard = ref.guard
   if (guard === undefined) return ref
   const matches = confirmedTasks(text, guard.task, s)
   const lines = matches.map(task => task.line).sort((a, b) => a - b)
-  // Identical cards cannot be retargeted by content when their positions also changed.
-  if (matches.length > 1 && (lines.length !== guard.lines.length || lines.some((line, index) => line !== guard.lines[index]))) return null
-  const task = matches.find(task => task.line === guard.task.line) ?? (matches.length === 1 ? matches[0] : undefined)
-  const step = task?.steps[guard.step]
+  if (lines.length !== guard.lines.length || lines.some((line, index) => line !== guard.lines[index])) return null
+  const task = matches.find(task => task.line === guard.task.line)
+  if (task === undefined || task.steps.length !== guard.steps.length || task.steps.some((step, index) => step.line !== guard.steps[index])) return null
+  const step = task.steps.find(step => step.line === ref.line)
   return step !== undefined && withoutStamp(step.raw) === withoutStamp(ref.raw)
     ? { ...ref, line: step.line, raw: step.raw, guard: undefined }
     : null

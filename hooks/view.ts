@@ -63,7 +63,7 @@ export type CurrentView = {
 }
 
 // A step of a hand-kept task, addressed so a press can tick exactly the line it showed.
-export type StepRef = { project: string; title: string; step: string; line: number; raw: string; guard?: { task: ConfirmRef; step: number; lines: readonly number[] } }
+export type StepRef = { project: string; title: string; step: string; line: number; raw: string; guard?: { task: ConfirmRef; steps: readonly number[]; lines: readonly number[] } }
 
 // What a row's 封存 press takes out: a session's block by its id, or a hand-kept task by its
 // heading line, checked against the title so a task that moved is still found once.
@@ -165,6 +165,8 @@ export type TaskRow = {
   // stale or silent block, which does not mean the session is closed.
   isRecordedEnded?: true
   steps: ViewStep[]
+  // Source positions before display folding, including a next step outside the shown list.
+  stepLines?: readonly number[]
   // One cell per step, unfolded, for the progress bar (#1085).
   cells: Cell[]
   // Every open step, unfolded: what a take-over hands on.
@@ -1205,6 +1207,7 @@ export const buildView = (
         isHere,
         auto,
         steps: rowSteps(shown, s),
+        ...(isManual ? { stepLines: task.steps.map(step => step.line) } : {}),
         cells: rowCells(shown),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
         questions: isInactive ? unresolved : [],

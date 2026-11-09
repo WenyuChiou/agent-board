@@ -8,10 +8,10 @@ const loader = registerHooks({
     return nextResolve(specifier, context)
   },
 })
-let boardItems, boardKey, emptyBoardState, pinned, buildView, parseProgress, serveAction, serveModel, setManualStep, EN, ZH_TW, ZH_CN
+let boardItems, boardKey, emptyBoardState, pinned, buildView, taskFingerprint, parseProgress, serveAction, serveModel, setManualStep, EN, ZH_TW, ZH_CN
 try {
   ;({ boardItems, boardKey, emptyBoardState, pinned } = await import('../hooks/board.ts'))
-  ;({ buildView } = await import('../hooks/view.ts'))
+  ;({ buildView, taskFingerprint } = await import('../hooks/view.ts'))
   ;({ parseProgress } = await import('../hooks/parse.ts'))
   ;({ serveAction, serveModel } = await import('../hooks/serve.ts'))
   ;({ setManualStep } = await import('../hooks/blocks.ts'))
@@ -76,16 +76,12 @@ test('a line-specific checkbox press without its drawn line fingerprint asks for
   assert.equal(action.note, EN.boardLineChanged)
 })
 
-test('a validated checkbox follows its original twin when the file moves before writing', () => {
+test('a validated checkbox refuses without writing when its source positions move before writing', () => {
   const before = draw(source)
   const action = serveAction(before.items, request(before.row), EN)
   assert.equal(action.type, 'tick')
   const shifted = source.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
-  const result = setManualStep(shifted, action.ref, 'x', now, EN)
-  const row = draw(shifted).row
-  const lines = result.split('\n')
-  assert.equal(lines[row.steps[0].fileLine], '- [ ] Inspect the map')
-  assert.match(lines[row.steps[1].fileLine], /^- \[x\] Inspect the map/)
+  assert.equal(setManualStep(shifted, action.ref, 'x', now, EN), shifted)
 })
 
 test('a validated checkbox refuses a replaced task even when its steps keep the same words', () => {
@@ -96,17 +92,13 @@ test('a validated checkbox refuses a replaced task even when its steps keep the 
   assert.equal(setManualStep(replaced, action.ref, 'x', now, EN), replaced)
 })
 
-test('the terminal tick follows its original first twin after an earlier line is removed', () => {
+test('the terminal tick refuses without writing after an earlier line is removed', () => {
   const before = draw(source)
   const state = pinned({ ...emptyBoardState, key: before.row.key }, before.items)
   const action = boardKey(state, 'x', before.items, EN).action
   assert.equal(action.type, 'tick')
   const shifted = source.replace('- [ ] Check the sample\n', '')
-  const result = setManualStep(shifted, action.ref, 'x', now, EN)
-  const row = draw(shifted).row
-  const lines = result.split('\n')
-  assert.match(lines[row.steps[0].fileLine], /^- \[x\] Inspect the map/)
-  assert.equal(lines[row.steps[1].fileLine], '- [ ] Inspect the map')
+  assert.equal(setManualStep(shifted, action.ref, 'x', now, EN), shifted)
 })
 
 test('guarded checkboxes keep unnamed projects addressable in all three languages', () => {
@@ -147,4 +139,58 @@ test('a guarded checkbox refuses when an identical task card moves into its old 
   const shifted = identicalCards.replace('### Twin steps', '\n\n\n### Twin steps')
   assert.equal(shifted.split('\n')[action.ref.guard.task.line], '### Twin steps', 'the other identical card now occupies the old task line')
   assert.equal(setManualStep(shifted, action.ref, 'x', now, EN), shifted, 'ambiguous task movement must not tick the other card')
+})
+
+const viewFor = text => {
+  const view = buildView(parseProgress(text), [], null, now, 0, {}, EN)
+  return { items: boardItems(view, [], true), row: serveModel(view, [], EN).groups.flatMap(group => group.rows).find(row => row.title === 'Twin steps') }
+}
+
+test('folding completed steps does not change which visible open twin is ticked', () => {
+  const text = '## Synthetic project\n### Twin steps\n- [x] Completed one\n- [x] Completed two\n' + '- [ ] Inspect the map\n'.repeat(6)
+  const { items, row } = viewFor(text)
+  const open = row.steps.filter(step => step.text === 'Inspect the map' && typeof step.fileLine === 'number')
+  const action = serveAction(items, { key: row.key, type: 'tick', text: open[1].text, line: open[1].fileLine, fp: row.tickFp, session: '' }, EN)
+  assert.equal(action.type, 'tick')
+  const result = setManualStep(text, action.ref, 'x', now, EN).split('\n')
+  assert.equal(result[open[0].fileLine], '- [ ] Inspect the map')
+  assert.match(result[open[1].fileLine], /^- \[x\] Inspect the map/)
+})
+
+test('a folded-out next tick cannot select its doing twin after an earlier line disappears', () => {
+  const text = '## Synthetic project\n### Earlier card\n- [ ] Check the sample\n### Twin steps\n' + Array.from({ length: 5 }, (_, i) => '- [ ] Ordinary step ' + i + '\n').join('') + '- [~] Inspect the map\n- [~] Inspect the map\n'
+  const { items, row } = viewFor(text)
+  assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine))
+  const action = serveAction(items, { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.tickFp, session: '' }, EN)
+  assert.equal(action.type, 'tick')
+  const shifted = text.replace('- [ ] Check the sample\n', '')
+  const result = setManualStep(shifted, action.ref, 'x', now, EN)
+  const first = shifted.split('\n').indexOf('- [~] Inspect the map')
+  assert.equal(result.split('\n')[first + 1], '- [~] Inspect the map', 'the other doing twin must remain open')
+  if (result !== shifted) assert.match(result.split('\n')[first], /^- \[x\] Inspect the map/)
+})
+
+test('a guarded checkbox cannot fall back to a sibling when its selected identical card changes', () => {
+  const { items, rows } = drawIdenticalCards()
+  const action = serveAction(items, request(rows[1]), EN)
+  assert.equal(action.type, 'tick')
+  const at = identicalCards.lastIndexOf('### Twin steps')
+  const changed = identicalCards.slice(0, at) + identicalCards.slice(at).replace('### Twin steps\n', '### Twin steps\n> Changed selected card\n')
+  assert.equal(setManualStep(changed, action.ref, 'x', now, EN), changed, 'losing the selected candidate must not select the unchanged sibling')
+})
+
+test('a manual question keeps its write guard when its task row is in the collapsed idle section', () => {
+  const text = source.replaceAll('- [ ] Inspect the map', '- [?] Inspect the map')
+  const projects = parseProgress(text)
+  const seen = Object.fromEntries(projects.flatMap(project => project.tasks.map(task => [taskFingerprint(project.name, task), now - 8 * 86400000])))
+  const view = buildView(projects, [], null, now, 0, {}, EN, [], seen)
+  assert.ok(view.idle.some(row => row.title === 'Twin steps'))
+  const items = boardItems(view, [], false)
+  assert.ok(!items.some(item => item.type === 'row' && item.row.title === 'Twin steps'))
+  const ask = items.find(item => item.type === 'ask' && item.ask.task === 'Twin steps')
+  assert.ok(ask)
+  const action = boardKey(pinned({ ...emptyBoardState, key: ask.key }, items), 'x', items, EN).action
+  assert.equal(action.type, 'tick')
+  const shifted = text.replace('- [ ] Check the sample\n', '')
+  assert.equal(setManualStep(shifted, action.ref, 'x', now, EN), shifted)
 })

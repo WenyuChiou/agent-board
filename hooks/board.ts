@@ -666,15 +666,21 @@ export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOp
   const isWorking = (row: TaskRow): boolean => row.auto === 'working' && !shelved.has(row.key) && needsOf(row) === null
   const rest = listed.filter(row => !isStuck(row) && !isWorking(row))
   const rows = [...listed.filter(isStuck), ...listed.filter(isWorking), ...[...new Set(rest.map(row => row.project))].flatMap(project => rest.filter(row => row.project === project))]
+  // A visible question can belong to a collapsed idle row. Keep the whole source
+  // catalog for its write proof without adding hidden rows to the drawn list.
+  const sourceRows = [...view.due, ...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped, ...(view.recentAsking ?? [])]
+  const sourceItems: BoardItem[] = sourceRows.map(row => ({ type: 'row', key: `row:${row.key}`, row }))
+  const guardedAsk = (ask: WaitingItem): WaitingItem => ask.step == null ? ask : { ...ask, step: guardStep(ask.step, sourceItems) }
+  const guardedRow = (row: TaskRow): TaskRow => row.next == null ? row : { ...row, next: guardStep(row.next, sourceItems) }
 
   return [
     // A question's key holds its words, so a press made while it showed one question is refused
     // once the same step asks another, rather than taken as the answer to the new one.
-    ...view.waiting.map(ask => ({ type: 'ask' as const, key: ask.hideKey === '' ? `ask:${ask.key}` : `ask:${ask.key}@${ask.hideKey}`, ask })),
-    ...(isOlderOpen ? [...(view.reminder ?? []), ...(view.older ?? [])].map(ask => ({ type: 'ask' as const, key: olderKey(ask), ask })) : []),
-    ...rows.map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
+    ...view.waiting.map(ask => ({ type: 'ask' as const, key: ask.hideKey === '' ? `ask:${ask.key}` : `ask:${ask.key}@${ask.hideKey}`, ask: guardedAsk(ask) })),
+    ...(isOlderOpen ? [...(view.reminder ?? []), ...(view.older ?? [])].map(ask => ({ type: 'ask' as const, key: olderKey(ask), ask: guardedAsk(ask) })) : []),
+    ...rows.map(row => ({ type: 'row' as const, key: `row:${row.key}`, row: guardedRow(row) })),
     ...remainingInbox(view, pending).map((turn, index) => ({ type: 'turn' as const, key: `turn:${turn.agent}:${turn.project}:${index}`, turn })),
-    ...(view.recentAsking ?? []).filter(row => !listed.some(one => one.key === row.key)).map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
+    ...(view.recentAsking ?? []).filter(row => !listed.some(one => one.key === row.key)).map(row => ({ type: 'row' as const, key: `row:${row.key}`, row: guardedRow(row) })),
   ]
 }
 
@@ -716,14 +722,14 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLine
   return sha256(parts.join('\u0000')).slice(0, 12)
 }
 
-// Preserve the selected step's ordinal and task identity through the writer's lock and retries.
+// Preserve source positions, not folded display ordinals, through the writer's lock and retries.
 export const guardStep = (ref: StepRef, items: readonly BoardItem[]): StepRef => {
-  const item = items.find(one => one.type === 'row' && one.row.project === ref.project && one.row.title === ref.title && one.row.steps.some(step => step.line === ref.line))
+  if (ref.guard !== undefined) return ref
+  const item = items.find(one => one.type === 'row' && one.row.project === ref.project && one.row.title === ref.title && one.row.stepLines?.includes(ref.line))
   if (item?.type !== 'row' || item.row.confirm == null) return ref
-  const step = item.row.steps.findIndex(step => step.line === ref.line)
   const expected = item.row.confirm.expected
   const lines = [...new Set(items.flatMap(one => one.type === 'row' && one.row.project === ref.project && one.row.confirm?.expected === expected ? [one.row.confirm.line] : []))].sort((a, b) => a - b)
-  return { ...ref, guard: { task: item.row.confirm, step, lines } }
+  return { ...ref, guard: { task: item.row.confirm, steps: item.row.stepLines ?? [], lines } }
 }
 
 // What each key does on the selected line, so the footer lists only keys that do something.
