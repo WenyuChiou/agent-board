@@ -4472,7 +4472,7 @@ export const register: Register = (on, options) => {
       const branch = await branchName($)
       await saveMine($, one => ({ ...one, branch, replied: undefined }))
       // A turn that ended on a question waits on the person even if Claude did not mark it.
-      if (question !== null && mirror.source === 'tasks') await saveMine($, one => markAsked(one, question, hasRunningTurnBackgroundJob))
+      if (question !== null && (mirror.source === 'tasks' || isDelivery)) await saveMine($, one => markAsked(one, question, hasRunningTurnBackgroundJob))
       await settle($)
       if (!mirror.isTitleFinal) {
         $.clock.after(1, () => {
@@ -4486,6 +4486,7 @@ export const register: Register = (on, options) => {
     }
     if (mirror !== null && mirror.tasks.length === 0 && mirror.source === 'turns') {
       await saveMine($, one => ({ ...one, replied: undefined }))
+      if (question !== null && isDelivery) await saveMine($, one => markAsked(one, question, hasRunningTurnBackgroundJob))
       await settle($)
     }
     // No Task list: a turn that changed something, or any turn once the session is tracked,
