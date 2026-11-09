@@ -159,6 +159,7 @@ export type TaskRow = {
   status: string
   tone: Tone
   when: string
+  isChatReplied?: true
   hasFutureTime?: boolean
   isHere: boolean
   auto: 'working' | 'waiting' | 'ended' | null
@@ -1222,6 +1223,7 @@ export const buildView = (
         total,
         ...phrase,
         when: isIdle && !clock.isFuture ? relativeTime(lastActive ?? 0, now, s) : when,
+        ...(isRepliedTask ? { isChatReplied: true as const } : {}),
         ...(lastActive === undefined ? {} : { at: lastActive }),
         dir: task.auto?.dir ?? null,
         ...(clock.isFuture ? { hasFutureTime: true } : {}),
