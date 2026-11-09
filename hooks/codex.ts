@@ -144,10 +144,10 @@ export const LIFECYCLE_STEPS: ReadonlySet<string> = new Set([
 export const isLifecycleStep = (text: string): boolean => LIFECYCLE_STEPS.has(text.replace(/^- \[[ x~?!]\] /, '').trim())
 
 export const codexLifecycleStep = (state: string, s: Strings): string =>
-  state === 'working' ? `- [ ] ${s.codexLifecycleWorking}` : `- [ ] ${s.codexLifecycle}`
+  state === 'working' ? `- [ ] ${s.codexLifecycleWorking}` : state === 'done' ? `- [x] ${s.codexLifecycle}` : `- [ ] ${s.codexLifecycle}`
 
 export const localAgentLifecycleStep = (state: string, s: Strings): string =>
-  state === 'working' ? `- [ ] ${s.localAgentLifecycleWorking}` : `- [ ] ${s.localAgentLifecycle}`
+  state === 'working' ? `- [ ] ${s.localAgentLifecycleWorking}` : state === 'done' ? `- [x] ${s.localAgentLifecycle}` : `- [ ] ${s.localAgentLifecycle}`
 
 // A later report keeps the same line as completion evidence, or reuses its slot
 // with a fresh revision when it asks again.
@@ -215,7 +215,11 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   const held = !Array.isArray(previous?.steps)
     ? [placeholder]
     : previous.steps.map((step, index) =>
-        index === 0 && isLifecycleStep(step) ? placeholder : step
+        index === 0 && isLifecycleStep(step)
+          ? state === 'done' && /^- \[[x\-]\]/.test(step)
+            ? step
+            : placeholder
+          : step
       )
   const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
   const approvalSteps = held.map((step, index) => event !== 'SessionStart' && index === earlier ? step.replace(/^- \[\?\] /, '- [x] ') : step)

@@ -784,7 +784,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const held = !Array.isArray(previous?.steps)
         ? [placeholder]
         : previous.steps.map((step, index) =>
-            index === 0 && isLifecycleStep(step) ? placeholder : step
+            index === 0 && isLifecycleStep(step)
+              ? state === 'done' && /^- \[[x\-]\]/.test(step)
+                ? step
+                : placeholder
+              : step
           )
       const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
       // Keep the recovery format. Causality uses the host event's milliseconds,
