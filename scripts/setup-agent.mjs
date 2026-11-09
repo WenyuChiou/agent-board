@@ -75,6 +75,7 @@ const summaries = [
     "filesPart": "{host} files",
     "trustPart": "Approve the board's hooks in {host}",
     "installPlugin": "Install the Claude Code plugin",
+    "enablePlugin": "Claude Code: your user settings disable the installed plugin. To enable it there, run {command}.",
     "marketplacePart": "Claude Code marketplace",
     "pluginPart": "Claude Code plugin",
     "partDone": "{part}: done.",
@@ -118,6 +119,7 @@ const summaries = [
     "filesPart": "{host} 設定檔案",
     "trustPart": "在 {host} 核准看板的 hooks",
     "installPlugin": "安裝 Claude Code 外掛",
+    "enablePlugin": "Claude Code：使用者設定已停用已安裝的外掛。若要在該設定啟用，請執行 {command}。",
     "marketplacePart": "Claude Code 外掛市集",
     "pluginPart": "Claude Code 外掛",
     "partDone": "{part}：已完成。",
@@ -161,6 +163,7 @@ const summaries = [
     "filesPart": "{host} 设置文件",
     "trustPart": "在 {host} 批准看板的 hooks",
     "installPlugin": "安装 Claude Code 插件",
+    "enablePlugin": "Claude Code：用户设置已禁用已安装的插件。要在该设置中启用，请运行 {command}。",
     "marketplacePart": "Claude Code 插件市场",
     "pluginPart": "Claude Code 插件",
     "partDone": "{part}：已完成。",
@@ -313,6 +316,10 @@ const hasPlugin = directory => {
   return Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === 'object'
 }
 
+const isPluginDisabled = directory => {
+  try { return JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8').replace(/^\uFEFF/, ''))?.enabledPlugins?.['agent-board@agent-board'] === false } catch { return false }
+}
+
 // npm supplies .cmd shims on Windows; quote each argument for cmd rather than enabling a shell for every program.
 // A plugin install fetches from GitHub, so a stuck one ends after three minutes and counts as failed.
 const runProgram = (program, argv) => {
@@ -370,16 +377,18 @@ const main = () => {
   const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude'], ['.exe', '.cmd']) : undefined
   const hasClaude = existsSync(claudeDirectory) || (homeAt < 0 && !!claude)
   const isPluginInstalled = hasClaude && hasPlugin(claudeDirectory)
+  const hasDisabledPlugin = isPluginInstalled && isPluginDisabled(claudeDirectory)
   const isPluginNeeded = isAsking && !!claude && !isPluginInstalled
   const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
   const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
     ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
   const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
   const setupCommand = extra => [command || nodeCommand(fileURLToPath(import.meta.url)), ...common.map(quote), ...extra.map(quote)].join(' ')
+  const enablePluginStep = () => words('enablePlugin', { command: 'claude plugin enable agent-board@agent-board --scope user' })
   if (selector === 'auto' && !selected.length && !isPluginNeeded) {
     const next = setupCommand(['--agent', 'codex'])
     const noAgent = noAgentText(homeAt < 0 ? 'anywhere' : 'home', { home, next })
-    const claudeNext = isPluginInstalled ? [words('openOne', { agents: 'Claude Code' }), words('thenBoardOne')] : [words('plugin')]
+    const claudeNext = !isPluginInstalled ? [words('plugin')] : hasDisabledPlugin ? [enablePluginStep()] : [words('openOne', { agents: 'Claude Code' }), words('thenBoardOne')]
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n${claudeNext.map((step, i) => `${i + 1}. ${step}`).join('\n')}` : noAgent}\n`)
     return
   }
@@ -547,7 +556,8 @@ const main = () => {
         const result = boardRun(plans[selected.indexOf(agent)], agent, extra)
         report(words('trustPart', { host: names[agent] }), !result.error && result.status === 0, next)
       }
-      let isPluginReady = !!claude && hasPlugin(claudeDirectory)
+      let hasInstalledPlugin = hasPlugin(claudeDirectory)
+      let isPluginReady = !!claude && hasInstalledPlugin && !isPluginDisabled(claudeDirectory)
       if (isPluginNeeded) {
         let known = null
         try { known = JSON.parse(readFileSync(join(claudeDirectory, 'plugins', 'known_marketplaces.json'), 'utf8').replace(/^\uFEFF/, '')) } catch {}
@@ -561,7 +571,10 @@ const main = () => {
           // An install counts once Claude Code lists the plugin, not on its exit status alone.
           const isDone = !result.error && result.status === 0 && (part !== 'pluginPart' || hasPlugin(claudeDirectory))
           report(words(part), isDone, ['claude', ...argv].join(' '))
-          if (part === 'pluginPart') isPluginReady = isDone
+          if (part === 'pluginPart') {
+            hasInstalledPlugin = isDone
+            isPluginReady = isDone && !isPluginDisabled(claudeDirectory)
+          }
         }
       }
       const next = []
@@ -577,6 +590,7 @@ const main = () => {
           sessions.push(names[agent])
         }
       }
+      if (hasInstalledPlugin && isPluginDisabled(claudeDirectory)) next.push(enablePluginStep())
       if (isPluginReady) sessions.push('Claude Code')
       if (sessions.length) {
         next.push(words(sessions.length === 1 ? 'openOne' : 'open', { agents: sessions.join(message(', ', '、', '、')) }))
@@ -612,10 +626,11 @@ const main = () => {
     if (agent === 'cursor' && process.platform === 'win32') steps.push(words('cursorWindows'))
     sessionAgents.push(names[agent])
   }
-  if (isPluginInstalled) sessionAgents.push('Claude Code')
+  if (isPluginInstalled && !hasDisabledPlugin) sessionAgents.push('Claude Code')
   if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
   for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
-  if (hasClaude && !isPluginInstalled) steps.push(words('plugin'))
+  if (hasDisabledPlugin) steps.push(enablePluginStep())
+  else if (hasClaude && !isPluginInstalled) steps.push(words('plugin'))
   if (available.length) {
     steps.push(words('board', { command: boardCommand }))
   }
