@@ -768,6 +768,7 @@ export const EN: Strings = {
   settingsTraditional: '繁體中文',
   settingsSimplified: '简体中文',
   settingsLanguageChanged: 'Language updated.',
+  settingsLanguageOverridden: 'The board uses English now (--lang). Choices apply to a later launch.',
   settingsNotifications: 'Notifications',
   settingsOn: 'On',
   settingsOff: 'Off',

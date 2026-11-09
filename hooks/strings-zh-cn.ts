@@ -762,6 +762,7 @@ export const ZH_CN: Strings = {
   settingsTraditional: '繁體中文',
   settingsSimplified: '简体中文',
   settingsLanguageChanged: '语言已更新。',
+  settingsLanguageOverridden: '看板目前使用简体中文（--lang）。此处的选择会在稍后启动时生效。',
   settingsNotifications: '通知',
   settingsOn: '开启',
   settingsOff: '关闭',
