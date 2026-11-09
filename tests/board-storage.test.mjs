@@ -1,8 +1,8 @@
 // Real bundled CLI subprocesses in disposable homes; only the requested filesystem calls
 // are fault-injected. These are not live agent sessions or actual disk/permission failures.
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
@@ -277,3 +277,103 @@ test('watch can quit while its board remains unreadable', () => fixture(({ paths
   failed(result, paths.board, 'EACCES')
   assert.ok(result.stderr.includes('RAW_RESTORED'))
 }))
+
+for (const key of ['x', 'd']) for (const first of ['reporter', 'board']) {
+  test(`a ${key === 'x' ? 'tick' : 'done'} and a report keep both files when ${first} pauses after its final check`, { timeout: 10000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'board-shared-write-'))
+    const children = []
+    const paused = join(dir, 'paused')
+    const release = join(dir, 'release')
+    const blocked = join(dir, 'blocked')
+    const progress = join(dir, 'progress.md')
+    const journal = join(dir, `progress-journal-${month}.md`)
+    const script = join(dir, 'agent-board.mjs')
+    const long = `Synthetic full report ${'evidence '.repeat(20)}`.trim()
+    const env = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(?:AGENT_BOARD_|CLAUDE_|CODEX_|XDG_|GROK_|HERMES_|OPENCODE_|OPENCLAW_|DSH_)/i.test(name))),
+      HOME: dir, USERPROFILE: dir, CLAUDE_CONFIG_DIR: dir,
+      LOCALAPPDATA: join(dir, 'AppData', 'Local'), APPDATA: join(dir, 'AppData', 'Roaming'),
+      CODEX_HOME: join(dir, '.codex'), XDG_CONFIG_HOME: dir, XDG_RUNTIME_DIR: join(dir, 'runtime'),
+      CLAUDE_PROGRESS_FILE: progress, CODEX_THREAD_ID: 'synthetic-storage-reporter',
+      NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid), AGENT_BOARD_NO_OPEN: '1',
+    }
+    const launch = role => {
+      const preload = join(dir, `${role}.cjs`)
+      // Pause inside the real rename, after the production final-content check.
+      // The contender either finishes (old code) or proves it met the shared lock.
+      writeFileSync(preload, `const fs = require('node:fs')
+const { performance } = require('node:perf_hooks')
+const { syncBuiltinESMExports } = require('node:module')
+Date.now = () => ${NOW}
+const rename = fs.renameSync
+const open = fs.openSync
+let didPause = false
+fs.renameSync = (from, to) => {
+  if (${JSON.stringify(role === first)} && !didPause && String(to) === ${JSON.stringify(role === 'reporter' ? journal : progress)}) {
+    didPause = true
+    fs.writeFileSync(${JSON.stringify(paused)}, 'after-final-check')
+    const until = performance.now() + 5000
+    while (!fs.existsSync(${JSON.stringify(release)})) {
+      if (performance.now() >= until) throw new Error('SYNTHETIC_BARRIER_TIMEOUT')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+    }
+  }
+  return rename(from, to)
+}
+fs.openSync = (file, flags, ...args) => {
+  try { return open(file, flags, ...args) } catch (error) {
+    if (${JSON.stringify(role !== first)} && flags === 'wx' && String(file) === ${JSON.stringify(`${progress}.agent-board-lock`)} && ['EEXIST', 'EPERM'].includes(error.code)) fs.writeFileSync(${JSON.stringify(blocked)}, 'contender-blocked')
+    throw error
+  }
+}
+syncBuiltinESMExports()
+`)
+      const args = role === 'reporter' ? ['--report', '--agent', 'codex', '--home', dir] : ['--keys', key]
+      const child = spawn(process.execPath, ['-r', preload, script, ...args], { cwd: dir, env, windowsHide: true })
+      const state = { child, isClosed: false, stdout: '', stderr: '', code: null, error: null }
+      child.stdout.on('data', data => { state.stdout += data })
+      child.stderr.on('data', data => { state.stderr += data })
+      child.on('error', error => { state.error = error })
+      state.closed = new Promise(resolve => child.on('close', code => { state.code = code; state.isClosed = true; resolve() }))
+      child.stdin.end(role === 'reporter' ? JSON.stringify({ project: 'Synthetic', title: 'Reported work', state: 'working', steps: [`- [~] ${long}`] }) : undefined)
+      children.push(state)
+      return state
+    }
+    const waitFor = async (condition, child) => {
+      const until = performance.now() + 5000
+      while (!condition()) {
+        assert.equal(child.isClosed, false, child.stdout + child.stderr)
+        assert.ok(performance.now() < until, 'synthetic rendezvous did not arrive')
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+    }
+    try {
+      writeFileSync(progress, FILE)
+      writeFileSync(journal, HISTORY)
+      writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${BOARD_SCRIPT}`)
+      const holder = launch(first)
+      await waitFor(() => existsSync(paused), holder)
+      const contender = launch(first === 'reporter' ? 'board' : 'reporter')
+      await waitFor(() => contender.isClosed || existsSync(blocked), holder)
+      writeFileSync(release, 'continue')
+      await Promise.all(children.map(state => state.closed))
+      for (const state of children) {
+        assert.equal(state.error, null)
+        assert.equal(state.code, 0, state.stdout + state.stderr)
+      }
+      const board = readFileSync(progress, 'utf8')
+      assert.ok(board.includes('- [x] Verify the result'), board)
+      assert.ok(board.includes('### Reported work'), board)
+      const history = readFileSync(journal, 'utf8')
+      assert.ok(history.includes('KEEP_OLD_HISTORY_7C4'), history)
+      assert.equal(history.split(' · Verify the result').length - 1, 1, history)
+      assert.equal(history.split(long).length - 1, 1, history)
+      assert.equal(existsSync(`${progress}.agent-board-lock`), false)
+    } finally {
+      writeFileSync(release, 'cleanup')
+      for (const state of children) if (!state.isClosed) state.child.kill()
+      await Promise.all(children.map(state => state.closed))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}

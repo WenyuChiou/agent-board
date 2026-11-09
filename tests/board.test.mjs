@@ -5301,6 +5301,58 @@ test('--serve starts the page in the background once, and the next --serve bring
   } finally { await board.end([url]) }
 })
 
+test('--serve prefers the last port when it is free and falls back to a random port when it is taken (#1164)', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  let url1 = null
+  let url2 = null
+  let url3 = null
+  let dummy = null
+  const closeServer = async url => {
+    if (!url) return
+    const { port, searchParams } = new URL(url)
+    await new Promise(done => {
+      const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+      req.on('error', done)
+      req.end('{}')
+    })
+    for (let tries = 0; existsSync(board.served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
+  }
+  try {
+    const first = await board.serve()
+    url1 = board.urlOf(first)
+    assert.ok(url1, first)
+    const port1 = Number(new URL(url1).port)
+    assert.ok(port1 > 0)
+    await closeServer(url1)
+
+    // Restart: since port1 is free, it should be reused
+    const second = await board.serve()
+    url2 = board.urlOf(second)
+    assert.ok(url2, second)
+    const port2 = Number(new URL(url2).port)
+    assert.equal(port2, port1, 'free last port is reused on restart')
+    await closeServer(url2)
+
+    // Occupy port1 with another listener
+    dummy = createNetServer()
+    await new Promise((done, fail) => {
+      dummy.once('error', fail)
+      dummy.listen(port1, '127.0.0.1', done)
+    })
+
+    // Third start: port1 is busy, server must fall back to a random free port without failing
+    const third = await board.serve()
+    url3 = board.urlOf(third)
+    assert.ok(url3, third)
+    const port3 = Number(new URL(url3).port)
+    assert.ok(port3 > 0)
+    assert.notEqual(port3, port1, 'occupied last port falls back to a free port')
+  } finally {
+    if (dummy !== null) dummy.close()
+    await board.end([url1, url2, url3])
+  }
+})
+
 test('/progress looks for the board script beside a Windows or a POSIX progress path', () => {
   assert.equal(liveBoardScript('C:\\Users\\me\\.claude\\progress.md'), 'C:\\Users\\me\\.claude\\agent-board.mjs')
   assert.equal(liveBoardScript('C:\\Users\\me\\board $sample.md'), 'C:\\Users\\me\\agent-board.mjs')

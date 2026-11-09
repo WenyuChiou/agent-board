@@ -262,6 +262,7 @@ export const ZH_TW = {
   backgroundRunning: '背景工作執行中',
   // A step of this session the person answered in chat, until Claude asks again.
   answeredNote: '你已回覆，等 Claude 處理',
+  answeredWaiting: '已在對話回答，等它繼續',
   allDone: '全部完成',
   claudeWorking: 'Claude 正在做',
   agentWorking: (agent: string): string => `${agent} 正在做`,
@@ -806,6 +807,7 @@ export const ZH_TW = {
   settingsTraditional: '繁體中文',
   settingsSimplified: '简体中文',
   settingsLanguageChanged: '語言已更新。',
+  settingsLanguageOverridden: '看板目前使用繁體中文（--lang）。此處的選擇會在稍後啟動時生效。',
   settingsNotifications: '通知',
   settingsOn: '開啟',
   settingsOff: '關閉',

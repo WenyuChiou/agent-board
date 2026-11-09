@@ -109,6 +109,13 @@ export const autoOf = (raw: string): ProgressAuto | null => {
   const pr = Number(attrs.pr)
   // `origin=run` is the one value that means anything (#399); `parent` only matters beside it.
   const isRun = attrs.origin === 'run'
+  const replied = attrs.replied !== undefined
+    ? Number.isFinite(Date.parse(attrs.replied))
+      ? Date.parse(attrs.replied)
+      : Number.isFinite(Number(attrs.replied))
+      ? Number(attrs.replied)
+      : null
+    : null
 
   return {
     session,
@@ -121,6 +128,7 @@ export const autoOf = (raw: string): ProgressAuto | null => {
     ci: CI_STATES.find(one => one === attrs.ci) ?? null,
     ...(isRun ? { isRun: true as const } : {}),
     ...(isRun && attrs.parent !== undefined && RESUME.test(attrs.parent) ? { parent: attrs.parent } : {}),
+    ...(replied !== null && Number.isFinite(replied) ? { replied } : {}),
   }
 }
 

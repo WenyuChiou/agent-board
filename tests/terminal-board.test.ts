@@ -1,12 +1,16 @@
 import { expect, test } from 'claude-code/testing'
-import { confirmTask, takeTask } from '../hooks/blocks'
-import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, pinned, routesOf, terminalLook } from '../hooks/board'
+import { confirmTask, takeTask, upsertAutoBlock } from '../hooks/blocks'
+import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, chatText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, peekInbox, pinned, routesOf, terminalLook } from '../hooks/board'
 import type { AnswerRoute } from '../hooks/board'
-import { codexEvent, codexLifecycleStep, isLifecycleStep, LIFECYCLE_STEPS, localAgentLifecycleStep } from '../hooks/codex'
+import { codexEvent, codexLifecycleStep, isLifecycleStep, LIFECYCLE_STEPS, localAgentLifecycleStep, putCodexBlock } from '../hooks/codex'
+import { applyDigest, noteChatReply, settleChatReply } from '../hooks/digest'
+import { answerAgentPrompt } from '../hooks/inbox'
+import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
 import { DARK, LIGHT } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
 import { serveModel } from '../hooks/serve'
 import { emptyQuestions, observeQuestions, resolveQuestion } from '../hooks/questions'
+import type { QuestionLedger } from '../hooks/questions'
 import { STRINGS } from '../hooks/strings'
 import { buildView, rowNeedsYou } from '../hooks/view'
 
@@ -556,6 +560,153 @@ test('a working Codex or local agent placeholder step matches its state in all l
 
     const answered = codexEvent(askStop, { session_id: 's-1142', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-2' }, at(1), s)
     expect(answered.state).toBe('working')
-    expect(answered.steps).toEqual([`- [ ] ${s.codexLifecycleWorking}`, '- [x] Should we proceed?'])
+    expect(answered.steps).toEqual([`- [ ] ${s.codexLifecycleWorking}`, '- [?] Should we proceed?'])
+    expect(answered.replied).toBe(at(1))
+  }
+})
+
+test('a reply typed in chat changes every board surface while its durable question stays open', () => {
+  const OWNER = '0'.repeat(64)
+  for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
+    const s = STRINGS[lang]
+    const ledgerOf = (file: string, previous = emptyQuestions()) => observeQuestions(previous, parseProgress(file), null, [], NOW, true).ledger
+    const unresolved = (ledger: QuestionLedger) => ledger.records.filter(record => record.isUnresolved).map(record => record.id)
+    const viewOfFile = (file: string, ledger: QuestionLedger) => buildView(parseProgress(file), [], null, NOW, 0, {}, s, [], {}, ledger)
+    const checkWaitingForAgent = (view: ReturnType<typeof buildView>) => {
+      expect(view.overview.waiting).toBe(0)
+      expect(view.waiting).toEqual([])
+      expect(view.groups[0]?.rows[0]?.status).toBe(s.answeredWaiting)
+      const page = serveModel(view, [], s)
+      expect(page.counts.waiting).toBe(0)
+      expect(page.groups[0]?.rows[0]?.status).toBe(s.answeredWaiting)
+      expect(boardScreen(view, [], emptyBoardState, s, { width: 120, isColor: false })).toContain(s.answeredWaiting)
+      expect(chatText(view, [], [], s, '/synthetic/home')).toContain(s.answeredWaiting)
+    }
+
+    // 1. Codex: Prompt submitted in agent chat
+    const start = codexEvent(null, { session_id: 's-401', hook_event_name: 'SessionStart' }, at(10), s)
+    const prompt1 = codexEvent(start, { session_id: 's-401', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }, at(9), s)
+    const askStop = codexEvent(prompt1, { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-1', question: 'Deploy to production?' }, at(5), s)
+    expect(askStop.state).toBe('waiting')
+
+    const fileWaiting = `# Progress\n\n## backend\n${putCodexBlock('', askStop, OWNER)}\n`
+    const original = ledgerOf(fileWaiting)
+    expect(unresolved(original)).toHaveLength(1)
+    const viewWaiting = viewOfFile(fileWaiting, original)
+    expect(viewWaiting.overview.waiting).toBe(1)
+    expect(viewWaiting.waiting.length).toBe(1)
+    expect(viewWaiting.waiting[0]?.text).toBe('Deploy to production?')
+
+    const typed = { session_id: 's-401', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-2' }
+    for (const stamp of [at(6), at(5), 'invalid-time', at(-1)])
+      expect(codexEvent(askStop, typed, at(2), s, stamp)).toEqual(askStop)
+    expect(codexEvent(askStop, { ...typed, prompt_submitted: false }, at(2), s).replied).toBeUndefined()
+    expect(() => codexEvent(askStop, { ...typed, session_id: 'foreign-owner' }, at(2), s)).toThrow('SESSION_CONFLICT')
+
+    // Recovery can retain a whole-second display value while the host's source
+    // clock orders the question, reply and report inside that second.
+    const second = Date.parse(at(5))
+    const timing = { lastAppliedAt: second + 300, observedAt: second + 900 }
+    expect(codexEvent(askStop, typed, at(5), s, second + 300, timing)).toEqual(askStop)
+    const sameSecond = codexEvent(askStop, typed, at(5), s, second + 500, timing)
+    expect(Date.parse(sameSecond.replied!)).toBe(second + 500)
+    const report = { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-2', has_response: true }
+    expect(codexEvent(sameSecond, report, at(5), s, second + 500, timing)).toEqual(sameSecond)
+    const reported = codexEvent(sameSecond, report, at(5), s, second + 700, timing)
+    expect(reported.replied).toBeUndefined()
+    expect(reported.steps[reported.asked!]).toBe('- [x] Deploy to production?')
+
+    // Newer prompt submitted in Codex session chat: question leaves Needs you, row says answeredWaiting
+    const answered = codexEvent(askStop, typed, at(2), s)
+    expect(answered.replied).toBe(at(2))
+
+    const fileReplied = `# Progress\n\n## backend\n${putCodexBlock('', answered, OWNER)}\n`
+    const pending = ledgerOf(fileReplied, original)
+    expect(unresolved(pending)).toEqual(unresolved(original))
+    checkWaitingForAgent(viewOfFile(fileReplied, pending))
+    expect(unresolved(resolveQuestion(pending, unresolved(original)[0]!, NOW))).toEqual([])
+
+    // Agent's next report without question settles it
+    const nextStop = codexEvent(answered, { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-2', has_response: true }, at(1), s)
+    expect(nextStop.replied).toBeUndefined()
+    const fileSettled = `# Progress\n\n## backend\n${putCodexBlock('', nextStop, OWNER)}\n`
+    const settled = ledgerOf(fileSettled, pending)
+    expect(unresolved(settled)).toEqual([])
+    const viewSettled = viewOfFile(fileSettled, settled)
+    expect(viewSettled.overview.waiting).toBe(0)
+    expect(viewSettled.waiting).toEqual([])
+
+    // Agent's next report with a new question asks again
+    const askAgain = codexEvent(answered, { session_id: 's-401', hook_event_name: 'Stop', turn_id: 'turn-2', question: 'Deploy to production?' }, at(1), s)
+    const fileAskAgain = `# Progress\n\n## backend\n${putCodexBlock('', askAgain, OWNER)}\n`
+    const askedAgain = ledgerOf(fileAskAgain, pending)
+    expect(unresolved(askedAgain)).toHaveLength(1)
+    expect(unresolved(askedAgain)[0]).not.toBe(unresolved(original)[0])
+    const viewAskAgain = viewOfFile(fileAskAgain, askedAgain)
+    expect(viewAskAgain.overview.waiting).toBe(1)
+    expect(viewAskAgain.waiting.length).toBe(1)
+    expect(viewAskAgain.waiting[0]?.text).toBe('Deploy to production?')
+
+    // 2. Inbox: An inbox agent prompt event answers the waiting question
+    const inboxTime = NOW - 100_000
+    const geminiMirror = {
+      ...applyDigest(emptyMirror('s-inbox', 'frontend', inboxTime, '/workspace/frontend', 'gemini'),
+        { title: 'Build frontend', context: '', done: '', next: '', ask: 'Ready to build, OK?', why: '' }, inboxTime, s),
+      resume: 's-inbox',
+      state: 'waiting' as const,
+      turnOrder: inboxTime * 2,
+    }
+    const fileGeminiWaiting = upsertAutoBlock('# Progress\n', geminiMirror, s)
+    const inboxOriginal = ledgerOf(fileGeminiWaiting)
+    expect(unresolved(inboxOriginal)).toHaveLength(1)
+    const viewGeminiWaiting = viewOfFile(fileGeminiWaiting, inboxOriginal)
+    expect(viewGeminiWaiting.overview.waiting).toBe(1)
+    expect(viewGeminiWaiting.waiting.length).toBe(1)
+
+    // Older prompt or prompt with no time returns null
+    const olderPromptTurn = { agent: 'gemini', event: 'prompt' as const, session: 's-inbox', id: 's-inbox', cwd: '/workspace/frontend', project: 'frontend', prompt: '', answer: '', transcript: '', at: NOW - 120_000 }
+    expect(answerAgentPrompt(geminiMirror, olderPromptTurn, NOW)).toBeNull()
+
+    // Newer prompt answers agent: sets replied, leaves Needs you, row says answeredWaiting
+    const promptTurn = { agent: 'gemini', event: 'prompt' as const, session: 's-inbox', id: 's-inbox', cwd: '/workspace/frontend', project: 'frontend', prompt: '', answer: '', transcript: '', at: NOW - 50_000 }
+    const answeredMirror = answerAgentPrompt(geminiMirror, promptTurn, NOW)!
+    expect(answeredMirror).not.toBeNull()
+    expect(answeredMirror.updated).toBe(NOW - 50_000)
+    expect(answeredMirror.replied).toBe(answeredMirror.updated)
+
+    const fileGeminiReplied = upsertAutoBlock(fileGeminiWaiting, answeredMirror, s)
+    const inboxPending = ledgerOf(fileGeminiReplied, inboxOriginal)
+    expect(unresolved(inboxPending)).toEqual(unresolved(inboxOriginal))
+    checkWaitingForAgent(viewOfFile(fileGeminiReplied, inboxPending))
+
+    // 3. Claude Mirror: Typing in chat sets replied and leaves Needs you
+    const claudeMirror = applyTaskCreate(emptyMirror('claude-sess-1', 'core', inboxTime, '/workspace/core'),
+      { subject: 'Verify fix?', metadata: { waiting: 'you', why: 'Needs your approval' } }, '1', inboxTime)
+    const ownOriginal = observeQuestions(emptyQuestions(), [], claudeMirror, [], NOW, true).ledger
+    expect(unresolved(ownOriginal)).toHaveLength(1)
+    const viewClaudeWaiting = buildView([], [], claudeMirror, NOW, 0, {}, s, [], {}, ownOriginal)
+    expect(viewClaudeWaiting.overview.waiting).toBe(1)
+    expect(viewClaudeWaiting.waiting.length).toBe(1)
+
+    // Later prompt submitted in Claude chat
+    const claudeReplied = noteChatReply(claudeMirror, NOW - 50_000)
+    const ownPending = observeQuestions(ownOriginal, [], claudeReplied, [], NOW, true).ledger
+    expect(unresolved(ownPending)).toEqual(unresolved(ownOriginal))
+    const viewClaudeReplied = buildView([], [], claudeReplied, NOW, 0, {}, s, [], {}, ownPending)
+    expect(viewClaudeReplied.overview.waiting).toBe(0)
+    expect(viewClaudeReplied.waiting).toEqual([])
+    expect(viewClaudeReplied.current?.status).toBe(s.answeredWaiting)
+    const claudeFile = upsertAutoBlock('# Progress\n', claudeReplied, s)
+    checkWaitingForAgent(viewOfFile(claudeFile, ledgerOf(claudeFile)))
+
+    // Next Claude report with new question asks again
+    const claudeAskAgain = applyTaskCreate(settleChatReply(claudeReplied),
+      { subject: 'Merge PR?', metadata: { waiting: 'you', why: 'Needs your confirmation' } }, '2', NOW - 10_000)
+    const ownNext = observeQuestions(ownPending, [], claudeAskAgain, [], NOW, true).ledger
+    expect(unresolved(ownNext)).toHaveLength(1)
+    expect(unresolved(ownNext)[0]).not.toBe(unresolved(ownOriginal)[0])
+    const viewClaudeAskAgain = buildView([], [], claudeAskAgain, NOW, 0, {}, s, [], {}, ownNext)
+    expect(viewClaudeAskAgain.overview.waiting).toBe(1)
+    expect(viewClaudeAskAgain.waiting.length).toBe(1)
   }
 })

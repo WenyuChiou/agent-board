@@ -444,9 +444,14 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
     // A row whose only step is a hook's placeholder waits for its next instruction: it is not at
     // work, whether the agent is idle or was closed without saying so (#1051). The same holds when
     // the only other steps are closed, such as a question the hook marked answered (#1067).
+    // A waiting session whose question was hidden stays waiting on the agent, out of Working now (#1206).
     working: sortedTasks.filter(task => {
       if (task.shelf !== 'open' || task.hasCard || task.isOwn) return false
       const source = task.source
+      if (typeof source === 'object' && source !== null) {
+        if ('auto' in source && source.auto === 'waiting') return false
+        if ('status' in source && source.status === s.answeredWaiting) return false
+      }
       const steps = typeof source === 'object' && source !== null && 'steps' in source && Array.isArray(source.steps) ? source.steps : []
       if (steps.some(step => isLifecycleStep(step.text)) && steps.every(step => isLifecycleStep(step.text) || step.status === 'done' || step.status === 'cancelled')) return false
       const isDoing = isWorkingTask(steps, task.at, now)

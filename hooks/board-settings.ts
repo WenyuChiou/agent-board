@@ -20,6 +20,13 @@ export const boardLanguage = (flag: Lang | 'auto' | null, saved: SettingsLang | 
   return picked === 'auto' || picked === null ? system ?? 'en' : picked
 }
 
+export const isLanguageOverridden = (flag: Lang | 'auto' | null, saved: SettingsLang | null, baked: Lang | null, system: Lang | null): boolean => {
+  if (flag === null) return false
+  const effectiveWithFlag = boardLanguage(flag, saved, baked, system)
+  const effectiveWithoutFlag = boardLanguage(null, saved, baked, system)
+  return effectiveWithFlag !== effectiveWithoutFlag
+}
+
 // Both page settings preserve unknown keys and refuse to replace a damaged JSON object.
 export const withBoardSettings = (text: string | null, patch: Record<string, unknown>): string | null => {
   try {

@@ -99,6 +99,7 @@ const markerOf = (mirror: ProgressMirror, parent?: string): string => {
     mirror.cwd ? `dir=${encodeURIComponent(mirror.cwd)}` : '',
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
+    mirror.replied !== undefined && Number.isFinite(mirror.replied) ? `replied=${new Date(mirror.replied).toISOString()}` : '',
     // A session an agent started for itself (#399); a person's has no such mark.
     mirror.isRun === true ? 'origin=run' : '',
     mirror.isRun === true && parent !== undefined && RESUME.test(parent) ? `parent=${parent}` : '',

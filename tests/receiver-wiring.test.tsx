@@ -1,3 +1,4 @@
+import { parseQuestions, questionsPath } from '../hooks/questions'
 import { addressFileName, addressKey } from '../hooks/receiver'
 import { engineBeneath, expect, FILE, outside, SESSION, start, test } from './pane-helpers'
 import type { World } from './pane-helpers'
@@ -30,7 +31,7 @@ const hub = (on: Parameters<Parameters<typeof test>[1]>[1], world: World) => {
 }
 
 test('a board message runs as one turn whose words and reply stay out of the board', async ($, on) => {
-  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: 'TITLE: x\nCONTEXT: -\nDONE: leaked\nNEXT: -\nASK: -' }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: () => 'TITLE: x\nCONTEXT: -\nDONE: leaked\nNEXT: -\nASK: -' }
   const clock = engineBeneath(on, world)
   outside(on, world)
   const { sent, submitted } = hub(on, world)
@@ -65,11 +66,38 @@ test('a board message whose reply ends on a question waits on you in a session w
   await clock.advance(2100)
   expect(submitted.length).toBe(1)
   await $.turn.start({ text: PROMPT, turnId: 'd1' })
-  await $.turn.complete({ answer: `ACK ${NONCE} Should I pick a third name?`, durationMs: 1, isAborted: false, turnId: 'd1', reason: 'answer' })
-  await clock.advance(10)
+  await $.turn.complete({ answer: `ACK ${NONCE}\nShould I pick a third name?`, durationMs: 1, isAborted: false, turnId: 'd1', reason: 'answer' })
+  await clock.advance(2100)
   const board = world.files.get(FILE) ?? ''
   expect(board).toContain('- [?] Should I pick a third name?')
   for (const leak of [WORDS, NONCE, 'ACK']) expect(board).not.toContain(leak)
+})
+
+test('a board message whose reply ends on a question waits on you in a session without a Task list, on an existing summary row', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, reply: () => 'TITLE: Pick the pets\nCONTEXT: -\nDONE: Picked a fish name\nNEXT: -\nASK: -' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('tool.call', { tool: 'Edit' }, () => ({ result: 'updated' }))
+  const { sent, submitted } = hub(on, world)
+  await start($, 'name the pets')
+  await $.tool.call({ tool: 'Edit', file_path: '/synthetic/pets', old_string: 'a', new_string: 'b' })
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2100)
+  expect(submitted.length).toBe(1)
+  expect(world.files.get(FILE) ?? '').toContain('Picked a fish name')
+  await $.turn.start({ text: PROMPT, turnId: 'd1' })
+  await $.turn.complete({ answer: `ACK ${NONCE}\nShould I pick a third name?`, durationMs: 1, isAborted: false, turnId: 'd1', reason: 'answer' })
+  await clock.advance(2100)
+  expect(sent.filter(one => one.action === 'receipt').map(one => one.body.status)).toEqual(['accepted', 'acknowledged'])
+  expect(sent.find(one => one.body.status === 'acknowledged')?.body.reply).toBe(`ACK ${NONCE}`)
+  const board = world.files.get(FILE) ?? ''
+  expect(board).toContain('Picked a fish name')
+  expect(board).toContain('- [?] Should I pick a third name?')
+  for (const leak of [WORDS, NONCE, 'ACK']) expect(board).not.toContain(leak)
+  const ledger = parseQuestions(world.files.get(questionsPath(FILE)) ?? '')
+  const unresolved = ledger?.records.filter(one => one.isUnresolved) ?? []
+  expect(unresolved).toHaveLength(1)
+  expect(unresolved[0]?.words).toBe('Should I pick a third name?')
 })
 
 test('a busy session keeps its address and does not take a message until its turn ends', async ($, on) => {

@@ -6,12 +6,12 @@ const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, 
 
 export const settingsToggle = (s: Strings): string => `<button type="button" class="icon-btn" id="settings-toggle" data-local data-settings-toggle aria-haspopup="dialog" aria-expanded="false" aria-controls="settings"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 1.5h3l.5 2 1 .6 2-.6 1.5 2.6-1.5 1.4v1l1.5 1.4-1.5 2.6-2-.6-1 .6-.5 2h-3l-.5-2-1-.6-2 .6L1.5 10 3 8.5v-1L1.5 6 3 3.5l2 .6 1-.6z"/><circle cx="8" cy="8" r="2.2"/></svg><span>${esc(s.settingsTitle)}</span></button>`
 
-export const settingsPanel = (s: Strings, language: SettingsLang, isLan = false): string =>
+export const settingsPanel = (s: Strings, language: SettingsLang, isLan = false, isLangOverridden = false): string =>
   `<div id="settings" class="settings-overlay" data-lan="${isLan}" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden><div class="settings-panel">` +
   `<div class="settings-head"><h2 id="settings-title">${esc(s.settingsTitle)}</h2><button type="button" class="icon-btn" id="settings-close" data-local aria-label="${esc(s.settingsClose)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>` +
   `<section><h3><label for="settings-lang">${esc(s.settingsLanguage)}</label></h3><select id="settings-lang" data-local>` +
   (['auto', 'en', 'zh-TW', 'zh-CN'] as const).map(lang => `<option value="${lang}"${language === lang ? ' selected' : ''}>${esc(lang === 'auto' ? s.settingsAutomatic : lang === 'en' ? s.settingsEnglish : lang === 'zh-TW' ? s.settingsTraditional : s.settingsSimplified)}</option>`).join('') +
-  `</select></section><section><h3>${esc(s.themeMenu)}</h3>${themeControls(s)}</section>` +
+  `</select>${isLangOverridden ? `<p class="settings-label" id="settings-lang-override">${esc(s.settingsLanguageOverridden)}</p>` : ''}</section><section><h3>${esc(s.themeMenu)}</h3>${themeControls(s)}</section>` +
   `<section id="settings-notifications"><h3>${esc(s.settingsNotifications)}</h3><button type="button" id="settings-notify" data-local role="switch" aria-checked="false" aria-label="${esc(s.settingsNotifications)}">${esc(s.settingsOff)}</button></section>` +
   `<section id="settings-agents"><h3 id="settings-agents-title">${esc(s.settingsAgents)}</h3><ul id="settings-agent-list" aria-labelledby="settings-agents-title"></ul>` +
   (isLan ? '' : `<div id="settings-agent-confirm" hidden><p id="settings-agent-question"></p><div class="settings-choices"><button type="button" id="settings-agent-yes">${esc(s.settingsAgentConfirm)}</button><button type="button" id="settings-agent-cancel">${esc(s.settingsAgentCancel)}</button></div></div>`) + `</section>` +
@@ -177,15 +177,16 @@ export const settingsScript = String.raw`
       if (!data.ok) { settingsLanguage.value = languageKept; settingsSay(data.note || w('pressFailed'), true); return; }
       languageKept = lang;
       settingsSay(data.note);
-      try { sessionStorage.setItem('agent-board.settings-changed', 'language'); } catch (error) {}
+      try { sessionStorage.setItem('agent-board.settings-changed', data.isOverridden ? 'overridden' : 'language'); } catch (error) {}
       window.location.reload();
     }, function () { settingsLanguage.value = languageKept; settingsSay(w('pressFailed'), true); }).finally(function () { settingsLanguage.disabled = false; });
   });
   try {
-    if (sessionStorage.getItem('agent-board.settings-changed') === 'language') {
+    var changed = sessionStorage.getItem('agent-board.settings-changed');
+    if (changed) {
       sessionStorage.removeItem('agent-board.settings-changed');
       openSettings();
-      settingsSay(w('settingsLanguageChanged'));
+      settingsSay(w(changed === 'overridden' ? 'settingsLanguageOverridden' : 'settingsLanguageChanged'));
     }
   } catch (error) {}
   function notificationState() {

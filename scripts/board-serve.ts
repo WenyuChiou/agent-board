@@ -37,6 +37,7 @@ export type ServeOptions = {
   reports?: (isFresh?: boolean) => ProgressBinding[]
   s: Strings
   port: number
+  preferredPort?: number
   // What the server answers a second `--serve` with, so it can tell it is the same board.
   ping: Record<string, unknown>
   view: () => View
@@ -56,6 +57,7 @@ export type ServeOptions = {
   setBarStyle?: (style: BarStyle) => boolean
   language?: () => SettingsLang
   setLanguage?: (lang: SettingsLang) => boolean
+  isLangOverridden?: () => boolean
   agents?: SettingsAgentControl
   sweep: () => void
   sweepMs: number
@@ -429,7 +431,7 @@ export const startServer = (o: ServeOptions): void => {
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
-      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.()))
+      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false))
       return
     }
     if (req.method === 'GET') {
@@ -561,7 +563,9 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/language') {
         const lang = body.lang
         if (!isSettingsLang(lang) || o.setLanguage === undefined) return json(res, 400, { note: o.s.pressFailed })
-        return o.setLanguage(lang) ? json(res, 200, { lang, note: o.s.settingsLanguageChanged }) : json(res, 409, { note: o.s.barStyleUnreadable })
+        if (!o.setLanguage(lang)) return json(res, 409, { note: o.s.barStyleUnreadable })
+        const isOverridden = o.isLangOverridden?.() ?? false
+        return json(res, 200, { lang, isOverridden, note: isOverridden ? o.s.settingsLanguageOverridden : o.s.settingsLanguageChanged })
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()
@@ -602,34 +606,51 @@ export const startServer = (o: ServeOptions): void => {
       if (!res.headersSent) json(res, 500, {})
     })
   })
-  server.on('error', () => {
-    try { messaging.close() } catch {}
-    o.onStop()
-  })
-  server.listen(o.port, '127.0.0.1', () => {
-    port = (server.address() as AddressInfo).port
-    const url = `http://127.0.0.1:${port}/?t=${token}`
-    if (!o.onReady(url, port)) {
-      stop()
-      return
+  const initial = o.port !== 0 ? o.port : (o.preferredPort ?? 0)
+  const attempt = (at: number): void => {
+    const fail = (error: NodeJS.ErrnoException): void => {
+      server.off('error', fail)
+      server.removeAllListeners('listening')
+      if (at !== 0 && o.port === 0) return attempt(0)
+      try { messaging.close() } catch {}
+      o.onStop()
     }
-    // Preparing a private address can block; inactivity starts once that address is ready.
-    lastSeen = Date.now()
-    // The idle timer starts only once the server is listening: a listen failure
-    // throws before this point, and a timer made earlier would keep the failed
-    // child alive instead of letting it exit.
-    // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
-    // `idleMs` and no reply is on its way.
-    const idle = setInterval(() => {
-      if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
-      if (o.idleMs > 0 && sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
-    }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
-    server.on('close', () => clearInterval(idle))
-    if (o.isDefaultMessagesDirectory) {
-      // A later --serve asks this address before moving a lock this hub left behind.
-      try { messaging.recordOwner(port, url) } catch {}
+    server.once('error', fail)
+    try {
+      server.listen(at, '127.0.0.1', () => {
+        server.off('error', fail)
+        server.on('error', () => {
+          try { messaging.close() } catch {}
+          o.onStop()
+        })
+        port = (server.address() as AddressInfo).port
+        const url = `http://127.0.0.1:${port}/?t=${token}`
+        if (!o.onReady(url, port)) {
+          stop()
+          return
+        }
+        // Preparing a private address can block; inactivity starts once that address is ready.
+        lastSeen = Date.now()
+        // The idle timer starts only once the server is listening: a listen failure
+        // throws before this point, and a timer made earlier would keep the failed
+        // child alive instead of letting it exit.
+        // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
+        // `idleMs` and no reply is on its way.
+        const idle = setInterval(() => {
+          if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
+          if (o.idleMs > 0 && sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
+        }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
+        server.on('close', () => clearInterval(idle))
+        if (o.isDefaultMessagesDirectory) {
+          // A later --serve asks this address before moving a lock this hub left behind.
+          try { messaging.recordOwner(port, url) } catch {}
+        }
+        const sweeper = setInterval(() => { try { o.sweep() } catch {} }, o.sweepMs)
+        server.on('close', () => clearInterval(sweeper))
+      })
+    } catch (error) {
+      fail(error as NodeJS.ErrnoException)
     }
-    const sweeper = setInterval(() => { try { o.sweep() } catch {} }, o.sweepMs)
-    server.on('close', () => clearInterval(sweeper))
-  })
+  }
+  attempt(initial)
 }
