@@ -156,6 +156,14 @@ test('Settings agent states follow their order in all three languages', () => {
   }
 })
 
+test('Settings Agents heading is translated in zh-TW and zh-CN (#1269)', () => {
+  assert.equal(ZH_TW.settingsAgents, '代理程式')
+  assert.equal(ZH_CN.settingsAgents, '代理')
+  for (const words of [ZH_TW, ZH_CN]) {
+    assert.notEqual(words.settingsAgents, EN.settingsAgents)
+  }
+})
+
 test('Settings setup confirmations describe files and hook approval', () => {
   assert.equal(EN.settingsAgentSetupConfirm('Codex', 1, true), 'Set up Codex? Setup will change 1 file. It also approves the board’s hooks.')
   assert.equal(EN.settingsAgentSetupConfirm('Codex', 2, true), 'Set up Codex? Setup will change 2 files. It also approves the board’s hooks.')

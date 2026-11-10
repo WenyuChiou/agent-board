@@ -1756,6 +1756,26 @@ test('a reply that quotes its earlier question asks nothing (#1273)', () => {
   expect(lastQuestion("Is it Alice's row or Bob's row?")).toBe("Is it Alice's row or Bob's row?")
 })
 
+test('a lone straight quote, such as an inch mark, is a literal character, and the question still asks (#1273)', () => {
+  expect(lastQuestion('Should I use a 12" shelf?')).toBe('Should I use a 12" shelf?')
+  expect(lastQuestion('Should I escape `"` in the output?')).toBe('Should I escape " in the output?')
+  expect(lastQuestion('The rack is 12" wide. Should I order it?')).toBe('Should I order it?')
+  expect(lastQuestion('要用 12" 的架子嗎？')).toBe('要用 12" 的架子嗎？')
+  expect(lastQuestion('Do you want "2"?')).toBe('Do you want "2"?')
+  expect(lastQuestion('Is "x" ok? "y" is next')).toBe('Is "x" ok?')
+  expect(lastQuestion('Should I use the "fast"-path? The "safe" path is slower.')).toBe('Should I use the "fast"-path?')
+  // A told-about quote still quotes after an inch mark or a closed pair, or with a space inside.
+  expect(lastQuestion('The 12" rack is in. I asked "Blue or green?"')).toBeNull()
+  expect(lastQuestion('The 12" rack is in, and I asked "Blue or green?"')).toBeNull()
+  expect(lastQuestion('I wrote "Version 2" in the title and asked "Ready?"')).toBeNull()
+  expect(lastQuestion('他問"要藍色還是綠色?"')).toBeNull()
+  expect(lastQuestion('I asked " Ready?"')).toBeNull()
+  expect(lastQuestion('I asked "...Ready?"')).toBeNull()
+  // A straight quote in code is a character, so it neither opens nor closes a quotation.
+  expect(lastQuestion('The tokens are `name"` and `"`. Should I escape both? "No" leaves them unchanged.')).toBe('Should I escape both?')
+  expect(lastQuestion('I compared `name"` and `"` and then asked "Ready?"')).toBeNull()
+})
+
 test('a link\'s own question mark is not a question, and a question with a link keeps it whole (#1108)', () => {
   expect(lastQuestion('http://127.0.0.1:58561/?t=abc123')).toBeNull()
   expect(lastQuestion('The board is open at http://127.0.0.1:58561/?t=abc123')).toBeNull()
