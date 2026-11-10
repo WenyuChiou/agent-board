@@ -189,17 +189,24 @@ const CLOSERS = new Set(Object.values(OPENERS))
 // wraps the whole question, and a quoted last option after `or` (`"red" row or "blue row?"`),
 // unless the sentence reports what was asked or said (`The test asked either "x" or "Ready?"`).
 const REPORTS = /\b(?:ask(?:ed|s)?|sa(?:id|ys)|wr(?:ote|ites)|repl(?:ied|ies)|typed|prompt(?:ed|s)?)\b|問|问|說|说|寫|写|回覆|回复/i
+const isLoneQuote = (line: string, at: number): boolean => {
+  const before = line[at - 1] ?? ' '
+  return /\d/.test(before) || /\S/.test(before) && /^(?:\s|$)/.test(line.slice(at + 1))
+}
 const isQuoted = (line: string, mark: number): boolean => {
   const open: number[] = []
   let straight = -1
   for (let i = 0; i < mark; i += 1) {
     const char = line[i] ?? ''
     if (char === '\\') i += 1
-    else if (char === '"') straight = straight < 0 ? i : -1
+    // A straight quote closes the open one. With none open, it also stands alone as an inch mark
+    // (`a 12" shelf`) or after a word with nothing after it (`fast" is`), and then opens nothing.
+    else if (char === '"') straight = straight >= 0 || isLoneQuote(line, i) ? -1 : i
     else if (char in OPENERS) open.push(i)
     else if (CLOSERS.has(char)) open.pop()
   }
-  if (straight >= 0) open.push(straight)
+  // A quote the reply talks about (`escape " here?`) has no partner after the mark.
+  if (straight >= 0 && line.indexOf('"', mark + 1) !== -1) open.push(straight)
   // An apostrophe also sits inside words, so a single quote counts only when it closes right
   // after the mark and opens at the start of a word.
   if (/^[?？]["”」』)）]*'/.test(line.slice(mark))) {
@@ -217,7 +224,9 @@ const isQuoted = (line: string, mark: number): boolean => {
 
 // For callers that already normalized the reply: do not parse it a second time.
 export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
-  const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, '$1')
+  // A straight quote in code (`name"`) is a character the reply shows, not a quotation: it stands
+  // in as another mark until the question is put back together.
+  const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, (_, code: string) => code.replace(/"/g, '\u0001'))
   const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '')
   const last = paragraphs.at(-1)
   if (last === undefined) return null
@@ -246,7 +255,7 @@ export const lastQuestionInProse = (answer: string, isFull = false): string | nu
   const sentence = [...tail.matchAll(/[^.。!！?？]*[?？]["'”」』)]*/g)].at(-1)
   if (sentence === undefined) return null
   if (isQuoted(tail, (sentence.index ?? 0) + sentence[0].search(/[?？]/))) return null
-  const question = sentence[0].replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '').trim()
+  const question = sentence[0].replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '').replace(/\u0001/g, '"').trim()
   // The question itself must be put to the person, not the line it ends: `You asked for a
   // summary. What changed?` over a list asks nothing.
   if (isOverList && !asksToPick(question, isHeading)) return null
