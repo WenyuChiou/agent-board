@@ -125,11 +125,15 @@ const LINK = /https?:\/\/[^\s<>"'`“”‘’「」『』，。！？、；：�
 // any changes?**`) all sit over a list too, and none of them waits on the person.
 const LIST_ITEM = /^( {0,3})(?:(?:[-*+•]|\d+[.)]|[A-Za-z][.)])\s+|\d+、\s*)(.*)$/
 // A choice is a short label. An item that is a sentence, or asks, explains or answers instead.
-const isChoice = (item: string): boolean =>
-  item !== '' && item.length <= 60 && !/[?？。！]|[.!]\s/.test(item) && !/[.!;；:：]$/.test(item)
+// One word may still end on a period (`1. PostgreSQL.`); a share (`Docker — 70%`) is a result.
+const isChoice = (item: string): boolean => {
+  const label = /^[^\s.]+\.$/.test(item) ? item.slice(0, -1) : item
+
+  return label !== '' && label.length <= 60 && !/[?？。！]|[.!]\s/.test(label) && !/[.!;；:：]$/.test(label) && !/\d\s*[%％]/.test(label)
+}
 // Words only the agent says to the person. With them an open `what` asks to pick too; a yes or
 // no (`Do you want the details?`) over a list does not.
-const ASKS_YOU = /\b(?:do you (?:want|prefer)|would you (?:like|prefer|rather)|want me to)\b|要我|[你您](?:要|想|希望|偏好)/i
+const ASKS_YOU = /\b(?:do you (?:want|prefer|need)|would you (?:like|prefer|rather)|want me to)\b|要我|[你您](?:要|想|希望|偏好|需要)/i
 // `Should I …?` is also how an FAQ heading words the person's own question. It counts only with
 // a word that asks to pick, on a line that is not set as a heading.
 const ASKS_ME = /\b(?:should|shall|can|could|may) (?:I|we)\b|我該|我應該|我应该|該用|该用|要用|要選|要选/i
@@ -137,22 +141,24 @@ const PICKS = /\b(?:which|or)\b|哪|還是|还是|或是/i
 const PICKS_OPEN = /\bwhat\b|什麼|什么/i
 // A question about what already happened is a recap, whoever it names.
 const IS_PAST = /\b(?:did|was|were|had|have|has)\b|了|過|过|剛|刚|之前|先前|原先|上次/i
-// A bare `Which … first?` (`先用哪個？`, the #1243 report's own shape) asks what to do next: a
-// summary's heading (`Which files changed?`) names no order. With a verb in the past
-// (`Which step failed first?`) it is still a recap.
-const ASKS_ORDER = /\b(?:first|next)\b|先|下一|接下來|接下来/i
-const IS_PAST_EN = /\b[a-z]{3,}ed\b/i
+// A bare `Which database first?` (`先用哪個資料庫？`, the #1243 report's own shape) asks for one
+// thing to do next. Only that exact shape counts: with a verb (`Which jobs ran first?`) or for
+// several (`先做哪些工作？`) it is a timeline's heading, answered by its list.
+const ASKS_ORDER = /^which (?:one|[\p{L}-]+) (?:first|next)[?？]$|^(?:先|下一步|接下來|接下来)[^，,。.]{0,4}哪(?:個|个|一)[^，,。.？?]{0,8}[？?]$/iu
 const asksToPick = (question: string, isHeading: boolean): boolean => {
-  if (IS_PAST.test(question)) return false
+  // A heading, bold line or `Q:` over a list is a section the list answers (an FAQ, a survey's
+  // results), whoever its words name.
+  if (isHeading || IS_PAST.test(question)) return false
   if (ASKS_YOU.test(question)) return PICKS.test(question) || PICKS_OPEN.test(question)
-  if (isHeading || !PICKS.test(question)) return false
 
-  return ASKS_ME.test(question) || ASKS_ORDER.test(question) && !IS_PAST_EN.test(question)
+  return PICKS.test(question) && ASKS_ME.test(question) || ASKS_ORDER.test(question)
 }
 const IS_HEADING = /^\s*(?:#|>|(?:Q|問|问)\s*[:：.])|^\s*([*_]{1,3})\S.*\1\s*$/i
 
 // The question line over a list of choices that ends the reply, or null. Blank lines may sit
 // between the question and the list and between the choices; any other line ends the list.
+// A question introduced by a label (`Survey results:`, `The CI timeline:`) heads a section of a
+// report, so it is null too.
 const lineOverChoices = (prose: string): string | null => {
   const lines = prose.split(/\r?\n/)
   let at = lines.length
@@ -167,15 +173,18 @@ const lineOverChoices = (prose: string): string | null => {
     at -= 1
   }
   const line = lines[at - 1] ?? ''
+  const lead = lines.slice(0, Math.max(at - 1, 0)).filter(one => one.trim() !== '').at(-1) ?? ''
 
-  return count < 2 || LIST_ITEM.test(line) ? null : line
+  return count < 2 || LIST_ITEM.test(line) || /[:：]\s*$/.test(withoutEmphasis(lead)) ? null : line
 }
 
 const OPENERS: Record<string, string> = { '“': '”', '‘': '’', '「': '」', '『': '』' }
 const CLOSERS = new Set(Object.values(OPENERS))
 // A question mark inside a quote that follows other words is a question told about, not one
 // put to the person: `… and asked "Blue or green?"` (#1273). Two shapes do ask: a quote that
-// wraps the whole question, and a quoted last option after `or` (`"red" row or "blue row?"`).
+// wraps the whole question, and a quoted last option after `or` (`"red" row or "blue row?"`),
+// unless the sentence reports what was asked or said (`The test asked either "x" or "Ready?"`).
+const REPORTS = /\b(?:ask(?:ed|s)?|sa(?:id|ys)|wr(?:ote|ites)|repl(?:ied|ies)|typed|prompt(?:ed|s)?)\b|問|问|說|说|寫|写|回覆|回复/i
 const isQuoted = (line: string, mark: number): boolean => {
   const open: number[] = []
   let straight = -1
@@ -196,8 +205,9 @@ const isQuoted = (line: string, mark: number): boolean => {
   }
 
   return open.some(from => {
-    const lead = line.slice(0, from).replace(/^.*[.。!！?？]/, '').replace(/["'“‘「『(（\s]/g, '')
-    return lead !== '' && !/(?:\bor|還是|还是|或是|或)$/i.test(line.slice(0, from).trim())
+    const before = line.slice(0, from).replace(/^.*[.。!！?？]/, '')
+    const lead = before.replace(/["'“‘「『(（\s]/g, '')
+    return lead !== '' && (REPORTS.test(before) || !/(?:\bor|還是|还是|或是|或)$/i.test(line.slice(0, from).trim()))
   })
 }
 

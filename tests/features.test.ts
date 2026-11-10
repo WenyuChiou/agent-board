@@ -1634,7 +1634,9 @@ test('a question put to the person, followed only by its choices as a list, stil
   expect(lastQuestion('The parser is fixed. Which one do you want first?\na) the docs\nb) the tests')).toBe('Which one do you want first?')
   expect(lastQuestion('What would you like me to do next?\n• Ship it\n• Add tests\n• Stop here')).toBe('What would you like me to do next?')
   // Bold does not hide a question only the agent could be asking.
-  expect(lastQuestion('**Which one do you prefer?**\n1. **Postgres** — replicas\n2. `SQLite` — one file')).toBe('Which one do you prefer?')
+  expect(lastQuestion('Which one do you prefer?\n1. **Postgres** — replicas\n2. `SQLite` — one file')).toBe('Which one do you prefer?')
+  expect(lastQuestion('Which database do you prefer?\n1. PostgreSQL.\n2. SQLite.')).toBe('Which database do you prefer?')
+  expect(lastQuestion('Which component do you need?\na) parser\nb) renderer')).toBe('Which component do you need?')
   expect(lastQuestion('我該用哪個資料庫？\n1、Postgres\n2、SQLite')).toBe('我該用哪個資料庫？')
   expect(lastQuestion('要我先用哪個資料庫？\n- Postgres\n- SQLite')).toBe('要我先用哪個資料庫？')
   expect(lastQuestion('你想先做哪一個？\n1. 文件\n2. 測試')).toBe('你想先做哪一個？')
@@ -1666,6 +1668,12 @@ test('a heading or a recap worded as a question over a list that answers it asks
 
 test('an answered FAQ heading over its answers asks nothing (#1243)', () => {
   expect(lastQuestion('**Should I make any changes?**\n- No changes are needed.\n- Your configuration is already correct.')).toBeNull()
+  // A survey's results: the heading asks the person in its words, and the list answers it.
+  expect(lastQuestion('**Which one do you prefer?**\n1. **Postgres** — replicas\n2. `SQLite` — one file')).toBeNull()
+  expect(lastQuestion('Survey results:\n\n**Which deployment option do you prefer?**\n- Docker — 70%\n- Binary — 30%')).toBeNull()
+  expect(lastQuestion('Survey results:\n\nWhich deployment option do you prefer?\n- Docker\n- Binary')).toBeNull()
+  expect(lastQuestion('Which deployment option do you prefer?\n- Docker — 70%\n- Binary — 30%')).toBeNull()
+  expect(lastQuestion('調查結果：\n\n你想要哪種部署方式？\n- Docker\n- 執行檔')).toBeNull()
   expect(lastQuestion('Should I make any changes?\n- No changes are needed.\n- Your configuration is already correct.')).toBeNull()
   expect(lastQuestion('Should I make any changes?\n- No\n- The configuration is already correct')).toBeNull()
   expect(lastQuestion('**Which database should I use?**\n- Postgres for production\n- SQLite for tests')).toBeNull()
@@ -1687,6 +1695,11 @@ test('a bare which-first question over its choices asks it, and a summary headin
   expect(lastQuestion('Which step failed first?\n- build\n- lint')).toBeNull()
   expect(lastQuestion('**Which database first?**\n- Postgres\n- SQLite')).toBeNull()
   expect(lastQuestion('先前用了哪個資料庫？\n- Postgres\n- SQLite')).toBeNull()
+  // A timeline's heading names an order too, but with a verb or for several things.
+  expect(lastQuestion('The CI timeline:\n\nWhich jobs ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which jobs ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('已确定的执行顺序：\n\n先做哪些工作？\n- 更新解析器\n- 补充测试')).toBeNull()
+  expect(lastQuestion('先做哪些工作？\n- 更新解析器\n- 补充测试')).toBeNull()
 })
 
 test('a list that explains, asks or follows a statement is not a list of choices (#1243)', () => {
@@ -1711,7 +1724,9 @@ test('a list that explains, asks or follows a statement is not a list of choices
   expect(lastQuestion('该用哪个数据库？\n- Postgres 适合生产环境。\n- SQLite 适合测试。')).toBeNull()
 })
 
-test('a question told about inside a quote is not a question to the person (#1273)', () => {
+test('a reply that quotes its earlier question asks nothing (#1273)', () => {
+  expect(lastQuestion('The test asked either "Your name" or "Are you ready?"')).toBeNull()
+  expect(lastQuestion('測試問了「你的名字」還是「準備好了嗎？」')).toBeNull()
   expect(lastQuestion('That finishes the test: I said hello, then goodbye, and asked "Blue or green?"')).toBeNull()
   expect(lastQuestion('Earlier you wrote “Blue or green?”')).toBeNull()
   expect(lastQuestion("The prompt was 'Blue or green?'")).toBeNull()
