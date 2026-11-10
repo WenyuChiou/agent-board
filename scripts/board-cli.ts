@@ -34,7 +34,7 @@ import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder'
-import { dockArguments, probeOf, windowPlaceOf } from '../hooks/board-dock'
+import { dockArguments, dockCommand, probeOf, windowPlaceOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
@@ -764,12 +764,14 @@ const saveLanguage = (lang: SettingsLang): boolean => {
   return true
 }
 
-// The docked window's place (#1084): the other keys are kept, and a file that does not read as a
-// JSON object is left as it is.
+// The docked window's place (#1084): the other keys are kept. A file that cannot be read (locked,
+// no access), does not read as a JSON object, or is a symlinked or non-regular file is left as it
+// is: false, the page's report is dropped and the next move tries again.
 const saveWindow = (place: Rect): boolean => {
   const file = settingsPath(path)
-  let text: string | null
-  try { text = read(file) } catch { text = null }
+  if (isSymlinkOrNonRegular(file)) return false
+  let text: string
+  try { text = read(file) } catch { return false }
   const next = withBoardSettings(text, { window: place })
   if (next === null) return false
   try { writeFileSync(file, next) } catch { return false }
@@ -1027,14 +1029,12 @@ const browserProfile = (): string | null => {
 }
 
 // The window docked on the right, or at the place the person last gave it (#1084), in one
-// PowerShell run, as windowsStart: it first prints the screens' work areas (DPI-unaware, so in the
-// browser's own pixels at the system scale), then reads the browser's arguments back as one base64
-// line and starts the first program that starts: today's plain app window when there is no dock.
-// The C# has no single quote, so the PowerShell string around it needs no escaping.
-const DOCK_PROBE = `Microsoft.PowerShell.Utility\\Add-Type -Namespace AgentBoard -Name Dock -MemberDefinition '[DllImport("user32.dll")] static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint f); [DllImport("user32.dll")] static extern bool GetMonitorInfoW(IntPtr m, int[] i); public delegate bool Each(IntPtr m, IntPtr dc, IntPtr r, IntPtr d); [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, Each each, IntPtr d); static string Work(IntPtr m) { int[] i = new int[10]; i[0] = 40; if (!GetMonitorInfoW(m, i)) return ""; return i[5] + "," + i[6] + "," + (i[7] - i[5]) + "," + (i[8] - i[6]); } public static string Probe() { var all = new System.Collections.Generic.List<string>(); EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (m, dc, r, d) => { string one = Work(m); if (one != "") all.Add(one); return true; }, IntPtr.Zero); return Work(MonitorFromWindow(GetForegroundWindow(), 2)) + "|" + string.Join(";", all); }'`
+// PowerShell run, as windowsStart: it first prints the screens' work areas, then reads the
+// browser's arguments back as one base64 line and starts the first program that starts: today's
+// plain app window when there is no dock (hooks/board-dock.ts, dockCommand).
 const dockLaunch = (programs: string[], target: string, done: (isOpen: boolean) => void): void => {
   const list = programs.map(bin => isAddress(bin) ? psLiteral(bin) : psWildcardLiteral(bin)).join(', ')
-  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); $probe = '|'; try { Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1'); ${DOCK_PROBE}; $probe = [AgentBoard.Dock]::Probe() } catch {}; [Console]::Out.WriteLine($probe); [Console]::Out.Flush(); $line = [Console]::In.ReadLine(); if (-not $line) { exit 2 }; $argumentList = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($line)); foreach ($program in @(${list})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program -ArgumentList $argumentList -WorkingDirectory ${psWildcardLiteral(dirname(path))} -PassThru } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) { if ($started.WaitForExit(${LAUNCH_GRACE_MS}) -and $started.ExitCode -ne 0) { continue }; [Console]::Out.WriteLine($started.Id) }; exit 0 }; exit 1`
+  const command = dockCommand(list, psWildcardLiteral(dirname(path)), LAUNCH_GRACE_MS)
   let child: ChildProcess
   try {
     child = spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {

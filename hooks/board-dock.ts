@@ -77,14 +77,28 @@ export const profileFlags = (dir: string): string[] => [
   '--disable-features=msImplicitSignin,msEdgeSyncConsent',
 ]
 
-// The browser's arguments for one open of the page's address: docked or at the remembered place
-// in the board's own profile, the page told so by `dock=1`; else today's plain app window (no
-// profile folder, no screen read, or a screen narrower than DOCK_MIN_WORK).
+// The browser's arguments for one open of the page's address: docked (`dock=1`) or at the
+// remembered place (`dock=2`) in the board's own profile; else today's plain app window (no
+// profile folder, no screen read, or a screen narrower than DOCK_MIN_WORK). The page docks itself
+// only for `dock=1`: a remembered place may span two monitors, and the launcher has already
+// checked that its title bar is on one.
 export const dockArguments = (address: string, remembered: Rect | null, probe: { foreground: Rect | null; works: readonly Rect[] } | null, profile: string | null): string[] => {
   const place = probe === null ? null : launchPlace(remembered, probe.foreground, probe.works)
   if (place === null || profile === null) return [`--app=${address}`]
-  return [...profileFlags(profile), ...placeFlags(place), `--app=${address}&dock=1`]
+  return [...profileFlags(profile), ...placeFlags(place), `--app=${address}&dock=${place === remembered ? 2 : 1}`]
 }
+
+// The screens' work areas, read by the launch PowerShell (DPI-unaware, so in the browser's own
+// pixels at the system scale). The C# has no single quote, so the PowerShell string around it
+// needs no escaping.
+const DOCK_PROBE = `Microsoft.PowerShell.Utility\\Add-Type -Namespace AgentBoard -Name Dock -MemberDefinition '[DllImport("user32.dll")] static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint f); [DllImport("user32.dll")] static extern bool GetMonitorInfoW(IntPtr m, int[] i); public delegate bool Each(IntPtr m, IntPtr dc, IntPtr r, IntPtr d); [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, Each each, IntPtr d); static string Work(IntPtr m) { int[] i = new int[10]; i[0] = 40; if (!GetMonitorInfoW(m, i)) return ""; return i[5] + "," + i[6] + "," + (i[7] - i[5]) + "," + (i[8] - i[6]); } public static string Probe() { var all = new System.Collections.Generic.List<string>(); EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (m, dc, r, d) => { string one = Work(m); if (one != "") all.Add(one); return true; }, IntPtr.Zero); return Work(MonitorFromWindow(GetForegroundWindow(), 2)) + "|" + string.Join(";", all); }'`
+
+// The whole launch PowerShell: it prints the probe's line (`|` when the probe fails), reads the
+// browser's arguments back as one base64 UTF-16 line (exit 2 when none comes), and starts the
+// first of `programs` (a PowerShell list) that starts, printing its process id (exit 0); exit 1
+// when none does. `isHidden` starts it hidden, for the test only.
+export const dockCommand = (programs: string, workingDirectory: string, graceMs: number, isHidden = false): string =>
+  `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); $probe = '|'; try { Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1'); ${DOCK_PROBE}; $probe = [AgentBoard.Dock]::Probe() } catch {}; [Console]::Out.WriteLine($probe); [Console]::Out.Flush(); $line = [Console]::In.ReadLine(); if (-not $line) { exit 2 }; $argumentList = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($line)); foreach ($program in @(${programs})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program -ArgumentList $argumentList -WorkingDirectory ${workingDirectory}${isHidden ? ' -WindowStyle Hidden' : ''} -PassThru } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) { if ($started.WaitForExit(${graceMs}) -and $started.ExitCode -ne 0) { continue }; [Console]::Out.WriteLine($started.Id) }; exit 0 }; exit 1`
 
 // The probe's one line: the foreground window's monitor work area, then every monitor's, each as
 // x,y,width,height, e.g. `0,0,2560,1392|0,0,2560,1392;-1920,0,1920,1040`. Null when it does not read.
@@ -110,9 +124,9 @@ export const probeOf = (line: string): { foreground: Rect | null; works: Rect[] 
 // moves or sizes the window, once that settles, so the next open goes there.
 export const dockScript = String.raw`
   (function () {
-    var isDocked = false;
-    try { isDocked = new URLSearchParams(location.search).get('dock') === '1'; } catch (error) {}
-    if (!isDocked || typeof window.screen !== 'object') return;
+    var mode = null;
+    try { mode = new URLSearchParams(location.search).get('dock'); } catch (error) {}
+    if ((mode !== '1' && mode !== '2') || typeof window.screen !== 'object') return;
     var MIN_WORK = ${DOCK_MIN_WORK}, MIN_WIDTH = ${DOCK_MIN_WIDTH}, MAX_WIDTH = ${DOCK_MAX_WIDTH};
     function place() { return { x: Math.round(window.screenX), y: Math.round(window.screenY), width: Math.round(window.outerWidth), height: Math.round(window.outerHeight) }; }
     function work() { var s = window.screen; return { x: s.availLeft || 0, y: s.availTop || 0, width: s.availWidth, height: s.availHeight }; }
@@ -123,7 +137,8 @@ export const dockScript = String.raw`
     }
     function isInside(one, area) { return one.x >= area.x - 8 && one.y >= area.y - 8 && one.x + one.width <= area.x + area.width + 8 && one.y + one.height <= area.y + area.height + 8; }
     var area = work(), now = place();
-    if (!isInside(now, area)) {
+    // Only the dock is corrected: a remembered place (dock=2) is where the person put it.
+    if (mode === '1' && !isInside(now, area)) {
       var target = dock(area);
       if (target) { try { window.resizeTo(target.width, target.height); window.moveTo(target.x, target.y); } catch (error) {} }
     }

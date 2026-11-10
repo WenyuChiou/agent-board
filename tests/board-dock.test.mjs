@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
-import { dockArguments, dockPlace, dockScript, isReachable, launchPlace, probeOf, windowPlaceOf } from '../hooks/board-dock.ts'
+import { dockArguments, dockCommand, dockPlace, dockScript, isReachable, launchPlace, probeOf, windowPlaceOf } from '../hooks/board-dock.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 
 const screen = (width, height = 1040, x = 0, y = 0) => ({ x, y, width, height })
@@ -49,7 +49,10 @@ test('#1084: a remembered place is used on the next open, and one on a monitor t
   // The remembered place opens even on a screen too narrow to dock.
   const small = screen(1200)
   const kept = { x: 10, y: 10, width: 500, height: 600 }
-  assert.deepEqual(dockArguments(address, kept, { foreground: small, works: [small] }, 'p').slice(-3), ['--window-size=500,600', '--window-position=10,10', `--app=${address}&dock=1`])
+  assert.deepEqual(dockArguments(address, kept, { foreground: small, works: [small] }, 'p').slice(-3), ['--window-size=500,600', '--window-position=10,10', `--app=${address}&dock=2`])
+  // A remembered place is told apart from the dock, so the page does not move it.
+  assert.equal(dockArguments(address, remembered, { foreground: main, works: [main, left] }, 'p').at(-1), `--app=${address}&dock=2`)
+  assert.equal(dockArguments(address, remembered, { foreground: main, works: [main] }, 'p').at(-1), `--app=${address}&dock=1`)
 })
 
 test('#1084: the probe line and the settings file are read strictly', () => {
@@ -103,6 +106,16 @@ test('#1084: the docked page docks itself when the browser put it off its screen
   scaled.tick()
   assert.deepEqual(scaled.calls, [['/api/window', { x: 300, y: 0, width: 512, height: 1114 }]])
 
+  // A remembered place across two monitors (dock=2) stays where the person put it, and their
+  // next move is still reported.
+  const across = runDockScript({ search: '?t=abc&dock=2', place: { x: 1650, y: 100, width: 600, height: 800 }, avail: screen(1920, 1040, 1920) })
+  assert.deepEqual(across.moves, [])
+  across.tick()
+  across.win.screenX = 1700
+  across.tick()
+  across.tick()
+  assert.deepEqual(across.calls, [['/api/window', { x: 1700, y: 100, width: 600, height: 800 }]])
+
   const inside = runDockScript({ search: '?t=abc&dock=1', place: { x: 2000, y: 0, width: 560, height: 1392 }, avail: screen(2560, 1392) })
   assert.deepEqual(inside.moves, [])
 
@@ -113,7 +126,7 @@ test('#1084: the docked page docks itself when the browser put it off its screen
 })
 
 test('#1084: the built page carries the dock script', () => {
-  assert.ok(BOARD_SCRIPT.includes("get('dock') === '1'"))
+  assert.ok(BOARD_SCRIPT.includes("mode === '1' && !isInside(now, area)"))
   assert.ok(BOARD_SCRIPT.includes("call('/api/window', one)"))
 })
 
@@ -138,12 +151,70 @@ test('#1084: the computer\'s page keeps the window place in the settings file; a
     assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')), { barStyle: 'blue', window: { x: -1500, y: 20, width: 700, height: 900 } })
     assert.equal((await post({ x: 'left', y: 0, width: 700, height: 900 })).status, 400)
     assert.equal((await post({ x: 0, y: 0, width: 10, height: 900 })).status, 400)
+    // A settings file that is a folder, or a link to another file, is left as it is (#1261).
+    const settings = join(root, 'progress-settings.json')
+    rmSync(settings)
+    mkdirSync(settings)
+    assert.equal((await post({ x: 0, y: 0, width: 700, height: 900 })).status, 409)
+    rmSync(settings, { recursive: true })
+    const victim = join(root, 'victim.json')
+    writeFileSync(victim, '{"kept":true}')
+    let hasLink = true
+    try { symlinkSync(victim, settings) } catch { hasLink = false }
+    if (hasLink) {
+      assert.equal((await post({ x: 0, y: 0, width: 700, height: 900 })).status, 409)
+      assert.equal(readFileSync(victim, 'utf8'), '{"kept":true}')
+      unlinkSync(settings)
+    }
   } finally {
     if (url) {
       const page = new URL(url)
       await fetch(new URL('/api/close', page), { method: 'POST', headers: { 'x-board-token': page.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}' }).catch(() => {})
       await new Promise(r => setTimeout(r, 500))
     }
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  }
+})
+
+// The launch PowerShell itself, on Windows: the probe's line, the arguments read back from stdin,
+// the program started with them; a program that does not start, and no arguments, both fail so
+// the caller opens today's plain window. The stand-in program is Node, started hidden.
+const literal = value => `'${value.replace(/'/g, "''")}'`
+const runLaunch = (programs, answer, cwd) => new Promise(done => {
+  const command = dockCommand(programs, literal(cwd), 1500, true)
+  const child = spawn(join(process.env.SystemRoot ?? 'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  let out = ''
+  let isAnswered = false
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', chunk => {
+    out += chunk
+    if (!isAnswered && out.includes('\n')) { isAnswered = true; child.stdin.end(answer === null ? '\n' : `${Buffer.from(answer, 'utf16le').toString('base64')}\n`) }
+  })
+  child.stdin.on('error', () => {})
+  const timer = setTimeout(() => child.kill(), 30000)
+  child.on('exit', code => { clearTimeout(timer); done({ code, lines: out.split(/\r?\n/).filter(Boolean) }) })
+})
+
+test('#1084: the launch PowerShell reads the screens, then starts the program with the arguments it is sent, and fails when none starts', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'board-dock-launch-'))
+  try {
+    const seen = join(root, 'seen.json')
+    const stand = join(root, 'stand-in.mjs')
+    writeFileSync(stand, `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(seen)}, JSON.stringify(process.argv.slice(2)))\n`)
+    const app = `--app=${address}&dock=1`
+    const started = await runLaunch(`${literal('C:\no\such\browser.exe')}, ${literal(process.execPath)}`, `"${stand}" "--window-size=480,1040" "${app}"`, root)
+    assert.equal(started.code, 0, started.lines.join('\n'))
+    const probe = probeOf(started.lines[0])
+    assert.ok(probe !== null && probe.works.length >= 1, `the probe reads every monitor: ${started.lines[0]}`)
+    assert.match(started.lines.at(-1), /^\d+$/, 'the started program\'s id')
+    for (let i = 0; i < 100 && !existsSync(seen); i++) await new Promise(r => setTimeout(r, 100))
+    assert.deepEqual(JSON.parse(readFileSync(seen, 'utf8')), ['--window-size=480,1040', app])
+
+    const none = await runLaunch(literal('C:\no\such\browser.exe'), `"${app}"`, root)
+    assert.equal(none.code, 1)
+    const unanswered = await runLaunch(literal(process.execPath), null, root)
+    assert.equal(unanswered.code, 2)
+  } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
   }
 })
