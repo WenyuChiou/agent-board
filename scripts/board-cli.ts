@@ -36,7 +36,7 @@ import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePriva
 import { isTimeout, privateFolderHandoff } from './private-folder'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
-import { pickSurface } from '../hooks/surface'
+import { pagePortOf, pickSurface, sshTargetOf } from '../hooks/surface'
 import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
 import { boardStatus } from '../hooks/board-status'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, clipped, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, plain, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
@@ -2413,6 +2413,8 @@ const serveBoard = async (): Promise<void> => {
   }
   const server = await serverPromise
   if (server === null) {
+    // No page started: a script that checks the exit status must not read success (#1292).
+    process.exitCode = 1
     process.stdout.write(`\n${serveFailureNote(failure)}\n`)
     return
   }
@@ -2443,6 +2445,12 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
 
 const openPageSurface = async (): Promise<void> => {
   const opened = await openPage()
+  // Over SSH the address is on the remote computer, even when a page is already open there: say
+  // how to forward its port first, as the terminal board does, so the address stays the last line
+  // an agent shows (#1283). The terminal board's own `o` keeps one-line notes.
+  if (opened.url !== undefined && (process.env.SSH_CONNECTION || process.env.SSH_TTY)) {
+    process.stdout.write(`${s.serveSshHint(pagePortOf(opened.url), sshTargetOf(process.env), opened.url)}\n`)
+  }
   process.stdout.write(`${opened.note}\n`)
   // `--lan` without `--serve`: the page opens here and the phone's address follows it (#868).
   if (args.includes('--lan') && opened.url !== undefined) await showLan(opened.url)
@@ -2462,14 +2470,6 @@ const stopBoard = async (): Promise<void> => {
   }
 }
 
-const sshHost = (): string => {
-  const conn = process.env.SSH_CONNECTION
-  if (conn) {
-    const parts = conn.trim().split(/\s+/)
-    if (parts.length >= 3 && parts[2]) return parts[2]
-  }
-  return process.env.HOSTNAME || 'host'
-}
 
 // The home folder, or none when the computer does not say: a failure must not raise another.
 const homeOrNone = (): string => {
@@ -2606,7 +2606,7 @@ const runWatchTerminal = async (): Promise<void> => {
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) {
     const server = await ensureServer()
     if (server) {
-      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshHost(), server.url), options())}\n`
+      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshTargetOf(process.env), server.url), options())}\n`
     }
   }
   let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }
