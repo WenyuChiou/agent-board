@@ -17,7 +17,7 @@ import childProcess from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
-import { pickSurface, AGENT_ENV_VARS } from '../hooks/surface.ts'
+import { pickSurface, AGENT_ENV_VARS, sshTargetOf, pagePortOf } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
@@ -6289,7 +6289,22 @@ test('the SSH hint links to the page with its token', () => {
     assert.ok(hint.includes(`ssh -L ${port}:127.0.0.1:${port} ${host}`), hint)
     assert.ok(hint.includes(url), hint)
   }
-  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshHost(), server.url)'))
+  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshTargetOf(process.env), server.url)'))
+  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(pagePortOf(opened.url), sshTargetOf(process.env), opened.url)'))
+})
+
+test('the SSH forwarding command names a valid non-22 SSH port and the page port a URL leaves out (#1283)', () => {
+  const at = port => ({ SSH_CONNECTION: `203.0.113.5 50000 203.0.113.9 ${port}`, HOSTNAME: 'board.example' })
+  assert.equal(sshTargetOf(at(22)), '203.0.113.9')
+  assert.equal(sshTargetOf(at(2222)), '-p 2222 203.0.113.9')
+  assert.equal(sshTargetOf(at(1)), '-p 1 203.0.113.9')
+  assert.equal(sshTargetOf(at(65535)), '-p 65535 203.0.113.9')
+  for (const bad of ['0', '65536', '99999', '-1', 'x22', '']) assert.equal(sshTargetOf(at(bad)), '203.0.113.9', `port ${JSON.stringify(bad)} is not passed to ssh -p`)
+  assert.equal(sshTargetOf({ SSH_CONNECTION: '203.0.113.5 50000', HOSTNAME: 'board.example' }), 'board.example')
+  assert.equal(sshTargetOf({ SSH_TTY: '/dev/pts/0' }), 'host')
+  assert.equal(pagePortOf('http://127.0.0.1:43210/?t=synthetic'), 43210)
+  assert.equal(pagePortOf('http://127.0.0.1:80/?t=synthetic'), 80, 'a URL drops :80, the command must not say 0')
+  assert.equal(pagePortOf('http://127.0.0.1/?t=synthetic'), 80)
 })
 
 test('an agent or a pipe running agent-board with no surface flag opens one page and prints one bare URL', async () => {
