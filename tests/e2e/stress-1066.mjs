@@ -27,8 +27,11 @@ const CONDITIONS = ['none', 'cpu', 'memory', 'disk', 'kill']
 if (!CONDITIONS.includes(condition)) { process.stderr.write(`unknown condition ${condition}\n`); process.exit(2) }
 const isWindows = process.platform === 'win32'
 const isLinux = process.platform === 'linux'
-const SAMPLE_MS = 15000
-// Linux lists /proc in a few ms; a Windows list is one PowerShell start (1–2 s), so it is rarer there.
+// The first Windows batch sampled with Get-CimInstance Win32_Process every 15 s (and every 6 s for the kill
+// condition): that WMI walk costs 1–2 s of a 4-CPU runner each time and lifted the baseline's hook p50 from
+// the weekly soak's 344 ms to about 2 s. Windows now samples Get-Process (no command lines) every 30 s and
+// looks a command line up once, for the page server's pid.
+const SAMPLE_MS = isWindows ? 30000 : 15000
 const KILL_MS = isWindows ? 6000 : 1000
 const HOOK_LOAD_LIMIT_MS = 15 * 60000
 const MEMORY_FLOOR = 768 * 1048576
@@ -78,6 +81,23 @@ const sh = (command, timeoutMs = 20000) => new Promise(done => {
   one.once('error', error => { clearTimeout(timer); done({ code: -1, stdout: '', stderr: firstLine(error) }) })
 })
 
+let pageServerPid
+const powershell = (script, timeoutMs) => new Promise(done => {
+  const one = spawnIsolated('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: world.env, cwd: world.root, stdio: ['ignore', 'pipe', 'ignore'] })
+  let stdout = ''
+  one.stdout.setEncoding('utf8').on('data', t => { stdout += t })
+  const timer = setTimeout(() => one.kill('SIGKILL'), timeoutMs)
+  one.once('close', () => { clearTimeout(timer); done(stdout) })
+  one.once('error', () => { clearTimeout(timer); done('') })
+})
+// One command-line lookup, after the load's page server is up.
+const findPageServer = async () => {
+  if (!isWindows) return
+  const out = await powershell('(Get-CimInstance Win32_Process -Filter "Name = \'node.exe\'" | Where-Object { $_.CommandLine -like "*--serve-child*" } | Select-Object -First 1).ProcessId', 60000)
+  const pid = Number(out.trim())
+  if (pid > 0) pageServerPid = pid
+  else note('The page server\'s pid could not be found on Windows; it is counted as a board process and could be killed.')
+}
 // The processes of this run: everything whose command names the world (the hook load's own world
 // lives in this world's temp folder, so its page server and hook children count too).
 const listProcesses = async () => {
@@ -95,15 +115,13 @@ const listProcesses = async () => {
     return list
   }
   if (isWindows) {
-    const script = '[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*agent-board-e2e-*" } | Select-Object ProcessId,CommandLine,WorkingSetSize | ConvertTo-Json -Compress'
-    const one = spawnIsolated('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: world.env, cwd: world.root, stdio: ['ignore', 'pipe', 'ignore'] })
-    let stdout = ''
-    one.stdout.setEncoding('utf8').on('data', t => { stdout += t })
-    const timer = setTimeout(() => one.kill('SIGKILL'), 60000)
-    await new Promise(done => one.once('close', done))
-    clearTimeout(timer)
+    // On a runner every node.exe but this script, the hook load and the stressors is the board's; the page
+    // server is told apart by the one command-line lookup in findPageServer. Own pids are left out here.
+    const script = 'Get-Process -Name node -ErrorAction SilentlyContinue | Select-Object Id,WorkingSet64 | ConvertTo-Json -Compress'
+    const stdout = await powershell(script, 30000)
+    const own = new Set([process.pid, ...children.map(c => c.pid).filter(Boolean)])
     try {
-      return [JSON.parse(stdout || '[]')].flat().filter(Boolean).map(p => ({ pid: p.ProcessId, command: p.CommandLine ?? '', rssMB: Math.round((p.WorkingSetSize ?? 0) / 1048576) })).filter(p => inWorld(p.command))
+      return [JSON.parse(stdout || '[]')].flat().filter(Boolean).filter(p => !own.has(p.Id)).map(p => ({ pid: p.Id, command: p.Id === pageServerPid ? '--serve-child' : 'node (board)', rssMB: Math.round((p.WorkingSet64 ?? 0) / 1048576) }))
     } catch { return [] }
   }
   const { stdout } = await new Promise(done => {
@@ -117,7 +135,7 @@ const listProcesses = async () => {
     return found && inWorld(found[3]) ? [{ pid: Number(found[1]), command: found[3], rssMB: Math.round(Number(found[2]) / 1024) }] : []
   })
 }
-const isBoardProcess = p => /agent-board(?:-hook)?\.mjs|board-script|--serve-child/.test(p.command) && !/stress-1066\.mjs|hook-load\.mjs/.test(p.command)
+const isBoardProcess = p => isWindows ? true : /agent-board(?:-hook)?\.mjs|board-script|--serve-child/.test(p.command) && !/stress-1066\.mjs|hook-load\.mjs/.test(p.command)
 const isPageServer = p => p.command.includes('--serve-child')
 // The page server, and the --serve start that launches it, are never killed: the load needs its page.
 const isServe = p => p.command.includes('--serve')
@@ -219,6 +237,7 @@ const main = async () => {
     return board
   }
   const sampler = setInterval(() => { void sample() }, SAMPLE_MS)
+  const pageServerLookup = setTimeout(() => { void findPageServer() }, 45000)
   let killer, killerStart
   if (condition === 'kill') {
     killerStart = setTimeout(() => {
@@ -233,7 +252,7 @@ const main = async () => {
   }
 
   const { code, signal } = await new Promise(done => load.once('close', (code, signal) => done({ code, signal })))
-  clearTimeout(deadline); clearInterval(sampler); clearTimeout(killerStart); clearInterval(killer)
+  clearTimeout(deadline); clearInterval(sampler); clearTimeout(pageServerLookup); clearTimeout(killerStart); clearInterval(killer)
   await sample()
   report.hookLoadExit = signal ?? code
   if (load.lastError) note(`hook load stderr: ${load.lastError.trim().split('\n').pop()}`)
