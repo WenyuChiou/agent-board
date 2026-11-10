@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { hermesHome } from '../hooks/hermes-home'
-import { agentHooks, BOARD_FOR, isReleased, readConfig, withHermesHooks, withoutHermesHooks } from '../hooks/connect-pure'
+import { agentHooks, BOARD_FOR, editHermesSetup, isReleased, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { parseProgress, STALE_MS } from '../hooks/parse'
@@ -319,7 +319,7 @@ export const codexTrustOutput = (result: { changes: number; applied: boolean; fi
   return `${line}\n`
 }
 
-type LocalPlan = {
+export type LocalPlan = {
   agent: string
   progress: string
   changes: { file: string; action: string }[]
@@ -436,8 +436,8 @@ const filesByFolder = (mode: string, agent: string): boolean => mode === '--code
 
 // `planInput` is a plan the --plan-event step already turned into a report's input: the report then
 // runs as --report does and prints nothing, because Codex and Gemini read a hook's stdout as a decision.
-export const runCodexLocal = async (args: string[], boardPath: string, s: Strings, planInput?: Json): Promise<boolean> => {
-  args = args.map(arg => arg === '--report' ? '--codex-report' : arg)
+export const runCodexLocal = async (args: string[], boardPath: string, s: Strings, planInput?: Json, local?: { output: (value: unknown) => void; beforeApply?: (plan: LocalPlan) => void }): Promise<boolean> => {
+  args = args.map(arg => arg === '--report' ? '--codex-report' : arg === '--remove' ? '--codex-remove' : arg)
   const mode = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event', '--mailbox'].find(one => args.includes(one))
   if (!mode) return false
   const flag = (name: string): string | undefined => {
@@ -447,6 +447,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (!value || value.startsWith('--')) throw new Error('MISSING_ARGUMENT')
     return value
   }
+  const removingAgents = (flag('--removing')?.split(',') ?? []).map(one => one.trim()).filter(Boolean)
   const baked = (globalThis as { AGENT_BOARD?: { codexRoot?: string } }).AGENT_BOARD
   // Reporting needs a known board name, while setup and lifecycle events need a native adapter.
   const agent = (flag('--agent') ?? (mode === '--hermes-trust' ? 'hermes' : 'codex')) as LocalAgent
@@ -560,7 +561,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (rest.some(arg => /["`$%!\\\r\n]/.test(arg))) return boardRun(process.argv[1]!, rest)
     return `${boardRun(process.argv[1]!)} ${rest.map(arg => /^[\w.:=/-]+$/.test(arg) ? arg : quote(arg)).join(' ')}`
   }
-  const output = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
+  const output = (value: unknown): void => {
+    if (local) local.output(value)
+    else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
+  }
 
   // Keep the connector as the sole writer for its agents, including its next automatic probe.
   if (activeConnection?.setup?.agents.some(one => one.agent === agent && one.hook === 'configured') && initial(manifestFile) === null) {
@@ -784,7 +788,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const held = !Array.isArray(previous?.steps)
         ? [placeholder]
         : previous.steps.map((step, index) =>
-            index === 0 && isLifecycleStep(step) ? placeholder : step
+            index === 0 && isLifecycleStep(step)
+              ? state === 'done' && /^- \[[x\-]\]/.test(step)
+                ? step
+                : placeholder
+              : step
           )
       const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
       // Keep the recovery format. Causality uses the host event's milliseconds,
@@ -1288,7 +1296,6 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   // The trust file Hermes keeps beside config.yaml: an approval is an (event, command) pair, and only ours are touched here.
   const allowlistFile = join(hermesDir, 'shell-hooks-allowlist.json')
-  const hermesOwns = /agent-board-hook\.mjs/
   // Hermes splits a hook command with shlex and runs it without a shell: every word is double-quoted,
   // and a Windows path takes forward slashes, since a backslash could be read as an escape.
   const hermesCommand = (event: string): string => hookArgs(event, statusEvents.hermes?.[event]).map(word => quote(process.platform === 'win32' ? word.replaceAll('\\', '/') : word)).join(' ')
@@ -1299,15 +1306,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   let nextAllowlist: string | undefined
   if (agent === 'hermes') {
     const text = initial(nativeConfig) ?? ''
-    if (manifest.groups.hooks !== undefined && !hermesOwns.test(text)) {
+    const events = hermesEvents()
+    const recorded = new Map(Object.entries(object(manifest.groups.hooks ?? {})).filter((pair): pair is [string, string] => typeof pair[1] === 'string'))
+    const patch = isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove) : null
+    if (manifest.groups.hooks !== undefined && patch !== null && !patch.hasOwned) {
       if (remove) alreadyGone.push(`${nativeConfig}:hooks`)
       else hasMissingGroup = true
     }
-    const events = hermesEvents()
-    const next = !isYamlMapping(text) ? null : remove ? withoutHermesHooks(text, hermesOwns) : withHermesHooks(text, events, hermesOwns)
-    if (next === null) conflicts.push(nativeConfig)
-    nextConfigText = next ?? text
-    if (!remove && next !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
+    if (patch === null) conflicts.push(nativeConfig)
+    nextConfigText = patch?.text ?? text
+    if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
     if (remove) {
       const approvals = readAllowlist(initial(allowlistFile))
       const mine = Object.entries(object(manifest.groups.hooks ?? {}))
@@ -1366,7 +1374,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (remove && shared) {
       // The same record that keeps a shared file out of this removal names the
       // agents still using it, so the preview says why the file stays (#816).
-      const usedBy = otherAgents.filter((_, index) => otherManifests[index]?.files !== undefined)
+      const usedBy = otherAgents.filter((one, index) => !removingAgents.includes(one) && otherManifests[index]?.files !== undefined)
       if (usedBy.length) { keptShared.push({ file, usedBy }); continue }
     }
     if (remove && existing === null && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
@@ -1418,8 +1426,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (folder === dirname(folder)) break
       }
     }
-    const siblingIndex = otherManifests.findIndex(one => one.files !== undefined)
-    const hasOtherManifest = otherAgents.some(other => initial(join(root, `install-${other}.json`)) !== null)
+    const siblingIndex = otherManifests.findIndex((one, idx) => !removingAgents.includes(otherAgents[idx]) && one.files !== undefined)
+    const hasOtherManifest = otherAgents.some((other, idx) => !removingAgents.includes(other) && initial(join(root, `install-${other}.json`)) !== null)
     if (!hasOtherManifest) for (const runtime of [join(home, '.cache', 'agent-board'), ...(process.env.XDG_RUNTIME_DIR ? [join(process.env.XDG_RUNTIME_DIR, 'agent-board')] : [])]) {
       candidates.add(runtime)
       try { for (const name of readdirSync(runtime)) if (name.endsWith('-messages')) candidates.add(join(runtime, name)) } catch {}
@@ -1462,7 +1470,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const executable = flag('--codex-bin')
     if (!executable) throw new Error('CODEX_BINARY_REQUIRED')
     const result = await trustCodex(executable, config, manifest.groups, args.includes('--apply'))
-    process.stdout.write(codexTrustOutput(result, s, args.includes('--json'), home))
+    if (local) output(result)
+    else process.stdout.write(codexTrustOutput(result, s, args.includes('--json'), home))
     return true
   }
   if (mode === '--hermes-trust') {
@@ -1547,6 +1556,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // Compare the bytes used to build the plan, not a fresh snapshot taken after
     // planning: another installer or host may have changed them in that interval.
     for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
+    local?.beforeApply?.(plan)
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue

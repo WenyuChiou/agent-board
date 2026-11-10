@@ -95,8 +95,12 @@ test('npm setup groups shared files, accurate counts, commands and sessions in e
     assert.ok(applied.includes(`${bootstrap[index].shared}: ${bootstrap[index].applied.replace('{count}', common.size)}`), applied)
     for (const output of [text, applied]) {
       assert.equal(output.split(start).length - 1, 1, output)
-      assert.match(output, /npx @wenyuchiou\/agent-board --codex-trust --codex-bin /)
-      assert.match(output, /npx @wenyuchiou\/agent-board --hermes-trust/)
+      const data = join(root, 'data')
+      const quoted = process.platform === 'win32' ? `'${data.replaceAll("'", "''")}'` : `'${data.replaceAll("'", "'\\''")}'`
+      const location = /^[\w./:@=-]+$/.test(data) ? data : quoted
+      const board = `npx @wenyuchiou/agent-board --data-dir ${location}`
+      assert.ok(output.includes(`${board} --codex-trust --codex-bin `))
+      assert.ok(output.includes(`${board} --hermes-trust`))
       assert.ok(output.includes(bootstrap[index].board.replace('{command}', 'npx @wenyuchiou/agent-board')))
       assert.doesNotMatch(output, /& '/)
       assert.ok(!output.includes(process.execPath), output)
@@ -339,6 +343,122 @@ test('terminal setup installs the plugin when only Claude Code is present', () =
   assert.match(result.stdout, /Open a new session in Claude Code\.\r?\n\d\. Then type \/agent-board there\./)
   assert.deepEqual(claudeCalls(f), pluginCommands)
   assert.equal(existsSync(join(f.root, 'data')), false)
+}, ['claude']))
+
+const copiedClaudeSettings = f => {
+  for (const name of ['CODEX_HOME', 'GROK_HOME', 'HERMES_HOME', 'OPENCODE_CONFIG_DIR', 'OPENCLAW_STATE_DIR', 'DSH_HOME']) rmSync(f.env[name], { recursive: true, force: true })
+  writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), JSON.stringify({ enabledPlugins: { 'agent-board@agent-board': true }, synthetic: 'keep' }))
+}
+
+test('a copied Claude enable setting still asks once and installs before reporting success', () => terminal(f => {
+  copiedClaudeSettings(f)
+  const result = f.invoke(['--lang', 'en'])
+  succeeded(result)
+  assert.equal(result.stdout.split('Set these up? [Y/n]').length - 1, 1)
+  assert.deepEqual(claudeCalls(f), pluginCommands)
+  assert.match(result.stdout, /Claude Code plugin: done\./)
+  assert.match(result.stdout, /Open a new session in Claude Code\./)
+  assert.equal(existsSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json')), true)
+  assert.equal(JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8')).synthetic, 'keep')
+  f.commands.clear()
+  const repeated = f.invoke(['--lang', 'en'])
+  succeeded(repeated)
+  assert.doesNotMatch(repeated.stdout, /Set these up\?|Install the Claude Code plugin/)
+  assert.deepEqual(claudeCalls(f), [])
+}, ['claude']))
+
+test('a copied Claude enable setting cannot make a silent plugin installation count as done', () => terminal(f => {
+  copiedClaudeSettings(f)
+  f.env.AGENT_BOARD_TEST_CLAUDE_FAIL = 'silent'
+  const result = f.invoke(['--lang', 'en'])
+  succeeded(result)
+  assert.deepEqual(claudeCalls(f), pluginCommands)
+  assert.match(result.stdout, /Claude Code plugin: failed\. Run: claude plugin install agent-board@agent-board/)
+  assert.doesNotMatch(result.stdout, /Claude Code plugin: done\.|Open a new session in Claude Code\./)
+  assert.equal(existsSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json')), false)
+}, ['claude']))
+
+const installedClaude = f => {
+  copiedClaudeSettings(f)
+  const directory = join(f.env.CLAUDE_CONFIG_DIR, 'plugins')
+  mkdirSync(directory, { recursive: true })
+  writeFileSync(join(directory, 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'agent-board@agent-board': [{ scope: 'user' }] } }))
+}
+
+const disabledClaude = (f, hasReceipt = true) => {
+  if (hasReceipt) installedClaude(f)
+  else copiedClaudeSettings(f)
+  writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), JSON.stringify({ enabledPlugins: { 'agent-board@agent-board': false }, synthetic: 'keep' }))
+}
+const enableCommand = 'claude plugin enable agent-board@agent-board --scope user'
+const assertDisabledGuidance = (f, result, index) => {
+  succeeded(result)
+  assert.ok(result.stdout.includes(enableCommand), 'a disabled plugin needs a manual enable instruction, not a ready-session claim')
+  assert.ok(result.stdout.includes(bootstrap[index].enablePlugin.replace('{command}', enableCommand)))
+  const settings = JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8'))
+  assert.equal(settings.enabledPlugins['agent-board@agent-board'], false, 'setup must preserve the disabled preference')
+  assert.equal(settings.synthetic, 'keep')
+}
+
+for (const [index, lang] of locales.entries()) {
+  test('an installed Claude-only repeat gives session guidance instead of reinstall instructions in ' + lang, () => terminal(f => {
+    installedClaude(f)
+    const result = f.invoke(['--lang', lang])
+    succeeded(result)
+    assert.ok(!result.stdout.includes(bootstrap[index].plugin), 'the installed plugin must not be offered for installation again')
+    assert.ok(result.stdout.includes(bootstrap[index].openOne.replace('{agents}', 'Claude Code')))
+    assert.ok(result.stdout.includes(bootstrap[index].thenBoardOne))
+    assert.deepEqual(claudeCalls(f), [])
+    assert.equal(JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8')).synthetic, 'keep')
+    assert.equal(existsSync(join(f.root, 'data')), false)
+  }, ['claude']))
+
+  test('a files-only setup keeps installed Claude out of plugin instructions in ' + lang, () => terminal(f => {
+    installedClaude(f)
+    const result = f.invoke(['--agent', 'grok', '--lang', lang, '--apply'])
+    succeeded(result)
+    assert.ok(!result.stdout.includes(bootstrap[index].plugin), 'another selected agent must not reintroduce Claude install guidance')
+    const agents = ['Grok Build', 'Claude Code'].join(lang === 'en' ? ', ' : '、')
+    assert.ok(result.stdout.includes(bootstrap[index].start.replace('{agents}', agents)))
+    assert.deepEqual(claudeCalls(f), [], 'files-only setup must not run plugin commands')
+    assert.equal(JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8')).synthetic, 'keep')
+  }, ['claude']))
+
+  test('a disabled installed Claude-only repeat gives manual enable guidance in ' + lang, () => terminal(f => {
+    disabledClaude(f)
+    const result = f.invoke(['--lang', lang])
+    assertDisabledGuidance(f, result, index)
+    assert.ok(!result.stdout.includes(bootstrap[index].openOne.replace('{agents}', 'Claude Code')))
+    assert.doesNotMatch(result.stdout, /claude plugin install agent-board@agent-board/)
+    assert.deepEqual(claudeCalls(f), [])
+  }, ['claude']))
+
+  test('a files-only setup preserves a disabled Claude preference in ' + lang, () => terminal(f => {
+    disabledClaude(f)
+    const result = f.invoke(['--agent', 'grok', '--lang', lang, '--apply'])
+    assertDisabledGuidance(f, result, index)
+    assert.ok(result.stdout.includes(bootstrap[index].startOne.replace('{agents}', 'Grok Build')))
+    assert.doesNotMatch(result.stdout, /claude plugin install agent-board@agent-board/)
+    assert.deepEqual(claudeCalls(f), [])
+  }, ['claude']))
+}
+
+test('consenting to another agent does not report a disabled installed Claude plugin ready', () => terminal(f => {
+  disabledClaude(f)
+  const result = f.invoke(['--agent', 'grok', '--lang', 'en'])
+  assertDisabledGuidance(f, result, 0)
+  assert.match(result.stdout, /Open a new session in Grok Build\./)
+  assert.doesNotMatch(result.stdout, /Open a new session in each of:.*Claude Code/)
+  assert.deepEqual(claudeCalls(f), [])
+}, ['claude']))
+
+test('a successful installation with a disabled preference still requires manual enabling', () => terminal(f => {
+  disabledClaude(f, false)
+  const result = f.invoke(['--lang', 'en'])
+  assertDisabledGuidance(f, result, 0)
+  assert.deepEqual(claudeCalls(f), pluginCommands)
+  assert.match(result.stdout, /Claude Code plugin: done\./)
+  assert.doesNotMatch(result.stdout, /Open a new session in Claude Code\./)
 }, ['claude']))
 
 // Two setup runs only: the three tables are kept identical by the bootstrap test above, and each
