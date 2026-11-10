@@ -46,6 +46,7 @@ const summaries = [
     "previewCreate": "would create {count} setup files",
     "preview": "would update {count} setup files",
     "previewRemove": "would remove {count} setup files",
+    "appliedCreate": "created {count} setup files",
     "applied": "updated {count} setup files",
     "current": "{count} already current",
     "shared": "Shared",
@@ -96,6 +97,7 @@ const summaries = [
     "previewCreate": "將建立 {count} 個設定檔案",
     "preview": "將更新 {count} 個設定檔案",
     "previewRemove": "將移除 {count} 個設定檔案",
+    "appliedCreate": "已建立 {count} 個設定檔案",
     "applied": "已更新 {count} 個設定檔案",
     "current": "{count} 個已是最新",
     "shared": "共用",
@@ -146,6 +148,7 @@ const summaries = [
     "previewCreate": "将创建 {count} 个设置文件",
     "preview": "将更新 {count} 个设置文件",
     "previewRemove": "将移除 {count} 个设置文件",
+    "appliedCreate": "已创建 {count} 个设置文件",
     "applied": "已更新 {count} 个设置文件",
     "current": "{count} 个已是最新",
     "shared": "共用",
@@ -425,7 +428,11 @@ const main = () => {
   const describe = changes => {
     if (isShowingApplied) {
       if (isRemove) return changes.length ? words('appliedRemove', { count: changes.length }) : ''
-      return changes.length ? words('applied', { count: changes.length }) : ''
+      return [['create', 'appliedCreate'], ['update', 'applied'], ['remove', 'appliedRemove']]
+        .flatMap(([action, key]) => {
+          const count = changes.filter(change => change.action === action).length
+          return count ? [words(key, { count })] : []
+        }).join('; ')
     }
     return [['create', 'previewCreate'], ['update', 'preview'], ['remove', 'previewRemove']]
       .flatMap(([action, key]) => {
@@ -611,16 +618,17 @@ const main = () => {
       steps.push(words(sessionAgents.length === 1 ? 'restartRemoveOne' : 'restartRemove', { agents: sessionAgents.join(message(', ', '、', '、')) }))
     }
   } else {
-    if (!apply && available.some(agent => plans[selected.indexOf(agent)].changes.length)) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
+    const hasChanges = available.some(agent => plans[selected.indexOf(agent)].changes.length > 0)
+    if (!apply && hasChanges) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
     const sessionAgents = []
     for (const agent of available) {
       const plan = results[selected.indexOf(agent)]
       if (plan.managedBy === 'connector') continue
       // Narrower than detection: this path goes to --codex-bin, which cannot start a .bat or .com.
       const codex = agent === 'codex' ? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
-      // A repeat run of an unchanged install asks Codex itself whether the board's hooks are trusted,
+      // A repeat run of an unchanged install asks Codex or Hermes itself whether the board's hooks are trusted,
       // and leaves out the trust step only on its yes; no answer or any other answer keeps it (#808).
-      if (codex && !plan.changes.length && isTrusted(plan, agent, codex)) continue
+      if (['codex', 'hermes'].includes(agent) && !plan.changes.length && isTrusted(plan, agent, agent === 'codex' ? codex : undefined)) continue
       if (agent === 'codex' && !codex) {
         steps.push(words('codexMissing'))
         continue
@@ -629,18 +637,26 @@ const main = () => {
         steps.push(words('skill', { host: names[agent] }))
         continue
       }
-      if (['codex', 'hermes', 'opencode', 'openclaw', 'deepseek'].includes(agent)) {
-        steps.push(words(agent, { command: boardCommand, codex: codex ? quote(codex) : '' }))
+      if (agent === 'codex') {
+        steps.push(words('codex', { command: boardCommand, codex: codex ? quote(codex) : '' }))
       }
-      if (agent === 'cursor' && process.platform === 'win32') steps.push(words('cursorWindows'))
-      sessionAgents.push(names[agent])
+      if (agent === 'hermes') {
+        steps.push(words('hermes', { command: boardCommand }))
+      }
+      if (hasChanges) {
+        if (['opencode', 'openclaw', 'deepseek'].includes(agent)) {
+          steps.push(words(agent, { command: boardCommand, codex: codex ? quote(codex) : '' }))
+        }
+        if (agent === 'cursor' && process.platform === 'win32') steps.push(words('cursorWindows'))
+        sessionAgents.push(names[agent])
+      }
     }
-    if (isPluginInstalled && !hasDisabledPlugin) sessionAgents.push('Claude Code')
+    if (isPluginInstalled && !hasDisabledPlugin && hasChanges) sessionAgents.push('Claude Code')
     if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
     for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
     if (hasDisabledPlugin) steps.push(enablePluginStep())
     else if (hasClaude && !isPluginInstalled) steps.push(words('plugin'))
-    if (available.length) {
+    if (available.length && hasChanges) {
       steps.push(words('board', { command: boardCommand }))
     }
   }
