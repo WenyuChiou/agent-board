@@ -724,6 +724,11 @@ Review: APPROVE ${head.slice(0, 7)} by Muse Spark`, submitted_at: '2026-11-10T09
   const whole = reviewProblems({ ...localPr, prComments: [{ body: `Review: APPROVE ${head} by Codex (local), codex's reviewer` }] })
   assert.ok(whole.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(whole))
   assert.equal(reviewProblems({ ...localPr, prComments: [{ body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, codex's reviewer` }] }).length, 0)
+  // The lane named must be the author's own, word for word: another lane that starts with the same word is not.
+  const desktopPr = { ...codexPr, body: codexPr.body.replace('Author: codex, fix/test-branch', 'Author: codex (desktop), fix/test-branch') }
+  const remote = reviewProblems({ ...desktopPr, prComments: [{ body: `Review: APPROVE ${head} by codex gpt-6.1, codex (remote)'s reviewer` }] })
+  assert.ok(remote.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(remote))
+  assert.equal(reviewProblems({ ...desktopPr, prComments: [{ body: `Review: APPROVE ${head} by codex gpt-6.1, codex (desktop)'s reviewer` }] }).length, 0)
 })
 
 test('pr-check combines issue state and draft information without mutating inputs', () => {
@@ -1331,6 +1336,12 @@ test('pr-check reads the GitHub reviews after an approval comment, so a later re
   globalThis.fetch = githubAnswers(calls, { reviews: [approval] })
   const passed = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
   assert.equal(passed.status, 0, passed.stdout + passed.stderr)
+  // A failed read of the GitHub reviews fails the check; it is not taken as no reviews.
+  const answers = githubAnswers(calls, { reviews: [approval] })
+  globalThis.fetch = async url => url.pathname.endsWith('/pulls/17/reviews') ? { ok: false, status: 503, headers: new Headers() } : answers(url)
+  const unread = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
+  assert.equal(unread.status, 2, unread.stdout + unread.stderr)
+  assert.match(unread.stderr, /network check failed/)
 })
 
 test('pr-check passes a team pull request when more than eight pull requests are open', async t => {

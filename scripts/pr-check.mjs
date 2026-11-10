@@ -678,7 +678,7 @@ export const verdict = (comments, head, options = {}) => {
   // A reviewer named only as the author (the agent word, or the whole name on the Author line) is the author,
   // whatever lane it claims. The checker cannot prove a reviewer is independent; R2's form is the lane's word.
   const words = text => String(text ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
-  const isAuthorLane = Boolean(authorAgent && last.lane && last.lane.split(/\s+/)[0].toLowerCase() === authorAgent.toLowerCase())
+  const isAuthorLane = Boolean(authorAgent && last.lane && [authorAgent, authorName].some(own => own && words(last.lane) === words(own)))
   const isAuthorOnly = Boolean(authorAgent && last.reviewer && [authorAgent, authorName].some(own => own && words(last.reviewer) === words(own)))
   if (authorAgent && last.reviewer && (isAuthorOnly || (isAuthorLane ? isRelease || isOutside : last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())))) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
@@ -1030,9 +1030,9 @@ export const main = async (argv = process.argv.slice(2)) => {
       if (data.number === null) data.prComments = []
       else {
         const comments = await api(`issues/${data.number}/comments`, { isList: true })
-        // GitHub reviews are always read, so one that requests changes after an approval comment is not missed.
-        let reviews = []
-        try { reviews = await api(`pulls/${data.number}/reviews`, { isList: true }) } catch {}
+        // GitHub reviews are always read, so one that requests changes after an approval comment is not missed; a
+        // failed read fails the check like any other lookup, rather than counting as no reviews.
+        const reviews = await api(`pulls/${data.number}/reviews`, { isList: true })
         data.prComments = byTime([...(Array.isArray(comments) ? comments : []), ...(Array.isArray(reviews) ? reviews : [])])
       }
     }
