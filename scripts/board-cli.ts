@@ -38,7 +38,7 @@ import { dockArguments, probeOf, windowPlaceOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
-import { pickSurface } from '../hooks/surface'
+import { pagePortOf, pickSurface, sshTargetOf } from '../hooks/surface'
 import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
 import { boardStatus } from '../hooks/board-status'
 import { boardAgents, boardKey, boardLayout, boardScreen, boardText, CHAT_MAX, chatText, clipped, doneToday, emptyBoardState, frame, isEmptyBoard, mutedLine, peekInbox, pinned, plain, redact, boardItems, routesOf, SCREEN_ENTER, SCREEN_LEAVE, terminalLook } from '../hooks/board'
@@ -729,6 +729,7 @@ let routes: Record<string, AnswerRoute> = {}
 // 10 s, so the page's idle poll does not read the file each time; a pick made here is kept at once.
 const SETTINGS_MS = 10_000
 let settingsKept: { text: string | null; at: number } | null = null
+
 const settingsNow = (): string | null => {
   const now = Date.now()
   if (settingsKept !== null && now - settingsKept.at < SETTINGS_MS) return settingsKept.text
@@ -739,18 +740,21 @@ const settingsNow = (): string | null => {
 }
 const barStyleNow = (): BarStyle => barStyleOf(settingsNow())
 // The pick from the page or the `s` key: the settings file's other keys are kept. False when the
-// file exists but does not read as a JSON object: it is left as it is. A read or write error throws.
+// file exists but does not read as a JSON object, or is a symlinked or non-regular file: it is left
+// as it is. A read or write error throws.
 const saveBarStyle = (style: BarStyle): boolean => {
   const file = settingsPath(path)
+  if (isSymlinkOrNonRegular(file)) return false
   const next = withBarStyle(read(file), style)
   if (next === null) return false
-  writeFileSync(file, next)
+  try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
   settingsKept = { text: next, at: Date.now() }
   return true
 }
 
 const saveLanguage = (lang: SettingsLang): boolean => {
   const file = settingsPath(path)
+  if (isSymlinkOrNonRegular(file)) return false
   const next = withBoardSettings(read(file), { lang })
   if (next === null) return false
   // A failed write names the file on the page, as a failed read does.
@@ -2486,6 +2490,8 @@ const serveBoard = async (): Promise<void> => {
   }
   const server = await serverPromise
   if (server === null) {
+    // No page started: a script that checks the exit status must not read success (#1292).
+    process.exitCode = 1
     process.stdout.write(`\n${serveFailureNote(failure)}\n`)
     return
   }
@@ -2516,6 +2522,12 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
 
 const openPageSurface = async (): Promise<void> => {
   const opened = await openPage()
+  // Over SSH the address is on the remote computer, even when a page is already open there: say
+  // how to forward its port first, as the terminal board does, so the address stays the last line
+  // an agent shows (#1283). The terminal board's own `o` keeps one-line notes.
+  if (opened.url !== undefined && (process.env.SSH_CONNECTION || process.env.SSH_TTY)) {
+    process.stdout.write(`${s.serveSshHint(pagePortOf(opened.url), sshTargetOf(process.env), opened.url)}\n`)
+  }
   process.stdout.write(`${opened.note}\n`)
   // `--lan` without `--serve`: the page opens here and the phone's address follows it (#868).
   if (args.includes('--lan') && opened.url !== undefined) await showLan(opened.url)
@@ -2535,14 +2547,6 @@ const stopBoard = async (): Promise<void> => {
   }
 }
 
-const sshHost = (): string => {
-  const conn = process.env.SSH_CONNECTION
-  if (conn) {
-    const parts = conn.trim().split(/\s+/)
-    if (parts.length >= 3 && parts[2]) return parts[2]
-  }
-  return process.env.HOSTNAME || 'host'
-}
 
 // The home folder, or none when the computer does not say: a failure must not raise another.
 const homeOrNone = (): string => {
@@ -2679,7 +2683,7 @@ const runWatchTerminal = async (): Promise<void> => {
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) {
     const server = await ensureServer()
     if (server) {
-      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshHost(), server.url), options())}\n`
+      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshTargetOf(process.env), server.url), options())}\n`
     }
   }
   let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }

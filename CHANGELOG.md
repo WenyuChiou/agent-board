@@ -2,6 +2,360 @@
 
 What changed for the person using Agent Board, one line per change, newest version first. How a change was built and tested is in its pull request. Entries up to 0.24.0 were shortened to this form on 2026-11-02; their full text is in `git show ddbef2a:CHANGELOG.md`.
 
+## 0.24.3 — 2026-11-10
+
+- **Tests / native hooks** · Failed Antigravity native-context checks name fixed hook-error codes and their exit status, while reading hook logs only on failure and keeping commands and log text private. Failed setup checks now also distinguish launch errors, deadlines and signals with bounded status, code and timing fields. The missing-context flake remains under investigation (#683).
+
+- **Page / Current waiting list** · The empty Needs you message now names the current list, including when filtering by agent. It no longer suggests there are no unanswered questions elsewhere, while older-question counts and navigation remain available in all three languages (#522).
+
+- **Questions / Complete choices** · A two-option question keeps both answers even when either answer is longer than 24 characters, so it is offered as a choice instead of Yes/No. Explicit metadata and independent note instructions still take precedence (#247).
+
+- **Remote reporters / Report clocks** · The Python importer refuses live reports over three days old, including reports without a state, and rejects future UTC seconds before writing anything. Rapid updates and retirement retain their order within the current second; clock refusals use the system language. Old done and ended reports still merge as history (#220).
+
+- A question that asks you to choose from the list it ends on, such as `Which should I do first?` over the options, reaches Needs you; a bare `Which one?` or a heading over a list does not. A reply that only quotes an earlier question no longer makes a false card, and an inch mark, as in `Should I use a 12" shelf?`, no longer hides the question it is in (#1248, #1282). A stray quote that pairs with a later quotation still can (#1290).
+
+- The board's page and terminal board refuse to save the language or the progress bar style over a progress-settings.json that is a link or not a regular file (#1264). The plugin's `/progress style` does not check this yet (#1276).
+
+- Over SSH, when your profile sets an agent's config folder such as `HERMES_HOME` or `OPENCODE_CONFIG_DIR`, plain `agent-board` opens the page and prints an `ssh -L` command for it, with the server address and SSH port that SSH reports (`-p <port>` when not 22) (#1283, #1293). It still opens the page there, not the terminal board (#1283). Behind NAT that address can be one your computer cannot reach (#1298), and a page on port 80 needs a local port of 1024 or higher (#1294).
+
+- `agent-board --serve` exits with status 1 when it could not start the page (#1292, #1293).
+
+- The Settings panel's Agents heading is in Traditional and Simplified Chinese too (#1269, #1279).
+
+- Setup says `1 setup file`, not `1 setup files`, when it creates, updates or removes one file (#1270, #1284).
+
+- The Corner Light logo and the Agent•Board name, with the board's status in the light (#1263).
+
+- Removing several agents keeps the shared board when one is skipped for a conflict (#1260).
+
+- A page or terminal press survives the board dating an earlier step (#1254).
+
+- Close the board is a red power sign and the GitHub link is its mark (#1253).
+
+- Apply says created for new files, a repeat preview repeats no first-time steps, and --no-open is documented (#1250).
+
+- Refuse a checkbox after its drawn lines move (#1212).
+
+- For contributors: the pull request check stops a merge that has no qualifying approval (#1247).
+
+- Use installed-plugin evidence in setup and next steps (#1213).
+
+- Retry transient locks during PowerShell scratch inbox sweep (#1239).
+
+- Settings lists every agent with Set up and Remove, so connecting one needs no terminal (#1173).
+
+- A report reply is both step counts or OK, also when a count is missing (#1238).
+
+- The page no longer goes back to the port it used last: each start takes a port from the system, as 0.24.2 does, unless `--port` names one (#1234). This undoes the fixed port of #1177, which was never released.
+
+- Preview and remove all touched agents in one run (#1236).
+
+- A report's tool reply carries only the step counts, never the session or file (#1232).
+
+- On Windows the board's server and browser no longer hold the caller's pipes, so a Cursor turn ends while the page stays open (#1166).
+
+- Keep your hooks when setting up or removing Agent Board (#1199).
+
+- Locate the installed board in the next command (#1211).
+
+- Keep accepted answers out of Needs you after disconnect (#1215).
+
+- Report valid steps in the host workspace (#1195).
+
+- Keep the task name when naming returns a short refusal (#1196).
+
+- Keep newer activity when an old idle lookup finishes (#1191).
+
+- Preserve checked placeholder for done lifecycle sessions (#1227).
+
+- Make browser-open failures visible and preserve the manual link (#1217).
+
+- Keep chat replies open until the agent reports (#1187).
+
+- A board answer waits when the session starts a turn during take (#1216).
+
+- Show when a language flag overrides the saved selection (#1214).
+
+- Keep a waiting session out of Working now after hiding its question (#1210).
+
+- Retain follow-up questions from Claude board replies without a Task list (#1189).
+
+- Keep completed work and accept synthetic screenshot attachments (#1184).
+
+- Another account's orphan handover folder no longer stops the checks (#1176).
+
+- A reply typed in the agent's own chat moves its question out of Needs you, to You replied (#1182).
+
+- Hiding a question moves its waiting session to Working now (#1174).
+
+- One Settings button on the board's page with Language, Look and Notifications (#1169).
+
+- On Windows, say to start cursor-agent from PowerShell, since from Git Bash none of its hooks run (#1172).
+
+- A card's button still works after a block above it grows; the soak's hook-load check finds mailbox sessions (#1171).
+
+- One setup command and one yes set up every agent, Codex approval and the Claude Code plugin included (#1165).
+
+- A working Codex or local agent row matches its state (#1167).
+
+- Hermes Agent's own todo list reaches the board as plan steps, with no model call (#1168).
+
+- Reclaim stale progress locks whose pid was reused (#1149).
+
+- Close the board shows its name beside the X (#1157).
+
+- The preview lists shared files once, says "would create", gives npx commands and one new-session step (#1152).
+
+- Every agent gets the question rule; plan steps written another way still reach the board (#1153).
+
+- Grok's plan steps reach the board when the folder has another Grok session (#1156).
+
+- A late ACK never reads as failed; one ACK rule for every receiver (#1154).
+
+- Bare 或, lead-ins, particles and yes/no endings give the buttons a person expects (#1151).
+
+- A filter says how many questions wait elsewhere; hand-kept tasks show no Unknown time; --lan says the link is unencrypted (#1144, #1145, #1146) (#1150).
+
+- DeepSeek Harness receives board answers directly, with no Copy (#1148).
+
+- A tool approval that waits behind another question reaches Needs you once that question is answered (#1134).
+
+- A reply that ends on a question shows its card even after the AI reported its steps done (#1133).
+
+- Wait while another start secures a new message folder (#1127).
+
+- Setup installs Hermes's four shell hooks, so its steps and questions reach the board (#1126).
+
+- DeepSeek opens and reports to the board through its own agent_board tool (#1128).
+
+- The footer keeps only what people use, and Close is an icon (#1123).
+
+- A kept question keeps its answer's receipt, a refusal never names a task, and a question after a link in Chinese text is read (#1124).
+
+- OpenClaw and Cursor report their steps to the board like the other local agents (#1122).
+
+- Progress shows as a bar of one cell per step on the page, the pane, the terminal board and the statusline, in one of three styles the person picks (#1088).
+
+- Revalidate the destination before retrying a refused rename (#1114).
+
+- Retry the press-matrix and resolve-test cleanups when Windows holds a file (#1120).
+
+- A link's question mark asks nothing, and a list before "or" keeps every option (#1113).
+
+- A question card shows its options as choices and one send arrow on the right (#1112).
+
+- A Should X be A or B question offers A and B, not the question frame (#1096).
+
+- A journal step keeps its bracketed words, a stale placeholder row offers Archive, and the away line counts any agent name (#1101).
+
+- A step start with more than eight changes sends the rest at the next step (#1102).
+
+- Move queued mailbox messages to a live poller and show busy state (#1094).
+
+- A ledger rename refused for a moment waits and lands (#1093).
+
+- Muse Code's hooks run on Windows, where Muse escapes each quote for cmd (#1097).
+
+- --status counts the same as the page, and a stopped session's task can be archived (#1087).
+
+- `agent-board --json --days N` gives an agent the finished work of the last N days (#1052).
+
+- Push session questions, hand-offs and waited completions at the next step (#1086).
+
+- Antigravity's closing question reaches Needs you when its hook names transcript_full.jsonl (#1091).
+
+- A stalled PowerShell no longer stops the page from opening (#1063).
+
+- Approvals close reliably without hiding new requests (#1073).
+
+- An idle row with an answered question stays out of Working (#1075).
+
+- Grok, Cursor, OpenCode and Antigravity put their closing question in Needs you (#1069).
+
+- A hook closes its own ask instead of deleting it, so it leaves Needs you (#1067).
+
+- Spread the slow board files over the Windows parts by their budget (#1062).
+
+- A Codex turn's closing question waits in Needs you (#1058).
+
+- A home folder that grants only Modify still starts the page and messages (#1055).
+
+- Tool approvals and native questions wait in Needs you (#1056).
+
+- An idle agent and a long-quiet step leave Working now (#1054).
+
+- Open the board npm setup wrote, and keep a board reply's closing question (#1053).
+
+- For contributors: the strict type checks of the board and the page pass (#1046).
+
+- --serve --progress-file opens that board, not the default one (#1039).
+
+- A Simplified Chinese page uses the SC UI fonts before the TC ones (#1036).
+
+- Gemini CLI and OpenCode open the board with /agent-board; the old /board file goes unless you edited it (#1035).
+
+- `agent-board` opens the page on its own; the first run asks once, `--lan` needs no `--serve`, and `--serve` is quiet (#1034).
+
+- A working session with an open question and a blocked step shows the blocker on its row (#1032).
+
+- A page restored from the browser's back/forward cache shows the board instead of saying it moved (#1030).
+
+- Explain each agent's next step and account for shared files (#945).
+
+- Make answer recovery and footer guidance clear (#944).
+
+- Smaller type (body 14px, nothing below 13px) and Inter with the system's Chinese UI font (#1020).
+
+- A new agent block joins its project's heading, and a plan with no block files under the agent's own project, never Codex (#1019).
+
+- Do not release claims from a truncated pull request list (#1022).
+
+- Opening the board again points at the window already open instead of opening another one (#1001).
+
+- The sidebar's foot actions are small quiet buttons, the version line steps back, and a row says its step once (#896).
+
+- Finished steps of a hand-kept task carry a hidden done date, and an open task keeps 7 days of them (#1015).
+
+- The npm-package tests open no browser window and leave no page server running (#1018).
+
+- Grok Build's todo_write reaches the board as the session's steps, read from the tool's result (#1012).
+
+- Archive and journal months older than the last three move to an archives folder, never deleted (#1013).
+
+- OpenCode's todo list and OpenClaw's progress_card reach the board's steps with no model call (#1009).
+
+- A question shows the block's time when it is earlier than the page's first sighting, and a hand-kept task shows its due date (#1011).
+
+- A receiver whose poll meets a busy store polls again after 250 ms, not a whole poll period (#1008).
+
+- The command checks the Windows message folder and hands it to the page's server (#1004).
+
+- Coming back to the page shows one line with what changed while you were away (#974).
+
+- Work finished by any agent counts in done today and reaches the journal once (#999).
+
+- First page view of a big board no longer blocks the server (#964).
+
+- A stopped task with no question shows no answer box (#996).
+
+- A tidied run's question no longer comes back as a card that Hide cannot keep away (#989).
+
+- A mailbox message a hook gave up on goes out on the next turn instead of blocking that session for 30 minutes (#992).
+
+- The /progress reply no longer prints the progress file path (#995).
+
+- A blocked step shows on every board surface while the same task has an open question (#994).
+
+- Release text names the team, and a release pull request needs current main (#993).
+
+- --status counts match the board and leave out hidden questions (#832).
+
+- An agent can open the board when asked, through an agent-board tool that runs the same code as /agent-board (#986).
+
+- The count row waits until the pane is wide enough for whole words, so a first turn no longer shows scattered letters (#984).
+
+- The Claude Code chip says closed once the block records state=ended, as Codex's does (#981).
+
+- The page can archive a finished asking task, and a done row offers no confirm (#980).
+
+- The Other work view says when it has none, a kept filter shows a Clear filters button, and the tab title counts what is shown (#978).
+
+- A repeat preview skips the Codex trust step once Codex says the hooks are trusted, and the trust preview names config.toml (#979).
+
+- A scanner holding the saved access list no longer stops a Windows start (#976).
+
+- Deduplicate same-session review-only copies and take newest task title (#973).
+
+- Every agent keeps its icon colours, and its state is a mark and a word (#972).
+
+- Removal takes the trust entries, empty hooks file and empty folders setup made, and the guide lists what stays (#971).
+
+- A default Claude Code CLI turn reaches the board, and a closing question or AskUserQuestion shows in Needs you (#968).
+
+- One question is one row with its own time, and a row with no task shows no empty title (#967).
+
+- Disambiguate row keys to avoid collisions with literal title suffixes (#969).
+
+- Codex and Gemini plans reach the board as the agent's steps, with no model call (#962).
+
+- Two open steps with the same text share one Done button (#958).
+
+- Reviewers with multiword or Unicode names are compared by their full identity (#952).
+
+- An agent can read and answer its board messages over a stdio MCP server (#842).
+
+- A board a test starts opens no window and stops once that test is gone (#960).
+
+- Setup finds agents on the PATH or as apps in a new home, lists every agent it set up on a repeat, and exits 0 when it finds none (#889).
+
+- Claude's own titles and steps are cut to 120 characters, with the full text in the journal (#953).
+
+- A change to the board page or bundle runs the browser journeys (#951).
+
+- Recognize directory aliases for the same native owner (#929).
+
+- Windows access checks for the page address run off the terminal board's draw loop (#947).
+
+- One --report command for every agent, steps cut to 120 characters with full text in the journal (#943).
+
+- Last names the last finished step, and each step has one Done button (#942).
+
+- Bulk cleanup of stopped, one-agent, and older blocks (Part of #186) (#825).
+
+- Preserve test locks from unknown Linux PID namespaces (#933).
+
+- Read Reviewing and APPROVE by agent name, not GitHub login (#937).
+
+- Archiving a finished task that still asks works on the terminal board, and the result says its question stays (#883).
+
+- Preserve board saved language on plain setup (#936).
+
+- For contributors: a stricter type for the evidence that a question was answered (#935).
+
+- A mailbox turn that defers says so, and a saved delivery or accept is not thrown away (#928).
+
+- `agent-board` opens the board page directly, and `progress.html` and the text board for people are gone (#911).
+
+- A Windows test job runs at most two test files at once (#930).
+
+- An older branch runs main's preflight, and a failed fetch warns instead of failing (#924).
+
+- The Claude Code pane and board script follow system locale when LANG is unset (#923).
+
+- Two Antigravity sessions in one folder show distinct titles (#849).
+
+- In a read-only sandbox the board reuses a running page's link (#892).
+
+- A live run's test lock blocks however old it is, judged by the process's real start time (#907).
+
+- An Antigravity session stopped on a limit leaves the working list (#898).
+
+- Codex prompt hook timeout matches the Stop hook's 10 s on Windows (#917).
+
+- Receive queued messages after an overlapping poll (#912).
+
+- Removal preview names the shared files it keeps (#845).
+
+- Hidden notice is shown again from the terminal (#888).
+
+- A leftover test lock whose PID was reused no longer blocks preflight (#900).
+
+- The Codex connector speaks WebSocket through codex app-server proxy, so it can reach an open Codex session (#893).
+
+- An agent reads the board as one JSON document with agent-board --json (#890).
+
+- Setup, the board and stop follow a Chinese system language when LANG is unset, and the Quick start shows --lang (#880).
+
+- Preflight runs on a VM or sandbox whose home folder cannot be written (#885).
+
+- The plugin no longer adds a second hook for an agent setup already connected (#788).
+
+- The bundle recognizes the board script of the 0.24.2 tag (#840).
+
+- A hook-backed session with no poller takes a board message on its next turn (#828).
+
+- A web chat's progress reaches the board by Ctrl+V, with no paste box (#824).
+
 ## 0.24.2 — 2026-11-03
 
 - Board: independent sessions with the same short ID stay apart, each with its own questions, and an ended one can be archived without touching the current session (#674, #678).

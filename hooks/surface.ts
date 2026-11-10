@@ -59,3 +59,19 @@ export const pickSurface = ({
 
   return 'page'
 }
+
+// What `ssh` connects to in the forwarding hint: SSH_CONNECTION's server address (its third
+// field), else the host name, with `-p <port>` when its fourth field is a valid port other
+// than 22 (#1283).
+export const sshTargetOf = (env: Record<string, string | undefined> = process.env): string => {
+  const parts = (env.SSH_CONNECTION ?? '').trim().split(/\s+/)
+  const host = parts.length >= 3 && parts[2] ? parts[2] : env.HOSTNAME || 'host'
+  const port = /^\d{1,5}$/.test(parts[3] ?? '') ? Number(parts[3]) : 0
+  return port >= 1 && port <= 65535 && port !== 22 ? `-p ${port} ${host}` : host
+}
+
+// The page's port, from its address: a URL leaves out its scheme's default port.
+export const pagePortOf = (url: string): number => {
+  const parsed = new URL(url)
+  return Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80))
+}
