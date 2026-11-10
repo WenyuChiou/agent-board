@@ -309,6 +309,22 @@ const indentOf = (line: string): number => line.length - line.trimStart().length
 const isContent = (line: string): boolean => line.trim() !== '' && !line.trimStart().startsWith('#')
 const isHermesItem = (line: string): boolean => /^-(?:\s|$)/.test(line.trimStart())
 
+// A block scalar that keeps its final line breaks (`|+`, `>+`) owns the blank lines after its
+// text: they are part of the person's setting, not a separator ours may add or take away.
+const BLOCK_SCALAR = /(?:^[ \t]*-|:)(?:[ \t]+[!&]\S*)*[ \t]+[|>]([1-9+-]{0,2})[ \t]*(?:#.*)?\r?$/
+const isKeptBlankAt = (lines: readonly string[], at: number): boolean => {
+  let inner = Infinity
+  for (let index = at - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? ''
+    if (!isContent(line) || indentOf(line) >= inner) continue
+    const header = BLOCK_SCALAR.exec(line)
+    if (header !== null) return header[1]?.includes('+') === true
+    if (indentOf(line) === 0) return false
+    inner = indentOf(line)
+  }
+  return false
+}
+
 // Whether the key on line `at` has anything under it (YAML lets a list sit at the key's own
 // indent).
 const hasChildren = (lines: string[], at: number): boolean => {
@@ -387,7 +403,10 @@ const addHermesHooks = (base: string, events: HermesEvents, isCrLf: boolean): st
   const at = lines.findIndex(line => /^hooks\s*:/.test(line))
   if (at === -1) {
     const added = ['hooks:', ...events.flatMap(([event, command, matcher]) => [`  ${event}:`, `    ${item(command, matcher)}`])].join(`${eol}\n`)
-    return base.trim() === '' ? `${added}${eol}\n` : `${base.replace(/(?:\r?\n)+$/, '')}${eol}\n${eol}\n${added}${eol}\n`
+    if (base.trim() === '') return `${added}${eol}\n`
+    // After a `|+` block at the end, its blank lines stay as they are and no separator is added.
+    if (isKeptBlankAt(base.split('\n'), base.split('\n').length)) return `${base.endsWith('\n') ? base : `${base}${eol}\n`}${added}${eol}\n`
+    return `${base.replace(/(?:\r?\n)+$/, '')}${eol}\n${eol}\n${added}${eol}\n`
   }
   if (!TOP_HOOKS.test(lines[at] ?? '')) return null
   let end = lines.findIndex((line, index) => index > at && isContent(line) && indentOf(line) === 0)
@@ -501,7 +520,7 @@ type HermesSetupEdit = { text: string; hasOwned: boolean }
 
 // Only the top-level hooks map and the recorded event/command pair can identify a setup entry.
 // Ambiguous copies are left alone rather than claiming both.
-export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string | readonly string[]>, isRemoving: boolean): HermesSetupEdit | null => {
+export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string | readonly string[]>, isRemoving: boolean, keyOf: (command: string) => string = command => command): HermesSetupEdit | null => {
   const lines = text.split('\n')
   const tops = lines.flatMap((line, at) => /^(?:hooks|"hooks"|'hooks')\s*:/.test(line) ? [at] : [])
   const top = tops[0]
@@ -542,7 +561,7 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
         if (parsed?.isSimple !== true) return null
         const { command } = parsed
         const item = parts.join('\n')
-        const isPrevious = typeof previous === 'string' ? command === previous : previous?.includes(command) === true
+        const isPrevious = (typeof previous === 'string' ? [previous] : previous ?? []).some(one => keyOf(one) === keyOf(command))
         if (!isPrevious) {
           if (command === wanted) return null
           continue
@@ -556,8 +575,9 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
     if (isRemoving && owned.size > 0 && /^hooks\s*:\s*$/.test(lines[top] ?? '') &&
         !lines.slice(top + 1, end).some((line, at) => isContent(line) && !drop.has(top + 1 + at))) {
       drop.add(top)
-      // Adding a new top-level map separates it with one blank line; remove that separator too.
-      if (top > 0 && (lines[top - 1] ?? '').trim() === '') drop.add(top - 1)
+      // Adding a new top-level map separates it with one blank line; remove that separator too,
+      // unless a `|+` block above owns it.
+      if (top > 0 && (lines[top - 1] ?? '').trim() === '' && !isKeptBlankAt(lines, top - 1)) drop.add(top - 1)
     }
   }
   const hasOwned = owned.size > 0
@@ -676,7 +696,13 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
           // Older POSIX reporters omitted the shell failure guard; their exact path still matches.
           recorded.set(event, [...(recorded.get(event) ?? []), command, command.replace(/ \|\| true$/, '')])
         }
-        return editHermesSetup(text, hermesEvents(ctx), recorded, remove)?.text ?? null
+        // The plan hook names the Node that ran the connect, and its bootstrap and hook version
+        // change with releases. Our worker, event, agent and progress file still mark it as ours,
+        // so a connect or removal under another Node finds the hook an earlier one wrote.
+        const keyOf = (command: string): string => command
+          .replace(/^"(?:\\.|[^"\\])*" ("--input-type=commonjs" "-e" )"eval\(Buffer\.from\('[A-Za-z0-9+/]*={0,2}','base64'\)\.toString\('utf8'\)\)"/, '"" $1""')
+          .replace(/ "--hook-version" "\d+" /, ' "--hook-version" "" ')
+        return editHermesSetup(text, hermesEvents(ctx), recorded, remove, keyOf)?.text ?? null
       },
     },
     {

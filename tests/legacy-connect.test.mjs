@@ -827,6 +827,39 @@ test('Hermes legacy removal restores a config that originally had no hooks secti
   })
 })
 
+for (const mode of ['remove', 'connect']) test(`Hermes legacy ${mode} finds its plan hook written under another Node`, () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const original = 'model: synthetic\n'
+  writeFileSync(config, original)
+  f.run(f.request('connect'))
+  const installed = readFileSync(config, 'utf8')
+  // The same install, as an earlier connect under another Node executable wrote it.
+  const otherNode = installed.replace(/(command: "\\")[^"\\]*(\\" \\"--input-type=commonjs\\")/, '$1/synthetic/other-node/bin/node$2')
+  assert.notEqual(otherNode, installed)
+  writeFileSync(config, otherNode)
+  f.run(f.request(mode))
+  const after = readFileSync(config, 'utf8')
+  if (mode === 'remove') assert.equal(after, original, 'Removal takes out the plan hook another Node wrote')
+  else assert.equal(after, installed, 'A connect replaces the old plan hook instead of adding a second one')
+}))
+
+test('Hermes legacy connect and removal keep the blank lines a |+ block scalar owns', async () => {
+  for (const [original, expected] of [
+    ['description: |+\n  keep\n\nhooks: {}\n', 'description: |+\n  keep\n\n'],
+    ['description: |+\n  keep\n\n', 'description: |+\n  keep\n\n'],
+    ['notes:\n  text: >+\n    keep\n\nhooks: {}\n', 'notes:\n  text: >+\n    keep\n\n'],
+  ]) await fixture(async f => {
+    mkdirSync(join(f.home, '.hermes'))
+    const config = join(f.home, '.hermes', 'config.yaml')
+    writeFileSync(config, original)
+    f.run(f.request('connect'))
+    assert.ok(readFileSync(config, 'utf8').startsWith(expected), 'The connect keeps the block and its blank lines')
+    f.run(f.request('remove'))
+    assert.equal(readFileSync(config, 'utf8'), expected)
+  })
+})
+
 test('a Hermes plugin connection reports todo plans and removes only its own hooks', () => fixture(async f => {
   mkdirSync(join(f.home, '.hermes'))
   const config = join(f.home, '.hermes', 'config.yaml')
