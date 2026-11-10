@@ -12,6 +12,7 @@ import { boardDocument } from '../hooks/board-json'
 import { serveModel } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
 import { sha256 } from '../hooks/sha256'
+import { cachedProcessStartedMany, processStartedMany } from '../scripts/local-lock'
 import { deadSessionsOf, isDeadSession, readingHostHash } from '../scripts/session-liveness'
 
 const NOW = Date.parse('2026-10-16T12:00:00Z')
@@ -110,6 +111,20 @@ test('a resumed session with a live pid raises its folded question again', () =>
   const raised = viewOf(after, new Set(), observe(emptyQuestions(), after, new Set()).ledger)
   expect(raised.waiting.map(item => item.text)).toEqual(['Deploy the synthetic build, OK?'])
   expect(raised.older.map(item => item.text)).toEqual([])
+})
+
+test('a batched start-time lookup returns each live pid start time and null for a dead pid', () => {
+  const pid = deadPid()
+  const starts = processStartedMany([alivePid, pid], 2000)
+  expect(starts.get(alivePid)).toBe(aliveStarted)
+  expect(starts.get(pid)).toBe(null)
+  // The cached batch reuses a pid already looked up and never looks it up again.
+  const cache = new Map<number, number | 'inaccessible' | null>()
+  expect(cachedProcessStartedMany([alivePid], cache, 2000).get(alivePid)).toBe(aliveStarted)
+  expect(cache.has(alivePid)).toBe(true)
+  const second = cachedProcessStartedMany([alivePid, pid], cache, 2000)
+  expect(second.get(alivePid)).toBe(aliveStarted)
+  expect(second.get(pid)).toBe(null)
 })
 
 test('a live pid with a start time far from the recorded one is a reused pid, so it counts as dead', () => {

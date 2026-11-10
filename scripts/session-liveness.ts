@@ -1,7 +1,8 @@
 import { hostname } from 'node:os'
-import { cachedProcessStarted } from './local-lock'
+import { cachedProcessStarted, cachedProcessStartedMany } from './local-lock'
 import type { ProcessStart } from './local-lock'
 import { agentClaimOf, hostHashOf, isDeadAgent } from '../hooks/session-liveness'
+import type { AgentClaim } from '../hooks/session-liveness'
 import { questionScope } from '../hooks/questions'
 import type { ProgressAuto, ProgressProject } from '../types'
 
@@ -64,16 +65,42 @@ export const isDeadSession = (auto: ProgressAuto | null, hostHash: string | null
 // The question scopes of sessions whose agent is dead on this machine, for buildView
 // and observeQuestions. A task with no agent block, a done or ended block, a
 // non-Claude agent (only Claude Code records a pid, PM Q4), or a live agent is
-// never in it.
+// never in it. The kill runs first for every pid; a dead pid needs no start-time
+// check, and the live pids share ONE start-time lookup (on Windows a PowerShell
+// spawn costs ~250 ms, so one spawn per session would make a ten-session poll
+// cost ~2.5 s). The host is checked for every pid, dead or live.
 export const deadSessionsOf = (projects: readonly ProgressProject[], hostHash: string | null = readingHostHash()): ReadonlySet<string> => {
   const dead = new Set<string>()
   if (hostHash === null) return dead
+  const live: Array<{ claim: AgentClaim; scope: string }> = []
   for (const project of projects) {
     for (const task of project.tasks) {
       const auto = task.auto
       if (auto === null || auto.state === 'done' || auto.state === 'ended' || auto.agent !== 'claude') continue
-      if (!isDeadSession(auto, hostHash)) continue
-      dead.add(questionScope(project.name, auto.agent, auto.session))
+      const claim = agentClaimOf(auto)
+      if (claim === null) continue
+      const scope = questionScope(project.name, auto.agent, auto.session)
+      let alive: boolean
+      try {
+        process.kill(claim.pid, 0)
+        alive = true
+      } catch (error) {
+        // ESRCH: no such process. Any other refusal means the process exists or
+        // the answer is uncertain, so it is alive: when in doubt the card is kept.
+        alive = (error as { code?: string }).code !== 'ESRCH'
+      }
+      if (!alive) {
+        if (isDeadAgent(claim, hostHash, false, null)) dead.add(scope)
+        continue
+      }
+      if (claim.started === undefined) continue
+      live.push({ claim, scope })
+    }
+  }
+  if (live.length > 0) {
+    const starts = cachedProcessStartedMany(live.map(one => one.claim.pid), startedCache, START_LOOKUP_TIMEOUT_MS)
+    for (const { claim, scope } of live) {
+      if (isDeadAgent(claim, hostHash, true, starts.get(claim.pid) ?? null)) dead.add(scope)
     }
   }
   return dead
