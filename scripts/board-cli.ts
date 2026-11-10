@@ -2434,21 +2434,23 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
   // The page is already in a window: point at it rather than opening another one that would poll too.
   if (isShape && await pageIsOpen(server)) return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
   const isOpen = isShape ? await new Promise<boolean>(done => openInBrowser(address, done, true)) : false
-  const isSsh = Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY)
-  const isSuppressed = Boolean(process.env.AGENT_BOARD_TEST_PID) || isSsh
+  const isSuppressed = Boolean(process.env.AGENT_BOARD_TEST_PID || process.env.SSH_CONNECTION || process.env.SSH_TTY)
   const note = isOpen
     ? s.boardPageWindowOpened(address)
     : isNoOpen || (isSuppressed && !isOpen)
       ? s.boardPageLink(address)
       : s.serveBrowserNone(address)
-  // Over SSH the address is on the remote computer: say how to forward its port, as the terminal
-  // board does, and keep the address the last line an agent shows (#1283).
-  const sshHint = isSsh && !isOpen ? `${s.serveSshHint(server.port, sshHost(), address)}\n` : ''
-  return { note: `${sshHint}${note}`, isOpen, url: address }
+  return { note, isOpen, url: address }
 }
 
 const openPageSurface = async (): Promise<void> => {
   const opened = await openPage()
+  // Over SSH the address is on the remote computer, even when a page is already open there: say
+  // how to forward its port first, as the terminal board does, so the address stays the last line
+  // an agent shows (#1283). The terminal board's own `o` keeps one-line notes.
+  if (opened.url !== undefined && (process.env.SSH_CONNECTION || process.env.SSH_TTY)) {
+    process.stdout.write(`${s.serveSshHint(Number(new URL(opened.url).port), sshTarget(), opened.url)}\n`)
+  }
   process.stdout.write(`${opened.note}\n`)
   // `--lan` without `--serve`: the page opens here and the phone's address follows it (#868).
   if (args.includes('--lan') && opened.url !== undefined) await showLan(opened.url)
@@ -2475,6 +2477,13 @@ const sshHost = (): string => {
     if (parts.length >= 3 && parts[2]) return parts[2]
   }
   return process.env.HOSTNAME || 'host'
+}
+
+// What `ssh` connects to: the SSH server's port is the fourth field of SSH_CONNECTION, and the
+// forwarding command needs it unless it is 22 (#1283).
+const sshTarget = (): string => {
+  const port = (process.env.SSH_CONNECTION ?? '').trim().split(/\s+/)[3]
+  return port !== undefined && /^\d{1,5}$/.test(port) && port !== '22' ? `-p ${port} ${sshHost()}` : sshHost()
 }
 
 // The home folder, or none when the computer does not say: a failure must not raise another.
@@ -2612,7 +2621,7 @@ const runWatchTerminal = async (): Promise<void> => {
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) {
     const server = await ensureServer()
     if (server) {
-      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshHost(), server.url), options())}\n`
+      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshTarget(), server.url), options())}\n`
     }
   }
   let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }

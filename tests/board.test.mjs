@@ -6166,11 +6166,27 @@ test('over SSH with a config folder variable set, plain agent-board opens the pa
       })
       url = board.urlOf(out)
       assert.ok(url, `${name}: the page's address is printed: ${JSON.stringify(out)}`)
-      const port = new URL(url).port
+      const port = Number(new URL(url).port)
       const lines = out.trim().split('\n')
       assert.equal(lines.at(-1), url, `${name}: the address stays the last line`)
-      assert.equal(lines.at(-2), EN.serveSshHint(Number(port), '203.0.113.9', url), `${name}: the line before it says how to forward the port`)
+      assert.equal(lines.at(-2), EN.serveSshHint(port, '203.0.113.9', url), `${name}: the line before it says how to forward the port`)
       assert.doesNotMatch(out, /\u001b\[\?1049h|Opened Agent Board|No browser found/, `${name}: no terminal board, no window, no browser note`)
+      const runAgain = extra => new Promise((done, fail) => {
+        execFile(process.execPath, ['--require', shim, board.script], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
+      })
+      // An SSH server on another port: the command must name it, or the forward reaches port 22.
+      const other = (await runAgain({ SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222' })).trim().split('\n')
+      assert.equal(other.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', url), `${name}: the SSH port is named`)
+      // A page already open somewhere on the remote computer: the person here still needs the forward.
+      await fetch(url)
+      const open = (await runAgain({})).trim().split('\n')
+      assert.equal(open.at(-1), EN.boardPageAlreadyOpen(url), `${name}: the page counts as open`)
+      assert.equal(open.at(-2), EN.serveSshHint(port, '203.0.113.9', url), `${name}: the forward is still offered`)
+      // The terminal board's `o` keeps its note to the address alone, so no two addresses run together.
+      const keys = spawnSync(process.execPath, [board.script, '--keys', 'o', '--no-open'], { env, encoding: 'utf8', timeout: 20_000, windowsHide: true })
+      assert.equal(keys.status, 0, keys.stderr)
+      assert.ok(keys.stdout.includes(url), keys.stdout)
+      assert.doesNotMatch(keys.stdout, /\?t=[\w-]+(?:http|Forward)/, `${name}: the address is not joined to another line`)
     } finally { await board.end([url]) }
   }
 })
