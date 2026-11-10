@@ -103,6 +103,7 @@ export const ZH_CN: Strings = {
     "previewCreate": "将创建 {count} 个设置文件",
     "preview": "将更新 {count} 个设置文件",
     "previewRemove": "将移除 {count} 个设置文件",
+    "appliedCreate": "已创建 {count} 个设置文件",
     "applied": "已更新 {count} 个设置文件",
     "current": "{count} 个已是最新",
     "shared": "共用",

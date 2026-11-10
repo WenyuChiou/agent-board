@@ -103,6 +103,7 @@ export const EN: Strings = {
     "previewCreate": "would create {count} setup files",
     "preview": "would update {count} setup files",
     "previewRemove": "would remove {count} setup files",
+    "appliedCreate": "created {count} setup files",
     "applied": "updated {count} setup files",
     "current": "{count} already current",
     "shared": "Shared",
