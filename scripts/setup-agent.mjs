@@ -373,9 +373,11 @@ const main = () => {
   if ((!selected.length && selector !== 'auto') || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
   const apply = args.includes('--apply')
   const isShowingApplied = apply
-  const script = fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
+  // Only inside a test run (as AGENT_BOARD_SETUP_TTY), a stand-in helper can report what a real one cannot on cue.
+  const script = process.env.AGENT_BOARD_TEST_PID && process.env.AGENT_BOARD_SETUP_HELPER ? process.env.AGENT_BOARD_SETUP_HELPER : fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
+  let removing = selected
   const run = (agent, isApplying) => {
-    const runArgs = isRemove ? ['--codex-remove', '--removing', selected.join(','), ...common.filter(arg => arg !== '--remove')] : common
+    const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')] : common
     const result = spawnSync(process.execPath, [script, ...runArgs, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
     const fallback = () => {
       const cause = isCode(result.error?.code) ? result.error.code : 'UNKNOWN'
@@ -397,7 +399,14 @@ const main = () => {
     try { return JSON.parse(result.stdout) } catch { fallback() }
   }
   const plans = selected.map(agent => run(agent, false))
-  const available = selected.filter((agent, i) => !plans[i].conflicts.length)
+  let available = selected.filter((agent, i) => !plans[i].conflicts.length)
+  // Preview again with only the agents whose removal goes ahead, until none of them newly conflicts, so the list
+  // every removal is told matches what is applied.
+  while (isRemove && available.length < removing.length) {
+    removing = available
+    for (const [i, agent] of selected.entries()) if (removing.includes(agent)) plans[i] = run(agent, false)
+    available = selected.filter((agent, i) => !plans[i].conflicts.length)
+  }
   if (selected.length && !available.length) process.exitCode = 1
   const results = plans.map((plan, i) => {
     if (!isShowingApplied || plan.conflicts.length) return plan
