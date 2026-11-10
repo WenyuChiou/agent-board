@@ -160,8 +160,11 @@ top(); setInterval(top, 5000); process.stdin.resume(); process.stdin.on('end', (
     report.stressor = { applied: one.exitCode === null, detail: last || 'no report from the memory hog' }
   } else if (condition === 'disk') {
     if (!isLinux) { report.stressor = { applied: false, detail: 'disk throttling is Linux only' }; return }
-    const device = (await sh(`findmnt -no MAJ:MIN -T ${JSON.stringify(world.root)}`)).stdout.split('\n')[0]
-    if (!/^\d+:\d+$/.test(device)) { report.stressor = { applied: false, detail: `no device for the temp folder (${device || 'empty'})` }; return }
+    // io.max takes the whole disk's MAJ:MIN, not a partition's (writing 8:1 there says "No such device").
+    const source = (await sh(`findmnt -no SOURCE -T ${JSON.stringify(world.root)}`)).stdout.split('\n')[0].replace(/\[.*$/, '')
+    const parent = (await sh(`lsblk -no PKNAME ${JSON.stringify(source)} 2>/dev/null | head -1`)).stdout
+    const device = (await sh(`lsblk -dno MAJ:MIN ${JSON.stringify(parent ? `/dev/${parent}` : source)}`)).stdout.trim()
+    if (!/^\d+:\d+$/.test(device)) { report.stressor = { applied: false, detail: `no device for the temp folder (source ${source || 'empty'}, parent ${parent || 'none'}, got ${device || 'empty'})` }; return }
     cgroup = '/sys/fs/cgroup/ab1066'
     const setup = await sh(`sudo -n mkdir -p ${cgroup} && echo '+io' | sudo -n tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null; echo '${device} rbps=524288 wbps=524288 riops=20 wiops=20' | sudo -n tee ${cgroup}/io.max`)
     if (setup.code !== 0) { report.stressor = { applied: false, detail: `io.max could not be set on ${device}: ${setup.stderr || setup.stdout}` }; cgroup = undefined; return }
