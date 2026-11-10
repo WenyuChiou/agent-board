@@ -146,6 +146,7 @@ export const authorLine = (body, branch) => {
     output.problems.push(problem('author', 'the Author line needs "<agent>, <branch>", with the comma.', 'write "Author: <your agent name>, <this branch>".'))
   } else {
     output.agent = name.split(/\s+/)[0].toLowerCase()
+    output.name = name
   }
   if (!namesBranch(comma === -1 ? author : author.slice(comma + 1), branch)) {
     output.problems.push(problem('author', 'the Author line does not name this pull request branch.', 'put the exact current branch on the Author line, optionally in backticks.'))
@@ -599,10 +600,10 @@ export const reviewOf = item => {
     return { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
   }
   const body = typeof item === 'string' ? item : item.body ?? ''
-  // The first verdict line counts, as before, except that a short approval (no verdict under R2) does not hide a
-  // later line of the same comment, such as a request for changes.
+  // A request for changes anywhere in a comment holds the merge. Otherwise the first full-sha approval counts, since
+  // a short approval is no verdict under R2; a comment with only short approvals keeps its first one.
   const matches = [...body.matchAll(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+)(?:,[ \t]*([^\r\n,']+)'s reviewer\b)?)?/gmi)]
-  const match = matches.find(found => found[1].toUpperCase() !== 'APPROVE' || found[2].length === 40) ?? matches[0]
+  const match = matches.find(found => found[1].toUpperCase() === 'REQUEST CHANGES') ?? matches.find(found => found[2].length === 40) ?? matches[0]
   if (match) {
     const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
     // R2's exception: a lane posts its own fresh reviewer's verdict as `by <reviewer and model>, <lane>'s reviewer`.
@@ -642,7 +643,7 @@ export const byTime = items => {
 
 export const verdict = (comments, head, options = {}) => {
   const output = result()
-  const { isDraft = false, authorAgent = null, number = null, isRelease = false, isOutside = false } = options
+  const { isDraft = false, authorAgent = null, authorName = null, number = null, isRelease = false, isOutside = false } = options
   const all = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
   // R2 asks for the full head sha, so an approval naming a prefix is not a verdict; an earlier full one still stands.
   const reviews = all.filter(review => review.kind !== 'APPROVE' || review.sha.length === 40)
@@ -678,9 +679,11 @@ export const verdict = (comments, head, options = {}) => {
 
   // The lane-reviewer form names the author's own lane: it counts on that lane's pull requests only, never on a
   // release or a pull request from outside the team (R2).
-  // A reviewer named only as the author is the author, whatever lane it claims.
+  // A reviewer named only as the author (the agent word, or the whole name on the Author line) is the author,
+  // whatever lane it claims. The checker cannot prove a reviewer is independent; R2's form is the lane's word.
+  const words = text => String(text ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
   const isAuthorLane = Boolean(authorAgent && last.lane && last.lane.split(/\s+/)[0].toLowerCase() === authorAgent.toLowerCase())
-  const isAuthorOnly = Boolean(authorAgent && last.reviewer && last.reviewer.trim().toLowerCase() === authorAgent.toLowerCase())
+  const isAuthorOnly = Boolean(authorAgent && last.reviewer && [authorAgent, authorName].some(own => own && words(last.reviewer) === words(own)))
   if (authorAgent && last.reviewer && (isAuthorOnly || (isAuthorLane ? isRelease || isOutside : last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())))) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
@@ -756,7 +759,7 @@ export const checkPr = data => {
     add(outsideNotes({ paths: data.paths, numstat: data.numstat }))
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
-  else add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, isRelease, isOutside }))
+  else add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, authorName: author.name ?? null, number: data.number, isRelease, isOutside }))
   if (data.isDraft) output.info.push(`draft: the reviewer starts when you run \`gh pr ready ${data.number}\` and comment \`Ready for review ${data.head}\`.`)
   return output
 }

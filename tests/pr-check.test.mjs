@@ -707,9 +707,21 @@ Review: APPROVE ${head.slice(0, 7)} by Muse Spark`, submitted_at: '2026-11-10T09
     { body: `Review: APPROVE ${head.slice(0, 7)} by independent\nReview: REQUEST CHANGES ${head} by reviewer\nP1: synthetic finding`, created_at: '2026-11-10T09:00:00Z' },
   ])
   assert.ok(reviewProblems({ ...codexPr, prComments: quotedComment }).some(p => p.message.includes('requested changes')), JSON.stringify(quotedComment))
-  // The lane form does not let the author approve under its own bare name.
+  // A request for changes anywhere in a comment holds the merge, even after a full approval of the head in it.
+  const mixed = byTime([
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T08:00:00Z' },
+    { body: `Review: APPROVE 76a88c2 by independent\nReview: APPROVE ${head} by independent\nReview: REQUEST CHANGES ${head} by reviewer\nP1: synthetic finding`, created_at: '2026-11-10T09:00:00Z' },
+  ])
+  assert.ok(reviewProblems({ ...codexPr, prComments: mixed }).some(p => p.message.includes('requested changes')), JSON.stringify(mixed))
+  assert.equal(reviewOf(`Review: APPROVE ${head} by independent\nReview: REQUEST CHANGES ${head} by reviewer`).kind, 'REQUEST CHANGES')
+  // The lane form does not let the author approve under its own name: the agent word or the whole Author name.
   const bare = reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head} by codex, codex's reviewer` }] })
   assert.ok(bare.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(bare))
+  const localPr = { ...codexPr, body: codexPr.body.replace('Author: codex, fix/test-branch', 'Author: Codex (local), fix/test-branch') }
+  assert.ok(localPr.body.includes('Author: Codex (local), fix/test-branch'))
+  const whole = reviewProblems({ ...localPr, prComments: [{ body: `Review: APPROVE ${head} by Codex (local), codex's reviewer` }] })
+  assert.ok(whole.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(whole))
+  assert.equal(reviewProblems({ ...localPr, prComments: [{ body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, codex's reviewer` }] }).length, 0)
 })
 
 test('pr-check combines issue state and draft information without mutating inputs', () => {
