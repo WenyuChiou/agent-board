@@ -167,8 +167,8 @@ Independent installations: update a clean checkout to the intended release, prev
 Preview and apply removal across all touched agents in a single run with `agent-board remove`, or specify `--agent` to remove only one (`codex`, `cursor`, `opencode`, `gemini`, `grok`, `muse`, `hermes`, `openclaw`, `antigravity`, `deepseek`):
 
 ```sh
-npx agent-board remove
-npx agent-board remove --apply
+npx @wenyuchiou/agent-board remove
+npx @wenyuchiou/agent-board remove --apply
 ```
 
 From a repository checkout:
@@ -256,7 +256,7 @@ The plugin was renamed in 0.10.0 and doesn't move over by itself. Run the steps 
 
 ### How do I uninstall it?
 
-Independent setup: close the board, preview `npx agent-board remove` (or `node scripts/setup-agent.mjs --remove`), then add `--apply` after review. This inspects and removes all installed agent setups in one go while listing and preserving your data files beside `progress.md`. To remove only one agent, specify `--agent <name>` or use `node "$HOME/.agent-board/agent-board.mjs" --remove --agent <name>`. See [Update and uninstall](#update-and-uninstall) for details. For the optional Claude plugin:
+Independent setup: close the board, preview `npx @wenyuchiou/agent-board remove` (or `node scripts/setup-agent.mjs --remove`), then add `--apply` after review. This inspects and removes all installed agent setups in one go while listing and preserving your data files beside `progress.md`. To remove only one agent, specify `--agent <name>` or use `node "$HOME/.agent-board/agent-board.mjs" --remove --agent <name>`. See [Update and uninstall](#update-and-uninstall) for details. For the optional Claude plugin:
 
 ```sh
 claude -p "/progress connect remove"
