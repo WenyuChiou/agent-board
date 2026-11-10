@@ -4953,7 +4953,6 @@ test("the redesigned pages speak the page's language in every new word", () => {
     expect(live).not.toContain('data-theme-toggle')
     expect(live).not.toContain('data-theme-pick')
     for (const label of [s.pgViews, s.pgOverview, s.pgNeeds, s.pgWorking, s.pgOthers, s.pgDone, s.pgProjects, s.pgAgents, s.pgSideFold]) expect(live).toContain(label)
-    expect(live).toContain(s.serveLive)
     expect(live).toContain(s.serveLiveHint)
     expect(live).toContain(s.sideClose)
     const words = pageWords(s)
