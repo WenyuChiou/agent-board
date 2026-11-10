@@ -55,7 +55,7 @@ const rowReceipt = (agent: string, session: string | undefined, messages: readon
 }
 // The person's answer to this question reached its session: the session took it, or replied.
 const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
-  messages.some(message => message.answers === questionId && (message.status === 'acknowledged' || message.status === 'accepted' && message.error === '' || message.status === 'uncertain' && message.hasAccepted === true))
+  messages.some(message => message.answers === questionId && (message.status === 'acknowledged' || message.status === 'accepted' || message.status === 'uncertain' && message.hasAccepted === true))
 const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerCase() === 'claude'
 // What pressing Send does right now, for a Claude session that is receiving (#316).
 const claudeHint = (agent: string, isWorking: boolean, s: Strings): string => !isClaudeAgent(agent) ? '' : isWorking ? s.claudeSendWorking : s.claudeSendNow

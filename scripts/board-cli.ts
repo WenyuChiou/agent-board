@@ -13,7 +13,7 @@ import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
 import { withLocalLock } from './local-lock'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
-import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -950,13 +950,59 @@ const watchLaunch = (child: ChildProcess, onResult: (isOpen: boolean) => void): 
   })
 }
 
-// A file or a page's address in the browser. The page's address holds only letters, digits,
-// `:/?=._-`, so cmd's `start` reads it as one word.
+// Start-Process creates the long-lived program without forwarding a shell's extra handles: a
+// program Node starts itself inherits the two extra pipes Cursor's shell passes on, since they
+// reach Node as plain inheritable handles outside its standard streams, and holds them open for as
+// long as it runs (#1158). PowerShell is hidden; a browser started from it keeps its normal visible
+// window. Several programs are tried in the one PowerShell run, in order, and the PID printed is
+// the first that started: each PowerShell start costs about a second, and the caller's turn waits
+// for every one of them. Start-Process returns as soon as the program exists, so with `graceMs` a
+// program that exits with an error within that time (no display, no sandbox) counts as not started
+// and the next one is tried, the way watchLaunch does it elsewhere. Start-Process reads -FilePath and
+// -WorkingDirectory as wildcards, so a program's path and the folder are escaped. A page's address
+// is not: it never names a file, so Start-Process hands it to the shell as written, and an escaped
+// one would reach the browser with backticks in it.
+// PowerShell ends a single-quoted string at the curly quotes too, so each is doubled like '.
+const psLiteral = (value: string): string => `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'`
+const psWildcardLiteral = (value: string): string => `([Management.Automation.WildcardPattern]::Escape(${psLiteral(value)}))`
+const isAddress = (value: string): boolean => /^[a-z][a-z\d+.-]+:\/\//i.test(value)
+const windowsArgument = (value: string): string => `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
+type WindowsStartOptions = { isHidden?: boolean; env?: NodeJS.ProcessEnv; isPiped?: boolean; graceMs?: number }
+const windowsStart = (bins: string | string[], argv: string[], options: WindowsStartOptions = {}): ChildProcess => {
+  const programs = (Array.isArray(bins) ? bins : [bins]).map(bin => isAddress(bin) ? psLiteral(bin) : psWildcardLiteral(bin)).join(', ')
+  const argumentsPart = argv.length === 0 ? '' : ` -ArgumentList ${psLiteral(argv.map(windowsArgument).join(' '))}`
+  const hiddenPart = options.isHidden ? ' -WindowStyle Hidden' : ''
+  const gracePart = options.graceMs === undefined ? '' : ` if ($started.WaitForExit(${Math.round(options.graceMs)}) -and $started.ExitCode -ne 0) { [Console]::Error.WriteLine($program + ' exited with ' + $started.ExitCode); continue };`
+  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); foreach ($program in @(${programs})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program${argumentsPart} -WorkingDirectory ${psWildcardLiteral(dirname(path))} -PassThru${hiddenPart} } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) {${gracePart} [Console]::Out.WriteLine($started.Id) }; exit 0 }; exit 1`
+  return spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
+    cwd: dirname(path), stdio: options.isPiped ? ['ignore', 'pipe', 'pipe'] : 'ignore', windowsHide: true, env: options.env,
+  })
+}
+
+const watchWindowsLaunch = (child: ChildProcess, done: (isOpen: boolean) => void): void => {
+  let isSettled = false
+  const finish = (isOpen: boolean): void => {
+    if (isSettled) return
+    isSettled = true
+    clearTimeout(timer)
+    done(isOpen)
+  }
+  const timer = setTimeout(() => { child.kill(); finish(false) }, 5000)
+  child.once('error', () => finish(false))
+  child.once('exit', code => finish(code === 0))
+  child.once('spawn', () => child.unref())
+}
+
+// A file or a page's address in the browser.
 const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = false): void => {
   // A board a test started never opens a window on the tester's screen (#959).
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY || process.env.AGENT_BOARD_TEST_PID) return done(false)
   const fallback = () => {
-    const opener = process.platform === 'win32' ? [system32('cmd.exe'), ['/c', 'start', '', target]] : process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]]
+    if (process.platform === 'win32') {
+      try { watchWindowsLaunch(windowsStart(target, []), done) } catch { done(false) }
+      return
+    }
+    const opener = process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]]
     // Waited on only for the launch grace: with no desktop, xdg-open can run a text browser that
     // never returns, and the agent's command would wait with it.
     try {
@@ -998,15 +1044,28 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
     )
   }
 
+  const isInstalled = (bin: string): boolean => !(bin.includes('/') || bin.includes('\\')) || existsSync(bin)
+
+  // On Windows every candidate goes into the one PowerShell run (#1158): a start for each would
+  // keep the caller waiting a second per browser that is not there or cannot start, and the Edge
+  // path repeats when only one Program Files folder is set.
+  if (process.platform === 'win32') {
+    const programs = [...new Set(candidates)].filter(isInstalled)
+    if (programs.length === 0) return fallback()
+    try {
+      watchWindowsLaunch(windowsStart(programs, [`--app=${target}`], { graceMs: LAUNCH_GRACE_MS }), isOpen => isOpen ? done(true) : fallback())
+    } catch {
+      fallback()
+    }
+    return
+  }
+
   const tryCandidate = (index: number): void => {
     if (index >= candidates.length) return fallback()
     const bin = candidates[index]!
     try {
-      if (bin.includes('/') || bin.includes('\\')) {
-        if (!existsSync(bin)) return tryCandidate(index + 1)
-      }
-      const child = spawn(bin, [`--app=${target}`], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: false })
-      watchLaunch(child, isOpen => isOpen ? done(true) : tryCandidate(index + 1))
+      if (!isInstalled(bin)) return tryCandidate(index + 1)
+      watchLaunch(spawn(bin, [`--app=${target}`], { cwd: dirname(path), detached: true, stdio: 'ignore', windowsHide: false }), isOpen => isOpen ? done(true) : tryCandidate(index + 1))
     } catch {
       tryCandidate(index + 1)
     }
@@ -1885,6 +1944,18 @@ const pageIsOpen = async (server: RunningServer): Promise<boolean> => {
   return answer !== null && answer !== 'silent' && typeof answer.pageAgo === 'number' && answer.pageAgo >= 0 && answer.pageAgo < PAGE_OPEN_MS()
 }
 
+// The detached Windows child reports startup failures through a private file too; redirecting
+// its standard handles would make Start-Process inherit the caller's extra pipes again.
+const serveChildError = (message: string): void => {
+  const ready = flag('--ready-file')
+  if (process.platform === 'win32' && ready !== undefined && /^\.agent-board-ready-[0-9a-f-]+\.tmp$/i.test(basename(ready)) && isRegularFile(ready)) {
+    const log = ready.replace(/\.tmp$/, '.err')
+    try { if (isRegularFile(log)) appendFileSync(log, message) } catch {}
+  } else {
+    process.stderr.write(message)
+  }
+}
+
 const serveChild = (): void => {
   // Resolve the protected address before asynchronous callbacks can run.
   const file = serveFile()
@@ -1955,13 +2026,21 @@ const serveChild = (): void => {
           // a word (#799): the command shows the same reason, not the generic line.
           // The file's own icacls calls end in their raw time-out error, not the folder check's.
           const isDenied = error instanceof RuntimeFolderDeniedError || (process.platform !== 'win32' && isAccessRefused(error))
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') process.stderr.write(`${error instanceof RuntimeFolderTimeoutError || isTimeout(error) ? s.serveRuntimeCheckTimeout : isDenied ? s.serveRuntimeDenied : s.serveRuntimePrivate}\n`)
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') serveChildError(`${error instanceof RuntimeFolderTimeoutError || isTimeout(error) ? s.serveRuntimeCheckTimeout : isDenied ? s.serveRuntimeDenied : s.serveRuntimePrivate}\n`)
           return false
         }
-        // The one line `--serve` waits for. Its pipe closes once it has read it.
-        process.stdout.on('error', () => undefined)
-        process.stderr.on('error', () => undefined)
-        process.stdout.write(`${url}\n`)
+        const ready = flag('--ready-file')
+        if (process.platform === 'win32' && ready !== undefined) {
+          // Only a pre-created file in this board's private folder may carry the token. A launcher
+          // that gave up has removed it and stops this child, so the r+ write fails and nothing is left.
+          if (dirname(resolve(ready)) !== dirname(file) || !/^\.agent-board-ready-[0-9a-f-]+\.tmp$/i.test(basename(ready)) || !isRegularFile(ready)) return false
+          try { writeFileSync(ready, `${url}\n`, { flag: 'r+' }) } catch { return false }
+        } else {
+          // A directly started child and non-Windows launches still report over stdout.
+          process.stdout.on('error', () => undefined)
+          process.stderr.on('error', () => undefined)
+          process.stdout.write(`${url}\n`)
+        }
         return true
       },
       onStop: () => {
@@ -1975,7 +2054,7 @@ const serveChild = (): void => {
     const errno = (error as NodeJS.ErrnoException).code
     const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message
       : typeof errno === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(errno) ? errno : 'UNREADABLE'
-    process.stderr.write(`MESSAGE_STORE_FAILED ${code}\n`)
+    serveChildError(`MESSAGE_STORE_FAILED ${code}\n`)
     process.exitCode = 1
   }
 }
@@ -2139,6 +2218,49 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   const startPage = async (): Promise<{ url: string | null; stderr: string; readyBy: number }> => {
     // In the board's own folder, not the agent's, so the server holds no project folder open.
     const readyBy = performance.now() + 10_000
+    if (process.platform === 'win32') {
+      const prefix = join(dirname(file), `.agent-board-ready-${randomUUID()}`)
+      const ready = `${prefix}.tmp`
+      const err = `${prefix}.err`
+      let child: ChildProcess | undefined
+      let pid: number | undefined
+      let isLauncherDone = false
+      let launcherOutput = ''
+      let launcherError = ''
+      let url: string | null = null
+      try {
+        for (const name of [ready, err]) writeFileSync(name, '', { flag: 'wx', mode: 0o600 })
+        child = windowsStart(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest, '--ready-file', ready], { isHidden: true, env: childEnv, isPiped: true })
+        child.stdout?.on('data', (chunk: Buffer) => {
+          launcherOutput += chunk.toString('utf8')
+          const found = /(?:^|\r?\n)([1-9][0-9]*)\r?\n/.exec(launcherOutput)
+          if (found?.[1] !== undefined) pid = Number(found[1])
+        })
+        child.stderr?.on('data', (chunk: Buffer) => { launcherError = (launcherError + chunk.toString('utf8')).slice(-16_384) })
+        child.once('close', () => { isLauncherDone = true })
+        child.once('error', () => { isLauncherDone = true })
+        while (performance.now() < readyBy) {
+          const contents = readFileSync(ready, 'utf8')
+          const text = contents.trim()
+          if (contents.endsWith('\n') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(text)) { url = text; break }
+          if (isLauncherDone && (pid === undefined || !isRunning(pid))) break
+          await new Promise(done => setTimeout(done, 50))
+        }
+        let stderr = launcherError
+        try { stderr = (stderr + '\n' + readFileSync(err, 'utf8')).slice(-16_384) } catch {}
+        return { url, stderr, readyBy }
+      } finally {
+        // In finally, so a server whose ready file could not be read is stopped too.
+        if (url === null && pid !== undefined && isRunning(pid)) {
+          try { process.kill(pid) } catch {}
+        }
+        if (url === null && child !== undefined && !isLauncherDone) child.kill()
+        child?.stdout?.destroy()
+        child?.stderr?.destroy()
+        child?.unref()
+        for (const name of [ready, err]) { try { unlinkSync(name) } catch {} }
+      }
+    }
     const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: childEnv })
     let stderr = ''
     child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-16_384) })
@@ -2701,12 +2823,13 @@ try {
     process.stderr.write('MCP_START_FAILED\n')
   } else if (error instanceof RuntimeFolderTimeoutError) {
     process.exitCode = 1
-    const output = args.includes('--serve-child') ? process.stderr : process.stdout
-    output.write(`${s.serveRuntimeCheckTimeout}\n`)
+    if (args.includes('--serve-child')) serveChildError(`${s.serveRuntimeCheckTimeout}\n`)
+    else process.stdout.write(`${s.serveRuntimeCheckTimeout}\n`)
   } else if (error instanceof RuntimeFolderError) {
     process.exitCode = 1
-    const output = args.includes('--serve-child') ? process.stderr : process.stdout
-    output.write(`${error instanceof RuntimeFolderDeniedError ? s.serveRuntimeDenied : s.serveRuntimePrivate}\n`)
+    const message = `${error instanceof RuntimeFolderDeniedError ? s.serveRuntimeDenied : s.serveRuntimePrivate}\n`
+    if (args.includes('--serve-child')) serveChildError(message)
+    else process.stdout.write(message)
   } else if (flag('--legacy-connect-request') !== undefined && typeof (globalThis as { AGENT_BOARD_WORKER_SOURCE?: unknown }).AGENT_BOARD_WORKER_SOURCE === 'string') {
     // The verified worker wrapper bounds data-URL errors and owns stage cleanup.
     throw error
