@@ -12,7 +12,7 @@ import { boardItems, boardScreen, emptyBoardState } from '../../hooks/board'
 import type { BoardState } from '../../hooks/board'
 import { countDay, journalLine } from '../../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../../hooks/mirror'
-import { MARK_PATH } from '../../hooks/page-look'
+import { GITHUB_PATH, MARK_PATH, POWER_PATH } from '../../hooks/page-look'
 import { settingsToggle } from '../../hooks/page-settings'
 import { DARK, LIGHT, PAGE_DARK, PAGE_LIGHT } from '../../hooks/palette'
 import type { Palette } from '../../hooks/palette'
@@ -1257,25 +1257,26 @@ ${iconTile('Codex', COVER_LEFT + 16, y + 16, 30)}
 <text x="${COVER_LEFT + 16}" y="${y + 76}" font-size="17" font-weight="600" fill="${look.ink}">${esc(question)}</text></g>`
   })()
 
-  // Scene 4: an excerpt of the web board's footer, using its own gear, label and palette.
+  // Scene 4: an excerpt of the web board's footer, using its own pictures, gear, label and palette.
   const settings = (() => {
     const y = propY(3) + 10
     const page = mode === 'dark' ? PAGE_DARK : PAGE_LIGHT
     const gear = settingsToggle(s).match(/<svg[^>]*>([\s\S]*?)<\/svg>/)?.[1]
     if (gear === undefined) throw new Error('The page Settings button has no SVG icon')
     const size = 15
-    const closeW = Math.ceil(textW(s.serveClose, size) + 30)
+    const closeW = 40
+    const red = mode === 'dark' ? PAGE_DARK.alert : pal.alert
     const settingsW = Math.ceil(textW(s.settingsTitle, size) + 46)
     const closeX = COVER_LEFT + COVER_COL - closeW - 12
     const settingsX = closeX - settingsW - 8
     return `<g class="a ${span((COVER_SCENES[3] ?? 0) + 0.2, ends[3] ?? 0)}" data-preview="page-footer">
 <rect x="${COVER_LEFT}" y="${y}" width="${COVER_COL - 2}" height="70" rx="12" fill="${page.surface}" stroke="${page.line}"/>
-<text x="${COVER_LEFT + 16}" y="${y + 41}" font-size="${size}" fill="${page.ink}">GitHub</text>
+<g transform="translate(${COVER_LEFT + 16},${y + 25}) scale(1.25)" fill="${page.ink}"><path d="${GITHUB_PATH}"/></g>
 <rect x="${settingsX}" y="${y + 15}" width="${settingsW}" height="40" rx="8" fill="${page.inset}" stroke="${page.brand}"/>
 <g transform="translate(${settingsX + 11},${y + 27})" fill="none" stroke="${page.ink}" stroke-width="1.3" stroke-linejoin="round">${gear}</g>
 <text x="${settingsX + 34}" y="${y + 41}" font-size="${size}" fill="${page.ink}">${esc(s.settingsTitle)}</text>
 <rect x="${closeX}" y="${y + 15}" width="${closeW}" height="40" rx="8" fill="${page.surface}" stroke="${page['line-strong']}"/>
-<text x="${closeX + closeW / 2}" y="${y + 41}" text-anchor="middle" font-size="${size}" fill="${page.ink}">${esc(s.serveClose)}</text></g>`
+<g transform="translate(${closeX + 9},${y + 24}) scale(1.375)" fill="none" stroke="${red}" stroke-width="1.5" stroke-linecap="round"><path d="${POWER_PATH}"/></g></g>`
   })()
 
   // Scene 5: Codex's card on the board's page, with its reply box and Send button. The person's
