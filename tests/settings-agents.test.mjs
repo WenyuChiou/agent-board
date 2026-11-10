@@ -216,8 +216,20 @@ test('Settings keeps every agent row when an install record or the connect recor
     assert.equal(result.status, 200, result.text)
     const rows = result.json().rows
     assert.deepEqual(rows.map(row => row.agent), setupAgents)
-    for (const agent of ['cursor', 'opencode', 'grok']) assert.equal(rows.find(row => row.agent === agent).note, EN.setupErrorRecord(`install-${agent}.json`), agent)
+    for (const agent of ['cursor', 'opencode', 'grok']) {
+      const row = rows.find(one => one.agent === agent)
+      assert.equal(row.note, EN.setupErrorRecord(`install-${agent}.json`), agent)
+      assert.deepEqual({ state: row.state, button: row.button }, { state: EN.settingsAgentStart, button: 'remove' }, agent)
+    }
     assert.equal(rows.find(row => row.agent === 'gemini').note, undefined)
+    // A press on a damaged row is refused and changes nothing; it is never reported as done.
+    const before = files(f.home)
+    for (const request of [() => board.call('GET', '/api/agents?agent=cursor&action=remove'), () => board.call('POST', '/api/agents/remove', { agent: 'cursor' })]) {
+      const pressed = await request()
+      assert.equal(pressed.status, 409, pressed.text)
+      assert.notEqual(pressed.json().note, EN.settingsAgentRemoved('Cursor'))
+      assert.deepEqual(files(f.home), before)
+    }
   } finally { await board.close() }
 })
 

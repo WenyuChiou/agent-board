@@ -2200,7 +2200,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   if (flag('--messages-dir') !== undefined) rest.push('--messages-dir', messagesDirectory())
   // Settings sets up and removes agents in the home, data folder and host folders this command was
   // given, so the child gets them too, resolved here for the same reason. A bare program name for
-  // --codex-bin stays a name, to be looked up on PATH.
+  // --codex-bin is passed on as it is, so setup refuses it as it does in a terminal.
   for (const name of ['--home', '--data-dir', '--codex-dir', '--grok-dir', '--hermes-dir', '--opencode-dir', '--openclaw-dir', '--deepseek-dir', '--codex-bin']) {
     const value = flag(name)
     if (value !== undefined) rest.push(name, name === '--codex-bin' && !/[\\/]/.test(value) ? value : resolve(value))
