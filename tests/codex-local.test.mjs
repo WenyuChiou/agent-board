@@ -13,7 +13,7 @@ import { neverShown } from './fixtures/never-shown.mjs'
 import { hookOrDeferred, turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
-import { HOOK_INPUT_TIMEOUT, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
+import { HOOK_INPUT_TIMEOUT, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
@@ -6436,6 +6436,15 @@ test('an OpenCode report tells the model only how many steps the board left out 
     assert.deepEqual(JSON.parse(cut), { dropped: 0, cut: 1 })
     for (const reply of [long, cut]) assert.doesNotMatch(reply, /session|progress|[\\/]/)
   })
+})
+
+test('a report tool reply is both counts or OK, even when a count is missing or not a whole number', () => {
+  const toolReply = new Function(`${REPORT_TOOL_REPLY}return toolReply`)()
+  assert.equal(toolReply('{"cut":1}'), '{"dropped":0,"cut":1}')
+  assert.equal(toolReply('{"dropped":2,"session":"s","progress":"p"}'), '{"dropped":2,"cut":0}')
+  assert.equal(toolReply('{"dropped":"3","cut":1.5}'), 'OK')
+  assert.equal(toolReply('{"dropped":0,"cut":0,"session":"s"}'), 'OK')
+  for (const text of ['', 'null', '[]', 'not json']) assert.equal(toolReply(text), 'OK', text)
 })
 
 test('an OpenCode report retries once when the runtime ends spawnSync early with ETIMEDOUT', async () => {
