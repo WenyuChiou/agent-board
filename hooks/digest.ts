@@ -119,21 +119,37 @@ export const lastQuestion = (answer: string, isFull = false): string | null => {
 // (`… at https://x.dev/a?`, `“Review https://x.dev/a?”`).
 const LINK = /https?:\/\/[^\s<>"'`“”‘’「」『』，。！？、；：（）]*[^\s<>"'`“”‘’「」『』.,;:!?？。！，、；：（)\]）]/g
 
+// A list item's mark: a bullet, a number or a letter (`-`, `1.`, `2)`, `1、`, `a)`).
+const LIST_ITEM = /^\s*(?:[-*+•]|\d+[.)、]|[A-Za-z][.)])\s+/
+// A line that ends on its question mark; closing quotes and brackets may follow it.
+const ENDS_ASKING = /[?？]["'”」』)）]*$/
+
 // For callers that already normalized the reply: do not parse it a second time.
 export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
   const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, '$1')
-  const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '')
+  const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '').map(one => one.split(/\r?\n/))
   const last = paragraphs.at(-1)
   if (last === undefined) return null
-  const lines = last
-    .split(/\r?\n/)
+  const words = (lines: string[]): string[] => lines
     .map(line => withoutEmphasis(line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')).trim())
     .filter(line => line !== '')
   // A link's own `?` and `.` (`http://127.0.0.1:5173/?t=…`) neither ask nor end a sentence
   // (#1108): each link stands in as a mark with neither, and is put back in the question.
   const links: string[] = []
-  const tail = (lines.at(-1) ?? '').replace(LINK, link => `\u0000${links.push(link) - 1}\u0000`)
-  if (!/[?？]/.test(tail)) return null
+  const hidden = (line: string): string => line.replace(LINK, link => `\u0000${links.push(link) - 1}\u0000`)
+  let tail = hidden(words(last).at(-1) ?? '')
+  if (!/[?？]/.test(tail)) {
+    // A question followed only by its choices as a list still asks it (#1243). The list is set
+    // aside, in the question's paragraph or as a paragraph of its own. The line before it must
+    // end on its question mark, so a list after a statement still asks nothing.
+    // An item that asks (`1. Which one?` over its own sub-list) is the question, not a choice.
+    const isChoice = (line: string): boolean => !ENDS_ASKING.test(line.trim()) && (LIST_ITEM.test(line) || /^\s/.test(line))
+    let at = last.length
+    while (at > 0 && isChoice(last[at - 1] ?? '')) at -= 1
+    if (at === last.length || !LIST_ITEM.test(last[at] ?? '')) return null
+    tail = hidden(words(at > 0 ? last.slice(0, at) : paragraphs.at(-2) ?? []).at(-1) ?? '')
+    if (!ENDS_ASKING.test(tail)) return null
+  }
   // Keep closing wrappers after the question mark so choice parsing can distinguish
   // a wrapped question from a word's own leading apostrophe, such as '90s.
   const sentences = tail.match(/[^.。!！?？]*[?？]["'”」』)]*/g) ?? []
