@@ -119,6 +119,10 @@ const listProcesses = async () => {
 }
 const isBoardProcess = p => /agent-board(?:-hook)?\.mjs|board-script|--serve-child/.test(p.command) && !/stress-1066\.mjs|hook-load\.mjs/.test(p.command)
 const isPageServer = p => p.command.includes('--serve-child')
+// The page server, and the --serve start that launches it, are never killed: the load needs its page.
+const isServe = p => p.command.includes('--serve')
+// The killer starts once the page server is up and every host's warm-up hook has run.
+const KILL_START_MS = 60000
 
 // Files that should not outlive a write: temps, locks and recovery gates in the load's own world.
 const worldFiles = () => {
@@ -212,19 +216,21 @@ const main = async () => {
     return board
   }
   const sampler = setInterval(() => { void sample() }, SAMPLE_MS)
-  let killer
+  let killer, killerStart
   if (condition === 'kill') {
-    killer = setInterval(async () => {
-      let list = []
-      try { list = (await listProcesses()).filter(p => isBoardProcess(p) && !isPageServer(p)) } catch { return }
-      if (list.length === 0) return
-      const victim = list[Math.floor(Math.random() * list.length)]
-      try { process.kill(victim.pid, 'SIGKILL'); report.kills += 1 } catch {}
-    }, KILL_MS)
+    killerStart = setTimeout(() => {
+      killer = setInterval(async () => {
+        let list = []
+        try { list = (await listProcesses()).filter(p => isBoardProcess(p) && !isServe(p)) } catch { return }
+        if (list.length === 0) return
+        const victim = list[Math.floor(Math.random() * list.length)]
+        try { process.kill(victim.pid, 'SIGKILL'); report.kills += 1; report.killed = [...(report.killed ?? []).slice(-19), { at: since(), command: victim.command.replace(/\S*agent-board-e2e-[^\s\\/]*/g, '<world>').slice(0, 120) }] } catch {}
+      }, KILL_MS)
+    }, KILL_START_MS)
   }
 
   const { code, signal } = await new Promise(done => load.once('close', (code, signal) => done({ code, signal })))
-  clearTimeout(deadline); clearInterval(sampler); clearInterval(killer)
+  clearTimeout(deadline); clearInterval(sampler); clearTimeout(killerStart); clearInterval(killer)
   await sample()
   report.hookLoadExit = signal ?? code
   if (load.lastError) note(`hook load stderr: ${load.lastError.trim().split('\n').pop()}`)
@@ -251,7 +257,8 @@ const main = async () => {
   ]
   writeFileSync(join(out, 'stress.md'), lines.join('\n') + '\n')
   say(lines.slice(2, 5).join(' | '))
-  return 0
+  // A load that did not run to its end is a failed measurement, whatever the checks say.
+  return report.hookLoad?.status === 'finished' ? 0 : 1
 }
 
 let exitCode = 1

@@ -16,6 +16,11 @@ on:
         required: false
         type: boolean
         default: false
+      only:
+        description: "#1066 only: run just these stress conditions (comma-separated), empty for all"
+        required: false
+        type: string
+        default: ''
   schedule:
     - cron: '17 6 * * 1'
 
@@ -50,6 +55,7 @@ jobs:
         with:
           node-version: 24
       - name: Hook load under ${{ matrix.condition }}
+        if: ${{ inputs.only == '' || contains(inputs.only, matrix.condition) }}
         shell: bash
         env:
           CONDITION: ${{ matrix.condition }}
