@@ -374,8 +374,9 @@ const main = () => {
   const apply = args.includes('--apply')
   const isShowingApplied = apply
   const script = fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
+  let removing = selected
   const run = (agent, isApplying) => {
-    const runArgs = isRemove ? ['--codex-remove', '--removing', selected.join(','), ...common.filter(arg => arg !== '--remove')] : common
+    const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')] : common
     const result = spawnSync(process.execPath, [script, ...runArgs, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
     const fallback = () => {
       const cause = isCode(result.error?.code) ? result.error.code : 'UNKNOWN'
@@ -398,6 +399,10 @@ const main = () => {
   }
   const plans = selected.map(agent => run(agent, false))
   const available = selected.filter((agent, i) => !plans[i].conflicts.length)
+  if (isRemove && available.length < selected.length) {
+    removing = available
+    for (const [i, agent] of selected.entries()) if (!plans[i].conflicts.length) plans[i] = run(agent, false)
+  }
   if (selected.length && !available.length) process.exitCode = 1
   const results = plans.map((plan, i) => {
     if (!isShowingApplied || plan.conflicts.length) return plan

@@ -67,7 +67,7 @@ import { createSettingsAgents } from './settings-agents'
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
 
 const args = process.argv.slice(2)
-const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust'].includes(arg))
+const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'].includes(arg))
 const flag = (name: string): string | undefined => {
   const at = args.indexOf(name)
   return at === -1 ? undefined : args[at + 1]
@@ -2863,7 +2863,7 @@ try {
     if (reason === 'INVALID_STEP' && typeof step === 'string' && args.some(arg => ['--codex-report', '--report'].includes(arg))) {
       process.stderr.write(`AGENT_BOARD_DETAIL ${JSON.stringify(s.reporterInvalidStep(step))}\n`)
     }
-  } else if (args.some(arg => ['--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust'].includes(arg))) {
+  } else if (args.some(arg => ['--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'].includes(arg))) {
     process.exitCode = 1
     const failure = setupFailure(error, flag('--agent') ?? 'codex', s)
     process.stderr.write(`${args.includes('--json') ? JSON.stringify({ error: failure }) : failure.message}\n`)

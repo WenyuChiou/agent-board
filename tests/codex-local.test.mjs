@@ -4044,6 +4044,74 @@ test('a reporter sweeps scratch files older than a minute from the inbox and kee
   else assert.doesNotMatch(hookLog(f), /CLEANUP_FAILED/)
 }))
 
+test('PowerShell reporter retries a scratch file released after its first failed removal', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.ps1')
+  const held = join(inbox, 'synthetic-held.tmp'), probe = join(f.home, 'retry-started'), release = join(f.home, 'retry-release')
+  const old = new Date(Date.now() - 300000)
+  f.save(held, 'held'); utimesSync(held, old, old)
+  const anchor = '          Start-Sleep -Milliseconds 25'
+  const source = reporterPs1()
+  assert.equal(source.split(anchor).length, 2)
+  // Hold the first retry at a handshake, so scheduler pauses cannot release the lock too late.
+  f.save(script, source.replace(anchor, `          [IO.File]::WriteAllText($env:SWEEP_RETRY_STARTED, 'ready')\n          while (-not [IO.File]::Exists($env:SWEEP_RETRY_RELEASED)) { Start-Sleep -Milliseconds 5 }\n${anchor}`))
+  let lock = openSync(held, 0x10000000)
+  const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'turn'], {
+    env: { ...f.env, SWEEP_RETRY_STARTED: probe, SWEEP_RETRY_RELEASED: release }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let stdout = '', stderr = '', error
+  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  child.on('error', failure => { error = failure })
+  child.stdin.on('error', failure => { error = failure })
+  const closed = new Promise(resolve => child.once('close', (status, signal) => resolve({ status, signal })))
+  const timer = setTimeout(() => child.kill(), 30000)
+  try {
+    child.stdin.end(JSON.stringify({ session_id: 'synthetic-retry-sweep' }))
+    const deadline = Date.now() + 25000
+    while (!existsSync(probe) && child.exitCode === null && child.signalCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(existsSync(probe), `the first removal did not reach its retry: ${stderr}`)
+    closeSync(lock); lock = undefined
+    f.save(release, 'released')
+    const result = await closed
+    assert.equal(error, undefined, String(error))
+    assert.equal(result.status, 0, `${stdout}\n${stderr}`)
+    assert.equal(existsSync(held), false)
+    assert.doesNotMatch(hookLog(f), /CLEANUP_FAILED/)
+  } finally {
+    clearTimeout(timer)
+    if (lock !== undefined) closeSync(lock)
+    if (child.exitCode === null && child.signalCode === null) child.kill()
+    await closed
+  }
+}))
+
+test('PowerShell reporter caps retry sleep across all locked scratch files', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.ps1'), sleeps = join(f.home, 'retry-sleeps')
+  const old = new Date(Date.now() - 300000)
+  const files = Array.from({ length: 12 }, (_, index) => join(inbox, `synthetic-${index}.tmp`))
+  const locks = []
+  for (const file of files) { f.save(file, 'held'); utimesSync(file, old, old) }
+  const anchor = '          Start-Sleep -Milliseconds 25'
+  const source = reporterPs1()
+  assert.equal(source.split(anchor).length, 2)
+  f.save(script, source.replace(anchor, `${anchor}\n          Add-Content -LiteralPath $env:SWEEP_RETRY_SLEEPS -Value 25`))
+  let out
+  try {
+    for (const file of files) locks.push(openSync(file, 0x10000000))
+    out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'turn'],
+      { ...f.env, SWEEP_RETRY_SLEEPS: sleeps }, JSON.stringify({ session_id: 'synthetic-budget-sweep' }))
+  } finally {
+    for (const lock of locks) closeSync(lock)
+  }
+  assert.equal(out.error, undefined, hookFailure(out))
+  assert.equal(out.status, 0, hookFailure(out))
+  const total = readFileSync(sleeps, 'utf8').trim().split(/\s+/).reduce((sum, value) => sum + Number(value), 0)
+  assert.ok(total > 0 && total <= 1000, `retry sleeps totaled ${total} ms`)
+  for (const file of files) assert.equal(existsSync(file), true, file)
+  assert.match(hookLog(f), /CLEANUP_FAILED/)
+  assert.equal(readdirSync(inbox).filter(name => name.endsWith('.json')).length, 1)
+}))
+
 test('the sh reporter logs CLEANUP_FAILED when its sweep fails, but not for a file that went mid-scan', { skip: process.platform === 'win32' }, () => fixture(async f => {
   const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.sh'), tools = join(f.home, 'sweep-tools')
   const locale = join(f.home, 'sweep-locale')
@@ -6167,6 +6235,62 @@ test('removing one agent preserves the shared board and skill used by another ag
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).turn, 'retained-worker-turn')
   assert.equal(f.command(['--codex-remove', '--apply']).status, 0)
   assert.ok(!existsSync(f.script) && !existsSync(f.skill) && !existsSync(join(f.root, 'agent-board-hook.mjs')))
+}))
+
+test('multi-agent removal preserves the shared board for an agent skipped by a conflict', () => fixture(async f => {
+  for (const agent of ['codex', 'antigravity']) {
+    const installed = f.install('--agent', agent, '--apply')
+    assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+  }
+  const skill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
+  const edited = `${readFileSync(skill, 'utf8')}Synthetic user edit\n`
+  f.save(skill, edited)
+  const args = ['--remove', '--agent', 'codex,antigravity', '--json']
+  const preview = setupAgent(f, ...args)
+  assert.equal(preview.status, 0, preview.stderr + preview.stdout)
+  const before = JSON.parse(preview.stdout)
+  const codexPreview = before.plans.find(plan => plan.agent === 'codex')
+  const antigravityPreview = before.plans.find(plan => plan.agent === 'antigravity')
+  assert.ok(antigravityPreview.conflicts.includes(skill), preview.stdout)
+  for (const file of [f.script, f.skill, join(f.root, 'agent-board-hook.mjs')]) {
+    assert.ok(!codexPreview.changes.some(change => change.file === file), preview.stdout)
+  }
+  const textPreview = setupAgent(f, '--remove', '--agent', 'codex,antigravity', '--lang', 'en')
+  assert.equal(textPreview.status, 0, textPreview.stderr + textPreview.stdout)
+  assert.match(textPreview.stdout, /Antigravity: skipped:/)
+  const removed = setupAgent(f, ...args, '--apply')
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  const result = JSON.parse(removed.stdout)
+  const codexResult = result.plans.find(plan => plan.agent === 'codex')
+  assert.equal(codexResult.applied, true)
+  assert.deepEqual(codexResult.changes, codexPreview.changes)
+  assert.ok(result.plans.find(plan => plan.agent === 'antigravity').conflicts.includes(skill), removed.stdout)
+  assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+  assert.equal(existsSync(join(f.root, 'install-antigravity.json')), true)
+  assert.equal(readFileSync(skill, 'utf8'), edited)
+  for (const file of [f.script, f.skill, join(f.root, 'agent-board-hook.mjs')]) assert.equal(existsSync(file), true, file)
+  const hook = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local'].PreInvocation[0]
+  const fired = await fireCommand(f, hook.command, JSON.stringify({ conversationId: 'synthetic-retained-antigravity' }))
+  assert.equal(fired.status, 0, hookFailure(fired))
+  assert.match(readFileSync(f.progress, 'utf8'), /agent=antigravity/)
+}))
+
+test('removal with JSON applies through the short remove flag', () => fixture(f => {
+  const installed = f.install('--apply')
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout)
+  const loader = join(f.home, 'source-loader.mjs')
+  f.save(loader, `import { registerHooks } from 'node:module'\nregisterHooks({ resolve(specifier, context, next) {\n  try { return next(specifier, context) } catch (error) {\n    if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error\n    return next(specifier + '.ts', context)\n  }\n} })\n`)
+  const run = agent => spawnSync(process.execPath, ['--experimental-transform-types', '--import', pathToFileURL(loader).href, resolve('scripts/board-cli.ts'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--data-dir', f.root, '--remove', '--agent', agent, '--json', '--apply'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const refused = run('unsupported')
+  assert.equal(refused.status, 1, refused.stderr + refused.stdout)
+  assert.equal(JSON.parse(refused.stderr.split(/\r?\n/).find(line => line.startsWith('{"error"'))).error.code, 'UNSUPPORTED_AGENT')
+  assert.equal(existsSync(join(f.root, 'install-codex.json')), true)
+  const removed = run('codex')
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  const result = JSON.parse(removed.stdout)
+  assert.equal(result.mode, 'remove')
+  assert.equal(result.applied, true)
+  assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
 }))
 
 test('a shared installation retains its chosen progress path when another agent joins', () => fixture(f => {
