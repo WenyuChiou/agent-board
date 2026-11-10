@@ -12,6 +12,10 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - **Remote reporters / Report clocks** · The Python importer refuses live reports over three days old, including reports without a state, and rejects future UTC seconds before writing anything. Rapid updates and retirement retain their order within the current second; clock refusals use the system language. Old done and ended reports still merge as history (#220).
 
+- A question followed by its choices as a list reaches Needs you, and a reply that only quotes an earlier question no longer makes a false card (#1248).
+
+- Saving settings refuses a progress-settings.json that is a link or not a regular file (#1264).
+
 - The Corner Light logo and the Agent•Board name, with the board's status in the light (#1263).
 
 - Removing several agents keeps the shared board when one is skipped for a conflict (#1260).
