@@ -12,9 +12,13 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - **Remote reporters / Report clocks** · The Python importer refuses live reports over three days old, including reports without a state, and rejects future UTC seconds before writing anything. Rapid updates and retirement retain their order within the current second; clock refusals use the system language. Old done and ended reports still merge as history (#220).
 
-- A question followed by its choices as a list reaches Needs you, and a reply that only quotes an earlier question no longer makes a false card (#1248).
+- A question that asks you to choose from the list it ends on, such as `Which should I do first?` over the options, reaches Needs you; a bare `Which one?` or a heading over a list does not. A reply that only quotes an earlier question no longer makes a false card, and a lone straight quote, such as an inch mark, no longer hides a question (#1248, #1282).
 
-- Saving settings refuses a progress-settings.json that is a link or not a regular file (#1264).
+- The board's page and terminal board refuse to save the language or the progress bar style over a progress-settings.json that is a link or not a regular file (#1264). The plugin's `/progress style` does not check this yet (#1276).
+
+- The Settings panel's Agents heading is in Traditional and Simplified Chinese too (#1269).
+
+- Setup says `1 setup file`, not `1 setup files`, when it creates, updates or removes one file (#1270).
 
 - The Corner Light logo and the Agent•Board name, with the board's status in the light (#1263).
 
@@ -38,7 +42,7 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - A report reply is both step counts or OK, also when a count is missing (#1238).
 
-- Take a new port on every start, so no page origin outlives its server (#1234). This undoes the fixed port of #1177, which was never released.
+- The page no longer goes back to the port it used last: each start takes a port from the system, as 0.24.2 does, unless `--port` names one (#1234). This undoes the fixed port of #1177, which was never released.
 
 - Preview and remove all touched agents in one run (#1236).
 
