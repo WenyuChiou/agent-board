@@ -164,14 +164,28 @@ Question tags: [Confirm] yes or no · [Choose] pick an option · [Input] type a 
 
 Independent installations: update a clean checkout to the intended release, preview `node scripts/setup-agent.mjs`, then apply the approved plan. Edited files are conflicts, not overwritten. Existing host sessions may need reload. No unattended updater or startup service is installed.
 
-Preview and apply removal with the installed program, once for each agent you set up. The example removes Codex; for another agent, use its name (`cursor`, `opencode`, `gemini`, `grok`, `muse`, `hermes`, `openclaw`, `antigravity`, `deepseek`):
+Preview and apply removal across all touched agents in a single run with `agent-board remove`, or specify `--agent` to remove only one (`codex`, `cursor`, `opencode`, `gemini`, `grok`, `muse`, `hermes`, `openclaw`, `antigravity`, `deepseek`):
 
 ```sh
-node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
-node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
+npx @wenyuchiou/agent-board remove
+npx @wenyuchiou/agent-board remove --apply
 ```
 
-`--codex-remove` and `--codex-doctor` are retained maintenance names for all targets. Close that board before removal. Removal takes unchanged board files, its hook definitions, Codex trust entries for those hooks, an empty hooks config setup created, and empty folders setup made. Shared files stay while another target needs them. User changes stay.
+From a repository checkout:
+
+```sh
+node scripts/setup-agent.mjs --remove
+node scripts/setup-agent.mjs --remove --apply
+```
+
+Or remove an individual agent using the installed helper:
+
+```sh
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex --apply
+```
+
+`--remove` (and `--codex-remove`) previews what it will remove for all touched agents using short paths, and lists the user data files kept beside `progress.md`. Close that board before removal. Removal takes unchanged board files, its hook definitions, Codex trust entries for those hooks, an empty hooks config setup created, and empty folders setup made. Shared files stay while another target needs them. User changes stay.
 
 Your history stays: `progress.md`, `progress-archive-*.md`, `progress-journal-*.md`, `sessions/`, `pending/`, `hook-recovery-*.json`, `hook-errors.log`, `progress-answered.json`, `progress-questions*.json`, `progress-seen.json`, `progress-run-cursor.txt`, `progress-page-state.json`, `progress-page-state-done-*.json`, `progress-inbox/` (`dropped.log`). You can delete these by hand. Non-empty runtime `*-messages/` folders also stay. Names based on `progress.md` follow your selected progress filename.
 
@@ -242,7 +256,7 @@ The plugin was renamed in 0.10.0 and doesn't move over by itself. Run the steps 
 
 ### How do I uninstall it?
 
-Independent setup: close the board, preview `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`, then add `--apply` after review. Repeat for each installed agent. See [Update and uninstall](#update-and-uninstall) for the history files kept. For the optional Claude plugin:
+Independent setup: close the board, preview `npx @wenyuchiou/agent-board remove` (or `node scripts/setup-agent.mjs --remove`), then add `--apply` after review. This inspects and removes all installed agent setups in one go while listing and preserving your data files beside `progress.md`. To remove only one agent, specify `--agent <name>` or use `node "$HOME/.agent-board/agent-board.mjs" --remove --agent <name>`. See [Update and uninstall](#update-and-uninstall) for details. For the optional Claude plugin:
 
 ```sh
 claude -p "/progress connect remove"

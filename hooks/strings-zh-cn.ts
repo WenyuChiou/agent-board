@@ -140,7 +140,13 @@ export const ZH_CN: Strings = {
     "thenBoard": "接着在其中任一个输入 /agent-board。",
     "open": "在 {agents} 各开一个新的会话。",
     "openOne": "在 {agents} 开一个新的会话。",
-    "thenBoardOne": "接着在那里输入 /agent-board。"
+    "thenBoardOne": "接着在那里输入 /agent-board。",
+    "appliedRemove": "已移除 {count} 个设置文件",
+    "noInstalled": "没有已安装的 Agent Board 设置可供移除",
+    "keptData": "保留 {progress} 旁的数据与历史记录（回答、提问、日志、归档、会话）：",
+    "applyRemove": "应用此移除更改：{command}",
+    "restartRemove": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
+    "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。"
   },
   setupNoAgent: {
     "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
