@@ -617,9 +617,15 @@ export const reviewOf = item => {
   return null
 }
 
+// A short-sha approval comment is not one R2 accepts, so it does not stop the GitHub reviews from being read.
+export const hasFullApproval = comments => comments.some(comment => {
+  const review = reviewOf(comment)
+  return review?.kind === 'APPROVE' && review.sha.length === 40
+})
+
 export const verdict = (comments, head, options = {}) => {
   const output = result()
-  const { isDraft = false, authorAgent = null, number = null } = options
+  const { isDraft = false, authorAgent = null, number = null, isRelease = false, isOutside = false } = options
   const reviews = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
   const last = reviews.at(-1)
 
@@ -657,7 +663,9 @@ export const verdict = (comments, head, options = {}) => {
     return output
   }
 
-  if (authorAgent && last.reviewer && !last.lane && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())) {
+  // The lane-reviewer form counts only for the author's own lane, never on a release or an outside pull request (R2).
+  const isLaneReviewer = Boolean(authorAgent && last.lane && !isRelease && !isOutside && last.lane.split(/\s+/)[0].toLowerCase() === authorAgent.toLowerCase())
+  if (authorAgent && last.reviewer && !isLaneReviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
       output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer.'))
@@ -732,7 +740,7 @@ export const checkPr = data => {
     add(outsideNotes({ paths: data.paths, numstat: data.numstat }))
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
-  else add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number }))
+  else add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, isRelease, isOutside }))
   if (data.isDraft) output.info.push(`draft: the reviewer starts when you run \`gh pr ready ${data.number}\` and comment \`Ready for review ${data.head}\`.`)
   return output
 }
@@ -1007,12 +1015,8 @@ export const main = async (argv = process.argv.slice(2)) => {
       if (data.number === null) data.prComments = []
       else {
         const comments = await api(`issues/${data.number}/comments`, { isList: true })
-        const hasApproval = (Array.isArray(comments) ? comments : []).some(c => {
-          const r = reviewOf(c)
-          return r && r.kind === 'APPROVE'
-        })
         let reviews = []
-        if (!hasApproval) {
+        if (!hasFullApproval(Array.isArray(comments) ? comments : [])) {
           try { reviews = await api(`pulls/${data.number}/reviews`, { isList: true }) } catch {}
         }
         data.prComments = [...(Array.isArray(comments) ? comments : []), ...(Array.isArray(reviews) ? reviews : [])]

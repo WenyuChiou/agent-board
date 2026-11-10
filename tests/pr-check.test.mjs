@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr,
   isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
-  privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
+  hasFullApproval, privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -649,6 +649,21 @@ test('approval gate: an approval needs the full head sha, and a lane\'s own fres
   // Without that form, a reviewer named like the author is still refused.
   const self = reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, read in full` }] })
   assert.ok(self.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(self))
+
+  // The form counts only for the author's own lane, and never on a release or a pull request from outside the team.
+  const laneApproval = { body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, codex's reviewer` }
+  const otherLane = reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, muse's reviewer` }] })
+  assert.ok(otherLane.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(otherLane))
+  const release = reviewProblems({ ...codexPr, title: 'chore(release): Agent Board 9.9.9', prComments: [laneApproval] })
+  assert.ok(release.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(release))
+  const outside = reviewProblems({ ...codexPr, association: 'CONTRIBUTOR', prComments: [laneApproval] })
+  assert.ok(outside.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(outside))
+
+  // A short approval comment does not hide a GitHub approval of the full head.
+  const shortComment = { body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark` }
+  assert.equal(hasFullApproval([shortComment]), false)
+  assert.equal(hasFullApproval([{ body: `Review: APPROVE ${head} by Muse Spark` }]), true)
+  assert.equal(reviewProblems({ ...codexPr, prComments: [shortComment, { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' } }] }).length, 0)
 
   // A request for changes still holds the merge whatever sha length it names.
   assert.ok(reviewProblems({ ...codexPr, prComments: [{ body: `Review: REQUEST CHANGES ${head.slice(0, 7)} by Muse Spark` }] }).some(p => p.message.includes('requested changes')))
