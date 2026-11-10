@@ -727,6 +727,7 @@ let routes: Record<string, AnswerRoute> = {}
 // 10 s, so the page's idle poll does not read the file each time; a pick made here is kept at once.
 const SETTINGS_MS = 10_000
 let settingsKept: { text: string | null; at: number } | null = null
+
 const settingsNow = (): string | null => {
   const now = Date.now()
   if (settingsKept !== null && now - settingsKept.at < SETTINGS_MS) return settingsKept.text
@@ -737,18 +738,21 @@ const settingsNow = (): string | null => {
 }
 const barStyleNow = (): BarStyle => barStyleOf(settingsNow())
 // The pick from the page or the `s` key: the settings file's other keys are kept. False when the
-// file exists but does not read as a JSON object: it is left as it is. A read or write error throws.
+// file exists but does not read as a JSON object, or is a symlinked or non-regular file: it is left
+// as it is. A read or write error throws.
 const saveBarStyle = (style: BarStyle): boolean => {
   const file = settingsPath(path)
+  if (isSymlinkOrNonRegular(file)) return false
   const next = withBarStyle(read(file), style)
   if (next === null) return false
-  writeFileSync(file, next)
+  try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
   settingsKept = { text: next, at: Date.now() }
   return true
 }
 
 const saveLanguage = (lang: SettingsLang): boolean => {
   const file = settingsPath(path)
+  if (isSymlinkOrNonRegular(file)) return false
   const next = withBoardSettings(read(file), { lang })
   if (next === null) return false
   // A failed write names the file on the page, as a failed read does.
