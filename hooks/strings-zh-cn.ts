@@ -777,7 +777,7 @@ export const ZH_CN: Strings = {
   settingsDenied: '浏览器已阻止通知。',
   settingsUnavailable: '此浏览器无法使用通知。',
   settingsChanged: (name: string, value: string): string => `${name}：${value}。`,
-  settingsAgents: 'Agents',
+  settingsAgents: '代理',
   settingsAgentOnBoard: '在看板上',
   settingsAgentApproval: '等你在 Codex 批准',
   settingsAgentStart: '开一个新的会话就会开始',

@@ -822,7 +822,7 @@ export const ZH_TW = {
   settingsDenied: '瀏覽器已封鎖通知。',
   settingsUnavailable: '此瀏覽器無法使用通知。',
   settingsChanged: (name: string, value: string): string => `${name}：${value}。`,
-  settingsAgents: 'Agents',
+  settingsAgents: '代理程式',
   settingsAgentOnBoard: '在看板上',
   settingsAgentApproval: '等你在 Codex 核准',
   settingsAgentStart: '開一個新的工作階段就會開始',
