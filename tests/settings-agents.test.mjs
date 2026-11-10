@@ -202,15 +202,14 @@ test('Settings keeps every agent when the Codex doctor itself throws', { timeout
   } finally { await board.close() }
 })
 
-test('Settings keeps every agent row when an install record or the connect record cannot be read', { timeout: 25_000 }, async () => {
+test('Settings keeps every agent row when an install record or the connect record cannot be read', { timeout: 35_000 }, async () => {
   const f = fixture()
   f.setup('--agent', 'gemini', '--apply')
   writeFileSync(join(f.data, 'install-cursor.json'), '{')
   writeFileSync(join(f.data, 'install-opencode.json'), JSON.stringify({ files: [] }))
   // A folder where the record should be exists but cannot be read as a file.
   mkdirSync(join(f.data, 'install-grok.json'))
-  writeFileSync(join(f.data, 'legacy-connect.json'), 'not json')
-  const board = await f.start()
+  let board = await f.start()
   try {
     const result = await board.call('GET', '/api/agents')
     assert.equal(result.status, 200, result.text)
@@ -222,14 +221,22 @@ test('Settings keeps every agent row when an install record or the connect recor
       assert.deepEqual({ state: row.state, button: row.button }, { state: EN.settingsAgentStart, button: 'remove' }, agent)
     }
     assert.equal(rows.find(row => row.agent === 'gemini').note, undefined)
-    // A press on a damaged row is refused and changes nothing; it is never reported as done.
+    // A press on a damaged row gets setup's own refusal for that record and changes nothing in the home.
     const before = files(f.home)
     for (const request of [() => board.call('GET', '/api/agents?agent=cursor&action=remove'), () => board.call('POST', '/api/agents/remove', { agent: 'cursor' })]) {
       const pressed = await request()
       assert.equal(pressed.status, 409, pressed.text)
-      assert.notEqual(pressed.json().note, EN.settingsAgentRemoved('Cursor'))
+      assert.equal(pressed.json().note, EN.setupErrorRecord('install-cursor.json'))
       assert.deepEqual(files(f.home), before)
     }
+  } finally { await board.close() }
+  // A damaged connect record does not hide the rows either.
+  writeFileSync(join(f.data, 'legacy-connect.json'), 'not json')
+  board = await f.start()
+  try {
+    const result = await board.call('GET', '/api/agents')
+    assert.equal(result.status, 200, result.text)
+    assert.deepEqual(result.json().rows.map(row => row.agent), setupAgents)
   } finally { await board.close() }
 })
 
