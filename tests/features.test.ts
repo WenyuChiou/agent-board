@@ -1628,6 +1628,134 @@ test('the question a reply ends on: its last paragraph only, without code or mar
   expect(lastQuestion('Use _this_ or __that__, not my__name?')).toBe('Use this or that, not my__name?')
 })
 
+test('a question put to the person, followed only by its choices as a list, still asks it (#1243)', () => {
+  expect(lastQuestion('Which database should I use?\n1. Postgres\n2. SQLite\n3. MySQL')).toBe('Which database should I use?')
+  expect(lastQuestion('Done.\n\nShould I use Postgres or SQLite?\n- Postgres\n- SQLite')).toBe('Should I use Postgres or SQLite?')
+  expect(lastQuestion('The parser is fixed. Which one do you want first?\na) the docs\nb) the tests')).toBe('Which one do you want first?')
+  expect(lastQuestion('What would you like me to do next?\n• Ship it\n• Add tests\n• Stop here')).toBe('What would you like me to do next?')
+  // Bold does not hide a question only the agent could be asking.
+  expect(lastQuestion('Which one do you prefer?\n1. **Postgres** — replicas\n2. `SQLite` — one file')).toBe('Which one do you prefer?')
+  expect(lastQuestion('Which database do you prefer?\n1. PostgreSQL.\n2. SQLite.')).toBe('Which database do you prefer?')
+  expect(lastQuestion('Which component do you need?\na) parser\nb) renderer')).toBe('Which component do you need?')
+  expect(lastQuestion('我該用哪個資料庫？\n1、Postgres\n2、SQLite')).toBe('我該用哪個資料庫？')
+  expect(lastQuestion('要我先用哪個資料庫？\n- Postgres\n- SQLite')).toBe('要我先用哪個資料庫？')
+  expect(lastQuestion('你想先做哪一個？\n1. 文件\n2. 測試')).toBe('你想先做哪一個？')
+  expect(lastQuestion('我应该用哪个数据库？\n- Postgres\n- SQLite')).toBe('我应该用哪个数据库？')
+  expect(lastQuestion('您希望先做哪一个？\n1. 文档\n2. 测试')).toBe('您希望先做哪一个？')
+})
+
+test('blank lines between a question and its choices, and between the choices, do not hide it (#1243)', () => {
+  expect(lastQuestion('Done.\n\nWhich one do you want first?\n\n1. Postgres\n2. SQLite')).toBe('Which one do you want first?')
+  expect(lastQuestion('Which database should I use?\n\n1. Postgres\n\n2. SQLite')).toBe('Which database should I use?')
+  expect(lastQuestion('你要先用哪個資料庫？\n\n- Postgres\n\n- SQLite')).toBe('你要先用哪個資料庫？')
+  expect(lastQuestion('你要先用哪个数据库？\r\n\r\n- Postgres\r\n\r\n- SQLite')).toBe('你要先用哪个数据库？')
+})
+
+test('a heading or a recap worded as a question over a list that answers it asks nothing (#1243)', () => {
+  expect(lastQuestion('What changed?\n- Updated the parser.\n- Added tests.')).toBeNull()
+  expect(lastQuestion('What changed?\n- the parser\n- the tests')).toBeNull()
+  expect(lastQuestion('Which database did I pick?\n- SQLite was selected.\n- Migrations completed.')).toBeNull()
+  expect(lastQuestion('Which database did you want?\n- SQLite\n- Postgres')).toBeNull()
+  expect(lastQuestion('What did you ask for?\n- Add dark mode.\n- Preserve settings.')).toBeNull()
+  expect(lastQuestion('What did you ask for?\n- dark mode\n- saved settings')).toBeNull()
+  expect(lastQuestion('You asked for a summary. What changed?\n- Updated the parser.\n- Added tests.')).toBeNull()
+  expect(lastQuestion('你提出了哪些需求？\n- 新增深色模式。\n- 修正設定頁。')).toBeNull()
+  expect(lastQuestion('你提出了哪些需求？\n- 深色模式\n- 設定頁')).toBeNull()
+  expect(lastQuestion('你要了哪些功能？\n- 深色模式\n- 設定頁')).toBeNull()
+  expect(lastQuestion('你提出了哪些需求？\n- 新增深色模式。\n- 修正设置页。')).toBeNull()
+  expect(lastQuestion('改了哪些地方？\n- 解析器\n- 测试')).toBeNull()
+})
+
+test('an answered FAQ heading over its answers asks nothing (#1243)', () => {
+  expect(lastQuestion('**Should I make any changes?**\n- No changes are needed.\n- Your configuration is already correct.')).toBeNull()
+  // A survey's results: the heading asks the person in its words, and the list answers it.
+  expect(lastQuestion('**Which one do you prefer?**\n1. **Postgres** — replicas\n2. `SQLite` — one file')).toBeNull()
+  expect(lastQuestion('Survey results:\n\n**Which deployment option do you prefer?**\n- Docker — 70%\n- Binary — 30%')).toBeNull()
+  expect(lastQuestion('Survey results:\n\nWhich deployment option do you prefer?\n- Docker\n- Binary')).toBeNull()
+  expect(lastQuestion('Which deployment option do you prefer?\n- Docker — 70%\n- Binary — 30%')).toBeNull()
+  expect(lastQuestion('調查結果：\n\n你想要哪種部署方式？\n- Docker\n- 執行檔')).toBeNull()
+  expect(lastQuestion('Should I make any changes?\n- No changes are needed.\n- Your configuration is already correct.')).toBeNull()
+  expect(lastQuestion('Should I make any changes?\n- No\n- The configuration is already correct')).toBeNull()
+  expect(lastQuestion('**Which database should I use?**\n- Postgres for production\n- SQLite for tests')).toBeNull()
+  expect(lastQuestion('## Which database should I use?\n- Postgres for production\n- SQLite for tests')).toBeNull()
+  expect(lastQuestion('Q: Which database should I use?\n- Postgres for production\n- SQLite for tests')).toBeNull()
+  expect(lastQuestion('Which database should I use?\n- Use Postgres for production.\n- Use SQLite for tests.')).toBeNull()
+  expect(lastQuestion('**我需要修改什麼嗎？**\n- 不需要修改。\n- 你的設定已經正確。')).toBeNull()
+  expect(lastQuestion('**我該用哪個資料庫？**\n- 正式環境用 Postgres\n- 測試用 SQLite')).toBeNull()
+  expect(lastQuestion('**我应该用哪个数据库？**\n- 生产环境用 Postgres\n- 测试用 SQLite')).toBeNull()
+})
+
+test('a bare which-first question over its choices asks it, and a summary heading over a list does not (#1243)', () => {
+  expect(lastQuestion('Which database first?\n1. Postgres\n2. SQLite')).toBe('Which database first?')
+  expect(lastQuestion('Which one next?\n- docs\n- tests')).toBe('Which one next?')
+  expect(lastQuestion('先用哪個資料庫？\n1. Postgres\n2. SQLite')).toBe('先用哪個資料庫？')
+  expect(lastQuestion('先用哪个数据库？\n- Postgres\n- SQLite')).toBe('先用哪个数据库？')
+  expect(lastQuestion('Which files changed?\n- parse.ts\n- digest.ts')).toBeNull()
+  expect(lastQuestion('Which agents are supported?\n- Codex\n- Claude Code')).toBeNull()
+  expect(lastQuestion('Which step failed first?\n- build\n- lint')).toBeNull()
+  expect(lastQuestion('**Which database first?**\n- Postgres\n- SQLite')).toBeNull()
+  expect(lastQuestion('先前用了哪個資料庫？\n- Postgres\n- SQLite')).toBeNull()
+  // A timeline's heading names an order too, but with a verb or for several things.
+  expect(lastQuestion('The CI timeline:\n\nWhich jobs ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which jobs ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('已确定的执行顺序：\n\n先做哪些工作？\n- 更新解析器\n- 补充测试')).toBeNull()
+  expect(lastQuestion('先做哪些工作？\n- 更新解析器\n- 补充测试')).toBeNull()
+})
+
+test('a question under a caption, or about an order already finished, asks nothing (#1243)', () => {
+  expect(lastQuestion('CI jobs, in the order they finished\n\nWhich finished first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which finished first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion("Completed intake form with the customer's answers\n\nWhich services do you need?\n- Storage\n- Backups")).toBeNull()
+  expect(lastQuestion('The customer selected both services in the completed intake form\n\nWhich services should I provide?\n- Storage.\n- Backups.')).toBeNull()
+  expect(lastQuestion('客戶填好的需求表\n\n你需要哪些服務？\n- 儲存\n- 備份')).toBeNull()
+  // A sentence the agent ends before its question leaves the question its own.
+  expect(lastQuestion('I checked both.\n\nWhich services do you need?\n- Storage\n- Backups')).toBe('Which services do you need?')
+  expect(lastQuestion('兩個都查過了。\n\n你需要哪些服務？\n- 儲存\n- 備份')).toBe('你需要哪些服務？')
+})
+
+test('a list that explains, asks or follows a statement is not a list of choices (#1243)', () => {
+  // A list after a statement, or after a question the same line already answered.
+  expect(lastQuestion('What changed:\n1. the parser\n2. the tests')).toBeNull()
+  expect(lastQuestion('Why did it fail? The cache was stale.\n1. cleared it\n2. reran')).toBeNull()
+  expect(lastQuestion('Which one should I use?\n\nI went with A.\n\n1. A\n2. B')).toBeNull()
+  expect(lastQuestion('I answered these questions:\n1. Why did tests fail?\n2. The cache was stale.')).toBeNull()
+  // An item that asks: which of the questions waits cannot be told.
+  expect(lastQuestion('Which database should I use?\n1. Postgres for scale?\n2. SQLite for simplicity.')).toBeNull()
+  // The last item's own question is read as before, never the line over the list.
+  expect(lastQuestion('Which database should I use?\n1. Postgres for scale?\n2. SQLite for simplicity?')).toBe('SQLite for simplicity?')
+  // An item with a paragraph of its own explains; one choice alone is not a choice.
+  expect(lastQuestion('Which database do you prefer?\n\n1. Postgres.\n\n   It supports replicas.\n\n2. SQLite.')).toBeNull()
+  expect(lastQuestion('Which database should I use?\n- Postgres')).toBeNull()
+  expect(lastQuestion('Which one should I use?\n1. Postgres\n   - replicas\n2. SQLite')).toBeNull()
+  // A yes or no over a list is not a pick among its items.
+  expect(lastQuestion('Do you want the details?\n- parser\n- tests')).toBeNull()
+  expect(lastQuestion('你要看細節嗎？\n- 解析器\n- 測試')).toBeNull()
+  expect(lastQuestion('你要看细节吗？\n- 解析器\n- 测试')).toBeNull()
+  expect(lastQuestion('要用哪個資料庫？\n- Postgres 適合正式環境。\n- SQLite 適合測試。')).toBeNull()
+  expect(lastQuestion('该用哪个数据库？\n- Postgres 适合生产环境。\n- SQLite 适合测试。')).toBeNull()
+})
+
+test('a reply that quotes its earlier question asks nothing (#1273)', () => {
+  expect(lastQuestion('The test asked either "Your name" or "Are you ready?"')).toBeNull()
+  expect(lastQuestion('測試問了「你的名字」還是「準備好了嗎？」')).toBeNull()
+  expect(lastQuestion('That finishes the test: I said hello, then goodbye, and asked "Blue or green?"')).toBeNull()
+  expect(lastQuestion('Earlier you wrote “Blue or green?”')).toBeNull()
+  expect(lastQuestion("The prompt was 'Blue or green?'")).toBeNull()
+  expect(lastQuestion('The prompt said "Ready? Blue or green?"')).toBeNull()
+  expect(lastQuestion('I asked "Blue or green? Pick one" and stopped.')).toBeNull()
+  expect(lastQuestion('測試完成：我說了你好，然後問了「藍色還是綠色？」')).toBeNull()
+  expect(lastQuestion('测试完成：我说了你好，然后问了“蓝色还是绿色？”')).toBeNull()
+  expect(lastQuestion('我先問了『要不要繼續？』')).toBeNull()
+  expect(lastQuestion('I asked which one, as "Blue or green?"\n1. Blue\n2. Green')).toBeNull()
+  // A quote that wraps the whole question, or its last option, still asks.
+  expect(lastQuestion('Done. "Blue or green?"')).toBe('"Blue or green?"')
+  expect(lastQuestion('改好了。\n\n「藍色還是綠色？」')).toBe('「藍色還是綠色？」')
+  expect(lastQuestion('Should I call it "fast" or "safe?"')).toBe('Should I call it "fast" or "safe?"')
+  expect(lastQuestion('I asked "Blue or green?" and you said blue. Ship it?')).toBe('Ship it?')
+  expect(lastQuestion("Is it Alice's row or Bob's row?")).toBe("Is it Alice's row or Bob's row?")
+})
+
 test('a link\'s own question mark is not a question, and a question with a link keeps it whole (#1108)', () => {
   expect(lastQuestion('http://127.0.0.1:58561/?t=abc123')).toBeNull()
   expect(lastQuestion('The board is open at http://127.0.0.1:58561/?t=abc123')).toBeNull()
