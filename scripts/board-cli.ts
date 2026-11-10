@@ -11,6 +11,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
 import { withLocalLock } from './local-lock'
+import { deadSessionsOf } from './session-liveness'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
 import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -529,7 +530,9 @@ const keepAskedQuestions = (projects: ReturnType<typeof parseProgress>, ref: Tas
   const latest = readQuestions(questionsPath(path))
   const proofs = readQuestionProofs()
   if (latest === null || proofs === null || !archiveQuestionsKept(projects, ref, latest)) return false
-  const settled = observeQuestions(latest, projects, null, parseAnswered(read(answeredPath(path))) ?? [], now, true, 'preview', proofs, pending(), [], frozen).ledger
+  // A session whose agent is gone asks nobody, so its question never blocks an
+  // archive (#1092): the settling pass reads the dead set, as the board read does.
+  const settled = observeQuestions(latest, projects, null, parseAnswered(read(answeredPath(path))) ?? [], now, true, 'preview', proofs, pending(), [], frozen, deadSessionsOf(projects)).ledger
   const task = refTasks(projects, ref)[0]
   if (settled.records.some(record => record.isUnresolved && isAskedBy(record, ref, task) && !latest.records.some(old => old.id === record.id && old.isUnresolved))) return false
   for (const record of latest.records) {
@@ -607,6 +610,10 @@ const readBoardView = (source: string, now: number) => {
   const previewProofs = proofs
   if (record !== null) lastQuestions = record
   const frozen = progressHealthCache.frozen
+  // Sessions whose agent process is gone on this machine (#1092): worked out once
+  // per read, from the pid each block carries, and passed to the observation and
+  // the view as data. The start-time lookup runs only for live pids, once each.
+  const deadSessions = deadSessionsOf(projects)
   let questions: QuestionLedger | null = null
   // Chat and a one-shot read never write. Interactive readers persist before accepting hides.
   if (proofs !== null && isWritingQuestions) {
@@ -616,7 +623,7 @@ const readBoardView = (source: string, now: number) => {
       if (current === null) return null
       lastQuestions = current
       if (read(path) !== source) return null
-      let next = observeWriterQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs ?? undefined, turns, [], frozen).ledger
+      let next = observeWriterQuestions(current, projects, null, answered, now, isSettled, incarnation, proofs ?? undefined, turns, [], frozen, deadSessions).ledger
       let nextText = compactQuestionsJson(next)
       const captures = readQuestionCaptures()
       if (captures === null) return null
@@ -640,7 +647,7 @@ const readBoardView = (source: string, now: number) => {
       // New retirement proofs change the observation; unchanged validated proofs already produced
       // this result. Repeating it needlessly copies and hashes every retained question (#428).
       if (latestProofs !== proofs) {
-        next = observeWriterQuestions(current, projects, null, answered, now, isSettled, incarnation, latestProofs, turns, [], frozen).ledger
+        next = observeWriterQuestions(current, projects, null, answered, now, isSettled, incarnation, latestProofs, turns, [], frozen, deadSessions).ledger
         nextText = compactQuestionsJson(next)
       }
       proofs = latestProofs
@@ -676,7 +683,7 @@ const readBoardView = (source: string, now: number) => {
       }
     }
   }
-  questions ??= observeWriterQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', previewProofs ?? undefined, turns, [], frozen).ledger
+  questions ??= observeWriterQuestions(lastQuestions, projects, null, answered, now, isSettled, 'preview', previewProofs ?? undefined, turns, [], frozen, deadSessions).ledger
   // A record that left the ledger while its capture is still pending (retired
   // in a later pass) stays visible until the flush lands, as a synchronous
   // write would have shown it. View-only: the persisted ledger never sees
@@ -702,7 +709,7 @@ const readBoardView = (source: string, now: number) => {
   const dropped = inboxDropped(droppedLogCache.text, prunedSince(now))
   const pruned = prunedNote({ ...prunedTotal(pageState.pruned, now), turns: dropped.age + dropped.cap }, s)
   // Proof writes above refresh this snapshot; drawing need not list the directory again.
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, viewQuestions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
+  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, viewQuestions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs(), undefined, deadSessions), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const view = (source = read(path), now = Date.now()) => {
@@ -1345,9 +1352,12 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       const source = read(path)
       const projects = parseProgress(source)
       const frozen = cutOffScopes(projects, cutOffSpans(source, isCutSettledAt(now)))
-      const fresh = buildView(projects, [], null, now, 0, {}, s, answered ?? [], {}, latest, proofs, pending(), frozen, undefined, staleTimeoutMs())
+      // A session whose agent is gone asks nobody (#1092): the hide check reads the
+      // same dead set as the board read, so its question is found under Older.
+      const deadSessions = deadSessionsOf(projects)
+      const fresh = buildView(projects, [], null, now, 0, {}, s, answered ?? [], {}, latest, proofs, pending(), frozen, undefined, staleTimeoutMs(), undefined, deadSessions)
       if (isHidden && keys.some(key => ![...fresh.waiting, ...(fresh.reminder ?? []), ...(fresh.older ?? []), ...fresh.hidden].some(item => item.canHide !== false && item.hideKey === key))) return null
-      const aliases = observeQuestions(latest, projects, null, answered ?? [], now, true, 'preview', undefined, [], [], frozen).ledger
+      const aliases = observeQuestions(latest, projects, null, answered ?? [], now, true, 'preview', undefined, [], [], frozen, deadSessions).ledger
       return answered === null ? null : answeredJson(withAnswered(answered, isHidden ? keys : keys.flatMap(key => acknowledgementKeys(aliases, key)), isHidden))
     })
     if (wrote === null) return s.hideFailed
@@ -2743,7 +2753,10 @@ const run = async (): Promise<void> => {
     } catch {
       turns = []
     }
-    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), answeredText, questionsText, turns)}\n`)
+    // A session whose agent is gone leaves the waiting count too (#1092): the
+    // status line reads the same dead set as the board read.
+    const statusText = read(path)
+    process.stdout.write(`${boardStatus(statusText, Date.now(), s, staleTimeoutMs(), answeredText, questionsText, turns, deadSessionsOf(parseProgress(statusText)))}\n`)
     return
   }
   const request = flag('--legacy-connect-request')

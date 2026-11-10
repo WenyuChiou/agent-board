@@ -8,7 +8,9 @@ import { performance } from 'node:perf_hooks'
 type Claim = { fd: number; text: string; device: number; inode: number }
 type Bounds = { waitMs?: number; staleMs?: number }
 type Synchronous<T> = T extends PromiseLike<unknown> ? never : T
-type ProcessStart = number | 'inaccessible' | null
+// A process's start time in epoch ms; 'inaccessible' when its start time cannot be
+// read, null when the lookup failed or timed out.
+export type ProcessStart = number | 'inaccessible' | null
 
 // Reused process IDs after a crash or reboot start at a different epoch time than the lock owner (#1089).
 const START_DRIFT_MS = 3000
@@ -81,7 +83,11 @@ const linuxStatTicks = (path: string): number | null => {
   return Number.isSafeInteger(ticks) && ticks >= 0 ? ticks : null
 }
 
-const processStarted = (pid: number, timeoutMs: number): ProcessStart => {
+// A process's start time in epoch ms, for pid-reuse checks (#1089, #1092). On
+// Linux it reads /proc (no spawn); elsewhere it asks the system (ps, PowerShell),
+// bounded by `timeoutMs`. A failure returns null; an unreadable start time returns
+// 'inaccessible'. The caller's own pid answers from `performance.timeOrigin`.
+export const processStarted = (pid: number, timeoutMs: number): ProcessStart => {
   if (pid === process.pid) return Math.round(performance.timeOrigin)
   if (process.platform === 'linux') {
     try {
@@ -129,7 +135,9 @@ const processStarted = (pid: number, timeoutMs: number): ProcessStart => {
   } catch { return null }
 }
 
-const cachedProcessStarted = (pid: number, cache: Map<number, ProcessStart>, timeoutMs: number): ProcessStart => {
+// A process's start time, looked up once per pid and cached in the board process
+// (#1092, PM Q5): a live pid's start time is checked once, never once per poll.
+export const cachedProcessStarted = (pid: number, cache: Map<number, ProcessStart>, timeoutMs: number): ProcessStart => {
   if (cache.has(pid)) return cache.get(pid) ?? null
   const value = processStarted(pid, timeoutMs)
   if (value !== null || Math.floor(timeoutMs) > 0) cache.set(pid, value)

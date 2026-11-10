@@ -107,6 +107,11 @@ export const autoOf = (raw: string): ProgressAuto | null => {
   const state = SESSION_STATES.find(one => one === attrs.state) ?? 'waiting'
   const updated = Date.parse(attrs.updated ?? '')
   const pr = Number(attrs.pr)
+  // The liveness claim (#1092): a pid and start time that are not safe positive
+  // integers, or a host that is not a 64-hex hash, are no claim at all.
+  const agentPid = Number(attrs.agentpid)
+  const agentStarted = Number(attrs.agentstarted)
+  const host = attrs.host
   // `origin=run` is the one value that means anything (#399); `parent` only matters beside it.
   const isRun = attrs.origin === 'run'
   const replied = attrs.replied !== undefined
@@ -126,6 +131,9 @@ export const autoOf = (raw: string): ProgressAuto | null => {
     dir: folderOf(attrs.dir),
     pr: Number.isInteger(pr) && pr > 0 ? pr : null,
     ci: CI_STATES.find(one => one === attrs.ci) ?? null,
+    ...(Number.isSafeInteger(agentPid) && agentPid > 0 ? { agentPid } : {}),
+    ...(Number.isSafeInteger(agentStarted) && agentStarted > 0 ? { agentStarted } : {}),
+    ...(host !== undefined && /^[0-9a-f]{64}$/.test(host) ? { host } : {}),
     ...(isRun ? { isRun: true as const } : {}),
     ...(isRun && attrs.parent !== undefined && RESUME.test(attrs.parent) ? { parent: attrs.parent } : {}),
     ...(replied !== null && Number.isFinite(replied) ? { replied } : {}),

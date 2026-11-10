@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 import { ageQuestions, questionAge, QUESTION_DAY } from '../hooks/question-aging'
-import { archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionsJson, withCaptures } from '../hooks/questions'
+import { archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionScope, questionsJson, withCaptures } from '../hooks/questions'
 import { parseProgress } from '../hooks/parse'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../hooks/mirror'
 import { archivableAsking, renderAutoBlock, takeArchivable } from '../hooks/blocks'
@@ -478,4 +478,29 @@ test('archiving a block refuses when a step\'s question annotation changed or no
   const twice = board(`- [x] Synthetic preparation\n<!-- question=${done} -->\n- [x] Synthetic review\n<!-- question=${'e'.repeat(64)}:1 -->\n- [?] Publish the first synthetic plan, OK?\n<!-- question=${first} -->`).replace('state=waiting', 'state=ended')
   const kept = observeQuestions(emptyQuestions(), parseProgress(twice), null, [], START, true, 'seed').ledger
   expect(archiveQuestionsKept(parseProgress(twice.replace(`${'e'.repeat(64)}:1`, done)), ref, kept)).toBe(true)
+})
+
+test('folding a question whose agent window is closed keeps its first observation and its three and seven day stages (#1092)', () => {
+  const host = '0'.repeat(64)
+  const file = `## demo\n<!-- auto session=a1b2c3d4 agent=claude state=waiting updated=${new Date(START).toISOString()} agentpid=12345 agentstarted=${START - 1000} host=${host} -->\n### Release\n- [?] Publish the synthetic plan, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
+  const projects = parseProgress(file)
+  const open = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'writer:1').ledger
+  expect(open.records[0]!.firstObserved).toBe(START)
+  // Six days later the window is closed: the record is retained, not re-observed.
+  const scope = questionScope('demo', 'claude', 'a1b2c3d4')
+  const folded = observeQuestions(open, projects, null, [], START + 6 * QUESTION_DAY, true, 'writer:2', undefined, [], [], new Set(), new Set([scope])).ledger
+  const record = folded.records.find(one => one.isUnresolved)!
+  expect(record.isPresent).toBe(false)
+  expect(record.isWaiting).toBe(false)
+  expect(record.isUnresolved).toBe(true)
+  expect(record.firstObserved).toBe(START)
+  // The age stages still read from the original first observation, not from the fold.
+  expect(questionAge(record.firstObserved, START + 3 * QUESTION_DAY)).toEqual({ stage: 'pending', age: 3 * QUESTION_DAY })
+  expect(questionAge(record.firstObserved, START + 6 * QUESTION_DAY)).toEqual({ stage: 'reminder', age: 6 * QUESTION_DAY })
+  expect(questionAge(record.firstObserved, START + 7 * QUESTION_DAY + 1)).toEqual({ stage: 'older', age: 7 * QUESTION_DAY + 1 })
+  // The fold itself is the death, not the age: at six days the question is under Older
+  // because its session is dead, while its age stage is still only a reminder.
+  const view = buildView(projects, [], null, START + 6 * QUESTION_DAY, 0, {}, STRINGS.en, [], {}, folded, undefined, [], new Set(), undefined, 12 * 60 * 60 * 1000, undefined, new Set([scope]))
+  expect(view.waiting).toEqual([])
+  expect(view.older.map(item => item.text)).toEqual(['Publish the synthetic plan, OK?'])
 })

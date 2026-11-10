@@ -98,6 +98,11 @@ export type ProgressPr = {
 // Present on a block a session's mod writes itself, between its auto markers. `resume` is
 // the full session id and `dir` the folder it ran in, for a resume command; `pr` and `ci`
 // say how its pull request stands.
+// `agentPid`, `agentStarted` and `host` (Claude Code only, #1092) let the board tell a
+// closed agent window from a live one without waiting 12 h: the agent process id, its
+// start time in epoch ms, and a SHA-256 hash of the host it runs on. They are optional;
+// a block without them keeps the 12 h backstop. They never appear in visible text,
+// `--json`, the page, the LAN page or any transmitted content.
 export type ProgressAuto = {
   session: string
   // Which agent writes the block (`agent=`): claude when the marker names none.
@@ -108,6 +113,11 @@ export type ProgressAuto = {
   dir: string | null
   pr: number | null
   ci: ProgressCi | null
+  // The agent process id, its start time in epoch ms, and a SHA-256 hash of the host
+  // it runs on (Claude Code only, #1092). Absent on every other agent's block.
+  agentPid?: number
+  agentStarted?: number
+  host?: string
   // `origin=run`: an agent started this session for itself (a delegate's one-shot, a helper
   // thread), not a person (#399). `parent` is the full session id or block id of the session that
   // started it, when the writer knew it. Absent on every block a person's conversation writes.
@@ -226,6 +236,12 @@ export type ProgressMirror = {
   promptQuestion?: { order: number; turnKey?: string; state: ProgressSessionState; autoAsk: string | null; tasks: ProgressMirrorTask[] } | null
   // Timestamp when a prompt replied to a waiting question in chat before the next report (#401).
   replied?: number
+  // The agent process id, its start time in epoch ms, and a SHA-256 hash of the host it
+  // runs on (Claude Code only, #1092): stamped at session start so the block's marker
+  // carries them. Absent on every other agent's mirror.
+  agentPid?: number
+  agentStarted?: number
+  host?: string
   // A person's completion rejects older (or undated) inbox turns without stopping new work.
   confirmedAt?: number
   // Claude's steps the person has answered since they were asked: task id to the stepKey of

@@ -1,6 +1,7 @@
 import type { ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressTask } from '../types'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
+import type { AgentClaim } from './session-liveness'
 import { sha256 } from './sha256'
 import { normalizeTurnOrder } from './inbox'
 import { renewQuestion } from './step-words'
@@ -111,6 +112,16 @@ export const emptyMirror = (sessionId: string, project: string, now: number, cwd
   lastAnswer: '',
   answered: {},
 })
+
+// The agent process identity a session stamps on its mirror at session start
+// (#1092): the pid, its start time and a host hash, so the board can tell a closed
+// window from a live session. Only Claude Code records one (PM Q4); another agent's
+// mirror keeps the 12 h backstop, and a mirror with no identity is left alone. A
+// resumed session is stamped again, so the new process's pid replaces the old one.
+export const withAgentIdentity = (mirror: ProgressMirror, identity: AgentClaim | null): ProgressMirror => {
+  if (identity === null || (mirror.agent || 'claude') !== 'claude') return mirror
+  return { ...mirror, agentPid: identity.pid, ...(identity.started === undefined ? {} : { agentStarted: identity.started }), host: identity.host }
+}
 
 // A short key for a step's words (FNV-1a, 32 bits, in hex): an answer is kept for the words
 // it answered, so the same step asking something new waits on the person again.

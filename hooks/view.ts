@@ -897,11 +897,15 @@ export const buildView = (
   observe: typeof observeQuestions = observeQuestions,
   staleMs: number = STALE_MS,
   counts?: ViewIndexCounts,
+  // Sessions whose agent process is gone on this machine (#1092): their rows are
+  // treated as ended, like stale ones. The set holds question scopes, as `frozen`
+  // does; the shell works it out per read and passes it in as data.
+  deadSessions: ReadonlySet<string> = new Set(),
 ): View => {
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
   // pair is no second row. What is left is what the rows, the questions and the counts read.
   const folded = foldRuns(projects)
-  const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
+  const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen, deadSessions)
   const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const records = observed?.ledger.records ?? []
@@ -1006,8 +1010,13 @@ export const buildView = (
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now, updated, staleMs)
+      // A session whose agent process is gone is ended too, without waiting 12 h
+      // (#1092). The scope is checked both ways, as `frozen` is: the dead set holds
+      // plain scopes, while a resumed session's scope may resolve to its full id.
+      const isDead = task.auto !== null && deadSessions.size > 0 && (deadSessions.has(scope) || deadSessions.has(questionScope(project.name, task.auto.agent, task.auto.session)))
+      const isGone = stale || isDead
       const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
-      const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
+      const isInactive = !isManual && (isComplete || isGone || isSilence || task.auto?.state === 'ended')
       const repliedAt = task.auto?.replied
       const isRepliedTask = repliedAt !== undefined && Number.isFinite(repliedAt) && repliedAt >= (task.auto?.updated ?? 0)
       if (isRepliedTask && !isInactive && !isFrozen && task.auto !== null && task.auto.resume !== null && repliedAt <= now) {
@@ -1191,7 +1200,7 @@ export const buildView = (
         if (!isInactive || (unresolved.length === 0 && !task.steps.some(step => step.status === 'waiting'))) continue
       }
 
-      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || stale || isSilence ? 'ended' : task.auto.state
+      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || isGone || isSilence ? 'ended' : task.auto.state
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
@@ -1212,7 +1221,7 @@ export const buildView = (
             : auto === 'working'
             ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
             : auto === 'ended'
-              ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
+              ? { status: isGone || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
               : !isBlocked && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
                 ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
                 : stepPhrase(task, s, isPrompt)
@@ -1257,13 +1266,13 @@ export const buildView = (
         // already done offer confirm (#876).
         // A silence row past the stale time is accepted by both write guards (blocks.ts),
         // so it offers what they accept instead of nothing (#898).
-        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && (!isSilence || stale))))
+        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && (!isSilence || isGone))))
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
-            : auto === 'ended' && (!isSilence || stale) && task.auto !== null
+            : auto === 'ended' && (!isSilence || isGone) && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               // A working row quiet past the Working now limit is no longer at work: the
               // person can archive it instead of waiting out the 12 h stale time (#1000).

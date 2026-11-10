@@ -82,10 +82,13 @@ import {
   noticesOf,
   resumeNote,
   stateOf,
+  withAgentIdentity,
 } from './mirror'
 import type { ListedTask } from './mirror'
 import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
 import { othersNote, sessionPushNote } from './others'
+import type { AgentClaim } from './session-liveness'
+import { hostHashOf } from './session-liveness'
 import type { ProgressProject } from '../types'
 import { boardRun } from './board-commands'
 import { peekInbox, redact, turnsFor } from './board'
@@ -2000,6 +2003,23 @@ const detectHere = async ($: EngineInterface): Promise<void> => {
   await update($, here, () => [...names].filter(name => name !== ''))
 }
 
+// The agent process identity for liveness (#1092): the plugin runs in-process, so
+// `process.pid` is Claude Code's own pid and `performance.timeOrigin` is when it
+// started. The host hash comes from the environment (COMPUTERNAME on Windows,
+// HOSTNAME elsewhere). A missing global or name leaves the session without an
+// identity, so it keeps the 12 h backstop; nothing here throws.
+const agentIdentity = async ($: EngineInterface): Promise<AgentClaim | null> => {
+  const pid = typeof process !== 'undefined' && typeof process.pid === 'number' && Number.isSafeInteger(process.pid) && process.pid > 0 ? process.pid : null
+  if (pid === null) return null
+  const platform = typeof process !== 'undefined' && typeof process.platform === 'string' ? process.platform : ''
+  const computer = await $.env.get('COMPUTERNAME').catch(() => undefined)
+  const hostnameEnv = await $.env.get('HOSTNAME').catch(() => undefined)
+  const host = hostHashOf(platform, platform === 'win32' ? computer : hostnameEnv)
+  if (host === null) return null
+  const started = typeof performance !== 'undefined' && typeof performance.timeOrigin === 'number' && Number.isFinite(performance.timeOrigin) && performance.timeOrigin > 0 ? Math.round(performance.timeOrigin) : undefined
+  return { pid, ...(started === undefined ? {} : { started }), host }
+}
+
 // The mirror outlives a reload in $.state and a restart in $.store. A mirror stored by an
 // older version gets the fields it lacks from a fresh one.
 const loadMine = async ($: EngineInterface, cwd: string): Promise<void> => {
@@ -2016,7 +2036,10 @@ const loadMine = async ($: EngineInterface, cwd: string): Promise<void> => {
   // Background processes belong to the old host, even when the conversation resumes.
   // A print-mode session (`claude -p`) is a run an agent started for itself, not a conversation a person
   // typed into (#501); its mirror stays local and writeMine writes no block.
-  await update($, mine, () => withRunMark(stored === undefined ? fresh : { ...clearBackgroundJobs({ ...fresh, ...stored }), isTurnRunning: false, cwd: stored.cwd || cwd }, !isInteractiveSession))
+  // A resumed session is stamped with this process's identity, so the old pid never
+  // outlives the process that wrote it (#1092).
+  const identity = await agentIdentity($)
+  await update($, mine, () => withAgentIdentity(withRunMark(stored === undefined ? fresh : { ...clearBackgroundJobs({ ...fresh, ...stored }), isTurnRunning: false, cwd: stored.cwd || cwd }, !isInteractiveSession), identity))
   // Reloads happen between turns: a retained approval is closure work left by the old host.
   hasApprovalStep = stored?.tasks.some(one => one.id === 'approval') === true
 }

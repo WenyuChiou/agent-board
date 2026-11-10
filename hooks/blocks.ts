@@ -100,6 +100,11 @@ const markerOf = (mirror: ProgressMirror, parent?: string): string => {
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
     mirror.replied !== undefined && Number.isFinite(mirror.replied) ? `replied=${new Date(mirror.replied).toISOString()}` : '',
+    // The liveness claim (#1092): only Claude Code records one (PM Q4), and only
+    // when the mirror carries it. It never appears in visible text.
+    (mirror.agent || 'claude') === 'claude' && mirror.agentPid !== undefined && Number.isSafeInteger(mirror.agentPid) && mirror.agentPid > 0 ? `agentpid=${mirror.agentPid}` : '',
+    (mirror.agent || 'claude') === 'claude' && mirror.agentStarted !== undefined && Number.isSafeInteger(mirror.agentStarted) && mirror.agentStarted > 0 ? `agentstarted=${mirror.agentStarted}` : '',
+    (mirror.agent || 'claude') === 'claude' && mirror.host !== undefined && /^[0-9a-f]{64}$/.test(mirror.host) ? `host=${mirror.host}` : '',
     // A session an agent started for itself (#399); a person's has no such mark.
     mirror.isRun === true ? 'origin=run' : '',
     mirror.isRun === true && parent !== undefined && RESUME.test(parent) ? `parent=${parent}` : '',

@@ -3,9 +3,10 @@ import { renderAutoBlock } from '../hooks/blocks'
 import { boardConfirmedReport, codexEvent, codexReport, putCodexBlock, questionSteps, validateCodexReport } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { clearApproval, closeApproval, markApproval, retainApproval } from '../hooks/digest'
-import { applyTaskCreate, emptyMirror } from '../hooks/mirror'
-import { parseProgress } from '../hooks/parse'
-import { emptyQuestions, observeQuestions, resolveQuestion } from '../hooks/questions'
+import { applyTaskCreate, emptyMirror, withAgentIdentity } from '../hooks/mirror'
+import { parseProgress, STALE_MS } from '../hooks/parse'
+import { emptyQuestions, observeQuestions, questionScope, resolveQuestion } from '../hooks/questions'
+import { hostHashOf } from '../hooks/session-liveness'
 import { STRINGS } from '../hooks/strings'
 import { buildView } from '../hooks/view'
 import type { ProgressMirror } from '../types'
@@ -276,4 +277,35 @@ test('identical idle question status preserves resolved identity across cache re
   expect(settled.records.filter(record => record.isUnresolved)).toHaveLength(0)
   expect(buildView(projects, [], null, NOW + 2, 0, {}, words, [], {}, settled).waiting).toHaveLength(0)
   expect(replay.askedRevision).toBe(first.askedRevision)
+})
+
+test('a waiting approval whose agent window is closed keeps its ledger record for review, and the row can be archived (#1092)', () => {
+  const task = applyTaskCreate(emptyMirror('a1b2c3d4-claude-session', 'demo', NOW), { subject: 'Real task' }, '1', NOW)
+  const waiting = markApproval(task, 'Approve the tool?')
+  const host = hostHashOf('linux', 'testhost')!
+  const claimed = withAgentIdentity(waiting, { pid: 12345, started: NOW - 1000, host })
+  const projects = projectsOf(claimed)
+  expect(projects[0]!.tasks[0]!.auto.agentPid).toBe(12345)
+  // The shell would derive this scope as dead from the claim; the ledger only sees the set.
+  // The marker carries the short session id (`session=a1b2c3d4`, `resume=` holds the full
+  // id), so the scope uses the short id, exactly as deadSessionsOf builds it.
+  // The reader is not the dead session, so `mine` is null here, as in the board script's read.
+  const scope = questionScope('demo', 'claude', 'a1b2c3d4')
+  const open = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
+  expect(open.records.filter(record => record.isUnresolved)).toHaveLength(1)
+  const retained = observeQuestions(open, projects, null, [], NOW + 1, true, 'preview', undefined, [], [], new Set(), new Set([scope])).ledger
+  const record = retained.records.find(one => one.isUnresolved)!
+  expect(record.isPresent).toBe(false)
+  expect(record.isWaiting).toBe(false)
+  expect(record.isUnresolved).toBe(true)
+  const view = buildView(projects, [], null, NOW + 1, 0, {}, words, [], {}, retained, undefined, [], new Set(), undefined, STALE_MS, undefined, new Set([scope]))
+  expect(view.waiting).toEqual([])
+  expect(view.older.map(item => item.text)).toEqual(['Approve the tool?'])
+  const row = view.stopped.find(one => one.title === 'Real task')
+  expect(row).toBeDefined()
+  expect(row!.archive).not.toBe(null)
+  // Answering the folded question keeps the record in the ledger for review.
+  const resolved = resolveQuestion(retained, record.id, NOW + 2)
+  expect(resolved.records.find(one => one.id === record.id)).toBeDefined()
+  expect(resolved.records.filter(one => one.isUnresolved)).toHaveLength(0)
 })
