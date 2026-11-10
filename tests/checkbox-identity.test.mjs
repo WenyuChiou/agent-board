@@ -346,3 +346,45 @@ test('the terminal refuses an untitled checkbox after an earlier source line dis
   const shifted = untitledSource.replace('- [ ] Check the sample\n', '')
   assert.equal(setManualStep(shifted, action.ref, 'x', now, EN), shifted)
 })
+
+// Codex Sol R2 on #1212: an identical card reworded and moved above its twin hands the twin the
+// drawn key, step line and task line; only the matching-task positions tell the two draws apart.
+const twinTasks = mark => '## Synthetic project\n' + `### Twin tasks\n- [${mark}] Inspect the map\n`.repeat(2)
+const reworkedAndMoved = mark => `## Synthetic project\n### Twin tasks\n- [${mark}] Replacement step\n### Twin tasks\n- [${mark}] Inspect the map\n`
+const drawTwinTasks = text => {
+  const view = buildView(parseProgress(text), [], null, now, 0, {}, EN)
+  const model = serveModel(view, [], EN)
+  return { items: boardItems(view, [], true), asks: model.asks.filter(ask => ask.task === 'Twin tasks'), rows: model.groups.flatMap(group => group.rows).filter(row => row.title === 'Twin tasks') }
+}
+
+for (const surface of ['page', 'terminal']) {
+  test('a ' + surface + ' question press refuses after its card is reworded and moved above an identical twin', () => {
+    const before = drawTwinTasks(twinTasks('?'))
+    const drawn = before.asks[1]
+    const state = pinned({ ...emptyBoardState, key: drawn.key }, before.items)
+    const moved = reworkedAndMoved('?')
+    const after = drawTwinTasks(moved)
+    const current = after.items.find(item => item.key === drawn.key)
+    assert.equal(current?.ask.step.line, drawn.fileLine, 'the untouched twin now holds the drawn key and source line')
+    const action = surface === 'page' ? serveAction(after.items, questionRequest(drawn), EN) : boardKey(state, 'x', after.items, EN).action
+    const result = action?.type === 'tick' ? setManualStep(moved, action.ref, 'x', now, EN) : moved
+    if (surface === 'page') assert.deepEqual(action, { type: 'refuse', note: EN.boardLineChanged })
+    else assert.equal(action, null)
+    assert.equal(result, moved, 'a refused question must not write the untouched twin')
+  })
+
+  test('a ' + surface + ' checkbox press refuses after its card is reworded and moved above an identical twin', () => {
+    const before = drawTwinTasks(twinTasks(' '))
+    const drawn = before.rows[1]
+    const state = pinned({ ...emptyBoardState, key: drawn.key }, before.items)
+    const moved = reworkedAndMoved(' ')
+    const after = drawTwinTasks(moved)
+    const current = after.items.find(item => item.key === drawn.key)
+    assert.equal(current?.row.next?.line, drawn.steps[0].fileLine, 'the untouched twin now holds the drawn key and source line')
+    const action = surface === 'page' ? serveAction(after.items, request(drawn, 0), EN) : boardKey(state, 'x', after.items, EN).action
+    const result = action?.type === 'tick' ? setManualStep(moved, action.ref, 'x', now, EN) : moved
+    if (surface === 'page') assert.deepEqual(action, { type: 'refuse', note: EN.boardLineChanged })
+    else assert.equal(action, null)
+    assert.equal(result, moved, 'a refused checkbox must not write the untouched twin')
+  })
+}

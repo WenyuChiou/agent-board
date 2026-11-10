@@ -716,10 +716,11 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLine
       : item.type === 'row'
         ? [session, item.row.target?.resume ?? '', item.row.project, item.row.title, item.row.next?.step ?? '', item.row.question ?? '', item.row.resume ?? '']
         : [item.turn.agent, item.turn.project, item.turn.text]
-  // Card actions survive unrelated line moves; a tick's absolute line must still name the drawn step.
+  // Card actions survive unrelated line moves; a tick's absolute line must still name the drawn step,
+// and the positions of every task it could be mistaken for must be the ones drawn.
   if (item.type === 'row') parts.push(item.row.stepTask?.expected ?? item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => step)))
-  if (item.type === 'row' && isLineTick) parts.push(JSON.stringify([item.row.next?.line ?? null, item.row.steps.map(step => step.line)]))
-  if (item.type === 'ask' && isLineTick) parts.push(JSON.stringify([item.ask.step?.line ?? null, item.ask.step?.guard?.steps ?? null, item.ask.step?.guard?.task ?? null]))
+  if (item.type === 'row' && isLineTick) parts.push(JSON.stringify([item.row.next?.line ?? null, item.row.steps.map(step => step.line), item.row.next?.guard?.lines ?? null]))
+  if (item.type === 'ask' && isLineTick) parts.push(JSON.stringify([item.ask.step?.line ?? null, item.ask.step?.guard?.steps ?? null, item.ask.step?.guard?.task ?? null, item.ask.step?.guard?.lines ?? null]))
   if (item.type !== 'turn' && session === '') parts.push(String(twinsOf(item, items)))
 
   return sha256(parts.join('\u0000')).slice(0, 12)
@@ -815,7 +816,10 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   }
   if (item.type === 'row') {
     const { row } = item
-    if (key === 'x' && row.next !== null) return { state, action: { type: 'tick', ref: guardStep(row.next, items) } }
+    if (key === 'x' && row.next !== null) {
+      if (state.seen !== null && state.seenTicks?.[item.key] !== fingerprint(item, items, true)) return changed
+      return { state, action: { type: 'tick', ref: guardStep(row.next, items) } }
+    }
     if (key === 'a' && row.archive !== null) return { state, action: { type: 'archive', ref: row.archive, title: row.title } }
     if (key === 'a' && (row.auto === 'working' || row.auto === 'waiting')) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
     if (key === 'd' && row.confirm != null) return { state, action: { type: 'done', ref: row.confirm, title: row.title } }
