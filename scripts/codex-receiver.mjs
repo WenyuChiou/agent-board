@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
-import { boardClient, deliveryPrompt } from './message-client.mjs'
+import { ackLine, boardClient, deliveryPrompt } from './message-client.mjs'
 import { openWebSocketStdio } from './ws-stdio.mjs'
 
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
@@ -15,7 +15,6 @@ export const messagingReceiver = {
 }
 
 const THREAD = /^[a-f0-9-]{36}$/i
-const ACK_MAX = 200
 // A turn that never ends cannot hold a message for ever; the board's own limit on an unanswered message is 30 minutes.
 const ACK_LIMIT_MS = 30 * 60_000
 // A steered turn that says nothing for this long is uncertain (L2: a steer once stalled a turn for over 3 minutes).
@@ -118,11 +117,6 @@ const loadedThreads = async daemon => {
   return loaded
 }
 
-const ackLine = (text, nonce) => {
-  const line = String(text ?? '').split(/\r?\n/).find(one => one === 'ACK ' + nonce || one.startsWith('ACK ' + nonce + ' '))
-  return line === undefined ? null : line.length > ACK_MAX ? 'ACK ' + nonce : line
-}
-
 const input = prompt => [{ type: 'text', text: prompt, text_elements: [] }]
 
 // Takes a board message for each Codex thread that the shared daemon has loaded and the board knows, and
@@ -149,7 +143,7 @@ export const startCodexReceiver = ({
       if (state.turn === p.turn.id) state.turn = null
       if (state.pending) { state.pending.ended.set(p.turn.id, p.turn.status ?? 'completed'); one.settle() }
     } else if (value.method === 'item/completed' && p.item?.type === 'agentMessage' && state.pending) {
-      const line = ackLine(p.item.text, state.pending.nonce)
+      const line = ackLine(String(p.item.text ?? ''), state.pending.nonce)
       if (line !== null) { state.pending.acked.set(p.turnId, line); one.settle() }
     }
   }

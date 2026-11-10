@@ -4243,6 +4243,8 @@ test('the board runs the Codex receiver for a Codex session it knows and ends it
     delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG
     await board?.close().catch(() => undefined)
     await removeKilledPageFolder(dir)
+  }
+})
 
 test('1139 both ACK parsers accept the same complete lines', async () => {
   const { ackLine: clientAck } = await import('../scripts/message-client.mjs')
