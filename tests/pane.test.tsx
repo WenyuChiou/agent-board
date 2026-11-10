@@ -2184,6 +2184,59 @@ for (const [mark, keys, what] of [[' ', ['Demo::Twin steps', 'Demo::Twin steps::
   })
 }
 
+// Round 2 of #1251: a task with no `###` heading carries the same read-back check, and another
+// writer finishing a different step of the same task does not undo a tick that is still there.
+const UNHEADED_1228 = (mark: string): string => `# Progress\n\n## Earlier\n### Earlier card\n- [ ] Check the sample\n\n## Demo\n- [${mark}] Inspect the map\n- [${mark}] Inspect the map\n`
+for (const [mark, what] of [[' ', 'tick'], ['?', 'question Done']] as const) {
+  test(`a pane ${what} on a task with no heading is not kept when its twin step takes the done date (#1228)`, async ($, on) => {
+    const world: World = { files: new Map([[FILE, UNHEADED_1228(mark)]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['waiting', 'others'] }, written: [] }
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    const task = `Demo::${EN.unnamed}`
+    const keys = what === 'tick' ? [task, `${task}::tick`] : [`${task}::0::done`]
+    for (const key of keys.slice(0, -1)) await ui.press({ key })
+    world.written = []
+    let swapped = ''
+    world.afterWrite = () => {
+      world.afterWrite = undefined
+      const done = (world.files.get(FILE) ?? '').split('\n')[7] ?? ''
+      swapped = UNHEADED_1228(mark).replace('- [ ] Check the sample\n', '').replace(`- [${mark}] Inspect the map\n- [${mark}] Inspect the map\n`, `- [${mark}] Inspect the map\n${done}\n`)
+      return swapped
+    }
+    await ui.press({ key: keys[keys.length - 1]! })
+    expect(swapped.split('\n')[7]).toMatch(/^- \[x\] Inspect the map/)
+    expect(world.files.get(FILE)).toBe(swapped)
+    expect(world.written.some(path => path.includes('-journal-'))).toBe(false)
+    expect(await ui.find({ type: 'Text', text: EN.boardTickGone })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`a pane ${what} is still reported when another writer finishes a different step of its task (#1228)`, async ($, on) => {
+    const text = `# Progress\n\n## Demo\n### Checklist\n- [${mark}] First step\n- [ ] Last step\n`
+    const world: World = { files: new Map([[FILE, text]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['waiting', 'others'] }, written: [] }
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    const keys = what === 'tick' ? ['Demo::Checklist', 'Demo::Checklist::tick'] : ['Demo::Checklist::0::done']
+    for (const key of keys.slice(0, -1)) await ui.press({ key })
+    world.written = []
+    world.afterWrite = () => {
+      world.afterWrite = undefined
+      return (world.files.get(FILE) ?? '').replace('- [ ] Last step', '- [x] Last step')
+    }
+    await ui.press({ key: keys[keys.length - 1]! })
+    const after = world.files.get(FILE) ?? ''
+    expect(after).toMatch(/^- \[x\] First step/m)
+    expect(after).toContain('- [x] Last step')
+    expect(world.written.filter(path => path === FILE)).toHaveLength(1)
+    const journal = [...world.files].filter(([path]) => path.includes('-journal-')).map(([, lines]) => lines).join('\n')
+    expect(journal.split('\n').filter(line => line.includes('First step'))).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: EN.boardTicked('First step') })).toBeDefined()
+    await ui.unmount()
+  })
+}
+
 test('a pane tick whose write is undone and whose twin then takes its line is reported as not kept (#1228)', async ($, on) => {
   const world = twinWorld1228(TWINS_1228(' '))
   engineBeneath(on, world)

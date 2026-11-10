@@ -3921,10 +3921,11 @@ const handOverPrompt = (row: TaskRow, s: Strings): string =>
 
 // A press on 完成: the step is ticked in the file, by the person's own hand, and journaled
 // like a step Claude finished.
-// The tick is kept when the task that took it reads back with it, wherever another writer moved
-// its lines (tickMark). Only a read-back that finds it counts: a write every read-back finds
-// undone, or a try that then finds nothing to tick (the step moved, or its twin took its line),
-// is not reported as made. The pane's words name an unnamed project, as its draw did.
+// The tick is kept when the step that took it reads back with it, wherever another writer moved
+// its lines or changed its other steps (tickMark). Only a read-back that finds it counts: a
+// write every read-back finds undone, or a try that then finds nothing to tick (the step moved,
+// or its twin took its line), is not reported as made. The pane's words name an unnamed
+// project, as its draw did.
 const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
   const s = await wordsOf($)
   let ticked: { mark: TickMark | null; at: number; line: string } | null = null
@@ -3943,7 +3944,7 @@ const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
       const was = before.split(/\r?\n/)
       const lines = after.split(/\r?\n/)
       const at = lines.findIndex((line, index) => line !== was[index])
-      ticked = { mark: tickMark(after, ref.project, ref.title, at, s), at, line: lines[at] ?? '' }
+      ticked = { mark: tickMark(after, ref.project, at, s), at, line: lines[at] ?? '' }
       isKept = false
       return after
     },
