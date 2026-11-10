@@ -687,6 +687,13 @@ test('approval gate: an approval needs the full head sha, and a lane\'s own fres
     { body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark`, created_at: '2026-11-10T09:00:00Z' },
   ])
   assert.equal(reviewProblems({ ...codexPr, prComments: after }).length, 0)
+  // A later GitHub review that requests changes holds the merge even when its text quotes a short approval.
+  const quoted = byTime([
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T08:00:00Z' },
+    { state: 'CHANGES_REQUESTED', commit_id: head, user: { login: 'muse-reviewer' }, body: `Earlier: Review: APPROVE ${head.slice(0, 7)}
+Review: APPROVE ${head.slice(0, 7)} by Muse Spark`, submitted_at: '2026-11-10T09:00:00Z' },
+  ])
+  assert.ok(reviewProblems({ ...codexPr, prComments: quoted }).some(p => p.message.includes('requested changes')))
   assert.equal(reviewProblems({ ...codexPr, prComments: [shortComment, { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' } }] }).length, 0)
 
   // A request for changes still holds the merge whatever sha length it names.

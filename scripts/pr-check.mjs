@@ -593,6 +593,11 @@ export const binaryImages = paths => {
 
 export const reviewOf = item => {
   if (!item) return null
+  // A GitHub review that requests changes holds the merge whatever its text quotes.
+  if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
+    const reviewer = item.user?.login ?? null
+    return { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
+  }
   const body = typeof item === 'string' ? item : item.body ?? ''
   const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+)(?:,[ \t]*([^\r\n,']+)'s reviewer\b)?)?/mi)
   if (match) {
