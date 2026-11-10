@@ -38,7 +38,7 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - A report reply is both step counts or OK, also when a count is missing (#1238).
 
-- Take a new port on every start, so no page origin outlives its server (#1234).
+- Take a new port on every start, so no page origin outlives its server (#1234). This undoes the fixed port of #1177, which was never released.
 
 - Preview and remove all touched agents in one run (#1236).
 
