@@ -8,13 +8,13 @@ const loader = registerHooks({
     return nextResolve(specifier, context)
   },
 })
-let boardItems, boardKey, emptyBoardState, pinned, buildView, taskFingerprint, parseProgress, serveAction, serveModel, setManualStep, EN, ZH_TW, ZH_CN
+let boardItems, boardKey, emptyBoardState, pinned, buildView, taskFingerprint, parseProgress, serveAction, serveModel, setManualStep, confirmKey, confirmMatches, EN, ZH_TW, ZH_CN
 try {
   ;({ boardItems, boardKey, emptyBoardState, pinned } = await import('../hooks/board.ts'))
   ;({ buildView, taskFingerprint } = await import('../hooks/view.ts'))
   ;({ parseProgress } = await import('../hooks/parse.ts'))
   ;({ serveAction, serveModel } = await import('../hooks/serve.ts'))
-  ;({ setManualStep } = await import('../hooks/blocks.ts'))
+  ;({ setManualStep, confirmKey, confirmMatches } = await import('../hooks/blocks.ts'))
   ;({ EN } = await import('../hooks/strings-en.ts'))
   ;({ ZH_TW } = await import('../hooks/i18n.ts'))
   ;({ ZH_CN } = await import('../hooks/strings-zh-cn.ts'))
@@ -388,3 +388,68 @@ for (const surface of ['page', 'terminal']) {
     assert.equal(result, moved, 'a refused checkbox must not write the untouched twin')
   })
 }
+
+// The board writes a hidden done date onto a finished step after the draw (done-stamp.ts).
+// That date is not part of the task's identity, so a guarded step drawn before it still ticks at
+// write time.
+test('a guarded step drawn before the board dated an earlier done step still ticks its own twin at write time', () => {
+  const text = '## Synthetic project\n### Twin steps\n- [x] Earlier step\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+  const dated = text.replace('- [x] Earlier step', '- [x] Earlier step <!-- done 2026-11-08 -->')
+  const drawn = viewFor(text).items.find(item => item.type === 'row' && item.row.title === 'Twin steps').row.next
+  assert.ok(drawn.guard, 'the drawn step carries its source guard')
+  const lines = setManualStep(dated, drawn, 'x', now, EN).split('\n')
+  assert.match(lines[3], /^- \[x\] Inspect the map/)
+  assert.equal(lines[4], '- [ ] Inspect the map')
+})
+
+for (const surface of ['page', 'terminal']) {
+  test('a ' + surface + ' checkbox drawn before the board dated an earlier done step still ticks its own twin', () => {
+    const text = '## Synthetic project\n### Twin steps\n- [x] Earlier step\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+    const dated = text.replace('- [x] Earlier step', '- [x] Earlier step <!-- done 2026-11-08 -->')
+    const before = viewFor(text)
+    const index = before.row.steps.findIndex(step => step.text === 'Inspect the map')
+    const state = pinned({ ...emptyBoardState, key: before.row.key }, before.items)
+    const after = viewFor(dated)
+    const action = surface === 'page' ? serveAction(after.items, request(before.row, index), EN) : boardKey(state, 'x', after.items, EN).action
+    assert.equal(action?.type, 'tick')
+    const lines = setManualStep(dated, action.ref, 'x', now, EN).split('\n')
+    assert.match(lines[3], /^- \[x\] Inspect the map/)
+    assert.equal(lines[4], '- [ ] Inspect the map')
+  })
+}
+
+// Two same-title cards may differ only in an earlier step's done date. Then that date is what
+// tells them apart, so it stays in their identity: a stale press or read-back after a swap refuses.
+const datedTwins = (first, second) => `## Synthetic project\n### Checklist\n- [x] Earlier step <!-- done ${first} -->\n- [ ] Inspect the map\n### Checklist\n- [x] Earlier step <!-- done ${second} -->\n- [ ] Inspect the map\n`
+const drawChecklists = text => {
+  const view = buildView(parseProgress(text), [], null, now, 0, {}, EN)
+  return { items: boardItems(view, [], true), rows: serveModel(view, [], EN).groups.flatMap(group => group.rows).filter(row => row.title === 'Checklist') }
+}
+
+for (const surface of ['page', 'terminal']) {
+  test('a ' + surface + ' checkbox press refuses after two same-title cards that differ only in a done date swap', () => {
+    const swapped = datedTwins('2026-11-08', '2026-11-01')
+    const before = drawChecklists(datedTwins('2026-11-01', '2026-11-08'))
+    const drawn = before.rows[0]
+    assert.ok(drawn, 'the first card is drawn')
+    const state = pinned({ ...emptyBoardState, key: drawn.key }, before.items)
+    const after = drawChecklists(swapped)
+    const index = drawn.steps.findIndex(step => step.text === 'Inspect the map')
+    const action = surface === 'page' ? serveAction(after.items, request(drawn, index), EN) : boardKey(state, 'x', after.items, EN).action
+    const result = action?.type === 'tick' ? setManualStep(swapped, action.ref, 'x', now, EN) : swapped
+    if (surface === 'page') assert.deepEqual(action, { type: 'refuse', note: EN.boardLineChanged })
+    else assert.equal(action, null)
+    assert.equal(result, swapped, 'a refused checkbox must not tick the other card')
+  })
+}
+
+test('a whole-task confirmation does not read back a same-title twin that differs only in a done date', () => {
+  const done = date => `### Checklist\n- [x] Earlier step <!-- done ${date} -->\n- [x] Inspect the map <!-- done 2026-11-09 -->\n`
+  const open = date => `### Checklist\n- [x] Earlier step <!-- done ${date} -->\n- [ ] Inspect the map\n`
+  const ours = '## Synthetic project\n' + done('2026-11-01') + open('2026-11-08')
+  const task = parseProgress(ours)[0].tasks[0]
+  const ref = { project: 'Synthetic project', title: 'Checklist', line: task.line, session: null, expected: confirmKey('Synthetic project', task, 2) }
+  assert.equal(confirmMatches(ours, ref, EN), true, 'the confirmed card reads back')
+  const other = '## Synthetic project\n' + done('2026-11-08') + open('2026-11-01')
+  assert.equal(confirmMatches(other, ref, EN), false, 'the other card, finished in its place, is not the confirmed one')
+})
