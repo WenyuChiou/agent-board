@@ -67,7 +67,7 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
     }))
     if (isLast || removesNeeded) throw Object.assign(new Error('BOARD_RUNNING'), { note: refusal(agent) })
   }
-  let cached: { at: number; installed: Set<string>; connected: Set<string>; found: Set<string>; hasClaude: boolean; isUntrusted: boolean } | null = null
+  let cached: { at: number; installed: Set<string>; broken: Set<string>; connected: Set<string>; found: Set<string>; hasClaude: boolean; isUntrusted: boolean } | null = null
   let reading: Promise<void> | null = null
   let isBusy = false
   let generation = 0
@@ -77,14 +77,22 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
     const observed = generation
     reading = (async () => {
       const installed = new Set<string>()
+      // A record that cannot be read, or is damaged, marks only its own row: the other agents still
+      // show. The row counts as set up, since setup itself refuses to touch that agent until the
+      // record is moved away, and its note says so.
+      const broken = new Set<string>()
       for (const agent of setupAgents) if (existsSync(record(agent))) {
-        const manifest = JSON.parse(readFileSync(record(agent), 'utf8')) as { files?: unknown }
-        if (manifest.files === null || typeof manifest.files !== 'object' || Array.isArray(manifest.files)) throw new Error('INVALID_INSTALL_RECORD')
         installed.add(agent)
+        try {
+          const manifest = JSON.parse(readFileSync(record(agent), 'utf8')) as { files?: unknown }
+          if (manifest.files === null || typeof manifest.files !== 'object' || Array.isArray(manifest.files)) throw new Error('INVALID_INSTALL_RECORD')
+        } catch { broken.add(agent) }
       }
-      const connector = new ConnectTransaction(home, undefined).state
+      // A damaged connect record must not hide the agents either. A press still reads it and reports it.
+      let connector: ConnectTransaction['state'] | undefined
+      try { connector = new ConnectTransaction(home, undefined).state } catch {}
       const connected = new Set<string>()
-      if (!connector.disabled) for (const agent of connector.setup?.agents ?? []) if (agent.hook === 'configured') connected.add(agent.agent)
+      if (connector !== undefined && !connector.disabled) for (const agent of connector.setup?.agents ?? []) if (agent.hook === 'configured') connected.add(agent.agent)
       const found = new Set<string>(discoverSetupAgents(home, data, {
         codex: flag('--codex-dir') || process.env.CODEX_HOME,
         grok: flag('--grok-dir') || process.env.GROK_HOME,
@@ -94,13 +102,13 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
         deepseek: flag('--deepseek-dir') || process.env.DSH_HOME,
       }, !o.args.includes('--home')))
       const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
-      const hasClaude = hasBoardPlugin(claudeDirectory) && !connector.disabled
+      const hasClaude = hasBoardPlugin(claudeDirectory) && connector?.disabled !== true
       let isUntrusted = false
       if (installed.has('codex') || connected.has('codex')) {
         // An unavailable Codex check must not hide the other agents.
         try { isUntrusted = (await execute('codex', '--codex-doctor')).hooksTrusted === false } catch { isUntrusted = false }
       }
-      if (observed === generation) cached = { at: Date.now(), installed, connected, found, hasClaude, isUntrusted }
+      if (observed === generation) cached = { at: Date.now(), installed, broken, connected, found, hasClaude, isUntrusted }
     })().finally(() => { reading = null })
     return reading
   }
@@ -115,7 +123,8 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
       const isSetUp = agent === 'claude' || setUp.has(agent)
       const state = settingsAgentState(isSetUp, onBoard.has(agent), agent === 'codex' && snapshot.isUntrusted, snapshot.found.has(agent), o.words())
       const name = o.words().agentNames[agent] ?? agent
-      const note = snapshot.connected.has(agent) && !snapshot.installed.has(agent) ? o.words().settingsAgentConnector(name)
+      const note = snapshot.broken.has(agent) ? setupFailure(Object.assign(new Error('INVALID_INSTALL_RECORD'), { record: `install-${agent}.json` }), agent, o.words()).message
+        : snapshot.connected.has(agent) && !snapshot.installed.has(agent) ? o.words().settingsAgentConnector(name)
         : isSetUp && (agent === 'claude' || setUp.size === 1) ? refusal(agent) : undefined
       return { agent, name, ...state, ...(note === undefined ? {} : { note }) }
     })

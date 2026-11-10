@@ -2198,6 +2198,13 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   // would resolve differently in the child too.
   rest.push('--progress-file', path)
   if (flag('--messages-dir') !== undefined) rest.push('--messages-dir', messagesDirectory())
+  // Settings sets up and removes agents in the home, data folder and host folders this command was
+  // given, so the child gets them too, resolved here for the same reason. A bare program name for
+  // --codex-bin stays a name, to be looked up on PATH.
+  for (const name of ['--home', '--data-dir', '--codex-dir', '--grok-dir', '--hermes-dir', '--opencode-dir', '--openclaw-dir', '--deepseek-dir', '--codex-bin']) {
+    const value = flag(name)
+    if (value !== undefined) rest.push(name, name === '--codex-bin' && !/[\\/]/.test(value) ? value : resolve(value))
+  }
   // On Windows the server child is told which folders were just checked, so it does not check them again.
   const handoff = runtimeFolderHandoff()
   // The default message folder is checked here, so its whoami and icacls starts are not among

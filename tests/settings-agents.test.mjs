@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn, spawnSync } from 'node:child_process'
+import { execFile, spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { registerHooks } from 'node:module'
@@ -200,6 +200,50 @@ test('Settings keeps every agent when the Codex doctor itself throws', { timeout
     assert.deepEqual(result.json().rows.map(row => row.agent), setupAgents)
     assert.equal(result.json().rows.find(row => row.agent === 'codex').state, EN.settingsAgentStart)
   } finally { await board.close() }
+})
+
+test('Settings keeps every agent row when an install record or the connect record cannot be read', { timeout: 25_000 }, async () => {
+  const f = fixture()
+  f.setup('--agent', 'gemini', '--apply')
+  writeFileSync(join(f.data, 'install-cursor.json'), '{')
+  writeFileSync(join(f.data, 'install-opencode.json'), JSON.stringify({ files: [] }))
+  // A folder where the record should be exists but cannot be read as a file.
+  mkdirSync(join(f.data, 'install-grok.json'))
+  writeFileSync(join(f.data, 'legacy-connect.json'), 'not json')
+  const board = await f.start()
+  try {
+    const result = await board.call('GET', '/api/agents')
+    assert.equal(result.status, 200, result.text)
+    const rows = result.json().rows
+    assert.deepEqual(rows.map(row => row.agent), setupAgents)
+    for (const agent of ['cursor', 'opencode', 'grok']) assert.equal(rows.find(row => row.agent === agent).note, EN.setupErrorRecord(`install-${agent}.json`), agent)
+    assert.equal(rows.find(row => row.agent === 'gemini').note, undefined)
+  } finally { await board.close() }
+})
+
+test('Settings sets up an agent in the home and data folder a normal --serve start was given', { timeout: 40_000 }, async () => {
+  const f = fixture()
+  const other = join(f.root, 'other home')
+  const otherData = join(other, '.agent-board')
+  const otherProgress = join(otherData, 'progress.md')
+  mkdirSync(join(other, '.cursor'), { recursive: true })
+  mkdirSync(otherData)
+  writeFileSync(otherProgress, '# Progress\n\n## Synthetic project\n')
+  const out = await new Promise((done, fail) => execFile(process.execPath, [f.script, '--serve', '--no-open', '--home', other, '--data-dir', otherData, '--progress-file', otherProgress, '--lang', 'en'], { env: f.env, encoding: 'utf8', timeout: 20_000, windowsHide: true }, (error, stdout) => (error ? fail(error) : done(stdout))))
+  const address = out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
+  assert.ok(address, out)
+  const url = new URL(address)
+  try {
+    const added = await transport(url, 'POST', '/api/agents/setup', { agent: 'cursor' })
+    assert.equal(added.status, 200, added.text)
+    assert.ok(existsSync(join(otherData, 'install-cursor.json')), 'setup keeps its record in the data folder the start was given')
+    assert.ok(!existsSync(join(f.data, 'install-cursor.json')), 'nothing is set up in the account home')
+    assert.ok(!existsSync(join(f.home, '.cursor')), 'nothing is set up in the account home')
+  } finally {
+    await transport(url, 'POST', '/api/close', {}).catch(() => undefined)
+    // The detached page exits once closed; wait until it no longer answers, on Windows too.
+    for (let tries = 0; tries < 50 && await transport(url, 'GET', '/api/agents').then(() => true, () => false); tries++) await new Promise(done => setTimeout(done, 100))
+  }
 })
 
 test('Settings directs connector-managed agent removal back to Claude Code', { timeout: 25_000 }, async () => {
