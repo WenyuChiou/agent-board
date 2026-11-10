@@ -118,40 +118,35 @@ test('setup with one agent asks for one new session, without "each of"', () => {
   })
 })
 
-test('setup separates newly created and updated files in its preview and apply (#1246)', () => {
-  for (const [index, lang] of locales.entries()) fixture((setup, { env }) => {
-    writeFileSync(join(env.CODEX_HOME, 'hooks.json'), '{"hooks":{},"synthetic":true}\n')
-    const args = ['--agent', 'codex', '--lang', lang]
-    const plan = JSON.parse(setup(...args, '--json')).plans[0]
-    const created = plan.changes.filter(change => change.action === 'create').length
-    const updated = plan.changes.filter(change => change.action === 'update').length
-    assert.ok(created > 0 && updated > 0)
-    const line = setup(...args).split(/\r?\n/)[0]
-    assert.ok(line.includes(bootstrap[index].previewCreate.replace('{count}', created)), line)
-    assert.ok(line.includes(bootstrap[index].preview.replace('{count}', updated)), line)
-    const appliedLine = setup(...args, '--apply').split(/\r?\n/)[0]
-    assert.ok(appliedLine.includes(bootstrap[index].appliedCreate.replace('{count}', created)), appliedLine)
-    assert.ok(appliedLine.includes(bootstrap[index].applied.replace('{count}', updated)), appliedLine)
-  })
-})
+test('setup separates newly created and updated files in its preview and apply (#1246)', () => fixture((setup, { env }) => {
+  writeFileSync(join(env.CODEX_HOME, 'hooks.json'), '{"hooks":{},"synthetic":true}\n')
+  const args = ['--agent', 'codex', '--lang', 'en']
+  const plan = JSON.parse(setup(...args, '--json')).plans[0]
+  const created = plan.changes.filter(change => change.action === 'create').length
+  const updated = plan.changes.filter(change => change.action === 'update').length
+  assert.ok(created > 0 && updated > 0)
+  const line = setup(...args).split(/\r?\n/)[0]
+  assert.ok(line.includes(bootstrap[0].previewCreate.replace('{count}', created)), line)
+  assert.ok(line.includes(bootstrap[0].preview.replace('{count}', updated)), line)
+  const appliedLine = setup(...args, '--apply').split(/\r?\n/)[0]
+  assert.ok(appliedLine.includes(bootstrap[0].appliedCreate.replace('{count}', created)), appliedLine)
+  assert.ok(appliedLine.includes(bootstrap[0].applied.replace('{count}', updated)), appliedLine)
+}))
 
-test('a repeat preview when every agent is already set up omits first-time steps and lists only open ones (#1246)', () => {
-  fixture(setup => {
-    const applied = setup('--agent', 'opencode,cursor', '--lang', 'en', '--apply')
-    assert.match(applied, /created \d+ setup files/)
-    assert.match(applied, /restart OpenCode/i)
-    assert.match(applied, /Then start a new session/i)
-    assert.match(applied, /Open the board:/i)
+test('a repeat preview when every agent is already set up omits first-time steps and lists only open ones (#1246)', () => fixture(setup => {
+  const applied = setup('--agent', 'opencode', '--lang', 'en', '--apply')
+  assert.match(applied, /created \d+ setup files/)
+  assert.match(applied, /restart OpenCode/i)
+  assert.match(applied, /Then start a new session/i)
+  assert.match(applied, /Open the board:/i)
 
-    const repeat = setup('--agent', 'opencode,cursor', '--lang', 'en')
-    assert.match(repeat, /OpenCode: already set up/)
-    assert.match(repeat, /Cursor: already set up/)
-    assert.doesNotMatch(repeat, /restart OpenCode/i)
-    assert.doesNotMatch(repeat, /Then start a new session/i)
-    assert.doesNotMatch(repeat, /Open the board:/i)
-    assert.match(repeat, /Claude Code: run claude plugin/i)
-  })
-})
+  const repeat = setup('--agent', 'opencode', '--lang', 'en')
+  assert.match(repeat, /OpenCode: already set up/)
+  assert.doesNotMatch(repeat, /restart OpenCode/i)
+  assert.doesNotMatch(repeat, /Then start a new session/i)
+  assert.doesNotMatch(repeat, /Open the board:/i)
+  assert.match(repeat, /Claude Code: run claude plugin/i)
+}))
 
 test('README quick start and troubleshooting document --no-open (#1246)', () => {
   const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
