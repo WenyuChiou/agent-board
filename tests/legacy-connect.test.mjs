@@ -590,10 +590,11 @@ test("a Hermes config saved with wrapped lines still counts as another data fold
   assert.equal(output.result.done.length, 0)
 }))
 
+// Keep the legacy plain-scalar fixture tied to the reporter actually installed on this OS.
 const plainHermes = root => `model: anthropic/claude-sonnet
 hooks:
   post_llm_call:
-  - command: sh '${root.replaceAll('\\', '/')}/progress-report.sh' hermes turn
+  - command: ${process.platform === 'win32' ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${join(root, 'progress-report.ps1')}" hermes turn` : `sh '${root.replaceAll('\\', '/')}/progress-report.sh' hermes turn`}
 `
 
 test("a Hermes config re-saved in plain style still counts as another data folder's", () => fixture(async f => {
@@ -742,6 +743,32 @@ test('a YAML command with combined apostrophe quoting or non-JSON escapes keeps 
     assert.deepEqual(output.result.done, [])
   })
 })
+
+for (const mode of ['connect', 'auto', 'remove']) test(`Hermes legacy ${mode} preserves foreign exact-basename hooks`, () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const original = 'model: synthetic\nhooks:\n  post_tool_call:\n    - {command: "node ./tools/progress-hook.mjs --hook-version 1 --hook-event post_tool_call --plan-event --agent hermes --progress-file ./synthetic-progress.md", matcher: external, timeout: 5}\n  post_llm_call:\n    - {command: "sh ./tools/progress-report.sh hermes turn", matcher: external, timeout: 5}\n  on_session_start:\n    - {command: "node ./tools/keep-this.mjs", timeout: 5}\n'
+  writeFileSync(config, original)
+  f.run(f.request(mode))
+  const after = readFileSync(config, 'utf8')
+  for (const line of original.split('\n').filter(line => line.includes('command:'))) assert.ok(after.includes(line), `${mode} removed a foreign event/command`)
+  if (mode === 'remove') assert.equal(after, original, 'No prior install means there is no managed hook to remove')
+}))
+
+test('Hermes legacy removal refuses ambiguous copies of its managed plan hook', () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  f.run(f.request('connect'))
+  const installed = readFileSync(config, 'utf8')
+  const item = installed.match(/^    - \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+), matcher: todo\}$/m)
+  assert.ok(item)
+  const ambiguous = installed.replace(item[0], `${item[0]}\n${item[0]}`)
+  writeFileSync(config, ambiguous)
+  const output = f.run(f.request('remove'))
+  assert.equal(readFileSync(config, 'utf8'), ambiguous)
+  assert.ok(output.result.problems.some(one => one.message === 'connectRemoveFailed'))
+  assert.ok(existsSync(join(dirname(f.progress), 'progress-hook.mjs')), 'Refused removal retains the worker still referenced by the config')
+}))
 
 test('a Hermes plugin connection reports todo plans and removes only its own hooks', () => fixture(async f => {
   mkdirSync(join(f.home, '.hermes'))

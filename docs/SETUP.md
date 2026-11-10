@@ -257,8 +257,9 @@ answered question closes; it prints nothing, because Hermes reads that hook's ou
 model), `post_llm_call` (its `extra.assistant_response` is the reply, so a closing question becomes a card)
 and `on_session_end` (which Hermes fires after every turn, so it only marks the session idle), and one
 `post_tool_call` entry with `matcher: todo`, which copies the whole list from the `todo` tool's result into
-the block's steps. Entries are found again by the installed worker's name; other keys and
-hooks are kept as they are. A `hooks:` written in flow style, or a root that is not a mapping, is a
+the block's steps. Entries are matched by event and complete decoded command; the plugin limits
+their paths to its selected or previously recorded data folder. Other keys and hooks are kept
+as they are. A `hooks:` written in flow style, or a root that is not a mapping, is a
 conflict and the file is left untouched. Each command is double-quoted for Hermes's `shlex` split
 (no shell), with forward slashes on Windows. Setup never sets `hooks_auto_accept` or passes
 `--accept-hooks`: Hermes asks once at a terminal, and a chat gateway cannot ask, so for that

@@ -101,7 +101,6 @@ export const reportCommand = (script: string, agent: string, event: 'prompt' | '
 // A hook command this plugin wrote: it runs the reporter script by its path, so a person's
 // own `my-progress-report.sh` is not taken for ours.
 const OURS = /(?:^|[\\/'"\s])progress-report\.(?:sh|ps1)(?:\\?['"])?(?:\s|$)/
-const HERMES_OURS = new RegExp(`${OURS.source}|[\\\\/]progress-hook\\.mjs[\\s\\S]*--hook-version[\\s\\S]*--hook-event[\\s\\S]*post_tool_call[\\s\\S]*--plan-event[\\s\\S]*--agent[\\s\\S]*hermes[\\s\\S]*--progress-file`)
 
 // Whether a config already runs our reporter, whatever else taking our hooks out would tidy.
 export const hasOurHook = (text: string): boolean => OURS.test(text)
@@ -226,7 +225,7 @@ export const withoutSection = (text: string): string => {
 // installed (its folder under the home directory); `edit` turns the file's text into the
 // new text, or null when the file cannot be read as JSON and is left alone.
 // `node` and `progress` build Antigravity's commands; only a connect that writes them passes them.
-export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; opencodeHome?: string; board?: string; node?: string; antigravityNode?: string; progress?: string; s?: Strings }
+export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; opencodeHome?: string; board?: string; node?: string; antigravityNode?: string; progress?: string; previousProgress?: string; s?: Strings }
 
 export type AgentHook = {
   agent: string
@@ -338,8 +337,6 @@ const hermesItems = (lines: readonly string[], owns: RegExp = OURS): Array<[numb
 
   return items
 }
-
-export const hasOurHermesHook = (text: string): boolean => hermesItems(text.split('\n'), HERMES_OURS).length > 0
 
 const stripHermesHooks = (text: string, isKeepingTop: boolean, owns: RegExp = OURS): string => {
   const lines = text.split('\n')
@@ -504,7 +501,7 @@ type HermesSetupEdit = { text: string; hasOwned: boolean }
 
 // Only the top-level hooks map and the recorded event/command pair can identify a setup entry.
 // Ambiguous copies are left alone rather than claiming both.
-export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string>, isRemoving: boolean): HermesSetupEdit | null => {
+export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string | readonly string[]>, isRemoving: boolean): HermesSetupEdit | null => {
   const lines = text.split('\n')
   const tops = lines.flatMap((line, at) => /^(?:hooks|"hooks"|'hooks')\s*:/.test(line) ? [at] : [])
   const top = tops[0]
@@ -545,7 +542,8 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
         if (parsed?.isSimple !== true) return null
         const { command } = parsed
         const item = parts.join('\n')
-        if (command !== previous) {
+        const isPrevious = typeof previous === 'string' ? command === previous : previous?.includes(command) === true
+        if (!isPrevious) {
           if (command === wanted) return null
           continue
         }
@@ -566,6 +564,20 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
   const kept = lines.filter((_, at) => !drop.has(at)).join('\n')
   const next = isRemoving ? kept : addHermesHooks(kept, events, text.includes('\r\n'))
   return next === null ? null : { text: next, hasOwned }
+}
+
+const hermesEvents = (ctx: ConnectContext): HermesEvents => {
+  const folder = ctx.script.replace(/[\\/][^\\/]*$/, '')
+  const progress = ctx.progress ?? [folder, 'progress.md'].join(ctx.sep)
+  const plan = planEvents.hermes!
+  const command = hookCommandArgs(ctx.node ?? 'node', ctx.home, 'hermes', [folder, HOOK_WORKER].join(ctx.sep), progress, plan.event)
+    .map(word => JSON.stringify(ctx.isWindows ? word.replace(/\\/g, '/') : word)).join(' ')
+  return [
+    ['post_llm_call', reportCommand(ctx.script, 'hermes', 'turn', ctx.isWindows)],
+    ['on_session_finalize', reportCommand(ctx.script, 'hermes', 'end', ctx.isWindows)],
+    ['pre_llm_call', reportCommand(ctx.script, 'hermes', 'prompt', ctx.isWindows)],
+    ...(ctx.board === undefined ? [] : [[plan.event, command, plan.matcher] as [string, string, string]]),
+  ]
 }
 
 export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
@@ -649,18 +661,18 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: ctx.hermesHome,
       file: [ctx.hermesHome, 'config.yaml'].join(ctx.sep),
       edit: (text, remove) => {
-        if (remove) return withoutHermesHooks(text, HERMES_OURS)
-        const folder = ctx.script.replace(/[\\/][^\\/]*$/, '')
-        const progress = ctx.progress ?? [folder, 'progress.md'].join(ctx.sep)
-        const plan = planEvents.hermes!
-        const command = hookCommandArgs(ctx.node ?? 'node', ctx.home, 'hermes', [folder, HOOK_WORKER].join(ctx.sep), progress, plan.event)
-          .map(word => JSON.stringify(ctx.isWindows ? word.replace(/\\/g, '/') : word)).join(' ')
-        return withHermesHooks(text, [
-          ['post_llm_call', turn('hermes')],
-          ['on_session_finalize', end('hermes')],
-          ['pre_llm_call', prompt('hermes')],
-          ...(ctx.board === undefined ? [] : [[plan.event, command, plan.matcher] as [string, string, string]]),
-        ], HERMES_OURS)
+        const origins = [ctx]
+        // Only the connection's recorded old path qualifies for a data-folder migration.
+        if (ctx.previousProgress !== undefined) {
+          const folder = ctx.previousProgress.replace(/[\\/][^\\/]*$/, '')
+          origins.push({ ...ctx, script: [folder, `progress-report.${ctx.isWindows ? 'ps1' : 'sh'}`].join(ctx.sep), progress: ctx.previousProgress })
+        }
+        const recorded = new Map<string, string[]>()
+        for (const origin of origins) for (const [event, command] of hermesEvents(origin)) {
+          // Older POSIX reporters omitted the shell failure guard; their exact path still matches.
+          recorded.set(event, [...(recorded.get(event) ?? []), command, command.replace(/ \|\| true$/, '')])
+        }
+        return editHermesSetup(text, hermesEvents(ctx), recorded, remove)?.text ?? null
       },
     },
     {
