@@ -164,14 +164,28 @@ claude plugin install agent-board@agent-board
 
 独立安装：将干净 checkout 更新到指定版本，预览 `node scripts/setup-agent.mjs`，再应用已批准范围。修改过的文件列为冲突，不覆盖。host 可能要重新加载；不安装自动更新器或开机服务。
 
-用已安装程序预览／应用移除，每个设置过的 agent 各做一次。下面以 Codex 为例；其他 agent 换成它的名称（`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
+通过 `@wenyuchiou/agent-board remove` 一次预览／应用所有设置过之 agent 的移除，或指定 `--agent` 只移除特定 agent（`codex`、`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
 
 ```sh
-node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
-node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
+npx @wenyuchiou/agent-board remove
+npx @wenyuchiou/agent-board remove --apply
 ```
 
-`--codex-remove`、`--codex-doctor` 是沿用的维护名称，可搭配各目标。先关闭该看板。卸载会移除未修改的看板文件、自有 hook 定义、对应的 Codex 信任项、setup 创建且已空的 hooks 配置，以及 setup 创建的空目录。其他目标还需要的共享文件保留。用户修改保留。
+从代码库 checkout 目录：
+
+```sh
+node scripts/setup-agent.mjs --remove
+node scripts/setup-agent.mjs --remove --apply
+```
+
+或使用已安装的辅助程序移除个别 agent：
+
+```sh
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex --apply
+```
+
+`--remove`（及兼容保留之 `--codex-remove`）会以短路径预览所有碰过的 agent 移除内容，并清楚列出保留在 `progress.md` 旁边的个人数据文件。先关闭该看板。卸载会移除未修改的看板文件、自有 hook 定义、对应的 Codex 信任项、setup 创建且已空的 hooks 配置，以及 setup 创建的空目录。其他目标还需要的共享文件保留。用户修改保留。
 
 这些是你的历史，会保留：`progress.md`, `progress-archive-*.md`, `progress-journal-*.md`, `sessions/`, `pending/`, `hook-recovery-*.json`, `hook-errors.log`, `progress-answered.json`, `progress-questions*.json`, `progress-seen.json`, `progress-run-cursor.txt`, `progress-page-state.json`, `progress-page-state-done-*.json`, `progress-inbox/` (`dropped.log`)。可手动删除。运行目录中非空的 `*-messages/` 目录也保留。以 `progress.md` 为基础的文件名会随所选进度文件名变化。
 
@@ -242,7 +256,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 
 ### 怎么卸载？
 
-独立安装：先关闭看板，预览 `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`，确认后加上 `--apply`。对每个已安装的 agent 重复此步骤。保留的历史文件见[更新和卸载](#更新和卸载)。可选 Claude 插件的卸载方式：
+独立安装：先关闭看板，预览 `npx @wenyuchiou/agent-board remove`（或 `node scripts/setup-agent.mjs --remove`），确认后加上 `--apply`。这会一次检查并移除所有安装过的 agent 设置，同时列出并完整保留 `progress.md` 旁边的数据文件。若只想移除特定 agent，可指定 `--agent <name>` 或运行 `node "$HOME/.agent-board/agent-board.mjs" --remove --agent <name>`。详见[更新和卸载](#更新和卸载)。可选 Claude 插件的卸载方式：
 
 ```sh
 claude -p "/progress connect remove"

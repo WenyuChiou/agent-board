@@ -176,8 +176,9 @@ const isWin = process.platform === 'win32'
 // --chat output may be pasted into a chat app, so it shows the home folder as ~, as the board's own --chat does.
 const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(home.toLowerCase()) : path.startsWith(home)) ? `~${path.slice(home.length)}` : path
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
-const run = (path, passed, { isSetup = false, env = process.env } = {}) => {
-  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : 'inherit', encoding: 'utf8', env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: `npx ${name} setup` } : env, windowsHide: true })
+const run = (path, passed, { isSetup = false, isRemove = false, env = process.env } = {}) => {
+  const setupCmd = isRemove ? `npx ${name} remove` : `npx ${name} setup`
+  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : 'inherit', encoding: 'utf8', env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: setupCmd } : env, windowsHide: true })
   if (result.error) {
     console.error(message(`agent-board: could not start ${shown(path)} (${code(result.error)}).`, `agent-board：無法啟動 ${shown(path)}（${code(result.error)}）。`, `agent-board：无法启动 ${shown(path)}（${code(result.error)}）。`))
     process.exit(1)
@@ -201,9 +202,11 @@ const showHelp = () => {
   console.log(isAll ? usageAll : usage)
   process.exit(0)
 }
-if (args[0] === 'setup') {
+if (args[0] === 'setup' || args[0] === 'remove') {
   if (isHelp) showHelp()
-  run(join(pkg, 'scripts/setup-agent.mjs'), args.slice(1), { isSetup: true })
+  const isRemove = args[0] === 'remove'
+  const forwarded = isRemove ? ['--remove', ...args.slice(1)] : args.slice(1)
+  run(join(pkg, 'scripts/setup-agent.mjs'), forwarded, { isSetup: true, isRemove })
 }
 if (args.includes('--version') || args.includes('-v')) { console.log(`agent-board ${v}`); process.exit(0) }
 if (args[0] === 'help' || isHelp) showHelp()

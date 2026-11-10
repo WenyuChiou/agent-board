@@ -1,14 +1,15 @@
 // Preview every selected target before applying any of them. Each target keeps its own
 // ownership record while sharing one script, skill and local progress file.
 import { spawnSync } from 'node:child_process'
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isatty } from 'node:tty'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
 
 const args = process.argv.slice(2)
+const isRemove = args.includes('--remove')
 // The npm launcher supplies its package name for the setup command in guidance.
 const command = process.env.AGENT_BOARD_SETUP_COMMAND || ''
 const isJson = args.includes('--json')
@@ -17,7 +18,7 @@ const isJson = args.includes('--json')
 const isTerminal = !isJson && ((isatty(0) && isatty(1)) || (process.env.AGENT_BOARD_SETUP_TTY === '1' && !!process.env.AGENT_BOARD_TEST_PID))
 // --apply keeps its old meaning in a terminal too: files only. Approving hooks and installing the
 // plugin need a yes typed at the question, so an agent's shell tool cannot approve for the person.
-const isAsking = isTerminal && !args.includes('--apply')
+const isAsking = !isRemove && isTerminal && !args.includes('--apply')
 const langOf = value => {
   if (typeof value !== 'string') return null
   const text = value.trim().toLowerCase()
@@ -82,7 +83,13 @@ const summaries = [
     "thenBoard": "Then type /agent-board in any of them.",
     "open": "Open a new session in each of: {agents}.",
     "openOne": "Open a new session in {agents}.",
-    "thenBoardOne": "Then type /agent-board there."
+    "thenBoardOne": "Then type /agent-board there.",
+    "appliedRemove": "removed {count} setup files",
+    "noInstalled": "no installed Agent Board setups to remove",
+    "keptData": "Keeps your data and history beside {progress} (answers, questions, journal, archive, sessions):",
+    "applyRemove": "Apply this removal: {command}",
+    "restartRemove": "Restart each of: {agents} to unload their removed reporting hooks.",
+    "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks."
   },
   {
     "previewCreate": "將建立 {count} 個設定檔案",
@@ -125,7 +132,13 @@ const summaries = [
     "thenBoard": "接著在其中任一個輸入 /agent-board。",
     "open": "在 {agents} 各開一個新的工作階段。",
     "openOne": "在 {agents} 開一個新的工作階段。",
-    "thenBoardOne": "接著在那裡輸入 /agent-board。"
+    "thenBoardOne": "接著在那裡輸入 /agent-board。",
+    "appliedRemove": "已移除 {count} 個設定檔案",
+    "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
+    "keptData": "保留 {progress} 旁邊的資料與歷史紀錄（回答、提問、日誌、歸檔、工作階段）：",
+    "applyRemove": "套用此移除變更：{command}",
+    "restartRemove": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
+    "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。"
   },
   {
     "previewCreate": "将创建 {count} 个设置文件",
@@ -168,7 +181,13 @@ const summaries = [
     "thenBoard": "接着在其中任一个输入 /agent-board。",
     "open": "在 {agents} 各开一个新的会话。",
     "openOne": "在 {agents} 开一个新的会话。",
-    "thenBoardOne": "接着在那里输入 /agent-board。"
+    "thenBoardOne": "接着在那里输入 /agent-board。",
+    "appliedRemove": "已移除 {count} 个设置文件",
+    "noInstalled": "没有已安装的 Agent Board 设置可供移除",
+    "keptData": "保留 {progress} 旁的数据与历史记录（回答、提问、日志、归档、会话）：",
+    "applyRemove": "应用此移除更改：{command}",
+    "restartRemove": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
+    "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。"
   }
 ]
 const summary = summaries[['en', 'zh-TW', 'zh-CN'].indexOf(language)]
@@ -314,8 +333,11 @@ const main = () => {
     deepseek: flag('--deepseek-dir') || process.env.DSH_HOME,
   }
   const data = flag('--data-dir') || join(home, '.agent-board')
+  const touched = targets.filter(agent => existsSync(join(data, `install-${agent}.json`)))
   // --home can name another account's home; PATH and apps belong to the running account.
-  const selected = selector === 'all' ? targets : selector === 'auto' ? discoverSetupAgents(home, data, hostDirs, homeAt < 0) : selector.split(',')
+  const selected = isRemove
+    ? (selector === 'all' ? targets : selector === 'auto' ? touched : selector.split(','))
+    : (selector === 'all' ? targets : selector === 'auto' ? discoverSetupAgents(home, data, hostDirs, homeAt < 0) : selector.split(','))
   const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
   const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude'], ['.exe', '.cmd']) : undefined
   const hasClaude = existsSync(claudeDirectory) || (homeAt < 0 && !!claude)
@@ -324,8 +346,15 @@ const main = () => {
   const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
     ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
   const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
-  const setupCommand = extra => [command || nodeCommand(fileURLToPath(import.meta.url)), ...common.map(quote), ...extra.map(quote)].join(' ')
-  if (selector === 'auto' && !selected.length && !isPluginNeeded) {
+  const setupCommand = extra => {
+    const baseCommon = common.filter(arg => !extra.includes(arg))
+    return [command || nodeCommand(fileURLToPath(import.meta.url)), ...baseCommon.map(quote), ...extra.map(quote)].join(' ')
+  }
+  if (isRemove && selector === 'auto' && !selected.length) {
+    process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : words('noInstalled')}\n`)
+    return
+  }
+  if (!isRemove && selector === 'auto' && !selected.length && !isPluginNeeded) {
     const next = setupCommand(['--agent', 'codex'])
     const noAgent = noAgentText(homeAt < 0 ? 'anywhere' : 'home', { home, next })
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n1. ${words('plugin')}` : noAgent}\n`)
@@ -336,7 +365,8 @@ const main = () => {
   const isShowingApplied = apply
   const script = fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
   const run = (agent, isApplying) => {
-    const result = spawnSync(process.execPath, [script, ...common, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
+    const runArgs = isRemove ? ['--codex-remove', '--removing', selected.join(','), ...common.filter(arg => arg !== '--remove')] : common
+    const result = spawnSync(process.execPath, [script, ...runArgs, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
     const fallback = () => {
       const cause = isCode(result.error?.code) ? result.error.code : 'UNKNOWN'
       const reason = result.error?.message || (result.stderr ?? '').trim().split(/\r?\n/).filter(Boolean).pop() || 'The setup helper did not return a result.'
@@ -386,7 +416,10 @@ const main = () => {
   const shared = new Set([...owners].filter(([, agents]) => agents.size > 1).map(([file]) => file))
   const changesFor = (plan, isShared) => plan.changes.filter(change => shared.has(change.file) === isShared)
   const describe = changes => {
-    if (isShowingApplied) return changes.length ? words('applied', { count: changes.length }) : ''
+    if (isShowingApplied) {
+      if (isRemove) return changes.length ? words('appliedRemove', { count: changes.length }) : ''
+      return changes.length ? words('applied', { count: changes.length }) : ''
+    }
     return [['create', 'previewCreate'], ['update', 'preview'], ['remove', 'previewRemove']]
       .flatMap(([action, key]) => {
         const count = changes.filter(change => change.action === action).length
@@ -395,7 +428,7 @@ const main = () => {
   }
   const fileLine = (file, changes) => {
     const change = changes.find(one => one.file === file)
-    return `  ${change?.action === 'remove' ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
+    return `  ${change?.action === 'remove' && !isRemove ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
   }
   const sharedChanges = [...new Map(results.flatMap(plan => plan.conflicts.length ? [] : changesFor(plan, true)).map(change => [change.file, change])).values()]
   const sharedFiles = [...new Set(filesByAgent.flat().filter(file => shared.has(file)))]
@@ -414,9 +447,9 @@ const main = () => {
     const alreadyCurrent = isShowingApplied && !plan.conflicts.length && plan.managedBy !== 'connector'
       ? changesFor(plans[i], false).filter(change => !changed.has(change.file)).length : 0
     const current = alreadyCurrent > 0 ? `; ${words('current', { count: alreadyCurrent })}` : ''
-    const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.join(', '), command: setupCommand(['--agent', agent, '--apply']) })
-      : describe(ownChanges) || words('ready')
-    const capability = plan.managedBy !== 'connector' && !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
+    const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.map(shortPath).join(', '), command: setupCommand([isRemove ? '--remove' : '', '--agent', agent, '--apply'].filter(Boolean)) })
+      : describe(ownChanges) || (isRemove ? words('noInstalled') : words('ready'))
+    const capability = !isRemove && plan.managedBy !== 'connector' && !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
     // An install plan removes a file only to retire the old /board command (#868), so the preview says so.
     const files = !isShowingApplied && !plan.conflicts.length ? filesByAgent[i].filter(file => !shared.has(file)).map(file => fileLine(file, ownChanges)) : []
     // An old /board file the person edited stays; say so in the preview and after applying.
@@ -424,7 +457,29 @@ const main = () => {
     return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
   })
   lines.push(...agentLines)
-  if (hasClaude) lines.push(`Claude Code: ${words('claude')}`)
+  if (hasClaude && !isRemove) lines.push(`Claude Code: ${words('claude')}`)
+  if (isRemove && results.length) {
+    const progress = results[0]?.progress || join(data, 'progress.md')
+    const progressDir = dirname(progress)
+    const keptDataFiles = []
+    try {
+      const names = readdirSync(progressDir)
+      for (const name of names) {
+        if (name === 'progress.md' || /^progress-(?:answered|answers|questions|journal|archive|sessions|seen|settings)(?:-[^.]+)?\.(?:json|md|log)$/.test(name) || name === 'progress-inbox') {
+          keptDataFiles.push(join(progressDir, name))
+        }
+      }
+    } catch {}
+    if (keptDataFiles.length) {
+      keptDataFiles.sort((a, b) => {
+        if (basename(a) === 'progress.md') return -1
+        if (basename(b) === 'progress.md') return 1
+        return a.localeCompare(b)
+      })
+      lines.push(words('keptData', { progress: shortPath(progress) }))
+      for (const file of keptDataFiles) lines.push(`  ${shortPath(file)}`)
+    }
+  }
   const steps = []
   const boardRun = (plan, agent, extra) => {
     const own = []
@@ -439,7 +494,12 @@ const main = () => {
     try { return doctor.status === 0 && JSON.parse(doctor.stdout).hooksTrusted === true } catch { return false }
   }
   const boardPlan = available.length ? results[selected.indexOf(available[0])] : null
-  const boardCommand = boardPlan ? command ? command.replace(/\s+setup\s*$/, '') : nodeCommand(boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs')) : ''
+  const boardFile = boardPlan ? boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs') : ''
+  // The package launcher cannot discover a custom install from the account's default locations.
+  const boardDirectory = boardFile ? dirname(resolve(boardFile)) : ''
+  const boardCommand = boardFile ? command
+    ? [command.replace(/\s+setup\s*$/, ''), ...(boardDirectory !== resolve(homedir(), '.agent-board') ? ['--data-dir', quote(boardDirectory)] : [])].join(' ')
+    : nodeCommand(boardFile) : ''
   if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
     const approvals = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
@@ -530,35 +590,45 @@ const main = () => {
     // A no: the preview is already on screen, so only the next steps follow.
     if (will.length) lines.length = 0
   }
-  if (!apply && available.some(agent => plans[selected.indexOf(agent)].changes.length)) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
-  const sessionAgents = []
-  for (const agent of available) {
-    const plan = results[selected.indexOf(agent)]
-    if (plan.managedBy === 'connector') continue
-    // Narrower than detection: this path goes to --codex-bin, which cannot start a .bat or .com.
-    const codex = agent === 'codex' ? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
-    // A repeat run of an unchanged install asks Codex itself whether the board's hooks are trusted,
-    // and leaves out the trust step only on its yes; no answer or any other answer keeps it (#808).
-    if (codex && !plan.changes.length && isTrusted(plan, agent, codex)) continue
-    if (agent === 'codex' && !codex) {
-      steps.push(words('codexMissing'))
-      continue
+  if (isRemove) {
+    if (!apply && available.some(agent => plans[selected.indexOf(agent)].changes.length)) {
+      const agentFlag = selector !== 'auto' ? ['--agent', available.join(',')] : []
+      steps.push(words('applyRemove', { command: setupCommand(['--remove', ...agentFlag, '--apply']) }))
+    } else if (apply && available.length) {
+      const sessionAgents = available.map(agent => names[agent])
+      steps.push(words(sessionAgents.length === 1 ? 'restartRemoveOne' : 'restartRemove', { agents: sessionAgents.join(message(', ', '、', '、')) }))
     }
-    if (agent !== 'codex' && plan.capabilities.lifecycle === 'adapter-pending') {
-      steps.push(words('skill', { host: names[agent] }))
-      continue
+  } else {
+    if (!apply && available.some(agent => plans[selected.indexOf(agent)].changes.length)) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
+    const sessionAgents = []
+    for (const agent of available) {
+      const plan = results[selected.indexOf(agent)]
+      if (plan.managedBy === 'connector') continue
+      // Narrower than detection: this path goes to --codex-bin, which cannot start a .bat or .com.
+      const codex = agent === 'codex' ? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
+      // A repeat run of an unchanged install asks Codex itself whether the board's hooks are trusted,
+      // and leaves out the trust step only on its yes; no answer or any other answer keeps it (#808).
+      if (codex && !plan.changes.length && isTrusted(plan, agent, codex)) continue
+      if (agent === 'codex' && !codex) {
+        steps.push(words('codexMissing'))
+        continue
+      }
+      if (agent !== 'codex' && plan.capabilities.lifecycle === 'adapter-pending') {
+        steps.push(words('skill', { host: names[agent] }))
+        continue
+      }
+      if (['codex', 'hermes', 'opencode', 'openclaw', 'deepseek'].includes(agent)) {
+        steps.push(words(agent, { command: boardCommand, codex: codex ? quote(codex) : '' }))
+      }
+      if (agent === 'cursor' && process.platform === 'win32') steps.push(words('cursorWindows'))
+      sessionAgents.push(names[agent])
     }
-    if (['codex', 'hermes', 'opencode', 'openclaw', 'deepseek'].includes(agent)) {
-      steps.push(words(agent, { command: boardCommand, codex: codex ? quote(codex) : '' }))
+    if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
+    for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
+    if (hasClaude) steps.push(words('plugin'))
+    if (available.length) {
+      steps.push(words('board', { command: boardCommand }))
     }
-    if (agent === 'cursor' && process.platform === 'win32') steps.push(words('cursorWindows'))
-    sessionAgents.push(names[agent])
-  }
-  if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
-  for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
-  if (hasClaude) steps.push(words('plugin'))
-  if (available.length) {
-    steps.push(words('board', { command: boardCommand }))
   }
   if (steps.length) lines.push('', words('next'), ...steps.map((step, i) => `${i + 1}. ${step}`))
   process.stdout.write(`${lines.join('\n')}\n`)

@@ -1387,6 +1387,14 @@ test('a naming reply accepts short titles and background in Chinese and English'
   expect(nameReply(`Build the progress board\n${Array(19).fill('word').join(' ')}`)).not.toBeNull()
 })
 
+test('short first-person refusals are not task names, but read-error titles are', () => {
+  for (const reply of ['I cannot read the file', 'I can’t access the file', 'Sorry, we are unable to read it',
+    "I'm unable to read the file", 'We’re not able to open it', 'Title: "I cannot read the file"',
+    '我無法讀取檔案', '我无法读取文件', '抱歉，我暫時不能讀檔', '任務名稱：「我無法讀取檔案」']) expect(nameReply(reply)).toBeNull()
+  expect(nameReply('Fix cannot read error')?.title).toBe('Fix cannot read error')
+  expect(nameReply('修正無法讀檔')?.title).toBe('修正無法讀檔')
+})
+
 test('a naming reply rejects refusals, sentences, extra lines and answers outside the prompt limits', () => {
   expect(nameReply('我無法讀取 claude-one.txt，對話中也沒有附上檔案\n請把檔案內容貼到對話中，我會依照你的格式要求回覆兩行')).toBeNull()
   expect(nameReply('重做進度面板\n說明背景\n多出一行')).toBeNull()
