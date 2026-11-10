@@ -16,6 +16,10 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - The board's page and terminal board refuse to save the language or the progress bar style over a progress-settings.json that is a link or not a regular file (#1264). The plugin's `/progress style` does not check this yet (#1276).
 
+- Over SSH, when your profile sets an agent's config folder such as `HERMES_HOME` or `OPENCODE_CONFIG_DIR`, plain `agent-board` opens the page and prints the `ssh -L` command that reaches it, with `-p <port>` when SSH is not on port 22 (#1283, #1293). It still opens the page there, not the terminal board (#1283), and a page on port 80 needs a local port of 1024 or higher (#1294).
+
+- `agent-board --serve` exits with status 1 when it could not start the page (#1292, #1293).
+
 - The Settings panel's Agents heading is in Traditional and Simplified Chinese too (#1269, #1279).
 
 - Setup says `1 setup file`, not `1 setup files`, when it creates, updates or removes one file (#1270, #1284).
