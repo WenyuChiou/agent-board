@@ -3742,6 +3742,11 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     scrollIntoView() { this.scrolled = true }
     setSelectionRange() {}
     select() { this.isSelected = true }
+    cloneNode() {
+      const copy = new Element(this.tag)
+      for (const [name, value] of Object.entries(this.attributes)) copy.setAttribute(name, value)
+      return copy
+    }
   }
   const get = id => {
     if (!nodes.has(id)) nodes.set(id, new Element(id))
@@ -3890,6 +3895,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     allButtons: () => document.querySelectorAll('button'),
     query: selector => document.querySelectorAll(selector),
     node: get,
+    element: tag => new Element(tag),
     paste: (text, target = document.body) => {
       let prevented = false
       document.events.paste?.({ target, clipboardData: { getData: type => { assert.equal(type, 'text/plain'); return text } }, preventDefault: () => { prevented = true } })
@@ -3962,7 +3968,7 @@ test('the logo and the icons carry the board’s state as a class: idle, working
   let isDown = false
   const dom = await pageDom(html, quietBoard, { getBoard: polling(() => current, () => isDown) })
   await dom.settle()
-  assert.deepEqual(lightsOf(dom), ['is-idle', 'is-idle', 'is-idle'], 'the name in the sidebar, the icon in the rail and the icon in the narrow header: a quiet, connected board is idle')
+  assert.deepEqual(lightsOf(dom), ['is-idle', 'is-idle', 'is-idle'], 'the name in the sidebar, the icon in the rail and the name in the narrow header: a quiet, connected board is idle')
   for (const [name, model, expected] of [['an agent is busy', busyBoard, 'is-working'], ['something needs the person', askedBoard, 'is-waiting'], ['the board is quiet again', quietBoard, 'is-idle']]) {
     current = model
     await dom.redraw(model)
@@ -4005,10 +4011,66 @@ test('the tab icon turns to the needs-you icon while something needs the person,
   }
 })
 
-test('the first run keeps its mark in a template, ready to drop its light into the corner once (#1262)', () => {
-  const mark = /<template id="fresh-mark">(<svg[^>]*>)/.exec(lightHtml())?.[1] ?? ''
-  assert.match(mark, /class="ab-icon is-idle is-arriving"/, 'the template holds the arriving icon')
-  assert.match(mark, /width="44" height="44"/)
+test('a page that stops, because a newer page took over or the board closed, greys its light and never keeps an amber tab (#1262)', async () => {
+  const html = lightHtml()
+  const calm = /<link rel="icon"[^>]*\bhref="([^"]+)"/.exec(html)?.[1]
+  assert.ok(calm, 'the page names a calm tab icon')
+  const tab = dom => dom.query('link[rel="icon"]')[0].getAttribute('href')
+  const offline = ['is-offline', 'is-offline', 'is-offline']
+  // A newer page takes over while a question waits: this one stops asking.
+  let isMoved = false
+  const moved = await pageDom(html, askedBoard, { getBoard: async () => ({ ok: true, json: async () => (isMoved ? { moved: true } : { model: askedBoard, now: 1 }) }) })
+  await moved.settle()
+  assert.deepEqual(lightsOf(moved), ['is-waiting', 'is-waiting', 'is-waiting'], 'the question waits')
+  assert.notEqual(tab(moved), calm, 'the tab is amber while the question waits')
+  isMoved = true
+  await moved.redraw(askedBoard)
+  await moved.settle()
+  assert.deepEqual(lightsOf(moved), offline, 'the replaced page shows no live status')
+  assert.equal(tab(moved), calm, 'the replaced page’s tab is calm again')
+  // The person closes the board while a question waits.
+  const closed = await pageDom(html, askedBoard, { getBoard: polling(() => askedBoard), post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  await closed.settle()
+  assert.notEqual(tab(closed), calm, 'the tab is amber before the board closes')
+  closed.node('close').click()
+  await closed.flush(); await closed.flush()
+  assert.deepEqual(lightsOf(closed), offline, 'the closed board shows no live status')
+  assert.equal(tab(closed), calm, 'the closed board’s tab is calm')
+})
+
+test('the first run drops its mark’s light into the corner once: a later empty board shows the mark at rest (#1262)', async () => {
+  const html = lightHtml()
+  const tag = /<template id="fresh-mark">(<svg[^>]*>)/.exec(html)?.[1] ?? ''
+  assert.match(tag, /class="ab-icon is-idle is-arriving"/, 'the template holds the arriving icon')
+  assert.match(tag, /width="44" height="44"/)
+  let current = busyBoard
+  const dom = await pageDom(html, busyBoard, { getBoard: polling(() => current) })
+  await dom.settle()
+  // The page clones the mark from the template's content, as a browser gives it.
+  const mark = dom.element('svg')
+  for (const [, name, value] of tag.matchAll(/([\w-]+)="([^"]*)"/g)) mark.setAttribute(name, value)
+  dom.node('fresh-mark').content = { firstChild: mark }
+  const freshMarks = () => [...new Set(dom.query('.ab-icon'))].filter(node => node.getAttribute('width') === '44')
+  const isArriving = node => String(node.getAttribute('class')).split(' ').includes('is-arriving')
+  assert.equal(freshMarks().length, 0, 'a board with work shows no first-run mark')
+  for (const [round, expected] of [['the first empty board', true], ['a later empty board', false], ['another empty board', false]]) {
+    current = quietBoard
+    await dom.redraw(quietBoard)
+    await dom.settle()
+    const shown = freshMarks()
+    assert.equal(shown.length, 1, round + ' shows one mark')
+    assert.equal(isArriving(shown[0]), expected, round + (expected ? ' plays the drop' : ' shows the mark at rest'))
+    current = busyBoard
+    await dom.redraw(busyBoard)
+    await dom.settle()
+    assert.equal(freshMarks().length, 0, 'the mark goes with the empty board')
+  }
+  // Without the template the empty board still draws.
+  dom.node('fresh-mark').content = null
+  current = quietBoard
+  await dom.redraw(quietBoard)
+  await dom.settle()
+  assert.equal(freshMarks().length, 0, 'no template, no mark, and no error')
 })
 
 test('the serve page and the terminal board answer every action with a visible line', async () => {

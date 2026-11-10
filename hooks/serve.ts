@@ -1339,11 +1339,12 @@ const PAGE_SCRIPT = String.raw`
     // Redraw even an unchanged model to restore each action's own sending state.
     last = '';
   }
-  // The light in the logo is the board's status: offline when the page has lost the board, waiting when something
-  // needs the person, working when an agent is busy, else idle. The tab icon turns amber only for waiting.
+  // The light in the logo is the board's status: offline when the page has lost the board, or stopped because the
+  // board closed or a newer page took over; waiting when something needs the person; working when an agent is busy;
+  // else idle. The tab icon turns amber only for waiting, so a page that stops never keeps an amber tab.
   var LIGHT_STATES = ${JSON.stringify(LOGO_STATES)};
   function lightState() {
-    if (isUnreachable) return 'is-offline';
+    if (isUnreachable || isClosed) return 'is-offline';
     if (pg.waitingNow > 0) return 'is-waiting';
     var view = pg.model && pg.model.view;
     return view && view.working && view.working.length ? 'is-working' : 'is-idle';
@@ -2958,6 +2959,7 @@ const PAGE_SCRIPT = String.raw`
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) {
         isClosed = true;
+        paintLight();
         var movedMain = document.querySelector('main');
         movedMain.textContent = '';
         add(movedMain, el('p', '', w('serveMoved')));
@@ -3104,6 +3106,7 @@ const PAGE_SCRIPT = String.raw`
     say(w('pressPending'), '', 'close');
     var shut = function () {
       isClosed = true;
+      paintLight();
       clearTimeout(timer);
       var main = document.querySelector('main');
       main.textContent = '';
