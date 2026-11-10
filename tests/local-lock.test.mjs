@@ -197,8 +197,10 @@ test('a stale lock whose pid is reused by a live process is recovered after the 
   const ready = join(root, 'unrelated-ready')
   const unrelated = spawn(process.execPath, ['-e', 'const fs = require("node:fs"); fs.writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 10000)', ready], { windowsHide: true, stdio: 'ignore' })
   try {
-    await until(() => existsSync(ready))
-    const livePid = Number(readFileSync(ready, 'utf8').trim())
+    // The file can exist before the child has written its pid into it, so wait for the pid itself.
+    const pidIn = () => { try { return Number(readFileSync(ready, 'utf8').trim()) } catch { return 0 } }
+    await until(() => pidIn() > 0)
+    const livePid = pidIn()
     assert.ok(Number.isSafeInteger(livePid) && livePid > 0)
     const pastMinute = new Date(Date.now() - 60_000)
     const pastHour = new Date(Date.now() - 3_600_000 - 5_000)
