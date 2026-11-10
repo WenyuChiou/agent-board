@@ -21,7 +21,7 @@ const modelOf = isWaiting => {
   return serveModel(buildView(parseProgress(source), [], null, now, 0, {}, EN), [], EN, new Set(), false, undefined, false, { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
 }
 
-const observeQuestion = async responseMs => {
+const observeQuestion = async (responseMs, { isLegacyPoll = false } = {}) => {
   const browser = await chromium.launch({ headless: true })
   try {
     const context = await browser.newContext()
@@ -36,8 +36,8 @@ const observeQuestion = async responseMs => {
             const json = response.json.bind(response)
             response.json = async () => {
               const data = await json()
-              // Start after the old snapshot arrives, before the next poll is scheduled.
-              // The synthetic question is already available to the next HTTP request.
+              // Publishing the new model uses this same clock boundary: the route below
+              // reads this marker, so the question cannot predate its measurement.
               if (window.syntheticLatency.start === null) window.syntheticLatency.start = performance.now()
               return data
             }
@@ -61,11 +61,16 @@ const observeQuestion = async responseMs => {
         const path = new URL(route.request().url()).pathname
         if (path === '/api/board') {
           const isFirst = ++reads === 1
-          const model = modelOf(!isFirst)
+          const isWaiting = await page.evaluate(() => window.syntheticLatency.start !== null)
+          const model = modelOf(isWaiting)
           await new Promise(done => setTimeout(done, isFirst ? 100 : responseMs))
           await route.fulfill({ json: { model, now } })
-        } else if (path === '/') await route.fulfill({ contentType: 'text/html', body: servePage(EN, 'synthetic') })
-        else await route.fulfill({ status: 404, body: '' })
+        } else if (path === '/') {
+          const original = servePage(EN, 'synthetic')
+          const body = isLegacyPoll ? original.replace('setTimeout(refresh, 2000)', 'setTimeout(refresh, 3000)') : original
+          if (isLegacyPoll) assert.notEqual(body, original, 'The causal control restores exactly the old poll delay')
+          await route.fulfill({ contentType: 'text/html', body })
+        } else await route.fulfill({ status: 404, body: '' })
       })
       await page.goto('https://agent-board.example.test/?t=synthetic')
       await page.waitForFunction(() => window.syntheticLatency.shown !== null, undefined, { timeout: 12_000 })
@@ -85,4 +90,9 @@ test('the shipped page visibly draws a newly available question within three sec
 test('a response that alone exceeds the three-second deadline is never reported as an in-budget question', { concurrency: false, timeout: 30_000 }, async () => {
   const elapsed = await observeQuestion(PANE_MS + 100)
   assert.ok(elapsed > PANE_MS, `Late response was counted inside ${PANE_MS} ms: ${elapsed}`)
+})
+
+test('restoring the legacy poll consumes the three-second deadline before a positive response can be shown', { concurrency: false, timeout: 30_000 }, async () => {
+  const elapsed = await observeQuestion(100, { isLegacyPoll: true })
+  assert.ok(elapsed > PANE_MS, `The legacy schedule unexpectedly met ${PANE_MS} ms: ${elapsed}`)
 })
