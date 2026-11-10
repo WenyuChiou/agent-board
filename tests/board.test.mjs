@@ -11940,10 +11940,11 @@ test('the sidebar version line is quiet', () => {
   const ver = html.match(/\.ver-link\{([^}]*)\}/)[1]
   assert.match(ver, /font-size:var\(--text-xs\)/)
   assert.match(ver, /color:color-mix\(in srgb,var\(--muted\) \d+%,var\(--surface\)\)/)
-  assert.match(html, /\.ver-link svg\.i\{width:12px;height:12px\}/)
+  // The GitHub mark is a filled shape, drawn at the page's icon size so it reads at a glance.
+  assert.match(html, /\.ver-link svg\.i\{width:16px;height:16px;fill:currentColor;stroke:none\}/)
 })
 
-test('the page footer has no web-chat or clipboard button and Close the board shows its name in every language (#1145)', async () => {
+test('the page footer has no web-chat or clipboard button and Close the board is a red power sign named in every language (#1145)', async () => {
   const { servePage } = await sourceBoard()
   for (const words of [EN, ZH_TW, ZH_CN]) {
     for (const isLan of [false, true]) {
@@ -11956,13 +11957,14 @@ test('the page footer has no web-chat or clipboard button and Close the board sh
       assert.match(close[1], /\btype="button"/)
       assert.match(close[1], /\bclass="icon-btn"/)
       assert.match(close[1], /\bdata-static\b/)
-      // The name is visible text, so the button needs no aria-label or tooltip.
-      assert.ok(!close[1].includes('aria-label=') && !close[1].includes('title='))
-      const shown = close[2].match(/^<svg class="i"[^>]*aria-hidden="true"><path d="[^"]+"\/><\/svg><span>([^<]+)<\/span>$/)
-      assert.ok(shown)
-      assert.equal(shown[1], words.serveClose)
+      // The button shows only a power sign, so its name is what a screen reader says and the tooltip.
+      assert.ok(close[1].includes(`aria-label="${words.serveClose}"`) && close[1].includes(`title="${words.serveClose}"`))
+      assert.match(close[2], /^<svg class="i"[^>]*aria-hidden="true"><path d="M8 1\.5v6M[^"]+"\/><\/svg>$/)
     }
   }
+  const css = servePage(EN, 'synthetic', false)
+  assert.match(css, /\.pfoot #close\{[^}]*color:var\(--alert\)/)
+  assert.match(css, /\.pfoot #close:hover\{[^}]*color:var\(--alert\)/)
 })
 
 test('a row whose title is its current step shows the step once', async () => {
@@ -12027,9 +12029,10 @@ test('the footer links to the project', async () => {
   assert.match(link, /target="_blank"/)
   assert.match(link, /rel="noopener"/)
   assert.ok(link.includes(`title="${EN.pgGithub}"`))
-  // The footer reads "v<version> · GitHub": the version is filled in by the page, and Close the board stays once.
+  // The footer reads "<GitHub mark> v<version>": the mark stands for the word, the version is filled in by the page, and Close the board stays once.
   const footer = html.slice(html.indexOf('<footer class="pfoot"'), html.indexOf('</footer>'))
-  assert.ok(footer.includes('<span id="versions"></span><span aria-hidden="true">·</span>GitHub'))
+  assert.match(footer, /<svg class="i" viewBox="0 0 16 16" role="img" aria-label="GitHub"><path d="M8 0c[^"]+"\/><\/svg><span id="versions"><\/span><\/a>/)
+  assert.ok(!footer.includes('>GitHub<'))
   assert.equal(html.split('id="close"').length - 1, 1)
   const { board, model } = await groupedPage()
   try {

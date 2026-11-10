@@ -4,7 +4,7 @@ import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, Quiet, RepoOf } from './grouping'
-import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead } from './page-look'
+import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, GITHUB_PATH, htmlLang, motionCss, pageBaseCss, pageTokens, POWER_PATH, sheetCss, themeHead } from './page-look'
 import { settingsCss, settingsPanel, settingsScript, settingsToggle } from './page-settings'
 import type { SettingsLang } from './board-settings'
 import { ZH_TW } from './i18n'
@@ -873,7 +873,7 @@ button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)
 button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
 .btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
-button.quiet:hover,.side .pfoot #close:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
+button.quiet:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
 .answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);background:color-mix(in srgb,var(--act) 12%,var(--hover))}
 .answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-lg)}
 .answers button.answer-send:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
@@ -1022,12 +1022,15 @@ ${CLIP_CSS}
 .side .pfoot .grow{display:none}
 /* Close the board shows its name beside the icon (#1145): an X alone did not say it stops the board */
 .pfoot #close,.pfoot #settings-toggle{display:inline-flex;gap:var(--s1);width:auto;height:var(--hit);min-width:var(--hit);min-height:var(--hit);padding:0 var(--s2);font:inherit;font-size:var(--text-xs)}
+/* Close the board is a red power sign with no words: its name is the tooltip and what a screen reader says. */
+.pfoot #close{justify-content:center;padding:0;color:var(--alert)}.pfoot #close svg.i{width:18px;height:18px;stroke-width:2}
+.pfoot #close:hover{color:var(--alert);background-color:color-mix(in srgb,var(--alert) 12%,transparent)}
 .side .pfoot .btn{min-height:24px;padding-inline:var(--s2);font-size:var(--text-xs);color:var(--muted)}
-.side .pfoot #close:hover,.side .pfoot .btn:hover{color:var(--ink)}
+.side .pfoot .btn:hover{color:var(--ink)}
 .side .pfoot p{order:3;flex-basis:100%}
 .ver-link{display:inline-flex;align-items:center;gap:var(--s1);color:color-mix(in srgb,var(--muted) 75%,var(--surface));font-size:var(--text-xs);line-height:1.2;text-decoration:none;border-radius:var(--radius-s);white-space:nowrap}
 .ver-link:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
-.ver-link svg.i{width:12px;height:12px}
+.ver-link svg.i{width:16px;height:16px;fill:currentColor;stroke:none}
 .set-row{display:inline-flex;align-items:center;gap:var(--s1)}
 .pfoot .grow{flex:1 1 auto}
 
@@ -1151,7 +1154,7 @@ ${settingsCss}
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${settingsToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg><span>${esc(s.serveClose)}</span></button></footer>
+<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><svg class="i" viewBox="0 0 16 16" role="img" aria-label="GitHub"><path d="${GITHUB_PATH}"/></svg><span id="versions"></span></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${settingsToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static aria-label="${esc(s.serveClose)}" title="${esc(s.serveClose)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="${POWER_PATH}"/></svg></button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>

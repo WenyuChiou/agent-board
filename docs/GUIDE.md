@@ -83,7 +83,7 @@ Pasted reports keep their source time. Repeats do nothing; older or equal-time c
 
 A card offers Send only when its exact session has a live adapter. Otherwise use Copy or open the agent yourself. [Messaging](MESSAGING.md) explains adapter setup, actual replies, duplicates, conflicts and timeouts. Setup does not attach receivers to arbitrary existing chats. Ordinary replies cannot approve tools, trust changes or PR merges.
 
-`--no-open` prints the address without opening the browser. Closing the browser tab leaves the local service running. Run the same command to reopen it. **Close the board** stops it; wait if a delivery is in progress. Idle shutdown is disabled by default; `--idle-minutes 30` opts in. Legacy `--allow-resume` deliberately enables starting ended Codex/Grok sessions; it is off by default and never a live-message fallback.
+`--no-open` prints the address without opening the browser. Closing the browser tab leaves the local service running. Run the same command to reopen it. **Close the board**, the red power button, stops it; wait if a delivery is in progress. Idle shutdown is disabled by default; `--idle-minutes 30` opts in. Legacy `--allow-resume` deliberately enables starting ended Codex/Grok sessions; it is off by default and never a live-message fallback.
 
 #### On a phone
 
