@@ -1763,11 +1763,14 @@ test('a lone straight quote, such as an inch mark, is a literal character, and t
   expect(lastQuestion('要用 12" 的架子嗎？')).toBe('要用 12" 的架子嗎？')
   expect(lastQuestion('Do you want "2"?')).toBe('Do you want "2"?')
   expect(lastQuestion('Is "x" ok? "y" is next')).toBe('Is "x" ok?')
-  // A told-about quote still quotes after an inch mark or a closed pair.
+  expect(lastQuestion('Should I use the "fast"-path? The "safe" path is slower.')).toBe('Should I use the "fast"-path?')
+  // A told-about quote still quotes after an inch mark or a closed pair, or with a space inside.
   expect(lastQuestion('The 12" rack is in. I asked "Blue or green?"')).toBeNull()
   expect(lastQuestion('The 12" rack is in, and I asked "Blue or green?"')).toBeNull()
   expect(lastQuestion('I wrote "Version 2" in the title and asked "Ready?"')).toBeNull()
   expect(lastQuestion('他問"要藍色還是綠色?"')).toBeNull()
+  expect(lastQuestion('I asked " Ready?"')).toBeNull()
+  expect(lastQuestion('I asked "...Ready?"')).toBeNull()
 })
 
 test('a link\'s own question mark is not a question, and a question with a link keeps it whole (#1108)', () => {

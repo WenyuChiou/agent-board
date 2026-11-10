@@ -189,22 +189,24 @@ const CLOSERS = new Set(Object.values(OPENERS))
 // wraps the whole question, and a quoted last option after `or` (`"red" row or "blue row?"`),
 // unless the sentence reports what was asked or said (`The test asked either "x" or "Ready?"`).
 const REPORTS = /\b(?:ask(?:ed|s)?|sa(?:id|ys)|wr(?:ote|ites)|repl(?:ied|ies)|typed|prompt(?:ed|s)?)\b|問|问|說|说|寫|写|回覆|回复/i
+const isLoneQuote = (line: string, at: number): boolean => {
+  const before = line[at - 1] ?? ' '
+  return /\d/.test(before) || /\S/.test(before) && /^(?:\s|$)/.test(line.slice(at + 1))
+}
 const isQuoted = (line: string, mark: number): boolean => {
   const open: number[] = []
   let straight = -1
   for (let i = 0; i < mark; i += 1) {
     const char = line[i] ?? ''
     if (char === '\\') i += 1
-    else if (char === '"') straight = i
+    // A straight quote closes the open one. With none open, it also stands alone as an inch mark
+    // (`a 12" shelf`) or after a word with nothing after it (`fast" is`), and then opens nothing.
+    else if (char === '"') straight = straight >= 0 || isLoneQuote(line, i) ? -1 : i
     else if (char in OPENERS) open.push(i)
     else if (CLOSERS.has(char)) open.pop()
   }
-  // A straight quote looks the same at both ends of a quotation, and it also stands alone as an
-  // inch mark (`a 12" shelf`) or as a character the reply talks about. So only the last one before
-  // the mark can open the quotation around it, and only when a word starts right after it, no
-  // digit comes before it, and another straight quote follows the mark.
-  const isOpening = straight >= 0 && /^[^\s,.;:!?)\]}]/.test(line.slice(straight + 1)) && !/\d/.test(line[straight - 1] ?? '')
-  if (isOpening && line.indexOf('"', mark + 1) !== -1) open.push(straight)
+  // A quote the reply talks about (`escape " here?`) has no partner after the mark.
+  if (straight >= 0 && line.indexOf('"', mark + 1) !== -1) open.push(straight)
   // An apostrophe also sits inside words, so a single quote counts only when it closes right
   // after the mark and opens at the start of a word.
   if (/^[?？]["”」』)）]*'/.test(line.slice(mark))) {
