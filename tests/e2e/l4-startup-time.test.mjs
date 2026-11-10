@@ -1,11 +1,10 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { makeWorld } from './lib/world.mjs'
-import { run, serve } from './lib/surfaces.mjs'
+import { run, runProcess, serve } from './lib/surfaces.mjs'
 import { BOARD_OPEN_MS, PAGE_OPEN_MS, SETUP_PREVIEW_MS, STARTUP_RUNS } from './lib/budget.mjs'
 
 const installer = fileURLToPath(new URL('../../scripts/setup-agent.mjs', import.meta.url))
@@ -22,7 +21,7 @@ describe('L4 start-up time (#768)', () => {
       const world = makeWorld()
       try {
         const began = performance.now()
-        const preview = spawnSync(process.execPath, [installer, '--home', world.home, '--data-dir', join(world.root, 'data'), '--progress-file', world.path], { env: world.env, encoding: 'utf8', windowsHide: true, timeout: 120_000 })
+        const preview = await runProcess(process.execPath, [installer, '--home', world.home, '--data-dir', join(world.root, 'data'), '--progress-file', world.path], { env: world.env, cwd: world.root })
         times.preview.push(Math.round(performance.now() - began))
         assert.equal(preview.status, 0, preview.stderr)
 
