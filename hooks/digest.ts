@@ -195,11 +195,16 @@ const isQuoted = (line: string, mark: number): boolean => {
   for (let i = 0; i < mark; i += 1) {
     const char = line[i] ?? ''
     if (char === '\\') i += 1
-    else if (char === '"') straight = straight < 0 ? i : -1
+    else if (char === '"') straight = i
     else if (char in OPENERS) open.push(i)
     else if (CLOSERS.has(char)) open.pop()
   }
-  if (straight >= 0) open.push(straight)
+  // A straight quote looks the same at both ends of a quotation, and it also stands alone as an
+  // inch mark (`a 12" shelf`) or as a character the reply talks about. So only the last one before
+  // the mark can open the quotation around it, and only when a word starts right after it, no
+  // digit comes before it, and another straight quote follows the mark.
+  const isOpening = straight >= 0 && /^[^\s,.;:!?)\]}]/.test(line.slice(straight + 1)) && !/\d/.test(line[straight - 1] ?? '')
+  if (isOpening && line.indexOf('"', mark + 1) !== -1) open.push(straight)
   // An apostrophe also sits inside words, so a single quote counts only when it closes right
   // after the mark and opens at the start of a word.
   if (/^[?？]["”」』)）]*'/.test(line.slice(mark))) {
