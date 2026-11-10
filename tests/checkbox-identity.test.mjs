@@ -388,3 +388,32 @@ for (const surface of ['page', 'terminal']) {
     assert.equal(result, moved, 'a refused checkbox must not write the untouched twin')
   })
 }
+
+// The board writes a hidden done date onto a finished step after the draw (done-stamp.ts).
+// That date is not part of the task's identity, so a guarded step drawn before it still ticks at
+// write time.
+test('a guarded step drawn before the board dated an earlier done step still ticks its own twin at write time', () => {
+  const text = '## Synthetic project\n### Twin steps\n- [x] Earlier step\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+  const dated = text.replace('- [x] Earlier step', '- [x] Earlier step <!-- done 2026-11-08 -->')
+  const drawn = viewFor(text).items.find(item => item.type === 'row' && item.row.title === 'Twin steps').row.next
+  assert.ok(drawn.guard, 'the drawn step carries its source guard')
+  const lines = setManualStep(dated, drawn, 'x', now, EN).split('\n')
+  assert.match(lines[3], /^- \[x\] Inspect the map/)
+  assert.equal(lines[4], '- [ ] Inspect the map')
+})
+
+for (const surface of ['page', 'terminal']) {
+  test('a ' + surface + ' checkbox drawn before the board dated an earlier done step still ticks its own twin', () => {
+    const text = '## Synthetic project\n### Twin steps\n- [x] Earlier step\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+    const dated = text.replace('- [x] Earlier step', '- [x] Earlier step <!-- done 2026-11-08 -->')
+    const before = viewFor(text)
+    const index = before.row.steps.findIndex(step => step.text === 'Inspect the map')
+    const state = pinned({ ...emptyBoardState, key: before.row.key }, before.items)
+    const after = viewFor(dated)
+    const action = surface === 'page' ? serveAction(after.items, request(before.row, index), EN) : boardKey(state, 'x', after.items, EN).action
+    assert.equal(action?.type, 'tick')
+    const lines = setManualStep(dated, action.ref, 'x', now, EN).split('\n')
+    assert.match(lines[3], /^- \[x\] Inspect the map/)
+    assert.equal(lines[4], '- [ ] Inspect the map')
+  })
+}
