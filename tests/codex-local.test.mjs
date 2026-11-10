@@ -6275,6 +6275,37 @@ test('multi-agent removal preserves the shared board for an agent skipped by a c
   assert.match(readFileSync(f.progress, 'utf8'), /agent=antigravity/)
 }))
 
+test('a removal that newly conflicts on the second preview is not told to the others, and none applies when all conflict', () => fixture(f => {
+  // A stand-in helper: Antigravity always conflicts; Cursor conflicts from its second preview on (as if the
+  // person edited its file during the run); every call is logged with the --removing list it was given.
+  const helper = join(f.home, 'stand-in-helper.mjs'), log = join(f.home, 'helper-calls.jsonl')
+  f.save(helper, `import { appendFileSync, readFileSync, existsSync } from 'node:fs'
+const args = process.argv.slice(2), agent = args[args.indexOf('--agent') + 1], removing = args[args.indexOf('--removing') + 1]
+const log = ${JSON.stringify(log)}
+const seen = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\\n').filter(Boolean).map(line => JSON.parse(line)).filter(call => call.agent === agent && !call.apply).length : 0
+appendFileSync(log, JSON.stringify({ agent, removing, apply: args.includes('--apply') }) + '\\n')
+const always = (process.env.STAND_IN_CONFLICTS || '').split(',')
+const conflicts = always.includes(agent) || (agent === 'cursor' && seen >= 1) ? ['synthetic-edited-file'] : []
+process.stdout.write(JSON.stringify({ agent, mode: 'remove', changes: [{ file: 'synthetic-' + agent, action: 'remove' }], conflicts, applied: args.includes('--apply') }))
+`)
+  const run = (agents, conflicts) => {
+    rmSync(log, { force: true })
+    return spawnSync(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--remove', '--agent', agents, '--json', '--apply'],
+      { env: { ...f.env, AGENT_BOARD_SETUP_HELPER: helper, STAND_IN_CONFLICTS: conflicts }, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+  }
+  const calls = () => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+
+  const some = run('codex,cursor,antigravity', 'antigravity')
+  assert.equal(some.status, 0, some.stderr + some.stdout)
+  assert.equal(JSON.parse(some.stdout).applied, true)
+  assert.deepEqual(calls().filter(call => call.apply), [{ agent: 'codex', removing: 'codex', apply: true }], JSON.stringify(calls()))
+
+  const none = run('cursor,antigravity', 'antigravity')
+  assert.equal(none.status, 1, none.stderr + none.stdout)
+  assert.equal(JSON.parse(none.stdout).applied, false)
+  assert.equal(calls().some(call => call.apply), false, JSON.stringify(calls()))
+}))
+
 test('removal with JSON applies through the short remove flag', () => fixture(f => {
   const installed = f.install('--apply')
   assert.equal(installed.status, 0, installed.stderr + installed.stdout)
