@@ -1,5 +1,5 @@
 import type { AskKind } from './ask'
-import { answersOf, boardItems, fingerprint, olderKey, remainingInbox } from './board'
+import { answersOf, boardItems, fingerprint, guardStep, olderKey, remainingInbox } from './board'
 import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { groupBoard } from './grouping'
@@ -147,6 +147,7 @@ export type ServeAsk = {
   // A hand-kept question, the person's own (its agent is '', as Claude Code's is); absent otherwise.
   isOwn?: true
   canTick: boolean
+  fileLine: number | null
   // Another session's question can be marked answered: kept off the board until it changes.
   canHide: boolean
   unhideKey?: string
@@ -157,6 +158,7 @@ export type ServeAsk = {
   session: string
   // The line's fingerprint (hooks/board.ts): the page sends it back with every press.
   fp: string
+  tickFp: string
   // The folder a reply runs in, shown beside the box before it is sent.
   where: string
   // Why a reply cannot be sent from here, when it cannot.
@@ -220,6 +222,8 @@ export type ServeRow = {
   send: SendMode
   session: string
   fp: string
+  // A checkbox also binds the file lines drawn with the card, so a moved twin cannot replace it.
+  tickFp: string
   where: string
   info: string
   isSending: boolean
@@ -415,11 +419,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         link: ask.link,
         ...(ask.native === undefined ? {} : { native: { options: ask.native.options, line: s.nativeAnswerIn(agentLabel(ask.native.agent, s)) } }),
         canTick: ask.step !== null,
+        fileLine: ask.step?.line ?? null,
         canHide: ask.hideKey !== '' && ask.canHide !== false,
         ...(ask.hideKey !== '' && ask.canHide !== false ? { unhideKey: `hidden:${ask.hideKey}` } : {}),
         send,
         session: connection?.session ?? ask.target?.session ?? '',
         fp: fingerprint(item, items),
+        tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (ask.target?.dir ?? '') : send === 'connected' ? claudeHint(ask.agent, false, s) : '',
         archiveNote: isManual ? '' : s.archiveLive,
         info: connection || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? infoOf(send, ask.agent, ask.task, '', s)),
@@ -489,6 +495,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         send,
         session: connection?.session ?? row.target?.session ?? '',
         fp: fingerprint(item, items),
+        tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (row.target?.dir ?? '') : send === 'connected' ? claudeHint(row.agent, row.auto === 'working', s) : '',
         // A row says why only when a reply could otherwise be expected here.
         info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
@@ -627,7 +634,8 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   // can be reworded under it: the press goes through only on the block and words the page drew.
   const item = items.find(one => one.key === request.key)
 
-  return item !== undefined && request.fp === fingerprint(item, items) ? action : { type: 'refuse', note: s.boardLineChanged }
+  if (item === undefined || request.fp !== fingerprint(item, items, request.type === 'tick' && (item.type === 'ask' || request.line !== undefined))) return { type: 'refuse', note: s.boardLineChanged }
+  return action.type === 'tick' ? { ...action, ref: guardStep(action.ref, items) } : action
 }
 
 const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean): ServeAction => {
@@ -638,7 +646,9 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'tick') {
     if (item.type === 'ask') {
       const ref = item.ask.step
-      return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
+      if (ref === null) return { type: 'refuse', note: s.boardTickGone }
+      if (request.line !== ref.line) return { type: 'refuse', note: s.boardLineChanged }
+      return { type: 'tick', ref }
     }
     if (item.type !== 'row') return { type: 'refuse', note: s.boardTickGone }
     // A press names the step it showed by its file line, so two open steps with the same
@@ -1740,7 +1750,7 @@ const PAGE_SCRIPT = String.raw`
       var isNext = step.fileLine !== undefined ? step.fileLine === row.nextFileLine : step.text === row.next;
       if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && !isNext) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
-        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp, undefined, step.fileLine); }, 'btn');
+        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.tickFp, undefined, step.fileLine); }, 'btn');
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
         tick.title = step.text;
         add(line, tick);
@@ -1798,7 +1808,7 @@ const PAGE_SCRIPT = String.raw`
       add(body, el('p', 'note', ask.native.line));
       if (ask.canHide) add(answers, button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
     } else if (ask.isOwn) {
-      if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
+      if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.tickFp, undefined, ask.fileLine); }, 'primary'));
     } else {
       var options = ask.answers || [];
       canWrite = true;
@@ -1968,7 +1978,7 @@ const PAGE_SCRIPT = String.raw`
         // the step list names a step, so the server can tell it from a twin with the same text.
         var nextStep = null;
         for (var index = 0; index < row.steps.length; index += 1) if (row.nextFileLine !== undefined && row.steps[index].fileLine === row.nextFileLine) { nextStep = row.steps[index]; break; }
-        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.fp, undefined, row.nextFileLine); }, 'primary');
+        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.tickFp, undefined, row.nextFileLine); }, 'primary');
         // A long step is named by its first words; the whole step is its title (#463).
         if (row.nextLabel) tickNext.title = row.next;
         add(acts, tickNext);

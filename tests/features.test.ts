@@ -3399,6 +3399,11 @@ const fpIn = (items: ReturnType<typeof boardItems>, key: string): string => {
   const item = items.find(one => one.key === key)
   return item === undefined ? '' : fingerprint(item, items)
 }
+// What a question's Done button sends: the tick fingerprint and the step's line (#1204).
+const askTickIn = (items: ReturnType<typeof boardItems>, key: string): { fp: string; line?: number } => {
+  const item = items.find(one => one.key === key)
+  return item?.type === 'ask' ? { fp: fingerprint(item, items, true), line: item.ask.step?.line ?? undefined } : { fp: '' }
+}
 
 const MATRIX_HOSTS = ['claude', 'codex', 'antigravity', 'hermes', 'openclaw', 'grok', 'opencode', 'cursor'] as const
 const MATRIX_SOURCES = ['own', 'other'] as const
@@ -3461,7 +3466,8 @@ test('the serve action contract covers every card kind from every agent and sour
       expect(actionItem === undefined ? '' : fingerprint(actionItem, items)).toBe(ask.fp)
       if (ask.canTick) {
         offered += 1
-        expect(serveAction(items, { key: ask.key, type: 'tick', text: '', session: '', fp: ask.fp }, STRINGS.en).type).toBe('tick')
+        // A question's Done sends what the page's button sends: the tick fingerprint and the step's line (#1204).
+        expect(serveAction(items, { key: ask.key, type: 'tick', text: '', session: '', fp: ask.tickFp, line: ask.fileLine ?? undefined }, STRINGS.en).type).toBe('tick')
       }
       if (ask.canHide) {
         offered += 1
@@ -3606,7 +3612,7 @@ test('a press on the page is worked out from the file as it is now: a line that 
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
   expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('Codex') })
   const manual = keyOf(item => item.type === 'ask' && item.ask.project === 'docs-site')
-  expect(resumeAction(items, { key: manual, type: 'tick', text: '', session: '', fp: fpIn(items, manual) }, STRINGS.en).type).toBe('tick')
+  expect(resumeAction(items, { key: manual, type: 'tick', text: '', session: '', ...askTickIn(items, manual) }, STRINGS.en).type).toBe('tick')
   expect(resumeAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveManualReply })
   // An ended block can go to the archive; a working one cannot yet.
   expect(resumeAction(items, { key: grok, type: 'archive', text: '', session: '', fp: fpIn(items, grok) }, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
@@ -4495,7 +4501,7 @@ test('two hand-kept questions with the same title and words are told apart by ho
   const one = keys[0] ?? ''
   expect(keys.length).toBe(2)
   expect(gone.some(item => item.key === one)).toBe(true)
-  const press = { key: one, type: 'tick', text: '', session: '', fp: fpIn(before, one) }
+  const press = { key: one, type: 'tick', text: '', session: '', ...askTickIn(before, one) }
   expect(serveAction(before, press, STRINGS.en).type).toBe('tick')
   expect(serveAction(gone, press, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   const drawn = pinned({ ...emptyBoardState, selected: before.findIndex(item => item.key === one) }, before)
