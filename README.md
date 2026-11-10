@@ -118,10 +118,10 @@ In the Claude desktop app the agent can open the board too: ask it to open the b
 
 | Where | Command |
 |---|---|
-| A terminal or desktop | `node "$HOME/.agent-board/agent-board.mjs"` (terminal board over SSH or without a display, page otherwise) |
-| A phone on the same Wi-Fi | `node "$HOME/.agent-board/agent-board.mjs" --lan` (scan the QR code it prints) |
-| An agent reading the board | `node "$HOME/.agent-board/agent-board.mjs" --json` ([field reference](docs/BOARD-JSON.md)) |
-| Check one agent's setup | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
+| A terminal or desktop | `npx @wenyuchiou/agent-board` (terminal board over SSH or without a display, page otherwise) |
+| A phone on the same Wi-Fi | `npx @wenyuchiou/agent-board --lan` (scan the QR code it prints) |
+| An agent reading the board | `npx @wenyuchiou/agent-board --json` ([field reference](docs/BOARD-JSON.md)) |
+| Check one agent's setup | `npx @wenyuchiou/agent-board --codex-doctor --agent codex` |
 
 <details>
 <summary><b>Keys on the terminal board</b></summary>
@@ -276,7 +276,7 @@ For architectural positioning and coexistence with memory tools, see the [Archit
 Start with the doctor. It checks what the installer wrote for one agent and changes nothing:
 
 ```sh
-node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
+npx @wenyuchiou/agent-board --codex-doctor --agent codex
 ```
 
 Use the agent's own name after `--agent` (the doctor keeps its old name for every agent). It prints whether the files are in place, what is wrong and one next step. Only a new session that shows up on the board proves the connection. With `--json`, `installed` says the files are in place and `ready` that the agent has a status adapter; `connected` stays `unverified`.

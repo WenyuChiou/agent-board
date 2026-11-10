@@ -154,7 +154,8 @@ export const ZH_CN: Strings = {
     "keptData": "保留 {progress} 旁的数据与历史记录（回答、提问、日志、归档、会话）：",
     "applyRemove": "应用此移除更改：{command}",
     "restartRemove": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
-    "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。"
+    "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
+    "directRemoved": "直接运行的 node 命令已无法使用；请改用 {command}。"
   },
   setupNoAgent: {
     "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",

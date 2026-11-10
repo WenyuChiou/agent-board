@@ -192,7 +192,8 @@ export const ZH_TW = {
     "keptData": "保留 {progress} 旁邊的資料與歷史紀錄（回答、提問、日誌、歸檔、工作階段）：",
     "applyRemove": "套用此移除變更：{command}",
     "restartRemove": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
-    "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。"
+    "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
+    "directRemoved": "直接執行的 node 指令已無法使用；請改用 {command}。"
   },
   setupNoAgent: {
     "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",

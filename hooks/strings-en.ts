@@ -154,7 +154,8 @@ export const EN: Strings = {
     "keptData": "Keeps your data and history beside {progress} (answers, questions, journal, archive, sessions):",
     "applyRemove": "Apply this removal: {command}",
     "restartRemove": "Restart each of: {agents} to unload their removed reporting hooks.",
-    "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks."
+    "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks.",
+    "directRemoved": "The direct node command stops working; use {command} instead."
   },
   setupNoAgent: {
     "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",

@@ -118,10 +118,10 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 
 | 在哪里 | 命令 |
 |---|---|
-| 终端或桌面 | `node "$HOME/.agent-board/agent-board.mjs"`（SSH 或没有图形显示时打开终端看板，其他情况打开网页） |
-| 同一个 Wi-Fi 的手机 | `node "$HOME/.agent-board/agent-board.mjs" --lan`（扫它打印的二维码） |
-| Agent 读取看板 | `node "$HOME/.agent-board/agent-board.mjs" --json`（[字段说明](docs/BOARD-JSON.md)） |
-| 检查某个 agent 的设置 | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
+| 终端或桌面 | `npx @wenyuchiou/agent-board`（SSH 或没有图形显示时打开终端看板，其他情况打开网页） |
+| 同一个 Wi-Fi 的手机 | `npx @wenyuchiou/agent-board --lan`（扫它打印的二维码） |
+| Agent 读取看板 | `npx @wenyuchiou/agent-board --json`（[字段说明](docs/BOARD-JSON.md)） |
+| 检查某个 agent 的设置 | `npx @wenyuchiou/agent-board --codex-doctor --agent codex` |
 
 <details>
 <summary><b>终端看板的按键</b></summary>
@@ -276,7 +276,7 @@ Hooks 说明对话在做事还是在等；任务步骤和什么时候算完成�
 先运行 doctor。它检查安装器替某个 agent 写了什么，不会改任何东西：
 
 ```sh
-node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
+npx @wenyuchiou/agent-board --codex-doctor --agent codex
 ```
 
 `--agent` 后面换成那个 agent 的名字（doctor 对每个 agent 都沿用这个旧名称）。它会说明文件在不在、哪里有问题，并给一个下一步。只有新开的对话真的出现在看板上，才算证明接通了。加 `--json` 时，`installed` 表示文件都在，`ready` 表示这个 agent 有报告状态的 adapter，`connected` 一律是 `unverified`。
