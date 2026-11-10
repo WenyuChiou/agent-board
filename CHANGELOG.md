@@ -12,13 +12,13 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - **Remote reporters / Report clocks** · The Python importer refuses live reports over three days old, including reports without a state, and rejects future UTC seconds before writing anything. Rapid updates and retirement retain their order within the current second; clock refusals use the system language. Old done and ended reports still merge as history (#220).
 
-- A question that asks you to choose from the list it ends on, such as `Which should I do first?` over the options, reaches Needs you; a bare `Which one?` or a heading over a list does not. A reply that only quotes an earlier question no longer makes a false card, and a lone straight quote, such as an inch mark, no longer hides a question (#1248, #1282).
+- A question that asks you to choose from the list it ends on, such as `Which should I do first?` over the options, reaches Needs you; a bare `Which one?` or a heading over a list does not. A reply that only quotes an earlier question no longer makes a false card, and an inch mark, as in `Should I use a 12" shelf?`, no longer hides the question it is in (#1248, #1282). A stray quote that pairs with a later quotation still can (#1290).
 
 - The board's page and terminal board refuse to save the language or the progress bar style over a progress-settings.json that is a link or not a regular file (#1264). The plugin's `/progress style` does not check this yet (#1276).
 
-- The Settings panel's Agents heading is in Traditional and Simplified Chinese too (#1269).
+- The Settings panel's Agents heading is in Traditional and Simplified Chinese too (#1269, #1279).
 
-- Setup says `1 setup file`, not `1 setup files`, when it creates, updates or removes one file (#1270).
+- Setup says `1 setup file`, not `1 setup files`, when it creates, updates or removes one file (#1270, #1284).
 
 - The Corner Light logo and the Agent•Board name, with the board's status in the light (#1263).
 
