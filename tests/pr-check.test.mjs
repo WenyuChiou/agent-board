@@ -632,6 +632,28 @@ test('approval gate: a ready pull request requires a qualifying review approval 
   assert.ok(pr1189.problems.some(p => p.check === 'review' && p.message.includes('RULES.md, R2')))
 })
 
+test('approval gate: an approval needs the full head sha, and a lane\'s own fresh reviewer is not refused for sharing the author\'s name (#1257)', () => {
+  const head = syntheticPr().head
+  const codexPr = { ...syntheticPr(), body: 'Author: codex, fix/test-branch\n\n' + syntheticPr().body, prComments: [] }
+  const reviewProblems = data => checkPr(data).problems.filter(p => p.check === 'review')
+
+  // A seven-character prefix of the head is not the full sha R2 asks for.
+  const short = reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark, Muse's reviewer` }] })
+  assert.ok(short.some(p => p.message.includes('full 40-character head sha')), JSON.stringify(short))
+  assert.equal(reviewProblems({ ...codexPr, isDraft: true, prComments: [{ body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark` }] }).length, 0)
+
+  // The lane's own fresh reviewer, posted in R2's form, counts even though its name contains the author's.
+  assert.deepEqual(reviewOf(`Review: APPROVE ${head} by Codex gpt-6.1-terra, codex's reviewer`), { kind: 'APPROVE', sha: head.toLowerCase(), reviewer: 'Codex gpt-6.1-terra', lane: 'codex' })
+  assert.equal(reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, codex's reviewer` }] }).length, 0)
+
+  // Without that form, a reviewer named like the author is still refused.
+  const self = reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, read in full` }] })
+  assert.ok(self.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(self))
+
+  // A request for changes still holds the merge whatever sha length it names.
+  assert.ok(reviewProblems({ ...codexPr, prComments: [{ body: `Review: REQUEST CHANGES ${head.slice(0, 7)} by Muse Spark` }] }).some(p => p.message.includes('requested changes')))
+})
+
 test('pr-check combines issue state and draft information without mutating inputs', () => {
   const data = syntheticPr()
   const before = JSON.stringify(data)

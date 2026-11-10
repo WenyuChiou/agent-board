@@ -594,13 +594,16 @@ export const binaryImages = paths => {
 export const reviewOf = item => {
   if (!item) return null
   const body = typeof item === 'string' ? item : item.body ?? ''
-  const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
+  const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+)(?:,[ \t]*([^\r\n,']+)'s reviewer\b)?)?/mi)
   if (match) {
     const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
+    // R2's exception: a lane posts its own fresh reviewer's verdict as `by <reviewer and model>, <lane>'s reviewer`.
+    const lane = match[4]?.trim()
     return {
       kind: match[1].toUpperCase(),
       sha: match[2].toLowerCase(),
       ...(reviewer ? { reviewer } : {}),
+      ...(lane ? { lane } : {}),
     }
   }
   if (typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
@@ -645,7 +648,16 @@ export const verdict = (comments, head, options = {}) => {
     return output
   }
 
-  if (authorAgent && last.reviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())) {
+  // R2 asks for the full head sha: a prefix could name another commit that shares it.
+  if (last.sha.length !== 40 || last.sha !== head.toLowerCase()) {
+    output.info.push(`review: APPROVE names ${last.sha.slice(0, 7)} without the full head sha.`)
+    if (!isDraft && number !== null) {
+      output.problems.push(problem('review', 'the approval does not name the full 40-character head sha (RULES.md, R2).', `post "Review: APPROVE ${head} by <reviewer>".`))
+    }
+    return output
+  }
+
+  if (authorAgent && last.reviewer && !last.lane && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
       output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer.'))
