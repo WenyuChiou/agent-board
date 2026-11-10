@@ -147,6 +147,7 @@ export type ServeAsk = {
   // A hand-kept question, the person's own (its agent is '', as Claude Code's is); absent otherwise.
   isOwn?: true
   canTick: boolean
+  fileLine: number | null
   // Another session's question can be marked answered: kept off the board until it changes.
   canHide: boolean
   unhideKey?: string
@@ -157,6 +158,7 @@ export type ServeAsk = {
   session: string
   // The line's fingerprint (hooks/board.ts): the page sends it back with every press.
   fp: string
+  tickFp: string
   // The folder a reply runs in, shown beside the box before it is sent.
   where: string
   // Why a reply cannot be sent from here, when it cannot.
@@ -417,11 +419,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         link: ask.link,
         ...(ask.native === undefined ? {} : { native: { options: ask.native.options, line: s.nativeAnswerIn(agentLabel(ask.native.agent, s)) } }),
         canTick: ask.step !== null,
+        fileLine: ask.step?.line ?? null,
         canHide: ask.hideKey !== '' && ask.canHide !== false,
         ...(ask.hideKey !== '' && ask.canHide !== false ? { unhideKey: `hidden:${ask.hideKey}` } : {}),
         send,
         session: connection?.session ?? ask.target?.session ?? '',
         fp: fingerprint(item, items),
+        tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (ask.target?.dir ?? '') : send === 'connected' ? claudeHint(ask.agent, false, s) : '',
         archiveNote: isManual ? '' : s.archiveLive,
         info: connection || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? infoOf(send, ask.agent, ask.task, '', s)),
@@ -630,7 +634,7 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   // can be reworded under it: the press goes through only on the block and words the page drew.
   const item = items.find(one => one.key === request.key)
 
-  if (item === undefined || request.fp !== fingerprint(item, items, request.type === 'tick' && request.line !== undefined)) return { type: 'refuse', note: s.boardLineChanged }
+  if (item === undefined || request.fp !== fingerprint(item, items, request.type === 'tick' && (item.type === 'ask' || request.line !== undefined))) return { type: 'refuse', note: s.boardLineChanged }
   return action.type === 'tick' ? { ...action, ref: guardStep(action.ref, items) } : action
 }
 
@@ -642,7 +646,9 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'tick') {
     if (item.type === 'ask') {
       const ref = item.ask.step
-      return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
+      if (ref === null) return { type: 'refuse', note: s.boardTickGone }
+      if (request.line !== ref.line) return { type: 'refuse', note: s.boardLineChanged }
+      return { type: 'tick', ref }
     }
     if (item.type !== 'row') return { type: 'refuse', note: s.boardTickGone }
     // A press names the step it showed by its file line, so two open steps with the same
@@ -1802,7 +1808,7 @@ const PAGE_SCRIPT = String.raw`
       add(body, el('p', 'note', ask.native.line));
       if (ask.canHide) add(answers, button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
     } else if (ask.isOwn) {
-      if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
+      if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.tickFp, undefined, ask.fileLine); }, 'primary'));
     } else {
       var options = ask.answers || [];
       canWrite = true;

@@ -3569,8 +3569,9 @@ test('a tick on the page for a hand-kept question that was reworded since the pa
     assert.equal(drawn.text, 'Ask two referees')
     const reworded = text().replace('- [?] Ask two referees', '- [?] Submit the replacement application')
     writeFileSync(path, reworded)
-    const press = fp => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp } })
-    const refused = await press(drawn.fp)
+    // The press is what the page's Done button sends: the tick fingerprint and the step's line (#1204).
+    const press = one => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp: one.tickFp, line: one.fileLine } })
+    const refused = await press(drawn)
     assert.equal(refused.status, 409, refused.body)
     assert.equal(refused.json().note, LINE_CHANGED)
     assert.equal(text(), reworded)
@@ -3578,7 +3579,7 @@ test('a tick on the page for a hand-kept question that was reworded since the pa
     const now = await ask()
     assert.equal(now.key, drawn.key)
     assert.notEqual(now.fp, drawn.fp)
-    assert.equal((await press(now.fp)).status, 200)
+    assert.equal((await press(now)).status, 200)
     assert.ok(text().includes('- [x] Submit the replacement application'))
   } finally {
     await board.close()

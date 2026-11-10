@@ -195,6 +195,104 @@ test('a manual question keeps its write guard when its task row is in the collap
   assert.equal(setManualStep(shifted, action.ref, 'x', now, EN), shifted)
 })
 
+const questionSource = '## Synthetic project\n### Twin steps\n- [ ] Earlier step\n- [?] Inspect the map\n- [?] Inspect the map\n'
+const drawQuestions = (text, isIdleOpen = true) => {
+  const projects = parseProgress(text)
+  const seen = isIdleOpen ? {} : Object.fromEntries(projects.flatMap(project => project.tasks.map(task => [taskFingerprint(project.name, task), now - 8 * 86400000])))
+  const view = buildView(projects, [], null, now, 0, {}, EN, [], seen)
+  const items = boardItems(view, [], isIdleOpen)
+  const asks = serveModel(view, [], EN).asks.filter(ask => ask.task === 'Twin steps')
+  for (const item of items.filter(item => item.type === 'ask' && item.ask.step !== null)) {
+    assert.ok(item.ask.step.guard, 'drawn questions must carry their task source guard')
+    assert.deepEqual(item.ask.step.guard.steps, projects[0].tasks[0].steps.map(step => step.line))
+  }
+  if (!isIdleOpen) assert.ok(!items.some(item => item.type === 'row' && item.row.title === 'Twin steps'))
+  return { items, asks }
+}
+const questionRequest = ask => ({ key: ask.key, type: 'tick', text: '', session: '', fp: ask.tickFp ?? ask.fp, line: ask.fileLine })
+
+for (const isIdleOpen of [true, false]) {
+  const shelf = isIdleOpen ? 'visible' : 'collapsed'
+  test('a saved question Done press refuses an identical sibling after an earlier step disappears with its task ' + shelf, () => {
+    const before = drawQuestions(questionSource, isIdleOpen)
+    const saved = questionRequest(before.asks[0])
+    const shifted = questionSource.replace('- [ ] Earlier step\n', '')
+    const after = drawQuestions(shifted, isIdleOpen)
+    const previous = before.items.find(item => item.key === saved.key)
+    const current = after.items.find(item => item.key === saved.key)
+    assert.equal(previous.ask.step.line, current.ask.step.line, 'the second question now occupies the first question\'s source line')
+    assert.notDeepEqual(previous.ask.step.guard.steps, current.ask.step.guard.steps, 'the task\'s full step-line vector must tell the questions apart')
+    assert.equal(before.asks[0].fp, after.asks.find(ask => ask.key === saved.key).fp, 'card actions keep their identity through unrelated line moves')
+    const action = serveAction(after.items, saved, EN)
+    const result = action.type === 'tick' ? setManualStep(shifted, action.ref, 'x', now, EN) : shifted
+    assert.deepEqual(action, { type: 'refuse', note: EN.boardLineChanged })
+    assert.equal(result, shifted, 'a refused question must not write either sibling')
+  })
+
+  test('a pinned terminal question refuses an identical sibling after an earlier step disappears with its task ' + shelf, () => {
+    const before = drawQuestions(questionSource, isIdleOpen)
+    const state = pinned({ ...emptyBoardState, key: before.asks[0].key }, before.items)
+    const shifted = questionSource.replace('- [ ] Earlier step\n', '')
+    const after = drawQuestions(shifted, isIdleOpen)
+    const pressed = boardKey(state, 'x', after.items, EN)
+    const result = pressed.action?.type === 'tick' ? setManualStep(shifted, pressed.action.ref, 'x', now, EN) : shifted
+    assert.equal(pressed.action, null)
+    assert.equal(pressed.state.note, EN.boardLineChanged)
+    assert.equal(result, shifted, 'a refused terminal question must not write either sibling')
+  })
+}
+
+for (const surface of ['page', 'terminal']) {
+  test('fresh ' + surface + ' question presses tick the second identical question and then the first', () => {
+    let text = questionSource
+    for (const index of [1, 0]) {
+      const { items, asks } = drawQuestions(text)
+      const ask = asks[index]
+      assert.equal(typeof ask.tickFp, 'string')
+      assert.equal(typeof ask.fileLine, 'number')
+      const action = surface === 'page'
+        ? serveAction(items, questionRequest(ask), EN)
+        : boardKey(pinned({ ...emptyBoardState, key: ask.key }, items), 'x', items, EN).action
+      assert.equal(action.type, 'tick')
+      assert.equal(action.ref.line, ask.fileLine)
+      text = setManualStep(text, action.ref, 'x', now, EN)
+      assert.match(text.split('\n')[ask.fileLine], /^- \[x\] Inspect the map/)
+      if (index === 1) assert.equal(text.split('\n')[asks[0].fileLine], '- [?] Inspect the map')
+    }
+    assert.equal(text.split('\n').filter(line => line.startsWith('- [x] Inspect the map')).length, 2)
+    assert.ok(text.includes('- [ ] Earlier step'))
+  })
+}
+
+test('an old question Done press without a tick fingerprint or source line asks for a refresh', () => {
+  const { items, asks } = drawQuestions(questionSource)
+  const action = serveAction(items, { key: asks[0].key, type: 'tick', text: '', session: '', fp: asks[0].fp }, EN)
+  const result = action.type === 'tick' ? setManualStep(questionSource, action.ref, 'x', now, EN) : questionSource
+  assert.deepEqual(action, { type: 'refuse', note: EN.boardLineChanged })
+  assert.equal(result, questionSource)
+})
+
+test('a question Done press needs both its tick fingerprint and its source line', () => {
+  const { items, asks } = drawQuestions(questionSource)
+  const ask = asks[0]
+  const fresh = questionRequest(ask)
+  for (const invalid of [{ ...fresh, fp: ask.fp }, { ...fresh, line: undefined }, { ...fresh, line: ask.fileLine + 1 }]) {
+    const action = serveAction(items, invalid, EN)
+    const result = action.type === 'tick' ? setManualStep(questionSource, action.ref, 'x', now, EN) : questionSource
+    assert.deepEqual(action, { type: 'refuse', note: EN.boardLineChanged })
+    assert.equal(result, questionSource)
+  }
+})
+
+test('a terminal question without its pinned tick fingerprint asks for a refresh', () => {
+  const { items, asks } = drawQuestions(questionSource)
+  const { seenTicks, ...state } = pinned({ ...emptyBoardState, key: asks[0].key }, items)
+  assert.ok(seenTicks)
+  const pressed = boardKey(state, 'x', items, EN)
+  assert.equal(pressed.action, null)
+  assert.equal(pressed.state.note, EN.boardLineChanged)
+})
+
 const untitledSource = '## Earlier project\n### Earlier card\n- [ ] Check the sample\n## Untitled project\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
 const drawUntitled = (text, words) => {
   const view = buildView(parseProgress(text), [], null, now, 0, {}, words)

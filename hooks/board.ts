@@ -619,7 +619,8 @@ export type BoardItem =
 
 // `key` is the chosen line's, so the choice stays on it when lines above it come or go. `seen`
 // holds each line's fingerprint as the last draw showed it (null before the first draw).
-export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean; bulkTidy?: { token: string; preview: TidyPreview } }
+// `seenTicks` also binds question ticks to the source steps that draw showed.
+export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; seenTicks?: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean; bulkTidy?: { token: string; preview: TidyPreview } }
 
 export type BoardAction =
   | { type: 'tick'; ref: StepRef }
@@ -639,7 +640,7 @@ export type BoardAction =
   // The next progress-bar style, written to the board's settings file for every surface (#1085).
   | { type: 'style' }
 
-export const emptyBoardState: BoardState = { selected: 0, key: null, open: null, note: '', seen: null }
+export const emptyBoardState: BoardState = { selected: 0, key: null, open: null, note: '', seen: null, seenTicks: null }
 
 // The line on screen that the keys act on. A line whose key is gone was replaced under the
 // cursor since the screen was drawn; isGone stops a key from acting on a line not yet seen.
@@ -718,6 +719,7 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLine
   // Card actions survive unrelated line moves; a tick's absolute line must still name the drawn step.
   if (item.type === 'row') parts.push(item.row.stepTask?.expected ?? item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => step)))
   if (item.type === 'row' && isLineTick) parts.push(JSON.stringify([item.row.next?.line ?? null, item.row.steps.map(step => step.line)]))
+  if (item.type === 'ask' && isLineTick) parts.push(JSON.stringify([item.ask.step?.line ?? null, item.ask.step?.guard?.steps ?? null, item.ask.step?.guard?.task ?? null]))
   if (item.type !== 'turn' && session === '') parts.push(String(twinsOf(item, items)))
 
   return sha256(parts.join('\u0000')).slice(0, 12)
@@ -751,7 +753,13 @@ export const pinned = (state: BoardState, items: readonly BoardItem[]): BoardSta
   const at = chosen(state, items)
   if (state.key !== null && items[at]?.key !== state.key) return state
 
-  return { ...state, selected: at, key: items[at]?.key ?? null, seen: Object.fromEntries(items.map(item => [item.key, fingerprint(item, items)])) }
+  return {
+    ...state,
+    selected: at,
+    key: items[at]?.key ?? null,
+    seen: Object.fromEntries(items.map(item => [item.key, fingerprint(item, items)])),
+    seenTicks: Object.fromEntries(items.map(item => [item.key, fingerprint(item, items, true)])),
+  }
 }
 
 export const boardKey = (state: BoardState, key: string, items: readonly BoardItem[], s: Strings = ZH_TW, routes: Readonly<Record<string, AnswerRoute>> = {}): { state: BoardState; action: BoardAction | null } => {
@@ -766,8 +774,8 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (key === 'down' || key === 'j') return moved(Math.min(last, at + 1))
   // The legacy action name now opens the same live page as the desktop command.
   if (key === 'o') return { state, action: { type: 'html' } }
-  if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: state.isIdleOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
-  if (key === 'l') return { state: { ...state, isOlderOpen: !state.isOlderOpen, selected: 0, key: null, open: null, note: state.isOlderOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
+  if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: state.isIdleOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {}, seenTicks: {} }, action: null }
+  if (key === 'l') return { state: { ...state, isOlderOpen: !state.isOlderOpen, selected: 0, key: null, open: null, note: state.isOlderOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {}, seenTicks: {} }, action: null }
   if (key === 'u') return { state, action: { type: 'unhide', key: null } }
   // Archive now, as the page's button under Done recently does: every finished task goes at once.
   if (key === 't') return { state, action: { type: 'tidy' } }
@@ -785,7 +793,10 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (key === 'enter' || key === ' ') return { state: { ...state, selected: at, key: item.key, open: state.open === item.key ? null : item.key, note: state.open === item.key ? s.pressClosed : s.pressOpened, tone: 'done' }, action: null }
   if (item.type === 'ask') {
     const { ask } = item
-    if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: guardStep(ask.step, items) } }
+    if (key === 'x' && ask.step !== null) {
+      if (state.seen !== null && state.seenTicks?.[item.key] !== fingerprint(item, items, true)) return changed
+      return { state, action: { type: 'tick', ref: guardStep(ask.step, items) } }
+    }
     if (key === 'h' && ask.hideKey !== '' && ask.canHide !== false) return { state, action: { type: 'hide', key: ask.hideKey, text: ask.text } }
     if (key === 'c' && (ask.command ?? ask.link) !== null) return { state, action: { type: 'copy', text: plain((ask.command ?? ask.link) as string) } }
     // Copy an actionable command on demand; a raw session id is not a clipboard action.
