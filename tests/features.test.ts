@@ -1639,9 +1639,15 @@ test('a question followed only by its choices as a list still asks it (#1243)', 
   expect(lastQuestion('What changed:\n1. the parser\n2. the tests')).toBeNull()
   expect(lastQuestion('Why did it fail? The cache was stale.\n1. cleared it\n2. reran')).toBeNull()
   expect(lastQuestion('Which one?\n\nI went with A.\n\n1. A\n2. B')).toBeNull()
-  // A summary under a question heading is not a choice put to the person.
+  expect(lastQuestion('你要先用哪個資料庫？\n- Postgres\n- SQLite')).toBe('你要先用哪個資料庫？')
+  // A list item's indented second paragraph stays with its item.
+  expect(lastQuestion('Which database do you prefer?\n\n1. Postgres.\n\n   It supports replicas.\n\n2. SQLite.')).toBe('Which database do you prefer?')
+  // A summary under a question heading is not a choice put to the person, even when it says you.
   expect(lastQuestion('What changed?\n- Updated the parser.\n- Added tests.')).toBeNull()
   expect(lastQuestion('Which database did I pick?\n- SQLite was selected.\n- Migrations completed.')).toBeNull()
+  expect(lastQuestion('What did you ask for?\n- Add dark mode.\n- Preserve settings.')).toBeNull()
+  expect(lastQuestion('你提出了哪些需求？\n- 新增深色模式。\n- 修正設定頁。')).toBeNull()
+  expect(lastQuestion('You asked for a summary. What changed?\n- Updated the parser.\n- Added tests.')).toBeNull()
   // A list whose items ask cannot tell which question waits.
   expect(lastQuestion('Which database should I use?\n1. Postgres for scale?\n2. SQLite for simplicity.')).toBeNull()
   expect(lastQuestion('I answered these questions:\n1. Why did tests fail?\n2. The cache was stale.')).toBeNull()

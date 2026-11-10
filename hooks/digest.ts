@@ -124,15 +124,18 @@ const LINK = /https?:\/\/[^\s<>"'`“”‘’「」『』，。！？、；：�
 const LIST_ITEM = /^\s*(?:[-*+•]|\d+[.)、]|[A-Za-z][.)])\s+/
 // Closing quotes and brackets may follow the mark, so `「選哪個？」` still ends on it.
 const ENDS_ASKING = /[?？]["'”」』)）]*$/
-// Over a list, a question counts only when it is put to the person. A heading such as `What
-// changed?` or `Which files did I touch?` over a summary asks nothing, and a false question
-// under Needs you costs the trust the board needs (#1243).
-const ASKS_PERSON = /\b(?:you|your|should I|shall I|should we|shall we|want me|can I|may I|ok to|okay to|prefer)\b|你|您|要我|要不要|要選|要选|請選|请选|我該|我应该|我應該/i
+// Over a list, a question counts only when it asks the person to decide. A heading such as
+// `What changed?` or `What did you ask for?` over a summary asks nothing, and a false question
+// under Needs you costs the trust the board needs (#1243). A bare `you` or `你` is not enough:
+// it is as common in a recap as in a request.
+const ASKS_PERSON = /\b(?:should I|shall I|should we|shall we|want me|would you|do you (?:want|prefer|need)|can I|may I|ok to|okay to|prefer)\b|要我|要不要|你要|您要|你想|您想|你希望|您希望|你偏好|要選|要选|請選|请选|我該|我应该|我應該/i
 
 // For callers that already normalized the reply: do not parse it a second time.
 export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
   const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, '$1')
-  const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '').map(one => one.split(/\r?\n/))
+  // Only the end of a paragraph is trimmed: a list item's indented second paragraph keeps the
+  // indent that ties it to its item.
+  const paragraphs = prose.split(/\n\s*\n/).map(one => one.replace(/\s+$/, '')).filter(one => one.trim() !== '').map(one => one.split(/\r?\n/))
   const last = paragraphs.at(-1)
   if (last === undefined) return null
   const words = (lines: string[]): string[] => lines
@@ -143,7 +146,8 @@ export const lastQuestionInProse = (answer: string, isFull = false): string | nu
   const links: string[] = []
   const hidden = (line: string): string => line.replace(LINK, link => `\u0000${links.push(link) - 1}\u0000`)
   let tail = hidden(words(last).at(-1) ?? '')
-  if (!/[?？]/.test(tail)) {
+  const isOverList = !/[?？]/.test(tail)
+  if (isOverList) {
     // A question followed only by its choices as a list still asks it (#1243). The list is set
     // aside, in the question's paragraph or over paragraphs of its own (a loose list has blank
     // lines between items). The line before it must end on its question mark and be put to the
@@ -164,12 +168,15 @@ export const lastQuestionInProse = (answer: string, isFull = false): string | nu
     }
     if (at === 0 || !LIST_ITEM.test(choices[0] ?? '') || choices.some(line => ENDS_ASKING.test(line.trim()))) return null
     tail = hidden(words(lines.slice(0, at)).at(-1) ?? '')
-    if (!ENDS_ASKING.test(tail) || !ASKS_PERSON.test(tail)) return null
+    if (!ENDS_ASKING.test(tail)) return null
   }
   // Keep closing wrappers after the question mark so choice parsing can distinguish
   // a wrapped question from a word's own leading apostrophe, such as '90s.
   const sentences = tail.match(/[^.。!！?？]*[?？]["'”」』)]*/g) ?? []
   const question = (sentences.at(-1) ?? '').replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '').trim()
+  // The question itself must ask, not the line it sits on: `You asked for a summary. What
+  // changed?` over a list asks nothing.
+  if (isOverList && !ASKS_PERSON.test(question)) return null
 
   return question === '' ? null : isFull ? question : clip(question, 120)
 }
