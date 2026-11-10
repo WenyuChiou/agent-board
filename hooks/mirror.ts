@@ -459,6 +459,12 @@ export const nameReply = (reply: string): { title: string; context: string } | n
 
   const title = cleanTitle(lines[0] ?? '')
   const fullTitle = cleanTitle(lines[0] ?? '', Infinity)
+  // A short first-person refusal can fit the title limits, even under a title label and quotes.
+  const statement = fullTitle.replace(/^["'“‘「『《【\s]+/u, '')
+  const isRefusal = /^(?:sorry[,:\s]+)?(?:i|we)(?:\s+(?:cannot|can\s+not|can['’]t|could\s+not|couldn['’]t)|(?:\s+(?:am|are)|['’](?:m|re))\s+(?:unable|not\s+able)\s+to)\b/i.test(statement)
+    || /^(?:抱歉[，,、：:\s]*)?我(?:們|们)?(?:目前|暫時|暂时)?(?:無法|无法|不能|沒辦法|没办法)/u.test(statement)
+  if (isRefusal) return null
+
   const context = cleanContext(lines[1] ?? '', Infinity)
   const hasCjk = (text: string): boolean => /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(text)
   const isTitle = (text: string): boolean => {

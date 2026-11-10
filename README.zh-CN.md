@@ -38,7 +38,7 @@ npx @wenyuchiou/agent-board setup
 npx @wenyuchiou/agent-board
 ```
 
-第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，然后问一次 `要设置这些吗？[Y/n]`。答 yes 就写入文件、在 Codex 和 Hermes Agent 批准看板的 hooks，电脑上有 Claude Code 时也一并装好插件；答 no 就什么都不写。没有终端可以回答时（例如在 agent 的对话中），setup 只会预览：这时 `setup --apply` 会写入文件，并列出批准 hooks 和安装插件需要你自己运行的命令。第二行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若还没设置任何东西，单独运行第二行也会先问同一个问题。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要卸载，见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
+第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，然后问一次 `要设置这些吗？[Y/n]`。答 yes 就写入文件、在 Codex 和 Hermes Agent 批准看板的 hooks，电脑上有 Claude Code 时也一并装好插件；答 no 就什么都不写。没有终端可以回答时（例如在 agent 的对话中），setup 只会预览：这时 `setup --apply` 会写入文件，并列出批准 hooks 和安装插件需要你自己运行的命令。第二行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若还没设置任何东西，单独运行第二行也会先问同一个问题。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要一次卸载所有设置过的 agent，运行 `npx @wenyuchiou/agent-board remove`（或 `setup --remove`）；见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
 
 看板语言跟随系统设置：系统是繁体或简体中文就用中文，其他用英文。要自己指定，在 setup 那行加上 `--lang zh-CN`（或 `zh-TW`、`en`），之后看板、网页和 `stop` 都会用这个语言。通过 Claude Code 插件接上的账号，改用 `/progress lang`。在网页的**设置**里选了语言，就以那个为准；选**自动**则跟随系统语言。
 

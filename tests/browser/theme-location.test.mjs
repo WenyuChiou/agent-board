@@ -35,6 +35,9 @@ test('at 375 px Settings is beside Close the board, traps focus, and fits every 
     await toggle.click()
     const panel = page.getByRole('dialog', { name: 'Settings', exact: true })
     await panel.waitFor({ state: 'visible' })
+    // The agent rows arrive a moment after the panel opens. Check the trap once they are in it, so
+    // the last control is the last row's button and not one the list then grows past.
+    await page.waitForFunction(() => document.querySelector('#settings-agent-list li') !== null || document.getElementById('settings-result').textContent !== '')
     await page.getByRole('button', { name: 'Close settings', exact: true }).focus()
     await page.keyboard.press('Shift+Tab')
     assert.equal(await panel.evaluate(element => element.contains(document.activeElement)), true)
@@ -54,8 +57,10 @@ test('at 375 px Settings is beside Close the board, traps focus, and fits every 
       await page.getByRole('heading', { name, exact: true }).waitFor({ state: 'visible' })
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true)
       assert.equal(await page.locator('#settings').evaluate(element => element.scrollWidth <= element.clientWidth), true)
-      const shortTargets = await page.locator('#settings button, #settings select').evaluateAll(elements => elements.filter(element => element.getBoundingClientRect().height < 48).length)
-      assert.equal(shortTargets, 0)
+      // Only controls on screen count: the agent confirm's Yes and Cancel stay hidden until a row's
+      // button is pressed, and a hidden control has no box to measure.
+      const shortTargets = await page.locator('#settings button, #settings select').evaluateAll(elements => elements.filter(element => element.getClientRects().length > 0 && element.getBoundingClientRect().height < 48).map(element => element.id || element.getAttribute('aria-label') || element.textContent.trim()))
+      assert.deepEqual(shortTargets, [])
       await page.screenshot({ path: join(evidence, `settings-${lang}-375.png`), fullPage: true })
       await page.keyboard.press('Escape')
     }

@@ -22,6 +22,8 @@ import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
+import { boardLanguage, isLanguageOverridden, type SettingsLang } from '../hooks/board-settings'
+import { settingsPanel } from '../hooks/page-settings'
 import { qrModules, qrText } from '../hooks/qr'
 import { STALE_MS } from '../hooks/parse'
 import { DOING_QUIET_MS, WORKING_MS } from '../hooks/grouping'
@@ -1383,6 +1385,14 @@ test('a naming reply accepts short titles and background in Chinese and English'
   expect(nameReply('one two three four five six seven')).not.toBeNull()
   expect(nameReply(`重做進度面板\n${'字'.repeat(40)}`)).not.toBeNull()
   expect(nameReply(`Build the progress board\n${Array(19).fill('word').join(' ')}`)).not.toBeNull()
+})
+
+test('short first-person refusals are not task names, but read-error titles are', () => {
+  for (const reply of ['I cannot read the file', 'I can’t access the file', 'Sorry, we are unable to read it',
+    "I'm unable to read the file", 'We’re not able to open it', 'Title: "I cannot read the file"',
+    '我無法讀取檔案', '我无法读取文件', '抱歉，我暫時不能讀檔', '任務名稱：「我無法讀取檔案」']) expect(nameReply(reply)).toBeNull()
+  expect(nameReply('Fix cannot read error')?.title).toBe('Fix cannot read error')
+  expect(nameReply('修正無法讀檔')?.title).toBe('修正無法讀檔')
 })
 
 test('a naming reply rejects refusals, sentences, extra lines and answers outside the prompt limits', () => {
@@ -2751,10 +2761,11 @@ test('a chat board puts the questions first, each with its project and agent, an
   expect(text).toContain('\n▸ acme-web › Dark mode for the settings page — next Settings page\n')
   for (const question of ['Per-key limit', 'Publish the fixed pages', 'Ship it to staging']) expect(at('▸ acme-web')).toBeGreaterThan(at(question))
   // One marked answered in a pane on this machine, and one hidden since, are not asked again.
+  // The waiting session leaves Needs you and stays waiting, out of Working now / in progress (#1206).
   const answered = chatText(chatView(CHAT_FILE, ['a1b2c3d4 2 Per-key limit — 100 or 300 a minute?']), [], [], STRINGS.en, '/home/jane')
   expect(answered).not.toContain('Per-key limit')
   expect(answered).toContain('[Confirm] Publish the fixed pages, OK?')
-  expect(answered.startsWith('Progress  ● 1 waiting  ▸ 2 in progress')).toBe(true)
+  expect(answered.startsWith('Progress  ● 1 waiting  ▸ 1 in progress')).toBe(true)
   // They are counted, as on the terminal board, after the questions that remain.
   expect(answered).toContain('    [Confirm] Publish the fixed pages, OK?\n  1 answered, hidden\n')
   // Its task goes on with the work that is not waiting, and its next step is the one after the question.
@@ -4602,17 +4613,50 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
 })
 
-test('hiding a question on a state=waiting session reflects answeredWaiting rather than plain working (#1143)', () => {
+test('hiding a question on a state=waiting session reflects answeredWaiting rather than plain working (#1143, #1206)', () => {
   const key = 'a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'
   for (const s of Object.values(STRINGS)) {
     expect(s.answeredWaiting).toBeTruthy()
+    // 1. Before hide: question is in asks, waiting session is not in Working now
+    const beforeView = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, s)
+    const beforeItems = boardItems(beforeView, [])
+    const askItem = beforeItems.find(item => item.type === 'ask' && item.key.includes('a1b2c3d4'))
+    expect(askItem).toBeDefined()
+    const beforeModel = serveModel(beforeView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(beforeModel.view.working.some(ref => ref.project === 'api-gateway')).toBe(false)
+
+    // 2. Hide through the page hide action
+    const acted = serveAction(beforeItems, { key: askItem!.key, type: 'hide', text: '', session: '' }, s)
+    expect(acted).toMatchObject({ type: 'hide', key })
+
+    // 3. After hide: question left Needs you, still-waiting session stays out of Working now and its count
     const hiddenView = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, s, [key])
     const row = hiddenView.groups.find(group => group.project === 'api-gateway')?.rows.find(r => r.title === 'Rate-limit the public endpoints')
     expect(row?.status).toBe(s.answeredWaiting)
     expect(row?.tone).toBe('quiet')
     const model = serveModel(hiddenView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
-    expect(model.view.working.some(ref => ref.key === `row:${row?.key}`)).toBe(true)
+    expect(model.view.working.some(ref => ref.key === `row:${row?.key}`)).toBe(false)
+    expect(model.view.working.filter(ref => ref.project === 'api-gateway').length).toBe(0)
+    expect(model.view.all.open.some(ref => ref.key === `row:${row?.key}`)).toBe(true)
+    expect(model.hidden.some(item => item.task === 'Rate-limit the public endpoints')).toBe(true)
     expect(pageWords(s).answeredWaiting).toBe(s.answeredWaiting)
+
+    // Unhide route remains available
+    const hiddenItems = boardItems(hiddenView, [])
+    expect(serveAction(hiddenItems, { key: `hidden:${key}`, type: 'unhide', text: '', session: '' }, s)).toEqual({ type: 'unhide', key })
+
+    // 4. Later real working report moves the session into Working now
+    const resumedFile = SERVE_FILE.replace(
+      '<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z',
+      '<!-- auto session=a1b2c3d4 agent=codex state=working updated=2026-10-17T08:44:00Z',
+    )
+    const resumedView = buildView(parseProgress(resumedFile), [], null, SERVE_NOW, 0, {}, s, [key])
+    const resumedRow = resumedView.groups.find(group => group.project === 'api-gateway')?.rows.find(r => r.title === 'Rate-limit the public endpoints')
+    expect(resumedRow?.status).toBe(s.agentWorking('Codex'))
+    expect(resumedRow?.tone).toBe('accent')
+    const resumedModel = serveModel(resumedView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(resumedModel.view.working.some(ref => ref.key === `row:${resumedRow?.key}`)).toBe(true)
+    expect(resumedModel.view.working.filter(ref => ref.project === 'api-gateway').length).toBe(1)
   }
 })
 
@@ -5007,4 +5051,41 @@ test('a native ask reaches the page model with its options and where to answer, 
   const page = servePage(STRINGS.en, 'n')
   expect(page).toContain('} else if (ask.native) {')
   expect(page.slice(page.indexOf('} else if (ask.native) {'), page.indexOf('} else if (ask.isOwn) {'))).not.toContain('canWrite = true')
+})
+
+test('Settings language override detects CLI flag precedence and displays override warning', () => {
+  expect(isLanguageOverridden(null, 'zh-TW', 'en', 'en')).toBe(false)
+  expect(isLanguageOverridden('en', 'zh-TW', 'en', 'en')).toBe(true)
+  expect(isLanguageOverridden('en', 'en', 'en', 'en')).toBe(false)
+  expect(isLanguageOverridden('auto', 'en', null, 'zh-TW')).toBe(true)
+
+  const enOverridden = settingsPanel(STRINGS.en, 'zh-TW', false, true)
+  expect(enOverridden).toContain('id="settings-lang-override"')
+  expect(enOverridden).toContain(STRINGS.en.settingsLanguageOverridden)
+
+  const enNormal = settingsPanel(STRINGS.en, 'en', false, false)
+  expect(enNormal).not.toContain('id="settings-lang-override"')
+})
+
+test('Settings language request on a server started with --lang en preserves precedence, shows override and reloads English', () => {
+  const flag = 'en'
+  let saved: SettingsLang = 'en'
+  expect(boardLanguage(flag, saved, 'en', 'zh-TW')).toBe('en')
+  expect(isLanguageOverridden(flag, saved, 'en', 'zh-TW')).toBe(false)
+
+  saved = 'zh-TW'
+  expect(boardLanguage(flag, saved, 'en', 'zh-TW')).toBe('en')
+  const isOverridden = isLanguageOverridden(flag, saved, 'en', 'zh-TW')
+  expect(isOverridden).toBe(true)
+
+  const reloadedHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverridden)
+  expect(reloadedHtml).toContain(`<h2 id="settings-title">${STRINGS.en.settingsTitle}</h2>`)
+  expect(reloadedHtml).toContain('<option value="zh-TW" selected>')
+  expect(reloadedHtml).toContain(`<p class="settings-label" id="settings-lang-override">${STRINGS.en.settingsLanguageOverridden}</p>`)
+
+  saved = 'en'
+  const isOverriddenAfterReset = isLanguageOverridden(flag, saved, 'en', 'zh-TW')
+  expect(isOverriddenAfterReset).toBe(false)
+  const resetHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverriddenAfterReset)
+  expect(resetHtml).not.toContain('id="settings-lang-override"')
 })

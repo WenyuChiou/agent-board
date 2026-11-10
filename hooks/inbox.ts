@@ -1,8 +1,7 @@
 import { baseName } from './parse'
-import { answeredStep, renewQuestion } from './step-words'
 import { STRINGS } from './strings'
 import type { ProgressMirror } from '../types'
-import { boardRequestWords, isBoardRequest, RECEIPT_FOLDER_KEYS, RECEIPT_SESSION_KEYS } from './board-commands'
+import { boardRequestWords, HOST_TURN_KEYS, inboxTurnKey, isBoardRequest, RECEIPT_FOLDER_KEYS, RECEIPT_SESSION_KEYS } from './board-commands'
 
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
 
@@ -22,6 +21,8 @@ export type AgentTurn = {
   answer: string
   transcript: string
   isBoardRequest?: boolean
+  // Optional host-provided turn identity, hashed before a receipt keeps it.
+  turnKey?: string
   // When the turn ended, normalized to milliseconds from the reporter's file name.
   at?: number
 }
@@ -122,6 +123,8 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
   const closing = typeof record.reason === 'string' && /^(?:channel_closed|shutdown)$/.test(record.reason)
   const event = name[2] === 'end' || END_EVENTS.test(hookEvent) || closing ? 'end' : name[2] === 'prompt' || PROMPT_EVENTS.test(hookEvent) ? 'prompt' : 'turn'
   const answer = event === 'prompt' ? '' : first(record, ['last_assistant_message', 'lastAssistantMessage', 'last-assistant-message', 'prompt_response', 'assistant_response', 'response', 'text'])
+  const turnKey = typeof record.turn_key === 'string' && /^[0-9a-f]{64}$/.test(record.turn_key)
+    ? record.turn_key : HOST_TURN_KEYS.map(key => inboxTurnKey(record[key])).find(key => key !== undefined)
 
   return {
     agent,
@@ -139,6 +142,7 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     answer: event === 'prompt' || answer === '[no response text]' ? '' : answer,
     transcript: event === 'prompt' ? '' : first(record, ['transcript_path', 'transcriptPath']),
     at: inboxTime(fileName),
+    ...(turnKey === undefined ? {} : { turnKey }),
     ...(event === 'prompt' && (record.board_request === true || isBoardRequest(record, BOARD_WORDS)) ? { isBoardRequest: true } : {}),
   }
 }
@@ -194,44 +198,35 @@ export const answerAgentPrompt = (mirror: (ProgressMirror & { confirmedAt?: numb
   if (barrier < 0 || order <= barrier) return null
   const at = prompt.at ?? now
   const updated = Math.min(at, now)
+  const questions = mirror.tasks.filter(one => one.waiting === 'you' && one.status !== 'completed')
   return {
-    ...mirror, state: 'working', updated, promptOrder: order, autoAsk: null,
-    replied: updated,
-    promptQuestion: mirror.tasks.some(one => one.waiting === 'you') ? { order, state: mirror.state, autoAsk: mirror.autoAsk, tasks: mirror.tasks.filter(one => one.waiting === 'you') } : null,
-    tasks: mirror.tasks.map(one => one.waiting === 'you' ? answeredStep(one) : one),
+    ...mirror, state: 'working', updated, promptOrder: order,
+    replied: questions.length > 0 ? updated : undefined,
+    promptQuestion: mirror.replied !== undefined ? mirror.promptQuestion
+      : questions.length > 0 && prompt.turnKey !== undefined ? { order, turnKey: prompt.turnKey, state: mirror.state, autoAsk: mirror.autoAsk, tasks: questions } : null,
   }
 }
 
-// Restore only the latest prompt's unchanged question. A later prompt or owner
-// turn invalidates this snapshot, so a delayed board reply cannot undo an answer.
+// Reclassify a provisional reply only with proof that this is the very same
+// turn. An unrelated board lookup cannot undo a real chat reply.
 export const restoreAgentBoardQuestion = (mirror: ProgressMirror, turn: AgentTurn, now: number): ProgressMirror | null => {
   const question = mirror.promptQuestion
   const order = turnOrder(turn)
-  if (!isBoardTurn(turn) || question == null || mirror.sessionId !== turn.id || mirror.agent !== turn.agent || mirror.resume !== turn.session || question.order !== normalizeTurnOrder(mirror.promptOrder) || order === undefined || !Number.isSafeInteger(order) || order > now * 2 || order <= question.order || order <= (normalizeTurnOrder(mirror.turnOrder) ?? -1) || order <= (mirror.confirmedAt ?? 0) * 2) return null
-  if (!question.tasks.every(old => mirror.tasks.some(one => JSON.stringify(one) === JSON.stringify(answeredStep(old))))) return null
-  // The provisional answer may already have closed its ledger revision.
-  let floor = mirror.questionSequence
-  const restored = question.tasks.map(one => {
-    const task = renewQuestion(one, floor)
-    floor = task.questionRevision
-    return task
-  })
-  return {
-    ...mirror, state: question.state, autoAsk: question.autoAsk, updated: now, turnOrder: order, promptQuestion: null,
-    questionSequence: restored.at(-1)?.questionRevision ?? mirror.questionSequence,
-    tasks: mirror.tasks.map(one => restored.find(old => one.id === old.id) ?? one),
-  }
+  if (!isBoardTurn(turn) || question?.turnKey === undefined || turn.turnKey !== question.turnKey || mirror.sessionId !== turn.id || mirror.agent !== turn.agent || mirror.resume !== turn.session || question.order !== normalizeTurnOrder(mirror.promptOrder) || order === undefined || !Number.isSafeInteger(order) || order > now * 2 || order <= question.order || order <= (normalizeTurnOrder(mirror.turnOrder) ?? -1) || order <= (mirror.confirmedAt ?? 0) * 2) return null
+  if (!question.tasks.every(old => mirror.tasks.some(one => JSON.stringify(one) === JSON.stringify(old)))) return null
+  return { ...mirror, state: question.state, autoAsk: question.autoAsk, updated: now, turnOrder: order, promptQuestion: null, replied: undefined }
 }
 
 // Separate immutable receipts survive an older summarizer replacing its raw mirror.
 // They retain binding and source time only, never the user's new prompt.
-export type AgentPromptReceipt = { id: string; agent: string; session: string; at: number; updated: number }
+export type AgentPromptReceipt = { id: string; agent: string; session: string; at: number; updated: number; turnKey?: string }
 
 export const withAgentPrompts = (mirror: ProgressMirror | undefined, values: readonly unknown[], now: number): ProgressMirror | undefined => {
   const receipts = values.filter((value): value is AgentPromptReceipt => {
     if (value === null || typeof value !== 'object') return false
     const one = value as Partial<AgentPromptReceipt>
     return typeof one.id === 'string' && typeof one.agent === 'string' && typeof one.session === 'string' && typeof one.at === 'number' && Number.isSafeInteger(one.at) && typeof one.updated === 'number' && Number.isSafeInteger(one.updated) && one.updated <= now
+      && (one.turnKey === undefined || typeof one.turnKey === 'string' && /^[0-9a-f]{64}$/.test(one.turnKey))
   }).sort((a, b) => a.at - b.at || a.updated - b.updated)
   let result = mirror
   for (const one of receipts) {
