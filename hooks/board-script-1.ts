@@ -5688,7 +5688,7 @@ export const LINES = [
 "    return isNow || age > DAY / 2;",
 "  return age > STOPPED_ARCHIVE_MS;",
 "};",
-"var confirmKey = (project, task, twins) => sha256(JSON.stringify([project, task.title, task.auto, task.notes, task.steps.map((step) => step.raw), task.auto === null ? twins : 0]));",
+"var confirmKey = (project, task, twins) => sha256(JSON.stringify([project, task.title, task.auto, task.notes, task.steps.map((step) => withoutStamp(step.raw)), task.auto === null ? twins : 0]));",
 "var confirmedTasks = (text, ref, s) => {",
 "  const tasks = parseProgress(text).filter((project) => (project.name || s.uncategorized) === ref.project).flatMap((project) => project.tasks);",
 "  const twins = tasks.filter((task) => task.title === ref.title).length;",

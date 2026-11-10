@@ -388,3 +388,16 @@ for (const surface of ['page', 'terminal']) {
     assert.equal(result, moved, 'a refused checkbox must not write the untouched twin')
   })
 }
+
+// #1228: the board writes a hidden done date onto a finished step after the draw (done-stamp.ts).
+// That date is not part of the task's identity, so a guarded step drawn before it still ticks at
+// write time (the native pane's queued write checks only this).
+test('a guarded step drawn before the board dated an earlier done step still ticks its own twin at write time (#1228)', () => {
+  const text = '## Synthetic project\n### Twin steps\n- [x] Earlier step\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+  const dated = text.replace('- [x] Earlier step', '- [x] Earlier step <!-- done 2026-11-08 -->')
+  const drawn = viewFor(text).items.find(item => item.type === 'row' && item.row.title === 'Twin steps').row.next
+  assert.ok(drawn.guard, 'the drawn step carries its source guard')
+  const lines = setManualStep(dated, drawn, 'x', now, EN).split('\n')
+  assert.match(lines[3], /^- \[x\] Inspect the map/)
+  assert.equal(lines[4], '- [ ] Inspect the map')
+})

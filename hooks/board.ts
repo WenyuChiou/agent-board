@@ -737,6 +737,32 @@ export const guardStep = (ref: StepRef, items: readonly BoardItem[]): StepRef =>
   return { ...ref, guard: { task: item.row.stepTask, steps: item.row.stepLines ?? [], lines } }
 }
 
+// The native pane draws the view itself and keeps each step ref in its button until the press.
+// Give those refs the same draw-time source proof the page and terminal carry, so a queued write
+// refuses, rather than retargets, a step whose task or twins moved since the draw (#1228).
+export const guardedView = (view: View): View => {
+  const rows = [...view.due, ...view.active, ...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped, ...(view.recentAsking ?? [])]
+  const items: BoardItem[] = rows.map(row => ({ type: 'row', key: `row:${row.key}`, row }))
+  const ask = (item: WaitingItem): WaitingItem => item.step == null ? item : { ...item, step: guardStep(item.step, items) }
+  const row = (one: TaskRow): TaskRow => one.next == null ? one : { ...one, next: guardStep(one.next, items) }
+  const focus = view.focus === null ? null : view.focus.type === 'ask' ? { ...view.focus, item: ask(view.focus.item) } : { ...view.focus, row: row(view.focus.row) }
+  return {
+    ...view,
+    focus,
+    waiting: view.waiting.map(ask),
+    hidden: view.hidden.map(ask),
+    ...(view.provisional === undefined ? {} : { provisional: view.provisional.map(ask) }),
+    ...(view.reminder === undefined ? {} : { reminder: view.reminder.map(ask) }),
+    ...(view.older === undefined ? {} : { older: view.older.map(ask) }),
+    idle: view.idle.map(row),
+    stopped: view.stopped.map(row),
+    due: view.due.map(row),
+    active: view.active.map(row),
+    groups: view.groups.map(group => ({ ...group, rows: group.rows.map(row) })),
+    ...(view.recentAsking === undefined ? {} : { recentAsking: view.recentAsking.map(row) }),
+  }
+}
+
 // What each key does on the selected line, so the footer lists only keys that do something.
 export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
   ask.native !== undefined ? [] : ask.kind === 'confirm' ? [s.yesAnswer, s.noAnswer] : ask.kind === 'choose' ? ask.options.slice(0, 9) : []

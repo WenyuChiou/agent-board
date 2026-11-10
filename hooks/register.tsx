@@ -88,7 +88,7 @@ import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_M
 import { othersNote, sessionPushNote } from './others'
 import type { ProgressProject } from '../types'
 import { boardRun } from './board-commands'
-import { peekInbox, redact, turnsFor } from './board'
+import { guardedView, peekInbox, redact, turnsFor } from './board'
 import type { PendingTurn, TurnCache } from './board'
 import { paletteFor } from './palette'
 import { drawPane, pressTarget, reviseKey } from './pane'
@@ -3919,11 +3919,37 @@ const handOverPrompt = (row: TaskRow, s: Strings): string =>
 
 // A press on 完成: the step is ticked in the file, by the person's own hand, and journaled
 // like a step Claude finished.
+// The tick is kept when its own line reads back as written, whatever else another writer added.
+// A try that runs after a write means that write was undone; if it then finds nothing to tick
+// (the step moved, or its twin took its line), the undone write is not reported as made.
 const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
-  const wrote = await rewrite($, await progressPath($), async before => setManualStep(before, ref, 'x', await $.clock.now()))
+  let ticked: { at: number; line: string } | null = null
+  let hasWritten = false
+  let isUndone = false
+  const wrote = await rewrite(
+    $,
+    await progressPath($),
+    async before => {
+      const after = setManualStep(before, ref, 'x', await $.clock.now())
+      if (after === before) {
+        isUndone = hasWritten
+        return after
+      }
+      const was = before.split(/\r?\n/)
+      const lines = after.split(/\r?\n/)
+      const at = lines.findIndex((line, index) => line !== was[index])
+      ticked = { at, line: lines[at] ?? '' }
+      return after
+    },
+    check => ticked !== null && check.split(/\r?\n/)[ticked.at] === ticked.line,
+    async (path, text) => {
+      await $.fs.write(path, text)
+      hasWritten = true
+    },
+  )
   await poll($)
 
-  return wrote !== null
+  return wrote !== null && !isUndone
 }
 
 // A side question: answered over this session's transcript, without a turn of its own.
@@ -4702,7 +4728,8 @@ export const register: Register = (on, options) => {
         ...warningOf(latest, s, seen, currentAt),
       }
     }
-    const view = await paneView()
+    // Drawn refs carry their source proof; presses re-read the view only for labels and counts.
+    const view = guardedView(await paneView())
     const ui: PaneUi = {
       Box: table.Box,
       Text: table.Text,
