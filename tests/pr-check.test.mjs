@@ -578,7 +578,7 @@ test('pr-check reports the last review verdict and distinguishes current and old
   const head = syntheticPr().head
   const comments = [{ body: 'Review: APPROVE 1234567' }, { body: `Review: REQUEST CHANGES ${head}` }]
   assert.match(verdict(comments, head).info[0], /REQUEST CHANGES.*current head/)
-  assert.match(verdict(comments.slice(0, 1), head).info[0], /older head/)
+  assert.match(verdict(comments.slice(0, 1), head).info[0], /without the full head sha/)
   assert.match(verdict([], head).info[0], /no review verdict/)
   assert.deepEqual(reviewOf('Checks complete\nReview: APPROVE ABCDEF0\nReview: REQUEST CHANGES 1234567'), { kind: 'APPROVE', sha: 'abcdef0' })
   assert.deepEqual(reviewOf('Review: REQUEST CHANGES `ABCDEF0`'), { kind: 'REQUEST CHANGES', sha: 'abcdef0' })
@@ -678,6 +678,15 @@ test('approval gate: an approval needs the full head sha, and a lane\'s own fres
   assert.ok(reviewProblems({ ...codexPr, prComments: merged }).some(p => p.message.includes('requested changes')))
   const undated = [{ body: 'a' }, { body: 'b' }]
   assert.deepEqual(byTime(undated), undated)
+  // A pending review has no time yet and is no verdict, so it does not stop the others being read in order.
+  const withPending = byTime([...merged.reverse(), { state: 'PENDING', body: `Review: APPROVE ${head} by Muse Spark` }])
+  assert.ok(reviewProblems({ ...codexPr, prComments: withPending }).some(p => p.message.includes('requested changes')))
+  // A short approval after a valid GitHub approval of the head is no verdict, so the GitHub approval stands.
+  const after = byTime([
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T08:00:00Z' },
+    { body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark`, created_at: '2026-11-10T09:00:00Z' },
+  ])
+  assert.equal(reviewProblems({ ...codexPr, prComments: after }).length, 0)
   assert.equal(reviewProblems({ ...codexPr, prComments: [shortComment, { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' } }] }).length, 0)
 
   // A request for changes still holds the merge whatever sha length it names.

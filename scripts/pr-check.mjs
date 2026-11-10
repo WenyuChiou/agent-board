@@ -623,21 +623,30 @@ export const hasHeadApproval = (comments, head) => comments.some(comment => {
   return review?.kind === 'APPROVE' && review.sha === String(head).toLowerCase()
 })
 
-// Comments and GitHub reviews come from two lists; the latest verdict is the latest by time, not by list.
-export const byTime = items => items.every(item => !Number.isNaN(Date.parse(item?.created_at ?? item?.submitted_at ?? '')))
-  ? [...items].sort((a, b) => Date.parse(a.created_at ?? a.submitted_at) - Date.parse(b.created_at ?? b.submitted_at))
-  : items
+// Comments and GitHub reviews come from two lists; the latest verdict is the latest by time, not by list. From
+// GitHub every comment and submitted review has a time, so an item without one (a pending review) is no verdict yet.
+// Items with no times at all (a local run's synthetic list) keep their order.
+export const byTime = items => {
+  const at = item => Date.parse(item?.created_at ?? item?.submitted_at ?? '')
+  if (!items.some(item => !Number.isNaN(at(item)))) return items
+  return items.filter(item => !Number.isNaN(at(item))).sort((a, b) => at(a) - at(b))
+}
 
 export const verdict = (comments, head, options = {}) => {
   const output = result()
   const { isDraft = false, authorAgent = null, number = null, isRelease = false, isOutside = false } = options
-  const reviews = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
+  const all = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
+  // R2 asks for the full head sha, so an approval naming a prefix is not a verdict; an earlier full one still stands.
+  const reviews = all.filter(review => review.kind !== 'APPROVE' || review.sha.length === 40)
   const last = reviews.at(-1)
 
   if (!last) {
-    output.info.push('review: no review verdict yet.')
+    const short = all.at(-1)
+    output.info.push(short ? `review: APPROVE names ${short.sha.slice(0, 7)} without the full head sha.` : 'review: no review verdict yet.')
     if (!isDraft && number !== null) {
-      output.problems.push(problem('review', 'a ready pull request needs a qualifying review approval on the current head.', 'request a review and post "Review: APPROVE <head> by <reviewer>".'))
+      output.problems.push(short
+        ? problem('review', 'the approval does not name the full 40-character head sha (RULES.md, R2).', `post "Review: APPROVE ${head} by <reviewer>".`)
+        : problem('review', 'a ready pull request needs a qualifying review approval on the current head.', 'request a review and post "Review: APPROVE <head> by <reviewer>".'))
     }
     return output
   }
@@ -655,15 +664,6 @@ export const verdict = (comments, head, options = {}) => {
     output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
       output.problems.push(problem('review', `the latest review requested changes on ${last.sha.slice(0, 7)}.`, 'address the review findings and request a new review.'))
-    }
-    return output
-  }
-
-  // R2 asks for the full head sha: a prefix could name another commit that shares it.
-  if (last.sha.length !== 40 || last.sha !== head.toLowerCase()) {
-    output.info.push(`review: APPROVE names ${last.sha.slice(0, 7)} without the full head sha.`)
-    if (!isDraft && number !== null) {
-      output.problems.push(problem('review', 'the approval does not name the full 40-character head sha (RULES.md, R2).', `post "Review: APPROVE ${head} by <reviewer>".`))
     }
     return output
   }
