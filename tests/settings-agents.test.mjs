@@ -137,6 +137,15 @@ syncSyntheticChild()
   return executable
 }
 
+// Claude Code's own records of the board plugin: its install receipt and the user's enable switch.
+const claudePlugin = (f, { installed, enabled }) => {
+  if (installed) {
+    mkdirSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins'), { recursive: true })
+    writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'agent-board@agent-board': [{ scope: 'user' }] } }))
+  }
+  writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), JSON.stringify({ enabledPlugins: { 'agent-board@agent-board': enabled } }))
+}
+
 test('Settings agent states follow their order in all three languages', () => {
   for (const words of [EN, ZH_TW, ZH_CN]) {
     assert.deepEqual(settingsAgentState(true, true, true, true, words), { state: words.settingsAgentOnBoard, button: 'remove' })
@@ -209,6 +218,8 @@ test('Settings keeps every agent row when an install record or the connect recor
   writeFileSync(join(f.data, 'install-opencode.json'), JSON.stringify({ files: [] }))
   // A folder where the record should be exists but cannot be read as a file.
   mkdirSync(join(f.data, 'install-grok.json'))
+  // Copied Claude settings that enable the plugin are not an install: no Claude row (#1203).
+  claudePlugin(f, { installed: false, enabled: true })
   let board = await f.start()
   try {
     const result = await board.call('GET', '/api/agents')
@@ -230,8 +241,10 @@ test('Settings keeps every agent row when an install record or the connect recor
       assert.deepEqual(files(f.home), before)
     }
   } finally { await board.close() }
-  // A damaged connect record does not hide the rows either.
+  // A damaged connect record does not hide the rows either. An installed plugin that the
+  // person turned off is not shown as set up, as setup reads it (#1203).
   writeFileSync(join(f.data, 'legacy-connect.json'), 'not json')
+  claudePlugin(f, { installed: true, enabled: false })
   board = await f.start()
   try {
     const result = await board.call('GET', '/api/agents')
@@ -306,7 +319,7 @@ test('Settings detects real synthetic installs once, trusts Codex and Hermes, re
   writeFileSync(codex, script.replace(output, `setTimeout(() => ${output}, Number(process.env.AGENT_BOARD_TEST_DELAY || 0))`), { mode: 0o755 })
   for (const agent of ['codex', 'opencode', 'gemini']) f.local('--codex-setup', '--agent', agent, '--apply')
   mkdirSync(join(f.home, '.cursor'))
-  writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), '{"enabledPlugins":{"agent-board@agent-board":true}}')
+  claudePlugin(f, { installed: true, enabled: true })
   writeFileSync(f.progress, '# Progress\n\n## Synthetic project\n' + block('opencode'))
   f.env.AGENT_BOARD_TEST_DELAY = '100'
   programs.clear()

@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { isatty } from 'node:tty'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
+import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, isBoardPluginDisabled as isPluginDisabled, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
 
 const args = process.argv.slice(2)
 const isRemove = args.includes('--remove')
@@ -76,6 +76,7 @@ const summaries = [
     "filesPart": "{host} files",
     "trustPart": "Approve the board's hooks in {host}",
     "installPlugin": "Install the Claude Code plugin",
+    "enablePlugin": "Claude Code: the plugin is installed but turned off in your user settings. Run {command} to turn it back on.",
     "marketplacePart": "Claude Code marketplace",
     "pluginPart": "Claude Code plugin",
     "partDone": "{part}: done.",
@@ -125,6 +126,7 @@ const summaries = [
     "filesPart": "{host} 設定檔案",
     "trustPart": "在 {host} 核准看板的 hooks",
     "installPlugin": "安裝 Claude Code 外掛",
+    "enablePlugin": "Claude Code：外掛已安裝，但在使用者設定裡被停用了。請執行 {command} 重新啟用。",
     "marketplacePart": "Claude Code 外掛市集",
     "pluginPart": "Claude Code 外掛",
     "partDone": "{part}：已完成。",
@@ -174,6 +176,7 @@ const summaries = [
     "filesPart": "{host} 设置文件",
     "trustPart": "在 {host} 批准看板的 hooks",
     "installPlugin": "安装 Claude Code 插件",
+    "enablePlugin": "Claude Code：插件已安装，但在用户设置里被禁用了。请运行 {command} 重新启用。",
     "marketplacePart": "Claude Code 插件市场",
     "pluginPart": "Claude Code 插件",
     "partDone": "{part}：已完成。",
@@ -341,7 +344,9 @@ const main = () => {
   const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
   const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude'], ['.exe', '.cmd']) : undefined
   const hasClaude = existsSync(claudeDirectory) || (homeAt < 0 && !!claude)
-  const isPluginNeeded = isAsking && !!claude && !hasPlugin(claudeDirectory)
+  const isPluginInstalled = hasClaude && hasPlugin(claudeDirectory)
+  const hasDisabledPlugin = isPluginInstalled && isPluginDisabled(claudeDirectory)
+  const isPluginNeeded = isAsking && !!claude && !isPluginInstalled
   const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
   const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
     ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
@@ -350,6 +355,7 @@ const main = () => {
     const baseCommon = common.filter(arg => !extra.includes(arg))
     return [command || nodeCommand(fileURLToPath(import.meta.url)), ...baseCommon.map(quote), ...extra.map(quote)].join(' ')
   }
+  const enablePluginStep = () => words('enablePlugin', { command: 'claude plugin enable agent-board@agent-board --scope user' })
   if (isRemove && selector === 'auto' && !selected.length) {
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : words('noInstalled')}\n`)
     return
@@ -357,7 +363,8 @@ const main = () => {
   if (!isRemove && selector === 'auto' && !selected.length && !isPluginNeeded) {
     const next = setupCommand(['--agent', 'codex'])
     const noAgent = noAgentText(homeAt < 0 ? 'anywhere' : 'home', { home, next })
-    process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n1. ${words('plugin')}` : noAgent}\n`)
+    const claudeNext = !isPluginInstalled ? [words('plugin')] : hasDisabledPlugin ? [enablePluginStep()] : [words('openOne', { agents: 'Claude Code' }), words('thenBoardOne')]
+    process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n${claudeNext.map((step, i) => `${i + 1}. ${step}`).join('\n')}` : noAgent}\n`)
     return
   }
   if ((!selected.length && selector !== 'auto') || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
@@ -549,7 +556,8 @@ const main = () => {
         const result = boardRun(plans[selected.indexOf(agent)], agent, extra)
         report(words('trustPart', { host: names[agent] }), !result.error && result.status === 0, next)
       }
-      let isPluginReady = !!claude && hasPlugin(claudeDirectory)
+      let hasInstalledPlugin = hasPlugin(claudeDirectory)
+      let isPluginReady = !!claude && hasInstalledPlugin && !isPluginDisabled(claudeDirectory)
       if (isPluginNeeded) {
         let known = null
         try { known = JSON.parse(readFileSync(join(claudeDirectory, 'plugins', 'known_marketplaces.json'), 'utf8').replace(/^\uFEFF/, '')) } catch {}
@@ -563,7 +571,10 @@ const main = () => {
           // An install counts once Claude Code lists the plugin, not on its exit status alone.
           const isDone = !result.error && result.status === 0 && (part !== 'pluginPart' || hasPlugin(claudeDirectory))
           report(words(part), isDone, ['claude', ...argv].join(' '))
-          if (part === 'pluginPart') isPluginReady = isDone
+          if (part === 'pluginPart') {
+            hasInstalledPlugin = isDone
+            isPluginReady = isDone && !isPluginDisabled(claudeDirectory)
+          }
         }
       }
       const next = []
@@ -579,6 +590,7 @@ const main = () => {
           sessions.push(names[agent])
         }
       }
+      if (hasInstalledPlugin && isPluginDisabled(claudeDirectory)) next.push(enablePluginStep())
       if (isPluginReady) sessions.push('Claude Code')
       if (sessions.length) {
         next.push(words(sessions.length === 1 ? 'openOne' : 'open', { agents: sessions.join(message(', ', '、', '、')) }))
@@ -623,9 +635,11 @@ const main = () => {
       if (agent === 'cursor' && process.platform === 'win32') steps.push(words('cursorWindows'))
       sessionAgents.push(names[agent])
     }
+    if (isPluginInstalled && !hasDisabledPlugin) sessionAgents.push('Claude Code')
     if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
     for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
-    if (hasClaude) steps.push(words('plugin'))
+    if (hasDisabledPlugin) steps.push(enablePluginStep())
+    else if (hasClaude && !isPluginInstalled) steps.push(words('plugin'))
     if (available.length) {
       steps.push(words('board', { command: boardCommand }))
     }

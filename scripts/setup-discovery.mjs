@@ -50,8 +50,13 @@ export const hasBoardPlugin = directory => {
     try { return JSON.parse(readFileSync(join(directory, file), 'utf8').replace(/^\uFEFF/, '')) } catch { return null }
   }
   const installed = read('plugins/installed_plugins.json')?.plugins?.[plugin]
-  return (Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === 'object')
-    || read('settings.json')?.enabledPlugins?.[plugin] === true
+  // Enabling a plugin in copied settings does not install it on this machine (#1203).
+  return Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === 'object'
+}
+
+// The person turned the installed plugin off in Claude Code's user settings.
+export const isBoardPluginDisabled = directory => {
+  try { return JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8').replace(/^﻿/, ''))?.enabledPlugins?.['agent-board@agent-board'] === false } catch { return false }
 }
 
 export const setupRecordChanges = (plan, selected) => setupAgents.filter(other => !selected.includes(other)).map(other => join(plan.data, `install-${other}.json`)).filter(file => {

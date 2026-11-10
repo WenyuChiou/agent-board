@@ -133,6 +133,7 @@ export const EN: Strings = {
     "filesPart": "{host} files",
     "trustPart": "Approve the board's hooks in {host}",
     "installPlugin": "Install the Claude Code plugin",
+    "enablePlugin": "Claude Code: the plugin is installed but turned off in your user settings. Run {command} to turn it back on.",
     "marketplacePart": "Claude Code marketplace",
     "pluginPart": "Claude Code plugin",
     "partDone": "{part}: done.",

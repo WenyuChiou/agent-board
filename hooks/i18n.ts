@@ -171,6 +171,7 @@ export const ZH_TW = {
     "filesPart": "{host} 設定檔案",
     "trustPart": "在 {host} 核准看板的 hooks",
     "installPlugin": "安裝 Claude Code 外掛",
+    "enablePlugin": "Claude Code：外掛已安裝，但在使用者設定裡被停用了。請執行 {command} 重新啟用。",
     "marketplacePart": "Claude Code 外掛市集",
     "pluginPart": "Claude Code 外掛",
     "partDone": "{part}：已完成。",
