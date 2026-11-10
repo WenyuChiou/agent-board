@@ -1521,12 +1521,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       hooksTrusted = inspectCodexConfigToml(configToml)
     }
     // /progress connect may have hooked the host instead, or left only its skill (#285).
-    const connected = agentHooks({
-      home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32', script: '', inbox: '',
+    // Exact Hermes attribution needs the connection's actual data path even in this read-only check.
+    const connectorProgress = typeof connected === 'string' && isAbsolute(connected) ? connected : legacyProgress.find(isAbsolute)!
+    const connectorFolder = dirname(connectorProgress)
+    const connectedHooks = agentHooks({
+      home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32',
+      script: join(connectorFolder, `progress-report.${process.platform === 'win32' ? 'ps1' : 'sh'}`), inbox: join(connectorFolder, 'progress-inbox'),
       codexHome: dirname(configs.codex!), grokHome: dirname(dirname(configs.grok!)), hermesHome: hermesDir,
-      openclawHome: openclawDir, opencodeHome: opencodeDir, board: script,
+      openclawHome: openclawDir, opencodeHome: opencodeDir, board: join(connectorFolder, 'agent-board.mjs'),
+      node: process.execPath, progress: connectorProgress,
     })
-    const hasConnectHook = connected.some(one => {
+    const hasConnectHook = connectedHooks.some(one => {
       if (one.agent !== agent || one.label === '') return false
       const original = readLocal(one.file)
       if (original === null) return false
@@ -1536,7 +1541,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       return typeof removed === 'string' && removed !== text
     })
     // The board files this host reads: the shared skill only where it reads that one.
-    const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connected.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
+    const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connectedHooks.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
     const reportHook = installed ? 'installer' : hasConnectHook ? 'connect' : 'none'
     const isSkillOnly = reportHook === 'none' && skills.some(file => readLocal(file) !== null)
     const result = { ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor }

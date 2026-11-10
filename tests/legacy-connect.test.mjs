@@ -770,6 +770,39 @@ test('Hermes legacy removal refuses ambiguous copies of its managed plan hook', 
   assert.ok(existsSync(join(dirname(f.progress), 'progress-hook.mjs')), 'Refused removal retains the worker still referenced by the config')
 }))
 
+for (const kind of ['complete', 'plan-only', 'foreign']) test(`Hermes legacy doctor classifies ${kind} hooks without rewriting them`, () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  f.run(f.request('connect'))
+  const installed = readFileSync(config, 'utf8')
+  if (kind === 'plan-only') {
+    const item = installed.match(/^    - \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+), matcher: todo\}$/m)
+    assert.ok(item)
+    writeFileSync(config, `hooks:\n  post_tool_call:\n${item[0]}\n`)
+  } else if (kind === 'foreign') writeFileSync(config, 'hooks:\n  post_tool_call:\n    - {command: "node ./tools/progress-hook.mjs --hook-version 1 --hook-event post_tool_call --plan-event --agent hermes --progress-file ./synthetic-progress.md", matcher: external, timeout: 5}\n')
+  const before = readFileSync(config, 'utf8')
+  const checked = spawnSync(process.execPath, [f.script, '--codex-doctor', '--agent', 'hermes', '--home', f.home, '--hermes-dir', join(f.home, '.hermes'), '--json'], {
+    encoding: 'utf8', windowsHide: true, timeout: 10000,
+    env: { ...process.env, HERMES_HOME: join(f.home, '.hermes') },
+  })
+  assert.equal(checked.status, 0, checked.stderr)
+  const result = JSON.parse(checked.stdout)
+  assert.equal(result.reportHook, kind === 'foreign' ? 'none' : 'connect')
+  if (kind !== 'foreign') assert.equal(result.problem, undefined)
+  assert.equal(readFileSync(config, 'utf8'), before, 'Doctor only observes the config')
+}))
+
+test('Hermes legacy removal restores a config that originally had no hooks section', async () => {
+  for (const original of ['model:\n  default: synthetic\n', 'model: synthetic\n# Synthetic setting stays\n', 'model:\r\n  default: synthetic\r\n']) await fixture(async f => {
+    mkdirSync(join(f.home, '.hermes'))
+    const config = join(f.home, '.hermes', 'config.yaml')
+    writeFileSync(config, original)
+    f.run(f.request('connect'))
+    f.run(f.request('remove'))
+    assert.equal(readFileSync(config, 'utf8'), original)
+  })
+})
+
 test('a Hermes plugin connection reports todo plans and removes only its own hooks', () => fixture(async f => {
   mkdirSync(join(f.home, '.hermes'))
   const config = join(f.home, '.hermes', 'config.yaml')

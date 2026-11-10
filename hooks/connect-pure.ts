@@ -554,7 +554,11 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
       if (owned.has(event) && !lines.slice(key + 1, last).some((line, at) => isContent(line) && !drop.has(key + 1 + at))) drop.add(key)
     }
     if (isRemoving && owned.size > 0 && /^hooks\s*:\s*$/.test(lines[top] ?? '') &&
-        !lines.slice(top + 1, end).some((line, at) => isContent(line) && !drop.has(top + 1 + at))) drop.add(top)
+        !lines.slice(top + 1, end).some((line, at) => isContent(line) && !drop.has(top + 1 + at))) {
+      drop.add(top)
+      // Adding a new top-level map separates it with one blank line; remove that separator too.
+      if (top > 0 && (lines[top - 1] ?? '').trim() === '') drop.add(top - 1)
+    }
   }
   const hasOwned = owned.size > 0
   if (!isRemoving && events.every(([event, command, matcher]) => {
