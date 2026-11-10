@@ -728,25 +728,6 @@ let routes: Record<string, AnswerRoute> = {}
 const SETTINGS_MS = 10_000
 let settingsKept: { text: string | null; at: number } | null = null
 
-const isRegularFile = (file: string): boolean => {
-  try {
-    const stat = lstatSync(file)
-    return stat.isFile() && !stat.isSymbolicLink()
-  } catch {
-    return false
-  }
-}
-
-const isSymlinkOrNonRegular = (file: string): boolean => {
-  try {
-    const stat = lstatSync(file)
-    return stat.isSymbolicLink() || !stat.isFile()
-  } catch (error) {
-    if ((error as { code?: string } | null)?.code === 'ENOENT') return false
-    return true
-  }
-}
-
 const settingsNow = (): string | null => {
   const now = Date.now()
   if (settingsKept !== null && now - settingsKept.at < SETTINGS_MS) return settingsKept.text
@@ -1096,6 +1077,25 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
   }
 
   tryCandidate(0)
+}
+
+const isRegularFile = (file: string): boolean => {
+  try {
+    const stat = lstatSync(file)
+    return stat.isFile() && !stat.isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+const isSymlinkOrNonRegular = (file: string): boolean => {
+  try {
+    const stat = lstatSync(file)
+    return stat.isSymbolicLink() || !stat.isFile()
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code === 'ENOENT') return false
+    return true
+  }
 }
 
 // Into the archive first, then out of the file, as the pane does: a crash between the two
