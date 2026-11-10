@@ -119,64 +119,123 @@ export const lastQuestion = (answer: string, isFull = false): string | null => {
 // (`… at https://x.dev/a?`, `“Review https://x.dev/a?”`).
 const LINK = /https?:\/\/[^\s<>"'`“”‘’「」『』，。！？、；：（）]*[^\s<>"'`“”‘’「」『』.,;:!?？。！，、；：（)\]）]/g
 
-// Bullets, numbers and letters all mark choices, since agents write options every way (`1.`,
-// `2)`, `1、`, `a)`, `-`).
-const LIST_ITEM = /^\s*(?:[-*+•]|\d+[.)、]|[A-Za-z][.)])\s+/
-// Closing quotes and brackets may follow the mark, so `「選哪個？」` still ends on it.
-const ENDS_ASKING = /[?？]["'”」』)）]*$/
-// Over a list, a question counts only when it asks the person to decide. A heading such as
-// `What changed?` or `What did you ask for?` over a summary asks nothing, and a false question
-// under Needs you costs the trust the board needs (#1243). A bare `you` or `你` is not enough:
-// it is as common in a recap as in a request.
-const ASKS_PERSON = /\b(?:should I|shall I|should we|shall we|want me|would you|do you (?:want|prefer|need)|can I|may I|ok to|okay to|prefer)\b|要我|要不要|你要|您要|你想|您想|你希望|您希望|你偏好|要選|要选|請選|请选|我該|我应该|我應該/i
+// A question whose choices follow as a list (#1243) counts only under every guard below, since
+// a false question under Needs you costs more trust than a missed one. A summary's heading
+// (`What changed?`), a recap (`What did you ask for?`) and an answered FAQ (`**Should I make
+// any changes?**`) all sit over a list too, and none of them waits on the person.
+const LIST_ITEM = /^( {0,3})(?:(?:[-*+•]|\d+[.)]|[A-Za-z][.)])\s+|\d+、\s*)(.*)$/
+// A choice is a short label. An item that is a sentence, or asks, explains or answers instead.
+const isChoice = (item: string): boolean =>
+  item !== '' && item.length <= 60 && !/[?？。！]|[.!]\s/.test(item) && !/[.!;；:：]$/.test(item)
+// Words only the agent says to the person. With them an open `what` asks to pick too; a yes or
+// no (`Do you want the details?`) over a list does not.
+const ASKS_YOU = /\b(?:do you (?:want|prefer)|would you (?:like|prefer|rather)|want me to)\b|要我|[你您](?:要|想|希望|偏好)/i
+// `Should I …?` is also how an FAQ heading words the person's own question. It counts only with
+// a word that asks to pick, on a line that is not set as a heading.
+const ASKS_ME = /\b(?:should|shall|can|could|may) (?:I|we)\b|我該|我應該|我应该|該用|该用|要用|要選|要选/i
+const PICKS = /\b(?:which|or)\b|哪|還是|还是|或是/i
+const PICKS_OPEN = /\bwhat\b|什麼|什么/i
+// A question about what already happened is a recap, whoever it names.
+const IS_PAST = /\b(?:did|was|were|had|have|has)\b|了|過|过|剛|刚|之前|先前|原先|上次/i
+// A bare `Which … first?` (`先用哪個？`, the #1243 report's own shape) asks what to do next: a
+// summary's heading (`Which files changed?`) names no order. With a verb in the past
+// (`Which step failed first?`) it is still a recap.
+const ASKS_ORDER = /\b(?:first|next)\b|先|下一|接下來|接下来/i
+const IS_PAST_EN = /\b[a-z]{3,}ed\b/i
+const asksToPick = (question: string, isHeading: boolean): boolean => {
+  if (IS_PAST.test(question)) return false
+  if (ASKS_YOU.test(question)) return PICKS.test(question) || PICKS_OPEN.test(question)
+  if (isHeading || !PICKS.test(question)) return false
+
+  return ASKS_ME.test(question) || ASKS_ORDER.test(question) && !IS_PAST_EN.test(question)
+}
+const IS_HEADING = /^\s*(?:#|>|(?:Q|問|问)\s*[:：.])|^\s*([*_]{1,3})\S.*\1\s*$/i
+
+// The question line over a list of choices that ends the reply, or null. Blank lines may sit
+// between the question and the list and between the choices; any other line ends the list.
+const lineOverChoices = (prose: string): string | null => {
+  const lines = prose.split(/\r?\n/)
+  let at = lines.length
+  let count = 0
+  // Every choice sits at one indent: an item nested under another explains it.
+  let indent: string | undefined
+  while (at > 0) {
+    const line = lines[at - 1] ?? ''
+    const item = LIST_ITEM.exec(line)
+    if (line.trim() !== '' && (item === null || item[1] !== (indent ??= item[1]) || !isChoice(withoutEmphasis(item[2] ?? '').trim()))) break
+    if (item !== null) count += 1
+    at -= 1
+  }
+  const line = lines[at - 1] ?? ''
+
+  return count < 2 || LIST_ITEM.test(line) ? null : line
+}
+
+const OPENERS: Record<string, string> = { '“': '”', '‘': '’', '「': '」', '『': '』' }
+const CLOSERS = new Set(Object.values(OPENERS))
+// A question mark inside a quote that follows other words is a question told about, not one
+// put to the person: `… and asked "Blue or green?"` (#1273). Two shapes do ask: a quote that
+// wraps the whole question, and a quoted last option after `or` (`"red" row or "blue row?"`).
+const isQuoted = (line: string, mark: number): boolean => {
+  const open: number[] = []
+  let straight = -1
+  for (let i = 0; i < mark; i += 1) {
+    const char = line[i] ?? ''
+    if (char === '\\') i += 1
+    else if (char === '"') straight = straight < 0 ? i : -1
+    else if (char in OPENERS) open.push(i)
+    else if (CLOSERS.has(char)) open.pop()
+  }
+  if (straight >= 0) open.push(straight)
+  // An apostrophe also sits inside words, so a single quote counts only when it closes right
+  // after the mark and opens at the start of a word.
+  if (/^[?？]["”」』)）]*'/.test(line.slice(mark))) {
+    for (let i = mark - 1; i >= 0; i -= 1) {
+      if (line[i] === "'" && !/[\p{L}\p{N}]/u.test(line[i - 1] ?? '')) { open.push(i); break }
+    }
+  }
+
+  return open.some(from => {
+    const lead = line.slice(0, from).replace(/^.*[.。!！?？]/, '').replace(/["'“‘「『(（\s]/g, '')
+    return lead !== '' && !/(?:\bor|還是|还是|或是|或)$/i.test(line.slice(0, from).trim())
+  })
+}
 
 // For callers that already normalized the reply: do not parse it a second time.
 export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
   const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, '$1')
-  // Only the end of a paragraph is trimmed: a list item's indented second paragraph keeps the
-  // indent that ties it to its item.
-  const paragraphs = prose.split(/\n\s*\n/).map(one => one.replace(/\s+$/, '')).filter(one => one.trim() !== '').map(one => one.split(/\r?\n/))
+  const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '')
   const last = paragraphs.at(-1)
   if (last === undefined) return null
-  const words = (lines: string[]): string[] => lines
+  const lines = last
+    .split(/\r?\n/)
     .map(line => withoutEmphasis(line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')).trim())
     .filter(line => line !== '')
   // A link's own `?` and `.` (`http://127.0.0.1:5173/?t=…`) neither ask nor end a sentence
   // (#1108): each link stands in as a mark with neither, and is put back in the question.
   const links: string[] = []
   const hidden = (line: string): string => line.replace(LINK, link => `\u0000${links.push(link) - 1}\u0000`)
-  let tail = hidden(words(last).at(-1) ?? '')
+  let tail = hidden(lines.at(-1) ?? '')
   const isOverList = !/[?？]/.test(tail)
+  let isHeading = false
   if (isOverList) {
-    // A question followed only by its choices as a list still asks it (#1243). The list is set
-    // aside, in the question's paragraph or over paragraphs of its own (a loose list has blank
-    // lines between items). The line before it must end on its question mark and be put to the
-    // person, so a list after a statement or under a summary heading still asks nothing. A list
-    // whose item asks is not a list of choices: which of its questions waits cannot be told.
-    const isChoice = (line: string): boolean => LIST_ITEM.test(line) || /^\s/.test(line)
-    let index = paragraphs.length - 1
-    let lines = last
-    let at = lines.length
-    const choices: string[] = []
-    for (;;) {
-      while (at > 0 && isChoice(lines[at - 1] ?? '')) at -= 1
-      choices.unshift(...lines.slice(at))
-      if (at > 0 || index === 0) break
-      index -= 1
-      lines = paragraphs[index] ?? []
-      at = lines.length
-    }
-    if (at === 0 || !LIST_ITEM.test(choices[0] ?? '') || choices.some(line => ENDS_ASKING.test(line.trim()))) return null
-    tail = hidden(words(lines.slice(0, at)).at(-1) ?? '')
-    if (!ENDS_ASKING.test(tail)) return null
+    const line = lineOverChoices(prose)
+    if (line === null) return null
+    isHeading = IS_HEADING.test(line)
+    tail = hidden(withoutEmphasis(line).trim())
+    // The line must end on its question mark: a question the same line goes on to answer
+    // (`Why did it fail? The cache was stale.`) asks nothing.
+    if (!/[?？]$/.test(tail)) return null
   }
   // Keep closing wrappers after the question mark so choice parsing can distinguish
   // a wrapped question from a word's own leading apostrophe, such as '90s.
-  const sentences = tail.match(/[^.。!！?？]*[?？]["'”」』)]*/g) ?? []
-  const question = (sentences.at(-1) ?? '').replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '').trim()
-  // The question itself must ask, not the line it sits on: `You asked for a summary. What
-  // changed?` over a list asks nothing.
-  if (isOverList && !ASKS_PERSON.test(question)) return null
+  const sentence = [...tail.matchAll(/[^.。!！?？]*[?？]["'”」』)]*/g)].at(-1)
+  if (sentence === undefined) return null
+  if (isQuoted(tail, (sentence.index ?? 0) + sentence[0].search(/[?？]/))) return null
+  const question = sentence[0].replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '').trim()
+  // The question itself must be put to the person, not the line it ends: `You asked for a
+  // summary. What changed?` over a list asks nothing.
+  if (isOverList && !asksToPick(question, isHeading)) return null
 
   return question === '' ? null : isFull ? question : clip(question, 120)
 }
