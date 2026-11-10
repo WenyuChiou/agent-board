@@ -263,8 +263,8 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
     setTimeout: (callback, ms) => {
       assert.ok(ms === undefined || Number.isFinite(ms) && ms > 0, 'The shipped page must schedule a poll interval')
       // Only the board's own poll is the next redraw; a short wait of a moving page is not.
-      if (ms === 3000 || ms === undefined) {
-        pollMs = ms ?? 3000
+      if (callback.name === 'refresh') {
+        pollMs = ms
         scheduled = callback
       }
       return 1

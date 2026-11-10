@@ -60,9 +60,9 @@ const observeQuestion = async responseMs => {
       await page.route('**/*', async route => {
         const path = new URL(route.request().url()).pathname
         if (path === '/api/board') {
-          const first = ++reads === 1
-          const model = modelOf(!first)
-          await new Promise(done => setTimeout(done, first ? 100 : responseMs))
+          const isFirst = ++reads === 1
+          const model = modelOf(!isFirst)
+          await new Promise(done => setTimeout(done, isFirst ? 100 : responseMs))
           await route.fulfill({ json: { model, now } })
         } else if (path === '/') await route.fulfill({ contentType: 'text/html', body: servePage(EN, 'synthetic') })
         else await route.fulfill({ status: 404, body: '' })
