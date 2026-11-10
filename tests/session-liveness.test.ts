@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process'
 import { test, expect } from 'claude-code/testing'
 import { parseProgress, STALE_MS } from '../hooks/parse'
 import { buildView } from '../hooks/view'
@@ -20,18 +19,18 @@ const words = STRINGS.en
 // The reading machine's host hash, so the test's blocks match this machine.
 const host = readingHostHash() ?? ''
 
-// A pid that is dead right now, from a child that already exited. The kill is
-// verified, so a reused pid fails loudly instead of passing quietly.
+// A pid that is dead right now. `claude plugin test` forbids a `node:` import in a
+// .ts test, so no child is spawned here; the largest pids are never handed out in
+// a test run, and the helper proves the pid is dead by asking the kernel before
+// it is used. (A real spawned-and-killed child pid is covered by T6 in
+// tests/board-status.test.mjs, a .mjs test where the import is allowed.)
 const deadPid = (): number => {
-  const child = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' })
-  if (child.pid === undefined) throw new Error('test child did not start')
-  try {
-    process.kill(child.pid, 0)
-    throw new Error(`test pid ${child.pid} is unexpectedly alive`)
-  } catch (error) {
-    if ((error as { code?: string }).code !== 'ESRCH') throw error
+  for (const pid of [999999999, 999999998, 999999997]) {
+    try { process.kill(pid, 0) } catch (error) {
+      if ((error as { code?: string }).code === 'ESRCH') return pid
+    }
   }
-  return child.pid
+  throw new Error('no dead pid found')
 }
 
 // A pid that is alive right now: this test process, with its real start time.
