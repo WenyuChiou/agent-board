@@ -486,9 +486,10 @@ export type ConfirmRef = TaskRef & { expected: string }
 
 // All words and marks are part of this action, including steps below the next one. The
 // twin count prevents a same-word manual task from taking another task's selected row.
-// The hidden done date the board writes after a draw (done-stamp.ts) is not part of a task's identity.
+// The hidden done date the board writes after a draw (done-stamp.ts) is not part of a task's
+// identity, unless another task shares its title: then a date may be all that tells the two apart.
 export const confirmKey = (project: string, task: ProgressTask, twins: number): string =>
-  sha256(JSON.stringify([project, task.title, task.auto, task.notes, task.steps.map(step => withoutStamp(step.raw)), task.auto === null ? twins : 0]))
+  sha256(JSON.stringify([project, task.title, task.auto, task.notes, task.steps.map(step => twins > 1 ? step.raw : withoutStamp(step.raw)), task.auto === null ? twins : 0]))
 
 const confirmedTasks = (text: string, ref: ConfirmRef, s: Strings): ProgressTask[] => {
   const tasks = parseProgress(text).filter(project => (project.name || s.uncategorized) === ref.project).flatMap(project => project.tasks)

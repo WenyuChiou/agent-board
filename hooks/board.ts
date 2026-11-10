@@ -719,8 +719,12 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLine
         : [item.turn.agent, item.turn.project, item.turn.text]
   // Card actions survive unrelated line moves; a tick's absolute line must still name the drawn step,
 // and the positions of every task it could be mistaken for must be the ones drawn.
-  // The hidden done date the board writes after a draw is not a change the person made.
-  if (item.type === 'row') parts.push(item.row.stepTask?.expected ?? item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => ({ ...step, raw: withoutStamp(step.raw) }))))
+  // The hidden done date the board writes after a draw is not a change the person made, unless
+  // another task shares this one's title: then a date may be all that tells the two apart.
+  if (item.type === 'row') {
+    const dated = twinsOf(item, items) > 1
+    parts.push(item.row.stepTask?.expected ?? item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => dated ? step : { ...step, raw: withoutStamp(step.raw) })))
+  }
   if (item.type === 'row' && isLineTick) parts.push(JSON.stringify([item.row.next?.line ?? null, item.row.steps.map(step => step.line), item.row.next?.guard?.lines ?? null]))
   if (item.type === 'ask' && isLineTick) parts.push(JSON.stringify([item.ask.step?.line ?? null, item.ask.step?.guard?.steps ?? null, item.ask.step?.guard?.task ?? null, item.ask.step?.guard?.lines ?? null]))
   if (item.type !== 'turn' && session === '') parts.push(String(twinsOf(item, items)))
