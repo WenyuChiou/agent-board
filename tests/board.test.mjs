@@ -2882,19 +2882,198 @@ test('ticking twin steps from the page ticks each line it showed', { timeout: 30
     assert.equal(lines.length, 2)
     assert.ok(lines.every(line => typeof line === 'number'), 'the board names each step by its file line')
     // The second twin first: its press must not tick the first line.
-    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.fp } })
+    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.tickFp } })
     assert.equal(second.status, 200, second.body)
     let left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[lines[1]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
     assert.equal(left[lines[0]], '- [ ] Draft the notes')
     // Then the first twin, with the board drawn again.
     const again = await rowOf('Draft the notes')
-    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.fp } })
+    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.tickFp } })
     assert.equal(first.status, 200, first.body)
     left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[lines[0]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
   } finally {
     await board.close()
+  }
+})
+
+test('fresh untitled checkbox presses from the page tick the second twin and then the first', { timeout: 30_000 }, async () => {
+  const board = await page('## Untitled project\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
+  try {
+    for (const index of [1, 0]) {
+      const row = (await board.rows()).find(one => one.project === 'Untitled project' && one.title === EN.unnamed)
+      assert.ok(row)
+      const step = row.steps[index]
+      const response = await board.call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: step.text, line: step.fileLine, fp: row.tickFp } })
+      assert.equal(response.status, 200, response.body)
+      const lines = readFileSync(board.path, 'utf8').split('\n')
+      assert.match(lines[step.fileLine], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      if (index === 1) assert.equal(lines[row.steps[0].fileLine], '- [ ] Inspect the map')
+    }
+  } finally {
+    await board.close()
+  }
+})
+
+test('a saved checkbox press refuses after another card moves its twin lines (#1204)', { timeout: 30_000 }, async () => {
+  const board = await page('## home\n### Earlier card\n- [ ] Check the sample\n### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
+  try {
+    const { path, call, rowOf } = board
+    const row = await rowOf('Twin steps')
+    const request = { key: row.key, type: 'tick', text: 'Inspect the map', line: row.steps[1].fileLine, fp: row.tickFp }
+    const shifted = readFileSync(path, 'utf8').replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    writeFileSync(path, shifted)
+    const stale = await call('POST', '/api/act', { body: request })
+    assert.equal(stale.status, 409)
+    assert.equal(readFileSync(path, 'utf8'), shifted, 'refusing the stale checkbox must not write either twin')
+    const fresh = await rowOf('Twin steps')
+    const ticked = await call('POST', '/api/act', { body: { ...request, fp: fresh.tickFp, line: fresh.steps[1].fileLine } })
+    assert.equal(ticked.status, 200, ticked.body)
+    const left = readFileSync(path, 'utf8').split('\n')
+    assert.equal(left[fresh.steps[0].fileLine], '- [ ] Inspect the map')
+    assert.match(left[fresh.steps[1].fileLine], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+  } finally {
+    await board.close()
+  }
+})
+
+for (const ordering of ['lock', 'retry', 'readback', 'replacement', 'folded-visible', 'folded-lock', 'card-lock', 'card-readback', 'untitled-lock']) test('a checkbox keeps its original twin through the actual write boundary: ' + ordering, { timeout: 30_000 }, async () => {
+  const isLocked = ordering.endsWith('lock')
+  const isCards = ordering.startsWith('card-')
+  const isHiddenNext = ordering === 'folded-lock'
+  const isFoldedVisible = ordering === 'folded-visible'
+  const isUntitled = ordering === 'untitled-lock'
+  const faults = mkdtempSync(join(tmpdir(), 'board-checkbox-write-'))
+  const preload = join(faults, 'boundary.cjs')
+  const armed = join(faults, 'armed')
+  const blocked = join(faults, 'blocked')
+  const release = join(faults, 'release')
+  const injected = join(faults, 'injected')
+  const env = { NODE_OPTIONS: '--require ' + JSON.stringify(preload), AGENT_BOARD_TEST_CHECKBOX_PROGRESS: '' }
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const progress = process.env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS
+const arm = ${JSON.stringify(armed)}, blocked = ${JSON.stringify(blocked)}, injected = ${JSON.stringify(injected)}
+const ordering = ${JSON.stringify(ordering)}
+const open = fs.openSync, rename = fs.renameSync
+const change = () => {
+  const before = fs.readFileSync(progress, 'utf8')
+  const after = ordering === 'replacement'
+    ? before.replace('### Twin steps', '### Replacement task')
+    : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  fs.writeFileSync(progress, after)
+  fs.writeFileSync(injected, '')
+}
+fs.openSync = (file, ...args) => {
+  try { return open(file, ...args) } catch (error) {
+    if (ordering.endsWith('lock') && String(file) === progress + '.agent-board-lock' && error.code === 'EEXIST' && fs.existsSync(arm) && !fs.existsSync(blocked)) fs.writeFileSync(blocked, '')
+    throw error
+  }
+}
+fs.renameSync = (from, to, ...args) => {
+  const controlled = !ordering.endsWith('lock') && ordering !== 'folded-visible' && String(to) === progress && fs.existsSync(arm) && !fs.existsSync(injected)
+  if (controlled && !ordering.endsWith('readback')) {
+    change()
+    throw Object.assign(new Error('synthetic competing write before rename'), { code: 'EPERM' })
+  }
+  const result = rename(from, to, ...args)
+  if (controlled) change()
+  return result
+}
+syncBuiltinESMExports()
+`)
+  let board, holder, holderExit, watcher
+  try {
+    const twins = '### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+    const manual = isUntitled ? '## Untitled project\n' + twins.replace('### Twin steps\n', '') : isCards ? twins.repeat(2) : isHiddenNext ? '### Twin steps\n' + Array.from({ length: 5 }, (_, i) => '- [ ] Ordinary step ' + i + '\n').join('') + '- [~] Inspect the map\n- [~] Inspect the map\n' : isFoldedVisible ? '### Twin steps\n- [x] Completed one\n- [x] Completed two\n' + '- [ ] Inspect the map\n'.repeat(6) : twins
+    board = await page('## home\n### Earlier card\n- [ ] Check the sample\n' + manual, env, [], undefined, BOARD_SCRIPT, (_dir, path) => { env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS = path })
+    const row = isUntitled ? (await board.rows()).find(one => one.project === 'Untitled project' && one.title === EN.unnamed) : isCards ? (await board.rows()).filter(one => one.title === 'Twin steps').at(-1) : await board.rowOf('Twin steps')
+    const before = readFileSync(board.path, 'utf8')
+    const shifted = isUntitled ? before.replace('## Untitled project', '> Synthetic extra context\n## Untitled project') : isFoldedVisible ? before : isHiddenNext ? before.replace('- [ ] Check the sample\n', '') : before.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    const replaced = before.replace('### Twin steps', '### Replacement task')
+    const at = before.lastIndexOf('### Twin steps')
+    const changedCard = before.slice(0, at) + before.slice(at).replace('### Twin steps\n', '### Twin steps\n> Changed selected card\n')
+    const visible = row.steps.filter(step => step.text === 'Inspect the map' && typeof step.fileLine === 'number')
+    const body = { key: row.key, type: 'tick', text: 'Inspect the map', line: isHiddenNext ? row.nextFileLine : visible[1].fileLine, fp: row.tickFp }
+    if (isHiddenNext) assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the primary target is outside the folded display')
+    if (isLocked) {
+      const worker = join(faults, 'holder.mjs')
+      writeFileSync(worker, `import { withLocalLock } from ${JSON.stringify(new URL('../scripts/local-lock.ts', import.meta.url).href)}
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+const ordering = ${JSON.stringify(ordering)}
+withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
+  process.stdout.write('held\\n')
+  const deadline = Date.now() + 5000
+  while (!existsSync(${JSON.stringify(release)})) {
+    if (Date.now() >= deadline) throw new Error('CONTROL_NOT_RELEASED')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+  }
+  const file = ${JSON.stringify(board.path)}
+  const before = readFileSync(file, 'utf8')
+  const at = before.lastIndexOf('### Twin steps')
+  const after = ordering === 'untitled-lock' ? before.replace('## Untitled project', '> Synthetic extra context\\n## Untitled project') : ordering === 'folded-lock' ? before.replace('- [ ] Check the sample\\n', '') : ordering === 'card-lock' ? before.slice(0, at) + before.slice(at).replace('### Twin steps\\n', '### Twin steps\\n> Changed selected card\\n') : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  writeFileSync(file, after)
+})
+`)
+      holder = spawn(process.execPath, [worker], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      holderExit = new Promise((done, fail) => { holder.once('error', fail); holder.once('exit', done) })
+      const held = new Promise(done => holder.stdout.once('data', done))
+      await Promise.race([held, holderExit.then(code => { throw new Error('the lock holder exited before its barrier: ' + code) })])
+    }
+    const observed = !isLocked ? null : new Promise((done, fail) => {
+      watcher = fs.watch(faults, () => { if (existsSync(blocked)) done() })
+      watcher.on('error', fail)
+    })
+    writeFileSync(armed, '')
+    const sent = board.call('POST', '/api/act', { body })
+    if (isLocked) {
+      // The real server must already have failed to acquire the real shared lock.
+      await Promise.race([observed, sent.then(() => { throw new Error('the action ended before the blocked lock boundary') })])
+      writeFileSync(release, '')
+      assert.equal(await holderExit, 0)
+    }
+    const response = await sent
+    const after = readFileSync(board.path, 'utf8')
+    if (!isLocked && !isFoldedVisible) assert.ok(existsSync(injected), 'the competing write must reach the intended production boundary')
+    const journal = readdirSync(board.dir).filter(name => /^progress-journal-/.test(name)).map(name => readFileSync(join(board.dir, name), 'utf8')).join('\n')
+    if (ordering === 'replacement' || ordering === 'card-lock') {
+      assert.equal(response.status, 409, 'a replaced task must not receive the old checkbox press')
+      assert.equal(after, ordering === 'card-lock' ? changedCard : replaced)
+      assert.doesNotMatch(journal, /Inspect the map/, 'a refused tentative tick must not leave a false journal entry')
+    } else if (response.status === 409) {
+      assert.equal(ordering.endsWith('readback') || isFoldedVisible, false, 'a landed tick or a fresh visible checkbox must remain a single completed action')
+      assert.equal(after, shifted)
+      assert.doesNotMatch(journal, /Inspect the map/)
+    } else if (isCards || isHiddenNext || isFoldedVisible || isUntitled) {
+      assert.equal(response.status, 200, response.body)
+      const expected = shifted.split('\n')
+      const header = isUntitled ? expected.indexOf('## Untitled project') : isCards ? expected.lastIndexOf('### Twin steps') : expected.indexOf('### Twin steps')
+      const target = header + (isHiddenNext ? 6 : isFoldedVisible ? 4 : 2)
+      const raw = isHiddenNext ? '- [~] Inspect the map' : '- [ ] Inspect the map'
+      assert.equal(expected[target], raw)
+      const actual = after.split('\n')
+      assert.match(actual[target], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      actual[target] = raw
+      assert.equal(actual.join('\n'), shifted, 'only the original selected source checkbox may change')
+      assert.equal(journal.split('\n').filter(line => line.includes('Inspect the map')).length, 1)
+    } else {
+      assert.equal(response.status, 200, response.body)
+      const lines = after.split('\n')
+      const task = lines.indexOf('### Twin steps')
+      assert.equal(lines[task + 1], '- [ ] Inspect the map', 'the first twin must remain open after the original second-twin press')
+      assert.match(lines[task + 2], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      assert.equal(after.replace(/- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->/, '- [ ] Inspect the map'), shifted)
+    }
+  } finally {
+    watcher?.close()
+    if (holder !== undefined && holder.exitCode === null) {
+      writeFileSync(release, '')
+      const timer = setTimeout(() => holder.kill(), 5000)
+      try { await holderExit } finally { clearTimeout(timer) }
+    }
+    if (board !== undefined) await board.close()
+    rmSync(faults, { recursive: true, force: true })
   }
 })
 
@@ -2917,7 +3096,7 @@ test('ticking the next step from the page still works when the step list folded 
     assert.equal(row.next, 'Step six')
     assert.equal(typeof row.nextFileLine, 'number')
     assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the next step is folded out of the shown steps')
-    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.fp } })
+    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.tickFp } })
     assert.equal(ticked.status, 200, ticked.body)
     const left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[row.nextFileLine], /^- \[x\] Step six <!-- done \d{4}-\d\d-\d\d -->$/)
@@ -3390,8 +3569,9 @@ test('a tick on the page for a hand-kept question that was reworded since the pa
     assert.equal(drawn.text, 'Ask two referees')
     const reworded = text().replace('- [?] Ask two referees', '- [?] Submit the replacement application')
     writeFileSync(path, reworded)
-    const press = fp => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp } })
-    const refused = await press(drawn.fp)
+    // The press is what the page's Done button sends: the tick fingerprint and the step's line (#1204).
+    const press = one => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp: one.tickFp, line: one.fileLine } })
+    const refused = await press(drawn)
     assert.equal(refused.status, 409, refused.body)
     assert.equal(refused.json().note, LINE_CHANGED)
     assert.equal(text(), reworded)
@@ -3399,7 +3579,7 @@ test('a tick on the page for a hand-kept question that was reworded since the pa
     const now = await ask()
     assert.equal(now.key, drawn.key)
     assert.notEqual(now.fp, drawn.fp)
-    assert.equal((await press(now.fp)).status, 200)
+    assert.equal((await press(now)).status, 200)
     assert.ok(text().includes('- [x] Submit the replacement application'))
   } finally {
     await board.close()
