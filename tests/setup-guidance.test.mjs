@@ -95,11 +95,15 @@ test('setup separates newly created and updated files in its preview and apply (
   const updated = plan.changes.filter(change => change.action === 'update').length
   assert.ok(created > 0 && updated > 0)
   const line = setup(...args).split(/\r?\n/)[0]
-  assert.ok(line.includes(bootstrap[0].previewCreate.replace('{count}', created)), line)
-  assert.ok(line.includes(bootstrap[0].preview.replace('{count}', updated)), line)
+  const previewCreateMsg = created === 1 ? bootstrap[0].previewCreateOne : bootstrap[0].previewCreate
+  const previewUpdateMsg = updated === 1 ? bootstrap[0].previewOne : bootstrap[0].preview
+  assert.ok(line.includes(previewCreateMsg.replace('{count}', created)), line)
+  assert.ok(line.includes(previewUpdateMsg.replace('{count}', updated)), line)
   const appliedLine = setup(...args, '--apply').split(/\r?\n/)[0]
-  assert.ok(appliedLine.includes(bootstrap[0].appliedCreate.replace('{count}', created)), appliedLine)
-  assert.ok(appliedLine.includes(bootstrap[0].applied.replace('{count}', updated)), appliedLine)
+  const appliedCreateMsg = created === 1 ? bootstrap[0].appliedCreateOne : bootstrap[0].appliedCreate
+  const appliedUpdateMsg = updated === 1 ? bootstrap[0].appliedOne : bootstrap[0].applied
+  assert.ok(appliedLine.includes(appliedCreateMsg.replace('{count}', created)), appliedLine)
+  assert.ok(appliedLine.includes(appliedUpdateMsg.replace('{count}', updated)), appliedLine)
 }))
 
 test('a repeat preview when every agent is already set up omits first-time steps and lists only open ones (#1246)', () => fixture(setup => {
@@ -153,5 +157,28 @@ test('on Windows setup says to start cursor-agent from PowerShell, in its previe
     const result = f.invoke(['--agent', 'cursor', '--lang', 'en'], 'y\n')
     succeeded(result)
     assert.equal(result.stdout.split('Next steps:')[1]?.includes(bootstrap[0].cursorWindows), isWindows, result.stdout)
+  })
+})
+
+test('setup prints 1 setup file in the singular for a count of one in all six messages (#1270)', () => {
+  const en = bootstrap[0]
+  const keys = ['previewCreate', 'preview', 'previewRemove', 'appliedCreate', 'applied', 'appliedRemove']
+  for (const key of keys) {
+    const plural = en[key].replace('{count}', '1')
+    const singular = en[`${key}One`].replace('{count}', '1')
+    assert.equal(singular, en[key].replace('{count} setup files', '1 setup file'))
+    assert.match(singular, /\b1 setup file\b/)
+    assert.match(plural, /\b1 setup files\b/)
+    assert.notEqual(singular, plural)
+  }
+  fixture((setup, { env }) => {
+    setup('--agent', 'cursor', '--lang', 'en', '--apply')
+    writeFileSync(join(env.HOME, '.cursor', 'hooks.json'), '{"version":1}\n')
+    const preview = setup('--agent', 'cursor', '--lang', 'en')
+    assert.match(preview, /would (?:create|update) 1 setup file\b/)
+    assert.doesNotMatch(preview, /1 setup files\b/)
+    const applied = setup('--agent', 'cursor', '--lang', 'en', '--apply')
+    assert.match(applied, /(?:created|updated) 1 setup file\b/)
+    assert.doesNotMatch(applied, /1 setup files\b/)
   })
 })
