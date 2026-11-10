@@ -844,11 +844,29 @@ for (const mode of ['remove', 'connect']) test(`Hermes legacy ${mode} finds its 
   else assert.equal(after, installed, 'A connect replaces the old plan hook instead of adding a second one')
 }))
 
+// Windows folder names cannot hold a double quote.
+test('Hermes legacy removal keeps the reporter hooks of a folder whose path differs by a hook-version-like segment', { skip: process.platform === 'win32' ? 'folder names with double quotes are POSIX only' : false }, () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const ours = join(f.home, 'data "--hook-version" "1" x', 'progress.md')
+  const other = join(f.home, 'data "--hook-version" "2" x', 'progress.md')
+  f.run(f.request('connect', { progress: other }))
+  // The other install is not a recorded earlier path of this one.
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  delete state.connectedProgress
+  writeFileSync(f.control, `${JSON.stringify(state, null, 2)}\n`)
+  const before = readFileSync(config, 'utf8')
+  f.run(f.request('remove', { progress: ours }))
+  assert.equal(readFileSync(config, 'utf8'), before)
+}))
+
 test('Hermes legacy connect and removal keep the blank lines a |+ block scalar owns', async () => {
   for (const [original, expected] of [
     ['description: |+\n  keep\n\nhooks: {}\n', 'description: |+\n  keep\n\n'],
     ['description: |+\n  keep\n\n', 'description: |+\n  keep\n\n'],
     ['notes:\n  text: >+\n    keep\n\nhooks: {}\n', 'notes:\n  text: >+\n    keep\n\n'],
+    // Text inside the block that looks like a header does not decide.
+    ['description: |+\n  example: |-\n\nhooks: {}\n', 'description: |+\n  example: |-\n\n'],
   ]) await fixture(async f => {
     mkdirSync(join(f.home, '.hermes'))
     const config = join(f.home, '.hermes', 'config.yaml')

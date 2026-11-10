@@ -312,17 +312,18 @@ const isHermesItem = (line: string): boolean => /^-(?:\s|$)/.test(line.trimStart
 // A block scalar that keeps its final line breaks (`|+`, `>+`) owns the blank lines after its
 // text: they are part of the person's setting, not a separator ours may add or take away.
 const BLOCK_SCALAR = /(?:^[ \t]*-|:)(?:[ \t]+[!&]\S*)*[ \t]+[|>]([1-9+-]{0,2})[ \t]*(?:#.*)?\r?$/
+// Inside a block, a line that looks like a header (`example: |-`) is only text, so the outermost
+// header above decides.
 const isKeptBlankAt = (lines: readonly string[], at: number): boolean => {
   let inner = Infinity
-  for (let index = at - 1; index >= 0; index -= 1) {
+  let chomping: string | undefined
+  for (let index = at - 1; index >= 0 && inner > 0; index -= 1) {
     const line = lines[index] ?? ''
     if (!isContent(line) || indentOf(line) >= inner) continue
-    const header = BLOCK_SCALAR.exec(line)
-    if (header !== null) return header[1]?.includes('+') === true
-    if (indentOf(line) === 0) return false
+    chomping = BLOCK_SCALAR.exec(line)?.[1] ?? chomping
     inner = indentOf(line)
   }
-  return false
+  return chomping?.includes('+') === true
 }
 
 // Whether the key on line `at` has anything under it (YAML lets a list sit at the key's own
@@ -699,9 +700,18 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
         // The plan hook names the Node that ran the connect, and its bootstrap and hook version
         // change with releases. Our worker, event, agent and progress file still mark it as ours,
         // so a connect or removal under another Node finds the hook an earlier one wrote.
-        const keyOf = (command: string): string => command
-          .replace(/^"(?:\\.|[^"\\])*" ("--input-type=commonjs" "-e" )"eval\(Buffer\.from\('[A-Za-z0-9+/]*={0,2}','base64'\)\.toString\('utf8'\)\)"/, '"" $1""')
-          .replace(/ "--hook-version" "\d+" /, ' "--hook-version" "" ')
+        // Only a command whose words have the plan hook's shape is read this way; a reporter
+        // command is compared whole.
+        const keyOf = (command: string): string => {
+          const quoted = command.match(/"(?:\\.|[^"\\])*"/g) ?? []
+          if (quoted.join(' ') !== command) return command
+          let words: string[]
+          try { words = quoted.map(word => JSON.parse(word) as string) } catch { return command }
+          const isPlan = words[1] === '--input-type=commonjs' && words[2] === '-e' &&
+            /^eval\(Buffer\.from\('[A-Za-z0-9+/]*={0,2}','base64'\)\.toString\('utf8'\)\)$/.test(words[3] ?? '') &&
+            words[5] === '--hook-version' && /^\d+$/.test(words[6] ?? '')
+          return isPlan ? JSON.stringify(words.map((word, at) => at === 0 || at === 3 || at === 6 ? '' : word)) : command
+        }
         return editHermesSetup(text, hermesEvents(ctx), recorded, remove, keyOf)?.text ?? null
       },
     },
