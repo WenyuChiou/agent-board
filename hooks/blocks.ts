@@ -787,28 +787,35 @@ export const manualStepRef = (text: string, ref: StepRef, s: Strings = ZH_TW): S
 }
 
 // What a pane tick wrote, so its read-back can tell the ticked step is still the one that holds
-// the tick: the task that holds the changed line (its title as written, which an unheaded task
-// leaves empty), which of the tasks with that project and title it is and how many there are,
-// and which of its steps, among how many, reads as written. Lines may move and other steps may
-// change under another writer; a twin step or task that took the step's place does not count.
-export type TickMark = { project: string; title: string; index: number; count: number; step: number; steps: number; raw: string }
+// the tick. A task is known by its words with every step's mark and done date left out (`shape`:
+// title, which an unheaded task leaves empty, owner, notes, and each step's words), so another
+// writer finishing a different step does not hide it, and a task with other words never stands
+// in for it. Among tasks of the same shape it is known by order, and the ticked step's mark in
+// each of them must read as written: a twin that took the tick's place, or a stale copy that
+// swapped twins and left this one open, does not count. Lines may move.
+export type TickMark = { project: string; shape: string; index: number; step: number; raw: string; marks: string[] }
 
 const projectTasks = (text: string, project: string, s: Strings): ProgressTask[] =>
   parseProgress(text).filter(one => (one.name || s.uncategorized) === project).flatMap(one => one.tasks)
+
+const shapeOf = (task: ProgressTask): string =>
+  JSON.stringify([task.title, task.auto?.session ?? null, task.notes, task.steps.map(step => withoutStamp(step.raw).replace(/\[[^\]]\]/, '[ ]'))])
 
 export const tickMark = (after: string, project: string, at: number, s: Strings = ZH_TW): TickMark | null => {
   const tasks = projectTasks(after, project, s)
   const task = tasks.find(one => one.steps.some(step => step.line === at))
   if (task === undefined) return null
-  const twins = tasks.filter(one => one.title === task.title)
+  const shape = shapeOf(task)
+  const twins = tasks.filter(one => shapeOf(one) === shape)
   const step = task.steps.findIndex(one => one.line === at)
-  return { project, title: task.title, index: twins.indexOf(task), count: twins.length, step, steps: task.steps.length, raw: task.steps[step]?.raw ?? '' }
+  return { project, shape, index: twins.indexOf(task), step, raw: task.steps[step]?.raw ?? '', marks: twins.map(one => one.steps[step]?.status ?? '') }
 }
 
 export const holdsTick = (text: string, mark: TickMark, s: Strings = ZH_TW): boolean => {
-  const twins = projectTasks(text, mark.project, s).filter(task => task.title === mark.title)
-  const task = twins[mark.index]
-  return twins.length === mark.count && task !== undefined && task.steps.length === mark.steps && task.steps[mark.step]?.raw === mark.raw
+  const twins = projectTasks(text, mark.project, s).filter(task => shapeOf(task) === mark.shape)
+  return twins.length === mark.marks.length
+    && twins[mark.index]?.steps[mark.step]?.raw === mark.raw
+    && twins.every((task, index) => task.steps[mark.step]?.status === mark.marks[index])
 }
 
 export const setManualStep = (text: string, ref: StepRef, mark: string, now?: number, s: Strings = ZH_TW): string => {

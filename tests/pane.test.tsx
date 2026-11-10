@@ -2212,6 +2212,31 @@ for (const [mark, what] of [[' ', 'tick'], ['?', 'question Done']] as const) {
     await ui.unmount()
   })
 
+  test(`a pane ${what} is not kept when a stale copy puts a done card of the same title in its place (#1228)`, async ($, on) => {
+    const text = `# Progress\n\n## Demo\n### Checklist\n- [${mark}] Inspect the map\n- [ ] Finish North\n### Checklist\n- [x] Inspect the map <!-- done 2026-01-01 -->\n- [ ] Finish South\n`
+    const world: World = { files: new Map([[FILE, text]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['waiting', 'others'] }, written: [] }
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    const keys = what === 'tick' ? ['Demo::Checklist', 'Demo::Checklist::tick'] : ['Demo::Checklist::0::done']
+    for (const key of keys.slice(0, -1)) await ui.press({ key })
+    world.written = []
+    let stale = ''
+    world.afterWrite = () => {
+      world.afterWrite = undefined
+      // South, done today on the line the tick wrote, now comes first; North is open again.
+      const done = (world.files.get(FILE) ?? '').split('\n')[4] ?? ''
+      stale = `# Progress\n\n## Demo\n### Checklist\n${done}\n- [ ] Finish South\n### Checklist\n- [${mark}] Inspect the map\n- [ ] Finish North\n`
+      return stale
+    }
+    await ui.press({ key: keys[keys.length - 1]! })
+    expect(stale.split('\n')[4]).toMatch(/^- \[x\] Inspect the map <!-- done /)
+    expect(world.files.get(FILE)).toBe(stale)
+    expect(world.written.some(path => path.includes('-journal-'))).toBe(false)
+    expect(await ui.find({ type: 'Text', text: EN.boardTickGone })).toBeDefined()
+    await ui.unmount()
+  })
+
   test(`a pane ${what} is still reported when another writer finishes a different step of its task (#1228)`, async ($, on) => {
     const text = `# Progress\n\n## Demo\n### Checklist\n- [${mark}] First step\n- [ ] Last step\n`
     const world: World = { files: new Map([[FILE, text]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['waiting', 'others'] }, written: [] }
