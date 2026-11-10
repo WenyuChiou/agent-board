@@ -13,6 +13,8 @@ import type { AddressInfo } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
 import { basename, delimiter, isAbsolute, join } from 'node:path'
 import { deliveryTargets } from '../hooks/hook-messages'
+import { placeOf } from '../hooks/board-dock'
+import type { Rect } from '../hooks/board-dock'
 import { boardItems } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
@@ -57,6 +59,8 @@ export type ServeOptions = {
   language?: () => SettingsLang
   setLanguage?: (lang: SettingsLang) => boolean
   isLangOverridden?: () => boolean
+  // Where the person last put the docked window (#1084), kept in the board's settings file.
+  setWindow?: (place: Rect) => boolean
   agents?: SettingsAgentControl
   sweep: () => void
   sweepMs: number
@@ -565,6 +569,12 @@ export const startServer = (o: ServeOptions): void => {
         if (!o.setLanguage(lang)) return json(res, 409, { note: o.s.barStyleUnreadable })
         const isOverridden = o.isLangOverridden?.() ?? false
         return json(res, 200, { lang, isOverridden, note: isOverridden ? o.s.settingsLanguageOverridden : o.s.settingsLanguageChanged })
+      }
+      if (url.pathname === '/api/window') {
+        // Only the computer's own page has a window to place; the phone's page never sends one.
+        const place = placeOf(body)
+        if (isLan || place === null || o.setWindow === undefined) return json(res, 400, {})
+        return o.setWindow(place) ? json(res, 200, {}) : json(res, 409, {})
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()

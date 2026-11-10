@@ -33,7 +33,9 @@ import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
-import { isTimeout, privateFolderHandoff } from './private-folder'
+import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder'
+import { dockArguments, probeOf, windowPlaceOf } from '../hooks/board-dock'
+import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pickSurface } from '../hooks/surface'
@@ -758,6 +760,19 @@ const saveLanguage = (lang: SettingsLang): boolean => {
   return true
 }
 
+// The docked window's place (#1084): the other keys are kept, and a file that does not read as a
+// JSON object is left as it is.
+const saveWindow = (place: Rect): boolean => {
+  const file = settingsPath(path)
+  let text: string | null
+  try { text = read(file) } catch { text = null }
+  const next = withBoardSettings(text, { window: place })
+  if (next === null) return false
+  try { writeFileSync(file, next) } catch { return false }
+  settingsKept = { text: next, at: Date.now() }
+  return true
+}
+
 const options = () => ({
   width: Math.max(40, Math.min(process.stdout.columns || 80, 120)),
   ...terminalLook(process.env, args, process.stdout.isTTY === true),
@@ -994,6 +1009,63 @@ const watchWindowsLaunch = (child: ChildProcess, done: (isOpen: boolean) => void
   child.once('spawn', () => child.unref())
 }
 
+// The board's own browser profile (#1084), in the board's private runtime folder and made private
+// like the message store. Null when it cannot be: the window then opens as it did before.
+const browserProfile = (): string | null => {
+  try {
+    const runtime = process.env.XDG_RUNTIME_DIR
+    const dir = join(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'), 'browser')
+    privateFolder(dir)
+    return dir
+  } catch {
+    return null
+  }
+}
+
+// The window docked on the right, or at the place the person last gave it (#1084), in one
+// PowerShell run, as windowsStart: it first prints the screens' work areas (DPI-unaware, so in the
+// browser's own pixels at the system scale), then reads the browser's arguments back as one base64
+// line and starts the first program that starts: today's plain app window when there is no dock.
+// The C# has no single quote, so the PowerShell string around it needs no escaping.
+const DOCK_PROBE = `Microsoft.PowerShell.Utility\\Add-Type -Namespace AgentBoard -Name Dock -MemberDefinition '[DllImport("user32.dll")] static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint f); [DllImport("user32.dll")] static extern bool GetMonitorInfoW(IntPtr m, int[] i); public delegate bool Each(IntPtr m, IntPtr dc, IntPtr r, IntPtr d); [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, Each each, IntPtr d); static string Work(IntPtr m) { int[] i = new int[10]; i[0] = 40; if (!GetMonitorInfoW(m, i)) return ""; return i[5] + "," + i[6] + "," + (i[7] - i[5]) + "," + (i[8] - i[6]); } public static string Probe() { var all = new System.Collections.Generic.List<string>(); EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (m, dc, r, d) => { string one = Work(m); if (one != "") all.Add(one); return true; }, IntPtr.Zero); return Work(MonitorFromWindow(GetForegroundWindow(), 2)) + "|" + string.Join(";", all); }'`
+const dockLaunch = (programs: string[], target: string, done: (isOpen: boolean) => void): void => {
+  const list = programs.map(bin => isAddress(bin) ? psLiteral(bin) : psWildcardLiteral(bin)).join(', ')
+  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); $probe = '|'; try { Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1'); ${DOCK_PROBE}; $probe = [AgentBoard.Dock]::Probe() } catch {}; [Console]::Out.WriteLine($probe); [Console]::Out.Flush(); $line = [Console]::In.ReadLine(); if (-not $line) { exit 2 }; $argumentList = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($line)); foreach ($program in @(${list})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program -ArgumentList $argumentList -WorkingDirectory ${psWildcardLiteral(dirname(path))} -PassThru } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) { if ($started.WaitForExit(${LAUNCH_GRACE_MS}) -and $started.ExitCode -ne 0) { continue }; [Console]::Out.WriteLine($started.Id) }; exit 0 }; exit 1`
+  let child: ChildProcess
+  try {
+    child = spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
+      cwd: dirname(path), stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+    })
+  } catch {
+    return done(false)
+  }
+  let isSettled = false
+  const finish = (isOpen: boolean): void => {
+    if (isSettled) return
+    isSettled = true
+    clearTimeout(timer)
+    done(isOpen)
+  }
+  // PowerShell's start, Add-Type's compile and the browser's grace: about 2 s on a slow machine.
+  const timer = setTimeout(() => { child.kill(); finish(false) }, 8000)
+  child.once('error', () => finish(false))
+  child.once('exit', code => finish(code === 0))
+  child.stdin?.on('error', () => {})
+  // The profile folder is made private while PowerShell starts.
+  const profile = browserProfile()
+  let output = ''
+  let isAnswered = false
+  child.stdout?.on('data', (chunk: Buffer) => {
+    if (isAnswered) return
+    output += chunk.toString('utf8')
+    const end = output.indexOf('\n')
+    if (end < 0) return
+    isAnswered = true
+    const argv = dockArguments(target, windowPlaceOf(settingsNow()), probeOf(output.slice(0, end)), profile)
+    child.stdin?.end(`${Buffer.from(argv.map(windowsArgument).join(' '), 'utf16le').toString('base64')}\n`)
+  })
+}
+
 // A file or a page's address in the browser.
 const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = false): void => {
   // A board a test started never opens a window on the tester's screen (#959).
@@ -1053,11 +1125,15 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
   if (process.platform === 'win32') {
     const programs = [...new Set(candidates)].filter(isInstalled)
     if (programs.length === 0) return fallback()
-    try {
-      watchWindowsLaunch(windowsStart(programs, [`--app=${target}`], { graceMs: LAUNCH_GRACE_MS }), isOpen => isOpen ? done(true) : fallback())
-    } catch {
-      fallback()
+    const asToday = (): void => {
+      try {
+        watchWindowsLaunch(windowsStart(programs, [`--app=${target}`], { graceMs: LAUNCH_GRACE_MS }), isOpen => isOpen ? done(true) : fallback())
+      } catch {
+        fallback()
+      }
     }
+    // Docked first (#1084); a dock that cannot start, or a screen too narrow for one, opens as before.
+    dockLaunch(programs, target, isOpen => isOpen ? done(true) : asToday())
     return
   }
 
@@ -2014,6 +2090,7 @@ const serveChild = (): void => {
       // With no pick saved, the panel shows the setup language the board uses, not Automatic.
       language: () => settingsLangOf(settingsNow()) ?? langOf(BAKED.lang) ?? 'auto',
       setLanguage: saveLanguage,
+      setWindow: saveWindow,
       isLangOverridden: () => isLanguageOverridden(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG)),
       agents: createSettingsAgents({ args, progress: path, script: process.argv[1]!, words: () => s, readProgress: () => read(path) }),
       sweep: () => { tidyCount(false, true); moveOldMonths() },
