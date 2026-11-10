@@ -624,7 +624,15 @@ test('a --serve whose server cannot start says so without mentioning a page', ()
     'zh-CN': '打不开看板网页：服务器没有启动。',
   }
   for (const [lang, line] of Object.entries(lines)) {
-    const text = run(lang, ['--serve', '--no-open', '--port', '65536'])
+    let text = ''
+    try {
+      run(lang, ['--serve', '--no-open', '--port', '65536'])
+      assert.fail('a --serve that started no page exits non-zero (#1292)')
+    } catch (error) {
+      if (error.code === 'ERR_ASSERTION') throw error
+      assert.equal(error.status, 1, 'a --serve that started no page exits 1 (#1292)')
+      text = error.stdout
+    }
     assert.equal(text.trim().split('\n').at(-1), line)
     assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
     assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
@@ -5686,6 +5694,9 @@ const serveIn = () => {
   }
   const serve = (extra = []) =>
     new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+  // A start that fails exits 1 (#1292): its output and status, for the tests of that failure.
+  const serveFailing = (extra = [], timeout = 20_000) =>
+    new Promise(done => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout }, (error, out) => done({ status: error ? error.code : 0, out })))
   const urlOf = out => out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0] ?? null
   const served = servedAt(run, path)
   // Closes every page it was given, and the one its address file names when a test could not read
@@ -5713,7 +5724,7 @@ const serveIn = () => {
     }
     await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
-  return { dir, path, script, env, serve, urlOf, served, end }
+  return { dir, path, script, env, serve, serveFailing, urlOf, served, end }
 }
 
 // A test that may run out of time writes what it saw so far to stderr just before the test runner
@@ -6047,10 +6058,11 @@ test('Windows page startup times out without leaving its child or ready files', 
   let pid
   try {
     const began = performance.now()
-    const out = await board.serve()
+    const { status, out } = await board.serveFailing()
     const elapsed = performance.now() - began
     assert.ok(elapsed >= 9000 && elapsed < 18000, `startup ended after ${elapsed} ms`)
     assert.equal(out.trim(), EN.serveFailed(EN.serveNotStarted))
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
     assert.ok(existsSync(marker), 'the child must start before the timeout')
     pid = Number(readFileSync(marker, 'utf8'))
     for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
@@ -6485,7 +6497,8 @@ test('Windows page startup refuses an existing address file granted to another a
     url = board.urlOf(await board.serve(['--quiet-board']))
     assert.ok(url)
     execFileSync(icacls, [board.served, '/grant', '*S-1-1-0:R', '/L'], { windowsHide: true, stdio: 'pipe' })
-    const again = await board.serve(['--quiet-board'])
+    const { status, out: again } = await board.serveFailing(['--quiet-board'])
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
     assert.ok(!again.includes(url), 'the widened address must not be used to contact or open the running page')
     assert.equal(again.trim(), EN.serveStoreFailed('MESSAGE_STORE_IN_USE', board.served.replace(/\.json$/, '-messages')))
   } finally {
@@ -6575,7 +6588,10 @@ require('node:module').syncBuiltinESMExports()
       renameSync(other.served, replay)
       const renamed = fs.lstatSync(replay)
       assert.deepEqual([renamed.dev, renamed.ino, renamed.size], [original.dev, original.ino, original.size])
-      victimUrl = victim.urlOf(await victim.serve(['--quiet-board']))
+      const started = await victim.serveFailing(['--quiet-board'])
+      victimUrl = victim.urlOf(started.out)
+      // Failing closed starts no page, so that start exits 1 (#1292).
+      assert.equal(started.status, location === 'legacy' ? 0 : 1, started.out)
       assert.deepEqual(readFileSync(requests, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)), [], 'a mismatched record authorizes no request to the other board')
       const pid = JSON.parse(otherBytes.toString('utf8')).pid
       assert.doesNotThrow(() => process.kill(pid, 0), 'the other owned board remains running')
@@ -7052,7 +7068,8 @@ require('node:module').syncBuiltinESMExports()
 `)
   board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
   try {
-    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
+    const { status, out } = await board.serveFailing(['--quiet-board'], 50_000)
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
     assert.equal(board.urlOf(out), null, out)
     assert.equal(out.trim(), EN.serveStoreFailed('ACL_CHECK_TIMEOUT', messages), out)
   } finally { await board.end([]) }
