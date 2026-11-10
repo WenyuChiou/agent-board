@@ -22,19 +22,14 @@ const SECTIONS = {
   'zh-CN': ['快速开始', '常用命令', '支持的 agent', '你会看到什么', '怎么运作', '问题排查', '文档', '许可证'],
 }
 
-// Each cover's six scenes: the two lines of every caption as COVER_WORDS in docs/preview/render.ts
-// has them (none holds a character the SVG escapes, so they are written as they appear), the chip
-// that marks scene 5 as a preview (soon.send there), and the words scene 5 shows in the board's own
-// language: the page's Send button, its sending line and the reply receipt (serveSend,
-// serveSending and messagesAcknowledged in the strings tables).
+// The six scenes, the page's Settings button, and the Send and receipt labels in each locale.
 const SCENES = {
-  en: [[['Every agent,', 'one board.'], ['Watch steps', 'tick off live.'], ['Questions jump', 'to the top.'], ['Answer with', 'one key.'], ['Message agents', 'from the board.'], ['One command,', 'every agent.']], 'Coming in 0.24.2', ['Send to Codex', 'Sending to Codex; waiting for its reply…', '✓ Replied']],
-  'zh-TW': [[['每個 agent', '同一塊看板'], ['每一步', '即時打勾'], ['等你回答的', '排在最上面'], ['按一個鍵', '就能回答'], ['從看板直接', '傳訊息給 agent'], ['一行指令', '接上每個 agent']], '0.24.2 起提供', ['傳給 Codex', '正在傳給 Codex，等它回完…', '✓ 已回覆']],
-  'zh-CN': [[['每个 agent', '同一块看板'], ['每一步', '实时打勾'], ['等你回答的', '排在最上面'], ['按一个键', '就能回答'], ['从看板直接', '发消息给 agent'], ['一行命令', '接上每个 agent']], '0.24.2 起提供', ['发给 Codex', '正在发给 Codex，等它回完…', '✓ 已回复']],
+  en: [[['Every agent,', 'one board.'], ['Watch steps', 'tick off live.'], ['Questions jump', 'to the top.'], ['Make the board', 'yours.'], ['Send from', 'the board.'], ['One command', 'to start.']], 'Settings', ['Send to Codex', 'Sending to Codex; waiting for its reply…', '✓ Replied']],
+  'zh-TW': [[['每個 agent', '同一塊看板'], ['每一步', '即時打勾'], ['等你回答的', '排在最上面'], ['用你習慣的', '看板設定'], ['直接從看板', '傳送訊息'], ['一行指令', '開始使用']], '設定', ['傳給 Codex', '正在傳給 Codex，等它回完…', '✓ 已回覆']],
+  'zh-CN': [[['每个 agent', '同一块看板'], ['每一步', '实时打勾'], ['等你回答的', '排在最上面'], ['用你习惯的', '看板设置'], ['直接从看板', '发送消息'], ['一行命令', '开始使用']], '设置', ['发给 Codex', '正在发给 Codex，等它回完…', '✓ 已回复']],
 }
-// The command the last scene shows, which reduced motion keeps on screen: the program on one line
-// and its arguments on the next, as a terminal this narrow would wrap it.
-const COMMAND = ['npx @wenyuchiou/agent-board', 'setup --apply']
+// The first-run command stays on screen with reduced motion.
+const COMMAND = 'npx @wenyuchiou/agent-board'
 // The ten integrations the header names, in the support matrix's order (#407).
 const INTEGRATIONS = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode', 'Cursor', 'Grok Build', 'Muse Code', 'Hermes Agent', 'OpenClaw', 'DeepSeek Harness']
 // Each agent's board command, and the agents whose command is not run live yet.
@@ -241,7 +236,7 @@ describe('L0 discover and install from the README', () => {
       }
       assert.match(answer, checks[lang].answerQueue, `${name}: Send queues the answer and session confirmation means receipt`)
       for (const line of [answer, tell]) assert.match(line, checks[lang].copyPress, `${name}: Copy requires a button press`)
-      assert.ok(answer.includes('[`--messages-dir`](docs/MESSAGING.md#enable-locally)'), `${name}: Send links to the local messaging setup`)
+      assert.ok(answer.includes('](docs/MESSAGING.md#local-storage)'), `${name}: Send links to the default local message hub`)
       assert.match(page, checks[lang].lan, `${name}: the LAN page has no messaging`)
       const image = [...text.matchAll(/<img\b[^>]*>/g)].find(([tag]) => tag.includes(`docs/images/cover-${lang}-dark.svg`))?.[0] ?? ''
       const alt = (/\balt="([^"]*)"/.exec(image)?.[1] ?? '').replaceAll('&quot;', '"')
@@ -355,7 +350,7 @@ describe('L0 discover and install from the README', () => {
 
       // The six captions, in order. Each is one <text> of two <tspan> lines inside an animated group;
       // reduced motion keeps only the last scene's group.
-      const [scenes, soon, words] = SCENES[lang]
+      const [scenes, settings, words] = SCENES[lang]
       let at = -1
       scenes.forEach(([first, second], k) => {
         // String match: the journey safety check reads a call on a built RegExp as a process call.
@@ -366,20 +361,19 @@ describe('L0 discover and install from the README', () => {
         at = found.index
         assert.equal(found[1].split(/\s+/).includes('last'), k === scenes.length - 1, `${file}: only scene ${scenes.length}'s caption stays for reduced motion`)
       })
-      // Scene 5 carries its preview mark, and the mark leaves with the scene: a group that
-      // reduced motion keeps must not hold it.
-      const chips = [...svg.matchAll(new RegExp(`>${literal(soon)}</text>`, 'g'))]
-      assert.ok(chips.length > 0, `${file}: scene 5 says "${soon}"`)
-      for (const chip of chips) assert.ok(!groupsAround(svg, chip.index).some(classes => classes.includes('last')), `${file}: "${soon}" is not in the group that reduced motion keeps`)
+      // The Settings excerpt uses the page's localized label.
+      const footer = /<g [^>]*data-preview="page-footer"[^>]*>([\s\S]*?)<\/g>\s*<g class="a /.exec(svg)
+      assert.ok(footer, `${file}: the page footer is shown in an animated scene`)
+      assert.match(footer[1], new RegExp(`>${literal(settings)}</text>`), `${file}: the footer shows its localized Settings control`)
+      assert.doesNotMatch(svg, /Coming in 0\.24\.2|0\.24\.2 起提供|copied to the clipboard|已複製|已复制|progress\.html/i, `${file}: the cover does not teach the retired demo`)
       // A receipt is text without textLength: the terminal board's own rows carry it, so a row
       // that reads the same as a receipt cannot stand in for it.
       const receipt = word => `<text(?![^>]*textLength)[^>]*>${literal(word)}</text>`
       for (const word of words) assert.match(svg, new RegExp(receipt(word)), `${file}: scene 5 shows "${word}"`)
       // The end frame shows the setup command: reduced motion keeps every animated group round it.
-      const [program, args] = COMMAND
-      const commands = [...svg.matchAll(new RegExp(`${literal(program)}</tspan>\\s*<tspan\\b[^>]*>${literal(args)}</tspan>\\s*</text>`, 'g'))]
+      const commands = [...svg.matchAll(new RegExp(`${literal(COMMAND)}</text>`, 'g'))]
       const isKept = groups => groups.some(classes => classes.includes('last')) && groups.every(classes => !classes.includes('a') || classes.includes('last'))
-      assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND.join(' ')}"`)
+      assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND}"`)
     }
   })
 

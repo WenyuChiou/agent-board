@@ -7,7 +7,7 @@
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · 简体中文</p>
 
 <p align="center">
-<img alt="会动的看板：各个 agent 汇报进度、提问和回复，一行设置命令就能接上。开启消息功能、Codex 的对话也连上时，按发送会把回复排进队列。“已接受”不代表送到；那个对话回的确认才代表收到，不代表事情做完。LAN 网页没有消息功能。合成数据。" src="docs/images/cover-zh-CN-dark.svg" width="860">
+<img alt="会动的看板：各个 agent 汇报进度和提问，网页的设置按钮可切换语言或主题。开启消息功能、Codex 的对话也连上时，按发送会把回复排进队列。“已接受”不代表送到；那个对话回的确认才代表收到，不代表事情做完。LAN 网页没有消息功能。合成数据。" src="docs/images/cover-zh-CN-dark.svg" width="860">
 </p>
 
 <p align="center"><b>集成</b><br>
@@ -28,6 +28,8 @@
 你在一个项目开 Claude Code，另一个开 Codex，第三个开 Antigravity，其中一个停下来问你事情，你要等到刚好切回去才会发现。**Agent Board** 在它一开口就把问题放到你眼前，每个答案一个按钮。它在你自己的电脑上运行，所有东西都放在一个 Markdown 文件里。
 
 ## 快速开始
+
+**0.24.3 的重大调整。** 在 agent 里用 `/agent-board` 打开实时网页，Codex 用 `$agent-board`；下方的终端命令可打开终端看板或网页。实时网页替代旧的静态 HTML 和供人查看的纯文本看板；Claude Code 保留 `/progress` 面板。Agent 用 `--json` 读取看板。旧看板命令和 `--chat` 在这个版本仍可用；重新运行设置会更新已安装的命令。有接收路径就能发送，其他界面可能仍需复制。
 
 需要 Node.js 22 以上，在任何终端运行：
 
@@ -146,16 +148,16 @@ CLI、桌面 App、IDE 的实际 hook 事件分开验收；装好了文件、传
 
 | | Agent | 在哪里运行 | 看板上有什么 | 从看板回复 |
 |:-:|---|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | 它自己的面板：每件工作、每个回合 | 在面板里 |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI、App | 七个 hooks、结尾问题和报告的步骤 | 复制；可发送给[已连接的对话](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI、App、IDE | 四个 hooks、CLI 结尾问题和报告的步骤 | 复制；可发送给[已连接的 CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
+| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | 它自己的面板：每件工作、每个回合 | 在面板内回复；也可从网页发送给已连接的 CLI 对话 |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI、App | 七个 hooks、结尾问题和报告的步骤 | [发送到运行中的 CLI 回合](docs/validation/2026-11-04-codex-cli-proxy-live.md)；CLI 下次提示的接收路径已实现、待实测；App 使用复制回退 |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI、App、IDE | 四个 hooks、CLI 结尾问题和报告的步骤 | 可发送给[已连接的 CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream)；下次提示的收件箱待实测；未连接时可复制 |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | 对话事件、结尾问题和进度工具报告的步骤 | 复制 |
-| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE、CLI | Hooks 和 CLI 结尾问题 | 复制 |
+| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE、CLI | Hooks 和 CLI 结尾问题 | 排队等对话打开；重新打开对话后是否收到仍待实测；未连接时可复制 |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | 四个 hooks 和结尾问题 | 复制；对话结束后可用 `--allow-resume` |
-| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | CLI | 两个 hooks（停下、结束） | 复制 |
+| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | CLI | 两个报告 hooks（停下、结束） | 下次提示的收件箱已实现，发送尚未实测；未连接时可复制 |
 | <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | 聊天软件 | 四个 shell hooks、结尾问题和汇报的步骤 | 复制 |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | 聊天软件 | 它的插件发来的对话事件 | 复制 |
-| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | CLI | 它的插件发来的对话事件 | 复制 |
+| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | TUI、Web | 它的插件发来的对话事件 | 空闲时可发送：[Web 已实测](docs/validation/2026-11-08-deepseek-harness-live.md)，TUI 尚未实测 |
 | | dot、其他网页聊天 | 网页 | 你合并进来的区块 | 在它的对话里回 |
 
 Hooks 说明对话在做事还是在等；任务步骤和什么时候算完成，来自 agent 自己的报告。上列结尾问题会由 hook 加入“需要你”。Antigravity CLI 的 hook 不带回复文字，所以看板从该对话自己的记录文件读取最后回复；格式没有文档，已在 agy 1.5.2 检查，只保留结尾问题。Gemini CLI 仍保留为付费和企业用的目标（`--agent gemini`），见[安装指南](docs/SETUP.md#legacy-gemini-cli-compatibility)（英文）。
@@ -229,14 +231,14 @@ Hooks 说明对话在做事还是在等；任务步骤和什么时候算完成�
 
 ## 你会看到什么
 
-- **回复在等你的那一个。** 任何 agent 的问题都排在最上面，每个答案一个按钮。开启消息功能（[`--messages-dir`](docs/MESSAGING.md#enable-locally)，英文说明）、那个对话也连上时，按**发送**会把回复排进队列，那个对话回复确认才代表收到；否则按**复制**，再贴回它的对话。
+- **回复在等你的那一个。** 任何 agent 的问题都排在最上面，每个答案一个按钮。开启[消息功能](docs/MESSAGING.md#local-storage)、那个对话也连上时，按**发送**会把回复排进队列，那个对话回复确认才代表收到；否则按**复制**，再贴回它的对话。
 - **确认其他的还在动。** 每个 agent 的工作都显示现在做到哪一步、多久前报告过。超过一周没人动的工作收进一行 **N 项超过 7 天没动**。
 - **收掉做完的和停掉的。** 做完的工作会自己移到每月归档文件。做到一半停掉的对话，可以归档、确认完成，或接手继续做。
 - **不用切过去也能交代事情。** 开启消息功能、对话也连上时，在回复框打字就能发送；否则按**复制**，再贴过去。
 
-**终端看板**（`--watch`），打开了 Codex 的问题：按 `y` 或 `n` 复制回答。
+**终端看板**：“需要你”列出 Codex 的问题，下方是 Claude Code 进行中的工作。
 
-<img alt="终端看板，打开了 Codex CLI 的问题；按 y 或 n 复制回答。合成数据。" src="docs/images/board/codex-zh-CN-dark.svg">
+<img alt="终端看板列出 Codex 的问题，接着是 Claude Code 进行中的工作。合成数据。" src="docs/images/board/codex-zh-CN-dark.svg">
 
 **Claude Code 的面板**，放在对话旁边：还是同一个看板，问题的答案变成按钮。
 
@@ -246,9 +248,10 @@ Hooks 说明对话在做事还是在等；任务步骤和什么时候算完成�
 
 ### 看板的网页
 
-上面的看板命令会在浏览器打开看板网页（在聊天软件里则只打印纯文本，没有链接）。在任何终端运行 `node "$HOME/.agent-board/agent-board.mjs"` 也一样，再运行一次就会重新打开网页。（`--serve` 是旧写法，仍可使用。）在网页上可以：
+上面的看板命令会在浏览器打开看板。如果 agent 无法打开窗口，就会提供链接。再次运行相同命令可重新打开网页。在网页上可以：
 
 - **回复**问题：开启消息功能、对话也连上时就**发送**，否则**复制**回复。LAN 网页没有消息功能。
+- 从网页下方的**设置**切换语言、外观和通知，也能直接设置或移除 agent，不必回到终端。
 - **勾掉**下一步、**归档**一件工作，或点**现在归档**收走所有做完的。
 - **已回复，先隐藏**：已在原来对话里回过的问题，只在这台电脑上隐藏，直到那个对话问新的问题；不会发出任何内容。发送后，卡片上也会直接显示这个按钮。隐藏提示提供**重新显示**，可恢复该问题。
 

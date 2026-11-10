@@ -7,7 +7,7 @@
 <p align="center">English · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
 
 <p align="center">
-<img alt="An animated board: agents report progress, questions and replies, and one setup command connects them. With messaging on and the Codex session connected, Send queues a reply. &quot;Accepted&quot; does not mean delivered; a confirmation from that session means it was received, not that the work is done. The LAN page has no messaging. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
+<img alt="An animated board: agents report progress and questions. The web board has a Settings button for language and theme. With messaging on and the Codex session connected, Send queues a reply. &quot;Accepted&quot; does not mean delivered; a confirmation from that session means it was received, not that the work is done. The LAN page has no messaging. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
 </p>
 
 <p align="center"><b>Integrations</b><br>
@@ -28,6 +28,8 @@
 You have Claude Code on one project, Codex on another and Antigravity on a third, and when one of them stops to ask you something, you only find out when you happen to switch back. **Agent Board** puts that question in front of you the moment it's asked, with a button for each answer. It runs on your computer and keeps everything in one Markdown file.
 
 ## Quick start
+
+**Major changes in 0.24.3.** In an agent, `/agent-board` opens the live page (`$agent-board` in Codex); the plain terminal command below opens the terminal board or page. The live page replaces the old static HTML and the plain text board for people; Claude Code keeps its `/progress` pane. Agents use the JSON read (`--json`). Old board commands and `--chat` still work in this version; running setup again refreshes the installed commands. Send works where there is a delivery path; other surfaces can still require Copy.
 
 With Node.js 22+, in any terminal:
 
@@ -146,16 +148,16 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 
 | | Agent | Runs in | On the board | Reply from the board |
 |:-:|---|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | Its own pane: every task and turn | In the pane |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI, App | Seven hooks, closing questions and reported steps | Copy; send to a [connected session](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI, App, IDE | Four hooks, CLI closing questions and reported steps | Copy; send to a [connected CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
+| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | Its own pane: every task and turn | In the pane; Send to a connected CLI session from the page |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI, App | Seven hooks, closing questions and reported steps | [Send to a running CLI turn](docs/validation/2026-11-04-codex-cli-proxy-live.md); CLI next-prompt delivery is implemented and awaits a live check; App falls back to Copy |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI, App, IDE | Four hooks, CLI closing questions and reported steps | Send to a [connected CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream); next-prompt mailbox awaits a live check; Copy without a connection |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | Session events, closing questions and steps from its progress tool | Copy |
-| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE, CLI | Hooks and CLI closing questions | Copy |
+| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE, CLI | Hooks and CLI closing questions | Queue for when a chat opens; delivery on reopening a chat still needs a live check; Copy without a connection |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | Four hooks and closing questions | Copy; `--allow-resume` once a session ended |
-| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | CLI | Two hooks (stop, end) | Copy |
+| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | CLI | Two reporting hooks (stop, end) | Next-prompt mailbox implemented; live delivery untested; Copy without a connection |
 | <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | Chat | Four shell hooks, closing questions and reported steps | Copy |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | Chat | Its plugin's session events | Copy |
-| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | CLI | Its plugin's session events | Copy |
+| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | TUI, Web | Its plugin's session events | Send when idle: [verified on Web](docs/validation/2026-11-08-deepseek-harness-live.md); TUI not tested live |
 | | dot, other web chats | Web | A block you merge | Answer in its chat |
 
 Hooks say whether a session is working or waiting; task steps and when it is done come from the agent's own reports. The closing questions above reach Needs you as hook-owned steps. Antigravity CLI's hooks carry no reply text, so the board reads the last reply from its own transcript file; that format is undocumented and was checked on agy 1.5.2. Only the closing question is kept. Gemini CLI is still a target (`--agent gemini`) for paid and enterprise use: see [setup](docs/SETUP.md#legacy-gemini-cli-compatibility).
@@ -229,14 +231,14 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 
 ## What you see
 
-- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. With messaging on ([`--messages-dir`](docs/MESSAGING.md#enable-locally)) and that session connected, **Send** queues your answer, and a confirmation from that session means it was received; otherwise press **Copy** and paste it into that chat.
+- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. With [messaging on](docs/MESSAGING.md#local-storage) and that session connected, **Send** queues your answer, and a confirmation from that session means it was received; otherwise press **Copy** and paste it into that chat.
 - **Check the others are still moving.** Each agent's task shows its current step and when it last reported. Work nobody has touched for a week folds into one **N idle 7+ days** line.
 - **Clear what is finished or dead.** Finished work moves to a monthly archive by itself. A session that stopped halfway can be archived, confirmed done or taken over.
 - **Tell an agent something without going there.** With messaging on and the session connected, type in the reply box and send it; otherwise press **Copy** and paste it there.
 
-**The terminal board** (`--watch`), with Codex's question open: `y` or `n` copies the answer.
+**The terminal board**, showing Codex's question under Needs you and a Claude Code task in progress.
 
-<img alt="The terminal board with a Codex CLI question open; y or n copies the answer. Synthetic data." src="docs/images/board/codex-en-dark.svg">
+<img alt="The terminal board lists a Codex question, then a Claude Code task in progress. Synthetic data." src="docs/images/board/codex-en-dark.svg">
 
 **Claude Code's pane**, beside the chat: the same board, with the question's answers as buttons.
 
@@ -246,9 +248,10 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 
 ### The board's page
 
-The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node "$HOME/.agent-board/agent-board.mjs"` does the same; run it again to reopen the page. (`--serve` is the old spelling, still accepted.) On the page you can:
+The commands above open the board in your browser. If the agent cannot open a window, it gives you a link. Run the same command again to reopen the page. On the page you can:
 
 - **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
+- **Settings** at the foot of the page changes the language, look and notifications, and sets up or removes an agent without going back to a terminal.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
 - **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent. This button is also visible directly on the card after Send. The Hidden notice offers **Show again** to restore that question.
 
